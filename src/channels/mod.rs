@@ -11,7 +11,7 @@ mod slack;
 mod telegram;
 
 pub use channel::{Channel, IncomingMessage, MessageStream, OutgoingResponse};
-pub use cli::{SimpleCliChannel as CliChannel, TuiChannel};
+pub use cli::TuiChannel;
 pub use http::HttpChannel;
 pub use manager::ChannelManager;
 pub use slack::SlackChannel;

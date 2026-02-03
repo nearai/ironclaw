@@ -35,16 +35,28 @@ struct Args {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    // Initialize tracing
-    tracing_subscriber::registry()
-        .with(
-            EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| EnvFilter::new("near_agent=debug,tower_http=debug")),
-        )
-        .with(tracing_subscriber::fmt::layer())
-        .init();
-
     let args = Args::parse();
+
+    // Create TUI channel early so we can hook up logging
+    // (channel is created but not started until agent.run())
+    let tui_channel = TuiChannel::new();
+    let tui_log_writer = tui_channel.log_writer();
+
+    // Initialize tracing with both stderr (for pre-TUI output) and TUI writer
+    let env_filter = EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| EnvFilter::new("near_agent=info,tower_http=debug"));
+
+    tracing_subscriber::registry()
+        .with(env_filter)
+        // TUI layer: sends logs to TUI status line (once TUI is running)
+        .with(
+            tracing_subscriber::fmt::layer()
+                .with_writer(tui_log_writer)
+                .without_time()
+                .with_target(false)
+                .with_level(true),
+        )
+        .init();
 
     tracing::info!("Starting NEAR Agent...");
 
@@ -79,9 +91,9 @@ async fn main() -> anyhow::Result<()> {
     // Initialize channel manager
     let mut channels = ChannelManager::new();
 
-    // Always add CLI channel (TUI with full-screen interface)
+    // Add TUI channel (already created for logging hookup)
     if config.channels.cli.enabled {
-        channels.add(Box::new(TuiChannel::new()));
+        channels.add(Box::new(tui_channel));
         tracing::info!("TUI channel enabled");
     }
 

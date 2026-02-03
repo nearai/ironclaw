@@ -20,6 +20,8 @@ pub enum AppEvent {
     ApprovalRequested(ApprovalRequest),
     /// Streaming chunk received.
     StreamChunk(String),
+    /// Log message from the application.
+    LogMessage(String),
     /// Force a redraw.
     Redraw,
     /// Quit the application.
@@ -116,6 +118,8 @@ pub struct AppState {
     pub streaming_buffer: Option<String>,
     /// Status line message.
     pub status_message: Option<String>,
+    /// Whether Ctrl+D was pressed (waiting for second press to quit).
+    pub ctrl_d_pending: bool,
 }
 
 impl AppState {
@@ -133,6 +137,7 @@ impl AppState {
             pending_approvals: VecDeque::new(),
             streaming_buffer: None,
             status_message: None,
+            ctrl_d_pending: false,
         }
     }
 

@@ -77,14 +77,28 @@ fn handle_key(
                     // Quit
                     app.should_quit = true;
                 }
+                app.ctrl_d_pending = false;
                 return Ok(());
             }
             KeyCode::Char('d') => {
-                app.should_quit = true;
+                if app.ctrl_d_pending {
+                    // Second Ctrl+D, quit now
+                    app.should_quit = true;
+                } else {
+                    // First Ctrl+D, show hint
+                    app.ctrl_d_pending = true;
+                    app.set_status("Press Ctrl+D again to quit");
+                }
                 return Ok(());
             }
-            _ => {}
+            _ => {
+                // Any other Ctrl+ combo clears the Ctrl+D pending state
+                app.ctrl_d_pending = false;
+            }
         }
+    } else {
+        // Any non-Ctrl key clears the Ctrl+D pending state
+        app.ctrl_d_pending = false;
     }
 
     match app.mode {
@@ -265,6 +279,9 @@ fn handle_app_event(app: &mut AppState, event: AppEvent) {
         }
         AppEvent::Input(_) => {
             // Already handled directly
+        }
+        AppEvent::LogMessage(msg) => {
+            app.set_status(msg);
         }
     }
 }

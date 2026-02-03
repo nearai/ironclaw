@@ -35,16 +35,26 @@ pub use overlay::{ApprovalOverlay, ApprovalRequest};
 
 /// TUI channel for interactive terminal input with Ratatui.
 pub struct TuiChannel {
-    /// Channel for sending events to the TUI.
-    event_tx: Arc<Mutex<Option<mpsc::Sender<AppEvent>>>>,
+    /// Channel for sending events to the TUI (created upfront for logging).
+    event_tx: mpsc::Sender<AppEvent>,
+    /// Receiver end, taken when start() is called.
+    event_rx: Arc<Mutex<Option<mpsc::Receiver<AppEvent>>>>,
 }
 
 impl TuiChannel {
     /// Create a new TUI channel.
     pub fn new() -> Self {
+        let (event_tx, event_rx) = mpsc::channel(64);
         Self {
-            event_tx: Arc::new(Mutex::new(None)),
+            event_tx,
+            event_rx: Arc::new(Mutex::new(Some(event_rx))),
         }
+    }
+
+    /// Get a log writer that sends messages to the TUI status line.
+    /// Use this to redirect tracing output to the TUI.
+    pub fn log_writer(&self) -> TuiLogWriter {
+        TuiLogWriter::new(self.event_tx.clone())
     }
 }
 
@@ -62,20 +72,22 @@ impl Channel for TuiChannel {
 
     async fn start(&self) -> Result<MessageStream, ChannelError> {
         let (msg_tx, msg_rx) = mpsc::channel(32);
-        let (event_tx, event_rx) = mpsc::channel(64);
 
-        // Store the event sender for respond()
-        {
-            let mut guard = self.event_tx.lock().await;
-            *guard = Some(event_tx);
-        }
+        // Take the event receiver (can only start once)
+        let event_rx = {
+            let mut guard = self.event_rx.lock().await;
+            guard.take().ok_or_else(|| ChannelError::StartupFailed {
+                name: "tui".to_string(),
+                reason: "TUI channel already started".to_string(),
+            })?
+        };
 
         tokio::task::spawn_blocking(move || {
             if let Err(e) = run_tui(msg_tx, event_rx) {
                 // Try to restore terminal even on error
                 let _ = disable_raw_mode();
                 let _ = execute!(io::stdout(), LeaveAlternateScreen, DisableMouseCapture);
-                tracing::error!("TUI error: {}", e);
+                eprintln!("TUI error: {}", e);
             }
         });
 
@@ -87,34 +99,29 @@ impl Channel for TuiChannel {
         _msg: &IncomingMessage,
         response: OutgoingResponse,
     ) -> Result<(), ChannelError> {
-        let guard = self.event_tx.lock().await;
-        if let Some(ref tx) = *guard {
-            tx.send(AppEvent::Response(response.content))
-                .await
-                .map_err(|e| ChannelError::SendFailed {
-                    name: "tui".to_string(),
-                    reason: e.to_string(),
-                })?;
-        }
+        self.event_tx
+            .send(AppEvent::Response(response.content))
+            .await
+            .map_err(|e| ChannelError::SendFailed {
+                name: "tui".to_string(),
+                reason: e.to_string(),
+            })?;
         Ok(())
     }
 
     async fn health_check(&self) -> Result<(), ChannelError> {
-        let guard = self.event_tx.lock().await;
-        if guard.is_some() {
-            Ok(())
-        } else {
+        // Channel is healthy if we haven't been closed
+        if self.event_tx.is_closed() {
             Err(ChannelError::HealthCheckFailed {
                 name: "tui".to_string(),
             })
+        } else {
+            Ok(())
         }
     }
 
     async fn shutdown(&self) -> Result<(), ChannelError> {
-        let guard = self.event_tx.lock().await;
-        if let Some(ref tx) = *guard {
-            let _ = tx.send(AppEvent::Quit).await;
-        }
+        let _ = self.event_tx.send(AppEvent::Quit).await;
         Ok(())
     }
 }
@@ -149,112 +156,39 @@ fn run_tui(
     result
 }
 
-/// Simple blocking CLI channel (fallback when TUI not available).
-pub struct SimpleCliChannel {
-    running: Arc<std::sync::atomic::AtomicBool>,
+/// TUI-compatible tracing writer that sends log messages to the TUI status line.
+#[derive(Clone)]
+pub struct TuiLogWriter {
+    tx: mpsc::Sender<AppEvent>,
 }
 
-impl SimpleCliChannel {
-    pub fn new() -> Self {
-        Self {
-            running: Arc::new(std::sync::atomic::AtomicBool::new(false)),
-        }
+impl TuiLogWriter {
+    pub fn new(tx: mpsc::Sender<AppEvent>) -> Self {
+        Self { tx }
     }
 }
 
-impl Default for SimpleCliChannel {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-#[async_trait]
-impl Channel for SimpleCliChannel {
-    fn name(&self) -> &str {
-        "cli"
-    }
-
-    async fn start(&self) -> Result<MessageStream, ChannelError> {
-        self.running
-            .store(true, std::sync::atomic::Ordering::SeqCst);
-        let running = self.running.clone();
-
-        let (tx, rx) = mpsc::channel(32);
-
-        tokio::task::spawn_blocking(move || {
-            use std::io::BufRead;
-
-            let stdin = io::stdin();
-            let reader = stdin.lock();
-
-            print_prompt();
-
-            for line in reader.lines() {
-                if !running.load(std::sync::atomic::Ordering::SeqCst) {
-                    break;
-                }
-
-                match line {
-                    Ok(content) => {
-                        let content = content.trim();
-                        if content.is_empty() {
-                            print_prompt();
-                            continue;
-                        }
-
-                        if content == "exit" || content == "quit" || content == "/quit" {
-                            running.store(false, std::sync::atomic::Ordering::SeqCst);
-                            break;
-                        }
-
-                        let msg = IncomingMessage::new("cli", "local-user", content);
-
-                        if tx.blocking_send(msg).is_err() {
-                            break;
-                        }
-                    }
-                    Err(e) => {
-                        tracing::error!("Error reading stdin: {}", e);
-                        break;
-                    }
-                }
+impl std::io::Write for TuiLogWriter {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        if let Ok(s) = std::str::from_utf8(buf) {
+            let s = s.trim();
+            if !s.is_empty() {
+                // Fire and forget - don't block on logging
+                let _ = self.tx.try_send(AppEvent::LogMessage(s.to_string()));
             }
-
-            tracing::debug!("CLI input loop ended");
-        });
-
-        Ok(Box::pin(ReceiverStream::new(rx)))
-    }
-
-    async fn respond(
-        &self,
-        _msg: &IncomingMessage,
-        response: OutgoingResponse,
-    ) -> Result<(), ChannelError> {
-        println!("\n{}\n", response.content);
-        print_prompt();
-        Ok(())
-    }
-
-    async fn health_check(&self) -> Result<(), ChannelError> {
-        if self.running.load(std::sync::atomic::Ordering::SeqCst) {
-            Ok(())
-        } else {
-            Err(ChannelError::HealthCheckFailed {
-                name: "cli".to_string(),
-            })
         }
+        Ok(buf.len())
     }
 
-    async fn shutdown(&self) -> Result<(), ChannelError> {
-        self.running
-            .store(false, std::sync::atomic::Ordering::SeqCst);
+    fn flush(&mut self) -> io::Result<()> {
         Ok(())
     }
 }
 
-fn print_prompt() {
-    use std::io::Write;
-    print!("agent> ");
-    let _ = io::stdout().flush();
+impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for TuiLogWriter {
+    type Writer = Self;
+
+    fn make_writer(&'a self) -> Self::Writer {
+        self.clone()
+    }
 }
