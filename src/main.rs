@@ -7,7 +7,10 @@ use tracing_subscriber::{EnvFilter, layer::SubscriberExt, util::SubscriberInitEx
 
 use near_agent::{
     agent::{Agent, AgentDeps},
-    channels::{AppEvent, ChannelManager, HttpChannel, ReplChannel, TuiChannel},
+    channels::{
+        AppEvent, ChannelManager, HttpChannel, ReplChannel, TuiChannel,
+        wasm::{WasmChannelLoader, WasmChannelRuntime, WasmChannelRuntimeConfig},
+    },
     cli::{Cli, Command, run_tool_command},
     config::Config,
     history::Store,
@@ -283,6 +286,41 @@ async fn main() -> anyhow::Result<()> {
                 http_config.host,
                 http_config.port
             );
+        }
+    }
+
+    // Load WASM channels if enabled
+    if config.channels.wasm_channels_enabled && config.channels.wasm_channels_dir.exists() {
+        match WasmChannelRuntime::new(WasmChannelRuntimeConfig::default()) {
+            Ok(runtime) => {
+                let runtime = Arc::new(runtime);
+                let loader = WasmChannelLoader::new(Arc::clone(&runtime));
+
+                match loader
+                    .load_from_dir(&config.channels.wasm_channels_dir)
+                    .await
+                {
+                    Ok(results) => {
+                        for channel in results.loaded {
+                            tracing::info!("Loaded WASM channel: {}", channel.channel_name());
+                            channels.add(Box::new(channel));
+                        }
+                        for (path, err) in &results.errors {
+                            tracing::warn!(
+                                "Failed to load WASM channel {}: {}",
+                                path.display(),
+                                err
+                            );
+                        }
+                    }
+                    Err(e) => {
+                        tracing::warn!("Failed to scan WASM channels directory: {}", e);
+                    }
+                }
+            }
+            Err(e) => {
+                tracing::warn!("Failed to initialize WASM channel runtime: {}", e);
+            }
         }
     }
 

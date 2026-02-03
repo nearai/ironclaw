@@ -118,4 +118,4 @@ pub use storage::{
 pub use loader::{DiscoveredTool, LoadResults, WasmLoadError, WasmToolLoader, discover_tools};
 
 // Capabilities schema (for parsing *.capabilities.json files)
-pub use capabilities_schema::CapabilitiesFile;
+pub use capabilities_schema::{CapabilitiesFile, RateLimitSchema};

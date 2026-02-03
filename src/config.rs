@@ -180,6 +180,10 @@ fn default_session_path() -> PathBuf {
 pub struct ChannelsConfig {
     pub cli: CliConfig,
     pub http: Option<HttpConfig>,
+    /// Directory containing WASM channel modules (default: ~/.near-agent/channels/).
+    pub wasm_channels_dir: std::path::PathBuf,
+    /// Whether WASM channels are enabled.
+    pub wasm_channels_enabled: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -222,8 +226,27 @@ impl ChannelsConfig {
                 enabled: cli_enabled,
             },
             http,
+            wasm_channels_dir: optional_env("WASM_CHANNELS_DIR")?
+                .map(PathBuf::from)
+                .unwrap_or_else(default_channels_dir),
+            wasm_channels_enabled: optional_env("WASM_CHANNELS_ENABLED")?
+                .map(|s| s.parse())
+                .transpose()
+                .map_err(|e| ConfigError::InvalidValue {
+                    key: "WASM_CHANNELS_ENABLED".to_string(),
+                    message: format!("must be 'true' or 'false': {e}"),
+                })?
+                .unwrap_or(true),
         })
     }
+}
+
+/// Get the default channels directory (~/.near-agent/channels/).
+fn default_channels_dir() -> PathBuf {
+    dirs::home_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join(".near-agent")
+        .join("channels")
 }
 
 /// Agent behavior configuration.

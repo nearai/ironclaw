@@ -1,0 +1,38 @@
+{
+  "type": "channel",
+  "name": "slack",
+  "description": "Slack Events API channel for receiving and responding to Slack messages",
+  "capabilities": {
+    "http": {
+      "allowlist": [
+        { "host": "slack.com", "path_prefix": "/api/" }
+      ],
+      "credentials": {
+        "slack_bot": {
+          "secret_name": "slack_bot_token",
+          "location": { "type": "bearer" },
+          "host_patterns": ["slack.com"]
+        }
+      },
+      "rate_limit": {
+        "requests_per_minute": 50,
+        "requests_per_hour": 1000
+      }
+    },
+    "secrets": {
+      "allowed_names": ["slack_*"]
+    },
+    "channel": {
+      "allowed_paths": ["/webhook/slack"],
+      "allow_polling": false,
+      "workspace_prefix": "channels/slack/",
+      "emit_rate_limit": {
+        "messages_per_minute": 100,
+        "messages_per_hour": 5000
+      }
+    }
+  },
+  "config": {
+    "signing_secret_name": "slack_signing_secret"
+  }
+}
