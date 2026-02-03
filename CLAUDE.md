@@ -55,6 +55,7 @@ src/
 │
 ├── llm/                # LLM integration
 │   ├── provider.rs     # LlmProvider trait, message types
+│   ├── nearai.rs       # NEAR AI chat-api (default, unified interface)
 │   ├── openai.rs       # OpenAI API implementation
 │   ├── anthropic.rs    # Anthropic API implementation
 │   └── reasoning.rs    # Planning, tool selection, evaluation
@@ -162,11 +163,36 @@ Pending -> InProgress -> Completed -> Submitted -> Accepted
 Environment variables (see `.env.example`):
 ```bash
 DATABASE_URL=postgres://user:pass@localhost/near_agent
+
+# LLM Provider (default: nearai)
+LLM_PROVIDER=nearai  # Options: nearai, openai, anthropic
+
+# NEAR AI (recommended - unified API with user auth)
+NEARAI_SESSION_TOKEN=sess_...
+NEARAI_MODEL=claude-3-5-sonnet-20241022
+NEARAI_BASE_URL=https://api.near.ai
+
+# OpenAI (alternative)
 OPENAI_API_KEY=sk-...
+OPENAI_MODEL=gpt-4-turbo
+
+# Anthropic (alternative)
 ANTHROPIC_API_KEY=sk-ant-...
+ANTHROPIC_MODEL=claude-3-opus-20240229
+
+# Agent settings
 AGENT_NAME=near-agent
 MAX_PARALLEL_JOBS=5
 ```
+
+### NEAR AI Provider
+
+The default provider uses the NEAR AI chat-api (`https://api.near.ai/v1/responses`) which provides:
+- Unified access to multiple models (OpenAI, Anthropic, etc.)
+- User authentication via session tokens
+- Usage tracking and billing through NEAR AI
+
+Session tokens have the format `sess_xxx` (37 characters). They are authenticated against the NEAR AI auth service.
 
 ## Database
 

@@ -66,12 +66,14 @@ pub struct LlmConfig {
     pub provider: LlmProvider,
     pub openai: Option<OpenAiConfig>,
     pub anthropic: Option<AnthropicConfig>,
+    pub nearai: Option<NearAiConfig>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LlmProvider {
     OpenAi,
     Anthropic,
+    NearAi,
 }
 
 impl std::str::FromStr for LlmProvider {
@@ -81,9 +83,12 @@ impl std::str::FromStr for LlmProvider {
         match s.to_lowercase().as_str() {
             "openai" => Ok(Self::OpenAi),
             "anthropic" => Ok(Self::Anthropic),
+            "nearai" | "near-ai" | "near_ai" => Ok(Self::NearAi),
             _ => Err(ConfigError::InvalidValue {
                 key: "LLM_PROVIDER".to_string(),
-                message: format!("unknown provider: {s}, expected 'openai' or 'anthropic'"),
+                message: format!(
+                    "unknown provider: {s}, expected 'openai', 'anthropic', or 'nearai'"
+                ),
             }),
         }
     }
@@ -103,12 +108,23 @@ pub struct AnthropicConfig {
     pub base_url: Option<String>,
 }
 
+/// NEAR AI chat-api configuration.
+#[derive(Debug, Clone)]
+pub struct NearAiConfig {
+    /// Session token for authentication (format: sess_xxx)
+    pub session_token: SecretString,
+    /// Model to use (e.g., "claude-3-5-sonnet-20241022", "gpt-4o")
+    pub model: String,
+    /// Base URL for the NEAR AI chat-api (default: https://api.near.ai)
+    pub base_url: String,
+}
+
 impl LlmConfig {
     fn from_env() -> Result<Self, ConfigError> {
         let provider: LlmProvider = optional_env("LLM_PROVIDER")?
             .map(|s| s.parse())
             .transpose()?
-            .unwrap_or(LlmProvider::OpenAi);
+            .unwrap_or(LlmProvider::NearAi);
 
         let openai = if let Some(api_key) = optional_env("OPENAI_API_KEY")? {
             Some(OpenAiConfig {
@@ -131,6 +147,18 @@ impl LlmConfig {
             None
         };
 
+        let nearai = if let Some(session_token) = optional_env("NEARAI_SESSION_TOKEN")? {
+            Some(NearAiConfig {
+                session_token: SecretString::from(session_token),
+                model: optional_env("NEARAI_MODEL")?
+                    .unwrap_or_else(|| "claude-3-5-sonnet-20241022".to_string()),
+                base_url: optional_env("NEARAI_BASE_URL")?
+                    .unwrap_or_else(|| "https://api.near.ai".to_string()),
+            })
+        } else {
+            None
+        };
+
         // Validate that the selected provider has configuration
         match provider {
             LlmProvider::OpenAi if openai.is_none() => {
@@ -139,13 +167,20 @@ impl LlmConfig {
             LlmProvider::Anthropic if anthropic.is_none() => {
                 return Err(ConfigError::MissingEnvVar("ANTHROPIC_API_KEY".to_string()));
             }
-            _ => {}
+            LlmProvider::NearAi if nearai.is_none() => {
+                return Err(ConfigError::MissingEnvVar(
+                    "NEARAI_SESSION_TOKEN".to_string(),
+                ));
+            }
+            // Provider has valid configuration
+            LlmProvider::OpenAi | LlmProvider::Anthropic | LlmProvider::NearAi => {}
         }
 
         Ok(Self {
             provider,
             openai,
             anthropic,
+            nearai,
         })
     }
 }
@@ -337,6 +372,18 @@ mod tests {
         assert_eq!(
             "OpenAI".parse::<LlmProvider>().unwrap(),
             LlmProvider::OpenAi
+        );
+        assert_eq!(
+            "nearai".parse::<LlmProvider>().unwrap(),
+            LlmProvider::NearAi
+        );
+        assert_eq!(
+            "near-ai".parse::<LlmProvider>().unwrap(),
+            LlmProvider::NearAi
+        );
+        assert_eq!(
+            "near_ai".parse::<LlmProvider>().unwrap(),
+            LlmProvider::NearAi
         );
         assert!("invalid".parse::<LlmProvider>().is_err());
     }
