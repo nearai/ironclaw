@@ -42,11 +42,11 @@ impl exports::near::agent::tool::Guest for SlackTool {
     fn execute(req: exports::near::agent::tool::Request) -> exports::near::agent::tool::Response {
         match execute_inner(&req.params) {
             Ok(result) => exports::near::agent::tool::Response {
-                result: Some(result),
+                output: Some(result),
                 error: None,
             },
             Err(e) => exports::near::agent::tool::Response {
-                result: None,
+                output: None,
                 error: Some(e),
             },
         }
@@ -147,7 +147,7 @@ impl exports::near::agent::tool::Guest for SlackTool {
 /// Inner execution logic with proper error handling.
 fn execute_inner(params: &str) -> Result<String, String> {
     // Check if the Slack token is configured
-    if !bindings::near::agent::host::secret_exists("slack_bot_token") {
+    if !crate::near::agent::host::secret_exists("slack_bot_token") {
         return Err(
             "Slack bot token not configured. Please add the 'slack_bot_token' secret.".to_string(),
         );
@@ -157,8 +157,8 @@ fn execute_inner(params: &str) -> Result<String, String> {
     let action: SlackAction =
         serde_json::from_str(params).map_err(|e| format!("Invalid parameters: {}", e))?;
 
-    bindings::near::agent::host::log(
-        bindings::near::agent::host::LogLevel::Info,
+    crate::near::agent::host::log(
+        crate::near::agent::host::LogLevel::Info,
         &format!("Executing Slack action: {:?}", action),
     );
 

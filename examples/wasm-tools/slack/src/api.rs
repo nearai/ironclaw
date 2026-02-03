@@ -4,7 +4,7 @@
 //! credential injection and rate limiting. The WASM tool never sees
 //! the actual bot token.
 
-use crate::bindings::near::agent::host;
+use crate::near::agent::host;
 use crate::types::*;
 
 const SLACK_API_BASE: &str = "https://slack.com/api";
