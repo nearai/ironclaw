@@ -1,0 +1,118 @@
+//! Channel manager for coordinating multiple input channels.
+
+use std::collections::HashMap;
+use std::sync::Arc;
+
+use futures::stream;
+use tokio::sync::RwLock;
+
+use crate::channels::{Channel, IncomingMessage, MessageStream, OutgoingResponse};
+use crate::error::ChannelError;
+
+/// Manages multiple input channels and merges their message streams.
+pub struct ChannelManager {
+    channels: Arc<RwLock<HashMap<String, Box<dyn Channel>>>>,
+}
+
+impl ChannelManager {
+    /// Create a new channel manager.
+    pub fn new() -> Self {
+        Self {
+            channels: Arc::new(RwLock::new(HashMap::new())),
+        }
+    }
+
+    /// Add a channel to the manager.
+    pub fn add(&mut self, channel: Box<dyn Channel>) {
+        let name = channel.name().to_string();
+        // We need to get the inner HashMap to insert
+        // Since we're in a sync context during setup, we'll use try_write
+        if let Ok(mut channels) = self.channels.try_write() {
+            channels.insert(name.clone(), channel);
+            tracing::debug!("Added channel: {}", name);
+        } else {
+            tracing::error!("Failed to add channel: {} (lock contention)", name);
+        }
+    }
+
+    /// Start all channels and return a merged stream of messages.
+    pub async fn start_all(&self) -> Result<MessageStream, ChannelError> {
+        let channels = self.channels.read().await;
+        let mut streams = Vec::new();
+
+        for (name, channel) in channels.iter() {
+            match channel.start().await {
+                Ok(stream) => {
+                    tracing::info!("Started channel: {}", name);
+                    streams.push(stream);
+                }
+                Err(e) => {
+                    tracing::error!("Failed to start channel {}: {}", name, e);
+                    // Continue with other channels, don't fail completely
+                }
+            }
+        }
+
+        if streams.is_empty() {
+            return Err(ChannelError::StartupFailed {
+                name: "all".to_string(),
+                reason: "No channels started successfully".to_string(),
+            });
+        }
+
+        // Merge all streams into one
+        let merged = stream::select_all(streams);
+        Ok(Box::pin(merged))
+    }
+
+    /// Send a response to a specific channel.
+    pub async fn respond(
+        &self,
+        msg: &IncomingMessage,
+        response: OutgoingResponse,
+    ) -> Result<(), ChannelError> {
+        let channels = self.channels.read().await;
+        if let Some(channel) = channels.get(&msg.channel) {
+            channel.respond(msg, response).await
+        } else {
+            Err(ChannelError::SendFailed {
+                name: msg.channel.clone(),
+                reason: "Channel not found".to_string(),
+            })
+        }
+    }
+
+    /// Check health of all channels.
+    pub async fn health_check_all(&self) -> HashMap<String, Result<(), ChannelError>> {
+        let channels = self.channels.read().await;
+        let mut results = HashMap::new();
+
+        for (name, channel) in channels.iter() {
+            results.insert(name.clone(), channel.health_check().await);
+        }
+
+        results
+    }
+
+    /// Shutdown all channels.
+    pub async fn shutdown_all(&self) -> Result<(), ChannelError> {
+        let channels = self.channels.read().await;
+        for (name, channel) in channels.iter() {
+            if let Err(e) = channel.shutdown().await {
+                tracing::error!("Error shutting down channel {}: {}", name, e);
+            }
+        }
+        Ok(())
+    }
+
+    /// Get list of channel names.
+    pub async fn channel_names(&self) -> Vec<String> {
+        self.channels.read().await.keys().cloned().collect()
+    }
+}
+
+impl Default for ChannelManager {
+    fn default() -> Self {
+        Self::new()
+    }
+}

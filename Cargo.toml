@@ -1,0 +1,70 @@
+[package]
+name = "near-agent"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+description = "LLM-powered autonomous agent for the NEAR AI marketplace"
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+# Async runtime
+tokio = { version = "1", features = ["full"] }
+tokio-stream = "0.1"
+futures = "0.3"
+
+# HTTP client
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# Database
+deadpool-postgres = "0.14"
+tokio-postgres = { version = "0.7", features = ["with-uuid-1", "with-chrono-0_4", "with-serde_json-1"] }
+postgres-types = { version = "0.2", features = ["with-serde_json-1"] }
+refinery = { version = "0.8", features = ["tokio-postgres"] }
+
+# Error handling
+thiserror = "2"
+anyhow = "1"
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+
+# Configuration
+dotenvy = "0.15"
+
+# Core types
+uuid = { version = "1", features = ["v4", "serde"] }
+chrono = { version = "0.4", features = ["serde"] }
+rust_decimal = { version = "1", features = ["serde", "serde-with-str", "db-tokio-postgres", "maths"] }
+rust_decimal_macros = "1"
+
+# Async traits
+async-trait = "0.1"
+
+# CLI
+clap = { version = "4", features = ["derive", "env"] }
+
+# Channel integrations
+axum = "0.8"
+tower = "0.5"
+tower-http = { version = "0.6", features = ["trace", "cors"] }
+
+# Safety/sanitization
+regex = "1"
+aho-corasick = "1"
+
+# Secrecy for sensitive values
+secrecy = { version = "0.10", features = ["serde"] }
+
+[dev-dependencies]
+tokio-test = "0.4"
+testcontainers-modules = { version = "0.11", features = ["postgres"] }
+pretty_assertions = "1"
+
+[features]
+default = []
+integration = []

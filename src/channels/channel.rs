@@ -1,0 +1,134 @@
+//! Channel trait and message types.
+
+use std::pin::Pin;
+
+use async_trait::async_trait;
+use chrono::{DateTime, Utc};
+use futures::Stream;
+use uuid::Uuid;
+
+use crate::error::ChannelError;
+
+/// A message received from an external channel.
+#[derive(Debug, Clone)]
+pub struct IncomingMessage {
+    /// Unique message ID.
+    pub id: Uuid,
+    /// Channel this message came from.
+    pub channel: String,
+    /// User identifier within the channel.
+    pub user_id: String,
+    /// Optional display name.
+    pub user_name: Option<String>,
+    /// Message content.
+    pub content: String,
+    /// Thread/conversation ID for threaded conversations.
+    pub thread_id: Option<String>,
+    /// When the message was received.
+    pub received_at: DateTime<Utc>,
+    /// Channel-specific metadata.
+    pub metadata: serde_json::Value,
+}
+
+impl IncomingMessage {
+    /// Create a new incoming message.
+    pub fn new(
+        channel: impl Into<String>,
+        user_id: impl Into<String>,
+        content: impl Into<String>,
+    ) -> Self {
+        Self {
+            id: Uuid::new_v4(),
+            channel: channel.into(),
+            user_id: user_id.into(),
+            user_name: None,
+            content: content.into(),
+            thread_id: None,
+            received_at: Utc::now(),
+            metadata: serde_json::Value::Null,
+        }
+    }
+
+    /// Set the thread ID.
+    pub fn with_thread(mut self, thread_id: impl Into<String>) -> Self {
+        self.thread_id = Some(thread_id.into());
+        self
+    }
+
+    /// Set metadata.
+    pub fn with_metadata(mut self, metadata: serde_json::Value) -> Self {
+        self.metadata = metadata;
+        self
+    }
+
+    /// Set user name.
+    pub fn with_user_name(mut self, name: impl Into<String>) -> Self {
+        self.user_name = Some(name.into());
+        self
+    }
+}
+
+/// Stream of incoming messages.
+pub type MessageStream = Pin<Box<dyn Stream<Item = IncomingMessage> + Send>>;
+
+/// Response to send back to a channel.
+#[derive(Debug, Clone)]
+pub struct OutgoingResponse {
+    /// The content to send.
+    pub content: String,
+    /// Optional thread ID to reply in.
+    pub thread_id: Option<String>,
+    /// Channel-specific metadata for the response.
+    pub metadata: serde_json::Value,
+}
+
+impl OutgoingResponse {
+    /// Create a simple text response.
+    pub fn text(content: impl Into<String>) -> Self {
+        Self {
+            content: content.into(),
+            thread_id: None,
+            metadata: serde_json::Value::Null,
+        }
+    }
+
+    /// Set the thread ID for the response.
+    pub fn in_thread(mut self, thread_id: impl Into<String>) -> Self {
+        self.thread_id = Some(thread_id.into());
+        self
+    }
+}
+
+/// Trait for message channels.
+///
+/// Channels receive messages from external sources and convert them to
+/// a unified format. They also handle sending responses back.
+#[async_trait]
+pub trait Channel: Send + Sync {
+    /// Get the channel name (e.g., "cli", "slack", "telegram", "http").
+    fn name(&self) -> &str;
+
+    /// Start listening for messages.
+    ///
+    /// Returns a stream of incoming messages. The channel should handle
+    /// reconnection and error recovery internally.
+    async fn start(&self) -> Result<MessageStream, ChannelError>;
+
+    /// Send a response back to the user.
+    ///
+    /// The response is sent in the context of the original message
+    /// (same channel, same thread if applicable).
+    async fn respond(
+        &self,
+        msg: &IncomingMessage,
+        response: OutgoingResponse,
+    ) -> Result<(), ChannelError>;
+
+    /// Check if the channel is healthy.
+    async fn health_check(&self) -> Result<(), ChannelError>;
+
+    /// Gracefully shut down the channel.
+    async fn shutdown(&self) -> Result<(), ChannelError> {
+        Ok(())
+    }
+}
