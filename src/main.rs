@@ -192,6 +192,7 @@ async fn main() -> anyhow::Result<()> {
         tools,
         channels,
         workspace,
+        Some(config.heartbeat.clone()),
     );
 
     tracing::info!("Agent initialized, starting main loop...");

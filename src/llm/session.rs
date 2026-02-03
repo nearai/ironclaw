@@ -9,7 +9,7 @@ use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
 use reqwest::Client;
-use secrecy::{ExposeSecret, SecretString};
+use secrecy::SecretString;
 use serde::{Deserialize, Serialize};
 use tokio::sync::{Mutex, RwLock};
 
@@ -127,122 +127,27 @@ impl SessionManager {
 
     /// Ensure we have a valid session, triggering login flow if needed.
     ///
-    /// This proactively validates the token with the server, so we catch
-    /// expired sessions early rather than failing on the first LLM request.
+    /// If no token exists, triggers the OAuth login flow. If a token exists,
+    /// it is assumed valid until a 401 response indicates otherwise.
     pub async fn ensure_authenticated(&self) -> Result<(), LlmError> {
-        if !self.has_token().await {
-            // No token at all, need to authenticate
-            return self.initiate_login().await;
+        if self.has_token().await {
+            tracing::debug!("Session token present, assuming valid");
+            return Ok(());
         }
 
-        // We have a token, but let's validate it's not expired
-        match self.validate_token().await {
-            Ok(()) => {
-                tracing::debug!("Session token validated successfully");
-                Ok(())
-            }
-            Err(e) => {
-                tracing::warn!("Session token validation failed: {}, will re-authenticate", e);
-                self.initiate_login().await
-            }
-        }
-    }
-
-    /// Validate the current token with the server.
-    ///
-    /// Attempts to refresh the token to verify it's still valid. If refresh
-    /// succeeds, we also get a fresh token as a bonus.
-    async fn validate_token(&self) -> Result<(), LlmError> {
-        // Try to refresh - this validates the token and gives us a fresh one
-        match self.refresh_session().await {
-            Ok(new_token) => {
-                let mut guard = self.token.write().await;
-                *guard = Some(new_token);
-                Ok(())
-            }
-            Err(e) => Err(e),
-        }
+        // No token, need to authenticate
+        self.initiate_login().await
     }
 
     /// Handle an authentication failure (401 response).
     ///
-    /// First attempts to refresh the session. If refresh fails, initiates
-    /// a full re-authentication flow.
-    ///
-    /// Returns `true` if authentication was recovered, `false` if it failed.
+    /// Triggers the OAuth login flow to get a new session token.
     pub async fn handle_auth_failure(&self) -> Result<(), LlmError> {
         // Acquire renewal lock to prevent thundering herd
         let _guard = self.renewal_lock.lock().await;
 
-        // Double-check: maybe another task already renewed
-        // (We don't have a way to verify without making a request,
-        // so we just try to refresh)
-
-        tracing::info!("Session expired, attempting refresh...");
-
-        // Try refresh first
-        match self.refresh_session().await {
-            Ok(new_token) => {
-                let mut guard = self.token.write().await;
-                *guard = Some(new_token);
-                tracing::info!("Session refreshed successfully");
-                return Ok(());
-            }
-            Err(e) => {
-                tracing::warn!(
-                    "Session refresh failed: {}, will need to re-authenticate",
-                    e
-                );
-            }
-        }
-
-        // Refresh failed, need full re-authentication
+        tracing::info!("Session expired or invalid, re-authenticating...");
         self.initiate_login().await
-    }
-
-    /// Attempt to refresh the session using the current token.
-    async fn refresh_session(&self) -> Result<SecretString, LlmError> {
-        let current_token = self.get_token().await?;
-
-        let url = format!("{}/auth/refresh", self.config.auth_base_url);
-        tracing::debug!("Attempting session refresh at {}", url);
-
-        let response = self
-            .client
-            .post(&url)
-            .header(
-                "Authorization",
-                format!("Bearer {}", current_token.expose_secret()),
-            )
-            .send()
-            .await
-            .map_err(|e| LlmError::SessionRenewalFailed {
-                provider: "nearai".to_string(),
-                reason: format!("HTTP request failed: {}", e),
-            })?;
-
-        if response.status().is_success() {
-            let body: RefreshResponse =
-                response
-                    .json()
-                    .await
-                    .map_err(|e| LlmError::SessionRenewalFailed {
-                        provider: "nearai".to_string(),
-                        reason: format!("Failed to parse response: {}", e),
-                    })?;
-
-            let new_token = SecretString::from(body.session_token.clone());
-            self.save_session(&body.session_token, None).await?;
-            return Ok(new_token);
-        }
-
-        // Refresh endpoint returned non-success
-        let status = response.status();
-        let body = response.text().await.unwrap_or_default();
-        Err(LlmError::SessionRenewalFailed {
-            provider: "nearai".to_string(),
-            reason: format!("HTTP {}: {}", status, body),
-        })
     }
 
     /// Start the OAuth login flow.
@@ -279,8 +184,9 @@ impl SessionManager {
         })?;
 
         let callback_url = format!("http://127.0.0.1:{}", port);
+        // Use GitHub OAuth (Google OAuth may not have the redirect URI configured)
         let auth_url = format!(
-            "{}/v1/auth/google?frontend_callback={}",
+            "{}/v1/auth/github?frontend_callback={}",
             self.config.auth_base_url,
             urlencoding::encode(&callback_url)
         );
@@ -362,8 +268,8 @@ impl SessionManager {
                                 let _ = socket.write_all(response.as_bytes()).await;
                                 let _ = socket.shutdown().await;
 
-                                // Provider is google since we used the google endpoint
-                                return Ok::<_, LlmError>((token, Some("google".to_string())));
+                                // Provider is github since we used the github endpoint
+                                return Ok::<_, LlmError>((token, Some("github".to_string())));
                             }
                         }
                     }
@@ -480,12 +386,6 @@ impl SessionManager {
     }
 }
 
-/// Response from the refresh endpoint.
-#[derive(Debug, Deserialize)]
-struct RefreshResponse {
-    session_token: String,
-}
-
 /// Create a session manager from a config, migrating from env var if present.
 pub async fn create_session_manager(config: SessionConfig) -> Arc<SessionManager> {
     let manager = SessionManager::new_async(config).await;
@@ -509,6 +409,7 @@ pub async fn create_session_manager(config: SessionConfig) -> Arc<SessionManager
 #[cfg(test)]
 mod tests {
     use super::*;
+    use secrecy::ExposeSecret;
     use tempfile::tempdir;
 
     #[tokio::test]

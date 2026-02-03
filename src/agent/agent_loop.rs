@@ -8,13 +8,16 @@ use uuid::Uuid;
 
 use crate::agent::compaction::ContextCompactor;
 use crate::agent::context_monitor::ContextMonitor;
+use crate::agent::heartbeat::spawn_heartbeat;
 use crate::agent::self_repair::DefaultSelfRepair;
 use crate::agent::session::{Session, ThreadState};
 use crate::agent::session_manager::SessionManager;
 use crate::agent::submission::{Submission, SubmissionParser, SubmissionResult};
-use crate::agent::{MessageIntent, RepairTask, Router, Scheduler};
+use crate::agent::{
+    HeartbeatConfig as AgentHeartbeatConfig, MessageIntent, RepairTask, Router, Scheduler,
+};
 use crate::channels::{ChannelManager, IncomingMessage, OutgoingResponse, StatusUpdate};
-use crate::config::AgentConfig;
+use crate::config::{AgentConfig, HeartbeatConfig};
 use crate::context::ContextManager;
 use crate::error::Error;
 use crate::history::Store;
@@ -37,6 +40,7 @@ pub struct Agent {
     session_manager: Arc<SessionManager>,
     context_monitor: ContextMonitor,
     workspace: Option<Arc<Workspace>>,
+    heartbeat_config: Option<HeartbeatConfig>,
 }
 
 impl Agent {
@@ -49,6 +53,7 @@ impl Agent {
         tools: Arc<ToolRegistry>,
         channels: ChannelManager,
         workspace: Option<Arc<Workspace>>,
+        heartbeat_config: Option<HeartbeatConfig>,
     ) -> Self {
         let context_manager = Arc::new(ContextManager::new(config.max_parallel_jobs));
 
@@ -74,6 +79,7 @@ impl Agent {
             session_manager: Arc::new(SessionManager::new()),
             context_monitor: ContextMonitor::new(),
             workspace,
+            heartbeat_config,
         }
     }
 
@@ -93,6 +99,58 @@ impl Agent {
         let repair_handle = tokio::spawn(async move {
             repair_task.run().await;
         });
+
+        // Spawn heartbeat if enabled
+        let heartbeat_handle = if let Some(ref hb_config) = self.heartbeat_config {
+            if hb_config.enabled {
+                if let Some(ref workspace) = self.workspace {
+                    let config = AgentHeartbeatConfig::default()
+                        .with_interval(std::time::Duration::from_secs(hb_config.interval_secs));
+
+                    // Set up notification channel if configured
+                    let (notify_tx, mut notify_rx) =
+                        tokio::sync::mpsc::channel::<OutgoingResponse>(16);
+
+                    // Spawn notification forwarder
+                    // We can't clone ChannelManager directly, so we just log the notifications
+                    // The heartbeat system will handle notifications via the response_tx
+                    let notify_channel = hb_config.notify_channel.clone();
+                    let notify_user = hb_config.notify_user.clone();
+                    tokio::spawn(async move {
+                        while let Some(response) = notify_rx.recv().await {
+                            if let (Some(ch), Some(user)) = (&notify_channel, &notify_user) {
+                                // Log the heartbeat notification
+                                // In a full implementation, we'd route this through a shared channel reference
+                                tracing::info!(
+                                    "Heartbeat notification for {}/{}: {}",
+                                    ch,
+                                    user,
+                                    &response.content
+                                );
+                            }
+                        }
+                    });
+
+                    tracing::info!(
+                        "Heartbeat enabled with {}s interval",
+                        hb_config.interval_secs
+                    );
+                    Some(spawn_heartbeat(
+                        config,
+                        workspace.clone(),
+                        self.llm.clone(),
+                        Some(notify_tx),
+                    ))
+                } else {
+                    tracing::warn!("Heartbeat enabled but no workspace available");
+                    None
+                }
+            } else {
+                None
+            }
+        } else {
+            None
+        };
 
         // Main message loop
         tracing::info!("Agent {} ready and listening", self.config.name);
@@ -123,6 +181,9 @@ impl Agent {
         // Cleanup
         tracing::info!("Agent shutting down...");
         repair_handle.abort();
+        if let Some(handle) = heartbeat_handle {
+            handle.abort();
+        }
         self.scheduler.stop_all().await;
         self.channels.shutdown_all().await?;
 

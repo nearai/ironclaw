@@ -29,7 +29,7 @@ pub use context_monitor::{CompactionStrategy, ContextBreakdown, ContextMonitor};
 pub use heartbeat::{HeartbeatConfig, HeartbeatResult, HeartbeatRunner, spawn_heartbeat};
 pub use router::{MessageIntent, Router};
 pub use scheduler::Scheduler;
-pub use self_repair::{RepairResult, RepairTask, SelfRepair, StuckJob};
+pub use self_repair::{BrokenTool, RepairResult, RepairTask, SelfRepair, StuckJob};
 pub use session::{Session, Thread, ThreadState, Turn, TurnState};
 pub use session_manager::SessionManager;
 pub use submission::{Submission, SubmissionParser, SubmissionResult};

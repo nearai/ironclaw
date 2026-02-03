@@ -18,6 +18,7 @@ pub struct Config {
     pub wasm: WasmConfig,
     pub secrets: SecretsConfig,
     pub builder: BuilderModeConfig,
+    pub heartbeat: HeartbeatConfig,
 }
 
 impl Config {
@@ -35,6 +36,7 @@ impl Config {
             wasm: WasmConfig::from_env()?,
             secrets: SecretsConfig::from_env()?,
             builder: BuilderModeConfig::from_env()?,
+            heartbeat: HeartbeatConfig::from_env()?,
         })
     }
 }
@@ -166,6 +168,8 @@ pub struct AgentConfig {
     pub stuck_threshold: Duration,
     pub repair_check_interval: Duration,
     pub max_repair_attempts: u32,
+    /// Whether to use planning before tool execution.
+    pub use_planning: bool,
 }
 
 impl AgentConfig {
@@ -183,6 +187,14 @@ impl AgentConfig {
                 60,
             )?),
             max_repair_attempts: parse_optional_env("SELF_REPAIR_MAX_ATTEMPTS", 3)?,
+            use_planning: optional_env("AGENT_USE_PLANNING")?
+                .map(|s| s.parse())
+                .transpose()
+                .map_err(|e| ConfigError::InvalidValue {
+                    key: "AGENT_USE_PLANNING".to_string(),
+                    message: format!("must be 'true' or 'false': {e}"),
+                })?
+                .unwrap_or(true), // Default to planning enabled
         })
     }
 }
@@ -415,6 +427,48 @@ impl BuilderModeConfig {
             auto_register: self.auto_register,
             wasm_output_dir: None,
         }
+    }
+}
+
+/// Heartbeat configuration.
+#[derive(Debug, Clone)]
+pub struct HeartbeatConfig {
+    /// Whether heartbeat is enabled.
+    pub enabled: bool,
+    /// Interval between heartbeat checks in seconds.
+    pub interval_secs: u64,
+    /// Channel to notify on heartbeat findings.
+    pub notify_channel: Option<String>,
+    /// User ID to notify on heartbeat findings.
+    pub notify_user: Option<String>,
+}
+
+impl Default for HeartbeatConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            interval_secs: 1800, // 30 minutes
+            notify_channel: None,
+            notify_user: None,
+        }
+    }
+}
+
+impl HeartbeatConfig {
+    fn from_env() -> Result<Self, ConfigError> {
+        Ok(Self {
+            enabled: optional_env("HEARTBEAT_ENABLED")?
+                .map(|s| s.parse())
+                .transpose()
+                .map_err(|e| ConfigError::InvalidValue {
+                    key: "HEARTBEAT_ENABLED".to_string(),
+                    message: format!("must be 'true' or 'false': {e}"),
+                })?
+                .unwrap_or(false),
+            interval_secs: parse_optional_env("HEARTBEAT_INTERVAL_SECS", 1800)?,
+            notify_channel: optional_env("HEARTBEAT_NOTIFY_CHANNEL")?,
+            notify_user: optional_env("HEARTBEAT_NOTIFY_USER")?,
+        })
     }
 }
 

@@ -12,7 +12,9 @@ use crate::agent::task::TaskOutput;
 use crate::context::{ContextManager, JobState};
 use crate::error::Error;
 use crate::history::Store;
-use crate::llm::{ChatMessage, LlmProvider, Reasoning, ReasoningContext, ToolSelection};
+use crate::llm::{
+    ActionPlan, ChatMessage, LlmProvider, Reasoning, ReasoningContext, ToolSelection,
+};
 use crate::safety::SafetyLayer;
 use crate::tools::ToolRegistry;
 
@@ -25,6 +27,8 @@ pub struct Worker {
     tools: Arc<ToolRegistry>,
     store: Option<Arc<Store>>,
     timeout: Duration,
+    /// Whether to use planning before tool execution.
+    use_planning: bool,
 }
 
 /// Result of a tool execution with metadata for context building.
@@ -44,6 +48,7 @@ impl Worker {
         tools: Arc<ToolRegistry>,
         store: Option<Arc<Store>>,
         timeout: Duration,
+        use_planning: bool,
     ) -> Self {
         Self {
             job_id,
@@ -53,6 +58,7 @@ impl Worker {
             tools,
             store,
             timeout,
+            use_planning,
         }
     }
 
@@ -144,6 +150,50 @@ Report when the job is complete or if you encounter issues you cannot resolve."#
         let max_iterations = 50;
         let mut iteration = 0;
 
+        // Generate plan if planning is enabled
+        let plan = if self.use_planning {
+            match reasoning.plan(reason_ctx).await {
+                Ok(p) => {
+                    tracing::info!(
+                        "Created plan for job {}: {} actions, {:.0}% confidence",
+                        self.job_id,
+                        p.actions.len(),
+                        p.confidence * 100.0
+                    );
+
+                    // Add plan to context as assistant message
+                    reason_ctx.messages.push(ChatMessage::assistant(format!(
+                        "I've created a plan to accomplish this goal: {}\n\nSteps:\n{}",
+                        p.goal,
+                        p.actions
+                            .iter()
+                            .enumerate()
+                            .map(|(i, a)| format!("{}. {} - {}", i + 1, a.tool_name, a.reasoning))
+                            .collect::<Vec<_>>()
+                            .join("\n")
+                    )));
+
+                    Some(p)
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        "Planning failed for job {}, falling back to direct selection: {}",
+                        self.job_id,
+                        e
+                    );
+                    None
+                }
+            }
+        } else {
+            None
+        };
+
+        // If we have a plan, execute it
+        if let Some(ref plan) = plan {
+            return self.execute_plan(rx, reasoning, reason_ctx, plan).await;
+        }
+
+        // Otherwise, use direct tool selection loop
         loop {
             // Check for stop signal
             if let Ok(msg) = rx.try_recv() {
@@ -401,6 +451,19 @@ Report when the job is complete or if you encounter issues you cannot resolve."#
                     e
                 );
 
+                // Record failure for self-repair tracking
+                if let Some(ref store) = self.store {
+                    let store = store.clone();
+                    let tool_name = selection.tool_name.clone();
+                    let error_msg = e.to_string();
+                    tokio::spawn(async move {
+                        if let Err(db_err) = store.record_tool_failure(&tool_name, &error_msg).await
+                        {
+                            tracing::warn!("Failed to record tool failure: {}", db_err);
+                        }
+                    });
+                }
+
                 reason_ctx.messages.push(ChatMessage::tool_result(
                     "tool_call_id",
                     &selection.tool_name,
@@ -410,6 +473,95 @@ Report when the job is complete or if you encounter issues you cannot resolve."#
                 Ok(false)
             }
         }
+    }
+
+    /// Execute a pre-generated plan.
+    async fn execute_plan(
+        &self,
+        rx: &mut mpsc::Receiver<WorkerMessage>,
+        reasoning: &Reasoning,
+        reason_ctx: &mut ReasoningContext,
+        plan: &ActionPlan,
+    ) -> Result<(), Error> {
+        for (i, action) in plan.actions.iter().enumerate() {
+            // Check for stop signal
+            if let Ok(msg) = rx.try_recv() {
+                match msg {
+                    WorkerMessage::Stop => {
+                        tracing::debug!(
+                            "Worker for job {} received stop signal during plan execution",
+                            self.job_id
+                        );
+                        return Ok(());
+                    }
+                    WorkerMessage::Ping => {
+                        tracing::trace!("Worker for job {} received ping", self.job_id);
+                    }
+                    WorkerMessage::Start => {}
+                }
+            }
+
+            tracing::debug!(
+                "Job {} executing planned action {}/{}: {} - {}",
+                self.job_id,
+                i + 1,
+                plan.actions.len(),
+                action.tool_name,
+                action.reasoning
+            );
+
+            // Execute the planned tool
+            let result = self
+                .execute_tool(&action.tool_name, &action.parameters)
+                .await;
+
+            // Create a synthetic ToolSelection for process_tool_result
+            let selection = ToolSelection {
+                tool_name: action.tool_name.clone(),
+                parameters: action.parameters.clone(),
+                reasoning: action.reasoning.clone(),
+                alternatives: vec![],
+            };
+
+            // Process the result
+            let completed = self
+                .process_tool_result(reason_ctx, &selection, result)
+                .await?;
+
+            if completed {
+                return Ok(());
+            }
+
+            // Small delay between actions
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+
+        // Plan completed, check with LLM if job is done
+        reason_ctx.messages.push(ChatMessage::user(
+            "All planned actions have been executed. Is the job complete? If not, what else needs to be done?",
+        ));
+
+        let response = reasoning.respond(reason_ctx).await?;
+        reason_ctx.messages.push(ChatMessage::assistant(&response));
+
+        let response_lower = response.to_lowercase();
+        if response_lower.contains("complete")
+            || response_lower.contains("finished")
+            || response_lower.contains("done")
+        {
+            self.mark_completed().await?;
+        } else {
+            // Job not complete, could re-plan or fall back to direct selection
+            tracing::info!(
+                "Job {} plan completed but work remains, falling back to direct selection",
+                self.job_id
+            );
+            // Continue with standard execution loop by returning (will be picked up by main loop)
+            self.mark_stuck("Plan completed but job incomplete - needs re-planning")
+                .await?;
+        }
+
+        Ok(())
     }
 
     async fn execute_tool(

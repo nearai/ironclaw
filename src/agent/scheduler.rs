@@ -120,6 +120,7 @@ impl Scheduler {
             self.tools.clone(),
             self.store.clone(),
             self.config.job_timeout,
+            self.config.use_planning,
         );
 
         // Spawn worker task

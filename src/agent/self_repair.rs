@@ -9,6 +9,8 @@ use uuid::Uuid;
 
 use crate::context::{ContextManager, JobState};
 use crate::error::RepairError;
+use crate::history::Store;
+use crate::tools::{BuildRequirement, Language, SoftwareBuilder, SoftwareType, ToolRegistry};
 
 /// A job that has been detected as stuck.
 #[derive(Debug, Clone)]
@@ -26,7 +28,10 @@ pub struct BrokenTool {
     pub name: String,
     pub failure_count: u32,
     pub last_error: Option<String>,
+    pub first_failure: DateTime<Utc>,
     pub last_failure: DateTime<Utc>,
+    pub last_build_result: Option<serde_json::Value>,
+    pub repair_attempts: u32,
 }
 
 /// Result of a repair attempt.
@@ -63,6 +68,9 @@ pub struct DefaultSelfRepair {
     context_manager: Arc<ContextManager>,
     stuck_threshold: Duration,
     max_repair_attempts: u32,
+    store: Option<Arc<Store>>,
+    builder: Option<Arc<dyn SoftwareBuilder>>,
+    tools: Option<Arc<ToolRegistry>>,
 }
 
 impl DefaultSelfRepair {
@@ -76,7 +84,27 @@ impl DefaultSelfRepair {
             context_manager,
             stuck_threshold,
             max_repair_attempts,
+            store: None,
+            builder: None,
+            tools: None,
         }
+    }
+
+    /// Add a Store for tool failure tracking.
+    pub fn with_store(mut self, store: Arc<Store>) -> Self {
+        self.store = Some(store);
+        self
+    }
+
+    /// Add a Builder and ToolRegistry for automatic tool repair.
+    pub fn with_builder(
+        mut self,
+        builder: Arc<dyn SoftwareBuilder>,
+        tools: Arc<ToolRegistry>,
+    ) -> Self {
+        self.builder = Some(builder);
+        self.tools = Some(tools);
+        self
     }
 }
 
@@ -151,19 +179,129 @@ impl SelfRepair for DefaultSelfRepair {
     }
 
     async fn detect_broken_tools(&self) -> Vec<BrokenTool> {
-        // TODO: Implement tool failure tracking
-        // Would need to track tool failures in the database
-        vec![]
+        let Some(ref store) = self.store else {
+            return vec![];
+        };
+
+        // Threshold: 5 failures before considering a tool broken
+        match store.get_broken_tools(5).await {
+            Ok(tools) => {
+                if !tools.is_empty() {
+                    tracing::info!("Detected {} broken tools needing repair", tools.len());
+                }
+                tools
+            }
+            Err(e) => {
+                tracing::warn!("Failed to detect broken tools: {}", e);
+                vec![]
+            }
+        }
     }
 
     async fn repair_broken_tool(&self, tool: &BrokenTool) -> Result<RepairResult, RepairError> {
-        // TODO: Implement tool repair via ToolBuilder
-        Ok(RepairResult::ManualRequired {
-            message: format!(
-                "Tool '{}' repair not implemented - manual intervention required",
-                tool.name
+        let Some(ref builder) = self.builder else {
+            return Ok(RepairResult::ManualRequired {
+                message: format!("Builder not available for repairing tool '{}'", tool.name),
+            });
+        };
+
+        let Some(ref store) = self.store else {
+            return Ok(RepairResult::ManualRequired {
+                message: "Store not available for tracking repair".to_string(),
+            });
+        };
+
+        // Check repair attempt limit
+        if tool.repair_attempts >= self.max_repair_attempts {
+            return Ok(RepairResult::ManualRequired {
+                message: format!(
+                    "Tool '{}' exceeded max repair attempts ({})",
+                    tool.name, self.max_repair_attempts
+                ),
+            });
+        }
+
+        tracing::info!(
+            "Attempting to repair tool '{}' (attempt {})",
+            tool.name,
+            tool.repair_attempts + 1
+        );
+
+        // Increment repair attempts
+        if let Err(e) = store.increment_repair_attempts(&tool.name).await {
+            tracing::warn!("Failed to increment repair attempts: {}", e);
+        }
+
+        // Create BuildRequirement for repair
+        let requirement = BuildRequirement {
+            name: tool.name.clone(),
+            description: format!(
+                "Repair broken WASM tool.\n\n\
+                 Tool name: {}\n\
+                 Previous error: {}\n\
+                 Failure count: {}\n\n\
+                 Analyze the error, fix the implementation, and rebuild.",
+                tool.name,
+                tool.last_error.as_deref().unwrap_or("Unknown error"),
+                tool.failure_count
             ),
-        })
+            software_type: SoftwareType::WasmTool,
+            language: Language::Rust,
+            input_spec: None,
+            output_spec: None,
+            dependencies: vec![],
+            capabilities: vec!["http".to_string(), "workspace".to_string()],
+        };
+
+        // Attempt to build/repair
+        match builder.build(&requirement).await {
+            Ok(result) if result.success => {
+                tracing::info!(
+                    "Successfully rebuilt tool '{}' after {} iterations",
+                    tool.name,
+                    result.iterations
+                );
+
+                // Mark as repaired in database
+                if let Err(e) = store.mark_tool_repaired(&tool.name).await {
+                    tracing::warn!("Failed to mark tool as repaired: {}", e);
+                }
+
+                // Log if the tool was auto-registered
+                if result.registered {
+                    tracing::info!("Repaired tool '{}' auto-registered", tool.name);
+                }
+
+                Ok(RepairResult::Success {
+                    message: format!(
+                        "Tool '{}' repaired successfully after {} iterations",
+                        tool.name, result.iterations
+                    ),
+                })
+            }
+            Ok(result) => {
+                // Build completed but failed
+                tracing::warn!(
+                    "Repair build for '{}' completed but failed: {:?}",
+                    tool.name,
+                    result.error
+                );
+                Ok(RepairResult::Retry {
+                    message: format!(
+                        "Repair attempt {} for '{}' failed: {}",
+                        tool.repair_attempts + 1,
+                        tool.name,
+                        result.error.unwrap_or_else(|| "Unknown error".to_string())
+                    ),
+                })
+            }
+            Err(e) => {
+                tracing::error!("Repair build for '{}' errored: {}", tool.name, e);
+                Ok(RepairResult::Retry {
+                    message: format!("Repair build error: {}", e),
+                })
+            }
+        }
     }
 }
 
