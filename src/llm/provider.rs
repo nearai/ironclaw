@@ -224,6 +224,12 @@ pub trait LlmProvider: Send + Sync {
         request: ToolCompletionRequest,
     ) -> Result<ToolCompletionResponse, LlmError>;
 
+    /// List available models from the provider.
+    /// Default implementation returns empty list.
+    async fn list_models(&self) -> Result<Vec<String>, LlmError> {
+        Ok(Vec::new())
+    }
+
     /// Calculate cost for a completion.
     fn calculate_cost(&self, input_tokens: u32, output_tokens: u32) -> Decimal {
         let (input_cost, output_cost) = self.cost_per_token();

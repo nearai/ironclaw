@@ -9,6 +9,7 @@
 mod app;
 mod composer;
 mod events;
+mod model_selector;
 mod overlay;
 mod render;
 
@@ -30,6 +31,7 @@ use crate::error::ChannelError;
 
 pub use app::{AppEvent, AppState, InputMode};
 pub use composer::ChatComposer;
+pub use model_selector::{ModelSelectorOverlay, ModelSelectorRequest};
 pub use overlay::{ApprovalOverlay, ApprovalRequest};
 
 /// TUI channel for interactive terminal input with Ratatui.
@@ -54,6 +56,12 @@ impl TuiChannel {
     /// Use this to redirect tracing output to the TUI.
     pub fn log_writer(&self) -> TuiLogWriter {
         TuiLogWriter::new(self.event_tx.clone())
+    }
+
+    /// Get a sender for sending events to the TUI.
+    /// Use this to send available models or other events from outside the channel.
+    pub fn event_sender(&self) -> mpsc::Sender<AppEvent> {
+        self.event_tx.clone()
     }
 }
 

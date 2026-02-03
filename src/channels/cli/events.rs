@@ -110,6 +110,7 @@ fn handle_key(
         InputMode::Normal => handle_normal_mode(app, key),
         InputMode::Editing => handle_editing_mode(app, key, msg_tx),
         InputMode::Approval => handle_approval_mode(app, key),
+        InputMode::ModelSelector => handle_model_selector_mode(app, key),
     }
 }
 
@@ -152,6 +153,13 @@ fn handle_editing_mode(
         KeyCode::Enter => {
             if !app.composer.is_empty() {
                 let input = app.composer.submit();
+
+                // Handle /model command locally (TUI-specific)
+                if input.trim().eq_ignore_ascii_case("/model") {
+                    app.show_model_selector();
+                    return Ok(());
+                }
+
                 app.add_user_message(&input);
 
                 // Send message to agent
@@ -251,6 +259,30 @@ fn handle_approval_mode(app: &mut AppState, key: KeyEvent) -> io::Result<()> {
     Ok(())
 }
 
+/// Handle keys in model selector mode.
+fn handle_model_selector_mode(app: &mut AppState, key: KeyEvent) -> io::Result<()> {
+    if let Some(ref mut overlay) = app.model_selector {
+        match key.code {
+            KeyCode::Left | KeyCode::Char('h') => {
+                overlay.select_prev();
+            }
+            KeyCode::Right | KeyCode::Char('l') => {
+                overlay.select_next();
+            }
+            KeyCode::Enter | KeyCode::Char(' ') => {
+                let selected = overlay.selected_model().map(|s| s.to_string());
+                app.handle_model_selection(selected);
+            }
+            KeyCode::Esc => {
+                // Cancel without changing model
+                app.handle_model_selection(None);
+            }
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
 /// Handle an application event.
 fn handle_app_event(app: &mut AppState, event: AppEvent) {
     match event {
@@ -290,6 +322,12 @@ fn handle_app_event(app: &mut AppState, event: AppEvent) {
         }
         AppEvent::ThinkingMessage(msg) => {
             app.set_thinking(msg);
+        }
+        AppEvent::ErrorMessage(msg) => {
+            app.add_error_message(msg);
+        }
+        AppEvent::AvailableModels(models) => {
+            app.set_available_models(models);
         }
     }
 }

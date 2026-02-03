@@ -20,6 +20,17 @@ use crate::llm::provider::{
 };
 use crate::llm::session::SessionManager;
 
+/// Information about an available model from NEAR AI API.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ModelInfo {
+    /// Model identifier.
+    #[serde(alias = "id", alias = "model")]
+    pub name: String,
+    /// Optional provider name.
+    #[serde(default)]
+    pub provider: Option<String>,
+}
+
 /// NEAR AI Chat API provider.
 pub struct NearAiProvider {
     client: Client,
@@ -48,6 +59,123 @@ impl NearAiProvider {
             self.config.base_url,
             path.trim_start_matches('/')
         )
+    }
+
+    /// Fetch available models from the NEAR AI API.
+    pub async fn list_models(&self) -> Result<Vec<ModelInfo>, LlmError> {
+        use secrecy::ExposeSecret;
+
+        let token = self.session.get_token().await?;
+        let url = self.api_url("model/list");
+
+        tracing::debug!("Fetching models from: {}", url);
+
+        let response = self
+            .client
+            .get(&url)
+            .header("Authorization", format!("Bearer {}", token.expose_secret()))
+            .send()
+            .await
+            .map_err(|e| LlmError::RequestFailed {
+                provider: "nearai".to_string(),
+                reason: format!("Failed to fetch models: {}", e),
+            })?;
+
+        let status = response.status();
+        let response_text = response.text().await.unwrap_or_default();
+
+        if !status.is_success() {
+            // Check for session expiration
+            if status.as_u16() == 401 {
+                return Err(LlmError::SessionExpired {
+                    provider: "nearai".to_string(),
+                });
+            }
+
+            return Err(LlmError::RequestFailed {
+                provider: "nearai".to_string(),
+                reason: format!("HTTP {}: {}", status, response_text),
+            });
+        }
+
+        // Parse the response - NEAR AI returns {"limit": N, "models": [...]}
+        // Each model object may have the name in different fields
+        #[derive(Deserialize)]
+        struct ModelMetadata {
+            #[serde(default)]
+            name: Option<String>,
+            #[serde(default, alias = "modelName", alias = "model_name")]
+            model_name: Option<String>,
+        }
+
+        #[derive(Deserialize)]
+        struct ModelEntry {
+            #[serde(default)]
+            name: Option<String>,
+            #[serde(default)]
+            id: Option<String>,
+            #[serde(default)]
+            model: Option<String>,
+            #[serde(default, alias = "modelName", alias = "model_name")]
+            model_name: Option<String>,
+            #[serde(default, alias = "modelId", alias = "model_id")]
+            model_id: Option<String>,
+            #[serde(default)]
+            metadata: Option<ModelMetadata>,
+        }
+
+        impl ModelEntry {
+            fn get_name(&self) -> Option<String> {
+                self.name
+                    .clone()
+                    .or_else(|| self.id.clone())
+                    .or_else(|| self.model.clone())
+                    .or_else(|| self.model_name.clone())
+                    .or_else(|| self.model_id.clone())
+                    .or_else(|| self.metadata.as_ref().and_then(|m| m.name.clone()))
+                    .or_else(|| self.metadata.as_ref().and_then(|m| m.model_name.clone()))
+            }
+        }
+
+        #[derive(Deserialize)]
+        struct ModelsResponse {
+            #[serde(default)]
+            models: Option<Vec<ModelEntry>>,
+            #[serde(default)]
+            data: Option<Vec<ModelEntry>>,
+        }
+
+        if let Ok(resp) = serde_json::from_str::<ModelsResponse>(&response_text) {
+            if let Some(entries) = resp.models.or(resp.data) {
+                let models: Vec<ModelInfo> = entries
+                    .into_iter()
+                    .filter_map(|e| e.get_name().map(|name| ModelInfo { name, provider: None }))
+                    .collect();
+                if !models.is_empty() {
+                    return Ok(models);
+                }
+            }
+        }
+
+        // Try direct array format
+        if let Ok(entries) = serde_json::from_str::<Vec<ModelEntry>>(&response_text) {
+            let models: Vec<ModelInfo> = entries
+                .into_iter()
+                .filter_map(|e| e.get_name().map(|name| ModelInfo { name, provider: None }))
+                .collect();
+            if !models.is_empty() {
+                return Ok(models);
+            }
+        }
+
+        // Couldn't find model names in response
+        Err(LlmError::InvalidResponse {
+            provider: "nearai".to_string(),
+            reason: format!(
+                "No model names found in response: {}",
+                &response_text[..response_text.len().min(300)]
+            ),
+        })
     }
 
     /// Send a request with automatic session renewal on 401.
@@ -430,6 +558,12 @@ impl LlmProvider for NearAiProvider {
         // Default costs - could be model-specific in the future
         // These are approximate and may vary by model
         (dec!(0.000003), dec!(0.000015))
+    }
+
+    async fn list_models(&self) -> Result<Vec<String>, LlmError> {
+        // Use the inherent method and extract IDs
+        let models = NearAiProvider::list_models(self).await?;
+        Ok(models.into_iter().map(|m| m.name).collect())
     }
 }
 

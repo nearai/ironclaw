@@ -94,8 +94,11 @@ impl LlmConfig {
     fn from_env() -> Result<Self, ConfigError> {
         Ok(Self {
             nearai: NearAiConfig {
-                model: optional_env("NEARAI_MODEL")?
-                    .unwrap_or_else(|| "claude-3-5-sonnet-20241022".to_string()),
+                // Load model from saved settings first, then env, then default
+                model: crate::settings::Settings::load()
+                    .selected_model
+                    .or_else(|| optional_env("NEARAI_MODEL").ok().flatten())
+                    .unwrap_or_else(|| "zai-org/GLM-4.7".to_string()),
                 base_url: optional_env("NEARAI_BASE_URL")?
                     .unwrap_or_else(|| "https://api.near.ai".to_string()),
                 auth_base_url: optional_env("NEARAI_AUTH_URL")?
@@ -210,8 +213,14 @@ impl ChannelsConfig {
             None
         };
 
+        let cli_enabled = optional_env("CLI_ENABLED")?
+            .map(|s| s.to_lowercase() != "false" && s != "0")
+            .unwrap_or(true);
+
         Ok(Self {
-            cli: CliConfig { enabled: true },
+            cli: CliConfig {
+                enabled: cli_enabled,
+            },
             http,
         })
     }

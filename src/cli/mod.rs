@@ -27,6 +27,14 @@ pub struct Cli {
     #[arg(long, global = true)]
     pub no_db: bool,
 
+    /// Simple REPL mode without TUI (for testing)
+    #[arg(long, global = true)]
+    pub repl: bool,
+
+    /// Single message mode - send one message and exit
+    #[arg(short, long, global = true)]
+    pub message: Option<String>,
+
     /// Configuration file path (optional, uses env vars by default)
     #[arg(short, long, global = true)]
     pub config: Option<std::path::PathBuf>,

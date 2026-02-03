@@ -7,7 +7,7 @@ use tracing_subscriber::{EnvFilter, layer::SubscriberExt, util::SubscriberInitEx
 
 use near_agent::{
     agent::{Agent, AgentDeps},
-    channels::{ChannelManager, HttpChannel, TuiChannel},
+    channels::{AppEvent, ChannelManager, HttpChannel, ReplChannel, TuiChannel},
     cli::{Cli, Command, run_tool_command},
     config::Config,
     history::Store,
@@ -59,24 +59,55 @@ async fn main() -> anyhow::Result<()> {
     // This happens before TUI so the menu displays correctly
     session.ensure_authenticated().await?;
 
-    // Now create TUI channel and set up logging
-    let tui_channel = TuiChannel::new();
-    let tui_log_writer = tui_channel.log_writer();
-
-    // Initialize tracing with TUI writer
+    // Initialize tracing and channels based on mode
     let env_filter = EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| EnvFilter::new("near_agent=info,tower_http=debug"));
 
-    tracing_subscriber::registry()
-        .with(env_filter)
-        .with(
-            tracing_subscriber::fmt::layer()
-                .with_writer(tui_log_writer)
-                .without_time()
-                .with_target(false)
-                .with_level(true),
-        )
-        .init();
+    // Determine which mode to use: REPL, single message, or TUI
+    let use_repl = cli.repl || cli.message.is_some();
+
+    // Create appropriate channel based on mode
+    let (tui_channel, tui_event_sender, repl_channel) = if use_repl {
+        // REPL mode - use simple stdin/stdout
+        tracing_subscriber::registry()
+            .with(env_filter)
+            .with(tracing_subscriber::fmt::layer().with_target(false))
+            .init();
+
+        let repl = if let Some(ref msg) = cli.message {
+            ReplChannel::with_message(msg.clone())
+        } else {
+            ReplChannel::new()
+        };
+
+        (None, None, Some(repl))
+    } else if config.channels.cli.enabled {
+        // TUI mode
+        let channel = TuiChannel::new();
+        let log_writer = channel.log_writer();
+        let event_sender = channel.event_sender();
+
+        tracing_subscriber::registry()
+            .with(env_filter)
+            .with(
+                tracing_subscriber::fmt::layer()
+                    .with_writer(log_writer)
+                    .without_time()
+                    .with_target(false)
+                    .with_level(true),
+            )
+            .init();
+
+        (Some(channel), Some(event_sender), None)
+    } else {
+        // No CLI - just logging
+        tracing_subscriber::registry()
+            .with(env_filter)
+            .with(tracing_subscriber::fmt::layer().with_target(false))
+            .init();
+
+        (None, None, None)
+    };
 
     tracing::info!("Starting NEAR Agent...");
     tracing::info!("Loaded configuration for agent: {}", config.agent.name);
@@ -96,6 +127,29 @@ async fn main() -> anyhow::Result<()> {
     // Initialize LLM provider (clone session so we can reuse it for embeddings)
     let llm = create_llm_provider(&config.llm, session.clone())?;
     tracing::info!("LLM provider initialized: {}", llm.model_name());
+
+    // Fetch available models and send to TUI (async, non-blocking)
+    if let Some(ref event_tx) = tui_event_sender {
+        let llm_for_models = llm.clone();
+        let event_tx = event_tx.clone();
+        tokio::spawn(async move {
+            match llm_for_models.list_models().await {
+                Ok(models) if !models.is_empty() => {
+                    let _ = event_tx.send(AppEvent::AvailableModels(models)).await;
+                }
+                Ok(_) => {
+                    let _ = event_tx
+                        .send(AppEvent::ErrorMessage("No models available from API".into()))
+                        .await;
+                }
+                Err(e) => {
+                    let _ = event_tx
+                        .send(AppEvent::ErrorMessage(format!("Failed to fetch models: {}", e)))
+                        .await;
+                }
+            }
+        });
+    }
 
     // Initialize safety layer
     let safety = Arc::new(SafetyLayer::new(&config.safety));
@@ -205,14 +259,23 @@ async fn main() -> anyhow::Result<()> {
     // Initialize channel manager
     let mut channels = ChannelManager::new();
 
-    // Add TUI channel (already created for logging hookup)
-    if config.channels.cli.enabled {
-        channels.add(Box::new(tui_channel));
+    // Add REPL channel if in REPL mode
+    if let Some(repl) = repl_channel {
+        channels.add(Box::new(repl));
+        if cli.message.is_some() {
+            tracing::info!("Single message mode");
+        } else {
+            tracing::info!("REPL mode enabled");
+        }
+    }
+    // Add TUI channel if CLI is enabled (already created for logging hookup)
+    else if let Some(tui) = tui_channel {
+        channels.add(Box::new(tui));
         tracing::info!("TUI channel enabled");
     }
 
     // Add HTTP channel if configured and not CLI-only mode
-    if !cli.cli_only {
+    if !cli.cli_only && !use_repl {
         if let Some(ref http_config) = config.channels.http {
             channels.add(Box::new(HttpChannel::new(http_config.clone())));
             tracing::info!(

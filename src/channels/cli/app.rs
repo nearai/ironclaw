@@ -3,6 +3,7 @@
 use std::collections::VecDeque;
 
 use crate::channels::cli::composer::ChatComposer;
+use crate::channels::cli::model_selector::{ModelSelectorOverlay, ModelSelectorRequest};
 use crate::channels::cli::overlay::{ApprovalOverlay, ApprovalRequest};
 
 /// Events that can occur in the TUI.
@@ -24,6 +25,10 @@ pub enum AppEvent {
     LogMessage(String),
     /// Thinking/status message (shown in chat window).
     ThinkingMessage(String),
+    /// Error message (shown in chat window).
+    ErrorMessage(String),
+    /// Available models fetched from API.
+    AvailableModels(Vec<String>),
     /// Force a redraw.
     Redraw,
     /// Quit the application.
@@ -39,6 +44,8 @@ pub enum InputMode {
     Editing,
     /// Approval overlay is active.
     Approval,
+    /// Model selector overlay is active.
+    ModelSelector,
 }
 
 /// Message in the chat history.
@@ -110,6 +117,8 @@ pub struct AppState {
     pub composer: ChatComposer,
     /// Approval overlay (if active).
     pub approval: Option<ApprovalOverlay>,
+    /// Model selector overlay (if active).
+    pub model_selector: Option<ModelSelectorOverlay>,
     /// Scroll offset for messages.
     pub scroll_offset: u16,
     /// Whether the app should quit.
@@ -122,11 +131,19 @@ pub struct AppState {
     pub status_message: Option<String>,
     /// Whether Ctrl+D was pressed (waiting for second press to quit).
     pub ctrl_d_pending: bool,
+    /// Currently selected model.
+    pub current_model: String,
+    /// Available models (fetched from API).
+    pub available_models: Vec<String>,
 }
 
 impl AppState {
     /// Create a new app state.
     pub fn new() -> Self {
+        // Load saved model from settings
+        let settings = crate::settings::Settings::load();
+        let current_model = settings.model_or("claude-3-5-sonnet-20241022");
+
         Self {
             mode: InputMode::Editing,
             messages: vec![ChatMessage::system(
@@ -134,12 +151,60 @@ impl AppState {
             )],
             composer: ChatComposer::new(),
             approval: None,
+            model_selector: None,
             scroll_offset: 0,
             should_quit: false,
             pending_approvals: VecDeque::new(),
             streaming_buffer: None,
             status_message: None,
             ctrl_d_pending: false,
+            current_model,
+            available_models: Vec::new(),
+        }
+    }
+
+    /// Show the model selector.
+    pub fn show_model_selector(&mut self) {
+        let request = ModelSelectorRequest {
+            current_model: self.current_model.clone(),
+            available_models: self.available_models.clone(),
+        };
+        self.model_selector = Some(ModelSelectorOverlay::new(request));
+        self.mode = InputMode::ModelSelector;
+    }
+
+    /// Handle model selection.
+    pub fn handle_model_selection(&mut self, selected: Option<String>) {
+        self.model_selector = None;
+        self.mode = InputMode::Editing;
+
+        if let Some(model) = selected {
+            if model != self.current_model {
+                self.current_model = model.clone();
+                // Save to settings
+                let mut settings = crate::settings::Settings::load();
+                if let Err(e) = settings.set_model(&model) {
+                    tracing::warn!("Failed to save model setting: {}", e);
+                }
+                self.messages.push(ChatMessage::system(format!(
+                    "Switched to model: {}",
+                    ModelSelectorOverlay::format_model_name(&model)
+                )));
+            }
+        }
+    }
+
+    /// Set available models (also updates selector if open).
+    pub fn set_available_models(&mut self, models: Vec<String>) {
+        self.available_models = models.clone();
+
+        // Update the selector if it's currently open
+        if let Some(ref mut selector) = self.model_selector {
+            selector.request.available_models = models;
+            // Reset selection index if it's out of bounds
+            if selector.selection_index >= selector.request.available_models.len() {
+                selector.selection_index = 0;
+            }
         }
     }
 
@@ -158,6 +223,13 @@ impl AppState {
         // Remove any pending thinking message before adding the response
         self.clear_thinking();
         self.messages.push(ChatMessage::agent(content));
+        self.scroll_to_bottom();
+    }
+
+    /// Add an error message to the chat.
+    pub fn add_error_message(&mut self, content: impl Into<String>) {
+        self.messages
+            .push(ChatMessage::system(format!("Error: {}", content.into())).with_status(MessageStatus::Error));
         self.scroll_to_bottom();
     }
 

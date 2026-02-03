@@ -115,13 +115,15 @@ impl Router {
     fn extract_intent(&self, content: &str) -> MessageIntent {
         let lower = content.to_lowercase();
 
-        // Job creation patterns
-        if lower.starts_with("create ")
-            || lower.starts_with("make ")
-            || lower.starts_with("new job")
-            || lower.contains("i need")
-            || lower.contains("can you")
-        {
+        // Job creation patterns - must be explicit about creating a job
+        // More specific patterns to avoid capturing general conversation
+        let is_job_creation = lower.starts_with("create job ")
+            || lower.starts_with("new job ")
+            || lower.starts_with("schedule job ")
+            || lower.starts_with("run job ")
+            || (lower.contains("create") && lower.contains("job"));
+
+        if is_job_creation {
             return MessageIntent::CreateJob {
                 title: extract_title(content),
                 description: content.to_string(),

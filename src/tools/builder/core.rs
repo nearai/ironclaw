@@ -40,7 +40,9 @@ use uuid::Uuid;
 
 use crate::context::JobContext;
 use crate::error::ToolError as AgentToolError;
-use crate::llm::{ChatMessage, LlmProvider, Reasoning, ReasoningContext, ToolDefinition};
+use crate::llm::{
+    ChatMessage, LlmProvider, Reasoning, ReasoningContext, RespondResult, ToolDefinition,
+};
 use crate::safety::SafetyLayer;
 use crate::tools::ToolRegistry;
 use crate::tools::tool::{Tool, ToolError, ToolOutput};
@@ -486,6 +488,7 @@ When defining capabilities for your tool, specify which host functions it needs:
         // Main build loop
         let mut current_phase = BuildPhase::Scaffolding;
         let mut last_error: Option<String> = None;
+        let mut tools_executed = false;
 
         loop {
             iteration += 1;
@@ -515,121 +518,143 @@ When defining capabilities for your tool, specify which host functions it needs:
                 });
             }
 
-            // Get next action from LLM
-            let selections = reasoning.select_tools(&reason_ctx).await.map_err(|e| {
-                AgentToolError::BuilderFailed(format!("LLM tool selection failed: {}", e))
-            })?;
+            // Refresh tool definitions each iteration
+            reason_ctx.available_tools = self.get_build_tools().await;
 
-            if selections.is_empty() {
-                // No tools selected - get response and check if done
-                let response = reasoning.respond(&reason_ctx).await.map_err(|e| {
+            // Get response from LLM (may be text or tool calls)
+            let result = reasoning
+                .respond_with_tools(&reason_ctx)
+                .await
+                .map_err(|e| {
                     AgentToolError::BuilderFailed(format!("LLM response failed: {}", e))
                 })?;
 
-                reason_ctx.messages.push(ChatMessage::assistant(&response));
-
-                // Check for completion signals
-                let response_lower = response.to_lowercase();
-                if response_lower.contains("build complete")
-                    || response_lower.contains("successfully built")
-                    || response_lower.contains("all tests pass")
-                {
-                    logs.push(BuildLog {
-                        timestamp: Utc::now(),
-                        phase: BuildPhase::Complete,
-                        message: "Build completed successfully".into(),
-                        details: Some(response),
-                    });
-
-                    // Determine artifact path
-                    let artifact_path = self.find_artifact(requirement, project_dir).await;
-
-                    return Ok(BuildResult {
-                        build_id,
-                        requirement: requirement.clone(),
-                        artifact_path,
-                        logs,
-                        success: true,
-                        error: None,
-                        started_at,
-                        completed_at: Utc::now(),
-                        iterations: iteration,
-                        validation_warnings: Vec::new(),
-                        tests_passed: 0,
-                        tests_failed: 0,
-                        registered: false,
-                    });
-                }
-
-                // Ask for next steps
-                reason_ctx
-                    .messages
-                    .push(ChatMessage::user("Continue with the next step."));
-                continue;
-            }
-
-            // Execute selected tools
-            for selection in &selections {
-                logs.push(BuildLog {
-                    timestamp: Utc::now(),
-                    phase: current_phase,
-                    message: format!("Executing: {}", selection.tool_name),
-                    details: Some(selection.reasoning.clone()),
-                });
-
-                // Execute tool
-                let tool_result = self
-                    .execute_build_tool(&selection.tool_name, &selection.parameters, project_dir)
-                    .await;
-
-                match tool_result {
-                    Ok(output) => {
-                        let output_str =
-                            serde_json::to_string_pretty(&output.result).unwrap_or_default();
-
-                        // Add to context
-                        reason_ctx.messages.push(ChatMessage::tool_result(
-                            "tool_call",
-                            &selection.tool_name,
-                            output_str.clone(),
+            match result {
+                RespondResult::Text(response) => {
+                    // If no tools have been executed, prompt for tool use
+                    if !tools_executed && iteration < 3 {
+                        tracing::debug!(
+                            "Builder: no tools executed yet (iteration {}), prompting for action",
+                            iteration
+                        );
+                        reason_ctx.messages.push(ChatMessage::assistant(&response));
+                        reason_ctx.messages.push(ChatMessage::user(
+                            "Please use the available tools to implement this. Start by creating the necessary files.",
                         ));
-
-                        // Update phase based on tool
-                        current_phase = match selection.tool_name.as_str() {
-                            "write_file" => BuildPhase::Implementing,
-                            "shell" if selection.parameters.to_string().contains("build") => {
-                                BuildPhase::Building
-                            }
-                            "shell" if selection.parameters.to_string().contains("test") => {
-                                BuildPhase::Testing
-                            }
-                            _ => current_phase,
-                        };
-
-                        // Check for build/test errors in output
-                        if output_str.contains("error") || output_str.contains("failed") {
-                            last_error = Some(output_str);
-                            current_phase = BuildPhase::Fixing;
-                        }
+                        continue;
                     }
-                    Err(e) => {
-                        let error_msg = format!("Tool error: {}", e);
-                        last_error = Some(error_msg.clone());
 
-                        reason_ctx.messages.push(ChatMessage::tool_result(
-                            "tool_call",
-                            &selection.tool_name,
-                            format!("Error: {}", e),
-                        ));
+                    reason_ctx.messages.push(ChatMessage::assistant(&response));
 
+                    // Check for completion signals
+                    let response_lower = response.to_lowercase();
+                    if response_lower.contains("build complete")
+                        || response_lower.contains("successfully built")
+                        || response_lower.contains("all tests pass")
+                        || (tools_executed && response_lower.contains("complete"))
+                    {
                         logs.push(BuildLog {
                             timestamp: Utc::now(),
-                            phase: BuildPhase::Fixing,
-                            message: "Tool execution failed".into(),
-                            details: Some(error_msg),
+                            phase: BuildPhase::Complete,
+                            message: "Build completed successfully".into(),
+                            details: Some(response),
                         });
 
-                        current_phase = BuildPhase::Fixing;
+                        // Determine artifact path
+                        let artifact_path = self.find_artifact(requirement, project_dir).await;
+
+                        return Ok(BuildResult {
+                            build_id,
+                            requirement: requirement.clone(),
+                            artifact_path,
+                            logs,
+                            success: true,
+                            error: None,
+                            started_at,
+                            completed_at: Utc::now(),
+                            iterations: iteration,
+                            validation_warnings: Vec::new(),
+                            tests_passed: 0,
+                            tests_failed: 0,
+                            registered: false,
+                        });
+                    }
+
+                    // Ask for next steps
+                    reason_ctx
+                        .messages
+                        .push(ChatMessage::user("Continue with the next step."));
+                }
+                RespondResult::ToolCalls(tool_calls) => {
+                    tools_executed = true;
+
+                    // Execute each tool call
+                    for tc in tool_calls {
+                        logs.push(BuildLog {
+                            timestamp: Utc::now(),
+                            phase: current_phase,
+                            message: format!("Executing: {}", tc.name),
+                            details: Some(format!("{:?}", tc.arguments)),
+                        });
+
+                        // Execute tool
+                        let tool_result = self
+                            .execute_build_tool(&tc.name, &tc.arguments, project_dir)
+                            .await;
+
+                        match tool_result {
+                            Ok(output) => {
+                                let output_str = serde_json::to_string_pretty(&output.result)
+                                    .unwrap_or_default();
+
+                                // Add to context
+                                reason_ctx.messages.push(ChatMessage::tool_result(
+                                    &tc.id,
+                                    &tc.name,
+                                    output_str.clone(),
+                                ));
+
+                                // Update phase based on tool
+                                current_phase = match tc.name.as_str() {
+                                    "write_file" => BuildPhase::Implementing,
+                                    "shell" if tc.arguments.to_string().contains("build") => {
+                                        BuildPhase::Building
+                                    }
+                                    "shell" if tc.arguments.to_string().contains("test") => {
+                                        BuildPhase::Testing
+                                    }
+                                    _ => current_phase,
+                                };
+
+                                // Check for build/test errors in output
+                                if output_str.to_lowercase().contains("error:")
+                                    || output_str.to_lowercase().contains("error[")
+                                    || output_str.to_lowercase().contains("failed")
+                                {
+                                    last_error = Some(output_str);
+                                    current_phase = BuildPhase::Fixing;
+                                }
+                            }
+                            Err(e) => {
+                                let error_msg = format!("Tool error: {}", e);
+                                last_error = Some(error_msg.clone());
+
+                                reason_ctx.messages.push(ChatMessage::tool_result(
+                                    &tc.id,
+                                    &tc.name,
+                                    format!("Error: {}", e),
+                                ));
+
+                                logs.push(BuildLog {
+                                    timestamp: Utc::now(),
+                                    phase: BuildPhase::Fixing,
+                                    message: "Tool execution failed".into(),
+                                    details: Some(error_msg),
+                                });
+
+                                current_phase = BuildPhase::Fixing;
+                            }
+                        }
                     }
                 }
             }

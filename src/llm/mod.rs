@@ -7,7 +7,7 @@ mod provider;
 mod reasoning;
 pub mod session;
 
-pub use nearai::NearAiProvider;
+pub use nearai::{ModelInfo, NearAiProvider};
 pub use provider::{
     ChatMessage, CompletionRequest, CompletionResponse, LlmProvider, Role, ToolCall,
     ToolCompletionRequest, ToolCompletionResponse, ToolDefinition, ToolResult,

@@ -9,6 +9,7 @@ use ratatui::{
 };
 
 use crate::channels::cli::app::{AppState, InputMode, MessageRole, MessageStatus};
+use crate::channels::cli::model_selector::ModelSelectorOverlay;
 use crate::channels::cli::overlay::ApprovalSelection;
 
 /// Render the entire UI.
@@ -100,12 +101,18 @@ fn render_messages(frame: &mut Frame, app: &AppState, area: Rect) {
     frame.render_widget(messages, area);
 }
 
-/// Render the input area.
+/// Render the input area (or model selector when in ModelSelector mode).
 fn render_input(frame: &mut Frame, app: &AppState, area: Rect) {
+    // In ModelSelector mode, render inline selector instead of input
+    if app.mode == InputMode::ModelSelector {
+        render_model_selector_inline(frame, app, area);
+        return;
+    }
+
     let input_style = match app.mode {
         InputMode::Editing => Style::default().fg(Color::Yellow),
         InputMode::Normal => Style::default(),
-        InputMode::Approval => Style::default().fg(Color::DarkGray),
+        InputMode::Approval | InputMode::ModelSelector => Style::default().fg(Color::DarkGray),
     };
 
     let buffer = app.composer.buffer();
@@ -142,15 +149,91 @@ fn render_input(frame: &mut Frame, app: &AppState, area: Rect) {
     }
 }
 
+/// Render inline model selector in the input area.
+fn render_model_selector_inline(frame: &mut Frame, app: &AppState, area: Rect) {
+    let Some(ref overlay) = app.model_selector else {
+        return;
+    };
+
+    let models = overlay.models();
+
+    // Build horizontal list of models
+    let mut spans: Vec<Span> = Vec::new();
+
+    if models.is_empty() {
+        spans.push(Span::styled(
+            "Loading models...",
+            Style::default().fg(Color::DarkGray).add_modifier(Modifier::ITALIC),
+        ));
+    } else {
+        for (i, model) in models.iter().enumerate() {
+            if i > 0 {
+                spans.push(Span::raw("  "));
+            }
+
+            let display_name = ModelSelectorOverlay::format_model_name(model);
+            let is_selected = i == overlay.selection_index;
+            let is_current = model == &overlay.request.current_model;
+
+            let style = if is_selected {
+                Style::default().bg(Color::Blue).fg(Color::White)
+            } else if is_current {
+                Style::default().fg(Color::Green)
+            } else {
+                Style::default().fg(Color::White)
+            };
+
+            let prefix = if is_current { "●" } else { " " };
+            spans.push(Span::styled(format!("{}{}", prefix, display_name), style));
+        }
+    }
+
+    let content = Paragraph::new(Line::from(spans))
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title(Span::styled("Select Model", Style::default().fg(Color::Cyan))),
+        )
+        .scroll((0, calculate_model_scroll(overlay, area.width.saturating_sub(2))));
+
+    frame.render_widget(content, area);
+}
+
+/// Calculate horizontal scroll offset to keep selected model visible.
+fn calculate_model_scroll(overlay: &ModelSelectorOverlay, visible_width: u16) -> u16 {
+    let models = overlay.models();
+    if models.is_empty() {
+        return 0;
+    }
+
+    // Estimate position of selected model (rough calculation)
+    let mut pos: u16 = 0;
+    for (i, model) in models.iter().enumerate() {
+        let name_len = ModelSelectorOverlay::format_model_name(model).len() as u16 + 3; // +3 for prefix and spacing
+        if i == overlay.selection_index {
+            // Check if selection is beyond visible area
+            if pos > visible_width {
+                return pos.saturating_sub(visible_width / 2);
+            }
+            return 0;
+        }
+        pos += name_len;
+    }
+    0
+}
+
 /// Render the status line.
 fn render_status(frame: &mut Frame, app: &AppState, area: Rect) {
     let status_text = if let Some(ref msg) = app.status_message {
         msg.clone()
     } else {
         match app.mode {
-            InputMode::Normal => "Press 'i' to edit, 'q' to quit".to_string(),
-            InputMode::Editing => "Type message, Enter to send, Esc to cancel".to_string(),
-            InputMode::Approval => "y=Yes, n=No, a=Always, Ctrl+C=Cancel all".to_string(),
+            InputMode::Normal | InputMode::Editing => {
+                let model = ModelSelectorOverlay::format_model_name(&app.current_model);
+                format!("{} | /model to switch", model)
+            }
+            InputMode::Approval => "y=Yes, n=No, a=Always, Ctrl+C=Cancel".to_string(),
+            InputMode::ModelSelector => "←/→ navigate, Enter=select, Esc=cancel".to_string(),
         }
     };
 
@@ -252,3 +335,4 @@ fn render_approval_overlay(frame: &mut Frame, app: &AppState) {
 
     frame.render_widget(content, overlay_area);
 }
+
