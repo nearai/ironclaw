@@ -6,7 +6,7 @@ use clap::Parser;
 use tracing_subscriber::{EnvFilter, layer::SubscriberExt, util::SubscriberInitExt};
 
 use near_agent::{
-    agent::Agent,
+    agent::{Agent, AgentDeps},
     channels::{ChannelManager, HttpChannel, TuiChannel},
     cli::{Cli, Command, run_tool_command},
     config::Config,
@@ -17,7 +17,7 @@ use near_agent::{
         ToolRegistry,
         wasm::{WasmToolLoader, WasmToolRuntime},
     },
-    workspace::Workspace,
+    workspace::{EmbeddingProvider, NearAiEmbeddings, OpenAiEmbeddings, Workspace},
 };
 
 #[tokio::main]
@@ -93,8 +93,8 @@ async fn main() -> anyhow::Result<()> {
         Some(Arc::new(store))
     };
 
-    // Initialize LLM provider
-    let llm = create_llm_provider(&config.llm, session)?;
+    // Initialize LLM provider (clone session so we can reuse it for embeddings)
+    let llm = create_llm_provider(&config.llm, session.clone())?;
     tracing::info!("LLM provider initialized: {}", llm.model_name());
 
     // Initialize safety layer
@@ -106,9 +106,52 @@ async fn main() -> anyhow::Result<()> {
     tools.register_builtin_tools();
     tracing::info!("Registered {} built-in tools", tools.count());
 
+    // Create embeddings provider if configured
+    let embeddings: Option<Arc<dyn EmbeddingProvider>> = if config.embeddings.enabled {
+        match config.embeddings.provider.as_str() {
+            "nearai" => {
+                tracing::info!(
+                    "Embeddings enabled via NEAR AI (model: {})",
+                    config.embeddings.model
+                );
+                Some(Arc::new(
+                    NearAiEmbeddings::new(&config.llm.nearai.base_url, session.clone())
+                        .with_model(&config.embeddings.model, 1536),
+                ))
+            }
+            _ => {
+                // Default to OpenAI for unknown providers
+                if let Some(api_key) = config.embeddings.openai_api_key() {
+                    tracing::info!(
+                        "Embeddings enabled via OpenAI (model: {})",
+                        config.embeddings.model
+                    );
+                    Some(Arc::new(OpenAiEmbeddings::with_model(
+                        api_key,
+                        &config.embeddings.model,
+                        match config.embeddings.model.as_str() {
+                            "text-embedding-3-large" => 3072,
+                            _ => 1536, // text-embedding-3-small and ada-002
+                        },
+                    )))
+                } else {
+                    tracing::warn!("Embeddings configured but OPENAI_API_KEY not set");
+                    None
+                }
+            }
+        }
+    } else {
+        tracing::info!("Embeddings disabled (set OPENAI_API_KEY or EMBEDDING_ENABLED=true)");
+        None
+    };
+
     // Register memory tools if database is available
     if let Some(ref store) = store {
-        let workspace = Arc::new(Workspace::new("default", store.pool()));
+        let mut workspace = Workspace::new("default", store.pool());
+        if let Some(ref emb) = embeddings {
+            workspace = workspace.with_embeddings(emb.clone());
+        }
+        let workspace = Arc::new(workspace);
         tools.register_memory_tools(workspace);
     }
 
@@ -181,19 +224,39 @@ async fn main() -> anyhow::Result<()> {
     }
 
     // Create workspace for agent (shared with memory tools)
-    let workspace = store
-        .as_ref()
-        .map(|s| Arc::new(Workspace::new("default", s.pool())));
+    let workspace = store.as_ref().map(|s| {
+        let mut ws = Workspace::new("default", s.pool());
+        if let Some(ref emb) = embeddings {
+            ws = ws.with_embeddings(emb.clone());
+        }
+        Arc::new(ws)
+    });
+
+    // Backfill embeddings if we just enabled the provider
+    if let (Some(ws), Some(_)) = (&workspace, &embeddings) {
+        match ws.backfill_embeddings().await {
+            Ok(count) if count > 0 => {
+                tracing::info!("Backfilled embeddings for {} chunks", count);
+            }
+            Ok(_) => {}
+            Err(e) => {
+                tracing::warn!("Failed to backfill embeddings: {}", e);
+            }
+        }
+    }
 
     // Create and run the agent
-    let agent = Agent::new(
-        config.agent.clone(),
+    let deps = AgentDeps {
         store,
         llm,
         safety,
         tools,
-        channels,
         workspace,
+    };
+    let agent = Agent::new(
+        config.agent.clone(),
+        deps,
+        channels,
         Some(config.heartbeat.clone()),
     );
 

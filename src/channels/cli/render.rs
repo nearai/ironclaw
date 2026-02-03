@@ -89,11 +89,7 @@ fn render_messages(frame: &mut Frame, app: &AppState, area: Rect) {
     // Calculate scroll - show most recent messages
     let visible_height = area.height.saturating_sub(2) as usize; // Account for borders
     let total_lines = lines.len();
-    let scroll_offset = if total_lines > visible_height {
-        total_lines - visible_height
-    } else {
-        0
-    };
+    let scroll_offset = total_lines.saturating_sub(visible_height);
 
     let text = Text::from(lines);
     let messages = Paragraph::new(text)

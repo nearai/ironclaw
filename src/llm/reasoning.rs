@@ -121,12 +121,29 @@ pub struct Reasoning {
     llm: Arc<dyn LlmProvider>,
     #[allow(dead_code)] // Will be used for sanitizing tool outputs
     safety: Arc<SafetyLayer>,
+    /// Optional workspace for loading identity/system prompts.
+    workspace_system_prompt: Option<String>,
 }
 
 impl Reasoning {
     /// Create a new reasoning engine.
     pub fn new(llm: Arc<dyn LlmProvider>, safety: Arc<SafetyLayer>) -> Self {
-        Self { llm, safety }
+        Self {
+            llm,
+            safety,
+            workspace_system_prompt: None,
+        }
+    }
+
+    /// Set a custom system prompt from workspace identity files.
+    ///
+    /// This is typically loaded from workspace.system_prompt() which combines
+    /// AGENTS.md, SOUL.md, USER.md, and IDENTITY.md into a unified prompt.
+    pub fn with_system_prompt(mut self, prompt: String) -> Self {
+        if !prompt.is_empty() {
+            self.workspace_system_prompt = Some(prompt);
+        }
+        self
     }
 
     /// Generate a plan for completing a goal.
@@ -361,9 +378,16 @@ Respond with a JSON plan in this format:
                 .map(|t| format!("  - {}: {}", t.name, t.description))
                 .collect();
             format!(
-                "\n\n## Available Tools\nYou have access to these tools:\n{}\n\nCall tools directly when needed.",
+                "\n\n## Available Tools\nYou have access to these tools:\n{}\n\nCall tools when they would help accomplish the task.",
                 tool_list.join("\n")
             )
+        };
+
+        // Include workspace identity prompt if available
+        let identity_section = if let Some(ref identity) = self.workspace_system_prompt {
+            format!("\n\n---\n\n{}", identity)
+        } else {
+            String::new()
         };
 
         format!(
@@ -388,8 +412,8 @@ Here's the solution: [actual response to user]
 - For code, use appropriate code blocks with language tags
 - Call tools when they would help accomplish the task{}
 
-The user sees ONLY content outside <thinking> tags."#,
-            tools_section
+The user sees ONLY content outside <thinking> tags.{}"#,
+            tools_section, identity_section
         )
     }
 

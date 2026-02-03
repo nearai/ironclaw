@@ -211,6 +211,19 @@ NEARAI_BASE_URL=https://private.near.ai
 # Agent settings
 AGENT_NAME=near-agent
 MAX_PARALLEL_JOBS=5
+
+# Embeddings (for semantic memory search)
+OPENAI_API_KEY=sk-...                   # For OpenAI embeddings
+# Or use NEAR AI embeddings:
+# EMBEDDING_PROVIDER=nearai
+# EMBEDDING_ENABLED=true
+EMBEDDING_MODEL=text-embedding-3-small  # or text-embedding-3-large
+
+# Heartbeat (proactive periodic execution)
+HEARTBEAT_ENABLED=true
+HEARTBEAT_INTERVAL_SECS=1800            # 30 minutes
+HEARTBEAT_NOTIFY_CHANNEL=tui
+HEARTBEAT_NOTIFY_USER=default
 ```
 
 ### NEAR AI Provider
@@ -276,8 +289,9 @@ Key test patterns:
 2. **Domain-specific tools** - `marketplace.rs`, `restaurant.rs`, `taskrabbit.rs`, `ecommerce.rs` return placeholder responses; need real API integrations
 3. **Integration tests** - Need testcontainers setup for PostgreSQL
 4. **MCP stdio transport** - Only HTTP transport implemented
-5. **Embedding backfill** - Background job to generate embeddings for chunks missing them
-6. **Auto-context compaction** - Context monitor exists but doesn't auto-trigger (requires manual `/compact`)
+5. **WIT bindgen integration** - Auto-extract tool description/schema from WASM modules (stubbed)
+6. **Capability granting after tool build** - Built tools get empty capabilities; need UX for granting HTTP/secrets access
+7. **Tool versioning workflow** - No version tracking or rollback for dynamically built tools
 
 ### Completed
 
@@ -285,11 +299,15 @@ Key test patterns:
 - ✅ **WASM sandboxing** - Full implementation in `tools/wasm/` with fuel metering, memory limits, capabilities
 - ✅ **Dynamic tool building** - `tools/builder/` has LlmSoftwareBuilder with iterative build loop
 - ✅ **HTTP webhook security** - Secret validation implemented, proper error handling (no panics)
-
-### Known Clippy Warnings (non-blocking)
-
-- `too_many_arguments` on Agent::new, Worker::new, Store::record_llm_call (refactor to config structs if desired)
-- `implicit_saturating_sub` in CLI render (use `.saturating_sub()` instead of manual check)
+- ✅ **Embeddings integration** - OpenAI and NEAR AI providers wired to workspace for semantic search
+- ✅ **Workspace system prompt** - Identity files (AGENTS.md, SOUL.md, USER.md, IDENTITY.md) injected into LLM context
+- ✅ **Heartbeat notifications** - Route through channel manager (broadcast API) instead of logging-only
+- ✅ **Auto-context compaction** - Triggers automatically when context exceeds threshold
+- ✅ **Embedding backfill** - Runs on startup when embeddings provider is enabled
+- ✅ **Clippy clean** - All warnings addressed via config struct refactoring
+- ✅ **Tool approval enforcement** - Tools with `requires_approval()` (shell, http, file write/patch, build_software) now gate execution, track auto-approved tools per session
+- ✅ **Tool definition refresh** - Tool definitions refreshed each iteration so newly built tools become visible in same session
+- ✅ **Worker tool call handling** - Uses `respond_with_tools()` to properly execute tool calls when `select_tools()` returns empty
 
 ## Adding a New Tool
 

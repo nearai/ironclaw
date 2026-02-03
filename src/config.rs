@@ -12,6 +12,7 @@ use crate::error::ConfigError;
 pub struct Config {
     pub database: DatabaseConfig,
     pub llm: LlmConfig,
+    pub embeddings: EmbeddingsConfig,
     pub channels: ChannelsConfig,
     pub agent: AgentConfig,
     pub safety: SafetyConfig,
@@ -30,6 +31,7 @@ impl Config {
         Ok(Self {
             database: DatabaseConfig::from_env()?,
             llm: LlmConfig::from_env()?,
+            embeddings: EmbeddingsConfig::from_env()?,
             channels: ChannelsConfig::from_env()?,
             agent: AgentConfig::from_env()?,
             safety: SafetyConfig::from_env()?,
@@ -103,6 +105,62 @@ impl LlmConfig {
                     .unwrap_or_else(default_session_path),
             },
         })
+    }
+}
+
+/// Embeddings provider configuration.
+#[derive(Debug, Clone)]
+pub struct EmbeddingsConfig {
+    /// Whether embeddings are enabled.
+    pub enabled: bool,
+    /// Provider to use: "openai" or "nearai"
+    pub provider: String,
+    /// OpenAI API key (for OpenAI provider).
+    pub openai_api_key: Option<SecretString>,
+    /// Model to use for embeddings.
+    /// For OpenAI: "text-embedding-3-small", "text-embedding-3-large", "text-embedding-ada-002"
+    /// For NEAR AI: Uses the configured session for auth.
+    pub model: String,
+}
+
+impl Default for EmbeddingsConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            provider: "openai".to_string(),
+            openai_api_key: None,
+            model: "text-embedding-3-small".to_string(),
+        }
+    }
+}
+
+impl EmbeddingsConfig {
+    fn from_env() -> Result<Self, ConfigError> {
+        let openai_api_key = optional_env("OPENAI_API_KEY")?.map(SecretString::from);
+        let provider = optional_env("EMBEDDING_PROVIDER")?.unwrap_or_else(|| "openai".to_string());
+
+        // Auto-enable if we have an API key
+        let enabled = optional_env("EMBEDDING_ENABLED")?
+            .map(|s| s.parse())
+            .transpose()
+            .map_err(|e| ConfigError::InvalidValue {
+                key: "EMBEDDING_ENABLED".to_string(),
+                message: format!("must be 'true' or 'false': {e}"),
+            })?
+            .unwrap_or(openai_api_key.is_some());
+
+        Ok(Self {
+            enabled,
+            provider,
+            openai_api_key,
+            model: optional_env("EMBEDDING_MODEL")?
+                .unwrap_or_else(|| "text-embedding-3-small".to_string()),
+        })
+    }
+
+    /// Get the OpenAI API key if configured.
+    pub fn openai_api_key(&self) -> Option<&str> {
+        self.openai_api_key.as_ref().map(|s| s.expose_secret())
     }
 }
 

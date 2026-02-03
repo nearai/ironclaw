@@ -10,7 +10,7 @@
 //! - Compaction: Summarize old turns to save context
 //! - Resume: Continue from a saved checkpoint
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -35,6 +35,9 @@ pub struct Session {
     pub last_active_at: DateTime<Utc>,
     /// Session metadata.
     pub metadata: serde_json::Value,
+    /// Tools that have been auto-approved for this session ("always approve").
+    #[serde(default)]
+    pub auto_approved_tools: HashSet<String>,
 }
 
 impl Session {
@@ -49,7 +52,18 @@ impl Session {
             created_at: now,
             last_active_at: now,
             metadata: serde_json::Value::Null,
+            auto_approved_tools: HashSet::new(),
         }
+    }
+
+    /// Check if a tool has been auto-approved for this session.
+    pub fn is_tool_auto_approved(&self, tool_name: &str) -> bool {
+        self.auto_approved_tools.contains(tool_name)
+    }
+
+    /// Add a tool to the auto-approved set.
+    pub fn auto_approve_tool(&mut self, tool_name: impl Into<String>) {
+        self.auto_approved_tools.insert(tool_name.into());
     }
 
     /// Create a new thread in this session.
@@ -107,6 +121,23 @@ pub enum ThreadState {
     Interrupted,
 }
 
+/// Pending tool approval request stored on a thread.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PendingApproval {
+    /// Unique request ID.
+    pub request_id: Uuid,
+    /// Tool name requiring approval.
+    pub tool_name: String,
+    /// Tool parameters.
+    pub parameters: serde_json::Value,
+    /// Description of what the tool will do.
+    pub description: String,
+    /// Tool call ID from LLM (for proper context continuation).
+    pub tool_call_id: String,
+    /// Context messages at the time of the request (to resume from).
+    pub context_messages: Vec<ChatMessage>,
+}
+
 /// A conversation thread within a session.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Thread {
@@ -124,6 +155,9 @@ pub struct Thread {
     pub updated_at: DateTime<Utc>,
     /// Thread metadata (e.g., title, tags).
     pub metadata: serde_json::Value,
+    /// Pending approval request (when state is AwaitingApproval).
+    #[serde(default)]
+    pub pending_approval: Option<PendingApproval>,
 }
 
 impl Thread {
@@ -138,6 +172,7 @@ impl Thread {
             created_at: now,
             updated_at: now,
             metadata: serde_json::Value::Null,
+            pending_approval: None,
         }
     }
 
@@ -184,9 +219,22 @@ impl Thread {
         self.updated_at = Utc::now();
     }
 
-    /// Mark the thread as awaiting approval.
-    pub fn await_approval(&mut self) {
+    /// Mark the thread as awaiting approval with pending request details.
+    pub fn await_approval(&mut self, pending: PendingApproval) {
         self.state = ThreadState::AwaitingApproval;
+        self.pending_approval = Some(pending);
+        self.updated_at = Utc::now();
+    }
+
+    /// Take the pending approval (clearing it from the thread).
+    pub fn take_pending_approval(&mut self) -> Option<PendingApproval> {
+        self.pending_approval.take()
+    }
+
+    /// Clear pending approval and return to idle state.
+    pub fn clear_pending_approval(&mut self) {
+        self.pending_approval = None;
+        self.state = ThreadState::Idle;
         self.updated_at = Utc::now();
     }
 

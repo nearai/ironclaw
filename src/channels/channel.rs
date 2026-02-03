@@ -146,6 +146,20 @@ pub trait Channel: Send + Sync {
         Ok(())
     }
 
+    /// Send a proactive message without a prior incoming message.
+    ///
+    /// Used for alerts, heartbeat notifications, and other agent-initiated communication.
+    /// The user_id helps target a specific user within the channel.
+    ///
+    /// Default implementation does nothing (for channels that don't support broadcast).
+    async fn broadcast(
+        &self,
+        _user_id: &str,
+        _response: OutgoingResponse,
+    ) -> Result<(), ChannelError> {
+        Ok(())
+    }
+
     /// Check if the channel is healthy.
     async fn health_check(&self) -> Result<(), ChannelError>;
 

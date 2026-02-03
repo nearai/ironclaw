@@ -13,22 +13,30 @@ use crate::context::{ContextManager, JobState};
 use crate::error::Error;
 use crate::history::Store;
 use crate::llm::{
-    ActionPlan, ChatMessage, LlmProvider, Reasoning, ReasoningContext, ToolSelection,
+    ActionPlan, ChatMessage, LlmProvider, Reasoning, ReasoningContext, RespondResult, ToolSelection,
 };
 use crate::safety::SafetyLayer;
 use crate::tools::ToolRegistry;
 
+/// Shared dependencies for worker execution.
+///
+/// This bundles the dependencies that are shared across all workers,
+/// reducing the number of arguments to `Worker::new`.
+#[derive(Clone)]
+pub struct WorkerDeps {
+    pub context_manager: Arc<ContextManager>,
+    pub llm: Arc<dyn LlmProvider>,
+    pub safety: Arc<SafetyLayer>,
+    pub tools: Arc<ToolRegistry>,
+    pub store: Option<Arc<Store>>,
+    pub timeout: Duration,
+    pub use_planning: bool,
+}
+
 /// Worker that executes a single job.
 pub struct Worker {
     job_id: Uuid,
-    context_manager: Arc<ContextManager>,
-    llm: Arc<dyn LlmProvider>,
-    safety: Arc<SafetyLayer>,
-    tools: Arc<ToolRegistry>,
-    store: Option<Arc<Store>>,
-    timeout: Duration,
-    /// Whether to use planning before tool execution.
-    use_planning: bool,
+    deps: WorkerDeps,
 }
 
 /// Result of a tool execution with metadata for context building.
@@ -37,32 +45,43 @@ struct ToolExecResult {
 }
 
 impl Worker {
-    /// Create a new worker.
-    pub fn new(
-        job_id: Uuid,
-        context_manager: Arc<ContextManager>,
-        llm: Arc<dyn LlmProvider>,
-        safety: Arc<SafetyLayer>,
-        tools: Arc<ToolRegistry>,
-        store: Option<Arc<Store>>,
-        timeout: Duration,
-        use_planning: bool,
-    ) -> Self {
-        Self {
-            job_id,
-            context_manager,
-            llm,
-            safety,
-            tools,
-            store,
-            timeout,
-            use_planning,
-        }
+    /// Create a new worker for a specific job.
+    pub fn new(job_id: Uuid, deps: WorkerDeps) -> Self {
+        Self { job_id, deps }
+    }
+
+    // Convenience accessors to avoid deps.field everywhere
+    fn context_manager(&self) -> &Arc<ContextManager> {
+        &self.deps.context_manager
+    }
+
+    fn llm(&self) -> &Arc<dyn LlmProvider> {
+        &self.deps.llm
+    }
+
+    fn safety(&self) -> &Arc<SafetyLayer> {
+        &self.deps.safety
+    }
+
+    fn tools(&self) -> &Arc<ToolRegistry> {
+        &self.deps.tools
+    }
+
+    fn store(&self) -> Option<&Arc<Store>> {
+        self.deps.store.as_ref()
+    }
+
+    fn timeout(&self) -> Duration {
+        self.deps.timeout
+    }
+
+    fn use_planning(&self) -> bool {
+        self.deps.use_planning
     }
 
     /// Fire-and-forget persistence of job status.
     fn persist_status(&self, status: JobState, reason: Option<String>) {
-        if let Some(ref store) = self.store {
+        if let Some(store) = self.store() {
             let store = store.clone();
             let job_id = self.job_id;
             tokio::spawn(async move {
@@ -91,16 +110,13 @@ impl Worker {
         }
 
         // Get job context
-        let job_ctx = self.context_manager.get_context(self.job_id).await?;
+        let job_ctx = self.context_manager().get_context(self.job_id).await?;
 
         // Create reasoning engine
-        let reasoning = Reasoning::new(self.llm.clone(), self.safety.clone());
+        let reasoning = Reasoning::new(self.llm().clone(), self.safety().clone());
 
-        // Build initial reasoning context
-        let tool_defs = self.tools.tool_definitions().await;
-        let mut reason_ctx = ReasoningContext::new()
-            .with_job(&job_ctx.description)
-            .with_tools(tool_defs);
+        // Build initial reasoning context (tool definitions refreshed each iteration in execution_loop)
+        let mut reason_ctx = ReasoningContext::new().with_job(&job_ctx.description);
 
         // Add system message
         reason_ctx.messages.push(ChatMessage::system(format!(
@@ -116,7 +132,7 @@ Report when the job is complete or if you encounter issues you cannot resolve."#
         )));
 
         // Main execution loop with timeout
-        let result = tokio::time::timeout(self.timeout, async {
+        let result = tokio::time::timeout(self.timeout(), async {
             self.execution_loop(&mut rx, &reasoning, &mut reason_ctx)
                 .await
         })
@@ -148,8 +164,11 @@ Report when the job is complete or if you encounter issues you cannot resolve."#
         let max_iterations = 50;
         let mut iteration = 0;
 
+        // Initial tool definitions for planning (will be refreshed in loop)
+        reason_ctx.available_tools = self.tools().tool_definitions().await;
+
         // Generate plan if planning is enabled
-        let plan = if self.use_planning {
+        let plan = if self.use_planning() {
             match reasoning.plan(reason_ctx).await {
                 Ok(p) => {
                     tracing::info!(
@@ -213,29 +232,61 @@ Report when the job is complete or if you encounter issues you cannot resolve."#
                 return Ok(());
             }
 
+            // Refresh tool definitions so newly built tools become visible
+            reason_ctx.available_tools = self.tools().tool_definitions().await;
+
             // Select next tool(s) to use
             let selections = reasoning.select_tools(reason_ctx).await?;
 
             if selections.is_empty() {
-                // No tools selected, ask LLM for next steps
-                let response = reasoning.respond(reason_ctx).await?;
+                // No tools from select_tools, ask LLM directly (may still return tool calls)
+                let respond_result = reasoning.respond_with_tools(reason_ctx).await?;
 
-                if response.to_lowercase().contains("complete")
-                    || response.to_lowercase().contains("finished")
-                    || response.to_lowercase().contains("done")
-                {
-                    self.mark_completed().await?;
-                    return Ok(());
-                }
+                match respond_result {
+                    RespondResult::Text(response) => {
+                        // Check for completion keywords
+                        let response_lower = response.to_lowercase();
+                        if response_lower.contains("complete")
+                            || response_lower.contains("finished")
+                            || response_lower.contains("done")
+                        {
+                            self.mark_completed().await?;
+                            return Ok(());
+                        }
 
-                // Add assistant response to context
-                reason_ctx.messages.push(ChatMessage::assistant(&response));
+                        // Add assistant response to context
+                        reason_ctx.messages.push(ChatMessage::assistant(&response));
 
-                // Give it one more chance to select a tool
-                if iteration > 3 && iteration % 5 == 0 {
-                    reason_ctx.messages.push(ChatMessage::user(
-                        "Are you stuck? Do you need help completing this job?",
-                    ));
+                        // Give it one more chance to select a tool
+                        if iteration > 3 && iteration % 5 == 0 {
+                            reason_ctx.messages.push(ChatMessage::user(
+                                "Are you stuck? Do you need help completing this job?",
+                            ));
+                        }
+                    }
+                    RespondResult::ToolCalls(tool_calls) => {
+                        // Model returned tool calls - execute them
+                        tracing::debug!(
+                            "Job {} respond_with_tools returned {} tool calls",
+                            self.job_id,
+                            tool_calls.len()
+                        );
+
+                        for tc in tool_calls {
+                            let result = self.execute_tool(&tc.name, &tc.arguments).await;
+
+                            // Create synthetic selection for process_tool_result
+                            let selection = ToolSelection {
+                                tool_name: tc.name.clone(),
+                                parameters: tc.arguments.clone(),
+                                reasoning: String::new(),
+                                alternatives: vec![],
+                            };
+
+                            self.process_tool_result(reason_ctx, &selection, result)
+                                .await?;
+                        }
+                    }
                 }
             } else if selections.len() == 1 {
                 // Single tool: execute directly
@@ -282,10 +333,10 @@ Report when the job is complete or if you encounter issues you cannot resolve."#
             .map(|selection| {
                 let tool_name = selection.tool_name.clone();
                 let params = selection.parameters.clone();
-                let tools = self.tools.clone();
-                let context_manager = self.context_manager.clone();
+                let tools = self.tools().clone();
+                let context_manager = self.context_manager().clone();
                 let job_id = self.job_id;
-                let store = self.store.clone();
+                let store = self.deps.store.clone();
 
                 async move {
                     let result = Self::execute_tool_inner(
@@ -320,6 +371,15 @@ Report when the job is complete or if you encounter issues you cannot resolve."#
             .ok_or_else(|| crate::error::ToolError::NotFound {
                 name: tool_name.to_string(),
             })?;
+
+        // Log warning if tool requires approval (autonomous jobs auto-approve for now)
+        if tool.requires_approval() {
+            tracing::warn!(
+                job_id = %job_id,
+                tool = %tool_name,
+                "Executing sensitive tool in autonomous job (auto-approved)"
+            );
+        }
 
         // Get job context for the tool
         let job_ctx = context_manager.get_context(job_id).await?;
@@ -412,11 +472,11 @@ Report when the job is complete or if you encounter issues you cannot resolve."#
             Ok(output) => {
                 // Sanitize output
                 let sanitized = self
-                    .safety
+                    .safety()
                     .sanitize_tool_output(&selection.tool_name, &output);
 
                 // Add to context
-                let wrapped = self.safety.wrap_for_llm(
+                let wrapped = self.safety().wrap_for_llm(
                     &selection.tool_name,
                     &sanitized.content,
                     sanitized.was_modified,
@@ -445,7 +505,7 @@ Report when the job is complete or if you encounter issues you cannot resolve."#
                 );
 
                 // Record failure for self-repair tracking
-                if let Some(ref store) = self.store {
+                if let Some(store) = self.store() {
                     let store = store.clone();
                     let tool_name = selection.tool_name.clone();
                     let error_msg = e.to_string();
@@ -563,9 +623,9 @@ Report when the job is complete or if you encounter issues you cannot resolve."#
         params: &serde_json::Value,
     ) -> Result<String, Error> {
         Self::execute_tool_inner(
-            self.tools.clone(),
-            self.context_manager.clone(),
-            self.store.clone(),
+            self.tools().clone(),
+            self.context_manager().clone(),
+            self.deps.store.clone(),
             self.job_id,
             tool_name,
             params,
@@ -574,7 +634,7 @@ Report when the job is complete or if you encounter issues you cannot resolve."#
     }
 
     async fn mark_completed(&self) -> Result<(), Error> {
-        self.context_manager
+        self.context_manager()
             .update_context(self.job_id, |ctx| {
                 ctx.transition_to(
                     JobState::Completed,
@@ -595,7 +655,7 @@ Report when the job is complete or if you encounter issues you cannot resolve."#
     }
 
     async fn mark_failed(&self, reason: &str) -> Result<(), Error> {
-        self.context_manager
+        self.context_manager()
             .update_context(self.job_id, |ctx| {
                 ctx.transition_to(JobState::Failed, Some(reason.to_string()))
             })
@@ -610,7 +670,7 @@ Report when the job is complete or if you encounter issues you cannot resolve."#
     }
 
     async fn mark_stuck(&self, reason: &str) -> Result<(), Error> {
-        self.context_manager
+        self.context_manager()
             .update_context(self.job_id, |ctx| ctx.mark_stuck(reason))
             .await?
             .map_err(|s| crate::error::JobError::ContextError {

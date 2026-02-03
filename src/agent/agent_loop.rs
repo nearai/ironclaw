@@ -10,7 +10,7 @@ use crate::agent::compaction::ContextCompactor;
 use crate::agent::context_monitor::ContextMonitor;
 use crate::agent::heartbeat::spawn_heartbeat;
 use crate::agent::self_repair::DefaultSelfRepair;
-use crate::agent::session::{Session, ThreadState};
+use crate::agent::session::{PendingApproval, Session, ThreadState};
 use crate::agent::session_manager::SessionManager;
 use crate::agent::submission::{Submission, SubmissionParser, SubmissionResult};
 use crate::agent::{
@@ -27,20 +27,38 @@ use crate::safety::SafetyLayer;
 use crate::tools::ToolRegistry;
 use crate::workspace::Workspace;
 
+/// Result of the agentic loop execution.
+enum AgenticLoopResult {
+    /// Completed with a response.
+    Response(String),
+    /// A tool requires approval before continuing.
+    NeedApproval {
+        /// The pending approval request to store.
+        pending: PendingApproval,
+    },
+}
+
+/// Core dependencies for the agent.
+///
+/// Bundles the shared components to reduce argument count.
+pub struct AgentDeps {
+    pub store: Option<Arc<Store>>,
+    pub llm: Arc<dyn LlmProvider>,
+    pub safety: Arc<SafetyLayer>,
+    pub tools: Arc<ToolRegistry>,
+    pub workspace: Option<Arc<Workspace>>,
+}
+
 /// The main agent that coordinates all components.
 pub struct Agent {
     config: AgentConfig,
-    store: Option<Arc<Store>>,
-    llm: Arc<dyn LlmProvider>,
-    safety: Arc<SafetyLayer>,
-    tools: Arc<ToolRegistry>,
-    channels: ChannelManager,
+    deps: AgentDeps,
+    channels: Arc<ChannelManager>,
     context_manager: Arc<ContextManager>,
     scheduler: Arc<Scheduler>,
     router: Router,
     session_manager: Arc<SessionManager>,
     context_monitor: ContextMonitor,
-    workspace: Option<Arc<Workspace>>,
     heartbeat_config: Option<HeartbeatConfig>,
 }
 
@@ -48,12 +66,8 @@ impl Agent {
     /// Create a new agent.
     pub fn new(
         config: AgentConfig,
-        store: Option<Arc<Store>>,
-        llm: Arc<dyn LlmProvider>,
-        safety: Arc<SafetyLayer>,
-        tools: Arc<ToolRegistry>,
+        deps: AgentDeps,
         channels: ChannelManager,
-        workspace: Option<Arc<Workspace>>,
         heartbeat_config: Option<HeartbeatConfig>,
     ) -> Self {
         let context_manager = Arc::new(ContextManager::new(config.max_parallel_jobs));
@@ -61,27 +75,44 @@ impl Agent {
         let scheduler = Arc::new(Scheduler::new(
             config.clone(),
             context_manager.clone(),
-            llm.clone(),
-            safety.clone(),
-            tools.clone(),
-            store.clone(),
+            deps.llm.clone(),
+            deps.safety.clone(),
+            deps.tools.clone(),
+            deps.store.clone(),
         ));
 
         Self {
             config,
-            store,
-            llm,
-            safety,
-            tools,
-            channels,
+            deps,
+            channels: Arc::new(channels),
             context_manager,
             scheduler,
             router: Router::new(),
             session_manager: Arc::new(SessionManager::new()),
             context_monitor: ContextMonitor::new(),
-            workspace,
             heartbeat_config,
         }
+    }
+
+    // Convenience accessors
+    fn store(&self) -> Option<&Arc<Store>> {
+        self.deps.store.as_ref()
+    }
+
+    fn llm(&self) -> &Arc<dyn LlmProvider> {
+        &self.deps.llm
+    }
+
+    fn safety(&self) -> &Arc<SafetyLayer> {
+        &self.deps.safety
+    }
+
+    fn tools(&self) -> &Arc<ToolRegistry> {
+        &self.deps.tools
+    }
+
+    fn workspace(&self) -> Option<&Arc<Workspace>> {
+        self.deps.workspace.as_ref()
     }
 
     /// Run the agent main loop.
@@ -104,30 +135,61 @@ impl Agent {
         // Spawn heartbeat if enabled
         let heartbeat_handle = if let Some(ref hb_config) = self.heartbeat_config {
             if hb_config.enabled {
-                if let Some(ref workspace) = self.workspace {
+                if let Some(workspace) = self.workspace() {
                     let config = AgentHeartbeatConfig::default()
                         .with_interval(std::time::Duration::from_secs(hb_config.interval_secs));
 
-                    // Set up notification channel if configured
+                    // Set up notification channel
                     let (notify_tx, mut notify_rx) =
                         tokio::sync::mpsc::channel::<OutgoingResponse>(16);
 
-                    // Spawn notification forwarder
-                    // We can't clone ChannelManager directly, so we just log the notifications
-                    // The heartbeat system will handle notifications via the response_tx
+                    // Spawn notification forwarder that routes through channel manager
                     let notify_channel = hb_config.notify_channel.clone();
                     let notify_user = hb_config.notify_user.clone();
+                    let channels = self.channels.clone();
                     tokio::spawn(async move {
                         while let Some(response) = notify_rx.recv().await {
-                            if let (Some(ch), Some(user)) = (&notify_channel, &notify_user) {
-                                // Log the heartbeat notification
-                                // In a full implementation, we'd route this through a shared channel reference
-                                tracing::info!(
-                                    "Heartbeat notification for {}/{}: {}",
-                                    ch,
-                                    user,
-                                    &response.content
-                                );
+                            // Route notification to configured channel/user, or broadcast to all
+                            match (&notify_channel, &notify_user) {
+                                (Some(channel), Some(user)) => {
+                                    // Send to specific channel and user
+                                    if let Err(e) =
+                                        channels.broadcast(channel, user, response.clone()).await
+                                    {
+                                        tracing::warn!(
+                                            "Failed to send heartbeat to {}/{}: {}",
+                                            channel,
+                                            user,
+                                            e
+                                        );
+                                    } else {
+                                        tracing::debug!(
+                                            "Heartbeat notification sent to {}/{}",
+                                            channel,
+                                            user
+                                        );
+                                    }
+                                }
+                                (None, Some(user)) => {
+                                    // Broadcast to all channels for this user
+                                    let results = channels.broadcast_all(user, response).await;
+                                    for (ch, result) in results {
+                                        if let Err(e) = result {
+                                            tracing::warn!(
+                                                "Failed to broadcast heartbeat to {}: {}",
+                                                ch,
+                                                e
+                                            );
+                                        }
+                                    }
+                                }
+                                _ => {
+                                    // No target configured, just log
+                                    tracing::info!(
+                                        "Heartbeat notification (no target configured): {}",
+                                        &response.content
+                                    );
+                                }
                             }
                         }
                     });
@@ -139,7 +201,7 @@ impl Agent {
                     Some(spawn_heartbeat(
                         config,
                         workspace.clone(),
-                        self.llm.clone(),
+                        self.llm().clone(),
                         Some(notify_tx),
                     ))
                 } else {
@@ -230,11 +292,24 @@ impl Agent {
             Submission::Resume { checkpoint_id } => {
                 self.process_resume(session, thread_id, checkpoint_id).await
             }
-            Submission::ExecApproval { .. } => {
-                // Not supported in simple chat flow
-                Ok(SubmissionResult::error(
-                    "Approval flow not supported in this context",
-                ))
+            Submission::ExecApproval {
+                request_id,
+                approved,
+                always,
+            } => {
+                self.process_approval(
+                    message,
+                    session,
+                    thread_id,
+                    Some(request_id),
+                    approved,
+                    always,
+                )
+                .await
+            }
+            Submission::ApprovalResponse { approved, always } => {
+                self.process_approval(message, session, thread_id, None, approved, always)
+                    .await
             }
         };
 
@@ -244,8 +319,32 @@ impl Agent {
             SubmissionResult::Ok { message } => Ok(message),
             SubmissionResult::Error { message } => Ok(Some(format!("Error: {}", message))),
             SubmissionResult::Interrupted => Ok(Some("Interrupted.".into())),
-            SubmissionResult::NeedApproval { .. } => {
-                Ok(Some("Approval required but not supported.".into()))
+            SubmissionResult::NeedApproval {
+                request_id,
+                tool_name,
+                description,
+                parameters,
+            } => {
+                // Format approval request for user
+                let params_preview = serde_json::to_string_pretty(&parameters)
+                    .unwrap_or_else(|_| parameters.to_string());
+                let params_truncated = if params_preview.len() > 200 {
+                    format!("{}...", &params_preview[..200])
+                } else {
+                    params_preview
+                };
+                Ok(Some(format!(
+                    "🔒 Tool requires approval:\n\n\
+                     **Tool:** {}\n\
+                     **Description:** {}\n\
+                     **Parameters:** ```\n{}\n```\n\n\
+                     Reply with:\n\
+                     - `yes` or `approve` to allow this tool\n\
+                     - `always` to always allow this tool in this session\n\
+                     - `no` or `deny` to reject\n\n\
+                     Request ID: {}",
+                    tool_name, description, params_truncated, request_id
+                )))
             }
         }
     }
@@ -322,9 +421,9 @@ impl Agent {
                     "Context at {:.1}% capacity, auto-compacting",
                     self.context_monitor.usage_percent(&messages)
                 );
-                let compactor = ContextCompactor::new(self.llm.clone());
+                let compactor = ContextCompactor::new(self.llm().clone());
                 if let Err(e) = compactor
-                    .compact(thread, strategy, self.workspace.as_deref())
+                    .compact(thread, strategy, self.workspace().map(|w| w.as_ref()))
                     .await
                 {
                     tracing::warn!("Auto-compaction failed: {}", e);
@@ -389,15 +488,36 @@ impl Agent {
             return Ok(SubmissionResult::Interrupted);
         }
 
-        // Complete or fail the turn
+        // Complete, fail, or request approval
         match result {
-            Ok(response) => {
+            Ok(AgenticLoopResult::Response(response)) => {
                 thread.complete_turn(&response);
                 let _ = self
                     .channels
                     .send_status(&message.channel, StatusUpdate::Status("Done".into()))
                     .await;
                 Ok(SubmissionResult::response(response))
+            }
+            Ok(AgenticLoopResult::NeedApproval { pending }) => {
+                // Store pending approval in thread and update state
+                let request_id = pending.request_id;
+                let tool_name = pending.tool_name.clone();
+                let description = pending.description.clone();
+                let parameters = pending.parameters.clone();
+                thread.await_approval(pending);
+                let _ = self
+                    .channels
+                    .send_status(
+                        &message.channel,
+                        StatusUpdate::Status("Awaiting approval".into()),
+                    )
+                    .await;
+                Ok(SubmissionResult::NeedApproval {
+                    request_id,
+                    tool_name,
+                    description,
+                    parameters,
+                })
             }
             Err(e) => {
                 thread.fail_turn(e.to_string());
@@ -407,15 +527,34 @@ impl Agent {
     }
 
     /// Run the agentic loop: call LLM, execute tools, repeat until text response.
+    ///
+    /// Returns `AgenticLoopResult::Response` on completion, or
+    /// `AgenticLoopResult::NeedApproval` if a tool requires user approval.
     async fn run_agentic_loop(
         &self,
         message: &IncomingMessage,
         session: Arc<Mutex<Session>>,
         thread_id: Uuid,
         initial_messages: Vec<ChatMessage>,
-    ) -> Result<String, Error> {
-        let reasoning = Reasoning::new(self.llm.clone(), self.safety.clone());
-        let tool_defs = self.tools.tool_definitions().await;
+    ) -> Result<AgenticLoopResult, Error> {
+        // Load workspace system prompt (identity files: AGENTS.md, SOUL.md, etc.)
+        let system_prompt = if let Some(ws) = self.workspace() {
+            match ws.system_prompt().await {
+                Ok(prompt) if !prompt.is_empty() => Some(prompt),
+                Ok(_) => None,
+                Err(e) => {
+                    tracing::debug!("Could not load workspace system prompt: {}", e);
+                    None
+                }
+            }
+        } else {
+            None
+        };
+
+        let mut reasoning = Reasoning::new(self.llm().clone(), self.safety().clone());
+        if let Some(prompt) = system_prompt {
+            reasoning = reasoning.with_system_prompt(prompt);
+        }
 
         // Build context with messages that we'll mutate during the loop
         let mut context_messages = initial_messages;
@@ -425,6 +564,7 @@ impl Agent {
 
         const MAX_TOOL_ITERATIONS: usize = 10;
         let mut iteration = 0;
+        let mut tools_executed = false;
 
         loop {
             iteration += 1;
@@ -450,19 +590,38 @@ impl Agent {
                 }
             }
 
+            // Refresh tool definitions each iteration so newly built tools become visible
+            let tool_defs = self.tools().tool_definitions().await;
+
             // Call LLM with current context
             let context = ReasoningContext::new()
                 .with_messages(context_messages.clone())
-                .with_tools(tool_defs.clone());
+                .with_tools(tool_defs);
 
             let result = reasoning.respond_with_tools(&context).await?;
 
             match result {
                 RespondResult::Text(text) => {
-                    // Final response, return it
-                    return Ok(text);
+                    // If no tools have been executed yet, prompt the LLM to use tools
+                    // This handles the case where the model explains what it will do
+                    // instead of actually calling tools
+                    if !tools_executed && iteration < 3 {
+                        tracing::debug!(
+                            "No tools executed yet (iteration {}), prompting for tool use",
+                            iteration
+                        );
+                        context_messages.push(ChatMessage::assistant(&text));
+                        context_messages.push(ChatMessage::user(
+                            "Please proceed and use the available tools to complete this task.",
+                        ));
+                        continue;
+                    }
+
+                    // Tools have been executed or we've tried multiple times, return response
+                    return Ok(AgenticLoopResult::Response(text));
                 }
                 RespondResult::ToolCalls(tool_calls) => {
+                    tools_executed = true;
                     // Execute tools and add results to context
                     let _ = self
                         .channels
@@ -487,8 +646,33 @@ impl Agent {
                         }
                     }
 
-                    // Execute each tool
+                    // Execute each tool (with approval checking)
                     for tc in tool_calls {
+                        // Check if tool requires approval
+                        if let Some(tool) = self.tools().get(&tc.name).await {
+                            if tool.requires_approval() {
+                                // Check if auto-approved for this session
+                                let is_auto_approved = {
+                                    let sess = session.lock().await;
+                                    sess.is_tool_auto_approved(&tc.name)
+                                };
+
+                                if !is_auto_approved {
+                                    // Need approval - store pending request and return
+                                    let pending = PendingApproval {
+                                        request_id: Uuid::new_v4(),
+                                        tool_name: tc.name.clone(),
+                                        parameters: tc.arguments.clone(),
+                                        description: tool.description().to_string(),
+                                        tool_call_id: tc.id.clone(),
+                                        context_messages: context_messages.clone(),
+                                    };
+
+                                    return Ok(AgenticLoopResult::NeedApproval { pending });
+                                }
+                            }
+                        }
+
                         let tool_result = self
                             .execute_chat_tool(&tc.name, &tc.arguments, &job_ctx)
                             .await;
@@ -514,8 +698,9 @@ impl Agent {
                         let result_content = match tool_result {
                             Ok(output) => {
                                 // Sanitize output before showing to LLM
-                                let sanitized = self.safety.sanitize_tool_output(&tc.name, &output);
-                                self.safety.wrap_for_llm(
+                                let sanitized =
+                                    self.safety().sanitize_tool_output(&tc.name, &output);
+                                self.safety().wrap_for_llm(
                                     &tc.name,
                                     &sanitized.content,
                                     sanitized.was_modified,
@@ -543,7 +728,7 @@ impl Agent {
         job_ctx: &JobContext,
     ) -> Result<String, Error> {
         let tool =
-            self.tools
+            self.tools()
                 .get(tool_name)
                 .await
                 .ok_or_else(|| crate::error::ToolError::NotFound {
@@ -718,9 +903,9 @@ impl Agent {
                 crate::agent::context_monitor::CompactionStrategy::Summarize { keep_recent: 5 },
             );
 
-        let compactor = ContextCompactor::new(self.llm.clone());
+        let compactor = ContextCompactor::new(self.llm().clone());
         match compactor
-            .compact(thread, strategy, self.workspace.as_deref())
+            .compact(thread, strategy, self.workspace().map(|w| w.as_ref()))
             .await
         {
             Ok(result) => {
@@ -755,6 +940,190 @@ impl Agent {
         undo_mgr.lock().await.clear();
 
         Ok(SubmissionResult::ok_with_message("Thread cleared."))
+    }
+
+    /// Process an approval or rejection of a pending tool execution.
+    async fn process_approval(
+        &self,
+        message: &IncomingMessage,
+        session: Arc<Mutex<Session>>,
+        thread_id: Uuid,
+        request_id: Option<Uuid>,
+        approved: bool,
+        always: bool,
+    ) -> Result<SubmissionResult, Error> {
+        // Get thread state and pending approval
+        let (_thread_state, pending) = {
+            let mut sess = session.lock().await;
+            let thread = sess
+                .threads
+                .get_mut(&thread_id)
+                .ok_or_else(|| Error::from(crate::error::JobError::NotFound { id: thread_id }))?;
+
+            if thread.state != ThreadState::AwaitingApproval {
+                return Ok(SubmissionResult::error("No pending approval request."));
+            }
+
+            let pending = thread.take_pending_approval();
+            (thread.state, pending)
+        };
+
+        let pending = match pending {
+            Some(p) => p,
+            None => return Ok(SubmissionResult::error("No pending approval request.")),
+        };
+
+        // Verify request ID if provided
+        if let Some(req_id) = request_id {
+            if req_id != pending.request_id {
+                // Put it back and return error
+                let mut sess = session.lock().await;
+                if let Some(thread) = sess.threads.get_mut(&thread_id) {
+                    thread.await_approval(pending);
+                }
+                return Ok(SubmissionResult::error(
+                    "Request ID mismatch. Use the correct request ID.",
+                ));
+            }
+        }
+
+        if approved {
+            // If always, add to auto-approved set
+            if always {
+                let mut sess = session.lock().await;
+                sess.auto_approve_tool(&pending.tool_name);
+                tracing::info!(
+                    "Auto-approved tool '{}' for session {}",
+                    pending.tool_name,
+                    sess.id
+                );
+            }
+
+            // Reset thread state to processing
+            {
+                let mut sess = session.lock().await;
+                if let Some(thread) = sess.threads.get_mut(&thread_id) {
+                    thread.state = ThreadState::Processing;
+                }
+            }
+
+            // Execute the approved tool and continue the loop
+            let job_ctx =
+                JobContext::with_user(&message.user_id, "chat", "Interactive chat session");
+
+            let tool_result = self
+                .execute_chat_tool(&pending.tool_name, &pending.parameters, &job_ctx)
+                .await;
+
+            // Build context including the tool result
+            let mut context_messages = pending.context_messages;
+
+            // Record result in thread
+            {
+                let mut sess = session.lock().await;
+                if let Some(thread) = sess.threads.get_mut(&thread_id) {
+                    if let Some(turn) = thread.last_turn_mut() {
+                        match &tool_result {
+                            Ok(output) => {
+                                turn.record_tool_result(serde_json::json!(output));
+                            }
+                            Err(e) => {
+                                turn.record_tool_error(e.to_string());
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Add tool result to context
+            let result_content = match tool_result {
+                Ok(output) => {
+                    let sanitized = self
+                        .safety()
+                        .sanitize_tool_output(&pending.tool_name, &output);
+                    self.safety().wrap_for_llm(
+                        &pending.tool_name,
+                        &sanitized.content,
+                        sanitized.was_modified,
+                    )
+                }
+                Err(e) => format!("Error: {}", e),
+            };
+
+            context_messages.push(ChatMessage::tool_result(
+                &pending.tool_call_id,
+                &pending.tool_name,
+                result_content,
+            ));
+
+            // Continue the agentic loop
+            let result = self
+                .run_agentic_loop(message, session.clone(), thread_id, context_messages)
+                .await;
+
+            // Handle the result
+            let mut sess = session.lock().await;
+            let thread = sess
+                .threads
+                .get_mut(&thread_id)
+                .ok_or_else(|| Error::from(crate::error::JobError::NotFound { id: thread_id }))?;
+
+            match result {
+                Ok(AgenticLoopResult::Response(response)) => {
+                    thread.complete_turn(&response);
+                    let _ = self
+                        .channels
+                        .send_status(&message.channel, StatusUpdate::Status("Done".into()))
+                        .await;
+                    Ok(SubmissionResult::response(response))
+                }
+                Ok(AgenticLoopResult::NeedApproval {
+                    pending: new_pending,
+                }) => {
+                    let request_id = new_pending.request_id;
+                    let tool_name = new_pending.tool_name.clone();
+                    let description = new_pending.description.clone();
+                    let parameters = new_pending.parameters.clone();
+                    thread.await_approval(new_pending);
+                    let _ = self
+                        .channels
+                        .send_status(
+                            &message.channel,
+                            StatusUpdate::Status("Awaiting approval".into()),
+                        )
+                        .await;
+                    Ok(SubmissionResult::NeedApproval {
+                        request_id,
+                        tool_name,
+                        description,
+                        parameters,
+                    })
+                }
+                Err(e) => {
+                    thread.fail_turn(e.to_string());
+                    Ok(SubmissionResult::error(e.to_string()))
+                }
+            }
+        } else {
+            // Rejected - clear approval and return to idle
+            {
+                let mut sess = session.lock().await;
+                if let Some(thread) = sess.threads.get_mut(&thread_id) {
+                    thread.clear_pending_approval();
+                }
+            }
+
+            let _ = self
+                .channels
+                .send_status(&message.channel, StatusUpdate::Status("Rejected".into()))
+                .await;
+
+            Ok(SubmissionResult::response(format!(
+                "Tool '{}' was rejected. The agent will not execute this tool.\n\n\
+                 You can continue the conversation or try a different approach.",
+                pending.tool_name
+            )))
+        }
     }
 
     async fn process_new_thread(
@@ -842,7 +1211,7 @@ impl Agent {
         }
 
         // Persist new job to database (fire-and-forget)
-        if let Some(ref store) = self.store {
+        if let Some(store) = self.store() {
             if let Ok(ctx) = self.context_manager.get_context(job_id).await {
                 let store = store.clone();
                 tokio::spawn(async move {
@@ -990,7 +1359,7 @@ impl Agent {
             ))),
 
             "tools" => {
-                let tools = self.tools.list().await;
+                let tools = self.tools().list().await;
                 Ok(Some(format!("Available tools: {}", tools.join(", "))))
             }
 

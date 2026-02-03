@@ -97,6 +97,45 @@ impl ChannelManager {
         }
     }
 
+    /// Broadcast a message to a specific user on a specific channel.
+    ///
+    /// Used for proactive notifications like heartbeat alerts.
+    pub async fn broadcast(
+        &self,
+        channel_name: &str,
+        user_id: &str,
+        response: OutgoingResponse,
+    ) -> Result<(), ChannelError> {
+        let channels = self.channels.read().await;
+        if let Some(channel) = channels.get(channel_name) {
+            channel.broadcast(user_id, response).await
+        } else {
+            Err(ChannelError::SendFailed {
+                name: channel_name.to_string(),
+                reason: "Channel not found".to_string(),
+            })
+        }
+    }
+
+    /// Broadcast a message to all channels.
+    ///
+    /// Sends to the specified user on every registered channel.
+    pub async fn broadcast_all(
+        &self,
+        user_id: &str,
+        response: OutgoingResponse,
+    ) -> Vec<(String, Result<(), ChannelError>)> {
+        let channels = self.channels.read().await;
+        let mut results = Vec::new();
+
+        for (name, channel) in channels.iter() {
+            let result = channel.broadcast(user_id, response.clone()).await;
+            results.push((name.clone(), result));
+        }
+
+        results
+    }
+
     /// Check health of all channels.
     pub async fn health_check_all(&self) -> HashMap<String, Result<(), ChannelError>> {
         let channels = self.channels.read().await;

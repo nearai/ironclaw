@@ -52,6 +52,30 @@ impl SubmissionParser {
             }
         }
 
+        // Approval responses (simple yes/no/always for pending approvals)
+        // These are short enough to check explicitly
+        match lower.as_str() {
+            "yes" | "y" | "approve" | "ok" => {
+                return Submission::ApprovalResponse {
+                    approved: true,
+                    always: false,
+                };
+            }
+            "always" | "yes always" | "approve always" => {
+                return Submission::ApprovalResponse {
+                    approved: true,
+                    always: true,
+                };
+            }
+            "no" | "n" | "deny" | "reject" | "cancel" => {
+                return Submission::ApprovalResponse {
+                    approved: false,
+                    always: false,
+                };
+            }
+            _ => {}
+        }
+
         // Default: user input
         Submission::UserInput {
             content: content.to_string(),
@@ -68,10 +92,18 @@ pub enum Submission {
         content: String,
     },
 
-    /// Response to an execution approval request.
+    /// Response to an execution approval request (with explicit request ID).
     ExecApproval {
         /// ID of the approval request being responded to.
         request_id: Uuid,
+        /// Whether the execution was approved.
+        approved: bool,
+        /// If true, auto-approve this tool for the rest of the session.
+        always: bool,
+    },
+
+    /// Simple approval response (yes/no/always) for the current pending approval.
+    ApprovalResponse {
         /// Whether the execution was approved.
         approved: bool,
         /// If true, auto-approve this tool for the rest of the session.

@@ -8,8 +8,8 @@ use tokio::sync::{RwLock, mpsc, oneshot};
 use tokio::task::JoinHandle;
 use uuid::Uuid;
 
-use crate::agent::Worker;
 use crate::agent::task::{Task, TaskContext, TaskOutput};
+use crate::agent::worker::{Worker, WorkerDeps};
 use crate::config::AgentConfig;
 use crate::context::{ContextManager, JobContext, JobState};
 use crate::error::{Error, JobError};
@@ -109,17 +109,17 @@ impl Scheduler {
         // Create worker channel
         let (tx, rx) = mpsc::channel(16);
 
-        // Create worker
-        let worker = Worker::new(
-            job_id,
-            self.context_manager.clone(),
-            self.llm.clone(),
-            self.safety.clone(),
-            self.tools.clone(),
-            self.store.clone(),
-            self.config.job_timeout,
-            self.config.use_planning,
-        );
+        // Create worker with shared dependencies
+        let deps = WorkerDeps {
+            context_manager: self.context_manager.clone(),
+            llm: self.llm.clone(),
+            safety: self.safety.clone(),
+            tools: self.tools.clone(),
+            store: self.store.clone(),
+            timeout: self.config.job_timeout,
+            use_planning: self.config.use_planning,
+        };
+        let worker = Worker::new(job_id, deps);
 
         // Spawn worker task
         let handle = tokio::spawn(async move {

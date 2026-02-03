@@ -128,6 +128,22 @@ impl Channel for TuiChannel {
         Ok(())
     }
 
+    async fn broadcast(
+        &self,
+        _user_id: &str,
+        response: OutgoingResponse,
+    ) -> Result<(), ChannelError> {
+        // For TUI, broadcasts appear as regular agent responses with a notification indicator
+        self.event_tx
+            .send(AppEvent::Response(response.content))
+            .await
+            .map_err(|e| ChannelError::SendFailed {
+                name: "tui".to_string(),
+                reason: e.to_string(),
+            })?;
+        Ok(())
+    }
+
     async fn health_check(&self) -> Result<(), ChannelError> {
         // Channel is healthy if we haven't been closed
         if self.event_tx.is_closed() {
