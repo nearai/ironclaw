@@ -330,6 +330,8 @@ impl MemoryTreeTool {
     }
 
     /// Recursively build tree structure.
+    ///
+    /// Returns a compact format where directories end with `/` and may have children.
     async fn build_tree(
         &self,
         path: &str,
@@ -344,34 +346,28 @@ impl MemoryTreeTool {
             .workspace
             .list(path)
             .await
-            .map_err(|e| ToolError::ExecutionFailed(format!("List failed: {}", e)))?;
+            .map_err(|e| ToolError::ExecutionFailed(format!("Tree failed: {}", e)))?;
 
         let mut result = Vec::new();
         for entry in entries {
-            let mut node = serde_json::json!({
-                "name": entry.name(),
-                "path": entry.path,
-                "is_directory": entry.is_directory,
-            });
+            // Directories end with `/`, files don't
+            let display_path = if entry.is_directory {
+                format!("{}/", entry.name())
+            } else {
+                entry.name().to_string()
+            };
 
             if entry.is_directory && current_depth < max_depth {
-                // Recurse into directory
                 let children =
                     Box::pin(self.build_tree(&entry.path, current_depth + 1, max_depth)).await?;
-                if !children.is_empty() {
-                    node["children"] = serde_json::Value::Array(children);
+                if children.is_empty() {
+                    result.push(serde_json::Value::String(display_path));
+                } else {
+                    result.push(serde_json::json!({ display_path: children }));
                 }
-            } else if !entry.is_directory {
-                // Include file metadata
-                if let Some(updated) = entry.updated_at {
-                    node["updated_at"] = serde_json::Value::String(updated.to_rfc3339());
-                }
-                if let Some(preview) = &entry.content_preview {
-                    node["preview"] = serde_json::Value::String(preview.clone());
-                }
+            } else {
+                result.push(serde_json::Value::String(display_path));
             }
-
-            result.push(node);
         }
 
         Ok(result)
@@ -426,13 +422,11 @@ impl Tool for MemoryTreeTool {
 
         let tree = self.build_tree(path, 1, depth).await?;
 
-        let output = serde_json::json!({
-            "root": if path.is_empty() { "/" } else { path },
-            "depth": depth,
-            "tree": tree,
-        });
-
-        Ok(ToolOutput::success(output, start.elapsed()))
+        // Compact output: just the tree array
+        Ok(ToolOutput::success(
+            serde_json::Value::Array(tree),
+            start.elapsed(),
+        ))
     }
 
     fn requires_sanitization(&self) -> bool {
