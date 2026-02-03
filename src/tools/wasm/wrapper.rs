@@ -258,7 +258,7 @@ fn extract_response(response: &Val) -> Result<(Option<String>, Option<String>), 
 
             for (name, val) in fields {
                 match name.as_str() {
-                    "result" => {
+                    "output" => {
                         if let Val::Option(Some(inner)) = val {
                             if let Val::String(s) = inner.as_ref() {
                                 result = Some(s.to_string());

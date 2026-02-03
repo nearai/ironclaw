@@ -267,14 +267,36 @@ fn build_wasm_component(source_dir: &Path, release: bool) -> anyhow::Result<Path
     }
 
     // Find the output wasm file
+    // cargo-component may output to wasm32-wasip1 or wasm32-wasip2 depending on version
     let profile = if release { "release" } else { "debug" };
-    let target_dir = source_dir
-        .join("target")
-        .join("wasm32-wasip2")
-        .join(profile);
+    let candidates = [
+        source_dir
+            .join("target")
+            .join("wasm32-wasip1")
+            .join(profile),
+        source_dir
+            .join("target")
+            .join("wasm32-wasip2")
+            .join(profile),
+        source_dir
+            .join("target")
+            .join("wasm32-unknown-unknown")
+            .join(profile),
+    ];
+
+    let target_dir = candidates.iter().find(|p| p.exists()).ok_or_else(|| {
+        anyhow::anyhow!(
+            "No WASM target directory found. Expected one of: {}",
+            candidates
+                .iter()
+                .map(|p| p.display().to_string())
+                .collect::<Vec<_>>()
+                .join(", ")
+        )
+    })?;
 
     // Look for .wasm files in target dir
-    let entries: Vec<_> = std::fs::read_dir(&target_dir)?
+    let entries: Vec<_> = std::fs::read_dir(target_dir)?
         .filter_map(|e| e.ok())
         .filter(|e| {
             e.path()
@@ -307,26 +329,45 @@ fn build_wasm_component(source_dir: &Path, release: bool) -> anyhow::Result<Path
 /// Find an existing WASM artifact without building.
 fn find_wasm_artifact(source_dir: &Path, name: &str, release: bool) -> anyhow::Result<PathBuf> {
     let profile = if release { "release" } else { "debug" };
-    let target_dir = source_dir
-        .join("target")
-        .join("wasm32-wasip2")
-        .join(profile);
 
-    // Try exact name match first
-    let snake_name = name.replace('-', "_");
-    let candidates = [
-        target_dir.join(format!("{}.wasm", name)),
-        target_dir.join(format!("{}.wasm", snake_name)),
+    // cargo-component may output to wasm32-wasip1 or wasm32-wasip2 depending on version
+    let target_dirs = [
+        source_dir
+            .join("target")
+            .join("wasm32-wasip1")
+            .join(profile),
+        source_dir
+            .join("target")
+            .join("wasm32-wasip2")
+            .join(profile),
+        source_dir
+            .join("target")
+            .join("wasm32-unknown-unknown")
+            .join(profile),
     ];
 
-    for candidate in &candidates {
-        if candidate.exists() {
-            return Ok(candidate.clone());
+    let snake_name = name.replace('-', "_");
+
+    // Try exact name match in any target dir first
+    for target_dir in &target_dirs {
+        let candidates = [
+            target_dir.join(format!("{}.wasm", name)),
+            target_dir.join(format!("{}.wasm", snake_name)),
+        ];
+        for candidate in &candidates {
+            if candidate.exists() {
+                return Ok(candidate.clone());
+            }
         }
     }
 
+    // Find a target dir that exists
+    let target_dir = target_dirs.iter().find(|p| p.exists()).ok_or_else(|| {
+        anyhow::anyhow!("No target directory found. Run without --skip-build to build first.")
+    })?;
+
     // Fall back to any .wasm file
-    let entries: Vec<_> = std::fs::read_dir(&target_dir)
+    let entries: Vec<_> = std::fs::read_dir(target_dir)
         .map_err(|_| {
             anyhow::anyhow!(
                 "Target directory not found: {}. Run without --skip-build.",

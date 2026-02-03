@@ -68,7 +68,7 @@ impl ContextMonitor {
 
     /// Estimate the token count for a list of messages.
     pub fn estimate_tokens(&self, messages: &[ChatMessage]) -> usize {
-        messages.iter().map(|m| estimate_message_tokens(m)).sum()
+        messages.iter().map(estimate_message_tokens).sum()
     }
 
     /// Check if compaction is needed.

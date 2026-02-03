@@ -112,8 +112,8 @@ interface tool {
 
     /// Response from tool execution.
     record response {
-        /// JSON-encoded result on success.
-        result: option<string>,
+        /// JSON-encoded output on success.
+        output: option<string>,
         /// Error message on failure.
         error: option<string>,
     }

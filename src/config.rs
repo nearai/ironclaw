@@ -240,6 +240,8 @@ impl SafetyConfig {
 pub struct WasmConfig {
     /// Whether WASM tool execution is enabled.
     pub enabled: bool,
+    /// Directory containing installed WASM tools (default: ~/.near-agent/tools/).
+    pub tools_dir: PathBuf,
     /// Default memory limit in bytes (default: 10 MB).
     pub default_memory_limit: u64,
     /// Default execution timeout in seconds (default: 60).
@@ -302,6 +304,7 @@ impl Default for WasmConfig {
     fn default() -> Self {
         Self {
             enabled: true,
+            tools_dir: default_tools_dir(),
             default_memory_limit: 10 * 1024 * 1024, // 10 MB
             default_timeout_secs: 60,
             default_fuel_limit: 10_000_000,
@@ -309,6 +312,14 @@ impl Default for WasmConfig {
             cache_dir: None,
         }
     }
+}
+
+/// Get the default tools directory (~/.near-agent/tools/).
+fn default_tools_dir() -> PathBuf {
+    dirs::home_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join(".near-agent")
+        .join("tools")
 }
 
 impl WasmConfig {
@@ -322,6 +333,9 @@ impl WasmConfig {
                     message: format!("must be 'true' or 'false': {e}"),
                 })?
                 .unwrap_or(true),
+            tools_dir: optional_env("WASM_TOOLS_DIR")?
+                .map(PathBuf::from)
+                .unwrap_or_else(default_tools_dir),
             default_memory_limit: parse_optional_env(
                 "WASM_DEFAULT_MEMORY_LIMIT",
                 10 * 1024 * 1024,

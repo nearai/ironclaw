@@ -13,7 +13,10 @@ use near_agent::{
     history::Store,
     llm::create_llm_provider,
     safety::SafetyLayer,
-    tools::ToolRegistry,
+    tools::{
+        ToolRegistry,
+        wasm::{WasmToolLoader, WasmToolRuntime},
+    },
 };
 
 #[tokio::main]
@@ -86,7 +89,42 @@ async fn main() -> anyhow::Result<()> {
     // Initialize tool registry
     let tools = Arc::new(ToolRegistry::new());
     tools.register_builtin_tools();
-    tracing::info!("Tool registry initialized with {} tools", tools.count());
+    tracing::info!("Registered {} built-in tools", tools.count());
+
+    // Load installed WASM tools
+    if config.wasm.enabled && config.wasm.tools_dir.exists() {
+        match WasmToolRuntime::new(config.wasm.to_runtime_config()) {
+            Ok(runtime) => {
+                let runtime = Arc::new(runtime);
+                let loader = WasmToolLoader::new(Arc::clone(&runtime), Arc::clone(&tools));
+
+                match loader.load_from_dir(&config.wasm.tools_dir).await {
+                    Ok(results) => {
+                        if !results.loaded.is_empty() {
+                            tracing::info!(
+                                "Loaded {} WASM tools from {}",
+                                results.loaded.len(),
+                                config.wasm.tools_dir.display()
+                            );
+                        }
+                        for (path, err) in &results.errors {
+                            tracing::warn!("Failed to load WASM tool {}: {}", path.display(), err);
+                        }
+                    }
+                    Err(e) => {
+                        tracing::warn!("Failed to scan WASM tools directory: {}", e);
+                    }
+                }
+            }
+            Err(e) => {
+                tracing::warn!("Failed to initialize WASM runtime: {}", e);
+            }
+        }
+    }
+    tracing::info!(
+        "Tool registry initialized with {} total tools",
+        tools.count()
+    );
 
     // Initialize channel manager
     let mut channels = ChannelManager::new();
