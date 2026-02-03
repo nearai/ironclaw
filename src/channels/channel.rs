@@ -99,6 +99,21 @@ impl OutgoingResponse {
     }
 }
 
+/// Status update types for showing agent activity.
+#[derive(Debug, Clone)]
+pub enum StatusUpdate {
+    /// Agent is thinking/processing.
+    Thinking(String),
+    /// Tool execution started.
+    ToolStarted { name: String },
+    /// Tool execution completed.
+    ToolCompleted { name: String, success: bool },
+    /// Streaming text chunk.
+    StreamChunk(String),
+    /// General status message.
+    Status(String),
+}
+
 /// Trait for message channels.
 ///
 /// Channels receive messages from external sources and convert them to
@@ -123,6 +138,13 @@ pub trait Channel: Send + Sync {
         msg: &IncomingMessage,
         response: OutgoingResponse,
     ) -> Result<(), ChannelError>;
+
+    /// Send a status update (thinking, tool execution, etc.).
+    ///
+    /// Default implementation does nothing (for channels that don't support status).
+    async fn send_status(&self, _status: StatusUpdate) -> Result<(), ChannelError> {
+        Ok(())
+    }
 
     /// Check if the channel is healthy.
     async fn health_check(&self) -> Result<(), ChannelError>;

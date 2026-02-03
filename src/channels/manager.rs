@@ -6,7 +6,7 @@ use std::sync::Arc;
 use futures::stream;
 use tokio::sync::RwLock;
 
-use crate::channels::{Channel, IncomingMessage, MessageStream, OutgoingResponse};
+use crate::channels::{Channel, IncomingMessage, MessageStream, OutgoingResponse, StatusUpdate};
 use crate::error::ChannelError;
 
 /// Manages multiple input channels and merges their message streams.
@@ -79,6 +79,21 @@ impl ChannelManager {
                 name: msg.channel.clone(),
                 reason: "Channel not found".to_string(),
             })
+        }
+    }
+
+    /// Send a status update to a specific channel.
+    pub async fn send_status(
+        &self,
+        channel_name: &str,
+        status: StatusUpdate,
+    ) -> Result<(), ChannelError> {
+        let channels = self.channels.read().await;
+        if let Some(channel) = channels.get(channel_name) {
+            channel.send_status(status).await
+        } else {
+            // Silently ignore if channel not found (status is best-effort)
+            Ok(())
         }
     }
 

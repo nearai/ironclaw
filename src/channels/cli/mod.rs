@@ -26,7 +26,7 @@ use ratatui::backend::CrosstermBackend;
 use tokio::sync::{Mutex, mpsc};
 use tokio_stream::wrappers::ReceiverStream;
 
-use crate::channels::{Channel, IncomingMessage, MessageStream, OutgoingResponse};
+use crate::channels::{Channel, IncomingMessage, MessageStream, OutgoingResponse, StatusUpdate};
 use crate::error::ChannelError;
 
 pub use app::{AppEvent, AppState, InputMode};
@@ -101,6 +101,26 @@ impl Channel for TuiChannel {
     ) -> Result<(), ChannelError> {
         self.event_tx
             .send(AppEvent::Response(response.content))
+            .await
+            .map_err(|e| ChannelError::SendFailed {
+                name: "tui".to_string(),
+                reason: e.to_string(),
+            })?;
+        Ok(())
+    }
+
+    async fn send_status(&self, status: StatusUpdate) -> Result<(), ChannelError> {
+        let event = match status {
+            StatusUpdate::Thinking(msg) => AppEvent::LogMessage(format!("🤔 {}", msg)),
+            StatusUpdate::ToolStarted { name } => AppEvent::ToolStarted { name },
+            StatusUpdate::ToolCompleted { name, success } => {
+                AppEvent::ToolCompleted { name, success }
+            }
+            StatusUpdate::StreamChunk(chunk) => AppEvent::StreamChunk(chunk),
+            StatusUpdate::Status(msg) => AppEvent::LogMessage(msg),
+        };
+        self.event_tx
+            .send(event)
             .await
             .map_err(|e| ChannelError::SendFailed {
                 name: "tui".to_string(),

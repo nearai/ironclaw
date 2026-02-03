@@ -10,7 +10,7 @@ mod manager;
 mod slack;
 mod telegram;
 
-pub use channel::{Channel, IncomingMessage, MessageStream, OutgoingResponse};
+pub use channel::{Channel, IncomingMessage, MessageStream, OutgoingResponse, StatusUpdate};
 pub use cli::TuiChannel;
 pub use http::HttpChannel;
 pub use manager::ChannelManager;

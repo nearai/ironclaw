@@ -7,7 +7,7 @@ use uuid::Uuid;
 
 use crate::agent::self_repair::DefaultSelfRepair;
 use crate::agent::{MessageIntent, RepairTask, Router, Scheduler};
-use crate::channels::{ChannelManager, IncomingMessage, OutgoingResponse};
+use crate::channels::{ChannelManager, IncomingMessage, OutgoingResponse, StatusUpdate};
 use crate::config::AgentConfig;
 use crate::context::ContextManager;
 use crate::error::Error;
@@ -126,6 +126,20 @@ impl Agent {
         // Route the message
         let intent = self.router.route(message);
         tracing::debug!("Routed to intent: {:?}", intent);
+
+        // Send thinking status for non-trivial operations
+        match &intent {
+            MessageIntent::Chat { .. } | MessageIntent::CreateJob { .. } => {
+                let _ = self
+                    .channels
+                    .send_status(
+                        &message.channel,
+                        StatusUpdate::Thinking("Processing...".into()),
+                    )
+                    .await;
+            }
+            _ => {}
+        }
 
         // Handle based on intent
         let response = match intent {
@@ -293,19 +307,40 @@ impl Agent {
         }
     }
 
-    async fn handle_chat(
-        &self,
-        _message: &IncomingMessage,
-        content: &str,
-    ) -> Result<String, Error> {
+    async fn handle_chat(&self, message: &IncomingMessage, content: &str) -> Result<String, Error> {
+        // Send thinking status
+        let _ = self
+            .channels
+            .send_status(
+                &message.channel,
+                StatusUpdate::Thinking("Generating response...".into()),
+            )
+            .await;
+
         // Use LLM for general chat
         let reasoning = Reasoning::new(self.llm.clone(), self.safety.clone());
 
         let context = ReasoningContext::new().with_message(ChatMessage::user(content));
 
-        let response = reasoning.respond(&context).await?;
-
-        Ok(response)
+        match reasoning.respond(&context).await {
+            Ok(response) => {
+                let _ = self
+                    .channels
+                    .send_status(&message.channel, StatusUpdate::Status("Done".into()))
+                    .await;
+                Ok(response)
+            }
+            Err(e) => {
+                let _ = self
+                    .channels
+                    .send_status(
+                        &message.channel,
+                        StatusUpdate::Status(format!("Error: {}", e)),
+                    )
+                    .await;
+                Err(e.into())
+            }
+        }
     }
 
     async fn handle_command(
