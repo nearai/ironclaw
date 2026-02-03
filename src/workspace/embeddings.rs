@@ -214,19 +214,20 @@ impl EmbeddingProvider for OpenAiEmbeddings {
 }
 
 /// A mock embedding provider for testing.
-#[cfg(test)]
+///
+/// Generates deterministic embeddings based on text hash.
+/// Useful for unit and integration tests.
 pub struct MockEmbeddings {
     dimension: usize,
 }
 
-#[cfg(test)]
 impl MockEmbeddings {
+    /// Create a new mock embeddings provider with the given dimension.
     pub fn new(dimension: usize) -> Self {
         Self { dimension }
     }
 }
 
-#[cfg(test)]
 #[async_trait]
 impl EmbeddingProvider for MockEmbeddings {
     fn dimension(&self) -> usize {
