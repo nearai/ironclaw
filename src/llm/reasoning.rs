@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::LlmError;
 use crate::llm::{
-    ChatMessage, CompletionRequest, LlmProvider, ToolCompletionRequest, ToolDefinition,
+    ChatMessage, CompletionRequest, LlmProvider, ToolCall, ToolCompletionRequest, ToolDefinition,
 };
 use crate::safety::SafetyLayer;
 
@@ -103,6 +103,17 @@ pub struct ToolSelection {
     pub reasoning: String,
     /// Alternative tools considered.
     pub alternatives: Vec<String>,
+}
+
+/// Result of a response with potential tool calls.
+///
+/// Used by the agent loop to handle tool execution before returning a final response.
+#[derive(Debug, Clone)]
+pub enum RespondResult {
+    /// A text response (no tools needed).
+    Text(String),
+    /// The model wants to call tools. Caller should execute them and call back.
+    ToolCalls(Vec<ToolCall>),
 }
 
 /// Reasoning engine for the agent.
@@ -236,7 +247,32 @@ Respond in JSON format:
     /// Generate a response to a user message.
     ///
     /// If tools are available in the context, uses tool completion mode.
+    /// This is a convenience wrapper around `respond_with_tools()` that formats
+    /// tool calls as text for simple cases. Use `respond_with_tools()` when you
+    /// need to actually execute tool calls in an agentic loop.
     pub async fn respond(&self, context: &ReasoningContext) -> Result<String, LlmError> {
+        match self.respond_with_tools(context).await? {
+            RespondResult::Text(text) => Ok(text),
+            RespondResult::ToolCalls(calls) => {
+                // Format tool calls as text (legacy behavior for non-agentic callers)
+                let tool_info: Vec<String> = calls
+                    .iter()
+                    .map(|tc| format!("`{}({})`", tc.name, tc.arguments))
+                    .collect();
+                Ok(format!("[Calling tools: {}]", tool_info.join(", ")))
+            }
+        }
+    }
+
+    /// Generate a response that may include tool calls.
+    ///
+    /// Returns `RespondResult::ToolCalls` if the model wants to call tools,
+    /// allowing the caller to execute them and continue the conversation.
+    /// Returns `RespondResult::Text` when the model has a final text response.
+    pub async fn respond_with_tools(
+        &self,
+        context: &ReasoningContext,
+    ) -> Result<RespondResult, LlmError> {
         let system_prompt = self.build_conversation_prompt(context);
 
         let mut messages = vec![ChatMessage::system(system_prompt)];
@@ -251,22 +287,16 @@ Respond in JSON format:
 
             let response = self.llm.complete_with_tools(request).await?;
 
-            // If there were tool calls, the content is usually just internal reasoning
-            // Don't show it - just acknowledge the tool calls (actual execution handled by caller)
+            // If there were tool calls, return them for execution
             if !response.tool_calls.is_empty() {
-                let tool_info: Vec<String> = response
-                    .tool_calls
-                    .iter()
-                    .map(|tc| format!("`{}({})`", tc.name, tc.arguments))
-                    .collect();
-                return Ok(format!("[Calling tools: {}]", tool_info.join(", ")));
+                return Ok(RespondResult::ToolCalls(response.tool_calls));
             }
 
             // No tool calls - clean up the response
             let content = response
                 .content
                 .unwrap_or_else(|| "I'm not sure how to respond to that.".to_string());
-            Ok(clean_response(&content))
+            Ok(RespondResult::Text(clean_response(&content)))
         } else {
             // No tools, use simple completion
             let request = CompletionRequest::new(messages)
@@ -274,7 +304,7 @@ Respond in JSON format:
                 .with_temperature(0.7);
 
             let response = self.llm.complete(request).await?;
-            Ok(clean_response(&response.content))
+            Ok(RespondResult::Text(clean_response(&response.content)))
         }
     }
 
@@ -331,7 +361,7 @@ Respond with a JSON plan in this format:
                 .map(|t| format!("  - {}: {}", t.name, t.description))
                 .collect();
             format!(
-                "\n\n## Available Tools\nYou have access to these tools:\n{}\n\nCall tools directly when needed - don't announce what you're going to do.",
+                "\n\n## Available Tools\nYou have access to these tools:\n{}\n\nCall tools directly when needed.",
                 tool_list.join("\n")
             )
         };
@@ -339,25 +369,26 @@ Respond with a JSON plan in this format:
         format!(
             r#"You are NEAR AI Agent, an autonomous assistant.
 
-CRITICAL: Never output your internal reasoning or thinking process. Your response must contain ONLY the final answer or action.
+## Response Format
 
-FORBIDDEN patterns (never start with these):
-- "The user wants..." / "The user is asking..."
-- "I need to..." / "I should..." / "I will..."
-- "Let me think..." / "Let me first..."
-- "This is a request to..."
-- Any self-narration about what you're doing
+If you need to think through a problem, wrap your thinking in <thinking> tags. Everything outside these tags goes directly to the user.
 
-CORRECT behavior:
-- Answer questions directly
-- Call tools without announcing it
-- Ask clarifying questions if genuinely needed
-- Provide code/content without preamble{}
+Example:
+<thinking>
+Let me consider the options...
+Option 1: ...
+Option 2: ...
+I'll go with option 1.
+</thinking>
+Here's the solution: [actual response to user]
 
-## Format
-- Be concise
-- Use markdown where helpful
-- Code blocks with language tags"#,
+## Guidelines
+- Be concise and direct
+- Use markdown formatting where helpful
+- For code, use appropriate code blocks with language tags
+- Call tools when they would help accomplish the task{}
+
+The user sees ONLY content outside <thinking> tags."#,
             tools_section
         )
     }
@@ -449,68 +480,44 @@ fn strip_thinking_tags(text: &str) -> String {
     cleaned
 }
 
-/// Strip common reasoning/thinking patterns from the start of responses.
+/// Strip any remaining reasoning that wasn't in proper <thinking> tags.
 ///
-/// Models sometimes output their thinking process as plain text despite
-/// instructions not to. This strips common patterns like "The user wants...",
-/// "Let me think...", "I need to...", etc.
+/// This is a simple fallback for models that don't follow the <thinking> tag
+/// instruction. It looks for paragraph breaks where actual content follows.
 fn strip_reasoning_patterns(text: &str) -> String {
     let text = text.trim();
+    if text.is_empty() {
+        return text.to_string();
+    }
 
-    // Patterns that indicate internal reasoning (case-insensitive check)
-    let reasoning_prefixes = [
-        "the user wants",
-        "the user is asking",
-        "the user would like",
-        "i need to",
-        "i should",
-        "i will",
-        "i'll",
-        "let me think",
-        "let me first",
-        "let me check",
-        "let me look",
-        "let me explore",
-        "let me search",
-        "this is a request",
-        "this request",
-        "to answer this",
-        "to help with this",
-        "first, i",
-        "okay, so",
-        "alright, ",
-    ];
+    // If text already looks clean (starts with actual content), return as-is
+    // Actual content often starts with: markdown, code blocks, direct statements
+    let first_char = text.chars().next().unwrap_or(' ');
+    if first_char == '#' || first_char == '`' || first_char == '*' || first_char == '-' {
+        return text.to_string();
+    }
 
-    // Find where reasoning ends and actual content begins
-    // Look for paragraph breaks or sentences that start the actual response
-    let lines: Vec<&str> = text.lines().collect();
-    let mut skip_until = 0;
-
-    for (i, line) in lines.iter().enumerate() {
-        let lower = line.to_lowercase();
-
-        // Check if this line starts with a reasoning pattern
-        let is_reasoning = reasoning_prefixes
-            .iter()
-            .any(|p| lower.trim_start().starts_with(p));
-
-        if is_reasoning {
-            skip_until = i + 1;
-        } else if !line.trim().is_empty() && skip_until <= i {
-            // Found non-reasoning content, stop looking
-            break;
+    // Look for paragraph break followed by actual content
+    // Often models output: "thinking...\n\nActual response"
+    if let Some(idx) = text.find("\n\n") {
+        let after_break = text[idx + 2..].trim();
+        if !after_break.is_empty() {
+            let first_after = after_break.chars().next().unwrap_or(' ');
+            // If it starts with typical response markers, use content after break
+            if first_after == '#'
+                || first_after == '`'
+                || first_after == '*'
+                || first_after == '-'
+                || after_break.to_lowercase().starts_with("here")
+                || after_break.to_lowercase().starts_with("i'd")
+                || after_break.to_lowercase().starts_with("sure")
+            {
+                return after_break.to_string();
+            }
         }
     }
 
-    if skip_until > 0 && skip_until < lines.len() {
-        // Skip the reasoning lines and return the rest
-        let result = lines[skip_until..].join("\n").trim().to_string();
-        if !result.is_empty() {
-            return result;
-        }
-    }
-
-    // If we'd strip everything, just return the original (better than empty)
+    // Return original if no clear split found
     text.to_string()
 }
 
@@ -582,43 +589,50 @@ Here is my response to your question."#;
     }
 
     #[test]
-    fn test_strip_reasoning_patterns_basic() {
-        let input = "The user wants me to implement something.\n\nHere's the implementation:";
+    fn test_strip_reasoning_paragraph_break() {
+        // Content after paragraph break with "here" marker
+        let input = "Some thinking here.\n\nHere's the answer:";
         let output = strip_reasoning_patterns(input);
-        assert_eq!(output, "Here's the implementation:");
+        assert_eq!(output, "Here's the answer:");
     }
 
     #[test]
-    fn test_strip_reasoning_patterns_multiline() {
-        let input = r#"The user is asking about Telegram.
-I need to think about what this involves.
-Let me first check the existing code.
-
-Here's what I found in the codebase."#;
+    fn test_strip_reasoning_markdown_after_break() {
+        // Content after paragraph break starting with markdown
+        let input = "Some reasoning.\n\n**The Solution**\n- Item 1";
         let output = strip_reasoning_patterns(input);
-        assert_eq!(output, "Here's what I found in the codebase.");
+        assert_eq!(output, "**The Solution**\n- Item 1");
     }
 
     #[test]
-    fn test_strip_reasoning_no_patterns() {
-        let input = "Here's a direct answer to your question.";
+    fn test_strip_reasoning_preserves_markdown_start() {
+        // If response starts with markdown, keep as-is
+        let input = "**What type of tool?**\n- Option 1\n- Option 2";
         let output = strip_reasoning_patterns(input);
-        assert_eq!(output, "Here's a direct answer to your question.");
+        assert_eq!(output, "**What type of tool?**\n- Option 1\n- Option 2");
     }
 
     #[test]
-    fn test_strip_reasoning_preserves_all_if_only_reasoning() {
-        // If stripping would leave nothing, keep the original
-        let input = "The user wants to know X.";
+    fn test_strip_reasoning_preserves_code_start() {
+        // If response starts with code block, keep as-is
+        let input = "```rust\nfn main() {}\n```";
         let output = strip_reasoning_patterns(input);
-        assert_eq!(output, "The user wants to know X.");
+        assert_eq!(output, "```rust\nfn main() {}\n```");
+    }
+
+    #[test]
+    fn test_strip_reasoning_no_paragraph_break() {
+        // Without clear paragraph break, return original
+        let input = "Some text without clear separation.";
+        let output = strip_reasoning_patterns(input);
+        assert_eq!(output, "Some text without clear separation.");
     }
 
     #[test]
     fn test_clean_response_combined() {
-        let input =
-            "<thinking>Internal thought</thinking>I need to check this.\n\nActual response here.";
+        // Combines thinking tags + paragraph break fallback
+        let input = "<thinking>Internal thought</thinking>Some text.\n\nHere's the answer.";
         let output = clean_response(input);
-        assert_eq!(output, "Actual response here.");
+        assert_eq!(output, "Here's the answer.");
     }
 }

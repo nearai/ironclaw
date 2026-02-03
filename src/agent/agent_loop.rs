@@ -19,9 +19,10 @@ use crate::agent::{
 use crate::channels::{ChannelManager, IncomingMessage, OutgoingResponse, StatusUpdate};
 use crate::config::{AgentConfig, HeartbeatConfig};
 use crate::context::ContextManager;
+use crate::context::JobContext;
 use crate::error::Error;
 use crate::history::Store;
-use crate::llm::{LlmProvider, Reasoning, ReasoningContext};
+use crate::llm::{ChatMessage, LlmProvider, Reasoning, ReasoningContext, RespondResult};
 use crate::safety::SafetyLayer;
 use crate::tools::ToolRegistry;
 use crate::workspace::Workspace;
@@ -368,13 +369,10 @@ impl Agent {
             )
             .await;
 
-        // Call LLM with thread context and available tools
-        let reasoning = Reasoning::new(self.llm.clone(), self.safety.clone());
-        let tool_defs = self.tools.tool_definitions().await;
-        let context = ReasoningContext::new()
-            .with_messages(turn_messages)
-            .with_tools(tool_defs);
-        let llm_result = reasoning.respond(&context).await;
+        // Run the agentic tool execution loop
+        let result = self
+            .run_agentic_loop(message, session.clone(), thread_id, turn_messages)
+            .await;
 
         // Re-acquire lock and check if interrupted
         let mut sess = session.lock().await;
@@ -392,7 +390,7 @@ impl Agent {
         }
 
         // Complete or fail the turn
-        match llm_result {
+        match result {
             Ok(response) => {
                 thread.complete_turn(&response);
                 let _ = self
@@ -406,6 +404,174 @@ impl Agent {
                 Ok(SubmissionResult::error(e.to_string()))
             }
         }
+    }
+
+    /// Run the agentic loop: call LLM, execute tools, repeat until text response.
+    async fn run_agentic_loop(
+        &self,
+        message: &IncomingMessage,
+        session: Arc<Mutex<Session>>,
+        thread_id: Uuid,
+        initial_messages: Vec<ChatMessage>,
+    ) -> Result<String, Error> {
+        let reasoning = Reasoning::new(self.llm.clone(), self.safety.clone());
+        let tool_defs = self.tools.tool_definitions().await;
+
+        // Build context with messages that we'll mutate during the loop
+        let mut context_messages = initial_messages;
+
+        // Create a JobContext for tool execution (chat doesn't have a real job)
+        let job_ctx = JobContext::with_user(&message.user_id, "chat", "Interactive chat session");
+
+        const MAX_TOOL_ITERATIONS: usize = 10;
+        let mut iteration = 0;
+
+        loop {
+            iteration += 1;
+            if iteration > MAX_TOOL_ITERATIONS {
+                return Err(crate::error::LlmError::InvalidResponse {
+                    provider: "nearai".to_string(),
+                    reason: format!("Exceeded maximum tool iterations ({})", MAX_TOOL_ITERATIONS),
+                }
+                .into());
+            }
+
+            // Check if interrupted
+            {
+                let sess = session.lock().await;
+                if let Some(thread) = sess.threads.get(&thread_id) {
+                    if thread.state == ThreadState::Interrupted {
+                        return Err(crate::error::JobError::ContextError {
+                            id: thread_id,
+                            reason: "Interrupted".to_string(),
+                        }
+                        .into());
+                    }
+                }
+            }
+
+            // Call LLM with current context
+            let context = ReasoningContext::new()
+                .with_messages(context_messages.clone())
+                .with_tools(tool_defs.clone());
+
+            let result = reasoning.respond_with_tools(&context).await?;
+
+            match result {
+                RespondResult::Text(text) => {
+                    // Final response, return it
+                    return Ok(text);
+                }
+                RespondResult::ToolCalls(tool_calls) => {
+                    // Execute tools and add results to context
+                    let _ = self
+                        .channels
+                        .send_status(
+                            &message.channel,
+                            StatusUpdate::Thinking(format!(
+                                "Executing {} tool(s)...",
+                                tool_calls.len()
+                            )),
+                        )
+                        .await;
+
+                    // Record tool calls in the thread
+                    {
+                        let mut sess = session.lock().await;
+                        if let Some(thread) = sess.threads.get_mut(&thread_id) {
+                            if let Some(turn) = thread.last_turn_mut() {
+                                for tc in &tool_calls {
+                                    turn.record_tool_call(&tc.name, tc.arguments.clone());
+                                }
+                            }
+                        }
+                    }
+
+                    // Execute each tool
+                    for tc in tool_calls {
+                        let tool_result = self
+                            .execute_chat_tool(&tc.name, &tc.arguments, &job_ctx)
+                            .await;
+
+                        // Record result in thread
+                        {
+                            let mut sess = session.lock().await;
+                            if let Some(thread) = sess.threads.get_mut(&thread_id) {
+                                if let Some(turn) = thread.last_turn_mut() {
+                                    match &tool_result {
+                                        Ok(output) => {
+                                            turn.record_tool_result(serde_json::json!(output));
+                                        }
+                                        Err(e) => {
+                                            turn.record_tool_error(e.to_string());
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
+                        // Add tool result to context for next LLM call
+                        let result_content = match tool_result {
+                            Ok(output) => {
+                                // Sanitize output before showing to LLM
+                                let sanitized = self.safety.sanitize_tool_output(&tc.name, &output);
+                                self.safety.wrap_for_llm(
+                                    &tc.name,
+                                    &sanitized.content,
+                                    sanitized.was_modified,
+                                )
+                            }
+                            Err(e) => format!("Error: {}", e),
+                        };
+
+                        context_messages.push(ChatMessage::tool_result(
+                            &tc.id,
+                            &tc.name,
+                            result_content,
+                        ));
+                    }
+                }
+            }
+        }
+    }
+
+    /// Execute a tool for chat (without full job context).
+    async fn execute_chat_tool(
+        &self,
+        tool_name: &str,
+        params: &serde_json::Value,
+        job_ctx: &JobContext,
+    ) -> Result<String, Error> {
+        let tool =
+            self.tools
+                .get(tool_name)
+                .await
+                .ok_or_else(|| crate::error::ToolError::NotFound {
+                    name: tool_name.to_string(),
+                })?;
+
+        // Execute with timeout
+        let result = tokio::time::timeout(std::time::Duration::from_secs(60), async {
+            tool.execute(params.clone(), job_ctx).await
+        })
+        .await
+        .map_err(|_| crate::error::ToolError::Timeout {
+            name: tool_name.to_string(),
+            timeout: std::time::Duration::from_secs(60),
+        })?
+        .map_err(|e| crate::error::ToolError::ExecutionFailed {
+            name: tool_name.to_string(),
+            reason: e.to_string(),
+        })?;
+
+        // Convert result to string
+        serde_json::to_string_pretty(&result.result).map_err(|e| {
+            crate::error::ToolError::ExecutionFailed {
+                name: tool_name.to_string(),
+                reason: format!("Failed to serialize result: {}", e),
+            }
+            .into()
+        })
     }
 
     /// Handle job-related intents without turn tracking.

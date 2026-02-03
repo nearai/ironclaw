@@ -12,7 +12,7 @@ pub use provider::{
     ChatMessage, CompletionRequest, CompletionResponse, LlmProvider, Role, ToolCall,
     ToolCompletionRequest, ToolCompletionResponse, ToolDefinition, ToolResult,
 };
-pub use reasoning::{ActionPlan, Reasoning, ReasoningContext, ToolSelection};
+pub use reasoning::{ActionPlan, Reasoning, ReasoningContext, RespondResult, ToolSelection};
 pub use session::{SessionConfig, SessionManager, create_session_manager};
 
 use std::sync::Arc;

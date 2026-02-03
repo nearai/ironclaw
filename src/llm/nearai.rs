@@ -153,14 +153,39 @@ impl NearAiProvider {
     }
 }
 
+/// Split messages into system instructions and non-system input messages.
+/// The OpenAI Responses API expects system prompts in an `instructions` field,
+/// not as a message with role "system" in the input array.
+fn split_messages(messages: Vec<ChatMessage>) -> (Option<String>, Vec<NearAiMessage>) {
+    let mut instructions: Vec<String> = Vec::new();
+    let mut input: Vec<NearAiMessage> = Vec::new();
+
+    for msg in messages {
+        if msg.role == Role::System {
+            instructions.push(msg.content);
+        } else {
+            input.push(msg.into());
+        }
+    }
+
+    let instructions = if instructions.is_empty() {
+        None
+    } else {
+        Some(instructions.join("\n\n"))
+    };
+
+    (instructions, input)
+}
+
 #[async_trait]
 impl LlmProvider for NearAiProvider {
     async fn complete(&self, req: CompletionRequest) -> Result<CompletionResponse, LlmError> {
-        let messages: Vec<NearAiMessage> = req.messages.into_iter().map(Into::into).collect();
+        let (instructions, input) = split_messages(req.messages);
 
         let request = NearAiRequest {
             model: self.config.model.clone(),
-            input: messages,
+            instructions,
+            input,
             temperature: req.temperature,
             max_output_tokens: req.max_tokens,
             stream: Some(false),
@@ -272,7 +297,7 @@ impl LlmProvider for NearAiProvider {
         &self,
         req: ToolCompletionRequest,
     ) -> Result<ToolCompletionResponse, LlmError> {
-        let messages: Vec<NearAiMessage> = req.messages.into_iter().map(Into::into).collect();
+        let (instructions, input) = split_messages(req.messages);
 
         let tools: Vec<NearAiTool> = req
             .tools
@@ -287,7 +312,8 @@ impl LlmProvider for NearAiProvider {
 
         let request = NearAiRequest {
             model: self.config.model.clone(),
-            input: messages,
+            instructions,
+            input,
             temperature: req.temperature,
             max_output_tokens: req.max_tokens,
             stream: Some(false),
@@ -302,16 +328,28 @@ impl LlmProvider for NearAiProvider {
 
                 // Try parsing as alternative response format
                 if let Ok(alt) = serde_json::from_str::<NearAiAltResponse>(raw_text) {
-                    tracing::info!("NEAR AI returned alternative response format (tool request)");
                     let text = extract_text_from_output(&alt.output);
+                    let tool_calls = extract_tool_calls_from_output(&alt.output);
                     let usage = alt.usage.unwrap_or(NearAiUsage {
                         input_tokens: 0,
                         output_tokens: 0,
                     });
+
+                    let finish_reason = if tool_calls.is_empty() {
+                        FinishReason::Stop
+                    } else {
+                        FinishReason::ToolUse
+                    };
+
+                    tracing::info!(
+                        "NEAR AI returned alternative response format ({} tool calls)",
+                        tool_calls.len()
+                    );
+
                     return Ok(ToolCompletionResponse {
                         content: if text.is_empty() { None } else { Some(text) },
-                        tool_calls: vec![],
-                        finish_reason: FinishReason::Stop,
+                        tool_calls,
+                        finish_reason,
                         input_tokens: usage.input_tokens,
                         output_tokens: usage.output_tokens,
                     });
@@ -403,7 +441,10 @@ impl LlmProvider for NearAiProvider {
 struct NearAiRequest {
     /// Model identifier (e.g., "fireworks::accounts/fireworks/models/llama-v3p1-405b-instruct")
     model: String,
-    /// Input messages - can be a string or array of message objects
+    /// System instructions (replaces sending system role in input)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    instructions: Option<String>,
+    /// Input messages (user/assistant/tool only, NOT system)
     input: Vec<NearAiMessage>,
     #[serde(skip_serializing_if = "Option::is_none")]
     temperature: Option<f32>,
@@ -524,6 +565,10 @@ fn extract_text_from_output(output: &Option<serde_json::Value>) -> String {
         let texts: Vec<String> = arr
             .iter()
             .filter_map(|item| {
+                // Skip function_call items
+                if item.get("type").and_then(|t| t.as_str()) == Some("function_call") {
+                    return None;
+                }
                 // Check for direct text field
                 if let Some(text) = item.get("text").and_then(|t| t.as_str()) {
                     return Some(text.to_string());
@@ -566,6 +611,49 @@ fn extract_text_from_output(output: &Option<serde_json::Value>) -> String {
     output.to_string()
 }
 
+/// Extract tool calls from alternative output format.
+fn extract_tool_calls_from_output(output: &Option<serde_json::Value>) -> Vec<ToolCall> {
+    let Some(output) = output else {
+        return vec![];
+    };
+
+    let Some(arr) = output.as_array() else {
+        return vec![];
+    };
+
+    arr.iter()
+        .filter_map(|item| {
+            // Look for function_call type items
+            let item_type = item.get("type").and_then(|t| t.as_str())?;
+            if item_type != "function_call" {
+                return None;
+            }
+
+            let name = item.get("name").and_then(|n| n.as_str())?;
+            let call_id = item
+                .get("call_id")
+                .and_then(|c| c.as_str())
+                .unwrap_or("unknown");
+
+            // Arguments can be a string (JSON) or already an object
+            let arguments = if let Some(args_str) = item.get("arguments").and_then(|a| a.as_str()) {
+                serde_json::from_str(args_str)
+                    .unwrap_or(serde_json::Value::Object(Default::default()))
+            } else if let Some(args_obj) = item.get("arguments") {
+                args_obj.clone()
+            } else {
+                serde_json::Value::Object(Default::default())
+            };
+
+            Some(ToolCall {
+                id: call_id.to_string(),
+                name: name.to_string(),
+                arguments,
+            })
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -583,5 +671,48 @@ mod tests {
         let msg = ChatMessage::system("You are helpful");
         let nearai_msg: NearAiMessage = msg.into();
         assert_eq!(nearai_msg.role, "system");
+    }
+
+    #[test]
+    fn test_split_messages_with_system() {
+        let messages = vec![
+            ChatMessage::system("You are a helpful assistant"),
+            ChatMessage::user("Hello"),
+            ChatMessage::assistant("Hi there!"),
+        ];
+        let (instructions, input) = split_messages(messages);
+        assert_eq!(
+            instructions,
+            Some("You are a helpful assistant".to_string())
+        );
+        assert_eq!(input.len(), 2);
+        assert_eq!(input[0].role, "user");
+        assert_eq!(input[1].role, "assistant");
+    }
+
+    #[test]
+    fn test_split_messages_no_system() {
+        let messages = vec![
+            ChatMessage::user("Hello"),
+            ChatMessage::assistant("Hi there!"),
+        ];
+        let (instructions, input) = split_messages(messages);
+        assert!(instructions.is_none());
+        assert_eq!(input.len(), 2);
+    }
+
+    #[test]
+    fn test_split_messages_multiple_system() {
+        let messages = vec![
+            ChatMessage::system("First instruction"),
+            ChatMessage::system("Second instruction"),
+            ChatMessage::user("Hello"),
+        ];
+        let (instructions, input) = split_messages(messages);
+        assert_eq!(
+            instructions,
+            Some("First instruction\n\nSecond instruction".to_string())
+        );
+        assert_eq!(input.len(), 1);
     }
 }
