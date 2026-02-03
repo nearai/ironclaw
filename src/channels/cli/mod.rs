@@ -17,7 +17,6 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use crossterm::{
-    event::{DisableMouseCapture, EnableMouseCapture},
     execute,
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
@@ -86,7 +85,7 @@ impl Channel for TuiChannel {
             if let Err(e) = run_tui(msg_tx, event_rx) {
                 // Try to restore terminal even on error
                 let _ = disable_raw_mode();
-                let _ = execute!(io::stdout(), LeaveAlternateScreen, DisableMouseCapture);
+                let _ = execute!(io::stdout(), LeaveAlternateScreen);
                 eprintln!("TUI error: {}", e);
             }
         });
@@ -152,9 +151,10 @@ fn run_tui(
     event_rx: mpsc::Receiver<AppEvent>,
 ) -> io::Result<()> {
     // Setup terminal
+    // Note: We don't enable mouse capture so users can select text normally
     enable_raw_mode()?;
     let mut stdout = io::stdout();
-    execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
+    execute!(stdout, EnterAlternateScreen)?;
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
@@ -166,11 +166,7 @@ fn run_tui(
 
     // Restore terminal
     disable_raw_mode()?;
-    execute!(
-        terminal.backend_mut(),
-        LeaveAlternateScreen,
-        DisableMouseCapture
-    )?;
+    execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
     terminal.show_cursor()?;
 
     result
