@@ -47,6 +47,7 @@ impl Agent {
             llm.clone(),
             safety.clone(),
             tools.clone(),
+            store.clone(),
         ));
 
         Self {
@@ -169,6 +170,18 @@ impl Agent {
                     ctx.category = Some(cat);
                 })
                 .await?;
+        }
+
+        // Persist new job to database (fire-and-forget)
+        if let Some(ref store) = self.store {
+            if let Ok(ctx) = self.context_manager.get_context(job_id).await {
+                let store = store.clone();
+                tokio::spawn(async move {
+                    if let Err(e) = store.save_job(&ctx).await {
+                        tracing::warn!("Failed to persist new job {}: {}", job_id, e);
+                    }
+                });
+            }
         }
 
         // Schedule for execution

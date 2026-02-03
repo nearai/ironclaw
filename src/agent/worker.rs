@@ -9,6 +9,7 @@ use uuid::Uuid;
 use crate::agent::scheduler::WorkerMessage;
 use crate::context::{ContextManager, JobState};
 use crate::error::Error;
+use crate::history::Store;
 use crate::llm::{ChatMessage, LlmProvider, Reasoning, ReasoningContext};
 use crate::safety::SafetyLayer;
 use crate::tools::ToolRegistry;
@@ -20,6 +21,7 @@ pub struct Worker {
     llm: Arc<dyn LlmProvider>,
     safety: Arc<SafetyLayer>,
     tools: Arc<ToolRegistry>,
+    store: Option<Arc<Store>>,
     timeout: Duration,
 }
 
@@ -31,6 +33,7 @@ impl Worker {
         llm: Arc<dyn LlmProvider>,
         safety: Arc<SafetyLayer>,
         tools: Arc<ToolRegistry>,
+        store: Option<Arc<Store>>,
         timeout: Duration,
     ) -> Self {
         Self {
@@ -39,7 +42,24 @@ impl Worker {
             llm,
             safety,
             tools,
+            store,
             timeout,
+        }
+    }
+
+    /// Fire-and-forget persistence of job status.
+    fn persist_status(&self, status: JobState, reason: Option<String>) {
+        if let Some(ref store) = self.store {
+            let store = store.clone();
+            let job_id = self.job_id;
+            tokio::spawn(async move {
+                if let Err(e) = store
+                    .update_job_status(job_id, status, reason.as_deref())
+                    .await
+                {
+                    tracing::warn!("Failed to persist status for job {}: {}", job_id, e);
+                }
+            });
         }
     }
 
@@ -241,22 +261,79 @@ Report when the job is complete or if you encounter issues you cannot resolve."#
         // Get job context for the tool
         let job_ctx = self.context_manager.get_context(self.job_id).await?;
 
-        // Execute with timeout
+        // Execute with timeout and timing
+        let start = std::time::Instant::now();
         let result = tokio::time::timeout(Duration::from_secs(60), async {
             tool.execute(params.clone(), &job_ctx).await
         })
-        .await
-        .map_err(|_| crate::error::ToolError::Timeout {
-            name: tool_name.to_string(),
-            timeout: Duration::from_secs(60),
-        })?
-        .map_err(|e| crate::error::ToolError::ExecutionFailed {
-            name: tool_name.to_string(),
-            reason: e.to_string(),
-        })?;
+        .await;
+        let elapsed = start.elapsed();
+
+        // Record action in memory and get the ActionRecord for persistence
+        let action = match &result {
+            Ok(Ok(output)) => {
+                let output_str = serde_json::to_string_pretty(&output.result).ok();
+                self.context_manager
+                    .update_memory(self.job_id, |mem| {
+                        let rec = mem.create_action(tool_name, params.clone()).succeed(
+                            output_str.clone(),
+                            output.result.clone(),
+                            elapsed,
+                        );
+                        mem.record_action(rec.clone());
+                        rec
+                    })
+                    .await
+                    .ok()
+            }
+            Ok(Err(e)) => self
+                .context_manager
+                .update_memory(self.job_id, |mem| {
+                    let rec = mem
+                        .create_action(tool_name, params.clone())
+                        .fail(e.to_string(), elapsed);
+                    mem.record_action(rec.clone());
+                    rec
+                })
+                .await
+                .ok(),
+            Err(_) => self
+                .context_manager
+                .update_memory(self.job_id, |mem| {
+                    let rec = mem
+                        .create_action(tool_name, params.clone())
+                        .fail("Execution timeout", elapsed);
+                    mem.record_action(rec.clone());
+                    rec
+                })
+                .await
+                .ok(),
+        };
+
+        // Persist action to database (fire-and-forget)
+        if let (Some(action), Some(store)) = (action, &self.store) {
+            let store = store.clone();
+            let job_id = self.job_id;
+            tokio::spawn(async move {
+                if let Err(e) = store.save_action(job_id, &action).await {
+                    tracing::warn!("Failed to persist action for job {}: {}", job_id, e);
+                }
+            });
+        }
+
+        // Handle the result
+        let output = result
+            .map_err(|_| crate::error::ToolError::Timeout {
+                name: tool_name.to_string(),
+                timeout: Duration::from_secs(60),
+            })?
+            .map_err(|e| crate::error::ToolError::ExecutionFailed {
+                name: tool_name.to_string(),
+                reason: e.to_string(),
+            })?;
 
         // Return result as string
-        serde_json::to_string_pretty(&result.result).map_err(|e| {
+        serde_json::to_string_pretty(&output.result).map_err(|e| {
             crate::error::ToolError::ExecutionFailed {
                 name: tool_name.to_string(),
                 reason: format!("Failed to serialize result: {}", e),
@@ -278,6 +355,11 @@ Report when the job is complete or if you encounter issues you cannot resolve."#
                 id: self.job_id,
                 reason: s,
             })?;
+
+        self.persist_status(
+            JobState::Completed,
+            Some("Job completed successfully".to_string()),
+        );
         Ok(())
     }
 
@@ -291,6 +373,8 @@ Report when the job is complete or if you encounter issues you cannot resolve."#
                 id: self.job_id,
                 reason: s,
             })?;
+
+        self.persist_status(JobState::Failed, Some(reason.to_string()));
         Ok(())
     }
 
@@ -302,6 +386,8 @@ Report when the job is complete or if you encounter issues you cannot resolve."#
                 id: self.job_id,
                 reason: s,
             })?;
+
+        self.persist_status(JobState::Stuck, Some(reason.to_string()));
         Ok(())
     }
 }

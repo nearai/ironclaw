@@ -11,6 +11,7 @@ use crate::agent::Worker;
 use crate::config::AgentConfig;
 use crate::context::{ContextManager, JobState};
 use crate::error::JobError;
+use crate::history::Store;
 use crate::llm::LlmProvider;
 use crate::safety::SafetyLayer;
 use crate::tools::ToolRegistry;
@@ -41,6 +42,7 @@ pub struct Scheduler {
     llm: Arc<dyn LlmProvider>,
     safety: Arc<SafetyLayer>,
     tools: Arc<ToolRegistry>,
+    store: Option<Arc<Store>>,
     /// Running jobs.
     jobs: RwLock<HashMap<Uuid, ScheduledJob>>,
 }
@@ -53,6 +55,7 @@ impl Scheduler {
         llm: Arc<dyn LlmProvider>,
         safety: Arc<SafetyLayer>,
         tools: Arc<ToolRegistry>,
+        store: Option<Arc<Store>>,
     ) -> Self {
         Self {
             config,
@@ -60,6 +63,7 @@ impl Scheduler {
             llm,
             safety,
             tools,
+            store,
             jobs: RwLock::new(HashMap::new()),
         }
     }
@@ -103,6 +107,7 @@ impl Scheduler {
             self.llm.clone(),
             self.safety.clone(),
             self.tools.clone(),
+            self.store.clone(),
             self.config.job_timeout,
         );
 
@@ -151,6 +156,23 @@ impl Scheduler {
                     );
                 })
                 .await?;
+
+            // Persist cancellation (fire-and-forget)
+            if let Some(ref store) = self.store {
+                let store = store.clone();
+                tokio::spawn(async move {
+                    if let Err(e) = store
+                        .update_job_status(
+                            job_id,
+                            JobState::Cancelled,
+                            Some("Stopped by scheduler"),
+                        )
+                        .await
+                    {
+                        tracing::warn!("Failed to persist cancellation for job {}: {}", job_id, e);
+                    }
+                });
+            }
 
             tracing::info!("Stopped job {}", job_id);
         }

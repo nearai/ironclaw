@@ -234,12 +234,11 @@ Key test patterns:
 1. **Slack/Telegram channels** - Stubs only, need implementation
 2. **Tool sandboxing** - `sandbox.rs` is a stub, needs WASM integration
 3. **Dynamic tool building** - `builder.rs` placeholder, needs LLM code generation
-4. **Database integration** - Store is created but not fully wired into agent loop
-5. **Integration tests** - Need testcontainers setup for PostgreSQL
-6. **MCP stdio transport** - Only HTTP transport implemented
-7. **Workspace integration** - Memory tools need to be registered and workspace passed to workers
-8. **Embedding backfill** - Background job to generate embeddings for chunks missing them
-9. **Context compaction** - Auto-trigger memory preservation before context window fills
+4. **Integration tests** - Need testcontainers setup for PostgreSQL
+5. **MCP stdio transport** - Only HTTP transport implemented
+6. **Workspace integration** - Memory tools need to be registered and workspace passed to workers
+7. **Embedding backfill** - Background job to generate embeddings for chunks missing them
+8. **Context compaction** - Auto-trigger memory preservation before context window fills
 
 ## Adding a New Tool
 
