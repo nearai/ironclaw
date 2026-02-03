@@ -238,7 +238,9 @@ Respond in JSON format:
             .with_temperature(0.7);
 
         let response = self.llm.complete(request).await?;
-        Ok(response.content)
+
+        // Strip any internal thinking tags before returning to user
+        Ok(strip_thinking_tags(&response.content))
     }
 
     fn build_planning_prompt(&self, context: &ReasoningContext) -> String {
@@ -339,6 +341,43 @@ fn extract_json(text: &str) -> Option<&str> {
     }
 }
 
+/// Strip `<thinking>...</thinking>` blocks from LLM output.
+///
+/// Some models (especially Claude with extended thinking) include internal
+/// reasoning in thinking tags. We strip these before showing to users.
+fn strip_thinking_tags(text: &str) -> String {
+    let mut result = String::with_capacity(text.len());
+    let mut remaining = text;
+
+    while let Some(start) = remaining.find("<thinking>") {
+        // Add everything before the tag
+        result.push_str(&remaining[..start]);
+
+        // Find the closing tag
+        if let Some(end_offset) = remaining[start..].find("</thinking>") {
+            // Skip past the closing tag (start + offset + tag length)
+            let end = start + end_offset + "</thinking>".len();
+            remaining = &remaining[end..];
+        } else {
+            // No closing tag found, discard everything from here
+            // (malformed, but handle gracefully by not including the unclosed tag)
+            remaining = "";
+            break;
+        }
+    }
+
+    // Add any remaining content after the last thinking block
+    result.push_str(remaining);
+
+    // Clean up any double newlines left behind
+    let mut cleaned = result.trim().to_string();
+    while cleaned.contains("\n\n\n") {
+        cleaned = cleaned.replace("\n\n\n", "\n\n");
+    }
+
+    cleaned
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -362,5 +401,47 @@ That's my plan."#;
 
         assert_eq!(context.messages.len(), 1);
         assert!(context.job_description.is_some());
+    }
+
+    #[test]
+    fn test_strip_thinking_tags_basic() {
+        let input = "<thinking>Let me think about this...</thinking>Hello, user!";
+        let output = strip_thinking_tags(input);
+        assert_eq!(output, "Hello, user!");
+    }
+
+    #[test]
+    fn test_strip_thinking_tags_multiple() {
+        let input =
+            "<thinking>First thought</thinking>Hello<thinking>Second thought</thinking> world!";
+        let output = strip_thinking_tags(input);
+        assert_eq!(output, "Hello world!");
+    }
+
+    #[test]
+    fn test_strip_thinking_tags_multiline() {
+        let input = r#"<thinking>
+I need to consider:
+1. What the user wants
+2. How to respond
+</thinking>
+Here is my response to your question."#;
+        let output = strip_thinking_tags(input);
+        assert_eq!(output, "Here is my response to your question.");
+    }
+
+    #[test]
+    fn test_strip_thinking_tags_no_tags() {
+        let input = "Just a normal response without thinking tags.";
+        let output = strip_thinking_tags(input);
+        assert_eq!(output, "Just a normal response without thinking tags.");
+    }
+
+    #[test]
+    fn test_strip_thinking_tags_unclosed() {
+        // Malformed: unclosed tag should strip from there to end
+        let input = "Hello <thinking>this never closes";
+        let output = strip_thinking_tags(input);
+        assert_eq!(output, "Hello");
     }
 }

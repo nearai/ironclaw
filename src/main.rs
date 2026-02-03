@@ -17,6 +17,7 @@ use near_agent::{
         ToolRegistry,
         wasm::{WasmToolLoader, WasmToolRuntime},
     },
+    workspace::Workspace,
 };
 
 #[tokio::main]
@@ -90,6 +91,24 @@ async fn main() -> anyhow::Result<()> {
     let tools = Arc::new(ToolRegistry::new());
     tools.register_builtin_tools();
     tracing::info!("Registered {} built-in tools", tools.count());
+
+    // Register memory tools if database is available
+    if let Some(ref store) = store {
+        let workspace = Arc::new(Workspace::new("default", store.pool()));
+        tools.register_memory_tools(workspace);
+    }
+
+    // Register builder tool if enabled
+    if config.builder.enabled {
+        tools
+            .register_builder_tool(
+                llm.clone(),
+                safety.clone(),
+                Some(config.builder.to_builder_config()),
+            )
+            .await;
+        tracing::info!("Builder mode enabled");
+    }
 
     // Load installed WASM tools
     if config.wasm.enabled && config.wasm.tools_dir.exists() {

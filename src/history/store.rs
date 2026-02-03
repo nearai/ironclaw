@@ -47,6 +47,13 @@ impl Store {
         Ok(self.pool.get().await?)
     }
 
+    /// Get a clone of the database pool.
+    ///
+    /// Useful for sharing the pool with other components like Workspace.
+    pub fn pool(&self) -> Pool {
+        self.pool.clone()
+    }
+
     // ==================== Conversations ====================
 
     /// Create a new conversation.
@@ -173,11 +180,12 @@ impl Store {
 
                 Ok(Some(JobContext {
                     job_id: row.get("id"),
+                    state,
+                    user_id: "default".to_string(), // Not stored in DB yet
                     conversation_id: row.get("conversation_id"),
                     title: row.get("title"),
                     description: row.get("description"),
                     category: row.get("category"),
-                    state,
                     budget: row.get("budget_amount"),
                     budget_token: row.get("budget_token"),
                     bid_amount: row.get("bid_amount"),

@@ -1303,6 +1303,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e5274423e17b7c9fc20b6e7e208532f9b19825d82dfd615708b70edd83df41f1"
 dependencies = [
  "ahash 0.8.12",
+ "serde",
 ]
 
 [[package]]
@@ -1983,6 +1984,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "uuid",
+ "wasmparser 0.220.1",
  "wasmtime",
 ]
 
@@ -4072,6 +4074,20 @@ checksum = "990065f2fe63003fe337b932cfb5e3b80e0b4d0f5ff650e6985b1048f62c8319"
 dependencies = [
  "leb128fmt",
  "wasmparser 0.244.0",
+]
+
+[[package]]
+name = "wasmparser"
+version = "0.220.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8d07b6a3b550fefa1a914b6d54fc175dd11c3392da11eee604e6ffc759805d25"
+dependencies = [
+ "ahash 0.8.12",
+ "bitflags 2.10.0",
+ "hashbrown 0.14.5",
+ "indexmap 2.13.0",
+ "semver",
+ "serde",
 ]
 
 [[package]]

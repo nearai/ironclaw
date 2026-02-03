@@ -5,13 +5,19 @@ use std::sync::Arc;
 
 use tokio::sync::RwLock;
 
-use crate::llm::ToolDefinition;
-use crate::tools::builtin::{EchoTool, HttpTool, JsonTool, TimeTool};
+use crate::llm::{LlmProvider, ToolDefinition};
+use crate::safety::SafetyLayer;
+use crate::tools::builder::{BuildSoftwareTool, BuilderConfig, LlmSoftwareBuilder};
+use crate::tools::builtin::{
+    ApplyPatchTool, EchoTool, HttpTool, JsonTool, ListDirTool, MemoryReadTool, MemorySearchTool,
+    MemoryTreeTool, MemoryWriteTool, ReadFileTool, ShellTool, TimeTool, WriteFileTool,
+};
 use crate::tools::tool::Tool;
 use crate::tools::wasm::{
     Capabilities, ResourceLimits, WasmError, WasmStorageError, WasmToolRuntime, WasmToolStore,
     WasmToolWrapper,
 };
+use crate::workspace::Workspace;
 
 /// Registry of available tools.
 pub struct ToolRegistry {
@@ -108,6 +114,64 @@ impl ToolRegistry {
         self.register_sync(Arc::new(HttpTool::new()));
 
         tracing::info!("Registered {} built-in tools", self.count());
+    }
+
+    /// Register development tools for building software.
+    ///
+    /// These tools provide shell access, file operations, and code editing
+    /// capabilities needed for the software builder. Call this after
+    /// `register_builtin_tools()` to enable code generation features.
+    pub fn register_dev_tools(&self) {
+        self.register_sync(Arc::new(ShellTool::new()));
+        self.register_sync(Arc::new(ReadFileTool::new()));
+        self.register_sync(Arc::new(WriteFileTool::new()));
+        self.register_sync(Arc::new(ListDirTool::new()));
+        self.register_sync(Arc::new(ApplyPatchTool::new()));
+
+        tracing::info!("Registered 5 development tools");
+    }
+
+    /// Register memory tools with a workspace.
+    ///
+    /// Memory tools require a workspace for persistence. Call this after
+    /// `register_builtin_tools()` if you have a workspace available.
+    pub fn register_memory_tools(&self, workspace: Arc<Workspace>) {
+        self.register_sync(Arc::new(MemorySearchTool::new(Arc::clone(&workspace))));
+        self.register_sync(Arc::new(MemoryWriteTool::new(Arc::clone(&workspace))));
+        self.register_sync(Arc::new(MemoryReadTool::new(Arc::clone(&workspace))));
+        self.register_sync(Arc::new(MemoryTreeTool::new(workspace)));
+
+        tracing::info!("Registered 4 memory tools");
+    }
+
+    /// Register the software builder tool.
+    ///
+    /// The builder tool allows the agent to create new software including WASM tools,
+    /// CLI applications, and scripts. It uses an LLM-driven iterative build loop.
+    ///
+    /// This also registers the dev tools (shell, file operations) needed by the builder.
+    pub async fn register_builder_tool(
+        self: &Arc<Self>,
+        llm: Arc<dyn LlmProvider>,
+        safety: Arc<SafetyLayer>,
+        config: Option<BuilderConfig>,
+    ) {
+        // First register dev tools needed by the builder
+        self.register_dev_tools();
+
+        // Create the builder (arg order: config, llm, safety, tools)
+        let builder = Arc::new(LlmSoftwareBuilder::new(
+            config.unwrap_or_default(),
+            llm,
+            safety,
+            Arc::clone(self),
+        ));
+
+        // Register the build_software tool
+        self.register(Arc::new(BuildSoftwareTool::new(builder)))
+            .await;
+
+        tracing::info!("Registered software builder tool");
     }
 
     /// Register a WASM tool from bytes.

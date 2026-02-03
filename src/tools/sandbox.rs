@@ -1,9 +1,38 @@
 //! Sandboxed tool execution environment.
+//!
+//! NOTE: For WASM-based sandboxing with full security, use the `wasm` module instead.
+//! This module provides a simpler process-based sandbox for scripts.
 
 use std::time::Duration;
 
-use crate::tools::builder::SandboxConfig;
 use crate::tools::tool::ToolError;
+
+/// Configuration for the sandbox.
+#[derive(Debug, Clone)]
+pub struct SandboxConfig {
+    /// Maximum execution time.
+    pub max_execution_time: Duration,
+    /// Maximum memory in bytes.
+    pub max_memory_bytes: u64,
+    /// Allowed network hosts (empty = no network).
+    pub allowed_hosts: Vec<String>,
+    /// Allowed filesystem paths (empty = no filesystem).
+    pub allowed_paths: Vec<String>,
+    /// Environment variables to pass.
+    pub env_vars: Vec<(String, String)>,
+}
+
+impl Default for SandboxConfig {
+    fn default() -> Self {
+        Self {
+            max_execution_time: Duration::from_secs(30),
+            max_memory_bytes: 128 * 1024 * 1024, // 128 MB
+            allowed_hosts: vec![],
+            allowed_paths: vec![],
+            env_vars: vec![],
+        }
+    }
+}
 
 /// Result of a sandboxed execution.
 #[derive(Debug)]

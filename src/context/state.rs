@@ -97,6 +97,8 @@ pub struct JobContext {
     pub job_id: Uuid,
     /// Current state.
     pub state: JobState,
+    /// User ID that owns this job (for workspace scoping).
+    pub user_id: String,
     /// Conversation ID if linked to a conversation.
     pub conversation_id: Option<Uuid>,
     /// Job title.
@@ -134,9 +136,19 @@ pub struct JobContext {
 impl JobContext {
     /// Create a new job context.
     pub fn new(title: impl Into<String>, description: impl Into<String>) -> Self {
+        Self::with_user("default", title, description)
+    }
+
+    /// Create a new job context with a specific user ID.
+    pub fn with_user(
+        user_id: impl Into<String>,
+        title: impl Into<String>,
+        description: impl Into<String>,
+    ) -> Self {
         Self {
             job_id: Uuid::new_v4(),
             state: JobState::Pending,
+            user_id: user_id.into(),
             conversation_id: None,
             title: title.into(),
             description: description.into(),
@@ -224,7 +236,7 @@ impl JobContext {
 
 impl Default for JobContext {
     fn default() -> Self {
-        Self::new("Untitled", "No description")
+        Self::with_user("default", "Untitled", "No description")
     }
 }
 
