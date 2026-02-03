@@ -26,10 +26,13 @@ pub struct NearAiProvider {
 impl NearAiProvider {
     /// Create a new NEAR AI provider.
     pub fn new(config: NearAiConfig) -> Self {
-        Self {
-            client: Client::new(),
-            config,
-        }
+        // Create client with reasonable timeout
+        let client = Client::builder()
+            .timeout(std::time::Duration::from_secs(120)) // 2 minute timeout for LLM calls
+            .build()
+            .unwrap_or_else(|_| Client::new());
+
+        Self { client, config }
     }
 
     fn api_url(&self, path: &str) -> String {
@@ -47,6 +50,8 @@ impl NearAiProvider {
     ) -> Result<R, LlmError> {
         let url = self.api_url(path);
 
+        tracing::debug!("Sending request to NEAR AI: {}", url);
+
         let response = self
             .client
             .post(&url)
@@ -57,7 +62,11 @@ impl NearAiProvider {
             .header("Content-Type", "application/json")
             .json(body)
             .send()
-            .await?;
+            .await
+            .map_err(|e| {
+                tracing::error!("NEAR AI request failed: {}", e);
+                e
+            })?;
 
         let status = response.status();
         if !status.is_success() {
