@@ -33,9 +33,7 @@ pub struct Worker {
 
 /// Result of a tool execution with metadata for context building.
 struct ToolExecResult {
-    tool_name: String,
     result: Result<String, Error>,
-    duration: Duration,
 }
 
 impl Worker {
@@ -290,7 +288,6 @@ Report when the job is complete or if you encounter issues you cannot resolve."#
                 let store = self.store.clone();
 
                 async move {
-                    let start = std::time::Instant::now();
                     let result = Self::execute_tool_inner(
                         tools,
                         context_manager,
@@ -300,11 +297,7 @@ Report when the job is complete or if you encounter issues you cannot resolve."#
                         &params,
                     )
                     .await;
-                    ToolExecResult {
-                        tool_name,
-                        result,
-                        duration: start.elapsed(),
-                    }
+                    ToolExecResult { result }
                 }
             })
             .collect();

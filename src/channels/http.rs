@@ -11,6 +11,7 @@ use axum::{
     response::IntoResponse,
     routing::{get, post},
 };
+use secrecy::ExposeSecret;
 use serde::{Deserialize, Serialize};
 use tokio::sync::{RwLock, mpsc, oneshot};
 use tokio_stream::wrappers::ReceiverStream;
@@ -33,17 +34,25 @@ struct HttpChannelState {
     pending_responses: RwLock<std::collections::HashMap<Uuid, oneshot::Sender<String>>>,
     /// Server shutdown signal.
     shutdown_tx: RwLock<Option<oneshot::Sender<()>>>,
+    /// Expected webhook secret for authentication (if configured).
+    webhook_secret: Option<String>,
 }
 
 impl HttpChannel {
     /// Create a new HTTP channel.
     pub fn new(config: HttpConfig) -> Self {
+        let webhook_secret = config
+            .webhook_secret
+            .as_ref()
+            .map(|s| s.expose_secret().to_string());
+
         Self {
             config,
             state: Arc::new(HttpChannelState {
                 tx: RwLock::new(None),
                 pending_responses: RwLock::new(std::collections::HashMap::new()),
                 shutdown_tx: RwLock::new(None),
+                webhook_secret,
             }),
         }
     }
@@ -90,8 +99,35 @@ async fn health_handler() -> impl IntoResponse {
 async fn webhook_handler(
     State(state): State<Arc<HttpChannelState>>,
     Json(req): Json<WebhookRequest>,
-) -> impl IntoResponse {
-    // TODO: Validate secret if configured
+) -> (StatusCode, Json<WebhookResponse>) {
+    // Validate secret if configured
+    if let Some(ref expected_secret) = state.webhook_secret {
+        match &req.secret {
+            Some(provided) if provided == expected_secret => {
+                // Secret matches, continue
+            }
+            Some(_) => {
+                return (
+                    StatusCode::UNAUTHORIZED,
+                    Json(WebhookResponse {
+                        message_id: Uuid::nil(),
+                        status: "error".to_string(),
+                        response: Some("Invalid webhook secret".to_string()),
+                    }),
+                );
+            }
+            None => {
+                return (
+                    StatusCode::UNAUTHORIZED,
+                    Json(WebhookResponse {
+                        message_id: Uuid::nil(),
+                        status: "error".to_string(),
+                        response: Some("Webhook secret required".to_string()),
+                    }),
+                );
+            }
+        }
+    }
 
     let msg =
         IncomingMessage::new("http", &req.user_id, &req.content).with_metadata(serde_json::json!({
@@ -110,7 +146,7 @@ async fn process_message(
     state: Arc<HttpChannelState>,
     msg: IncomingMessage,
     wait_for_response: bool,
-) -> impl IntoResponse {
+) -> (StatusCode, Json<WebhookResponse>) {
     let msg_id = msg.id;
 
     // Set up response channel if waiting
@@ -182,6 +218,26 @@ impl Channel for HttpChannel {
         let host = self.config.host.clone();
         let port = self.config.port;
 
+        // Parse address before spawning so we can return errors
+        let addr: SocketAddr =
+            format!("{}:{}", host, port)
+                .parse()
+                .map_err(|e| ChannelError::StartupFailed {
+                    name: "http".to_string(),
+                    reason: format!("Invalid address '{}:{}': {}", host, port, e),
+                })?;
+
+        // Bind listener before spawning so we can return errors
+        let listener =
+            tokio::net::TcpListener::bind(addr)
+                .await
+                .map_err(|e| ChannelError::StartupFailed {
+                    name: "http".to_string(),
+                    reason: format!("Failed to bind to {}: {}", addr, e),
+                })?;
+
+        tracing::info!("HTTP channel listening on {}", addr);
+
         // Create router
         let app = Router::new()
             .route("/health", get(health_handler))
@@ -192,23 +248,17 @@ impl Channel for HttpChannel {
         let (shutdown_tx, shutdown_rx) = oneshot::channel();
         *self.state.shutdown_tx.write().await = Some(shutdown_tx);
 
-        // Spawn server
+        // Spawn server (listener is already bound, serve errors are logged)
         tokio::spawn(async move {
-            let addr: SocketAddr = format!("{}:{}", host, port)
-                .parse()
-                .expect("Invalid address");
-
-            tracing::info!("HTTP channel listening on {}", addr);
-
-            let listener = tokio::net::TcpListener::bind(addr).await.unwrap();
-
-            axum::serve(listener, app)
+            if let Err(e) = axum::serve(listener, app)
                 .with_graceful_shutdown(async {
                     let _ = shutdown_rx.await;
                     tracing::info!("HTTP channel shutting down");
                 })
                 .await
-                .unwrap();
+            {
+                tracing::error!("HTTP server error: {}", e);
+            }
         });
 
         Ok(Box::pin(ReceiverStream::new(rx)))

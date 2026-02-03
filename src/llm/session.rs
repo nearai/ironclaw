@@ -128,15 +128,62 @@ impl SessionManager {
     /// Ensure we have a valid session, triggering login flow if needed.
     ///
     /// If no token exists, triggers the OAuth login flow. If a token exists,
-    /// it is assumed valid until a 401 response indicates otherwise.
+    /// validates it by making a test API call. If validation fails, triggers
+    /// the login flow.
     pub async fn ensure_authenticated(&self) -> Result<(), LlmError> {
-        if self.has_token().await {
-            tracing::debug!("Session token present, assuming valid");
+        if !self.has_token().await {
+            // No token, need to authenticate
+            return self.initiate_login().await;
+        }
+
+        // Token exists, validate it by calling /v1/users/me
+        println!("Validating session...");
+        match self.validate_token().await {
+            Ok(()) => {
+                println!("Session valid.");
+                Ok(())
+            }
+            Err(e) => {
+                println!("Session expired or invalid: {}", e);
+                self.initiate_login().await
+            }
+        }
+    }
+
+    /// Validate the current token by calling the /v1/users/me endpoint.
+    async fn validate_token(&self) -> Result<(), LlmError> {
+        use secrecy::ExposeSecret;
+
+        let token = self.get_token().await?;
+        let url = format!("{}/v1/users/me", self.config.auth_base_url);
+
+        let response = self
+            .client
+            .get(&url)
+            .header("Authorization", format!("Bearer {}", token.expose_secret()))
+            .send()
+            .await
+            .map_err(|e| LlmError::SessionRenewalFailed {
+                provider: "nearai".to_string(),
+                reason: format!("Validation request failed: {}", e),
+            })?;
+
+        if response.status().is_success() {
             return Ok(());
         }
 
-        // No token, need to authenticate
-        self.initiate_login().await
+        if response.status().as_u16() == 401 {
+            return Err(LlmError::SessionExpired {
+                provider: "nearai".to_string(),
+            });
+        }
+
+        let status = response.status();
+        let body = response.text().await.unwrap_or_default();
+        Err(LlmError::SessionRenewalFailed {
+            provider: "nearai".to_string(),
+            reason: format!("Validation failed: HTTP {}: {}", status, body),
+        })
     }
 
     /// Handle an authentication failure (401 response).
@@ -184,20 +231,71 @@ impl SessionManager {
         })?;
 
         let callback_url = format!("http://127.0.0.1:{}", port);
-        // Use GitHub OAuth (Google OAuth may not have the redirect URI configured)
-        let auth_url = format!(
-            "{}/v1/auth/github?frontend_callback={}",
-            self.config.auth_base_url,
-            urlencoding::encode(&callback_url)
-        );
 
-        // Print auth URL
+        // Show auth provider menu
         println!();
         println!("╔════════════════════════════════════════════════════════════════╗");
         println!("║                    NEAR AI Authentication                      ║");
         println!("╠════════════════════════════════════════════════════════════════╣");
-        println!("║ Please open the following URL in your browser to authenticate: ║");
+        println!("║  Choose an authentication method:                              ║");
+        println!("║                                                                ║");
+        println!("║    [1] GitHub                                                  ║");
+        println!("║    [2] Google                                                  ║");
+        println!("║    [3] NEAR Wallet (coming soon)                               ║");
+        println!("║                                                                ║");
         println!("╚════════════════════════════════════════════════════════════════╝");
+        println!();
+        print!("Enter choice [1-3]: ");
+
+        // Flush stdout to ensure prompt is displayed
+        use std::io::Write;
+        std::io::stdout().flush().ok();
+
+        // Read user choice
+        let mut choice = String::new();
+        std::io::stdin()
+            .read_line(&mut choice)
+            .map_err(|e| LlmError::SessionRenewalFailed {
+                provider: "nearai".to_string(),
+                reason: format!("Failed to read input: {}", e),
+            })?;
+
+        let (auth_provider, auth_url) = match choice.trim() {
+            "1" | "" => {
+                let url = format!(
+                    "{}/v1/auth/github?frontend_callback={}",
+                    self.config.auth_base_url,
+                    urlencoding::encode(&callback_url)
+                );
+                ("github", url)
+            }
+            "2" => {
+                let url = format!(
+                    "{}/v1/auth/google?frontend_callback={}",
+                    self.config.auth_base_url,
+                    urlencoding::encode(&callback_url)
+                );
+                ("google", url)
+            }
+            "3" => {
+                println!();
+                println!("NEAR Wallet authentication is not yet implemented.");
+                println!("Please use GitHub or Google for now.");
+                return Err(LlmError::SessionRenewalFailed {
+                    provider: "nearai".to_string(),
+                    reason: "NEAR Wallet auth not yet implemented".to_string(),
+                });
+            }
+            _ => {
+                return Err(LlmError::SessionRenewalFailed {
+                    provider: "nearai".to_string(),
+                    reason: format!("Invalid choice: {}", choice.trim()),
+                });
+            }
+        };
+
+        println!();
+        println!("Opening {} authentication...", auth_provider);
         println!();
         println!("  {}", auth_url);
         println!();
@@ -215,7 +313,8 @@ impl SessionManager {
         // Wait for callback with timeout
         // The API redirects to: {frontend_callback}/auth/callback?token=X&session_id=X&expires_at=X&is_new_user=X
         let timeout = std::time::Duration::from_secs(300); // 5 minutes
-        let (session_token, auth_provider) = tokio::time::timeout(timeout, async {
+        let selected_provider = auth_provider.to_string();
+        let (session_token, auth_provider) = tokio::time::timeout(timeout, async move {
             loop {
                 let (mut socket, _) = listener.accept().await.map_err(|e| {
                     LlmError::SessionRenewalFailed {
@@ -252,24 +351,82 @@ impl SessionManager {
                             }
 
                             if let Some(token) = token {
-                                // Send success response
+                                // Send success response with nice styling
                                 let response = concat!(
                                     "HTTP/1.1 200 OK\r\n",
-                                    "Content-Type: text/html\r\n",
+                                    "Content-Type: text/html; charset=utf-8\r\n",
                                     "Connection: close\r\n",
                                     "\r\n",
-                                    "<!DOCTYPE html><html><head><title>NEAR AI Auth</title></head>",
-                                    "<body style=\"font-family: sans-serif; text-align: center; padding-top: 50px;\">",
-                                    "<h1>✓ Authentication successful!</h1>",
-                                    "<p>You can close this window and return to the terminal.</p>",
-                                    "</body></html>"
+                                    "<!DOCTYPE html>\n",
+                                    "<html>\n",
+                                    "<head>\n",
+                                    "  <meta charset=\"utf-8\">\n",
+                                    "  <title>NEAR AI - Authentication Successful</title>\n",
+                                    "  <style>\n",
+                                    "    * { margin: 0; padding: 0; box-sizing: border-box; }\n",
+                                    "    body {\n",
+                                    "      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;\n",
+                                    "      background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%);\n",
+                                    "      min-height: 100vh;\n",
+                                    "      display: flex;\n",
+                                    "      align-items: center;\n",
+                                    "      justify-content: center;\n",
+                                    "      color: #fff;\n",
+                                    "    }\n",
+                                    "    .container {\n",
+                                    "      text-align: center;\n",
+                                    "      padding: 3rem;\n",
+                                    "      background: rgba(255,255,255,0.05);\n",
+                                    "      border-radius: 16px;\n",
+                                    "      backdrop-filter: blur(10px);\n",
+                                    "      border: 1px solid rgba(255,255,255,0.1);\n",
+                                    "      max-width: 400px;\n",
+                                    "    }\n",
+                                    "    .checkmark {\n",
+                                    "      width: 80px;\n",
+                                    "      height: 80px;\n",
+                                    "      background: linear-gradient(135deg, #00d9a5 0%, #00b386 100%);\n",
+                                    "      border-radius: 50%;\n",
+                                    "      display: flex;\n",
+                                    "      align-items: center;\n",
+                                    "      justify-content: center;\n",
+                                    "      margin: 0 auto 1.5rem;\n",
+                                    "      font-size: 40px;\n",
+                                    "    }\n",
+                                    "    h1 {\n",
+                                    "      font-size: 1.5rem;\n",
+                                    "      font-weight: 600;\n",
+                                    "      margin-bottom: 0.75rem;\n",
+                                    "    }\n",
+                                    "    p {\n",
+                                    "      color: rgba(255,255,255,0.7);\n",
+                                    "      font-size: 0.95rem;\n",
+                                    "      line-height: 1.5;\n",
+                                    "    }\n",
+                                    "    .brand {\n",
+                                    "      margin-top: 2rem;\n",
+                                    "      padding-top: 1.5rem;\n",
+                                    "      border-top: 1px solid rgba(255,255,255,0.1);\n",
+                                    "      font-size: 0.8rem;\n",
+                                    "      color: rgba(255,255,255,0.4);\n",
+                                    "    }\n",
+                                    "  </style>\n",
+                                    "</head>\n",
+                                    "<body>\n",
+                                    "  <div class=\"container\">\n",
+                                    "    <div class=\"checkmark\">&#10003;</div>\n",
+                                    "    <h1>Authentication Successful</h1>\n",
+                                    "    <p>You can close this window and return to the terminal.</p>\n",
+                                    "    <div class=\"brand\">NEAR AI Agent</div>\n",
+                                    "  </div>\n",
+                                    "</body>\n",
+                                    "</html>"
                                 );
 
                                 let _ = socket.write_all(response.as_bytes()).await;
                                 let _ = socket.shutdown().await;
 
-                                // Provider is github since we used the github endpoint
-                                return Ok::<_, LlmError>((token, Some("github".to_string())));
+                                return Ok::<_, LlmError>((token, Some(selected_provider.clone())));
                             }
                         }
                     }

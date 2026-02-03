@@ -82,12 +82,14 @@ impl RuleBasedEvaluator {
     }
 
     /// Set minimum action success rate.
+    #[allow(dead_code)] // Public API for configuring evaluation threshold
     pub fn with_min_success_rate(mut self, rate: f64) -> Self {
         self.min_action_success_rate = rate;
         self
     }
 
     /// Set maximum failures.
+    #[allow(dead_code)] // Public API for configuring failure tolerance
     pub fn with_max_failures(mut self, max: u32) -> Self {
         self.max_failures = max;
         self
@@ -204,6 +206,7 @@ pub struct LlmEvaluator {
 
 impl LlmEvaluator {
     /// Create a new LLM-based evaluator.
+    #[allow(dead_code)] // Public API for LLM-based evaluation
     pub fn new(llm: Arc<dyn LlmProvider>) -> Self {
         Self { llm }
     }

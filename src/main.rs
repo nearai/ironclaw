@@ -41,18 +41,34 @@ async fn main() -> anyhow::Result<()> {
         }
     }
 
-    // Create TUI channel early so we can hook up logging
-    // (channel is created but not started until agent.run())
+    // Load configuration first (before any logging setup)
+    // so we can do auth before TUI starts
+    let _ = dotenvy::dotenv(); // Load .env if present
+    let config = Config::from_env()?;
+
+    // Initialize session manager and authenticate BEFORE TUI setup
+    // This allows the auth menu to display cleanly without TUI interference
+    let session_config = SessionConfig {
+        auth_base_url: config.llm.nearai.auth_base_url.clone(),
+        session_path: config.llm.nearai.session_path.clone(),
+        ..Default::default()
+    };
+    let session = create_session_manager(session_config).await;
+
+    // Ensure we're authenticated before proceeding (may trigger login flow)
+    // This happens before TUI so the menu displays correctly
+    session.ensure_authenticated().await?;
+
+    // Now create TUI channel and set up logging
     let tui_channel = TuiChannel::new();
     let tui_log_writer = tui_channel.log_writer();
 
-    // Initialize tracing with both stderr (for pre-TUI output) and TUI writer
+    // Initialize tracing with TUI writer
     let env_filter = EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| EnvFilter::new("near_agent=info,tower_http=debug"));
 
     tracing_subscriber::registry()
         .with(env_filter)
-        // TUI layer: sends logs to TUI status line (once TUI is running)
         .with(
             tracing_subscriber::fmt::layer()
                 .with_writer(tui_log_writer)
@@ -63,10 +79,8 @@ async fn main() -> anyhow::Result<()> {
         .init();
 
     tracing::info!("Starting NEAR Agent...");
-
-    // Load configuration
-    let config = Config::from_env()?;
     tracing::info!("Loaded configuration for agent: {}", config.agent.name);
+    tracing::info!("NEAR AI session authenticated");
 
     // Initialize database store (optional for testing)
     let store = if cli.no_db {
@@ -78,18 +92,6 @@ async fn main() -> anyhow::Result<()> {
         tracing::info!("Database connected and migrations applied");
         Some(Arc::new(store))
     };
-
-    // Initialize session manager for NEAR AI authentication
-    let session_config = SessionConfig {
-        auth_base_url: config.llm.nearai.auth_base_url.clone(),
-        session_path: config.llm.nearai.session_path.clone(),
-        ..Default::default()
-    };
-    let session = create_session_manager(session_config).await;
-
-    // Ensure we're authenticated before proceeding (may trigger login flow)
-    session.ensure_authenticated().await?;
-    tracing::info!("NEAR AI session authenticated");
 
     // Initialize LLM provider
     let llm = create_llm_provider(&config.llm, session)?;

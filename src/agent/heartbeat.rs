@@ -29,7 +29,6 @@ use std::time::Duration;
 use tokio::sync::mpsc;
 
 use crate::channels::OutgoingResponse;
-use crate::error::WorkspaceError;
 use crate::llm::{ChatMessage, CompletionRequest, LlmProvider};
 use crate::workspace::Workspace;
 
@@ -275,21 +274,6 @@ pub fn spawn_heartbeat(
     tokio::spawn(async move {
         runner.run().await;
     })
-}
-
-/// Update heartbeat state in the database.
-pub async fn update_heartbeat_state(
-    workspace: &Workspace,
-    last_run: chrono::DateTime<chrono::Utc>,
-) -> Result<(), WorkspaceError> {
-    // This would update the heartbeat_state table
-    // For now, we just log
-    tracing::debug!(
-        "Heartbeat state updated for user {} at {}",
-        workspace.user_id(),
-        last_run
-    );
-    Ok(())
 }
 
 #[cfg(test)]

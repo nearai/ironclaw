@@ -116,6 +116,7 @@ pub fn chunk_document(content: &str, config: ChunkConfig) -> Vec<String> {
 /// Split content by paragraphs first, then chunk.
 ///
 /// This is better for preserving semantic boundaries.
+#[allow(dead_code)] // Alternative chunking strategy for paragraph-aware indexing
 pub fn chunk_by_paragraphs(content: &str, config: ChunkConfig) -> Vec<String> {
     if content.is_empty() {
         return Vec::new();

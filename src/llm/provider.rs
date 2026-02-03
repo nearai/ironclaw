@@ -181,6 +181,12 @@ impl ToolCompletionRequest {
         self
     }
 
+    /// Set temperature.
+    pub fn with_temperature(mut self, temperature: f32) -> Self {
+        self.temperature = Some(temperature);
+        self
+    }
+
     /// Set tool choice mode.
     pub fn with_tool_choice(mut self, choice: impl Into<String>) -> Self {
         self.tool_choice = Some(choice.into());

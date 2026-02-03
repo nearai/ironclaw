@@ -368,9 +368,12 @@ impl Agent {
             )
             .await;
 
-        // Call LLM with thread context
+        // Call LLM with thread context and available tools
         let reasoning = Reasoning::new(self.llm.clone(), self.safety.clone());
-        let context = ReasoningContext::new().with_messages(turn_messages);
+        let tool_defs = self.tools.tool_definitions().await;
+        let context = ReasoningContext::new()
+            .with_messages(turn_messages)
+            .with_tools(tool_defs);
         let llm_result = reasoning.respond(&context).await;
 
         // Re-acquire lock and check if interrupted

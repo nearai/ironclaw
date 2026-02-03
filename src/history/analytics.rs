@@ -1,21 +1,11 @@
 //! Analytics and aggregation for learning.
+//!
+//! Analytics methods are implemented directly on [`Store`] for convenience.
 
 use rust_decimal::Decimal;
 
 use crate::error::DatabaseError;
 use crate::history::Store;
-
-/// Analytics queries for the store.
-pub struct Analytics<'a> {
-    store: &'a Store,
-}
-
-impl<'a> Analytics<'a> {
-    /// Create analytics wrapper for a store.
-    pub fn new(store: &'a Store) -> Self {
-        Self { store }
-    }
-}
 
 /// Statistics about jobs.
 #[derive(Debug, Default)]

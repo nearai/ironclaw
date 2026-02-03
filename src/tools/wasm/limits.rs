@@ -68,10 +68,12 @@ pub struct WasmResourceLimiter {
     /// Maximum tables allowed.
     max_tables: u32,
     /// Current table count.
+    #[allow(dead_code)] // Reserved for table limit enforcement
     tables_created: u32,
     /// Maximum instances allowed.
     max_instances: u32,
     /// Current instance count.
+    #[allow(dead_code)] // Reserved for instance limit enforcement
     instances_created: u32,
 }
 

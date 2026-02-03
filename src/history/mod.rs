@@ -8,5 +8,5 @@
 mod analytics;
 mod store;
 
-pub use analytics::{Analytics, JobStats, ToolStats};
+pub use analytics::{JobStats, ToolStats};
 pub use store::Store;

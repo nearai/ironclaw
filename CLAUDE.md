@@ -2,7 +2,13 @@
 
 ## Project Overview
 
-LLM-powered autonomous agent for the NEAR AI marketplace. Handles multi-channel input (CLI, HTTP, Slack, Telegram), parallel job execution, extensible tools (including MCP), prompt injection defense, and self-repair for stuck jobs.
+LLM-powered autonomous agent for the NEAR AI marketplace. Features:
+- **Multi-channel input**: Full TUI (Ratatui), HTTP webhook with secret auth (Slack/Telegram stubs)
+- **Parallel job execution** with state machine and self-repair for stuck jobs
+- **Extensible tools**: Built-in tools, WASM sandbox, MCP client, dynamic builder
+- **Persistent memory**: Workspace with hybrid search (FTS + vector via RRF)
+- **Prompt injection defense**: Sanitizer, validator, policy rules, leak detection
+- **Heartbeat system**: Proactive periodic execution with checklist
 
 ## Build & Test
 
@@ -38,39 +44,69 @@ src/
 │   ├── scheduler.rs    # Parallel job scheduling
 │   ├── worker.rs       # Per-job execution with LLM reasoning
 │   ├── self_repair.rs  # Stuck job detection and recovery
-│   └── heartbeat.rs    # Proactive periodic execution (OpenClaw-inspired)
+│   ├── heartbeat.rs    # Proactive periodic execution
+│   ├── session.rs      # Session/thread/turn model with state machine
+│   ├── session_manager.rs # Thread/session lifecycle management
+│   ├── compaction.rs   # Context window management with turn summarization
+│   ├── context_monitor.rs # Memory pressure detection
+│   ├── undo.rs         # Turn-based undo/redo with checkpoints
+│   ├── submission.rs   # Submission parsing (undo, redo, compact, clear, etc.)
+│   └── task.rs         # Sub-task execution framework
 │
 ├── channels/           # Multi-channel input
 │   ├── channel.rs      # Channel trait, IncomingMessage, OutgoingResponse
 │   ├── manager.rs      # ChannelManager merges streams
-│   ├── cli.rs          # Interactive CLI (stdin)
-│   ├── http.rs         # HTTP webhook (axum)
+│   ├── cli/            # Full TUI with Ratatui
+│   │   ├── mod.rs      # TuiChannel implementation
+│   │   ├── app.rs      # Application state
+│   │   ├── render.rs   # UI rendering
+│   │   ├── events.rs   # Input handling
+│   │   ├── overlay.rs  # Approval overlays
+│   │   └── composer.rs # Message composition
+│   ├── http.rs         # HTTP webhook (axum) with secret validation
 │   ├── slack.rs        # Stub
 │   └── telegram.rs     # Stub
 │
 ├── safety/             # Prompt injection defense
 │   ├── sanitizer.rs    # Pattern detection, content escaping
 │   ├── validator.rs    # Input validation (length, encoding, patterns)
-│   └── policy.rs       # PolicyRule system with severity/actions
+│   ├── policy.rs       # PolicyRule system with severity/actions
+│   └── leak_detector.rs # Secret detection (API keys, tokens, etc.)
 │
 ├── llm/                # LLM integration (NEAR AI only)
 │   ├── provider.rs     # LlmProvider trait, message types
 │   ├── nearai.rs       # NEAR AI chat-api implementation
-│   └── reasoning.rs    # Planning, tool selection, evaluation
+│   ├── reasoning.rs    # Planning, tool selection, evaluation
+│   └── session.rs      # Session token management with auto-renewal
 │
 ├── tools/              # Extensible tool system
 │   ├── tool.rs         # Tool trait, ToolOutput, ToolError
 │   ├── registry.rs     # ToolRegistry for discovery
-│   ├── builder.rs      # Dynamic tool creation (stub)
-│   ├── sandbox.rs      # Sandboxed execution (stub)
+│   ├── sandbox.rs      # Process-based sandbox (stub, superseded by wasm/)
 │   ├── builtin/        # Built-in tools
 │   │   ├── echo.rs, time.rs, json.rs, http.rs
-│   │   ├── marketplace.rs, ecommerce.rs
-│   │   ├── taskrabbit.rs, restaurant.rs
-│   │   └── memory.rs   # Memory tools (search, write, read)
-│   └── mcp/            # Model Context Protocol
-│       ├── client.rs   # MCP client over HTTP
-│       └── protocol.rs # JSON-RPC types
+│   │   ├── file.rs     # ReadFile, WriteFile, ListDir, ApplyPatch
+│   │   ├── shell.rs    # Shell command execution
+│   │   ├── memory.rs   # Memory tools (search, write, read, tree)
+│   │   └── marketplace.rs, ecommerce.rs, taskrabbit.rs, restaurant.rs (stubs)
+│   ├── builder/        # Dynamic tool building
+│   │   ├── core.rs     # BuildRequirement, SoftwareType, Language
+│   │   ├── templates.rs # Project scaffolding
+│   │   ├── testing.rs  # Test harness integration
+│   │   └── validation.rs # WASM validation
+│   ├── mcp/            # Model Context Protocol
+│   │   ├── client.rs   # MCP client over HTTP
+│   │   └── protocol.rs # JSON-RPC types
+│   └── wasm/           # Full WASM sandbox (wasmtime)
+│       ├── runtime.rs  # Module compilation and caching
+│       ├── wrapper.rs  # Tool trait wrapper for WASM modules
+│       ├── host.rs     # Host functions (logging, time, workspace)
+│       ├── limits.rs   # Fuel metering and memory limiting
+│       ├── allowlist.rs # Network endpoint allowlisting
+│       ├── credential_injector.rs # Safe credential injection
+│       ├── loader.rs   # WASM tool discovery from filesystem
+│       ├── rate_limiter.rs # Per-tool rate limiting
+│       └── storage.rs  # Linear memory persistence
 │
 ├── workspace/          # Persistent memory system (OpenClaw-inspired)
 │   ├── mod.rs          # Workspace struct, memory operations
@@ -92,12 +128,17 @@ src/
 │   └── learner.rs      # Exponential moving average learning
 │
 ├── evaluation/         # Success evaluation
-│   ├── success.rs      # SuccessEvaluator trait, RuleBasedEvaluator
+│   ├── success.rs      # SuccessEvaluator trait, RuleBasedEvaluator, LlmEvaluator
 │   └── metrics.rs      # MetricsCollector, QualityMetrics
+│
+├── secrets/            # Secrets management
+│   ├── crypto.rs       # AES-256-GCM encryption
+│   ├── store.rs        # Secret storage
+│   └── types.rs        # Credential types
 │
 └── history/            # Persistence
     ├── store.rs        # PostgreSQL repositories
-    └── analytics.rs    # Aggregation queries for learning
+    └── analytics.rs    # Aggregation queries (JobStats, ToolStats)
 ```
 
 ## Key Patterns
@@ -232,13 +273,23 @@ Key test patterns:
 ## Current Limitations / TODOs
 
 1. **Slack/Telegram channels** - Stubs only, need implementation
-2. **Tool sandboxing** - `sandbox.rs` is a stub, needs WASM integration
-3. **Dynamic tool building** - `builder.rs` placeholder, needs LLM code generation
-4. **Integration tests** - Need testcontainers setup for PostgreSQL
-5. **MCP stdio transport** - Only HTTP transport implemented
-6. **Workspace integration** - Memory tools need to be registered and workspace passed to workers
-7. **Embedding backfill** - Background job to generate embeddings for chunks missing them
-8. **Context compaction** - Auto-trigger memory preservation before context window fills
+2. **Domain-specific tools** - `marketplace.rs`, `restaurant.rs`, `taskrabbit.rs`, `ecommerce.rs` return placeholder responses; need real API integrations
+3. **Integration tests** - Need testcontainers setup for PostgreSQL
+4. **MCP stdio transport** - Only HTTP transport implemented
+5. **Embedding backfill** - Background job to generate embeddings for chunks missing them
+6. **Auto-context compaction** - Context monitor exists but doesn't auto-trigger (requires manual `/compact`)
+
+### Completed
+
+- ✅ **Workspace integration** - Memory tools registered, workspace passed to Agent and heartbeat
+- ✅ **WASM sandboxing** - Full implementation in `tools/wasm/` with fuel metering, memory limits, capabilities
+- ✅ **Dynamic tool building** - `tools/builder/` has LlmSoftwareBuilder with iterative build loop
+- ✅ **HTTP webhook security** - Secret validation implemented, proper error handling (no panics)
+
+### Known Clippy Warnings (non-blocking)
+
+- `too_many_arguments` on Agent::new, Worker::new, Store::record_llm_call (refactor to config structs if desired)
+- `implicit_saturating_sub` in CLI render (use `.saturating_sub()` instead of manual check)
 
 ## Adding a New Tool
 

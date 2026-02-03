@@ -411,6 +411,7 @@ fn get_json_path<'a>(value: &'a serde_json::Value, path: &str) -> Option<&'a ser
 }
 
 /// Generate basic test cases for a tool based on its schema.
+#[allow(dead_code)] // Public API for auto-generating test cases
 pub fn generate_basic_tests(name: &str, input_schema: &serde_json::Value) -> TestSuite {
     let mut suite = TestSuite::new(format!("{}_basic_tests", name));
     suite.description = Some("Auto-generated basic tests".to_string());

@@ -32,14 +32,12 @@ pub enum WorkerMessage {
 /// Status of a scheduled job.
 #[derive(Debug)]
 pub struct ScheduledJob {
-    pub job_id: Uuid,
     pub handle: JoinHandle<()>,
     pub tx: mpsc::Sender<WorkerMessage>,
 }
 
 /// Status of a scheduled sub-task.
 struct ScheduledSubtask {
-    task_id: Uuid,
     handle: JoinHandle<Result<TaskOutput, Error>>,
 }
 
@@ -137,7 +135,7 @@ impl Scheduler {
         self.jobs
             .write()
             .await
-            .insert(job_id, ScheduledJob { job_id, handle, tx });
+            .insert(job_id, ScheduledJob { handle, tx });
 
         tracing::info!("Scheduled job {} for execution", job_id);
         Ok(())
@@ -203,7 +201,6 @@ impl Scheduler {
         self.subtasks.write().await.insert(
             task_id,
             ScheduledSubtask {
-                task_id,
                 handle: tokio::spawn(async move {
                     // Wrap the handle to get its result
                     match handle.await {

@@ -108,6 +108,7 @@ pub struct ToolSelection {
 /// Reasoning engine for the agent.
 pub struct Reasoning {
     llm: Arc<dyn LlmProvider>,
+    #[allow(dead_code)] // Will be used for sanitizing tool outputs
     safety: Arc<SafetyLayer>,
 }
 
@@ -233,20 +234,48 @@ Respond in JSON format:
     }
 
     /// Generate a response to a user message.
+    ///
+    /// If tools are available in the context, uses tool completion mode.
     pub async fn respond(&self, context: &ReasoningContext) -> Result<String, LlmError> {
-        let system_prompt = self.build_conversation_prompt();
+        let system_prompt = self.build_conversation_prompt(context);
 
         let mut messages = vec![ChatMessage::system(system_prompt)];
         messages.extend(context.messages.clone());
 
-        let request = CompletionRequest::new(messages)
-            .with_max_tokens(2048)
-            .with_temperature(0.7);
+        // If we have tools, use tool completion mode
+        if !context.available_tools.is_empty() {
+            let request = ToolCompletionRequest::new(messages, context.available_tools.clone())
+                .with_max_tokens(4096)
+                .with_temperature(0.7)
+                .with_tool_choice("auto");
 
-        let response = self.llm.complete(request).await?;
+            let response = self.llm.complete_with_tools(request).await?;
 
-        // Strip any internal thinking tags before returning to user
-        Ok(strip_thinking_tags(&response.content))
+            // If there were tool calls, the content is usually just internal reasoning
+            // Don't show it - just acknowledge the tool calls (actual execution handled by caller)
+            if !response.tool_calls.is_empty() {
+                let tool_info: Vec<String> = response
+                    .tool_calls
+                    .iter()
+                    .map(|tc| format!("`{}({})`", tc.name, tc.arguments))
+                    .collect();
+                return Ok(format!("[Calling tools: {}]", tool_info.join(", ")));
+            }
+
+            // No tool calls - clean up the response
+            let content = response
+                .content
+                .unwrap_or_else(|| "I'm not sure how to respond to that.".to_string());
+            Ok(clean_response(&content))
+        } else {
+            // No tools, use simple completion
+            let request = CompletionRequest::new(messages)
+                .with_max_tokens(4096)
+                .with_temperature(0.7);
+
+            let response = self.llm.complete(request).await?;
+            Ok(clean_response(&response.content))
+        }
     }
 
     fn build_planning_prompt(&self, context: &ReasoningContext) -> String {
@@ -292,15 +321,45 @@ Respond with a JSON plan in this format:
         )
     }
 
-    fn build_conversation_prompt(&self) -> String {
-        r#"You are a helpful AI agent assistant. You help users with tasks by:
-1. Understanding their requests clearly
-2. Asking clarifying questions when needed
-3. Providing accurate, helpful responses
-4. Being honest about limitations
+    fn build_conversation_prompt(&self, context: &ReasoningContext) -> String {
+        let tools_section = if context.available_tools.is_empty() {
+            String::new()
+        } else {
+            let tool_list: Vec<String> = context
+                .available_tools
+                .iter()
+                .map(|t| format!("  - {}: {}", t.name, t.description))
+                .collect();
+            format!(
+                "\n\n## Available Tools\nYou have access to these tools:\n{}\n\nCall tools directly when needed - don't announce what you're going to do.",
+                tool_list.join("\n")
+            )
+        };
 
-Be concise but thorough. If you're unsure, say so."#
-            .to_string()
+        format!(
+            r#"You are NEAR AI Agent, an autonomous assistant.
+
+CRITICAL: Never output your internal reasoning or thinking process. Your response must contain ONLY the final answer or action.
+
+FORBIDDEN patterns (never start with these):
+- "The user wants..." / "The user is asking..."
+- "I need to..." / "I should..." / "I will..."
+- "Let me think..." / "Let me first..."
+- "This is a request to..."
+- Any self-narration about what you're doing
+
+CORRECT behavior:
+- Answer questions directly
+- Call tools without announcing it
+- Ask clarifying questions if genuinely needed
+- Provide code/content without preamble{}
+
+## Format
+- Be concise
+- Use markdown where helpful
+- Code blocks with language tags"#,
+            tools_section
+        )
     }
 
     fn parse_plan(&self, content: &str) -> Result<ActionPlan, LlmError> {
@@ -347,6 +406,12 @@ fn extract_json(text: &str) -> Option<&str> {
     }
 }
 
+/// Clean up LLM response by stripping thinking tags and reasoning patterns.
+fn clean_response(text: &str) -> String {
+    let text = strip_thinking_tags(text);
+    strip_reasoning_patterns(&text)
+}
+
 /// Strip `<thinking>...</thinking>` blocks from LLM output.
 ///
 /// Some models (especially Claude with extended thinking) include internal
@@ -382,6 +447,71 @@ fn strip_thinking_tags(text: &str) -> String {
     }
 
     cleaned
+}
+
+/// Strip common reasoning/thinking patterns from the start of responses.
+///
+/// Models sometimes output their thinking process as plain text despite
+/// instructions not to. This strips common patterns like "The user wants...",
+/// "Let me think...", "I need to...", etc.
+fn strip_reasoning_patterns(text: &str) -> String {
+    let text = text.trim();
+
+    // Patterns that indicate internal reasoning (case-insensitive check)
+    let reasoning_prefixes = [
+        "the user wants",
+        "the user is asking",
+        "the user would like",
+        "i need to",
+        "i should",
+        "i will",
+        "i'll",
+        "let me think",
+        "let me first",
+        "let me check",
+        "let me look",
+        "let me explore",
+        "let me search",
+        "this is a request",
+        "this request",
+        "to answer this",
+        "to help with this",
+        "first, i",
+        "okay, so",
+        "alright, ",
+    ];
+
+    // Find where reasoning ends and actual content begins
+    // Look for paragraph breaks or sentences that start the actual response
+    let lines: Vec<&str> = text.lines().collect();
+    let mut skip_until = 0;
+
+    for (i, line) in lines.iter().enumerate() {
+        let lower = line.to_lowercase();
+
+        // Check if this line starts with a reasoning pattern
+        let is_reasoning = reasoning_prefixes
+            .iter()
+            .any(|p| lower.trim_start().starts_with(p));
+
+        if is_reasoning {
+            skip_until = i + 1;
+        } else if !line.trim().is_empty() && skip_until <= i {
+            // Found non-reasoning content, stop looking
+            break;
+        }
+    }
+
+    if skip_until > 0 && skip_until < lines.len() {
+        // Skip the reasoning lines and return the rest
+        let result = lines[skip_until..].join("\n").trim().to_string();
+        if !result.is_empty() {
+            return result;
+        }
+    }
+
+    // If we'd strip everything, just return the original (better than empty)
+    text.to_string()
 }
 
 #[cfg(test)]
@@ -449,5 +579,46 @@ Here is my response to your question."#;
         let input = "Hello <thinking>this never closes";
         let output = strip_thinking_tags(input);
         assert_eq!(output, "Hello");
+    }
+
+    #[test]
+    fn test_strip_reasoning_patterns_basic() {
+        let input = "The user wants me to implement something.\n\nHere's the implementation:";
+        let output = strip_reasoning_patterns(input);
+        assert_eq!(output, "Here's the implementation:");
+    }
+
+    #[test]
+    fn test_strip_reasoning_patterns_multiline() {
+        let input = r#"The user is asking about Telegram.
+I need to think about what this involves.
+Let me first check the existing code.
+
+Here's what I found in the codebase."#;
+        let output = strip_reasoning_patterns(input);
+        assert_eq!(output, "Here's what I found in the codebase.");
+    }
+
+    #[test]
+    fn test_strip_reasoning_no_patterns() {
+        let input = "Here's a direct answer to your question.";
+        let output = strip_reasoning_patterns(input);
+        assert_eq!(output, "Here's a direct answer to your question.");
+    }
+
+    #[test]
+    fn test_strip_reasoning_preserves_all_if_only_reasoning() {
+        // If stripping would leave nothing, keep the original
+        let input = "The user wants to know X.";
+        let output = strip_reasoning_patterns(input);
+        assert_eq!(output, "The user wants to know X.");
+    }
+
+    #[test]
+    fn test_clean_response_combined() {
+        let input =
+            "<thinking>Internal thought</thinking>I need to check this.\n\nActual response here.";
+        let output = clean_response(input);
+        assert_eq!(output, "Actual response here.");
     }
 }

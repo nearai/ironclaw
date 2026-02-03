@@ -51,6 +51,7 @@ pub struct SandboxResult {
 
 /// Sandbox for executing untrusted code.
 pub struct ToolSandbox {
+    #[allow(dead_code)] // Will be used when sandbox execution is implemented
     config: SandboxConfig,
 }
 
