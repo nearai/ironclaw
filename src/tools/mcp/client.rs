@@ -203,6 +203,11 @@ impl Tool for McpToolWrapper {
     fn requires_sanitization(&self) -> bool {
         true // MCP tools are external, always sanitize
     }
+
+    fn requires_approval(&self) -> bool {
+        // Check the destructive_hint annotation from the MCP server
+        self.tool.requires_approval()
+    }
 }
 
 #[cfg(test)]

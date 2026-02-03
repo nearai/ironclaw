@@ -163,4 +163,8 @@ impl Tool for HttpTool {
     fn requires_sanitization(&self) -> bool {
         true // External data always needs sanitization
     }
+
+    fn requires_approval(&self) -> bool {
+        true // HTTP requests go to external services, require user approval
+    }
 }

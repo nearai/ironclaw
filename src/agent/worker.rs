@@ -3,14 +3,16 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use futures::future::join_all;
 use tokio::sync::mpsc;
 use uuid::Uuid;
 
 use crate::agent::scheduler::WorkerMessage;
+use crate::agent::task::TaskOutput;
 use crate::context::{ContextManager, JobState};
 use crate::error::Error;
 use crate::history::Store;
-use crate::llm::{ChatMessage, LlmProvider, Reasoning, ReasoningContext};
+use crate::llm::{ChatMessage, LlmProvider, Reasoning, ReasoningContext, ToolSelection};
 use crate::safety::SafetyLayer;
 use crate::tools::ToolRegistry;
 
@@ -23,6 +25,13 @@ pub struct Worker {
     tools: Arc<ToolRegistry>,
     store: Option<Arc<Store>>,
     timeout: Duration,
+}
+
+/// Result of a tool execution with metadata for context building.
+struct ToolExecResult {
+    tool_name: String,
+    result: Result<String, Error>,
+    duration: Duration,
 }
 
 impl Worker {
@@ -97,6 +106,7 @@ Job: {}
 Description: {}
 
 You have access to tools to complete this job. Plan your approach and execute tools as needed.
+You may request multiple tools at once if they can be executed in parallel.
 Report when the job is complete or if you encounter issues you cannot resolve."#,
             job_ctx.title, job_ctx.description
         )));
@@ -155,88 +165,60 @@ Report when the job is complete or if you encounter issues you cannot resolve."#
                 return Ok(());
             }
 
-            // Select next tool to use
-            let selection = reasoning.select_tool(reason_ctx).await?;
+            // Select next tool(s) to use
+            let selections = reasoning.select_tools(reason_ctx).await?;
 
-            match selection {
-                Some(tool_selection) => {
-                    tracing::debug!(
-                        "Job {} selecting tool: {} - {}",
-                        self.job_id,
-                        tool_selection.tool_name,
-                        tool_selection.reasoning
-                    );
+            if selections.is_empty() {
+                // No tools selected, ask LLM for next steps
+                let response = reasoning.respond(reason_ctx).await?;
 
-                    // Execute the tool
-                    let result = self
-                        .execute_tool(&tool_selection.tool_name, &tool_selection.parameters)
-                        .await;
-
-                    // Record the result
-                    match result {
-                        Ok(output) => {
-                            // Sanitize output
-                            let sanitized = self
-                                .safety
-                                .sanitize_tool_output(&tool_selection.tool_name, &output);
-
-                            // Add to context
-                            let wrapped = self.safety.wrap_for_llm(
-                                &tool_selection.tool_name,
-                                &sanitized.content,
-                                sanitized.was_modified,
-                            );
-
-                            reason_ctx.messages.push(ChatMessage::tool_result(
-                                "tool_call_id",
-                                &tool_selection.tool_name,
-                                wrapped,
-                            ));
-
-                            // Check if job is complete
-                            if output.contains("TASK_COMPLETE") || output.contains("JOB_DONE") {
-                                self.mark_completed().await?;
-                                return Ok(());
-                            }
-                        }
-                        Err(e) => {
-                            tracing::warn!(
-                                "Tool {} failed for job {}: {}",
-                                tool_selection.tool_name,
-                                self.job_id,
-                                e
-                            );
-
-                            reason_ctx.messages.push(ChatMessage::tool_result(
-                                "tool_call_id",
-                                &tool_selection.tool_name,
-                                format!("Error: {}", e),
-                            ));
-                        }
-                    }
+                if response.to_lowercase().contains("complete")
+                    || response.to_lowercase().contains("finished")
+                    || response.to_lowercase().contains("done")
+                {
+                    self.mark_completed().await?;
+                    return Ok(());
                 }
-                None => {
-                    // No tool selected, ask LLM for next steps
-                    let response = reasoning.respond(reason_ctx).await?;
 
-                    if response.to_lowercase().contains("complete")
-                        || response.to_lowercase().contains("finished")
-                        || response.to_lowercase().contains("done")
-                    {
-                        self.mark_completed().await?;
-                        return Ok(());
-                    }
+                // Add assistant response to context
+                reason_ctx.messages.push(ChatMessage::assistant(&response));
 
-                    // Add assistant response to context
-                    reason_ctx.messages.push(ChatMessage::assistant(&response));
+                // Give it one more chance to select a tool
+                if iteration > 3 && iteration % 5 == 0 {
+                    reason_ctx.messages.push(ChatMessage::user(
+                        "Are you stuck? Do you need help completing this job?",
+                    ));
+                }
+            } else if selections.len() == 1 {
+                // Single tool: execute directly
+                let selection = &selections[0];
+                tracing::debug!(
+                    "Job {} selecting tool: {} - {}",
+                    self.job_id,
+                    selection.tool_name,
+                    selection.reasoning
+                );
 
-                    // Give it one more chance to select a tool
-                    if iteration > 3 && iteration % 5 == 0 {
-                        // Ask if stuck
-                        reason_ctx.messages.push(ChatMessage::user(
-                            "Are you stuck? Do you need help completing this job?",
-                        ));
-                    }
+                let result = self
+                    .execute_tool(&selection.tool_name, &selection.parameters)
+                    .await;
+
+                self.process_tool_result(reason_ctx, selection, result)
+                    .await?;
+            } else {
+                // Multiple tools: execute in parallel
+                tracing::debug!(
+                    "Job {} executing {} tools in parallel",
+                    self.job_id,
+                    selections.len()
+                );
+
+                let results = self.execute_tools_parallel(&selections).await;
+
+                // Process all results
+                for (selection, result) in selections.iter().zip(results) {
+                    self.process_tool_result(reason_ctx, selection, result.result)
+                        .await?;
                 }
             }
 
@@ -245,21 +227,59 @@ Report when the job is complete or if you encounter issues you cannot resolve."#
         }
     }
 
-    async fn execute_tool(
-        &self,
+    /// Execute multiple tools in parallel.
+    async fn execute_tools_parallel(&self, selections: &[ToolSelection]) -> Vec<ToolExecResult> {
+        let futures: Vec<_> = selections
+            .iter()
+            .map(|selection| {
+                let tool_name = selection.tool_name.clone();
+                let params = selection.parameters.clone();
+                let tools = self.tools.clone();
+                let context_manager = self.context_manager.clone();
+                let job_id = self.job_id;
+                let store = self.store.clone();
+
+                async move {
+                    let start = std::time::Instant::now();
+                    let result = Self::execute_tool_inner(
+                        tools,
+                        context_manager,
+                        store,
+                        job_id,
+                        &tool_name,
+                        &params,
+                    )
+                    .await;
+                    ToolExecResult {
+                        tool_name,
+                        result,
+                        duration: start.elapsed(),
+                    }
+                }
+            })
+            .collect();
+
+        join_all(futures).await
+    }
+
+    /// Inner tool execution logic that can be called from both single and parallel paths.
+    async fn execute_tool_inner(
+        tools: Arc<ToolRegistry>,
+        context_manager: Arc<ContextManager>,
+        store: Option<Arc<Store>>,
+        job_id: Uuid,
         tool_name: &str,
         params: &serde_json::Value,
     ) -> Result<String, Error> {
-        let tool =
-            self.tools
-                .get(tool_name)
-                .await
-                .ok_or_else(|| crate::error::ToolError::NotFound {
-                    name: tool_name.to_string(),
-                })?;
+        let tool = tools
+            .get(tool_name)
+            .await
+            .ok_or_else(|| crate::error::ToolError::NotFound {
+                name: tool_name.to_string(),
+            })?;
 
         // Get job context for the tool
-        let job_ctx = self.context_manager.get_context(self.job_id).await?;
+        let job_ctx = context_manager.get_context(job_id).await?;
 
         // Execute with timeout and timing
         let start = std::time::Instant::now();
@@ -273,8 +293,8 @@ Report when the job is complete or if you encounter issues you cannot resolve."#
         let action = match &result {
             Ok(Ok(output)) => {
                 let output_str = serde_json::to_string_pretty(&output.result).ok();
-                self.context_manager
-                    .update_memory(self.job_id, |mem| {
+                context_manager
+                    .update_memory(job_id, |mem| {
                         let rec = mem.create_action(tool_name, params.clone()).succeed(
                             output_str.clone(),
                             output.result.clone(),
@@ -286,9 +306,8 @@ Report when the job is complete or if you encounter issues you cannot resolve."#
                     .await
                     .ok()
             }
-            Ok(Err(e)) => self
-                .context_manager
-                .update_memory(self.job_id, |mem| {
+            Ok(Err(e)) => context_manager
+                .update_memory(job_id, |mem| {
                     let rec = mem
                         .create_action(tool_name, params.clone())
                         .fail(e.to_string(), elapsed);
@@ -297,9 +316,8 @@ Report when the job is complete or if you encounter issues you cannot resolve."#
                 })
                 .await
                 .ok(),
-            Err(_) => self
-                .context_manager
-                .update_memory(self.job_id, |mem| {
+            Err(_) => context_manager
+                .update_memory(job_id, |mem| {
                     let rec = mem
                         .create_action(tool_name, params.clone())
                         .fail("Execution timeout", elapsed);
@@ -311,9 +329,7 @@ Report when the job is complete or if you encounter issues you cannot resolve."#
         };
 
         // Persist action to database (fire-and-forget)
-        if let (Some(action), Some(store)) = (action, &self.store) {
-            let store = store.clone();
-            let job_id = self.job_id;
+        if let (Some(action), Some(store)) = (action, store) {
             tokio::spawn(async move {
                 if let Err(e) = store.save_action(job_id, &action).await {
                     tracing::warn!("Failed to persist action for job {}: {}", job_id, e);
@@ -340,6 +356,76 @@ Report when the job is complete or if you encounter issues you cannot resolve."#
             }
             .into()
         })
+    }
+
+    /// Process a tool execution result and add it to the reasoning context.
+    async fn process_tool_result(
+        &self,
+        reason_ctx: &mut ReasoningContext,
+        selection: &ToolSelection,
+        result: Result<String, Error>,
+    ) -> Result<bool, Error> {
+        match result {
+            Ok(output) => {
+                // Sanitize output
+                let sanitized = self
+                    .safety
+                    .sanitize_tool_output(&selection.tool_name, &output);
+
+                // Add to context
+                let wrapped = self.safety.wrap_for_llm(
+                    &selection.tool_name,
+                    &sanitized.content,
+                    sanitized.was_modified,
+                );
+
+                reason_ctx.messages.push(ChatMessage::tool_result(
+                    "tool_call_id",
+                    &selection.tool_name,
+                    wrapped,
+                ));
+
+                // Check if job is complete
+                if output.contains("TASK_COMPLETE") || output.contains("JOB_DONE") {
+                    self.mark_completed().await?;
+                    return Ok(true);
+                }
+
+                Ok(false)
+            }
+            Err(e) => {
+                tracing::warn!(
+                    "Tool {} failed for job {}: {}",
+                    selection.tool_name,
+                    self.job_id,
+                    e
+                );
+
+                reason_ctx.messages.push(ChatMessage::tool_result(
+                    "tool_call_id",
+                    &selection.tool_name,
+                    format!("Error: {}", e),
+                ));
+
+                Ok(false)
+            }
+        }
+    }
+
+    async fn execute_tool(
+        &self,
+        tool_name: &str,
+        params: &serde_json::Value,
+    ) -> Result<String, Error> {
+        Self::execute_tool_inner(
+            self.tools.clone(),
+            self.context_manager.clone(),
+            self.store.clone(),
+            self.job_id,
+            tool_name,
+            params,
+        )
+        .await
     }
 
     async fn mark_completed(&self) -> Result<(), Error> {
@@ -389,5 +475,18 @@ Report when the job is complete or if you encounter issues you cannot resolve."#
 
         self.persist_status(JobState::Stuck, Some(reason.to_string()));
         Ok(())
+    }
+}
+
+/// Convert a TaskOutput to a string result for tool execution.
+impl From<TaskOutput> for Result<String, Error> {
+    fn from(output: TaskOutput) -> Self {
+        serde_json::to_string_pretty(&output.result).map_err(|e| {
+            crate::error::ToolError::ExecutionFailed {
+                name: "task".to_string(),
+                reason: format!("Failed to serialize result: {}", e),
+            }
+            .into()
+        })
     }
 }

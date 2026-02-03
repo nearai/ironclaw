@@ -48,6 +48,10 @@ async-trait = "0.1"
 # CLI
 clap = { version = "4", features = ["derive", "env"] }
 
+# TUI
+ratatui = "0.29"
+crossterm = { version = "0.28", features = ["event-stream"] }
+
 # Channel integrations
 axum = "0.8"
 tower = "0.5"

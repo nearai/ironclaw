@@ -148,6 +148,18 @@ pub trait Tool: Send + Sync {
         true
     }
 
+    /// Whether this tool requires explicit user approval before execution.
+    ///
+    /// Returns false by default since most tools run in a sandboxed/virtualized
+    /// environment. Only tools that make external network calls or perform
+    /// destructive operations should return true.
+    ///
+    /// When true, the agent will prompt the user for confirmation before
+    /// executing this tool.
+    fn requires_approval(&self) -> bool {
+        false
+    }
+
     /// Get the tool schema for LLM function calling.
     fn schema(&self) -> ToolSchema {
         ToolSchema {

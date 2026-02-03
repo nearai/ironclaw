@@ -140,8 +140,20 @@ impl Reasoning {
         &self,
         context: &ReasoningContext,
     ) -> Result<Option<ToolSelection>, LlmError> {
+        let tools = self.select_tools(context).await?;
+        Ok(tools.into_iter().next())
+    }
+
+    /// Select tools to execute (may return multiple for parallel execution).
+    ///
+    /// The LLM may return multiple tool calls if it determines they can be
+    /// executed in parallel. This enables more efficient job completion.
+    pub async fn select_tools(
+        &self,
+        context: &ReasoningContext,
+    ) -> Result<Vec<ToolSelection>, LlmError> {
         if context.available_tools.is_empty() {
-            return Ok(None);
+            return Ok(vec![]);
         }
 
         let request =
@@ -151,16 +163,20 @@ impl Reasoning {
 
         let response = self.llm.complete_with_tools(request).await?;
 
-        if let Some(tool_call) = response.tool_calls.first() {
-            Ok(Some(ToolSelection {
-                tool_name: tool_call.name.clone(),
-                parameters: tool_call.arguments.clone(),
-                reasoning: response.content.unwrap_or_default(),
+        let reasoning = response.content.unwrap_or_default();
+
+        let selections: Vec<ToolSelection> = response
+            .tool_calls
+            .into_iter()
+            .map(|tool_call| ToolSelection {
+                tool_name: tool_call.name,
+                parameters: tool_call.arguments,
+                reasoning: reasoning.clone(),
                 alternatives: vec![],
-            }))
-        } else {
-            Ok(None)
-        }
+            })
+            .collect();
+
+        Ok(selections)
     }
 
     /// Evaluate whether a task was completed successfully.

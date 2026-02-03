@@ -299,12 +299,11 @@ impl LeakDetector {
 
         // Scan each header value
         for (name, value) in headers {
-            self.scan_and_clean(value).map_err(|e| {
-                LeakDetectionError::SecretLeakBlocked {
+            self.scan_and_clean(value)
+                .map_err(|e| LeakDetectionError::SecretLeakBlocked {
                     pattern: format!("header:{}", name),
                     preview: e.to_string(),
-                }
-            })?;
+                })?;
         }
 
         // Scan body if present and valid UTF-8
@@ -688,7 +687,10 @@ mod tests {
         // Attempt to exfiltrate in custom header
         let result = detector.scan_http_request(
             "https://api.example.com/data",
-            &[("X-Custom".to_string(), "ghp_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx".to_string())],
+            &[(
+                "X-Custom".to_string(),
+                "ghp_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx".to_string(),
+            )],
             None,
         );
         assert!(result.is_err());
@@ -700,11 +702,7 @@ mod tests {
 
         // Attempt to exfiltrate in request body
         let body = b"{\"stolen\": \"sk-proj-test1234567890abcdefghij\"}";
-        let result = detector.scan_http_request(
-            "https://api.example.com/webhook",
-            &[],
-            Some(body),
-        );
+        let result = detector.scan_http_request("https://api.example.com/webhook", &[], Some(body));
         assert!(result.is_err());
     }
 }

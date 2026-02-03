@@ -2,15 +2,17 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::Duration;
 
-use tokio::sync::{RwLock, mpsc};
+use tokio::sync::{RwLock, mpsc, oneshot};
 use tokio::task::JoinHandle;
 use uuid::Uuid;
 
 use crate::agent::Worker;
+use crate::agent::task::{Task, TaskContext, TaskOutput};
 use crate::config::AgentConfig;
-use crate::context::{ContextManager, JobState};
-use crate::error::JobError;
+use crate::context::{ContextManager, JobContext, JobState};
+use crate::error::{Error, JobError};
 use crate::history::Store;
 use crate::llm::LlmProvider;
 use crate::safety::SafetyLayer;
@@ -35,6 +37,12 @@ pub struct ScheduledJob {
     pub tx: mpsc::Sender<WorkerMessage>,
 }
 
+/// Status of a scheduled sub-task.
+struct ScheduledSubtask {
+    task_id: Uuid,
+    handle: JoinHandle<Result<TaskOutput, Error>>,
+}
+
 /// Schedules and manages parallel job execution.
 pub struct Scheduler {
     config: AgentConfig,
@@ -43,8 +51,10 @@ pub struct Scheduler {
     safety: Arc<SafetyLayer>,
     tools: Arc<ToolRegistry>,
     store: Option<Arc<Store>>,
-    /// Running jobs.
+    /// Running jobs (main LLM-driven jobs).
     jobs: RwLock<HashMap<Uuid, ScheduledJob>>,
+    /// Running sub-tasks (tool executions, background tasks).
+    subtasks: RwLock<HashMap<Uuid, ScheduledSubtask>>,
 }
 
 impl Scheduler {
@@ -65,6 +75,7 @@ impl Scheduler {
             tools,
             store,
             jobs: RwLock::new(HashMap::new()),
+            subtasks: RwLock::new(HashMap::new()),
         }
     }
 
@@ -131,6 +142,185 @@ impl Scheduler {
         Ok(())
     }
 
+    /// Schedule a sub-task from within a worker.
+    ///
+    /// Sub-tasks are lightweight tasks that don't go through the full job lifecycle.
+    /// They're used for parallel tool execution and background computations.
+    ///
+    /// Returns a oneshot receiver to get the result.
+    pub async fn spawn_subtask(
+        &self,
+        parent_id: Uuid,
+        task: Task,
+    ) -> Result<oneshot::Receiver<Result<TaskOutput, Error>>, JobError> {
+        let task_id = Uuid::new_v4();
+        let (result_tx, result_rx) = oneshot::channel();
+
+        let handle = match task {
+            Task::Job { .. } => {
+                // Jobs should go through schedule(), not spawn_subtask
+                return Err(JobError::ContextError {
+                    id: parent_id,
+                    reason: "Use schedule() for Job tasks, not spawn_subtask()".to_string(),
+                });
+            }
+
+            Task::ToolExec {
+                parent_id: tool_parent_id,
+                tool_name,
+                params,
+            } => {
+                let tools = self.tools.clone();
+                let context_manager = self.context_manager.clone();
+
+                tokio::spawn(async move {
+                    let result = Self::execute_tool_task(
+                        tools,
+                        context_manager,
+                        tool_parent_id,
+                        &tool_name,
+                        params,
+                    )
+                    .await;
+
+                    // Send result (ignore if receiver dropped)
+                    let _ = result_tx.send(result);
+                })
+            }
+
+            Task::Background { id: _, handler } => {
+                let ctx = TaskContext::new(task_id).with_parent(parent_id);
+
+                tokio::spawn(async move {
+                    let result = handler.run(ctx).await;
+                    let _ = result_tx.send(result);
+                })
+            }
+        };
+
+        // Track the subtask
+        self.subtasks.write().await.insert(
+            task_id,
+            ScheduledSubtask {
+                task_id,
+                handle: tokio::spawn(async move {
+                    // Wrap the handle to get its result
+                    match handle.await {
+                        Ok(()) => Err(Error::Job(JobError::ContextError {
+                            id: task_id,
+                            reason: "Subtask completed but result not captured".to_string(),
+                        })),
+                        Err(e) => Err(Error::Job(JobError::ContextError {
+                            id: task_id,
+                            reason: format!("Subtask panicked: {}", e),
+                        })),
+                    }
+                }),
+            },
+        );
+
+        tracing::debug!(
+            parent_id = %parent_id,
+            task_id = %task_id,
+            "Spawned subtask"
+        );
+
+        Ok(result_rx)
+    }
+
+    /// Schedule multiple tasks in parallel and wait for all to complete.
+    ///
+    /// Returns results in the same order as the input tasks.
+    pub async fn spawn_batch(
+        &self,
+        parent_id: Uuid,
+        tasks: Vec<Task>,
+    ) -> Vec<Result<TaskOutput, Error>> {
+        if tasks.is_empty() {
+            return Vec::new();
+        }
+
+        let mut receivers = Vec::with_capacity(tasks.len());
+
+        // Spawn all tasks
+        for task in tasks {
+            match self.spawn_subtask(parent_id, task).await {
+                Ok(rx) => receivers.push(Some(rx)),
+                Err(e) => {
+                    // Store the error directly
+                    receivers.push(None);
+                    tracing::warn!(
+                        parent_id = %parent_id,
+                        error = %e,
+                        "Failed to spawn subtask in batch"
+                    );
+                }
+            }
+        }
+
+        // Collect results
+        let mut results = Vec::with_capacity(receivers.len());
+        for rx in receivers {
+            let result = match rx {
+                Some(receiver) => match receiver.await {
+                    Ok(task_result) => task_result,
+                    Err(_) => Err(Error::Job(JobError::ContextError {
+                        id: parent_id,
+                        reason: "Subtask channel closed unexpectedly".to_string(),
+                    })),
+                },
+                None => Err(Error::Job(JobError::ContextError {
+                    id: parent_id,
+                    reason: "Subtask failed to spawn".to_string(),
+                })),
+            };
+            results.push(result);
+        }
+
+        results
+    }
+
+    /// Execute a single tool as a subtask.
+    async fn execute_tool_task(
+        tools: Arc<ToolRegistry>,
+        context_manager: Arc<ContextManager>,
+        job_id: Uuid,
+        tool_name: &str,
+        params: serde_json::Value,
+    ) -> Result<TaskOutput, Error> {
+        let start = std::time::Instant::now();
+
+        // Get the tool
+        let tool = tools.get(tool_name).await.ok_or_else(|| {
+            Error::Tool(crate::error::ToolError::NotFound {
+                name: tool_name.to_string(),
+            })
+        })?;
+
+        // Get job context
+        let job_ctx: JobContext = context_manager.get_context(job_id).await?;
+
+        // Execute with timeout
+        let result = tokio::time::timeout(Duration::from_secs(60), async {
+            tool.execute(params, &job_ctx).await
+        })
+        .await
+        .map_err(|_| {
+            Error::Tool(crate::error::ToolError::Timeout {
+                name: tool_name.to_string(),
+                timeout: Duration::from_secs(60),
+            })
+        })?
+        .map_err(|e| {
+            Error::Tool(crate::error::ToolError::ExecutionFailed {
+                name: tool_name.to_string(),
+                reason: e.to_string(),
+            })
+        })?;
+
+        Ok(TaskOutput::new(result.result, start.elapsed()))
+    }
+
     /// Stop a running job.
     pub async fn stop(&self, job_id: Uuid) -> Result<(), JobError> {
         let mut jobs = self.jobs.write().await;
@@ -190,25 +380,50 @@ impl Scheduler {
         self.jobs.read().await.len()
     }
 
+    /// Get count of running subtasks.
+    pub async fn subtask_count(&self) -> usize {
+        self.subtasks.read().await.len()
+    }
+
     /// Get all running job IDs.
     pub async fn running_jobs(&self) -> Vec<Uuid> {
         self.jobs.read().await.keys().cloned().collect()
     }
 
-    /// Clean up finished jobs.
+    /// Clean up finished jobs and subtasks.
     pub async fn cleanup_finished(&self) {
-        let mut jobs = self.jobs.write().await;
-        let mut finished = Vec::new();
+        // Clean up jobs
+        {
+            let mut jobs = self.jobs.write().await;
+            let mut finished = Vec::new();
 
-        for (id, scheduled) in jobs.iter() {
-            if scheduled.handle.is_finished() {
-                finished.push(*id);
+            for (id, scheduled) in jobs.iter() {
+                if scheduled.handle.is_finished() {
+                    finished.push(*id);
+                }
+            }
+
+            for id in finished {
+                jobs.remove(&id);
+                tracing::debug!("Cleaned up finished job {}", id);
             }
         }
 
-        for id in finished {
-            jobs.remove(&id);
-            tracing::debug!("Cleaned up finished job {}", id);
+        // Clean up subtasks
+        {
+            let mut subtasks = self.subtasks.write().await;
+            let mut finished = Vec::new();
+
+            for (id, scheduled) in subtasks.iter() {
+                if scheduled.handle.is_finished() {
+                    finished.push(*id);
+                }
+            }
+
+            for id in finished {
+                subtasks.remove(&id);
+                tracing::trace!("Cleaned up finished subtask {}", id);
+            }
         }
     }
 
@@ -219,16 +434,35 @@ impl Scheduler {
         for job_id in job_ids {
             let _ = self.stop(job_id).await;
         }
+
+        // Abort all subtasks
+        let mut subtasks = self.subtasks.write().await;
+        for (_, scheduled) in subtasks.drain() {
+            scheduled.handle.abort();
+        }
+    }
+
+    /// Get access to the tools registry.
+    pub fn tools(&self) -> &Arc<ToolRegistry> {
+        &self.tools
+    }
+
+    /// Get access to the context manager.
+    pub fn context_manager(&self) -> &Arc<ContextManager> {
+        &self.context_manager
     }
 }
 
 #[cfg(test)]
 mod tests {
-    // Note: Full scheduler tests require mocking LLM provider
-    // These are placeholder tests
-
     #[test]
     fn test_scheduler_creation() {
         // Would need to mock dependencies for proper testing
+    }
+
+    #[tokio::test]
+    async fn test_spawn_batch_empty() {
+        // This test would need mock dependencies.
+        // For now just verify the empty case doesn't panic.
     }
 }

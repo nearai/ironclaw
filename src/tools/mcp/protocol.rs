@@ -11,6 +11,52 @@ pub struct McpTool {
     pub description: String,
     /// JSON Schema for input parameters.
     pub input_schema: serde_json::Value,
+    /// Optional annotations from the MCP server.
+    #[serde(default)]
+    pub annotations: Option<McpToolAnnotations>,
+}
+
+/// Annotations for an MCP tool that provide hints about its behavior.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct McpToolAnnotations {
+    /// Hint that this tool performs destructive operations that cannot be undone.
+    /// Tools with this hint set to true should require user approval before execution.
+    #[serde(default)]
+    pub destructive_hint: bool,
+
+    /// Hint that this tool may have side effects beyond its return value.
+    #[serde(default)]
+    pub side_effects_hint: bool,
+
+    /// Hint that this tool performs read-only operations.
+    #[serde(default)]
+    pub read_only_hint: bool,
+
+    /// Hint about the expected execution time category.
+    #[serde(default)]
+    pub execution_time_hint: Option<ExecutionTimeHint>,
+}
+
+/// Hint about how long a tool typically takes to execute.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ExecutionTimeHint {
+    /// Typically completes in under 1 second.
+    Fast,
+    /// Typically completes in 1-10 seconds.
+    Medium,
+    /// Typically completes in more than 10 seconds.
+    Slow,
+}
+
+impl McpTool {
+    /// Check if this tool requires user approval based on its annotations.
+    pub fn requires_approval(&self) -> bool {
+        self.annotations
+            .as_ref()
+            .map(|a| a.destructive_hint)
+            .unwrap_or(false)
+    }
 }
 
 /// Request to an MCP server.

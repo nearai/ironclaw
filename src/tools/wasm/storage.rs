@@ -553,9 +553,7 @@ fn row_to_tool(row: &tokio_postgres::Row) -> Result<StoredWasmTool, WasmStorageE
         trust_level: trust_level_str
             .parse()
             .map_err(WasmStorageError::InvalidData)?,
-        status: status_str
-            .parse()
-            .map_err(WasmStorageError::InvalidData)?,
+        status: status_str.parse().map_err(WasmStorageError::InvalidData)?,
         created_at: row.get("created_at"),
         updated_at: row.get("updated_at"),
     })
