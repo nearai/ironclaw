@@ -228,8 +228,10 @@ impl AppState {
 
     /// Add an error message to the chat.
     pub fn add_error_message(&mut self, content: impl Into<String>) {
-        self.messages
-            .push(ChatMessage::system(format!("Error: {}", content.into())).with_status(MessageStatus::Error));
+        self.messages.push(
+            ChatMessage::system(format!("Error: {}", content.into()))
+                .with_status(MessageStatus::Error),
+        );
         self.scroll_to_bottom();
     }
 

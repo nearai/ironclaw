@@ -142,12 +142,17 @@ async fn main() -> anyhow::Result<()> {
                 }
                 Ok(_) => {
                     let _ = event_tx
-                        .send(AppEvent::ErrorMessage("No models available from API".into()))
+                        .send(AppEvent::ErrorMessage(
+                            "No models available from API".into(),
+                        ))
                         .await;
                 }
                 Err(e) => {
                     let _ = event_tx
-                        .send(AppEvent::ErrorMessage(format!("Failed to fetch models: {}", e)))
+                        .send(AppEvent::ErrorMessage(format!(
+                            "Failed to fetch models: {}",
+                            e
+                        )))
                         .await;
                 }
             }

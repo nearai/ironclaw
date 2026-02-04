@@ -77,28 +77,77 @@ pub struct LlmConfig {
     pub nearai: NearAiConfig,
 }
 
+/// API mode for NEAR AI.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum NearAiApiMode {
+    /// Use the Responses API (chat-api proxy) - session-based auth
+    #[default]
+    Responses,
+    /// Use the Chat Completions API (cloud-api) - API key auth
+    ChatCompletions,
+}
+
+impl std::str::FromStr for NearAiApiMode {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.to_lowercase().as_str() {
+            "responses" | "response" => Ok(Self::Responses),
+            "chat_completions" | "chatcompletions" | "chat" | "completions" => {
+                Ok(Self::ChatCompletions)
+            }
+            _ => Err(format!(
+                "invalid API mode '{}', expected 'responses' or 'chat_completions'",
+                s
+            )),
+        }
+    }
+}
+
 /// NEAR AI chat-api configuration.
 #[derive(Debug, Clone)]
 pub struct NearAiConfig {
     /// Model to use (e.g., "claude-3-5-sonnet-20241022", "gpt-4o")
     pub model: String,
-    /// Base URL for the NEAR AI chat-api (default: https://api.near.ai)
+    /// Base URL for the NEAR AI API (default: https://api.near.ai)
     pub base_url: String,
     /// Base URL for auth/refresh endpoints (default: https://private.near.ai)
     pub auth_base_url: String,
     /// Path to session file (default: ~/.near-agent/session.json)
     pub session_path: PathBuf,
+    /// API mode: "responses" (chat-api) or "chat_completions" (cloud-api)
+    pub api_mode: NearAiApiMode,
+    /// API key for cloud-api (required for chat_completions mode)
+    pub api_key: Option<SecretString>,
 }
 
 impl LlmConfig {
     fn from_env() -> Result<Self, ConfigError> {
+        let api_key = optional_env("NEARAI_API_KEY")?.map(SecretString::from);
+
+        // Determine API mode: explicit setting, or infer from API key presence
+        let api_mode = if let Some(mode_str) = optional_env("NEARAI_API_MODE")? {
+            mode_str.parse().map_err(|e| ConfigError::InvalidValue {
+                key: "NEARAI_API_MODE".to_string(),
+                message: e,
+            })?
+        } else if api_key.is_some() {
+            // If API key is provided, default to chat_completions mode
+            NearAiApiMode::ChatCompletions
+        } else {
+            NearAiApiMode::Responses
+        };
+
         Ok(Self {
             nearai: NearAiConfig {
                 // Load model from saved settings first, then env, then default
                 model: crate::settings::Settings::load()
                     .selected_model
                     .or_else(|| optional_env("NEARAI_MODEL").ok().flatten())
-                    .unwrap_or_else(|| "zai-org/GLM-4.7".to_string()),
+                    .unwrap_or_else(|| {
+                        "fireworks::accounts/fireworks/models/llama4-maverick-instruct-basic"
+                            .to_string()
+                    }),
                 base_url: optional_env("NEARAI_BASE_URL")?
                     .unwrap_or_else(|| "https://api.near.ai".to_string()),
                 auth_base_url: optional_env("NEARAI_AUTH_URL")?
@@ -106,6 +155,8 @@ impl LlmConfig {
                 session_path: optional_env("NEARAI_SESSION_PATH")?
                     .map(PathBuf::from)
                     .unwrap_or_else(default_session_path),
+                api_mode,
+                api_key,
             },
         })
     }

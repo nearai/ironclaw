@@ -149,7 +149,12 @@ impl NearAiProvider {
             if let Some(entries) = resp.models.or(resp.data) {
                 let models: Vec<ModelInfo> = entries
                     .into_iter()
-                    .filter_map(|e| e.get_name().map(|name| ModelInfo { name, provider: None }))
+                    .filter_map(|e| {
+                        e.get_name().map(|name| ModelInfo {
+                            name,
+                            provider: None,
+                        })
+                    })
                     .collect();
                 if !models.is_empty() {
                     return Ok(models);
@@ -161,7 +166,12 @@ impl NearAiProvider {
         if let Ok(entries) = serde_json::from_str::<Vec<ModelEntry>>(&response_text) {
             let models: Vec<ModelInfo> = entries
                 .into_iter()
-                .filter_map(|e| e.get_name().map(|name| ModelInfo { name, provider: None }))
+                .filter_map(|e| {
+                    e.get_name().map(|name| ModelInfo {
+                        name,
+                        provider: None,
+                    })
+                })
                 .collect();
             if !models.is_empty() {
                 return Ok(models);
@@ -508,12 +518,21 @@ impl LlmProvider for NearAiProvider {
 
         for item in &response.output {
             if item.item_type == "message" {
+                // Check for direct text field first
+                if let Some(t) = &item.text {
+                    text.push_str(t);
+                }
+                // Then check content array
                 if let Some(contents) = &item.content {
                     for content in contents {
-                        if content.content_type == "output_text" {
-                            if let Some(t) = &content.text {
-                                text.push_str(t);
+                        // Accept various content type names the API might return
+                        match content.content_type.as_str() {
+                            "output_text" | "input_text" | "text" => {
+                                if let Some(t) = &content.text {
+                                    text.push_str(t);
+                                }
                             }
+                            _ => {}
                         }
                     }
                 }

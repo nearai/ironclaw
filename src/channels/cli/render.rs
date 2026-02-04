@@ -163,7 +163,9 @@ fn render_model_selector_inline(frame: &mut Frame, app: &AppState, area: Rect) {
     if models.is_empty() {
         spans.push(Span::styled(
             "Loading models...",
-            Style::default().fg(Color::DarkGray).add_modifier(Modifier::ITALIC),
+            Style::default()
+                .fg(Color::DarkGray)
+                .add_modifier(Modifier::ITALIC),
         ));
     } else {
         for (i, model) in models.iter().enumerate() {
@@ -189,12 +191,14 @@ fn render_model_selector_inline(frame: &mut Frame, app: &AppState, area: Rect) {
     }
 
     let content = Paragraph::new(Line::from(spans))
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .title(Span::styled("Select Model", Style::default().fg(Color::Cyan))),
-        )
-        .scroll((0, calculate_model_scroll(overlay, area.width.saturating_sub(2))));
+        .block(Block::default().borders(Borders::ALL).title(Span::styled(
+            "Select Model",
+            Style::default().fg(Color::Cyan),
+        )))
+        .scroll((
+            0,
+            calculate_model_scroll(overlay, area.width.saturating_sub(2)),
+        ));
 
     frame.render_widget(content, area);
 }
@@ -335,4 +339,3 @@ fn render_approval_overlay(frame: &mut Frame, app: &AppState) {
 
     frame.render_widget(content, overlay_area);
 }
-
