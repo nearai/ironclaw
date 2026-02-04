@@ -351,7 +351,7 @@ Inspired by [OpenClaw](https://github.com/openclaw/openclaw), the workspace prov
 
 ### Key Principles
 
-1. **"Memory is files, not RAM"** - If you want to remember something, write it explicitly
+1. **"Memory is database, not RAM"** - If you want to remember something, write it explicitly
 2. **Flexible structure** - Create any directory/file hierarchy you need
 3. **Self-documenting** - Use README.md files to describe directory structure
 4. **Hybrid search** - Combines FTS (keyword) + vector (semantic) via Reciprocal Rank Fusion
