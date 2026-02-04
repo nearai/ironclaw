@@ -4,18 +4,54 @@
 //! 1. Displays setup instructions
 //! 2. Collects configuration (tokens, ports, etc.)
 //! 3. Validates the configuration
-//! 4. Saves secrets securely
+//! 4. Saves secrets to the database
 
-use std::io;
-use std::path::PathBuf;
+use std::sync::Arc;
 
 use reqwest::Client;
 use secrecy::{ExposeSecret, SecretString};
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 
+use crate::secrets::{CreateSecretParams, PostgresSecretsStore, SecretsCrypto, SecretsStore};
 use crate::setup::prompts::{
     confirm, optional_input, print_error, print_info, print_success, secret_input,
 };
+
+/// Context for saving secrets during setup.
+pub struct SecretsContext {
+    store: PostgresSecretsStore,
+    user_id: String,
+}
+
+impl SecretsContext {
+    /// Create a new secrets context.
+    pub fn new(pool: deadpool_postgres::Pool, crypto: Arc<SecretsCrypto>, user_id: &str) -> Self {
+        Self {
+            store: PostgresSecretsStore::new(pool, crypto),
+            user_id: user_id.to_string(),
+        }
+    }
+
+    /// Save a secret to the database.
+    pub async fn save_secret(&self, name: &str, value: &SecretString) -> Result<(), String> {
+        let params = CreateSecretParams::new(name, value.expose_secret());
+
+        self.store
+            .create(&self.user_id, params)
+            .await
+            .map_err(|e| format!("Failed to save secret: {}", e))?;
+
+        Ok(())
+    }
+
+    /// Check if a secret exists.
+    pub async fn secret_exists(&self, name: &str) -> bool {
+        self.store
+            .exists(&self.user_id, name)
+            .await
+            .unwrap_or(false)
+    }
+}
 
 /// Result of Telegram setup.
 #[derive(Debug, Clone)]
@@ -44,8 +80,8 @@ struct TelegramUser {
 /// 1. Creating a bot with @BotFather
 /// 2. Entering the bot token
 /// 3. Validating the token
-/// 4. Saving the token to secrets
-pub async fn setup_telegram() -> io::Result<TelegramSetupResult> {
+/// 4. Saving the token to the database
+pub async fn setup_telegram(secrets: &SecretsContext) -> Result<TelegramSetupResult, String> {
     println!("Telegram Setup:");
     println!();
     print_info("To create a Telegram bot:");
@@ -54,7 +90,18 @@ pub async fn setup_telegram() -> io::Result<TelegramSetupResult> {
     print_info("3. Copy the bot token (looks like 123456:ABC-DEF...)");
     println!();
 
-    let token = secret_input("Bot token (from @BotFather)")?;
+    // Check if token already exists
+    if secrets.secret_exists("telegram_bot_token").await {
+        print_info("Existing Telegram token found in database.");
+        if !confirm("Replace existing token?", false).map_err(|e| e.to_string())? {
+            return Ok(TelegramSetupResult {
+                enabled: true,
+                bot_username: None,
+            });
+        }
+    }
+
+    let token = secret_input("Bot token (from @BotFather)").map_err(|e| e.to_string())?;
 
     // Validate the token
     print_info("Validating bot token...");
@@ -66,13 +113,9 @@ pub async fn setup_telegram() -> io::Result<TelegramSetupResult> {
                 username.as_deref().unwrap_or("unknown")
             ));
 
-            // Save to secrets file
-            if let Err(e) = save_channel_secret("telegram_bot_token", &token) {
-                print_error(&format!("Failed to save token: {}", e));
-                return Err(io::Error::new(io::ErrorKind::Other, e.to_string()));
-            }
-
-            print_success("Token saved to ~/.near-agent/secrets/telegram_bot_token");
+            // Save to database
+            secrets.save_secret("telegram_bot_token", &token).await?;
+            print_success("Token saved to database");
 
             Ok(TelegramSetupResult {
                 enabled: true,
@@ -82,9 +125,8 @@ pub async fn setup_telegram() -> io::Result<TelegramSetupResult> {
         Err(e) => {
             print_error(&format!("Token validation failed: {}", e));
 
-            if confirm("Try again?", true)? {
-                // Recursive retry
-                Box::pin(setup_telegram()).await
+            if confirm("Try again?", true).map_err(|e| e.to_string())? {
+                Box::pin(setup_telegram(secrets)).await
             } else {
                 Ok(TelegramSetupResult {
                     enabled: false,
@@ -140,30 +182,34 @@ pub struct HttpSetupResult {
 }
 
 /// Set up HTTP webhook channel.
-pub fn setup_http() -> io::Result<HttpSetupResult> {
+pub async fn setup_http(secrets: &SecretsContext) -> Result<HttpSetupResult, String> {
     println!("HTTP Webhook Setup:");
     println!();
     print_info("The HTTP webhook allows external services to send messages to the agent.");
     println!();
 
-    let port_str = optional_input("Port", Some("default: 8080"))?;
-    let port: u16 =
-        port_str.as_deref().unwrap_or("8080").parse().map_err(|e| {
-            io::Error::new(io::ErrorKind::InvalidInput, format!("Invalid port: {}", e))
-        })?;
+    let port_str = optional_input("Port", Some("default: 8080")).map_err(|e| e.to_string())?;
+    let port: u16 = port_str
+        .as_deref()
+        .unwrap_or("8080")
+        .parse()
+        .map_err(|e| format!("Invalid port: {}", e))?;
 
     if port < 1024 {
         print_info("Note: Ports below 1024 may require root privileges");
     }
 
-    let host =
-        optional_input("Host", Some("default: 0.0.0.0"))?.unwrap_or_else(|| "0.0.0.0".to_string());
+    let host = optional_input("Host", Some("default: 0.0.0.0"))
+        .map_err(|e| e.to_string())?
+        .unwrap_or_else(|| "0.0.0.0".to_string());
 
     // Generate a webhook secret
-    if confirm("Generate a webhook secret for authentication?", true)? {
+    if confirm("Generate a webhook secret for authentication?", true).map_err(|e| e.to_string())? {
         let secret = generate_webhook_secret();
-        save_channel_secret("http_webhook_secret", &SecretString::from(secret.clone()))?;
-        print_success("Webhook secret generated and saved");
+        secrets
+            .save_secret("http_webhook_secret", &SecretString::from(secret.clone()))
+            .await?;
+        print_success("Webhook secret generated and saved to database");
         print_info(&format!(
             "Secret: {} (store this for your webhook clients)",
             secret
@@ -185,91 +231,7 @@ fn generate_webhook_secret() -> String {
     let mut rng = rand::thread_rng();
     let mut bytes = [0u8; 32];
     rng.fill_bytes(&mut bytes);
-    // Encode as hex manually (avoid adding hex crate dependency)
     bytes.iter().map(|b| format!("{:02x}", b)).collect()
-}
-
-/// Get the secrets directory path.
-pub fn secrets_dir() -> PathBuf {
-    dirs::home_dir()
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join(".near-agent")
-        .join("secrets")
-}
-
-/// Save a channel secret to the secrets directory.
-///
-/// Secrets are stored as individual files with restricted permissions.
-pub fn save_channel_secret(name: &str, value: &SecretString) -> io::Result<()> {
-    let dir = secrets_dir();
-    std::fs::create_dir_all(&dir)?;
-
-    let path = dir.join(name);
-
-    // Write the secret
-    std::fs::write(&path, value.expose_secret())?;
-
-    // Set restrictive permissions on Unix
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let mut perms = std::fs::metadata(&path)?.permissions();
-        perms.set_mode(0o600); // Owner read/write only
-        std::fs::set_permissions(&path, perms)?;
-    }
-
-    Ok(())
-}
-
-/// Load a channel secret from the secrets directory.
-#[allow(dead_code)]
-pub fn load_channel_secret(name: &str) -> io::Result<Option<SecretString>> {
-    let path = secrets_dir().join(name);
-
-    if !path.exists() {
-        return Ok(None);
-    }
-
-    let contents = std::fs::read_to_string(&path)?;
-    Ok(Some(SecretString::from(contents.trim().to_string())))
-}
-
-/// Check if a channel secret exists.
-#[allow(dead_code)]
-pub fn has_channel_secret(name: &str) -> bool {
-    secrets_dir().join(name).exists()
-}
-
-/// Delete a channel secret.
-#[allow(dead_code)]
-pub fn delete_channel_secret(name: &str) -> io::Result<bool> {
-    let path = secrets_dir().join(name);
-    if path.exists() {
-        std::fs::remove_file(&path)?;
-        Ok(true)
-    } else {
-        Ok(false)
-    }
-}
-
-/// Channel secrets configuration (persisted to settings).
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
-pub struct ChannelSecretsConfig {
-    /// Whether Telegram has a saved token.
-    pub telegram_configured: bool,
-    /// Whether HTTP webhook has a saved secret.
-    pub http_configured: bool,
-}
-
-impl ChannelSecretsConfig {
-    /// Load from the secrets directory.
-    #[allow(dead_code)]
-    pub fn from_secrets_dir() -> Self {
-        Self {
-            telegram_configured: has_channel_secret("telegram_bot_token"),
-            http_configured: has_channel_secret("http_webhook_secret"),
-        }
-    }
 }
 
 #[cfg(test)]
