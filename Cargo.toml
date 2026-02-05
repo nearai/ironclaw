@@ -98,6 +98,15 @@ hyper-util = { version = "0.1", features = ["server", "tokio", "http1", "http2"]
 http-body-util = "0.1"
 bytes = "1"
 
+# macOS keychain
+[target.'cfg(target_os = "macos")'.dependencies]
+security-framework = "3"
+
+# Linux secret-service (GNOME Keyring, KWallet)
+[target.'cfg(target_os = "linux")'.dependencies]
+secret-service = { version = "4", features = ["rt-tokio-crypto-rust"] }
+zbus = "4"
+
 [dev-dependencies]
 tokio-test = "0.4"
 testcontainers-modules = { version = "0.11", features = ["postgres"] }

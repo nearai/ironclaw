@@ -156,6 +156,9 @@ pub enum SecretError {
 
     #[error("Secret access denied for tool")]
     AccessDenied,
+
+    #[error("Keychain error: {0}")]
+    KeychainError(String),
 }
 
 /// Parameters for creating a new secret.
