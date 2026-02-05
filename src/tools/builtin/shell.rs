@@ -403,12 +403,12 @@ fn truncate_output(s: &str) -> String {
     }
 }
 
-/// Truncate command for error messages.
+/// Truncate command for error messages (char-aware to avoid UTF-8 boundary panics).
 fn truncate_for_error(s: &str) -> String {
-    if s.len() <= 100 {
+    if s.chars().count() <= 100 {
         s.to_string()
     } else {
-        format!("{}...", &s[..100])
+        format!("{}...", s.chars().take(100).collect::<String>())
     }
 }
 

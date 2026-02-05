@@ -333,8 +333,11 @@ impl Agent {
                 // Format approval request for user
                 let params_preview = serde_json::to_string_pretty(&parameters)
                     .unwrap_or_else(|_| parameters.to_string());
-                let params_truncated = if params_preview.len() > 200 {
-                    format!("{}...", &params_preview[..200])
+                let params_truncated = if params_preview.chars().count() > 200 {
+                    format!(
+                        "{}...",
+                        params_preview.chars().take(200).collect::<String>()
+                    )
                 } else {
                     params_preview
                 };

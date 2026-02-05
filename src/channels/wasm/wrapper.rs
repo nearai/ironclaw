@@ -93,19 +93,22 @@ impl ChannelStoreData {
         }
     }
 
-    /// Inject credentials into a URL by replacing placeholders.
+    /// Inject credentials into a string by replacing placeholders.
     ///
-    /// Replaces patterns like `{TELEGRAM_BOT_TOKEN}` with actual values from
-    /// the injected credentials map. This allows WASM channels to reference
-    /// credentials without ever seeing the actual values.
-    fn inject_credentials_into_url(&self, url: &str) -> String {
-        let mut result = url.to_string();
+    /// Replaces patterns like `{TELEGRAM_BOT_TOKEN}` or `{WHATSAPP_ACCESS_TOKEN}`
+    /// with actual values from the injected credentials map. This allows WASM
+    /// channels to reference credentials without ever seeing the actual values.
+    ///
+    /// Works on URLs, headers, or any string with credential placeholders.
+    fn inject_credentials(&self, input: &str, context: &str) -> String {
+        let mut result = input.to_string();
 
         tracing::debug!(
-            url = %url,
+            input_preview = %input.chars().take(100).collect::<String>(),
+            context = %context,
             credential_count = self.credentials.len(),
             credential_names = ?self.credentials.keys().collect::<Vec<_>>(),
-            "Injecting credentials into URL"
+            "Injecting credentials"
         );
 
         // Replace all known placeholders from the credentials map
@@ -114,6 +117,7 @@ impl ChannelStoreData {
             if result.contains(&placeholder) {
                 tracing::debug!(
                     placeholder = %placeholder,
+                    context = %context,
                     "Found and replacing credential placeholder"
                 );
                 result = result.replace(&placeholder, value);
@@ -122,11 +126,16 @@ impl ChannelStoreData {
 
         // Check if any placeholders remain (indicates missing credential)
         if result.contains('{') && result.contains('}') {
-            tracing::warn!(
-                original_url = %url,
-                result_url = %result,
-                "URL may contain unresolved placeholders"
-            );
+            // Only warn if it looks like an unresolved placeholder (not JSON braces)
+            let brace_pattern = regex::Regex::new(r"\{[A-Z_]+\}").ok();
+            if let Some(re) = brace_pattern {
+                if re.is_match(&result) {
+                    tracing::warn!(
+                        context = %context,
+                        "String may contain unresolved credential placeholders"
+                    );
+                }
+            }
         }
 
         result
@@ -186,15 +195,11 @@ impl near::agent::channel_host::Host for ChannelStoreData {
         );
 
         // Inject credentials into URL (e.g., replace {TELEGRAM_BOT_TOKEN} with actual token)
-        let injected_url = self.inject_credentials_into_url(&url);
+        let injected_url = self.inject_credentials(&url, "url");
 
         // Log whether injection happened (without revealing the token)
         let url_changed = injected_url != url;
-        tracing::info!(
-            url_changed = url_changed,
-            has_bot_token = injected_url.contains("/bot") && !injected_url.contains("{"),
-            "URL after credential injection"
-        );
+        tracing::info!(url_changed = url_changed, "URL after credential injection");
 
         // Check if HTTP is allowed for this URL
         self.host_state
@@ -210,11 +215,29 @@ impl near::agent::channel_host::Host for ChannelStoreData {
             format!("Rate limit exceeded: {}", e)
         })?;
 
-        // Parse headers
-        let headers: std::collections::HashMap<String, String> =
+        // Parse headers and inject credentials into header values
+        // This allows patterns like "Authorization": "Bearer {WHATSAPP_ACCESS_TOKEN}"
+        let raw_headers: std::collections::HashMap<String, String> =
             serde_json::from_str(&headers_json).unwrap_or_default();
 
-        tracing::debug!(header_count = headers.len(), "Parsed request headers");
+        let headers: std::collections::HashMap<String, String> = raw_headers
+            .into_iter()
+            .map(|(k, v)| {
+                (
+                    k.clone(),
+                    self.inject_credentials(&v, &format!("header:{}", k)),
+                )
+            })
+            .collect();
+
+        let headers_changed = headers
+            .values()
+            .any(|v| v.contains("Bearer ") && !v.contains('{'));
+        tracing::debug!(
+            header_count = headers.len(),
+            headers_changed = headers_changed,
+            "Parsed and injected request headers"
+        );
 
         let url = injected_url;
 
@@ -273,10 +296,10 @@ impl near::agent::channel_host::Host for ChannelStoreData {
                 "HTTP response received"
             );
 
-            // Log response body for debugging (truncated)
+            // Log response body for debugging (truncated at char boundary)
             if let Ok(body_str) = std::str::from_utf8(&body) {
-                let truncated = if body_str.len() > 500 {
-                    format!("{}...", &body_str[..500])
+                let truncated = if body_str.chars().count() > 500 {
+                    format!("{}...", body_str.chars().take(500).collect::<String>())
                 } else {
                     body_str.to_string()
                 };
@@ -647,10 +670,10 @@ impl WasmChannel {
             "call_on_http_request invoked (webhook received)"
         );
 
-        // Log the body for debugging (if it looks like JSON)
+        // Log the body for debugging (truncated at char boundary)
         if let Ok(body_str) = std::str::from_utf8(body) {
-            let truncated = if body_str.len() > 1000 {
-                format!("{}...", &body_str[..1000])
+            let truncated = if body_str.chars().count() > 1000 {
+                format!("{}...", body_str.chars().take(1000).collect::<String>())
             } else {
                 body_str.to_string()
             };
@@ -884,8 +907,10 @@ impl WasmChannel {
                     metadata_json,
                 };
 
+                // Truncate at char boundary for logging (avoid panic on multi-byte UTF-8)
+                let content_preview: String = content.chars().take(50).collect();
                 tracing::info!(
-                    content_preview = %if content.len() > 50 { &content[..50] } else { &content },
+                    content_preview = %content_preview,
                     "Calling WASM on_respond"
                 );
 

@@ -1,0 +1,53 @@
+{
+  "type": "channel",
+  "name": "whatsapp",
+  "description": "WhatsApp Cloud API channel for receiving and responding to WhatsApp messages",
+  "setup": {
+    "required_secrets": [
+      {
+        "name": "whatsapp_access_token",
+        "prompt": "Enter your WhatsApp Cloud API access token (from Meta Developer Portal)",
+        "validation": "^[A-Za-z0-9_-]+$"
+      },
+      {
+        "name": "whatsapp_verify_token",
+        "prompt": "Webhook verify token (leave empty to auto-generate)",
+        "optional": true,
+        "auto_generate": { "length": 32 }
+      }
+    ],
+    "validation_endpoint": "https://graph.facebook.com/v18.0/me?access_token={whatsapp_access_token}"
+  },
+  "capabilities": {
+    "http": {
+      "allowlist": [
+        { "host": "graph.facebook.com", "path_prefix": "/" }
+      ],
+      "rate_limit": {
+        "requests_per_minute": 80,
+        "requests_per_hour": 1000
+      }
+    },
+    "secrets": {
+      "allowed_names": ["whatsapp_*"]
+    },
+    "channel": {
+      "allowed_paths": ["/webhook/whatsapp"],
+      "allow_polling": false,
+      "workspace_prefix": "channels/whatsapp/",
+      "emit_rate_limit": {
+        "messages_per_minute": 100,
+        "messages_per_hour": 5000
+      },
+      "webhook": {
+        "secret_header": "X-Hub-Signature-256",
+        "secret_name": "whatsapp_verify_token",
+        "verify_token_param": "hub.verify_token"
+      }
+    }
+  },
+  "config": {
+    "api_version": "v18.0",
+    "reply_to_message": true
+  }
+}
