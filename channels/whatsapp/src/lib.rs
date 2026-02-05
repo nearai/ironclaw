@@ -1,7 +1,7 @@
 // WhatsApp API types have fields reserved for future use (contacts, statuses, etc.)
 #![allow(dead_code)]
 
-//! WhatsApp Cloud API channel for NEAR Agent.
+//! WhatsApp Cloud API channel for IronClaw.
 //!
 //! This WASM component implements the channel interface for handling WhatsApp
 //! webhooks and sending messages back via the Cloud API.

@@ -147,7 +147,7 @@ impl AppState {
         Self {
             mode: InputMode::Editing,
             messages: vec![ChatMessage::system(
-                "Welcome to NEAR Agent. Type a message or /help for commands.",
+                "Welcome to IronClaw. Type a message or /help for commands.",
             )],
             composer: ChatComposer::new(),
             approval: None,

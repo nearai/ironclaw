@@ -1,11 +1,11 @@
-//! NEAR Agent - Main entry point.
+//! IronClaw - Main entry point.
 
 use std::sync::Arc;
 
 use clap::Parser;
 use tracing_subscriber::{EnvFilter, layer::SubscriberExt, util::SubscriberInitExt};
 
-use near_agent::{
+use ironclaw::{
     agent::{Agent, AgentDeps},
     channels::{
         AppEvent, ChannelManager, HttpChannel, ReplChannel, TuiChannel,
@@ -46,6 +46,11 @@ async fn main() -> anyhow::Result<()> {
 
             return run_tool_command(tool_cmd.clone()).await;
         }
+        Some(Command::Config(config_cmd)) => {
+            // Config commands don't need logging setup
+            return ironclaw::cli::run_config_command(config_cmd.clone())
+                .map_err(|e| anyhow::anyhow!("{}", e));
+        }
         Some(Command::Setup {
             skip_auth,
             channels_only,
@@ -70,14 +75,10 @@ async fn main() -> anyhow::Result<()> {
     // Load .env if present
     let _ = dotenvy::dotenv();
 
-    // First-run detection: if setup hasn't been completed and user didn't skip it,
-    // automatically run the setup wizard
+    // Enhanced first-run detection
     if !cli.no_setup {
-        let settings = Settings::load();
-        let session_path = near_agent::llm::session::default_session_path();
-
-        if !settings.setup_completed && !session_path.exists() {
-            println!("First run detected. Starting setup wizard...");
+        if let Some(reason) = check_setup_needed() {
+            println!("Setup needed: {}", reason);
             println!();
             let mut wizard = SetupWizard::new();
             wizard.run().await?;
@@ -85,7 +86,19 @@ async fn main() -> anyhow::Result<()> {
     }
 
     // Load configuration (after potential setup)
-    let config = Config::from_env()?;
+    let config = match Config::from_env() {
+        Ok(c) => c,
+        Err(ironclaw::error::ConfigError::MissingRequired { key, hint }) => {
+            eprintln!("Configuration error: Missing required setting '{}'", key);
+            eprintln!("  {}", hint);
+            eprintln!();
+            eprintln!(
+                "Run 'ironclaw setup' to configure, or set the required environment variables."
+            );
+            std::process::exit(1);
+        }
+        Err(e) => return Err(e.into()),
+    };
 
     // Initialize session manager and authenticate BEFORE TUI setup
     // This allows the auth menu to display cleanly without TUI interference
@@ -102,7 +115,7 @@ async fn main() -> anyhow::Result<()> {
 
     // Initialize tracing and channels based on mode
     let env_filter = EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| EnvFilter::new("near_agent=info,tower_http=debug"));
+        .unwrap_or_else(|_| EnvFilter::new("ironclaw=info,tower_http=debug"));
 
     // Determine which mode to use: REPL, single message, or TUI
     let use_repl = cli.repl || cli.message.is_some();
@@ -150,7 +163,7 @@ async fn main() -> anyhow::Result<()> {
         (None, None, None)
     };
 
-    tracing::info!("Starting NEAR Agent...");
+    tracing::info!("Starting IronClaw...");
     tracing::info!("Loaded configuration for agent: {}", config.agent.name);
     tracing::info!("NEAR AI session authenticated");
 
@@ -571,6 +584,35 @@ async fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Check if setup is needed and return the reason.
+///
+/// Returns `Some(reason)` if setup should be triggered, `None` otherwise.
+fn check_setup_needed() -> Option<&'static str> {
+    let settings = Settings::load();
+
+    // Database not configured (and not in env)
+    if settings.database_url.is_none() && std::env::var("DATABASE_URL").is_err() {
+        return Some("Database not configured");
+    }
+
+    // Secrets not configured (and not in env)
+    if settings.secrets_master_key_source == ironclaw::settings::KeySource::None
+        && std::env::var("SECRETS_MASTER_KEY").is_err()
+        && !ironclaw::secrets::keychain::has_master_key()
+    {
+        // Only require secrets setup if user hasn't explicitly disabled it
+        // For now, we don't require it for first run
+    }
+
+    // First run (setup never completed and no session)
+    let session_path = ironclaw::llm::session::default_session_path();
+    if !settings.setup_completed && !session_path.exists() {
+        return Some("First run");
+    }
+
+    None
+}
+
 /// Inject credentials for a channel based on naming convention.
 ///
 /// Looks for secrets matching the pattern `{channel_name}_*` and injects them
@@ -578,7 +620,7 @@ async fn main() -> anyhow::Result<()> {
 ///
 /// Returns the number of credentials injected.
 async fn inject_channel_credentials(
-    channel: &Arc<near_agent::channels::wasm::WasmChannel>,
+    channel: &Arc<ironclaw::channels::wasm::WasmChannel>,
     secrets: &dyn SecretsStore,
     channel_name: &str,
 ) -> anyhow::Result<usize> {

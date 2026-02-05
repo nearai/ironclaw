@@ -1,4 +1,4 @@
-//! Slack WASM Tool for NEAR Agent.
+//! Slack WASM Tool for IronClaw.
 //!
 //! This is a standalone WASM component that provides Slack integration.
 //! It demonstrates how to build external tools that can be dynamically

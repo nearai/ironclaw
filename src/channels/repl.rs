@@ -64,7 +64,7 @@ impl Default for ReplChannel {
 fn print_help() {
     println!(
         r#"
-NEAR Agent REPL - Interactive debugging mode
+IronClaw REPL - Interactive debugging mode
 
 Commands:
   /help          Show this help message
@@ -116,7 +116,7 @@ impl Channel for ReplChannel {
             let stdin = io::stdin();
             let mut stdout = io::stdout();
 
-            println!("NEAR Agent REPL - Type /help for commands, /quit to exit");
+            println!("IronClaw REPL - Type /help for commands, /quit to exit");
             println!();
 
             loop {

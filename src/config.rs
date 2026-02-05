@@ -1,4 +1,4 @@
-//! Configuration for the NEAR Agent.
+//! Configuration for IronClaw.
 
 use std::path::PathBuf;
 use std::time::Duration;
@@ -131,16 +131,30 @@ pub struct DatabaseConfig {
 
 impl DatabaseConfig {
     fn from_env() -> Result<Self, ConfigError> {
+        let settings = crate::settings::Settings::load();
+
+        // Priority: env var > settings > error (required)
+        let url = optional_env("DATABASE_URL")?
+            .or(settings.database_url.clone())
+            .ok_or_else(|| ConfigError::MissingRequired {
+                key: "database_url".to_string(),
+                hint: "Run 'ironclaw setup' or set DATABASE_URL environment variable".to_string(),
+            })?;
+
+        // Priority: env var > settings > default
+        let pool_size = optional_env("DATABASE_POOL_SIZE")?
+            .map(|s| s.parse())
+            .transpose()
+            .map_err(|e| ConfigError::InvalidValue {
+                key: "DATABASE_POOL_SIZE".to_string(),
+                message: format!("must be a positive integer: {e}"),
+            })?
+            .or(settings.database_pool_size)
+            .unwrap_or(10);
+
         Ok(Self {
-            url: SecretString::from(required_env("DATABASE_URL")?),
-            pool_size: optional_env("DATABASE_POOL_SIZE")?
-                .map(|s| s.parse())
-                .transpose()
-                .map_err(|e| ConfigError::InvalidValue {
-                    key: "DATABASE_POOL_SIZE".to_string(),
-                    message: format!("must be a positive integer: {e}"),
-                })?
-                .unwrap_or(10),
+            url: SecretString::from(url),
+            pool_size,
         })
     }
 
@@ -192,7 +206,7 @@ pub struct NearAiConfig {
     pub base_url: String,
     /// Base URL for auth/refresh endpoints (default: https://private.near.ai)
     pub auth_base_url: String,
-    /// Path to session file (default: ~/.near-agent/session.json)
+    /// Path to session file (default: ~/.ironclaw/session.json)
     pub session_path: PathBuf,
     /// API mode: "responses" (chat-api) or "chat_completions" (cloud-api)
     pub api_mode: NearAiApiMode,
@@ -269,10 +283,17 @@ impl Default for EmbeddingsConfig {
 
 impl EmbeddingsConfig {
     fn from_env() -> Result<Self, ConfigError> {
+        let settings = crate::settings::Settings::load();
         let openai_api_key = optional_env("OPENAI_API_KEY")?.map(SecretString::from);
-        let provider = optional_env("EMBEDDING_PROVIDER")?.unwrap_or_else(|| "openai".to_string());
 
-        // Auto-enable if we have an API key
+        // Priority: env var > settings > default
+        let provider = optional_env("EMBEDDING_PROVIDER")?
+            .unwrap_or_else(|| settings.embeddings.provider.clone());
+
+        let model =
+            optional_env("EMBEDDING_MODEL")?.unwrap_or_else(|| settings.embeddings.model.clone());
+
+        // Priority: env var > settings > auto-detect from API key
         let enabled = optional_env("EMBEDDING_ENABLED")?
             .map(|s| s.parse())
             .transpose()
@@ -280,14 +301,16 @@ impl EmbeddingsConfig {
                 key: "EMBEDDING_ENABLED".to_string(),
                 message: format!("must be 'true' or 'false': {e}"),
             })?
-            .unwrap_or(openai_api_key.is_some());
+            .unwrap_or_else(|| {
+                // Check settings, or auto-enable if API key present
+                settings.embeddings.enabled || openai_api_key.is_some()
+            });
 
         Ok(Self {
             enabled,
             provider,
             openai_api_key,
-            model: optional_env("EMBEDDING_MODEL")?
-                .unwrap_or_else(|| "text-embedding-3-small".to_string()),
+            model,
         })
     }
 
@@ -297,11 +320,11 @@ impl EmbeddingsConfig {
     }
 }
 
-/// Get the default session file path (~/.near-agent/session.json).
+/// Get the default session file path (~/.ironclaw/session.json).
 fn default_session_path() -> PathBuf {
     dirs::home_dir()
         .unwrap_or_else(|| PathBuf::from("."))
-        .join(".near-agent")
+        .join(".ironclaw")
         .join("session.json")
 }
 
@@ -310,7 +333,7 @@ fn default_session_path() -> PathBuf {
 pub struct ChannelsConfig {
     pub cli: CliConfig,
     pub http: Option<HttpConfig>,
-    /// Directory containing WASM channel modules (default: ~/.near-agent/channels/).
+    /// Directory containing WASM channel modules (default: ~/.ironclaw/channels/).
     pub wasm_channels_dir: std::path::PathBuf,
     /// Whether WASM channels are enabled.
     pub wasm_channels_enabled: bool,
@@ -371,11 +394,11 @@ impl ChannelsConfig {
     }
 }
 
-/// Get the default channels directory (~/.near-agent/channels/).
+/// Get the default channels directory (~/.ironclaw/channels/).
 fn default_channels_dir() -> PathBuf {
     dirs::home_dir()
         .unwrap_or_else(|| PathBuf::from("."))
-        .join(".near-agent")
+        .join(".ironclaw")
         .join("channels")
 }
 
@@ -394,19 +417,57 @@ pub struct AgentConfig {
 
 impl AgentConfig {
     fn from_env() -> Result<Self, ConfigError> {
+        let settings = crate::settings::Settings::load();
+
         Ok(Self {
-            name: optional_env("AGENT_NAME")?.unwrap_or_else(|| "near-agent".to_string()),
-            max_parallel_jobs: parse_optional_env("AGENT_MAX_PARALLEL_JOBS", 5)?,
-            job_timeout: Duration::from_secs(parse_optional_env("AGENT_JOB_TIMEOUT_SECS", 3600)?),
-            stuck_threshold: Duration::from_secs(parse_optional_env(
-                "AGENT_STUCK_THRESHOLD_SECS",
-                300,
-            )?),
-            repair_check_interval: Duration::from_secs(parse_optional_env(
-                "SELF_REPAIR_CHECK_INTERVAL_SECS",
-                60,
-            )?),
-            max_repair_attempts: parse_optional_env("SELF_REPAIR_MAX_ATTEMPTS", 3)?,
+            // Priority: env var > settings > default
+            name: optional_env("AGENT_NAME")?.unwrap_or_else(|| settings.agent.name.clone()),
+            max_parallel_jobs: optional_env("AGENT_MAX_PARALLEL_JOBS")?
+                .map(|s| s.parse())
+                .transpose()
+                .map_err(|e| ConfigError::InvalidValue {
+                    key: "AGENT_MAX_PARALLEL_JOBS".to_string(),
+                    message: format!("must be a positive integer: {e}"),
+                })?
+                .unwrap_or(settings.agent.max_parallel_jobs as usize),
+            job_timeout: Duration::from_secs(
+                optional_env("AGENT_JOB_TIMEOUT_SECS")?
+                    .map(|s| s.parse())
+                    .transpose()
+                    .map_err(|e| ConfigError::InvalidValue {
+                        key: "AGENT_JOB_TIMEOUT_SECS".to_string(),
+                        message: format!("must be a positive integer: {e}"),
+                    })?
+                    .unwrap_or(settings.agent.job_timeout_secs),
+            ),
+            stuck_threshold: Duration::from_secs(
+                optional_env("AGENT_STUCK_THRESHOLD_SECS")?
+                    .map(|s| s.parse())
+                    .transpose()
+                    .map_err(|e| ConfigError::InvalidValue {
+                        key: "AGENT_STUCK_THRESHOLD_SECS".to_string(),
+                        message: format!("must be a positive integer: {e}"),
+                    })?
+                    .unwrap_or(settings.agent.stuck_threshold_secs),
+            ),
+            repair_check_interval: Duration::from_secs(
+                optional_env("SELF_REPAIR_CHECK_INTERVAL_SECS")?
+                    .map(|s| s.parse())
+                    .transpose()
+                    .map_err(|e| ConfigError::InvalidValue {
+                        key: "SELF_REPAIR_CHECK_INTERVAL_SECS".to_string(),
+                        message: format!("must be a positive integer: {e}"),
+                    })?
+                    .unwrap_or(settings.agent.repair_check_interval_secs),
+            ),
+            max_repair_attempts: optional_env("SELF_REPAIR_MAX_ATTEMPTS")?
+                .map(|s| s.parse())
+                .transpose()
+                .map_err(|e| ConfigError::InvalidValue {
+                    key: "SELF_REPAIR_MAX_ATTEMPTS".to_string(),
+                    message: format!("must be a positive integer: {e}"),
+                })?
+                .unwrap_or(settings.agent.max_repair_attempts),
             use_planning: optional_env("AGENT_USE_PLANNING")?
                 .map(|s| s.parse())
                 .transpose()
@@ -414,7 +475,7 @@ impl AgentConfig {
                     key: "AGENT_USE_PLANNING".to_string(),
                     message: format!("must be 'true' or 'false': {e}"),
                 })?
-                .unwrap_or(true), // Default to planning enabled
+                .unwrap_or(settings.agent.use_planning),
         })
     }
 }
@@ -447,7 +508,7 @@ impl SafetyConfig {
 pub struct WasmConfig {
     /// Whether WASM tool execution is enabled.
     pub enabled: bool,
-    /// Directory containing installed WASM tools (default: ~/.near-agent/tools/).
+    /// Directory containing installed WASM tools (default: ~/.ironclaw/tools/).
     pub tools_dir: PathBuf,
     /// Default memory limit in bytes (default: 10 MB).
     pub default_memory_limit: u64,
@@ -464,11 +525,13 @@ pub struct WasmConfig {
 /// Secrets management configuration.
 #[derive(Clone, Default)]
 pub struct SecretsConfig {
-    /// Master key for encrypting secrets (loaded from SECRETS_MASTER_KEY env var).
-    /// Must be at least 32 bytes for AES-256-GCM.
+    /// Master key for encrypting secrets.
+    /// Source determined by KeySource in settings.
     pub master_key: Option<SecretString>,
     /// Whether secrets management is enabled.
     pub enabled: bool,
+    /// Source of the master key.
+    pub source: crate::settings::KeySource,
 }
 
 impl std::fmt::Debug for SecretsConfig {
@@ -476,13 +539,53 @@ impl std::fmt::Debug for SecretsConfig {
         f.debug_struct("SecretsConfig")
             .field("master_key", &self.master_key.is_some())
             .field("enabled", &self.enabled)
+            .field("source", &self.source)
             .finish()
     }
 }
 
 impl SecretsConfig {
     fn from_env() -> Result<Self, ConfigError> {
-        let master_key = optional_env("SECRETS_MASTER_KEY")?.map(SecretString::from);
+        use crate::settings::KeySource;
+
+        let settings = crate::settings::Settings::load();
+
+        // Priority: env var > keychain (based on settings) > disabled
+        let (master_key, source) = if let Some(env_key) = optional_env("SECRETS_MASTER_KEY")? {
+            // Env var takes priority (for CI/Docker)
+            (Some(SecretString::from(env_key)), KeySource::Env)
+        } else {
+            match settings.secrets_master_key_source {
+                KeySource::Keychain => {
+                    // Try to load from OS keychain
+                    match crate::secrets::keychain::get_master_key() {
+                        Ok(key_bytes) => {
+                            let key_hex: String =
+                                key_bytes.iter().map(|b| format!("{:02x}", b)).collect();
+                            (Some(SecretString::from(key_hex)), KeySource::Keychain)
+                        }
+                        Err(_) => {
+                            // Keychain configured but key not found
+                            // This might happen if keychain was cleared
+                            tracing::warn!(
+                                "Secrets configured for keychain but key not found. \
+                                 Run 'ironclaw setup' to reconfigure."
+                            );
+                            (None, KeySource::None)
+                        }
+                    }
+                }
+                KeySource::Env => {
+                    // Settings say env, but no env var found
+                    tracing::warn!(
+                        "Secrets configured for env var but SECRETS_MASTER_KEY not set."
+                    );
+                    (None, KeySource::None)
+                }
+                KeySource::None => (None, KeySource::None),
+            }
+        };
+
         let enabled = master_key.is_some();
 
         // Validate master key length if provided
@@ -498,6 +601,7 @@ impl SecretsConfig {
         Ok(Self {
             master_key,
             enabled,
+            source,
         })
     }
 
@@ -521,11 +625,11 @@ impl Default for WasmConfig {
     }
 }
 
-/// Get the default tools directory (~/.near-agent/tools/).
+/// Get the default tools directory (~/.ironclaw/tools/).
 fn default_tools_dir() -> PathBuf {
     dirs::home_dir()
         .unwrap_or_else(|| PathBuf::from("."))
-        .join(".near-agent")
+        .join(".ironclaw")
         .join("tools")
 }
 
@@ -676,7 +780,10 @@ impl Default for HeartbeatConfig {
 
 impl HeartbeatConfig {
     fn from_env() -> Result<Self, ConfigError> {
+        let settings = crate::settings::Settings::load();
+
         Ok(Self {
+            // Priority: env var > settings > default
             enabled: optional_env("HEARTBEAT_ENABLED")?
                 .map(|s| s.parse())
                 .transpose()
@@ -684,10 +791,19 @@ impl HeartbeatConfig {
                     key: "HEARTBEAT_ENABLED".to_string(),
                     message: format!("must be 'true' or 'false': {e}"),
                 })?
-                .unwrap_or(false),
-            interval_secs: parse_optional_env("HEARTBEAT_INTERVAL_SECS", 1800)?,
-            notify_channel: optional_env("HEARTBEAT_NOTIFY_CHANNEL")?,
-            notify_user: optional_env("HEARTBEAT_NOTIFY_USER")?,
+                .unwrap_or(settings.heartbeat.enabled),
+            interval_secs: optional_env("HEARTBEAT_INTERVAL_SECS")?
+                .map(|s| s.parse())
+                .transpose()
+                .map_err(|e| ConfigError::InvalidValue {
+                    key: "HEARTBEAT_INTERVAL_SECS".to_string(),
+                    message: format!("must be a positive integer: {e}"),
+                })?
+                .unwrap_or(settings.heartbeat.interval_secs),
+            notify_channel: optional_env("HEARTBEAT_NOTIFY_CHANNEL")?
+                .or(settings.heartbeat.notify_channel.clone()),
+            notify_user: optional_env("HEARTBEAT_NOTIFY_USER")?
+                .or(settings.heartbeat.notify_user.clone()),
         })
     }
 }
@@ -786,10 +902,6 @@ impl SandboxModeConfig {
 }
 
 // Helper functions
-
-fn required_env(key: &str) -> Result<String, ConfigError> {
-    std::env::var(key).map_err(|_| ConfigError::MissingEnvVar(key.to_string()))
-}
 
 fn optional_env(key: &str) -> Result<Option<String>, ConfigError> {
     match std::env::var(key) {

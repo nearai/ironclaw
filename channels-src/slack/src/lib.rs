@@ -1,4 +1,4 @@
-//! Slack Events API channel for NEAR Agent.
+//! Slack Events API channel for IronClaw.
 //!
 //! This WASM component implements the channel interface for handling Slack
 //! webhooks and sending messages back to Slack.

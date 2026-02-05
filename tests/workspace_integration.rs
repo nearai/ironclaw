@@ -1,15 +1,15 @@
 //! Integration tests for the workspace module.
 //!
 //! Requires a running PostgreSQL with pgvector extension.
-//! Set DATABASE_URL=postgres://localhost/near_agent_test
+//! Set DATABASE_URL=postgres://localhost/ironclaw_test
 
 use std::sync::Arc;
 
-use near_agent::workspace::{MockEmbeddings, SearchConfig, Workspace, paths};
+use ironclaw::workspace::{MockEmbeddings, SearchConfig, Workspace, paths};
 
 fn get_pool() -> deadpool_postgres::Pool {
     let database_url = std::env::var("DATABASE_URL")
-        .unwrap_or_else(|_| "postgres://localhost/near_agent_test".to_string());
+        .unwrap_or_else(|_| "postgres://localhost/ironclaw_test".to_string());
 
     let config: tokio_postgres::Config = database_url.parse().expect("Invalid DATABASE_URL");
 

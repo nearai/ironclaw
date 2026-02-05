@@ -3,18 +3,22 @@
 //! Provides subcommands for:
 //! - Running the agent (`run`)
 //! - Interactive setup wizard (`setup`)
+//! - Managing configuration (`config list`, `config get`, `config set`)
 //! - Managing WASM tools (`tool install`, `tool list`, `tool remove`)
-//! - Managing secrets (`secret set`, `secret list`, `secret remove`)
 
+mod config;
 mod tool;
 
+pub use config::{ConfigCommand, run_config_command};
 pub use tool::{ToolCommand, run_tool_command};
 
 use clap::{Parser, Subcommand};
 
 #[derive(Parser, Debug)]
-#[command(name = "near-agent")]
-#[command(about = "LLM-powered autonomous agent for the NEAR AI marketplace")]
+#[command(name = "ironclaw")]
+#[command(
+    about = "Secure personal AI assistant that protects your data and expands its capabilities"
+)]
 #[command(version)]
 pub struct Cli {
     #[command(subcommand)]
@@ -61,12 +65,13 @@ pub enum Command {
         channels_only: bool,
     },
 
+    /// Manage configuration settings
+    #[command(subcommand)]
+    Config(ConfigCommand),
+
     /// Manage WASM tools
     #[command(subcommand)]
     Tool(ToolCommand),
-    // Future: Secret management
-    // #[command(subcommand)]
-    // Secret(SecretCommand),
 }
 
 impl Cli {

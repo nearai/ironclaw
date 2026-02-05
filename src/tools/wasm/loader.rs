@@ -7,7 +7,7 @@
 //! # Example: Loading from Directory
 //!
 //! ```text
-//! ~/.near-agent/tools/
+//! ~/.ironclaw/tools/
 //! ├── slack.wasm
 //! ├── slack.capabilities.json
 //! ├── github.wasm
@@ -16,7 +16,7 @@
 //!
 //! ```ignore
 //! let loader = WasmToolLoader::new(runtime, registry);
-//! loader.load_from_dir(Path::new("~/.near-agent/tools/")).await?;
+//! loader.load_from_dir(Path::new("~/.ironclaw/tools/")).await?;
 //! ```
 //!
 //! # Security

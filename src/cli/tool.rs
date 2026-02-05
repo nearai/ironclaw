@@ -13,8 +13,8 @@ use crate::tools::wasm::{CapabilitiesFile, compute_binary_hash};
 /// Default tools directory.
 fn default_tools_dir() -> PathBuf {
     dirs::home_dir()
-        .map(|h| h.join(".near-agent").join("tools"))
-        .unwrap_or_else(|| PathBuf::from(".near-agent/tools"))
+        .map(|h| h.join(".ironclaw").join("tools"))
+        .unwrap_or_else(|| PathBuf::from(".ironclaw/tools"))
 }
 
 #[derive(Subcommand, Debug, Clone)]
@@ -32,7 +32,7 @@ pub enum ToolCommand {
         #[arg(long)]
         capabilities: Option<PathBuf>,
 
-        /// Target directory for installation (default: ~/.near-agent/tools/)
+        /// Target directory for installation (default: ~/.ironclaw/tools/)
         #[arg(short, long)]
         target: Option<PathBuf>,
 
@@ -51,7 +51,7 @@ pub enum ToolCommand {
 
     /// List installed tools
     List {
-        /// Directory to list tools from (default: ~/.near-agent/tools/)
+        /// Directory to list tools from (default: ~/.ironclaw/tools/)
         #[arg(short, long)]
         dir: Option<PathBuf>,
 
@@ -65,7 +65,7 @@ pub enum ToolCommand {
         /// Name of the tool to remove
         name: String,
 
-        /// Directory to remove tool from (default: ~/.near-agent/tools/)
+        /// Directory to remove tool from (default: ~/.ironclaw/tools/)
         #[arg(short, long)]
         dir: Option<PathBuf>,
     },
@@ -75,7 +75,7 @@ pub enum ToolCommand {
         /// Name of the tool or path to .wasm file
         name_or_path: String,
 
-        /// Directory to look for tool (default: ~/.near-agent/tools/)
+        /// Directory to look for tool (default: ~/.ironclaw/tools/)
         #[arg(short, long)]
         dir: Option<PathBuf>,
     },
@@ -420,7 +420,7 @@ async fn list_tools(dir: Option<PathBuf>, verbose: bool) -> anyhow::Result<()> {
 
     if !tools_dir.exists() {
         println!("No tools directory found at {}", tools_dir.display());
-        println!("Install a tool with: near-agent tool install <path>");
+        println!("Install a tool with: ironclaw tool install <path>");
         return Ok(());
     }
 
@@ -674,7 +674,7 @@ mod tests {
     #[test]
     fn test_default_tools_dir() {
         let dir = default_tools_dir();
-        assert!(dir.to_string_lossy().contains(".near-agent"));
+        assert!(dir.to_string_lossy().contains(".ironclaw"));
         assert!(dir.to_string_lossy().contains("tools"));
     }
 }

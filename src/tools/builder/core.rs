@@ -218,7 +218,7 @@ pub struct BuilderConfig {
 impl Default for BuilderConfig {
     fn default() -> Self {
         Self {
-            build_dir: std::env::temp_dir().join("near-agent-builds"),
+            build_dir: std::env::temp_dir().join("ironclaw-builds"),
             max_iterations: 10,
             timeout: Duration::from_secs(600), // 10 minutes
             cleanup_on_failure: false,         // Keep for debugging
@@ -532,9 +532,12 @@ Create alongside the .wasm file to grant capabilities:
             .messages
             .push(ChatMessage::system(self.build_system_prompt(requirement)));
 
-        // Add initial user message
+        // Add initial user message - directive to force immediate tool use
         reason_ctx.messages.push(ChatMessage::user(format!(
-            "Build the {} in directory: {}\n\nRequirements:\n- {}\n\nStart by creating the project structure.",
+            "Build the {} in directory: {}\n\n\
+             Requirements:\n- {}\n\n\
+             IMPORTANT: Use the write_file tool NOW to create Cargo.toml. \
+             Do not explain, plan, or output JSON—immediately call write_file.",
             requirement.name,
             project_dir.display(),
             requirement.description
@@ -551,6 +554,7 @@ Create alongside the .wasm file to grant capabilities:
         let mut current_phase = BuildPhase::Scaffolding;
         let mut last_error: Option<String> = None;
         let mut tools_executed = false;
+        let mut consecutive_text_responses = 0;
 
         loop {
             iteration += 1;
@@ -593,27 +597,65 @@ Create alongside the .wasm file to grant capabilities:
 
             match result {
                 RespondResult::Text(response) => {
-                    // If no tools have been executed, prompt for tool use
-                    if !tools_executed && iteration < 3 {
+                    reason_ctx.messages.push(ChatMessage::assistant(&response));
+
+                    // If tools haven't been executed yet, we're stuck in planning mode
+                    if !tools_executed {
+                        consecutive_text_responses += 1;
+
+                        // Fail fast after 2 consecutive text-only responses
+                        if consecutive_text_responses >= 2 {
+                            logs.push(BuildLog {
+                                timestamp: Utc::now(),
+                                phase: BuildPhase::Failed,
+                                message: "Builder stuck in planning mode".into(),
+                                details: Some(format!(
+                                    "LLM returned {} consecutive text responses without calling tools. \
+                                     Try a more specific requirement.",
+                                    consecutive_text_responses
+                                )),
+                            });
+
+                            return Ok(BuildResult {
+                                build_id,
+                                requirement: requirement.clone(),
+                                artifact_path: project_dir.to_path_buf(),
+                                logs,
+                                success: false,
+                                error: Some(
+                                    "LLM not executing tools - stuck in planning mode".into(),
+                                ),
+                                started_at,
+                                completed_at: Utc::now(),
+                                iterations: iteration,
+                                validation_warnings: Vec::new(),
+                                tests_passed: 0,
+                                tests_failed: 0,
+                                registered: false,
+                            });
+                        }
+
                         tracing::debug!(
-                            "Builder: no tools executed yet (iteration {}), prompting for action",
-                            iteration
+                            "Builder: no tools executed (text response #{}/2), forcing tool use",
+                            consecutive_text_responses
                         );
-                        reason_ctx.messages.push(ChatMessage::assistant(&response));
                         reason_ctx.messages.push(ChatMessage::user(
-                            "Please use the available tools to implement this. Start by creating the necessary files.",
+                            "STOP. Do NOT output text, JSON specs, or explanations. \
+                             Call the write_file tool RIGHT NOW to create Cargo.toml. \
+                             Just call the tool—no commentary.",
                         ));
                         continue;
                     }
 
-                    reason_ctx.messages.push(ChatMessage::assistant(&response));
+                    // Reset counter when tools have been executed (we're in completion phase)
+                    consecutive_text_responses = 0;
 
                     // Check for completion signals
                     let response_lower = response.to_lowercase();
                     if response_lower.contains("build complete")
                         || response_lower.contains("successfully built")
                         || response_lower.contains("all tests pass")
-                        || (tools_executed && response_lower.contains("complete"))
+                        || response_lower.contains("complete")
                     {
                         logs.push(BuildLog {
                             timestamp: Utc::now(),

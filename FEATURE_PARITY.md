@@ -208,7 +208,7 @@ This document tracks feature parity between IronClaw (Rust implementation) and O
 | Dynamic loading | ✅ | ✅ | WASM modules |
 | Manifest validation | ✅ | ✅ | WASM metadata |
 | HTTP path registration | ✅ | ❌ | Plugin routes |
-| Workspace-relative install | ✅ | ✅ | ~/.near-agent/tools/ |
+| Workspace-relative install | ✅ | ✅ | ~/.ironclaw/tools/ |
 | Channel plugins | ✅ | ✅ | WASM channels |
 | Auth plugins | ✅ | ❌ | |
 | Memory plugins | ✅ | ❌ | Custom backends |
@@ -233,7 +233,7 @@ This document tracks feature parity between IronClaw (Rust implementation) and O
 | Config validation/schema | ✅ | ✅ | Type-safe Config struct |
 | Hot-reload | ✅ | ❌ | |
 | Legacy migration | ✅ | ➖ | |
-| State directory | ✅ `~/.openclaw-state/` | ✅ `~/.near-agent/` | |
+| State directory | ✅ `~/.openclaw-state/` | ✅ `~/.ironclaw/` | |
 | Credentials directory | ✅ | ✅ | Session files |
 
 ### Owner: _Unassigned_

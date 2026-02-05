@@ -1,4 +1,4 @@
-//! Error types for the NEAR Agent.
+//! Error types for IronClaw.
 
 use std::time::Duration;
 
@@ -46,6 +46,9 @@ pub enum Error {
 pub enum ConfigError {
     #[error("Missing required environment variable: {0}")]
     MissingEnvVar(String),
+
+    #[error("Missing required configuration: {key}. {hint}")]
+    MissingRequired { key: String, hint: String },
 
     #[error("Invalid configuration value for {key}: {message}")]
     InvalidValue { key: String, message: String },

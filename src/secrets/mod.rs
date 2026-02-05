@@ -4,6 +4,7 @@
 //! - AES-256-GCM encrypted secret storage
 //! - Per-secret key derivation (HKDF-SHA256)
 //! - PostgreSQL persistence
+//! - OS keychain integration for master key
 //! - Access control for WASM tools
 //!
 //! # Security Model
@@ -28,10 +29,16 @@
 //! └─────────────────────────────────────────────────────────────────────────────┘
 //! ```
 //!
+//! # Master Key Storage
+//!
+//! The master key for encrypting secrets can come from:
+//! - **OS Keychain** (recommended for local installs): Auto-generated and stored securely
+//! - **Environment variable** (for CI/Docker): Set `SECRETS_MASTER_KEY`
+//!
 //! # Example
 //!
 //! ```ignore
-//! use near_agent::secrets::{SecretsStore, PostgresSecretsStore, SecretsCrypto, CreateSecretParams};
+//! use ironclaw::secrets::{SecretsStore, PostgresSecretsStore, SecretsCrypto, CreateSecretParams};
 //! use secrecy::SecretString;
 //!
 //! // Initialize crypto with master key from environment
@@ -52,6 +59,7 @@
 //! ```
 
 mod crypto;
+pub mod keychain;
 mod store;
 mod types;
 

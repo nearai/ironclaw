@@ -2,7 +2,7 @@
 name = "whatsapp-channel"
 version = "0.1.0"
 edition = "2021"
-description = "WhatsApp channel for near-agent using the Cloud API"
+description = "WhatsApp Cloud API channel for IronClaw"
 
 [lib]
 crate-type = ["cdylib"]

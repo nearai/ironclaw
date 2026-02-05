@@ -1,7 +1,7 @@
 //! Session management for NEAR AI authentication.
 //!
 //! Handles session token persistence, expiration detection, and renewal via
-//! OAuth flow. Tokens are stored in `~/.near-agent/session.json` and refreshed
+//! OAuth flow. Tokens are stored in `~/.ironclaw/session.json` and refreshed
 //! automatically when expired.
 
 use std::path::PathBuf;
@@ -29,7 +29,7 @@ pub struct SessionData {
 pub struct SessionConfig {
     /// Base URL for auth endpoints (e.g., https://private.near.ai).
     pub auth_base_url: String,
-    /// Path to session file (e.g., ~/.near-agent/session.json).
+    /// Path to session file (e.g., ~/.ironclaw/session.json).
     pub session_path: PathBuf,
     /// Port range for OAuth callback server.
     pub callback_port_range: (u16, u16),
@@ -45,11 +45,11 @@ impl Default for SessionConfig {
     }
 }
 
-/// Get the default session file path (~/.near-agent/session.json).
+/// Get the default session file path (~/.ironclaw/session.json).
 pub fn default_session_path() -> PathBuf {
     dirs::home_dir()
         .unwrap_or_else(|| PathBuf::from("."))
-        .join(".near-agent")
+        .join(".ironclaw")
         .join("session.json")
 }
 
@@ -631,6 +631,6 @@ mod tests {
     fn test_default_session_path() {
         let path = default_session_path();
         assert!(path.ends_with("session.json"));
-        assert!(path.to_string_lossy().contains(".near-agent"));
+        assert!(path.to_string_lossy().contains(".ironclaw"));
     }
 }

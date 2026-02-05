@@ -5,58 +5,60 @@
 <h1 align="center">IronClaw</h1>
 
 <p align="center">
-  <strong>LLM-powered autonomous agent for the NEAR AI marketplace</strong>
+  <strong>Your secure personal AI assistant, always on your side</strong>
 </p>
 
 <p align="center">
+  <a href="#philosophy">Philosophy</a> •
   <a href="#features">Features</a> •
-  <a href="#openclaw-feature-parity">Parity</a> •
   <a href="#installation">Installation</a> •
   <a href="#configuration">Configuration</a> •
-  <a href="#architecture">Architecture</a> •
-  <a href="#security">Security</a>
+  <a href="#security">Security</a> •
+  <a href="#architecture">Architecture</a>
 </p>
 
 ---
 
+## Philosophy
+
+IronClaw is built on a simple principle: **your AI assistant should work for you, not against you**.
+
+In a world where AI systems are increasingly opaque about data handling and aligned with corporate interests, IronClaw takes a different approach:
+
+- **Your data stays yours** - All information is stored locally, encrypted, and never leaves your control
+- **Transparency by design** - Open source, auditable, no hidden telemetry or data harvesting
+- **Self-expanding capabilities** - Build new tools on the fly without waiting for vendor updates
+- **Defense in depth** - Multiple security layers protect against prompt injection and data exfiltration
+
+IronClaw is the AI assistant you can actually trust with your personal and professional life.
+
 ## Features
 
-- **Multi-channel input** - CLI, HTTP webhooks, Slack, Telegram
-- **Parallel job execution** - Concurrent task processing with isolated contexts
-- **Extensible tools** - Built-in tools + MCP protocol + WASM sandbox
-- **Persistent memory** - Hybrid search (FTS + vector) with chunked documents
-- **Prompt injection defense** - Pattern detection, content sanitization, policy enforcement
-- **Self-repair** - Automatic detection and recovery of stuck jobs
-- **Heartbeat system** - Proactive periodic execution for background tasks
+### Security First
 
-## OpenClaw Feature Parity
+- **WASM Sandbox** - Untrusted tools run in isolated WebAssembly containers with capability-based permissions
+- **Credential Protection** - Secrets are never exposed to tools; injected at the host boundary with leak detection
+- **Prompt Injection Defense** - Pattern detection, content sanitization, and policy enforcement
+- **Endpoint Allowlisting** - HTTP requests only to explicitly approved hosts and paths
 
-IronClaw is a Rust reimplementation inspired by [OpenClaw](https://github.com/openclaw/openclaw). See [FEATURE_PARITY.md](FEATURE_PARITY.md) for the complete tracking matrix.
+### Always Available
 
-### Status Summary
+- **Multi-channel** - Reach your assistant via CLI, Telegram, WhatsApp, Slack, or HTTP webhooks
+- **Heartbeat System** - Proactive background execution for monitoring and maintenance tasks
+- **Parallel Jobs** - Handle multiple requests concurrently with isolated contexts
+- **Self-repair** - Automatic detection and recovery of stuck operations
 
-| Category | Status | Notes |
-|----------|--------|-------|
-| **Core Agent** | ✅ Complete | Sessions, workers, routing, context compaction |
-| **Channels** | 🚧 Partial | TUI, HTTP, REPL, WASM channels done; messaging platforms pending |
-| **Tools** | ✅ Complete | Built-in, MCP, WASM sandbox, dynamic builder |
-| **Memory** | ✅ Complete | Hybrid search, embeddings, workspace filesystem |
-| **Security** | ✅ Complete | WASM sandbox, prompt injection, leak detection |
-| **Automation** | 🚧 Partial | Heartbeat done; cron, hooks pending |
-| **Gateway** | ❌ Pending | WebSocket control plane, service management |
-| **Web UI** | ❌ Pending | Control dashboard, WebChat |
-| **Mobile/Desktop** | 🚫 Out of scope | Focus on server-side initially |
+### Self-Expanding
 
-### Key Differences from OpenClaw
+- **Dynamic Tool Building** - Describe what you need, and IronClaw builds it as a WASM tool
+- **MCP Protocol** - Connect to Model Context Protocol servers for additional capabilities
+- **Plugin Architecture** - Drop in new WASM tools and channels without restarting
 
-- **Rust vs TypeScript** - Native performance, single binary
-- **WASM sandbox vs Docker** - Lightweight, capability-based security
-- **PostgreSQL vs SQLite** - Production-ready persistence
-- **NEAR AI primary** - Session-based auth with model proxy
+### Persistent Memory
 
-### Contributing
-
-Pick an unassigned feature area in [FEATURE_PARITY.md](FEATURE_PARITY.md) and claim it.
+- **Hybrid Search** - Full-text + vector search using Reciprocal Rank Fusion
+- **Workspace Filesystem** - Flexible path-based storage for notes, logs, and context
+- **Identity Files** - Maintain consistent personality and preferences across sessions
 
 ## Installation
 
@@ -64,14 +66,14 @@ Pick an unassigned feature area in [FEATURE_PARITY.md](FEATURE_PARITY.md) and cl
 
 - Rust 1.85+
 - PostgreSQL 15+ with pgvector extension
-- NEAR AI session token
+- NEAR AI session token (or other LLM provider)
 
 ### Build
 
 ```bash
 # Clone the repository
-git clone https://github.com/nearai/near-agent.git
-cd near-agent
+git clone https://github.com/nearai/ironclaw.git
+cd ironclaw
 
 # Build
 cargo build --release
@@ -84,10 +86,10 @@ cargo test
 
 ```bash
 # Create database
-createdb near_agent
+createdb ironclaw
 
 # Enable pgvector
-psql near_agent -c "CREATE EXTENSION IF NOT EXISTS vector;"
+psql ironclaw -c "CREATE EXTENSION IF NOT EXISTS vector;"
 
 # Run migrations
 refinery migrate -c refinery.toml
@@ -99,12 +101,13 @@ Copy `.env.example` to `.env` and configure:
 
 ```bash
 # Required
-DATABASE_URL=postgres://user:pass@localhost/near_agent
+DATABASE_URL=postgres://user:pass@localhost/ironclaw
 NEARAI_SESSION_TOKEN=sess_...
 
 # Optional: Enable channels
-SLACK_BOT_TOKEN=xoxb-...
 TELEGRAM_BOT_TOKEN=...
+WHATSAPP_ACCESS_TOKEN=...
+SLACK_BOT_TOKEN=xoxb-...
 HTTP_PORT=8080
 ```
 
@@ -118,15 +121,51 @@ HTTP_PORT=8080
 | `AGENT_MAX_PARALLEL_JOBS` | Max concurrent jobs (default: 5) | No |
 | `SECRETS_MASTER_KEY` | 32+ byte key for secret encryption | For secrets |
 
+## Security
+
+IronClaw implements defense in depth to protect your data and prevent misuse.
+
+### WASM Sandbox
+
+All untrusted tools run in isolated WebAssembly containers:
+
+- **Capability-based permissions** - Explicit opt-in for HTTP, secrets, tool invocation
+- **Endpoint allowlisting** - HTTP requests only to approved hosts/paths
+- **Credential injection** - Secrets injected at host boundary, never exposed to WASM code
+- **Leak detection** - Scans requests and responses for secret exfiltration attempts
+- **Rate limiting** - Per-tool request limits to prevent abuse
+- **Resource limits** - Memory, CPU, and execution time constraints
+
+```
+WASM ──► Allowlist ──► Leak Scan ──► Credential ──► Execute ──► Leak Scan ──► WASM
+         Validator     (request)     Injector       Request     (response)
+```
+
+### Prompt Injection Defense
+
+External content passes through multiple security layers:
+
+- Pattern-based detection of injection attempts
+- Content sanitization and escaping
+- Policy rules with severity levels (Block/Warn/Review/Sanitize)
+- Tool output wrapping for safe LLM context injection
+
+### Data Protection
+
+- All data stored locally in your PostgreSQL database
+- Secrets encrypted with AES-256-GCM
+- No telemetry, analytics, or data sharing
+- Full audit log of all tool executions
+
 ## Architecture
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
 │                         Channels                                 │
-│  ┌─────┐  ┌──────┐  ┌───────┐  ┌──────────┐                    │
-│  │ CLI │  │ HTTP │  │ Slack │  │ Telegram │                    │
-│  └──┬──┘  └──┬───┘  └───┬───┘  └────┬─────┘                    │
-│     └────────┴──────────┴───────────┘                           │
+│  ┌─────┐  ┌──────────┐  ┌──────────┐  ┌───────┐                │
+│  │ CLI │  │ Telegram │  │ WhatsApp │  │ Slack │                │
+│  └──┬──┘  └────┬─────┘  └────┬─────┘  └───┬───┘                │
+│     └──────────┴─────────────┴────────────┘                     │
 │                         │                                        │
 │                    ┌────▼────┐                                  │
 │                    │  Router │  Intent classification           │
@@ -165,31 +204,6 @@ HTTP_PORT=8080
 | **Workspace** | Persistent memory with hybrid search |
 | **Safety Layer** | Prompt injection defense and content sanitization |
 
-## Security
-
-### WASM Sandbox
-
-Untrusted tools run in a sandboxed WASM environment with:
-
-- **Capability-based permissions** - Explicit opt-in for HTTP, secrets, tool invocation
-- **Endpoint allowlisting** - HTTP requests only to approved hosts/paths
-- **Credential injection** - Secrets injected at host boundary, never exposed to WASM
-- **Leak detection** - Scans requests and responses for secret exfiltration
-- **Rate limiting** - Per-tool request limits (per-minute and per-hour)
-- **Resource limits** - Memory, CPU, and execution time constraints
-
-```
-WASM ──► Allowlist ──► Leak Scan ──► Credential ──► Execute ──► Leak Scan ──► WASM
-         Validator     (request)     Injector       Request     (response)
-```
-
-### Prompt Injection Defense
-
-- Pattern-based detection of injection attempts
-- Content sanitization and escaping
-- Policy rules with severity levels (Block/Warn/Review/Sanitize)
-- Tool output wrapping for LLM context
-
 ## Usage
 
 ### CLI Mode
@@ -199,7 +213,7 @@ WASM ──► Allowlist ──► Leak Scan ──► Credential ──► Exec
 cargo run
 
 # With debug logging
-RUST_LOG=near_agent=debug cargo run
+RUST_LOG=ironclaw=debug cargo run
 ```
 
 ### HTTP Server
@@ -211,7 +225,7 @@ HTTP_PORT=8080 cargo run
 # Send a request
 curl -X POST http://localhost:8080/webhook \
   -H "Content-Type: application/json" \
-  -d '{"message": "Hello, agent!"}'
+  -d '{"message": "Hello, IronClaw!"}'
 ```
 
 ## Development
@@ -229,6 +243,17 @@ cargo test
 # Run specific test
 cargo test test_name
 ```
+
+## OpenClaw Heritage
+
+IronClaw is a Rust reimplementation inspired by [OpenClaw](https://github.com/openclaw/openclaw). See [FEATURE_PARITY.md](FEATURE_PARITY.md) for the complete tracking matrix.
+
+Key differences:
+
+- **Rust vs TypeScript** - Native performance, memory safety, single binary
+- **WASM sandbox vs Docker** - Lightweight, capability-based security
+- **PostgreSQL vs SQLite** - Production-ready persistence
+- **Security-first design** - Multiple defense layers, credential protection
 
 ## License
 

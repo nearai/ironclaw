@@ -1,9 +1,17 @@
-# NEAR Agent Development Guide
+# IronClaw Development Guide
 
 ## Project Overview
 
-LLM-powered autonomous agent for the NEAR AI marketplace. Features:
-- **Multi-channel input**: Full TUI (Ratatui), HTTP webhook with secret auth (Slack/Telegram stubs)
+**IronClaw** is a secure personal AI assistant that protects your data and expands its capabilities on the fly.
+
+### Core Philosophy
+- **User-first security** - Your data stays yours, encrypted and local
+- **Self-expanding** - Build new tools dynamically without vendor dependency
+- **Defense in depth** - Multiple security layers against prompt injection and data exfiltration
+- **Always available** - Multi-channel access with proactive background execution
+
+### Features
+- **Multi-channel input**: TUI (Ratatui), HTTP webhooks, Telegram, WhatsApp, Slack (WASM channels)
 - **Parallel job execution** with state machine and self-repair for stuck jobs
 - **Extensible tools**: Built-in tools, WASM sandbox, MCP client, dynamic builder
 - **Persistent memory**: Workspace with hybrid search (FTS + vector via RRF)
@@ -26,7 +34,7 @@ cargo test
 cargo test test_name
 
 # Run with logging
-RUST_LOG=near_agent=debug cargo run
+RUST_LOG=ironclaw=debug cargo run
 ```
 
 ## Project Structure
@@ -201,7 +209,7 @@ Pending -> InProgress -> Completed -> Submitted -> Accepted
 
 Environment variables (see `.env.example`):
 ```bash
-DATABASE_URL=postgres://user:pass@localhost/near_agent
+DATABASE_URL=postgres://user:pass@localhost/ironclaw
 
 # NEAR AI (required)
 NEARAI_SESSION_TOKEN=sess_...
@@ -209,7 +217,7 @@ NEARAI_MODEL=claude-3-5-sonnet-20241022
 NEARAI_BASE_URL=https://private.near.ai
 
 # Agent settings
-AGENT_NAME=near-agent
+AGENT_NAME=ironclaw
 MAX_PARALLEL_JOBS=5
 
 # Embeddings (for semantic memory search)
@@ -328,13 +336,13 @@ Key test patterns:
 
 ```bash
 # Verbose logging
-RUST_LOG=near_agent=trace cargo run
+RUST_LOG=ironclaw=trace cargo run
 
 # Just the agent module
-RUST_LOG=near_agent::agent=debug cargo run
+RUST_LOG=ironclaw::agent=debug cargo run
 
 # With HTTP request logging
-RUST_LOG=near_agent=debug,tower_http=debug cargo run
+RUST_LOG=ironclaw=debug,tower_http=debug cargo run
 ```
 
 ## Code Style

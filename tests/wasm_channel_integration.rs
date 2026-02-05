@@ -9,8 +9,8 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use near_agent::channels::Channel;
-use near_agent::channels::wasm::{
+use ironclaw::channels::Channel;
+use ironclaw::channels::wasm::{
     ChannelCapabilities, EmitRateLimitConfig, PreparedChannelModule, RegisteredEndpoint,
     WasmChannel, WasmChannelRouter, WasmChannelRuntime, WasmChannelRuntimeConfig,
 };
@@ -238,7 +238,7 @@ mod loader_tests {
     async fn test_discover_channels_empty_dir() {
         let dir = TempDir::new().expect("Failed to create temp dir");
 
-        let channels = near_agent::channels::wasm::discover_channels(dir.path())
+        let channels = ironclaw::channels::wasm::discover_channels(dir.path())
             .await
             .expect("Discovery failed");
 
@@ -253,7 +253,7 @@ mod loader_tests {
         std::fs::File::create(dir.path().join("slack.wasm")).expect("Failed to create file");
         std::fs::File::create(dir.path().join("telegram.wasm")).expect("Failed to create file");
 
-        let channels = near_agent::channels::wasm::discover_channels(dir.path())
+        let channels = ironclaw::channels::wasm::discover_channels(dir.path())
             .await
             .expect("Discovery failed");
 
@@ -284,7 +284,7 @@ mod loader_tests {
             )
             .expect("Failed to write capabilities");
 
-        let channels = near_agent::channels::wasm::discover_channels(dir.path())
+        let channels = ironclaw::channels::wasm::discover_channels(dir.path())
             .await
             .expect("Discovery failed");
 
@@ -301,7 +301,7 @@ mod loader_tests {
         std::fs::File::create(dir.path().join("config.json")).expect("Failed to create file");
         std::fs::File::create(dir.path().join("channel.wasm")).expect("Failed to create file");
 
-        let channels = near_agent::channels::wasm::discover_channels(dir.path())
+        let channels = ironclaw::channels::wasm::discover_channels(dir.path())
             .await
             .expect("Discovery failed");
 
@@ -388,7 +388,7 @@ mod capabilities_tests {
 
 mod message_emission_tests {
     use super::*;
-    use near_agent::channels::wasm::{ChannelHostState, EmittedMessage};
+    use ironclaw::channels::wasm::{ChannelHostState, EmittedMessage};
 
     #[test]
     fn test_emit_message_basic() {

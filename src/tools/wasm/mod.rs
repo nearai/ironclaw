@@ -51,8 +51,8 @@
 //! # Example
 //!
 //! ```ignore
-//! use near_agent::tools::wasm::{WasmToolRuntime, WasmRuntimeConfig, WasmToolWrapper};
-//! use near_agent::tools::wasm::Capabilities;
+//! use ironclaw::tools::wasm::{WasmToolRuntime, WasmRuntimeConfig, WasmToolWrapper};
+//! use ironclaw::tools::wasm::Capabilities;
 //! use std::sync::Arc;
 //!
 //! // Create runtime

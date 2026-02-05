@@ -2,7 +2,7 @@
 name = "telegram-channel"
 version = "0.1.0"
 edition = "2021"
-description = "Telegram Bot API channel for NEAR Agent"
+description = "Telegram Bot API channel for IronClaw"
 license = "MIT OR Apache-2.0"
 
 [lib]

@@ -1,6 +1,6 @@
 # Slack WASM Tool
 
-A standalone WASM component that provides Slack integration for NEAR Agent. This serves as both a functional tool and a template for building custom WASM tools.
+A standalone WASM component that provides Slack integration for IronClaw. This serves as both a functional tool and a template for building custom WASM tools.
 
 ## Features
 
@@ -50,9 +50,9 @@ target/wasm32-wasip2/release/slack_tool.wasm
 Copy the WASM and capabilities files to the agent's tools directory:
 
 ```bash
-mkdir -p ~/.near-agent/tools
-cp target/wasm32-wasip2/release/slack_tool.wasm ~/.near-agent/tools/slack.wasm
-cp slack.capabilities.json ~/.near-agent/tools/
+mkdir -p ~/.ironclaw/tools
+cp target/wasm32-wasip2/release/slack_tool.wasm ~/.ironclaw/tools/slack.wasm
+cp slack.capabilities.json ~/.ironclaw/tools/
 ```
 
 ### Option B: Database Storage (Production)
@@ -60,7 +60,7 @@ cp slack.capabilities.json ~/.near-agent/tools/
 Use the agent CLI or API to store the tool:
 
 ```bash
-near-agent tool install \
+ironclaw tool install \
   --name slack \
   --wasm target/wasm32-wasip2/release/slack_tool.wasm \
   --capabilities slack.capabilities.json
@@ -71,7 +71,7 @@ near-agent tool install \
 Store your Slack bot token as a secret:
 
 ```bash
-near-agent secret set slack_bot_token "xoxb-your-token-here"
+ironclaw secret set slack_bot_token "xoxb-your-token-here"
 ```
 
 Or via SQL:
@@ -88,7 +88,7 @@ VALUES ('your_user_id', 'slack_bot_token', ...);
 {
   "action": "send_message",
   "channel": "#general",
-  "text": "Hello from the NEAR Agent!"
+  "text": "Hello from IronClaw!"
 }
 ```
 
@@ -214,7 +214,7 @@ world sandboxed-tool {
 
 Ensure you've stored the secret:
 ```bash
-near-agent secret set slack_bot_token "xoxb-..."
+ironclaw secret set slack_bot_token "xoxb-..."
 ```
 
 ### "Endpoint not in allowlist"

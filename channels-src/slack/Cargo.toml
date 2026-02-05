@@ -2,7 +2,7 @@
 name = "slack-channel"
 version = "0.1.0"
 edition = "2021"
-description = "Slack Events API channel for NEAR Agent"
+description = "Slack Events API channel for IronClaw"
 license = "MIT OR Apache-2.0"
 
 [lib]

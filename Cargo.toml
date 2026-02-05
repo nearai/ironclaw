@@ -1,9 +1,9 @@
 [package]
-name = "near-agent"
+name = "ironclaw"
 version = "0.1.0"
 edition = "2024"
 rust-version = "1.85"
-description = "LLM-powered autonomous agent for the NEAR AI marketplace"
+description = "Secure personal AI assistant that protects your data and expands its capabilities on the fly"
 license = "MIT OR Apache-2.0"
 
 [dependencies]
@@ -97,6 +97,15 @@ hyper = { version = "1.5", features = ["server", "http1", "http2"] }
 hyper-util = { version = "0.1", features = ["server", "tokio", "http1", "http2"] }
 http-body-util = "0.1"
 bytes = "1"
+
+# macOS keychain
+[target.'cfg(target_os = "macos")'.dependencies]
+security-framework = "3"
+
+# Linux secret-service (GNOME Keyring, KWallet)
+[target.'cfg(target_os = "linux")'.dependencies]
+secret-service = { version = "4", features = ["rt-tokio-crypto-rust"] }
+zbus = "4"
 
 [dev-dependencies]
 tokio-test = "0.4"
