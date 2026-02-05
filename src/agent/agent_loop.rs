@@ -2,6 +2,29 @@
 
 use std::sync::Arc;
 
+/// Escape special characters for Telegram's legacy Markdown.
+///
+/// In Telegram's Markdown mode, these characters have special meaning:
+/// - `_` starts/ends italic
+/// - `*` starts/ends bold
+/// - `` ` `` starts/ends code
+/// - `[` starts a link
+///
+/// We escape them with backslash so dynamic content doesn't break formatting.
+fn escape_telegram_markdown(s: &str) -> String {
+    let mut result = String::with_capacity(s.len());
+    for c in s.chars() {
+        match c {
+            '_' | '*' | '`' | '[' => {
+                result.push('\\');
+                result.push(c);
+            }
+            _ => result.push(c),
+        }
+    }
+    result
+}
+
 use futures::StreamExt;
 use tokio::sync::Mutex;
 use uuid::Uuid;
@@ -341,17 +364,22 @@ impl Agent {
                 } else {
                     params_preview
                 };
+                // Escape Markdown special chars in dynamic values to avoid breaking
+                // Telegram's Markdown parser (underscores, asterisks, backticks, brackets)
+                let tool_name_escaped = escape_telegram_markdown(&tool_name);
+                let description_escaped = escape_telegram_markdown(&description);
+                // Params go inside a code block, so no escaping needed there
                 Ok(Some(format!(
                     "🔒 Tool requires approval:\n\n\
-                     **Tool:** {}\n\
-                     **Description:** {}\n\
-                     **Parameters:** ```\n{}\n```\n\n\
+                     *Tool:* {}\n\
+                     *Description:* {}\n\
+                     *Parameters:*\n```\n{}\n```\n\n\
                      Reply with:\n\
-                     - `yes` or `approve` to allow this tool\n\
-                     - `always` to always allow this tool in this session\n\
-                     - `no` or `deny` to reject\n\n\
+                     • yes or approve to allow this tool\n\
+                     • always to always allow this tool in this session\n\
+                     • no or deny to reject\n\n\
                      Request ID: {}",
-                    tool_name, description, params_truncated, request_id
+                    tool_name_escaped, description_escaped, params_truncated, request_id
                 )))
             }
         }

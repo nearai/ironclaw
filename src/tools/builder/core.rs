@@ -343,105 +343,167 @@ Language: {language:?}
 
 ## WASM Tool Requirements
 
-You are building a WASM tool for an autonomous agent. The tool must:
+You are building a WASM Component tool for an autonomous agent using the WASM Component Model.
+The tool MUST use `wit_bindgen` and `cargo-component` to build.
 
-1. **Implement the guest interface** - Export a `run` function that takes JSON input and returns JSON output
+## Available Host Functions (from WIT interface)
 
-2. **Use only available host functions**:
-   - `host_log(level, message)` - Log messages (levels: debug, info, warn, error)
-   - `host_time()` - Get current Unix timestamp
-   - `host_http_request(method, url, headers, body)` - Make HTTP requests (if capability granted)
-   - `host_workspace_read(path)` - Read from workspace (if capability granted)
-   - `host_workspace_write(path, content)` - Write to workspace (if capability granted)
-   - `host_get_secret(name)` - Get injected secret (if capability granted)
-
-3. **Handle errors gracefully** - Return error results, never panic
-
-4. **Be deterministic** - Same input should produce same output (except for time/HTTP)
-
-## WASM Tool Template (Rust)
+The host provides these functions via `near::agent::host`:
 
 ```rust
-// Cargo.toml
+// Logging (always available)
+host::log(level: LogLevel, message: &str);  // LogLevel: Trace, Debug, Info, Warn, Error
+
+// Time (always available)
+host::now_millis() -> u64;  // Unix timestamp in milliseconds
+
+// Workspace (if capability granted)
+host::workspace_read(path: &str) -> Option<String>;
+
+// HTTP (if capability granted)
+host::http_request(method: &str, url: &str, headers_json: &str, body: Option<Vec<u8>>)
+    -> Result<HttpResponse, String>;
+// HttpResponse has: status: u16, headers_json: String, body: Vec<u8>
+
+// Tool invocation (if capability granted)
+host::tool_invoke(alias: &str, params_json: &str) -> Result<String, String>;
+
+// Secrets (if capability granted) - can only CHECK existence, not read values
+host::secret_exists(name: &str) -> bool;
+```
+
+## Project Structure
+
+```
+my_tool/
+├── Cargo.toml
+├── wit/
+│   └── tool.wit      # Copy from agent's wit/tool.wit
+└── src/
+    └── lib.rs
+```
+
+## Cargo.toml Template
+
+```toml
 [package]
-name = "tool_name"
+name = "my_tool"
 version = "0.1.0"
-edition = "2024"
+edition = "2021"
 
 [lib]
 crate-type = ["cdylib"]
 
 [dependencies]
+wit-bindgen = "0.41"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+```
 
-// src/lib.rs
+## src/lib.rs Template
+
+```rust
+// Generate bindings from the WIT interface
+wit_bindgen::generate!({
+    world: "sandboxed-tool",
+    path: "wit/tool.wit",
+});
+
 use serde::{Deserialize, Serialize};
+use exports::near::agent::tool::{Guest, Request, Response};
+use near::agent::host::{self, LogLevel};
 
+// Your input/output types
 #[derive(Deserialize)]
-struct Input {
-    // Define your input parameters
+struct MyInput {
+    // Define parameters here
 }
 
 #[derive(Serialize)]
-struct Output {
-    // Define your output structure
+struct MyOutput {
+    // Define output here
 }
 
-// Host function imports
-extern "C" {
-    fn host_log(level: i32, ptr: *const u8, len: usize);
+struct MyTool;
+
+impl Guest for MyTool {
+    fn execute(req: Request) -> Response {
+        // Parse input
+        let input: MyInput = match serde_json::from_str(&req.params) {
+            Ok(i) => i,
+            Err(e) => return Response {
+                output: None,
+                error: Some(format!("Invalid input: {}", e)),
+            },
+        };
+
+        host::log(LogLevel::Info, &format!("Processing request..."));
+
+        // Your implementation here
+        let output = MyOutput { /* ... */ };
+
+        // Return success
+        Response {
+            output: Some(serde_json::to_string(&output).unwrap()),
+            error: None,
+        }
+    }
+
+    fn schema() -> String {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                // Define your JSON Schema here
+            },
+            "required": []
+        }).to_string()
+    }
+
+    fn description() -> String {
+        "Description of what this tool does".to_string()
+    }
 }
 
-fn log_info(msg: &str) {
-    unsafe { host_log(1, msg.as_ptr(), msg.len()); }
-}
-
-#[no_mangle]
-pub extern "C" fn run(input_ptr: *const u8, input_len: usize) -> *mut u8 {
-    // Parse input
-    let input_bytes = unsafe { std::slice::from_raw_parts(input_ptr, input_len) };
-    let input: Input = match serde_json::from_slice(input_bytes) {
-        Ok(i) => i,
-        Err(e) => return error_response(&format!("Invalid input: {}", e)),
-    };
-
-    // Your implementation here
-    let output = Output { /* ... */ };
-
-    // Return output
-    let json = serde_json::to_vec(&output).unwrap();
-    let ptr = json.as_ptr() as *mut u8;
-    std::mem::forget(json);
-    ptr
-}
-
-fn error_response(msg: &str) -> *mut u8 {
-    let json = serde_json::json!({"error": msg}).to_string();
-    let ptr = json.as_ptr() as *mut u8;
-    std::mem::forget(json);
-    ptr
-}
+export!(MyTool);
 ```
 
-## Build Commands for WASM
+## Build Commands
 
 ```bash
-# Add WASM target
-rustup target add wasm32-wasip2
+# Install cargo-component (one time)
+cargo install cargo-component
 
-# Build
-cargo build --target wasm32-wasip2 --release
+# Build the WASM component
+cargo component build --release
 
-# Output will be at: target/wasm32-wasip2/release/tool_name.wasm
+# Output: target/wasm32-wasip2/release/my_tool.wasm
 ```
 
-## Tool Capabilities
+## Capabilities File (my_tool.capabilities.json)
 
-When defining capabilities for your tool, specify which host functions it needs:
-- `http`: Allows HTTP requests to specified endpoints
-- `workspace`: Allows reading/writing workspace files
-- `secrets`: Allows accessing injected secrets
+Create alongside the .wasm file to grant capabilities:
+
+```json
+{
+    "http": {
+        "allowed_endpoints": [
+            {"host": "api.example.com", "path_prefix": "/v1/"}
+        ]
+    },
+    "workspace": true,
+    "secrets": {
+        "allowed": ["API_KEY"]
+    }
+}
+```
+
+## Important Notes
+
+1. NEVER panic - always return Response with error field set
+2. Secrets are NEVER exposed to WASM - use placeholders like `{API_KEY}` in URLs
+   and the host will inject the real value
+3. HTTP requests are rate-limited and only allowed to endpoints in capabilities
+4. Keep the tool focused on one thing - small, composable tools are better
 
 "#
         .to_string()
@@ -714,11 +776,20 @@ impl SoftwareBuilder for LlmSoftwareBuilder {
 
 Description: {}
 
+IMPORTANT: If this is a "tool" that the agent will use (e.g., "calendar tool", "email tool",
+"API client tool"), you MUST use:
+- software_type: "wasm_tool"
+- language: "rust"
+
+Only use cli_binary/script/library for software meant for human end-users, not agent tools.
+
 Respond with a JSON object containing:
 - name: A short identifier (snake_case)
 - description: What the software should do
 - software_type: One of "wasm_tool", "cli_binary", "library", "script", "web_service"
+  (PREFER "wasm_tool" for agent-usable tools)
 - language: One of "rust", "python", "typescript", "javascript", "go", "bash"
+  (PREFER "rust" for wasm_tool)
 - input_spec: Expected input format (optional)
 - output_spec: Expected output format (optional)
 - dependencies: List of external dependencies needed
@@ -806,8 +877,10 @@ impl Tool for BuildSoftwareTool {
     }
 
     fn description(&self) -> &str {
-        "Build software from a description. Can create WASM tools, CLI applications, scripts, \
-         and more. The builder will scaffold, implement, compile, and test the software iteratively."
+        "Build software from a description. IMPORTANT: For tools the agent will use, \
+         ALWAYS build Rust WASM tools (type: wasm_tool, language: rust). Only use cli_binary, \
+         script, or other types for software meant for human users. The builder scaffolds, \
+         implements, compiles, and tests iteratively."
     }
 
     fn parameters_schema(&self) -> serde_json::Value {

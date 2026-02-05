@@ -266,8 +266,10 @@ impl Tool for MemoryReadTool {
     }
 
     fn description(&self) -> &str {
-        "Read a file from the workspace. Use this to read identity files, \
-         heartbeat checklist, memory, daily logs, or any custom file."
+        "Read a file from the workspace memory (database-backed storage). \
+         Use this to read files shown by memory_tree. NOT for local filesystem files \
+         (use read_file for those). Works with identity files, heartbeat checklist, \
+         memory, daily logs, or any custom workspace path."
     }
 
     fn parameters_schema(&self) -> serde_json::Value {
@@ -381,8 +383,9 @@ impl Tool for MemoryTreeTool {
     }
 
     fn description(&self) -> &str {
-        "View the workspace structure as a tree. Use this to explore \
-         the workspace hierarchy and discover available files and directories."
+        "View the workspace memory structure as a tree (database-backed storage). \
+         Use memory_read to read files shown here, NOT read_file. \
+         The workspace is separate from the local filesystem."
     }
 
     fn parameters_schema(&self) -> serde_json::Value {

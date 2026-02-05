@@ -119,7 +119,8 @@ impl Tool for ReadFileTool {
     }
 
     fn description(&self) -> &str {
-        "Read the contents of a file. Returns the file content as text. \
+        "Read a file from the LOCAL FILESYSTEM. NOT for workspace memory paths \
+         (use memory_read for those). Returns file content as text. \
          For large files, you can specify offset and limit to read a portion."
     }
 
@@ -239,8 +240,9 @@ impl Tool for WriteFileTool {
     }
 
     fn description(&self) -> &str {
-        "Write content to a file. Creates the file if it doesn't exist, overwrites if it does. \
-         Parent directories are created automatically. Use apply_patch for targeted edits to existing files."
+        "Write content to a file on the LOCAL FILESYSTEM. NOT for workspace memory \
+         (use memory_write for that). Creates the file if it doesn't exist, overwrites if it does. \
+         Parent directories are created automatically. Use apply_patch for targeted edits."
     }
 
     fn parameters_schema(&self) -> serde_json::Value {
@@ -342,8 +344,8 @@ impl Tool for ListDirTool {
     }
 
     fn description(&self) -> &str {
-        "List contents of a directory. Shows files and subdirectories with their sizes. \
-         Use for exploring project structure."
+        "List contents of a directory on the LOCAL FILESYSTEM. NOT for workspace memory \
+         (use memory_tree for that). Shows files and subdirectories with their sizes."
     }
 
     fn parameters_schema(&self) -> serde_json::Value {
