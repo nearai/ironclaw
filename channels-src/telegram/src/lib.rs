@@ -177,7 +177,11 @@ struct TelegramMessageMetadata {
     is_private: bool,
 }
 
-/// Channel configuration from capabilities file.
+/// Channel configuration injected by host.
+///
+/// The host injects runtime values like tunnel_url and webhook_secret.
+/// The channel doesn't need to know about polling vs webhook mode - it just
+/// checks if tunnel_url is set to determine behavior.
 #[derive(Debug, Deserialize)]
 struct TelegramConfig {
     /// Bot username (without @) for mention detection in groups.
@@ -188,28 +192,15 @@ struct TelegramConfig {
     #[serde(default)]
     respond_to_all_group_messages: bool,
 
-    /// Whether to use polling instead of webhooks.
-    /// Automatically disabled if tunnel_url is set.
-    #[serde(default)]
-    polling_enabled: bool,
-
-    /// Polling interval in milliseconds (if polling enabled).
-    #[serde(default = "default_poll_interval")]
-    poll_interval_ms: u32,
-
-    /// Public tunnel URL for webhook mode (e.g., "https://abc123.ngrok.io").
+    /// Public tunnel URL for webhook mode (injected by host from global settings).
     /// When set, webhook mode is enabled and polling is disabled.
     #[serde(default)]
     tunnel_url: Option<String>,
 
-    /// Secret token for webhook validation.
+    /// Secret token for webhook validation (injected by host from secrets store).
     /// Telegram will include this in the X-Telegram-Bot-Api-Secret-Token header.
     #[serde(default)]
     webhook_secret: Option<String>,
-}
-
-fn default_poll_interval() -> u32 {
-    30000 // 30 seconds (minimum allowed)
 }
 
 // ============================================================================
@@ -220,6 +211,11 @@ struct TelegramChannel;
 
 impl Guest for TelegramChannel {
     fn on_start(config_json: String) -> Result<ChannelConfig, String> {
+        channel_host::log(
+            channel_host::LogLevel::Debug,
+            &format!("Telegram channel config: {}", config_json),
+        );
+
         let config: TelegramConfig = serde_json::from_str(&config_json)
             .map_err(|e| format!("Failed to parse config: {}", e))?;
 
@@ -232,21 +228,21 @@ impl Guest for TelegramChannel {
             );
         }
 
-        // Determine mode: webhook or polling
-        // Webhook mode is enabled if tunnel_url is set, which disables polling
+        // Mode is determined by whether the host injected a tunnel_url
+        // If tunnel is configured, use webhooks. Otherwise, use polling.
         let webhook_mode = config.tunnel_url.is_some();
 
         if webhook_mode {
             channel_host::log(
                 channel_host::LogLevel::Info,
-                "Webhook mode enabled (polling disabled)",
+                "Webhook mode enabled (tunnel configured)",
             );
 
             // Register webhook with Telegram API
             if let Some(ref tunnel_url) = config.tunnel_url {
                 channel_host::log(
                     channel_host::LogLevel::Info,
-                    &format!("Registering webhook with Telegram API: {}", tunnel_url),
+                    &format!("Registering webhook: {}/webhook/telegram", tunnel_url),
                 );
 
                 if let Err(e) = register_webhook(tunnel_url, config.webhook_secret.as_deref()) {
@@ -254,28 +250,35 @@ impl Guest for TelegramChannel {
                         channel_host::LogLevel::Error,
                         &format!("Failed to register webhook: {}", e),
                     );
-                    // Continue anyway, the host will start the server
-                    // and Telegram will eventually receive updates
                 }
+            }
+        } else {
+            channel_host::log(
+                channel_host::LogLevel::Info,
+                "Polling mode enabled (no tunnel configured)",
+            );
+
+            // Delete any existing webhook before polling
+            // Telegram doesn't allow getUpdates while a webhook is active
+            if let Err(e) = delete_webhook() {
+                channel_host::log(
+                    channel_host::LogLevel::Warn,
+                    &format!("Failed to delete webhook (may not exist): {}", e),
+                );
             }
         }
 
-        // Configure polling only if not in webhook mode and polling is enabled
-        let poll = if !webhook_mode && config.polling_enabled {
-            channel_host::log(
-                channel_host::LogLevel::Info,
-                &format!("Polling enabled (interval: {}ms)", config.poll_interval_ms.max(30000)),
-            );
+        // Configure polling only if not in webhook mode
+        let poll = if !webhook_mode {
             Some(PollConfig {
-                interval_ms: config.poll_interval_ms.max(30000), // Enforce minimum
+                interval_ms: 30000, // 30 seconds minimum
                 enabled: true,
             })
         } else {
             None
         };
 
-        // Webhook secret validation is handled by the host (X-Telegram-Bot-Api-Secret-Token header)
-        // The require_secret flag tells the host to validate the secret_validated field
+        // Webhook secret validation is handled by the host
         let require_secret = config.webhook_secret.is_some();
 
         Ok(ChannelConfig {
@@ -507,8 +510,53 @@ impl Guest for TelegramChannel {
 }
 
 // ============================================================================
-// Webhook Registration
+// Webhook Management
 // ============================================================================
+
+/// Delete any existing webhook with Telegram API.
+///
+/// Called during on_start() when switching to polling mode.
+/// Telegram doesn't allow getUpdates while a webhook is active.
+fn delete_webhook() -> Result<(), String> {
+    let headers = serde_json::json!({
+        "Content-Type": "application/json"
+    });
+
+    let result = channel_host::http_request(
+        "POST",
+        "https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/deleteWebhook",
+        &headers.to_string(),
+        None,
+    );
+
+    match result {
+        Ok(response) => {
+            if response.status != 200 {
+                let body_str = String::from_utf8_lossy(&response.body);
+                return Err(format!("HTTP {}: {}", response.status, body_str));
+            }
+
+            let api_response: TelegramApiResponse<bool> =
+                serde_json::from_slice(&response.body)
+                    .map_err(|e| format!("Failed to parse response: {}", e))?;
+
+            if !api_response.ok {
+                return Err(format!(
+                    "Telegram API error: {}",
+                    api_response.description.unwrap_or_else(|| "unknown".to_string())
+                ));
+            }
+
+            channel_host::log(
+                channel_host::LogLevel::Info,
+                "Webhook deleted successfully (switching to polling mode)",
+            );
+
+            Ok(())
+        }
+        Err(e) => Err(format!("HTTP request failed: {}", e)),
+    }
+}
 
 /// Register webhook URL with Telegram API.
 ///

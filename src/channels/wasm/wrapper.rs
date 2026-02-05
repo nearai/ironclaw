@@ -373,7 +373,8 @@ pub struct WasmChannel {
     capabilities: ChannelCapabilities,
 
     /// Channel configuration JSON (passed to on_start).
-    config_json: String,
+    /// Wrapped in RwLock to allow updating before start.
+    config_json: RwLock<String>,
 
     /// Channel configuration returned by on_start.
     channel_config: RwLock<Option<ChannelConfig>>,
@@ -420,7 +421,7 @@ impl WasmChannel {
             runtime,
             prepared,
             capabilities,
-            config_json,
+            config_json: RwLock::new(config_json),
             channel_config: RwLock::new(None),
             message_tx: Arc::new(RwLock::new(None)),
             pending_responses: RwLock::new(HashMap::new()),
@@ -430,6 +431,32 @@ impl WasmChannel {
             endpoints: RwLock::new(Vec::new()),
             credentials: Arc::new(RwLock::new(HashMap::new())),
         }
+    }
+
+    /// Update the channel config before starting.
+    ///
+    /// Merges the provided values into the existing config JSON.
+    /// Call this before `start()` to inject runtime values like tunnel_url.
+    pub async fn update_config(&self, updates: HashMap<String, serde_json::Value>) {
+        let mut config_guard = self.config_json.write().await;
+
+        // Parse existing config
+        let mut config: HashMap<String, serde_json::Value> =
+            serde_json::from_str(&config_guard).unwrap_or_default();
+
+        // Merge updates
+        for (key, value) in updates {
+            config.insert(key, value);
+        }
+
+        // Serialize back
+        *config_guard = serde_json::to_string(&config).unwrap_or_else(|_| "{}".to_string());
+
+        tracing::debug!(
+            channel = %self.name,
+            config = %*config_guard,
+            "Updated channel config"
+        );
     }
 
     /// Set a credential for URL injection.
@@ -590,7 +617,7 @@ impl WasmChannel {
         let runtime = Arc::clone(&self.runtime);
         let prepared = Arc::clone(&self.prepared);
         let capabilities = self.capabilities.clone();
-        let config_json = self.config_json.clone();
+        let config_json = self.config_json.read().await.clone();
         let timeout = self.runtime.config().callback_timeout;
         let channel_name = self.name.clone();
         let credentials = self.get_credentials().await;

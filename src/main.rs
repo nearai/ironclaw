@@ -399,6 +399,36 @@ async fn main() -> anyhow::Result<()> {
 
                             let channel_arc = Arc::new(loaded.channel);
 
+                            // Inject runtime config into the channel (tunnel_url, webhook_secret)
+                            // This must be done before start() is called
+                            {
+                                let mut config_updates = std::collections::HashMap::new();
+
+                                if let Some(ref tunnel_url) = config.tunnel.public_url {
+                                    config_updates.insert(
+                                        "tunnel_url".to_string(),
+                                        serde_json::Value::String(tunnel_url.clone()),
+                                    );
+                                }
+
+                                if let Some(ref secret) = webhook_secret {
+                                    config_updates.insert(
+                                        "webhook_secret".to_string(),
+                                        serde_json::Value::String(secret.clone()),
+                                    );
+                                }
+
+                                if !config_updates.is_empty() {
+                                    channel_arc.update_config(config_updates).await;
+                                    tracing::info!(
+                                        channel = %channel_name,
+                                        has_tunnel = config.tunnel.public_url.is_some(),
+                                        has_webhook_secret = webhook_secret.is_some(),
+                                        "Injected runtime config into channel"
+                                    );
+                                }
+                            }
+
                             tracing::info!(
                                 channel = %channel_name,
                                 has_webhook_secret = webhook_secret.is_some(),
@@ -410,7 +440,7 @@ async fn main() -> anyhow::Result<()> {
                                 .register(
                                     Arc::clone(&channel_arc),
                                     endpoints,
-                                    webhook_secret,
+                                    webhook_secret.clone(),
                                     secret_header,
                                 )
                                 .await;
