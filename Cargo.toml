@@ -89,6 +89,15 @@ sha2 = "0.10"
 blake3 = "1"
 rand = "0.8"
 
+# Docker sandbox
+bollard = "0.18"
+
+# HTTP proxy for sandboxed network access
+hyper = { version = "1.5", features = ["server", "http1", "http2"] }
+hyper-util = { version = "0.1", features = ["server", "tokio", "http1", "http2"] }
+http-body-util = "0.1"
+bytes = "1"
+
 [dev-dependencies]
 tokio-test = "0.4"
 testcontainers-modules = { version = "0.11", features = ["postgres"] }

@@ -49,6 +49,7 @@ pub mod evaluation;
 pub mod history;
 pub mod llm;
 pub mod safety;
+pub mod sandbox;
 pub mod secrets;
 pub mod settings;
 pub mod setup;

@@ -64,13 +64,18 @@ pub struct Agent {
 
 impl Agent {
     /// Create a new agent.
+    ///
+    /// Optionally accepts a pre-created `ContextManager` for sharing with job tools.
+    /// If not provided, creates a new one.
     pub fn new(
         config: AgentConfig,
         deps: AgentDeps,
         channels: ChannelManager,
         heartbeat_config: Option<HeartbeatConfig>,
+        context_manager: Option<Arc<ContextManager>>,
     ) -> Self {
-        let context_manager = Arc::new(ContextManager::new(config.max_parallel_jobs));
+        let context_manager = context_manager
+            .unwrap_or_else(|| Arc::new(ContextManager::new(config.max_parallel_jobs)));
 
         let scheduler = Arc::new(Scheduler::new(
             config.clone(),
@@ -388,24 +393,20 @@ impl Agent {
             }
         }
 
-        // Route for job commands (bypass turn system)
-        // Build a temporary message with the content to route
+        // Handle explicit commands (starting with /) directly
+        // Everything else goes through the normal agentic loop with tools
         let temp_message = IncomingMessage {
             content: content.to_string(),
             ..message.clone()
         };
-        let intent = self.router.route(&temp_message);
-        match &intent {
-            MessageIntent::CreateJob { .. }
-            | MessageIntent::CheckJobStatus { .. }
-            | MessageIntent::CancelJob { .. }
-            | MessageIntent::ListJobs { .. }
-            | MessageIntent::HelpJob { .. }
-            | MessageIntent::Command { .. } => {
-                return self.handle_job_or_command(intent, message).await;
-            }
-            _ => {}
+
+        if let Some(intent) = self.router.route_command(&temp_message) {
+            // Explicit command like /status, /job, /list - handle directly
+            return self.handle_job_or_command(intent, message).await;
         }
+
+        // Natural language goes through the agentic loop
+        // Job tools (create_job, list_jobs, etc.) are in the tool registry
 
         // Auto-compact if needed BEFORE adding new turn
         {

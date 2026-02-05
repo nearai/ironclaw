@@ -5,12 +5,14 @@ use std::sync::Arc;
 
 use tokio::sync::RwLock;
 
+use crate::context::ContextManager;
 use crate::llm::{LlmProvider, ToolDefinition};
 use crate::safety::SafetyLayer;
 use crate::tools::builder::{BuildSoftwareTool, BuilderConfig, LlmSoftwareBuilder};
 use crate::tools::builtin::{
-    ApplyPatchTool, EchoTool, HttpTool, JsonTool, ListDirTool, MemoryReadTool, MemorySearchTool,
-    MemoryTreeTool, MemoryWriteTool, ReadFileTool, ShellTool, TimeTool, WriteFileTool,
+    ApplyPatchTool, CancelJobTool, CreateJobTool, EchoTool, HttpTool, JobStatusTool, JsonTool,
+    ListDirTool, ListJobsTool, MemoryReadTool, MemorySearchTool, MemoryTreeTool, MemoryWriteTool,
+    ReadFileTool, ShellTool, TimeTool, WriteFileTool,
 };
 use crate::tools::tool::Tool;
 use crate::tools::wasm::{
@@ -142,6 +144,19 @@ impl ToolRegistry {
         self.register_sync(Arc::new(MemoryTreeTool::new(workspace)));
 
         tracing::info!("Registered 4 memory tools");
+    }
+
+    /// Register job management tools.
+    ///
+    /// Job tools allow the LLM to create, list, check status, and cancel jobs.
+    /// These enable natural language job management without hardcoded intent parsing.
+    pub fn register_job_tools(&self, context_manager: Arc<ContextManager>) {
+        self.register_sync(Arc::new(CreateJobTool::new(Arc::clone(&context_manager))));
+        self.register_sync(Arc::new(ListJobsTool::new(Arc::clone(&context_manager))));
+        self.register_sync(Arc::new(JobStatusTool::new(Arc::clone(&context_manager))));
+        self.register_sync(Arc::new(CancelJobTool::new(context_manager)));
+
+        tracing::info!("Registered 4 job management tools");
     }
 
     /// Register the software builder tool.

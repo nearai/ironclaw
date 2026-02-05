@@ -16,6 +16,7 @@ use near_agent::{
     },
     cli::{Cli, Command, run_tool_command},
     config::Config,
+    context::ContextManager,
     history::Store,
     llm::{SessionConfig, create_llm_provider, create_session_manager},
     safety::SafetyLayer,
@@ -509,6 +510,12 @@ async fn main() -> anyhow::Result<()> {
         }
     }
 
+    // Create context manager (shared between job tools and agent)
+    let context_manager = Arc::new(ContextManager::new(config.agent.max_parallel_jobs));
+
+    // Register job tools
+    tools.register_job_tools(Arc::clone(&context_manager));
+
     // Create and run the agent
     let deps = AgentDeps {
         store,
@@ -522,6 +529,7 @@ async fn main() -> anyhow::Result<()> {
         deps,
         channels,
         Some(config.heartbeat.clone()),
+        Some(context_manager),
     );
 
     tracing::info!("Agent initialized, starting main loop...");

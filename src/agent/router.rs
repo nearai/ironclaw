@@ -1,4 +1,8 @@
 //! Message routing to appropriate handlers.
+//!
+//! The router handles explicit commands (starting with `/`).
+//! Natural language intent classification is handled by `IntentClassifier`
+//! which uses LLM + tools instead of brittle pattern matching.
 
 use crate::channels::IncomingMessage;
 
@@ -27,7 +31,9 @@ pub enum MessageIntent {
     Unknown,
 }
 
-/// Routes messages to appropriate handlers based on intent.
+/// Routes messages to appropriate handlers based on explicit commands.
+///
+/// For natural language messages, use `IntentClassifier` instead.
 pub struct Router {
     /// Command prefix (e.g., "/" or "!")
     command_prefix: String,
@@ -47,17 +53,23 @@ impl Router {
         self
     }
 
-    /// Route a message to determine its intent.
-    pub fn route(&self, message: &IncomingMessage) -> MessageIntent {
+    /// Check if a message is an explicit command.
+    pub fn is_command(&self, message: &IncomingMessage) -> bool {
+        message.content.trim().starts_with(&self.command_prefix)
+    }
+
+    /// Route an explicit command to determine its intent.
+    ///
+    /// Returns `None` if the message is not a command.
+    /// For non-commands, use `IntentClassifier::classify()` instead.
+    pub fn route_command(&self, message: &IncomingMessage) -> Option<MessageIntent> {
         let content = message.content.trim();
 
-        // Check for commands
         if content.starts_with(&self.command_prefix) {
-            return self.parse_command(content);
+            Some(self.parse_command(content))
+        } else {
+            None
         }
-
-        // Try to extract intent from natural language
-        self.extract_intent(content)
     }
 
     fn parse_command(&self, content: &str) -> MessageIntent {
@@ -111,114 +123,12 @@ impl Router {
             None => MessageIntent::Unknown,
         }
     }
-
-    fn extract_intent(&self, content: &str) -> MessageIntent {
-        let lower = content.to_lowercase();
-
-        // Job creation patterns - must be explicit about creating a job
-        // More specific patterns to avoid capturing general conversation
-        let is_job_creation = lower.starts_with("create job ")
-            || lower.starts_with("new job ")
-            || lower.starts_with("schedule job ")
-            || lower.starts_with("run job ")
-            || (lower.contains("create") && lower.contains("job"));
-
-        if is_job_creation {
-            return MessageIntent::CreateJob {
-                title: extract_title(content),
-                description: content.to_string(),
-                category: extract_category(content),
-            };
-        }
-
-        // Status check patterns
-        if lower.contains("status")
-            || lower.contains("how is")
-            || lower.contains("progress")
-            || lower.starts_with("check ")
-        {
-            return MessageIntent::CheckJobStatus {
-                job_id: extract_job_id(content),
-            };
-        }
-
-        // Cancel patterns
-        if lower.contains("cancel") || lower.contains("stop") || lower.contains("abort") {
-            if let Some(job_id) = extract_job_id(content) {
-                return MessageIntent::CancelJob { job_id };
-            }
-        }
-
-        // List patterns
-        if lower.starts_with("list") || lower.contains("show jobs") || lower.contains("my jobs") {
-            return MessageIntent::ListJobs { filter: None };
-        }
-
-        // Help patterns
-        if lower.contains("stuck") || lower.contains("not working") || lower.contains("fix") {
-            if let Some(job_id) = extract_job_id(content) {
-                return MessageIntent::HelpJob { job_id };
-            }
-        }
-
-        // Default to chat
-        MessageIntent::Chat {
-            content: content.to_string(),
-        }
-    }
 }
 
 impl Default for Router {
     fn default() -> Self {
         Self::new()
     }
-}
-
-/// Extract a title from content.
-fn extract_title(content: &str) -> String {
-    // Take first sentence or first N characters
-    let first_sentence = content.split('.').next().unwrap_or(content);
-    let title = first_sentence.chars().take(100).collect::<String>();
-    if title.len() < first_sentence.len() {
-        format!("{}...", title)
-    } else {
-        title
-    }
-}
-
-/// Extract a category from content.
-fn extract_category(content: &str) -> Option<String> {
-    let lower = content.to_lowercase();
-
-    let categories = [
-        ("code", "development"),
-        ("program", "development"),
-        ("website", "web"),
-        ("api", "development"),
-        ("data", "data"),
-        ("write", "writing"),
-        ("design", "design"),
-        ("research", "research"),
-    ];
-
-    for (keyword, category) in categories {
-        if lower.contains(keyword) {
-            return Some(category.to_string());
-        }
-    }
-
-    None
-}
-
-/// Extract a job ID from content.
-fn extract_job_id(content: &str) -> Option<String> {
-    // Look for UUID patterns
-    let uuid_regex = regex::Regex::new(
-        r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}",
-    )
-    .ok()?;
-
-    uuid_regex.find(content).map(|m| m.as_str().to_string())
 }
 
 #[cfg(test)]
@@ -230,35 +140,61 @@ mod tests {
         let router = Router::new();
 
         let msg = IncomingMessage::new("test", "user", "/status abc-123");
-        let intent = router.route(&msg);
+        let intent = router.route_command(&msg);
 
-        assert!(matches!(intent, MessageIntent::CheckJobStatus { .. }));
+        assert!(matches!(intent, Some(MessageIntent::CheckJobStatus { .. })));
     }
 
     #[test]
-    fn test_natural_language_routing() {
+    fn test_is_command() {
         let router = Router::new();
 
+        let cmd_msg = IncomingMessage::new("test", "user", "/status");
+        assert!(router.is_command(&cmd_msg));
+
+        let chat_msg = IncomingMessage::new("test", "user", "Hello there");
+        assert!(!router.is_command(&chat_msg));
+    }
+
+    #[test]
+    fn test_non_command_returns_none() {
+        let router = Router::new();
+
+        // Natural language messages return None - they should use IntentClassifier
         let msg = IncomingMessage::new("test", "user", "Can you create a website for me?");
-        let intent = router.route(&msg);
+        assert!(router.route_command(&msg).is_none());
 
-        assert!(matches!(intent, MessageIntent::CreateJob { .. }));
+        let msg2 = IncomingMessage::new("test", "user", "Hello, how are you?");
+        assert!(router.route_command(&msg2).is_none());
     }
 
     #[test]
-    fn test_chat_fallback() {
+    fn test_command_create_job() {
         let router = Router::new();
 
-        let msg = IncomingMessage::new("test", "user", "Hello, how are you?");
-        let intent = router.route(&msg);
+        let msg = IncomingMessage::new("test", "user", "/job build a website");
+        let intent = router.route_command(&msg);
 
-        assert!(matches!(intent, MessageIntent::Chat { .. }));
+        match intent {
+            Some(MessageIntent::CreateJob { title, .. }) => {
+                assert_eq!(title, "build a website");
+            }
+            _ => panic!("Expected CreateJob intent"),
+        }
     }
 
     #[test]
-    fn test_extract_job_id() {
-        let content = "Check status of job 550e8400-e29b-41d4-a716-446655440000";
-        let id = extract_job_id(content);
-        assert_eq!(id, Some("550e8400-e29b-41d4-a716-446655440000".to_string()));
+    fn test_command_list_jobs() {
+        let router = Router::new();
+
+        let msg = IncomingMessage::new("test", "user", "/list active");
+        let intent = router.route_command(&msg);
+
+        match intent {
+            Some(MessageIntent::ListJobs { filter }) => {
+                assert_eq!(filter, Some("active".to_string()));
+            }
+            _ => panic!("Expected ListJobs intent"),
+        }
     }
 }

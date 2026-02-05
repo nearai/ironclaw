@@ -21,6 +21,7 @@ pub struct Config {
     pub secrets: SecretsConfig,
     pub builder: BuilderModeConfig,
     pub heartbeat: HeartbeatConfig,
+    pub sandbox: SandboxModeConfig,
 }
 
 impl Config {
@@ -41,6 +42,7 @@ impl Config {
             secrets: SecretsConfig::from_env()?,
             builder: BuilderModeConfig::from_env()?,
             heartbeat: HeartbeatConfig::from_env()?,
+            sandbox: SandboxModeConfig::from_env()?,
         })
     }
 }
@@ -599,7 +601,7 @@ pub struct BuilderModeConfig {
 impl Default for BuilderModeConfig {
     fn default() -> Self {
         Self {
-            enabled: false,
+            enabled: true, // Builder enabled by default
             build_dir: None,
             max_iterations: 20,
             timeout_secs: 600,
@@ -618,7 +620,7 @@ impl BuilderModeConfig {
                     key: "BUILDER_ENABLED".to_string(),
                     message: format!("must be 'true' or 'false': {e}"),
                 })?
-                .unwrap_or(false),
+                .unwrap_or(true), // Builder enabled by default
             build_dir: optional_env("BUILDER_DIR")?.map(PathBuf::from),
             max_iterations: parse_optional_env("BUILDER_MAX_ITERATIONS", 20)?,
             timeout_secs: parse_optional_env("BUILDER_TIMEOUT_SECS", 600)?,
@@ -687,6 +689,99 @@ impl HeartbeatConfig {
             notify_channel: optional_env("HEARTBEAT_NOTIFY_CHANNEL")?,
             notify_user: optional_env("HEARTBEAT_NOTIFY_USER")?,
         })
+    }
+}
+
+/// Docker sandbox configuration.
+#[derive(Debug, Clone)]
+pub struct SandboxModeConfig {
+    /// Whether the Docker sandbox is enabled.
+    pub enabled: bool,
+    /// Sandbox policy: "readonly", "workspace_write", or "full_access".
+    pub policy: String,
+    /// Command timeout in seconds.
+    pub timeout_secs: u64,
+    /// Memory limit in megabytes.
+    pub memory_limit_mb: u64,
+    /// CPU shares (relative weight).
+    pub cpu_shares: u32,
+    /// Docker image for the sandbox.
+    pub image: String,
+    /// Whether to auto-pull the image if not found.
+    pub auto_pull_image: bool,
+    /// Additional domains to allow through the network proxy.
+    pub extra_allowed_domains: Vec<String>,
+}
+
+impl Default for SandboxModeConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false, // Disabled by default
+            policy: "readonly".to_string(),
+            timeout_secs: 120,
+            memory_limit_mb: 2048,
+            cpu_shares: 1024,
+            image: "ghcr.io/nearai/sandbox:latest".to_string(),
+            auto_pull_image: true,
+            extra_allowed_domains: Vec::new(),
+        }
+    }
+}
+
+impl SandboxModeConfig {
+    fn from_env() -> Result<Self, ConfigError> {
+        let extra_domains = optional_env("SANDBOX_EXTRA_DOMAINS")?
+            .map(|s| s.split(',').map(|d| d.trim().to_string()).collect())
+            .unwrap_or_default();
+
+        Ok(Self {
+            enabled: optional_env("SANDBOX_ENABLED")?
+                .map(|s| s.parse())
+                .transpose()
+                .map_err(|e| ConfigError::InvalidValue {
+                    key: "SANDBOX_ENABLED".to_string(),
+                    message: format!("must be 'true' or 'false': {e}"),
+                })?
+                .unwrap_or(true),
+            policy: optional_env("SANDBOX_POLICY")?.unwrap_or_else(|| "readonly".to_string()),
+            timeout_secs: parse_optional_env("SANDBOX_TIMEOUT_SECS", 120)?,
+            memory_limit_mb: parse_optional_env("SANDBOX_MEMORY_LIMIT_MB", 2048)?,
+            cpu_shares: parse_optional_env("SANDBOX_CPU_SHARES", 1024)?,
+            image: optional_env("SANDBOX_IMAGE")?
+                .unwrap_or_else(|| "ghcr.io/nearai/sandbox:latest".to_string()),
+            auto_pull_image: optional_env("SANDBOX_AUTO_PULL")?
+                .map(|s| s.parse())
+                .transpose()
+                .map_err(|e| ConfigError::InvalidValue {
+                    key: "SANDBOX_AUTO_PULL".to_string(),
+                    message: format!("must be 'true' or 'false': {e}"),
+                })?
+                .unwrap_or(true),
+            extra_allowed_domains: extra_domains,
+        })
+    }
+
+    /// Convert to SandboxConfig for the sandbox module.
+    pub fn to_sandbox_config(&self) -> crate::sandbox::SandboxConfig {
+        use crate::sandbox::SandboxPolicy;
+        use std::time::Duration;
+
+        let policy = self.policy.parse().unwrap_or(SandboxPolicy::ReadOnly);
+
+        let mut allowlist = crate::sandbox::default_allowlist();
+        allowlist.extend(self.extra_allowed_domains.clone());
+
+        crate::sandbox::SandboxConfig {
+            enabled: self.enabled,
+            policy,
+            timeout: Duration::from_secs(self.timeout_secs),
+            memory_limit_mb: self.memory_limit_mb,
+            cpu_shares: self.cpu_shares,
+            network_allowlist: allowlist,
+            image: self.image.clone(),
+            auto_pull_image: self.auto_pull_image,
+            proxy_port: 0, // Auto-assign
+        }
     }
 }
 
