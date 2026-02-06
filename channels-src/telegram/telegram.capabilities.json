@@ -35,6 +35,7 @@
   },
   "config": {
     "bot_username": null,
+    "owner_id": null,
     "respond_to_all_group_messages": false,
     "polling_enabled": false,
     "poll_interval_ms": 30000

@@ -157,6 +157,9 @@ struct SentMessage {
 /// Workspace path for storing polling state.
 const POLLING_STATE_PATH: &str = "state/last_update_id";
 
+/// Workspace path for persisting owner_id across WASM callbacks.
+const OWNER_ID_PATH: &str = "state/owner_id";
+
 // ============================================================================
 // Channel Metadata
 // ============================================================================
@@ -187,6 +190,11 @@ struct TelegramConfig {
     /// Bot username (without @) for mention detection in groups.
     #[serde(default)]
     bot_username: Option<String>,
+
+    /// Telegram user ID of the bot owner. When set, only messages from this
+    /// user are processed. All others are silently dropped.
+    #[serde(default)]
+    owner_id: Option<i64>,
 
     /// Whether to respond to all group messages (not just mentions).
     #[serde(default)]
@@ -225,6 +233,27 @@ impl Guest for TelegramChannel {
             channel_host::log(
                 channel_host::LogLevel::Info,
                 &format!("Bot username: @{}", username),
+            );
+        }
+
+        // Persist owner_id so subsequent callbacks (on_http_request, on_poll) can read it
+        if let Some(owner_id) = config.owner_id {
+            if let Err(e) = channel_host::workspace_write(OWNER_ID_PATH, &owner_id.to_string()) {
+                channel_host::log(
+                    channel_host::LogLevel::Error,
+                    &format!("Failed to persist owner_id: {}", e),
+                );
+            }
+            channel_host::log(
+                channel_host::LogLevel::Info,
+                &format!("Owner restriction enabled: user {}", owner_id),
+            );
+        } else {
+            // Clear any stale owner_id from a previous config
+            let _ = channel_host::workspace_write(OWNER_ID_PATH, "");
+            channel_host::log(
+                channel_host::LogLevel::Warn,
+                "No owner_id configured, bot is open to all users",
             );
         }
 
@@ -584,14 +613,15 @@ fn delete_webhook() -> Result<(), String> {
                 return Err(format!("HTTP {}: {}", response.status, body_str));
             }
 
-            let api_response: TelegramApiResponse<bool> =
-                serde_json::from_slice(&response.body)
-                    .map_err(|e| format!("Failed to parse response: {}", e))?;
+            let api_response: TelegramApiResponse<bool> = serde_json::from_slice(&response.body)
+                .map_err(|e| format!("Failed to parse response: {}", e))?;
 
             if !api_response.ok {
                 return Err(format!(
                     "Telegram API error: {}",
-                    api_response.description.unwrap_or_else(|| "unknown".to_string())
+                    api_response
+                        .description
+                        .unwrap_or_else(|| "unknown".to_string())
                 ));
             }
 
@@ -622,7 +652,8 @@ fn register_webhook(tunnel_url: &str, webhook_secret: Option<&str>) -> Result<()
         body["secret_token"] = serde_json::Value::String(secret.to_string());
     }
 
-    let body_bytes = serde_json::to_vec(&body).map_err(|e| format!("Failed to serialize body: {}", e))?;
+    let body_bytes =
+        serde_json::to_vec(&body).map_err(|e| format!("Failed to serialize body: {}", e))?;
 
     let headers = serde_json::json!({
         "Content-Type": "application/json"
@@ -703,6 +734,24 @@ fn handle_message(message: TelegramMessage) {
     // Skip bot messages to avoid loops
     if from.is_bot {
         return;
+    }
+
+    // Owner validation: silently drop messages from non-owner users
+    if let Some(owner_id_str) = channel_host::workspace_read(OWNER_ID_PATH) {
+        if !owner_id_str.is_empty() {
+            if let Ok(owner_id) = owner_id_str.parse::<i64>() {
+                if from.id != owner_id {
+                    channel_host::log(
+                        channel_host::LogLevel::Debug,
+                        &format!(
+                            "Dropping message from non-owner user {} (owner: {})",
+                            from.id, owner_id
+                        ),
+                    );
+                    return;
+                }
+            }
+        }
     }
 
     let is_private = message.chat.chat_type == "private";
@@ -829,6 +878,40 @@ mod tests {
         assert_eq!(clean_message_text("@botname"), "");
         assert_eq!(clean_message_text("just text"), "just text");
         assert_eq!(clean_message_text("  spaced  "), "spaced");
+    }
+
+    #[test]
+    fn test_config_with_owner_id() {
+        let json = r#"{"owner_id": 123456789}"#;
+        let config: TelegramConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(config.owner_id, Some(123456789));
+    }
+
+    #[test]
+    fn test_config_without_owner_id() {
+        let json = r#"{}"#;
+        let config: TelegramConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(config.owner_id, None);
+    }
+
+    #[test]
+    fn test_config_with_null_owner_id() {
+        let json = r#"{"owner_id": null}"#;
+        let config: TelegramConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(config.owner_id, None);
+    }
+
+    #[test]
+    fn test_config_full() {
+        let json = r#"{
+            "bot_username": "my_bot",
+            "owner_id": 42,
+            "respond_to_all_group_messages": true
+        }"#;
+        let config: TelegramConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(config.bot_username, Some("my_bot".to_string()));
+        assert_eq!(config.owner_id, Some(42));
+        assert!(config.respond_to_all_group_messages);
     }
 
     #[test]
