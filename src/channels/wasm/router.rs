@@ -4,7 +4,6 @@
 //! registered paths. Handles secret validation at the host level.
 
 use std::collections::HashMap;
-use std::net::SocketAddr;
 use std::sync::Arc;
 
 use axum::{
@@ -467,56 +466,6 @@ pub fn create_wasm_channel_router(
         .route("/webhook/{*path}", get(webhook_handler))
         .route("/webhook/{*path}", post(webhook_handler))
         .with_state(state)
-}
-
-/// HTTP server for WASM channel webhooks.
-pub struct WasmChannelServer {
-    router: Arc<WasmChannelRouter>,
-    extension_manager: Option<Arc<crate::extensions::ExtensionManager>>,
-}
-
-impl WasmChannelServer {
-    /// Create a new server.
-    pub fn new(router: Arc<WasmChannelRouter>) -> Self {
-        Self {
-            router,
-            extension_manager: None,
-        }
-    }
-
-    /// Set the extension manager for OAuth callback handling.
-    pub fn with_extension_manager(
-        mut self,
-        manager: Arc<crate::extensions::ExtensionManager>,
-    ) -> Self {
-        self.extension_manager = Some(manager);
-        self
-    }
-
-    /// Start the HTTP server.
-    ///
-    /// Returns a handle that can be used to shut down the server.
-    pub async fn start(
-        &self,
-        addr: SocketAddr,
-    ) -> Result<tokio::task::JoinHandle<()>, std::io::Error> {
-        let app = create_wasm_channel_router(self.router.clone(), self.extension_manager.clone());
-
-        let listener = tokio::net::TcpListener::bind(addr).await?;
-
-        tracing::info!(
-            addr = %addr,
-            "WASM channel HTTP server started"
-        );
-
-        let handle = tokio::spawn(async move {
-            if let Err(e) = axum::serve(listener, app).await {
-                tracing::error!("WASM channel HTTP server error: {}", e);
-            }
-        });
-
-        Ok(handle)
-    }
 }
 
 #[cfg(test)]

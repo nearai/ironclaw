@@ -9,9 +9,9 @@
 //! ┌─────────────────────────────────────────────────────────────────────┐
 //! │                         ChannelManager                              │
 //! │                                                                     │
-//! │   ┌─────────────┐   ┌─────────────┐   ┌─────────────┐              │
-//! │   │  TuiChannel │   │ HttpChannel │   │ WasmChannel │   ...        │
-//! │   └──────┬──────┘   └──────┬──────┘   └──────┬──────┘              │
+//! │   ┌──────────────┐   ┌─────────────┐   ┌─────────────┐             │
+//! │   │ ReplChannel  │   │ HttpChannel │   │ WasmChannel │   ...       │
+//! │   └──────┬───────┘   └──────┬──────┘   └──────┬──────┘             │
 //! │          │                 │                 │                      │
 //! │          └─────────────────┴─────────────────┘                      │
 //! │                            │                                        │
@@ -28,16 +28,16 @@
 //! See the [`wasm`] module for details.
 
 mod channel;
-pub mod cli;
 mod http;
 mod manager;
 mod repl;
 pub mod wasm;
 pub mod web;
+mod webhook_server;
 
 pub use channel::{Channel, IncomingMessage, MessageStream, OutgoingResponse, StatusUpdate};
-pub use cli::{AppEvent, TuiChannel};
 pub use http::HttpChannel;
 pub use manager::ChannelManager;
 pub use repl::ReplChannel;
 pub use web::GatewayChannel;
+pub use webhook_server::{WebhookServer, WebhookServerConfig};

@@ -295,11 +295,19 @@ impl Agent {
                                     }
                                 }
                                 _ => {
-                                    // No target configured, just log
-                                    tracing::info!(
-                                        "Heartbeat notification (no target configured): {}",
-                                        &response.content
-                                    );
+                                    // No explicit target, broadcast to all channels
+                                    // for the default user so notifications actually
+                                    // reach someone instead of vanishing into logs.
+                                    let results = channels.broadcast_all("default", response).await;
+                                    for (ch, result) in results {
+                                        if let Err(e) = result {
+                                            tracing::warn!(
+                                                "Failed to broadcast heartbeat to {}: {}",
+                                                ch,
+                                                e
+                                            );
+                                        }
+                                    }
                                 }
                             }
                         }

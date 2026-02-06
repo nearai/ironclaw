@@ -178,7 +178,7 @@ impl HeartbeatRunner {
     pub async fn check_heartbeat(&self) -> HeartbeatResult {
         // Get the heartbeat checklist
         let checklist = match self.workspace.heartbeat_checklist().await {
-            Ok(Some(content)) if !content.trim().is_empty() => content,
+            Ok(Some(content)) if !is_effectively_empty(&content) => content,
             Ok(_) => return HeartbeatResult::Skipped,
             Err(e) => return HeartbeatResult::Failed(format!("Failed to read checklist: {}", e)),
         };
@@ -257,6 +257,45 @@ impl HeartbeatRunner {
     }
 }
 
+/// Check if heartbeat content is effectively empty.
+///
+/// Returns true if the content contains only:
+/// - Whitespace
+/// - Markdown headers (lines starting with #)
+/// - HTML comments (`<!-- ... -->`)
+/// - Empty list items (`- [ ]`, `- [x]`, `-`, `*`)
+///
+/// This skips the LLM call when the user hasn't added real tasks yet,
+/// saving API costs.
+fn is_effectively_empty(content: &str) -> bool {
+    let without_comments = strip_html_comments(content);
+
+    without_comments.lines().all(|line| {
+        let trimmed = line.trim();
+        trimmed.is_empty()
+            || trimmed.starts_with('#')
+            || trimmed == "- [ ]"
+            || trimmed == "- [x]"
+            || trimmed == "-"
+            || trimmed == "*"
+    })
+}
+
+/// Remove HTML comments from content.
+fn strip_html_comments(content: &str) -> String {
+    let mut result = String::with_capacity(content.len());
+    let mut rest = content;
+    while let Some(start) = rest.find("<!--") {
+        result.push_str(&rest[..start]);
+        match rest[start..].find("-->") {
+            Some(end) => rest = &rest[start + end + 3..],
+            None => return result, // unclosed comment, treat rest as comment
+        }
+    }
+    result.push_str(rest);
+    result
+}
+
 /// Spawn the heartbeat runner as a background task.
 ///
 /// Returns a handle that can be used to stop the runner.
@@ -300,5 +339,108 @@ mod tests {
 
         let disabled = HeartbeatConfig::default().disabled();
         assert!(!disabled.enabled);
+    }
+
+    // ==================== strip_html_comments ====================
+
+    #[test]
+    fn test_strip_html_comments_no_comments() {
+        assert_eq!(strip_html_comments("hello world"), "hello world");
+    }
+
+    #[test]
+    fn test_strip_html_comments_single() {
+        assert_eq!(
+            strip_html_comments("before<!-- gone -->after"),
+            "beforeafter"
+        );
+    }
+
+    #[test]
+    fn test_strip_html_comments_multiple() {
+        let input = "a<!-- 1 -->b<!-- 2 -->c";
+        assert_eq!(strip_html_comments(input), "abc");
+    }
+
+    #[test]
+    fn test_strip_html_comments_multiline() {
+        let input = "# Title\n<!-- multi\nline\ncomment -->\nreal content";
+        assert_eq!(strip_html_comments(input), "# Title\n\nreal content");
+    }
+
+    #[test]
+    fn test_strip_html_comments_unclosed() {
+        let input = "before<!-- never closed";
+        assert_eq!(strip_html_comments(input), "before");
+    }
+
+    // ==================== is_effectively_empty ====================
+
+    #[test]
+    fn test_effectively_empty_empty_string() {
+        assert!(is_effectively_empty(""));
+    }
+
+    #[test]
+    fn test_effectively_empty_whitespace() {
+        assert!(is_effectively_empty("   \n\n  \n  "));
+    }
+
+    #[test]
+    fn test_effectively_empty_headers_only() {
+        assert!(is_effectively_empty("# Title\n## Subtitle\n### Section"));
+    }
+
+    #[test]
+    fn test_effectively_empty_html_comments_only() {
+        assert!(is_effectively_empty("<!-- this is a comment -->"));
+    }
+
+    #[test]
+    fn test_effectively_empty_empty_checkboxes() {
+        assert!(is_effectively_empty("# Checklist\n- [ ]\n- [x]"));
+    }
+
+    #[test]
+    fn test_effectively_empty_bare_list_markers() {
+        assert!(is_effectively_empty("-\n*\n-"));
+    }
+
+    #[test]
+    fn test_effectively_empty_seeded_template() {
+        let template = "\
+# Heartbeat Checklist
+
+<!-- Keep this file empty to skip heartbeat API calls.
+     Add tasks below when you want the agent to check something periodically.
+
+     Example:
+     - [ ] Check for unread emails needing a reply
+     - [ ] Review today's calendar for upcoming meetings
+     - [ ] Check CI build status for main branch
+-->";
+        assert!(is_effectively_empty(template));
+    }
+
+    #[test]
+    fn test_effectively_empty_real_checklist() {
+        let content = "\
+# Heartbeat Checklist
+
+- [ ] Check for unread emails needing a reply
+- [ ] Review today's calendar for upcoming meetings";
+        assert!(!is_effectively_empty(content));
+    }
+
+    #[test]
+    fn test_effectively_empty_mixed_real_and_headers() {
+        let content = "# Title\n\nDo something important";
+        assert!(!is_effectively_empty(content));
+    }
+
+    #[test]
+    fn test_effectively_empty_comment_plus_real_content() {
+        let content = "<!-- comment -->\nActual task here";
+        assert!(!is_effectively_empty(content));
     }
 }

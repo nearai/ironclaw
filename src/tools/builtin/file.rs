@@ -12,6 +12,34 @@ use tokio::fs;
 
 use crate::context::JobContext;
 use crate::tools::tool::{Tool, ToolError, ToolOutput};
+use crate::workspace::paths as ws_paths;
+
+/// Well-known workspace filenames that must go through memory_write, not write_file.
+///
+/// If the LLM tries to write one of these via the filesystem tool we reject
+/// immediately and point it at the correct tool.
+const WORKSPACE_FILES: &[&str] = &[
+    ws_paths::HEARTBEAT,
+    ws_paths::MEMORY,
+    ws_paths::IDENTITY,
+    ws_paths::SOUL,
+    ws_paths::AGENTS,
+    ws_paths::USER,
+    ws_paths::README,
+];
+
+/// Check whether `path` resolves to a workspace file that should be written
+/// through `memory_write` instead of `write_file`.
+fn is_workspace_path(path: &str) -> bool {
+    let filename = std::path::Path::new(path)
+        .file_name()
+        .and_then(|f| f.to_str())
+        .unwrap_or(path);
+
+    WORKSPACE_FILES.iter().any(|ws| *ws == filename)
+        || path.starts_with("daily/")
+        || path.starts_with("context/")
+}
 
 /// Maximum file size for reading (1MB).
 const MAX_READ_SIZE: u64 = 1024 * 1024;
@@ -275,6 +303,15 @@ impl Tool for WriteFileTool {
             .get("path")
             .and_then(|v| v.as_str())
             .ok_or_else(|| ToolError::InvalidParameters("missing 'path' parameter".into()))?;
+
+        // Reject workspace paths: these live in the database, not on disk.
+        if is_workspace_path(path_str) {
+            return Err(ToolError::InvalidParameters(format!(
+                "'{}' is a workspace memory file. Use the memory_write tool instead of write_file. \
+                 For HEARTBEAT.md use target='heartbeat', for MEMORY.md use target='memory'.",
+                path_str
+            )));
+        }
 
         let content = params
             .get("content")
@@ -724,6 +761,78 @@ mod tests {
         assert!(result.result.get("success").unwrap().as_bool().unwrap());
         let content = std::fs::read_to_string(&file_path).unwrap();
         assert!(content.contains("println!(\"new\")"));
+    }
+
+    #[tokio::test]
+    async fn test_write_file_rejects_workspace_paths() {
+        let dir = TempDir::new().unwrap();
+        let tool = WriteFileTool::new().with_base_dir(dir.path().to_path_buf());
+        let ctx = JobContext::default();
+
+        let workspace_files = &[
+            "HEARTBEAT.md",
+            "MEMORY.md",
+            "IDENTITY.md",
+            "SOUL.md",
+            "AGENTS.md",
+            "USER.md",
+            "README.md",
+        ];
+
+        for filename in workspace_files {
+            let path = dir.path().join(filename);
+            let err = tool
+                .execute(
+                    serde_json::json!({
+                        "path": path.to_str().unwrap(),
+                        "content": "test"
+                    }),
+                    &ctx,
+                )
+                .await
+                .unwrap_err();
+
+            let msg = err.to_string();
+            assert!(
+                msg.contains("memory_write"),
+                "Rejection for {} should mention memory_write, got: {}",
+                filename,
+                msg
+            );
+        }
+
+        // daily/ and context/ prefixes should also be rejected
+        for prefix_path in &["daily/2024-01-15.md", "context/vision.md"] {
+            let err = tool
+                .execute(
+                    serde_json::json!({
+                        "path": prefix_path,
+                        "content": "test"
+                    }),
+                    &ctx,
+                )
+                .await
+                .unwrap_err();
+
+            assert!(
+                err.to_string().contains("memory_write"),
+                "Rejection for {} should mention memory_write",
+                prefix_path
+            );
+        }
+
+        // Regular files should still work
+        let regular_path = dir.path().join("normal.txt");
+        let result = tool
+            .execute(
+                serde_json::json!({
+                    "path": regular_path.to_str().unwrap(),
+                    "content": "fine"
+                }),
+                &ctx,
+            )
+            .await;
+        assert!(result.is_ok());
     }
 
     #[tokio::test]

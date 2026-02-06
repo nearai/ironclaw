@@ -1,6 +1,5 @@
 //! HTTP webhook channel for receiving messages via HTTP POST.
 
-use std::net::SocketAddr;
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -32,8 +31,6 @@ struct HttpChannelState {
     tx: RwLock<Option<mpsc::Sender<IncomingMessage>>>,
     /// Pending responses keyed by message ID.
     pending_responses: RwLock<std::collections::HashMap<Uuid, oneshot::Sender<String>>>,
-    /// Server shutdown signal.
-    shutdown_tx: RwLock<Option<oneshot::Sender<()>>>,
     /// Expected webhook secret for authentication (if configured).
     webhook_secret: Option<String>,
     /// Fixed user ID for this HTTP channel.
@@ -74,7 +71,6 @@ impl HttpChannel {
             state: Arc::new(HttpChannelState {
                 tx: RwLock::new(None),
                 pending_responses: RwLock::new(std::collections::HashMap::new()),
-                shutdown_tx: RwLock::new(None),
                 webhook_secret,
                 user_id,
                 rate_limit: tokio::sync::Mutex::new(RateLimitState {
@@ -83,6 +79,24 @@ impl HttpChannel {
                 }),
             }),
         }
+    }
+
+    /// Return the channel's axum routes with state applied.
+    ///
+    /// The returned `Router` shares the same `Arc<HttpChannelState>` that
+    /// `start()` later populates. Before `start()` is called the webhook
+    /// handler returns 503 ("Channel not started").
+    pub fn routes(&self) -> Router {
+        Router::new()
+            .route("/health", get(health_handler))
+            .route("/webhook", post(webhook_handler))
+            .layer(DefaultBodyLimit::max(MAX_BODY_BYTES))
+            .with_state(self.state.clone())
+    }
+
+    /// Return the configured host and port for this channel.
+    pub fn addr(&self) -> (&str, u16) {
+        (&self.config.host, self.config.port)
     }
 }
 
@@ -303,53 +317,11 @@ impl Channel for HttpChannel {
         let (tx, rx) = mpsc::channel(256);
         *self.state.tx.write().await = Some(tx);
 
-        let state = self.state.clone();
-        let host = self.config.host.clone();
-        let port = self.config.port;
-
-        // Parse address before spawning so we can return errors
-        let addr: SocketAddr =
-            format!("{}:{}", host, port)
-                .parse()
-                .map_err(|e| ChannelError::StartupFailed {
-                    name: "http".to_string(),
-                    reason: format!("Invalid address '{}:{}': {}", host, port, e),
-                })?;
-
-        // Bind listener before spawning so we can return errors
-        let listener =
-            tokio::net::TcpListener::bind(addr)
-                .await
-                .map_err(|e| ChannelError::StartupFailed {
-                    name: "http".to_string(),
-                    reason: format!("Failed to bind to {}: {}", addr, e),
-                })?;
-
-        tracing::info!("HTTP channel listening on {}", addr);
-
-        // Create router
-        let app = Router::new()
-            .route("/health", get(health_handler))
-            .route("/webhook", post(webhook_handler))
-            .layer(DefaultBodyLimit::max(MAX_BODY_BYTES))
-            .with_state(state.clone());
-
-        // Create shutdown channel
-        let (shutdown_tx, shutdown_rx) = oneshot::channel();
-        *self.state.shutdown_tx.write().await = Some(shutdown_tx);
-
-        // Spawn server (listener is already bound, serve errors are logged)
-        tokio::spawn(async move {
-            if let Err(e) = axum::serve(listener, app)
-                .with_graceful_shutdown(async {
-                    let _ = shutdown_rx.await;
-                    tracing::info!("HTTP channel shutting down");
-                })
-                .await
-            {
-                tracing::error!("HTTP server error: {}", e);
-            }
-        });
+        tracing::info!(
+            "HTTP channel ready ({}:{})",
+            self.config.host,
+            self.config.port
+        );
 
         Ok(Box::pin(ReceiverStream::new(rx)))
     }
@@ -363,13 +335,10 @@ impl Channel for HttpChannel {
         if let Some(tx) = self.state.pending_responses.write().await.remove(&msg.id) {
             let _ = tx.send(response.content);
         }
-        // For async webhooks, we'd need to make an HTTP callback here
-        // but that requires the caller to provide a callback URL
         Ok(())
     }
 
     async fn health_check(&self) -> Result<(), ChannelError> {
-        // Check if we have an active sender
         if self.state.tx.read().await.is_some() {
             Ok(())
         } else {
@@ -380,11 +349,6 @@ impl Channel for HttpChannel {
     }
 
     async fn shutdown(&self) -> Result<(), ChannelError> {
-        // Send shutdown signal
-        if let Some(tx) = self.state.shutdown_tx.write().await.take() {
-            let _ = tx.send(());
-        }
-        // Clear the message sender
         *self.state.tx.write().await = None;
         Ok(())
     }

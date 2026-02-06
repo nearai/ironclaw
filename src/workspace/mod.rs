@@ -60,6 +60,23 @@ use uuid::Uuid;
 
 use crate::error::WorkspaceError;
 
+/// Default template seeded into HEARTBEAT.md on first access.
+///
+/// Intentionally comment-only so the heartbeat runner treats it as
+/// "effectively empty" and skips the LLM call until the user adds
+/// real tasks.
+const HEARTBEAT_SEED: &str = "\
+# Heartbeat Checklist
+
+<!-- Keep this file empty to skip heartbeat API calls.
+     Add tasks below when you want the agent to check something periodically.
+
+     Example:
+     - [ ] Check for unread emails needing a reply
+     - [ ] Review today's calendar for upcoming meetings
+     - [ ] Check CI build status for main branch
+-->";
+
 /// Workspace provides database-backed memory storage for an agent.
 ///
 /// Each workspace is scoped to a user (and optionally an agent).
@@ -246,10 +263,17 @@ impl Workspace {
     }
 
     /// Get the heartbeat checklist (HEARTBEAT.md).
+    ///
+    /// Returns the DB-stored checklist if it exists, otherwise falls back
+    /// to the in-memory seed template. The seed is never written to the
+    /// database; the user creates the real file via `memory_write` when
+    /// they actually want periodic checks. The seed content is all HTML
+    /// comments, which the heartbeat runner treats as "effectively empty"
+    /// and skips the LLM call.
     pub async fn heartbeat_checklist(&self) -> Result<Option<String>, WorkspaceError> {
         match self.read(paths::HEARTBEAT).await {
             Ok(doc) => Ok(Some(doc.content)),
-            Err(WorkspaceError::DocumentNotFound { .. }) => Ok(None),
+            Err(WorkspaceError::DocumentNotFound { .. }) => Ok(Some(HEARTBEAT_SEED.to_string())),
             Err(e) => Err(e),
         }
     }

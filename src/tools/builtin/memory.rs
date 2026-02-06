@@ -133,10 +133,11 @@ impl Tool for MemoryWriteTool {
     }
 
     fn description(&self) -> &str {
-        "Write to persistent memory. Use for important facts, decisions, preferences, \
-         or lessons learned that should be remembered across sessions. Use 'memory' target \
-         for curated long-term facts, 'daily_log' for timestamped session notes, or \
-         provide a custom path for arbitrary file creation."
+        "Write to persistent memory (database-backed, NOT the local filesystem). \
+         Use for important facts, decisions, preferences, or lessons learned that should \
+         be remembered across sessions. Targets: 'memory' for curated long-term facts, \
+         'daily_log' for timestamped session notes, 'heartbeat' for the periodic \
+         checklist (HEARTBEAT.md), or provide a custom path for arbitrary file creation."
     }
 
     fn parameters_schema(&self) -> serde_json::Value {
@@ -149,7 +150,7 @@ impl Tool for MemoryWriteTool {
                 },
                 "target": {
                     "type": "string",
-                    "description": "Where to write: 'memory' for MEMORY.md, 'daily_log' for today's log, or a path like 'projects/alpha/notes.md'",
+                    "description": "Where to write: 'memory' for MEMORY.md, 'daily_log' for today's log, 'heartbeat' for HEARTBEAT.md checklist, or a path like 'projects/alpha/notes.md'",
                     "default": "daily_log"
                 },
                 "append": {
@@ -213,6 +214,20 @@ impl Tool for MemoryWriteTool {
                     .await
                     .map_err(|e| ToolError::ExecutionFailed(format!("Write failed: {}", e)))?;
                 format!("daily/{}.md", chrono::Utc::now().format("%Y-%m-%d"))
+            }
+            "heartbeat" => {
+                if append {
+                    self.workspace
+                        .append(paths::HEARTBEAT, content)
+                        .await
+                        .map_err(|e| ToolError::ExecutionFailed(format!("Write failed: {}", e)))?;
+                } else {
+                    self.workspace
+                        .write(paths::HEARTBEAT, content)
+                        .await
+                        .map_err(|e| ToolError::ExecutionFailed(format!("Write failed: {}", e)))?;
+                }
+                paths::HEARTBEAT.to_string()
             }
             path => {
                 if append {

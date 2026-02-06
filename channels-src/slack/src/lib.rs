@@ -27,7 +27,7 @@ use serde::{Deserialize, Serialize};
 // Re-export generated types
 use exports::near::agent::channel::{
     AgentResponse, ChannelConfig, Guest, HttpEndpointConfig, IncomingHttpRequest,
-    OutgoingHttpResponse, PollConfig,
+    OutgoingHttpResponse, StatusUpdate,
 };
 use near::agent::channel_host::{self, EmittedMessage};
 
@@ -269,6 +269,8 @@ impl Guest for SlackChannel {
         }
     }
 
+    fn on_status(_update: StatusUpdate) {}
+
     fn on_shutdown() {
         channel_host::log(channel_host::LogLevel::Info, "Slack channel shutting down");
     }
@@ -339,7 +341,7 @@ fn emit_message(
     // Strip @ mentions of the bot from the text for cleaner messages
     let cleaned_text = strip_bot_mention(&text);
 
-    channel_host::emit_message(EmittedMessage {
+    channel_host::emit_message(&EmittedMessage {
         user_id,
         user_name: None, // Could fetch from Slack API if needed
         content: cleaned_text,

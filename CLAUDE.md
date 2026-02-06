@@ -151,6 +151,10 @@ src/
 
 ## Key Patterns
 
+### Architecture
+
+When designing new features or systems, always prefer generic/extensible architectures over hardcoding specific integrations. Ask clarifying questions about the desired abstraction level before implementing.
+
 ### Error Handling
 - Use `thiserror` for error types in `error.rs`
 - Never use `.unwrap()` in production code (tests are fine)
@@ -331,13 +335,13 @@ Key test patterns:
 
 WASM tools are the preferred way to add new capabilities. They run in a sandboxed environment with explicit capabilities.
 
-1. Create a new crate in `examples/wasm-tools/<name>/`
+1. Create a new crate in `tools-src/wasm-tools/<name>/`
 2. Implement the WIT interface (`wit/tool.wit`)
 3. Create `<name>.capabilities.json` declaring required permissions
 4. Build with `cargo build --target wasm32-wasip2 --release`
 5. Install with `ironclaw tool install path/to/tool.wasm`
 
-See `examples/wasm-tools/` for examples.
+See `tools-src/wasm-tools/` for examples.
 
 ## Tool Architecture Principles
 
