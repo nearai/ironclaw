@@ -56,7 +56,7 @@ impl Tool for CreateJobTool {
     async fn execute(
         &self,
         params: serde_json::Value,
-        _ctx: &JobContext,
+        ctx: &JobContext,
     ) -> Result<ToolOutput, ToolError> {
         let start = std::time::Instant::now();
 
@@ -72,7 +72,11 @@ impl Tool for CreateJobTool {
                 ToolError::InvalidParameters("missing 'description' parameter".into())
             })?;
 
-        match self.context_manager.create_job(title, description).await {
+        match self
+            .context_manager
+            .create_job_for_user(&ctx.user_id, title, description)
+            .await
+        {
             Ok(job_id) => {
                 let result = serde_json::json!({
                     "job_id": job_id.to_string(),
@@ -133,7 +137,7 @@ impl Tool for ListJobsTool {
     async fn execute(
         &self,
         params: serde_json::Value,
-        _ctx: &JobContext,
+        ctx: &JobContext,
     ) -> Result<ToolOutput, ToolError> {
         let start = std::time::Instant::now();
 
@@ -143,8 +147,8 @@ impl Tool for ListJobsTool {
             .unwrap_or("all");
 
         let job_ids = match filter {
-            "active" => self.context_manager.active_jobs().await,
-            _ => self.context_manager.all_jobs().await,
+            "active" => self.context_manager.active_jobs_for(&ctx.user_id).await,
+            _ => self.context_manager.all_jobs_for(&ctx.user_id).await,
         };
 
         let mut jobs = Vec::new();
@@ -168,7 +172,7 @@ impl Tool for ListJobsTool {
             }
         }
 
-        let summary = self.context_manager.summary().await;
+        let summary = self.context_manager.summary_for(&ctx.user_id).await;
 
         let result = serde_json::json!({
             "jobs": jobs,
@@ -226,9 +230,10 @@ impl Tool for JobStatusTool {
     async fn execute(
         &self,
         params: serde_json::Value,
-        _ctx: &JobContext,
+        ctx: &JobContext,
     ) -> Result<ToolOutput, ToolError> {
         let start = std::time::Instant::now();
+        let requester_id = ctx.user_id.clone();
 
         let job_id_str = params
             .get("job_id")
@@ -240,16 +245,22 @@ impl Tool for JobStatusTool {
         })?;
 
         match self.context_manager.get_context(job_id).await {
-            Ok(ctx) => {
+            Ok(job_ctx) => {
+                if job_ctx.user_id != requester_id {
+                    let result = serde_json::json!({
+                        "error": "Job not found".to_string()
+                    });
+                    return Ok(ToolOutput::success(result, start.elapsed()));
+                }
                 let result = serde_json::json!({
                     "job_id": job_id.to_string(),
-                    "title": ctx.title,
-                    "description": ctx.description,
-                    "status": format!("{:?}", ctx.state),
-                    "created_at": ctx.created_at.to_rfc3339(),
-                    "started_at": ctx.started_at.map(|t| t.to_rfc3339()),
-                    "completed_at": ctx.completed_at.map(|t| t.to_rfc3339()),
-                    "actual_cost": ctx.actual_cost.to_string()
+                    "title": job_ctx.title,
+                    "description": job_ctx.description,
+                    "status": format!("{:?}", job_ctx.state),
+                    "created_at": job_ctx.created_at.to_rfc3339(),
+                    "started_at": job_ctx.started_at.map(|t| t.to_rfc3339()),
+                    "completed_at": job_ctx.completed_at.map(|t| t.to_rfc3339()),
+                    "actual_cost": job_ctx.actual_cost.to_string()
                 });
                 Ok(ToolOutput::success(result, start.elapsed()))
             }
@@ -304,9 +315,10 @@ impl Tool for CancelJobTool {
     async fn execute(
         &self,
         params: serde_json::Value,
-        _ctx: &JobContext,
+        ctx: &JobContext,
     ) -> Result<ToolOutput, ToolError> {
         let start = std::time::Instant::now();
+        let requester_id = ctx.user_id.clone();
 
         let job_id_str = params
             .get("job_id")
@@ -321,6 +333,9 @@ impl Tool for CancelJobTool {
         match self
             .context_manager
             .update_context(job_id, |ctx| {
+                if ctx.user_id != requester_id {
+                    return Err("Job not found".to_string());
+                }
                 ctx.transition_to(JobState::Cancelled, Some("Cancelled by user".to_string()))
             })
             .await

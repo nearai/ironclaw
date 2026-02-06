@@ -424,6 +424,29 @@ impl Agent {
             }
         }
 
+        // Safety validation for user input
+        let validation = self.safety().validate_input(content);
+        if !validation.is_valid {
+            let details = validation
+                .errors
+                .iter()
+                .map(|e| format!("{}: {}", e.field, e.message))
+                .collect::<Vec<_>>()
+                .join("; ");
+            return Ok(SubmissionResult::error(format!(
+                "Input rejected by safety validation: {}",
+                details
+            )));
+        }
+
+        let violations = self.safety().check_policy(content);
+        if violations
+            .iter()
+            .any(|rule| rule.action == crate::safety::PolicyAction::Block)
+        {
+            return Ok(SubmissionResult::error("Input rejected by safety policy."));
+        }
+
         // Handle explicit commands (starting with /) directly
         // Everything else goes through the normal agentic loop with tools
         let temp_message = IncomingMessage {
@@ -767,6 +790,22 @@ impl Agent {
                     name: tool_name.to_string(),
                 })?;
 
+        // Validate tool parameters
+        let validation = self.safety().validator().validate_tool_params(params);
+        if !validation.is_valid {
+            let details = validation
+                .errors
+                .iter()
+                .map(|e| format!("{}: {}", e.field, e.message))
+                .collect::<Vec<_>>()
+                .join("; ");
+            return Err(crate::error::ToolError::InvalidParameters {
+                name: tool_name.to_string(),
+                reason: format!("Invalid tool parameters: {}", details),
+            }
+            .into());
+        }
+
         // Execute with timeout
         let result = tokio::time::timeout(std::time::Duration::from_secs(60), async {
             tool.execute(params.clone(), job_ctx).await
@@ -813,11 +852,22 @@ impl Agent {
                 title,
                 description,
                 category,
-            } => self.handle_create_job(title, description, category).await?,
-            MessageIntent::CheckJobStatus { job_id } => self.handle_check_status(job_id).await?,
-            MessageIntent::CancelJob { job_id } => self.handle_cancel_job(&job_id).await?,
-            MessageIntent::ListJobs { filter } => self.handle_list_jobs(filter).await?,
-            MessageIntent::HelpJob { job_id } => self.handle_help_job(&job_id).await?,
+            } => {
+                self.handle_create_job(&message.user_id, title, description, category)
+                    .await?
+            }
+            MessageIntent::CheckJobStatus { job_id } => {
+                self.handle_check_status(&message.user_id, job_id).await?
+            }
+            MessageIntent::CancelJob { job_id } => {
+                self.handle_cancel_job(&message.user_id, &job_id).await?
+            }
+            MessageIntent::ListJobs { filter } => {
+                self.handle_list_jobs(&message.user_id, filter).await?
+            }
+            MessageIntent::HelpJob { job_id } => {
+                self.handle_help_job(&message.user_id, &job_id).await?
+            }
             MessageIntent::Command { command, args } => {
                 match self.handle_command(&command, &args).await? {
                     Some(s) => s,
@@ -1223,6 +1273,7 @@ impl Agent {
 
     async fn handle_create_job(
         &self,
+        user_id: &str,
         title: String,
         description: String,
         category: Option<String>,
@@ -1230,7 +1281,7 @@ impl Agent {
         // Create job context
         let job_id = self
             .context_manager
-            .create_job(&title, &description)
+            .create_job_for_user(user_id, &title, &description)
             .await?;
 
         // Update category if provided
@@ -1263,13 +1314,20 @@ impl Agent {
         ))
     }
 
-    async fn handle_check_status(&self, job_id: Option<String>) -> Result<String, Error> {
+    async fn handle_check_status(
+        &self,
+        user_id: &str,
+        job_id: Option<String>,
+    ) -> Result<String, Error> {
         match job_id {
             Some(id) => {
                 let uuid = Uuid::parse_str(&id)
                     .map_err(|_| crate::error::JobError::NotFound { id: Uuid::nil() })?;
 
                 let ctx = self.context_manager.get_context(uuid).await?;
+                if ctx.user_id != user_id {
+                    return Err(crate::error::JobError::NotFound { id: uuid }.into());
+                }
 
                 Ok(format!(
                     "Job: {}\nStatus: {:?}\nCreated: {}\nStarted: {}\nActual cost: {}",
@@ -1284,7 +1342,7 @@ impl Agent {
             }
             None => {
                 // Show summary of all jobs
-                let summary = self.context_manager.summary().await;
+                let summary = self.context_manager.summary_for(user_id).await;
                 Ok(format!(
                     "Jobs summary:\n  Total: {}\n  In Progress: {}\n  Completed: {}\n  Failed: {}\n  Stuck: {}",
                     summary.total,
@@ -1297,17 +1355,26 @@ impl Agent {
         }
     }
 
-    async fn handle_cancel_job(&self, job_id: &str) -> Result<String, Error> {
+    async fn handle_cancel_job(&self, user_id: &str, job_id: &str) -> Result<String, Error> {
         let uuid = Uuid::parse_str(job_id)
             .map_err(|_| crate::error::JobError::NotFound { id: Uuid::nil() })?;
+
+        let ctx = self.context_manager.get_context(uuid).await?;
+        if ctx.user_id != user_id {
+            return Err(crate::error::JobError::NotFound { id: uuid }.into());
+        }
 
         self.scheduler.stop(uuid).await?;
 
         Ok(format!("Job {} has been cancelled.", job_id))
     }
 
-    async fn handle_list_jobs(&self, _filter: Option<String>) -> Result<String, Error> {
-        let jobs = self.context_manager.all_jobs().await;
+    async fn handle_list_jobs(
+        &self,
+        user_id: &str,
+        _filter: Option<String>,
+    ) -> Result<String, Error> {
+        let jobs = self.context_manager.all_jobs_for(user_id).await;
 
         if jobs.is_empty() {
             return Ok("No jobs found.".to_string());
@@ -1316,18 +1383,23 @@ impl Agent {
         let mut output = String::from("Jobs:\n");
         for job_id in jobs {
             if let Ok(ctx) = self.context_manager.get_context(job_id).await {
-                output.push_str(&format!("  {} - {} ({:?})\n", job_id, ctx.title, ctx.state));
+                if ctx.user_id == user_id {
+                    output.push_str(&format!("  {} - {} ({:?})\n", job_id, ctx.title, ctx.state));
+                }
             }
         }
 
         Ok(output)
     }
 
-    async fn handle_help_job(&self, job_id: &str) -> Result<String, Error> {
+    async fn handle_help_job(&self, user_id: &str, job_id: &str) -> Result<String, Error> {
         let uuid = Uuid::parse_str(job_id)
             .map_err(|_| crate::error::JobError::NotFound { id: Uuid::nil() })?;
 
         let ctx = self.context_manager.get_context(uuid).await?;
+        if ctx.user_id != user_id {
+            return Err(crate::error::JobError::NotFound { id: uuid }.into());
+        }
 
         if ctx.state == crate::context::JobState::Stuck {
             // Attempt recovery

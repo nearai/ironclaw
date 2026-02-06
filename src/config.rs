@@ -349,6 +349,7 @@ pub struct HttpConfig {
     pub host: String,
     pub port: u16,
     pub webhook_secret: Option<SecretString>,
+    pub user_id: String,
 }
 
 impl ChannelsConfig {
@@ -365,6 +366,7 @@ impl ChannelsConfig {
                     })?
                     .unwrap_or(8080),
                 webhook_secret: optional_env("HTTP_WEBHOOK_SECRET")?.map(SecretString::from),
+                user_id: optional_env("HTTP_USER_ID")?.unwrap_or_else(|| "http".to_string()),
             })
         } else {
             None

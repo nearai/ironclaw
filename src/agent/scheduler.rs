@@ -50,9 +50,9 @@ pub struct Scheduler {
     tools: Arc<ToolRegistry>,
     store: Option<Arc<Store>>,
     /// Running jobs (main LLM-driven jobs).
-    jobs: RwLock<HashMap<Uuid, ScheduledJob>>,
+    jobs: Arc<RwLock<HashMap<Uuid, ScheduledJob>>>,
     /// Running sub-tasks (tool executions, background tasks).
-    subtasks: RwLock<HashMap<Uuid, ScheduledSubtask>>,
+    subtasks: Arc<RwLock<HashMap<Uuid, ScheduledSubtask>>>,
 }
 
 impl Scheduler {
@@ -72,8 +72,8 @@ impl Scheduler {
             safety,
             tools,
             store,
-            jobs: RwLock::new(HashMap::new()),
-            subtasks: RwLock::new(HashMap::new()),
+            jobs: Arc::new(RwLock::new(HashMap::new())),
+            subtasks: Arc::new(RwLock::new(HashMap::new())),
         }
     }
 
@@ -137,6 +137,27 @@ impl Scheduler {
             .await
             .insert(job_id, ScheduledJob { handle, tx });
 
+        // Cleanup task for this job to avoid capacity leaks
+        let jobs = Arc::clone(&self.jobs);
+        tokio::spawn(async move {
+            loop {
+                let finished = {
+                    let jobs_read = jobs.read().await;
+                    match jobs_read.get(&job_id) {
+                        Some(scheduled) => scheduled.handle.is_finished(),
+                        None => true,
+                    }
+                };
+
+                if finished {
+                    jobs.write().await.remove(&job_id);
+                    break;
+                }
+
+                tokio::time::sleep(Duration::from_secs(1)).await;
+            }
+        });
+
         tracing::info!("Scheduled job {} for execution", job_id);
         Ok(())
     }
@@ -171,11 +192,13 @@ impl Scheduler {
             } => {
                 let tools = self.tools.clone();
                 let context_manager = self.context_manager.clone();
+                let safety = self.safety.clone();
 
                 tokio::spawn(async move {
                     let result = Self::execute_tool_task(
                         tools,
                         context_manager,
+                        safety,
                         tool_parent_id,
                         &tool_name,
                         params,
@@ -216,6 +239,27 @@ impl Scheduler {
                 }),
             },
         );
+
+        // Cleanup task for subtask tracking
+        let subtasks = Arc::clone(&self.subtasks);
+        tokio::spawn(async move {
+            loop {
+                let finished = {
+                    let subtasks_read = subtasks.read().await;
+                    match subtasks_read.get(&task_id) {
+                        Some(scheduled) => scheduled.handle.is_finished(),
+                        None => true,
+                    }
+                };
+
+                if finished {
+                    subtasks.write().await.remove(&task_id);
+                    break;
+                }
+
+                tokio::time::sleep(Duration::from_secs(1)).await;
+            }
+        });
 
         tracing::debug!(
             parent_id = %parent_id,
@@ -282,6 +326,7 @@ impl Scheduler {
     async fn execute_tool_task(
         tools: Arc<ToolRegistry>,
         context_manager: Arc<ContextManager>,
+        safety: Arc<SafetyLayer>,
         job_id: Uuid,
         tool_name: &str,
         params: serde_json::Value,
@@ -297,6 +342,36 @@ impl Scheduler {
 
         // Get job context
         let job_ctx: JobContext = context_manager.get_context(job_id).await?;
+        if job_ctx.state == JobState::Cancelled {
+            return Err(crate::error::ToolError::ExecutionFailed {
+                name: tool_name.to_string(),
+                reason: "Job is cancelled".to_string(),
+            }
+            .into());
+        }
+
+        if tool.requires_approval() {
+            return Err(crate::error::ToolError::AuthRequired {
+                name: tool_name.to_string(),
+            }
+            .into());
+        }
+
+        // Validate tool parameters
+        let validation = safety.validator().validate_tool_params(&params);
+        if !validation.is_valid {
+            let details = validation
+                .errors
+                .iter()
+                .map(|e| format!("{}: {}", e.field, e.message))
+                .collect::<Vec<_>>()
+                .join("; ");
+            return Err(crate::error::ToolError::InvalidParameters {
+                name: tool_name.to_string(),
+                reason: format!("Invalid tool parameters: {}", details),
+            }
+            .into());
+        }
 
         // Execute with timeout
         let result = tokio::time::timeout(Duration::from_secs(60), async {

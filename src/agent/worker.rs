@@ -226,6 +226,14 @@ Report when the job is complete or if you encounter issues you cannot resolve."#
                 }
             }
 
+            // Check for cancellation
+            if let Ok(ctx) = self.context_manager().get_context(self.job_id).await {
+                if ctx.state == JobState::Cancelled {
+                    tracing::info!("Worker for job {} detected cancellation", self.job_id);
+                    return Ok(());
+                }
+            }
+
             iteration += 1;
             if iteration > max_iterations {
                 self.mark_stuck("Maximum iterations exceeded").await?;
@@ -335,6 +343,7 @@ Report when the job is complete or if you encounter issues you cannot resolve."#
                 let params = selection.parameters.clone();
                 let tools = self.tools().clone();
                 let context_manager = self.context_manager().clone();
+                let safety = self.safety().clone();
                 let job_id = self.job_id;
                 let store = self.deps.store.clone();
 
@@ -342,6 +351,7 @@ Report when the job is complete or if you encounter issues you cannot resolve."#
                     let result = Self::execute_tool_inner(
                         tools,
                         context_manager,
+                        safety,
                         store,
                         job_id,
                         &tool_name,
@@ -360,6 +370,7 @@ Report when the job is complete or if you encounter issues you cannot resolve."#
     async fn execute_tool_inner(
         tools: Arc<ToolRegistry>,
         context_manager: Arc<ContextManager>,
+        safety: Arc<SafetyLayer>,
         store: Option<Arc<Store>>,
         job_id: Uuid,
         tool_name: &str,
@@ -372,17 +383,39 @@ Report when the job is complete or if you encounter issues you cannot resolve."#
                 name: tool_name.to_string(),
             })?;
 
-        // Log warning if tool requires approval (autonomous jobs auto-approve for now)
+        // Tools requiring approval are blocked in autonomous jobs
         if tool.requires_approval() {
-            tracing::warn!(
-                job_id = %job_id,
-                tool = %tool_name,
-                "Executing sensitive tool in autonomous job (auto-approved)"
-            );
+            return Err(crate::error::ToolError::AuthRequired {
+                name: tool_name.to_string(),
+            }
+            .into());
         }
 
         // Get job context for the tool
         let job_ctx = context_manager.get_context(job_id).await?;
+        if job_ctx.state == JobState::Cancelled {
+            return Err(crate::error::ToolError::ExecutionFailed {
+                name: tool_name.to_string(),
+                reason: "Job is cancelled".to_string(),
+            }
+            .into());
+        }
+
+        // Validate tool parameters
+        let validation = safety.validator().validate_tool_params(params);
+        if !validation.is_valid {
+            let details = validation
+                .errors
+                .iter()
+                .map(|e| format!("{}: {}", e.field, e.message))
+                .collect::<Vec<_>>()
+                .join("; ");
+            return Err(crate::error::ToolError::InvalidParameters {
+                name: tool_name.to_string(),
+                reason: format!("Invalid tool parameters: {}", details),
+            }
+            .into());
+        }
 
         // Execute with timeout and timing
         let start = std::time::Instant::now();
@@ -395,7 +428,9 @@ Report when the job is complete or if you encounter issues you cannot resolve."#
         // Record action in memory and get the ActionRecord for persistence
         let action = match &result {
             Ok(Ok(output)) => {
-                let output_str = serde_json::to_string_pretty(&output.result).ok();
+                let output_str = serde_json::to_string_pretty(&output.result)
+                    .ok()
+                    .map(|s| safety.sanitize_tool_output(tool_name, &s).content);
                 context_manager
                     .update_memory(job_id, |mem| {
                         let rec = mem.create_action(tool_name, params.clone()).succeed(
@@ -625,6 +660,7 @@ Report when the job is complete or if you encounter issues you cannot resolve."#
         Self::execute_tool_inner(
             self.tools().clone(),
             self.context_manager().clone(),
+            self.safety().clone(),
             self.deps.store.clone(),
             self.job_id,
             tool_name,

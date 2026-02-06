@@ -16,7 +16,7 @@ pub use leak_detector::{
     LeakAction, LeakDetectionError, LeakDetector, LeakMatch, LeakPattern, LeakScanResult,
     LeakSeverity,
 };
-pub use policy::{Policy, PolicyRule, Severity};
+pub use policy::{Policy, PolicyAction, PolicyRule, Severity};
 pub use sanitizer::{InjectionWarning, SanitizedOutput, Sanitizer};
 pub use validator::{ValidationResult, Validator};
 
@@ -27,6 +27,7 @@ pub struct SafetyLayer {
     sanitizer: Sanitizer,
     validator: Validator,
     policy: Policy,
+    leak_detector: LeakDetector,
     config: SafetyConfig,
 }
 
@@ -37,6 +38,7 @@ impl SafetyLayer {
             sanitizer: Sanitizer::new(),
             validator: Validator::new(),
             policy: Policy::default(),
+            leak_detector: LeakDetector::new(),
             config: config.clone(),
         }
     }
@@ -64,14 +66,55 @@ impl SafetyLayer {
             };
         }
 
+        let mut content = output.to_string();
+        let mut was_modified = false;
+
+        // Leak detection and redaction
+        match self.leak_detector.scan_and_clean(&content) {
+            Ok(cleaned) => {
+                if cleaned != content {
+                    was_modified = true;
+                    content = cleaned;
+                }
+            }
+            Err(_) => {
+                return SanitizedOutput {
+                    content: "[Output blocked due to potential secret leakage]".to_string(),
+                    warnings: vec![],
+                    was_modified: true,
+                };
+            }
+        }
+
+        // Safety policy enforcement
+        let violations = self.policy.check(&content);
+        if violations
+            .iter()
+            .any(|rule| rule.action == crate::safety::PolicyAction::Block)
+        {
+            return SanitizedOutput {
+                content: "[Output blocked by safety policy]".to_string(),
+                warnings: vec![],
+                was_modified: true,
+            };
+        }
+        if violations
+            .iter()
+            .any(|rule| rule.action == crate::safety::PolicyAction::Sanitize)
+        {
+            was_modified = true;
+        }
+
         // Run sanitization if enabled
         if self.config.injection_check_enabled {
-            self.sanitizer.sanitize(output)
+            let mut sanitized = self.sanitizer.sanitize(&content);
+            sanitized.was_modified = sanitized.was_modified || was_modified;
+            sanitized
         } else {
             SanitizedOutput {
-                content: output.to_string(),
+                content,
                 warnings: vec![],
-                was_modified: false,
+                was_modified,
             }
         }
     }

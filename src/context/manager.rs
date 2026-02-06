@@ -34,6 +34,17 @@ impl ContextManager {
         title: impl Into<String>,
         description: impl Into<String>,
     ) -> Result<Uuid, JobError> {
+        self.create_job_for_user("default", title, description)
+            .await
+    }
+
+    /// Create a new job context for a specific user.
+    pub async fn create_job_for_user(
+        &self,
+        user_id: impl Into<String>,
+        title: impl Into<String>,
+        description: impl Into<String>,
+    ) -> Result<Uuid, JobError> {
         let contexts = self.contexts.read().await;
         let active_count = contexts.values().filter(|c| c.state.is_active()).count();
 
@@ -42,7 +53,7 @@ impl ContextManager {
         }
         drop(contexts);
 
-        let context = JobContext::new(title, description);
+        let context = JobContext::with_user(user_id, title, description);
         let job_id = context.job_id;
 
         let memory = Memory::new(job_id);
@@ -113,6 +124,28 @@ impl ContextManager {
         self.contexts.read().await.keys().cloned().collect()
     }
 
+    /// List all active job IDs for a specific user.
+    pub async fn active_jobs_for(&self, user_id: &str) -> Vec<Uuid> {
+        self.contexts
+            .read()
+            .await
+            .iter()
+            .filter(|(_, c)| c.user_id == user_id && c.state.is_active())
+            .map(|(id, _)| *id)
+            .collect()
+    }
+
+    /// List all job IDs for a specific user.
+    pub async fn all_jobs_for(&self, user_id: &str) -> Vec<Uuid> {
+        self.contexts
+            .read()
+            .await
+            .iter()
+            .filter(|(_, c)| c.user_id == user_id)
+            .map(|(id, _)| *id)
+            .collect()
+    }
+
     /// Get count of active jobs.
     pub async fn active_count(&self) -> usize {
         self.contexts
@@ -174,6 +207,35 @@ impl ContextManager {
         summary.total = contexts.len();
         summary
     }
+
+    /// Get summary of all jobs for a specific user.
+    pub async fn summary_for(&self, user_id: &str) -> ContextSummary {
+        let contexts = self.contexts.read().await;
+
+        let mut summary = ContextSummary::default();
+        for ctx in contexts.values().filter(|c| c.user_id == user_id) {
+            match ctx.state {
+                crate::context::JobState::Pending => summary.pending += 1,
+                crate::context::JobState::InProgress => summary.in_progress += 1,
+                crate::context::JobState::Completed => summary.completed += 1,
+                crate::context::JobState::Submitted => summary.submitted += 1,
+                crate::context::JobState::Accepted => summary.accepted += 1,
+                crate::context::JobState::Failed => summary.failed += 1,
+                crate::context::JobState::Stuck => summary.stuck += 1,
+                crate::context::JobState::Cancelled => summary.cancelled += 1,
+            }
+        }
+
+        summary.total = summary.pending
+            + summary.in_progress
+            + summary.completed
+            + summary.submitted
+            + summary.accepted
+            + summary.failed
+            + summary.stuck
+            + summary.cancelled;
+        summary
+    }
 }
 
 impl Default for ContextManager {
@@ -207,6 +269,18 @@ mod tests {
 
         let context = manager.get_context(job_id).await.unwrap();
         assert_eq!(context.title, "Test");
+    }
+
+    #[tokio::test]
+    async fn test_create_job_for_user_sets_user_id() {
+        let manager = ContextManager::new(5);
+        let job_id = manager
+            .create_job_for_user("user-123", "Test", "Description")
+            .await
+            .unwrap();
+
+        let context = manager.get_context(job_id).await.unwrap();
+        assert_eq!(context.user_id, "user-123");
     }
 
     #[tokio::test]

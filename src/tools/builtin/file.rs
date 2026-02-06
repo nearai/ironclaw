@@ -214,6 +214,10 @@ impl Tool for ReadFileTool {
     fn requires_sanitization(&self) -> bool {
         true // File content could contain anything
     }
+
+    fn requires_approval(&self) -> bool {
+        true // Reading local files should require approval
+    }
 }
 
 /// Write file contents tool.
@@ -421,6 +425,10 @@ impl Tool for ListDirTool {
 
     fn requires_sanitization(&self) -> bool {
         false // Directory listings are safe
+    }
+
+    fn requires_approval(&self) -> bool {
+        true // Directory listings can leak filesystem structure
     }
 }
 

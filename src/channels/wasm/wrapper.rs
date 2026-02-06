@@ -48,6 +48,7 @@ use crate::channels::wasm::runtime::{PreparedChannelModule, WasmChannelRuntime};
 use crate::channels::wasm::schema::ChannelConfig;
 use crate::channels::{Channel, IncomingMessage, MessageStream, OutgoingResponse, StatusUpdate};
 use crate::error::ChannelError;
+use crate::safety::LeakDetector;
 use crate::tools::wasm::LogLevel;
 use crate::tools::wasm::WasmResourceLimiter;
 
@@ -240,6 +241,15 @@ impl near::agent::channel_host::Host for ChannelStoreData {
         );
 
         let url = injected_url;
+        let leak_detector = LeakDetector::new();
+        let header_vec: Vec<(String, String)> = headers
+            .iter()
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect();
+
+        leak_detector
+            .scan_http_request(&url, &header_vec, body.as_deref())
+            .map_err(|e| format!("Potential secret leak blocked: {}", e))?;
 
         // Make the HTTP request using blocking I/O
         // We're already in a spawn_blocking context, so we can use block_on
@@ -304,6 +314,13 @@ impl near::agent::channel_host::Host for ChannelStoreData {
                     body_str.to_string()
                 };
                 tracing::debug!(body = %truncated, "Response body");
+            }
+
+            // Leak detection on response body (best-effort)
+            if let Ok(body_str) = std::str::from_utf8(&body) {
+                leak_detector
+                    .scan_and_clean(body_str)
+                    .map_err(|e| format!("Potential secret leak in response: {}", e))?;
             }
 
             Ok(near::agent::channel_host::HttpResponse {

@@ -6,7 +6,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use axum::{
     Json, Router,
-    extract::State,
+    extract::{DefaultBodyLimit, State},
     http::StatusCode,
     response::IntoResponse,
     routing::{get, post},
@@ -36,7 +36,29 @@ struct HttpChannelState {
     shutdown_tx: RwLock<Option<oneshot::Sender<()>>>,
     /// Expected webhook secret for authentication (if configured).
     webhook_secret: Option<String>,
+    /// Fixed user ID for this HTTP channel.
+    user_id: String,
+    /// Rate limiting state.
+    rate_limit: tokio::sync::Mutex<RateLimitState>,
 }
+
+#[derive(Debug)]
+struct RateLimitState {
+    window_start: std::time::Instant,
+    request_count: u32,
+}
+
+/// Maximum JSON body size for webhook requests (64 KB).
+const MAX_BODY_BYTES: usize = 64 * 1024;
+
+/// Maximum number of pending wait-for-response requests.
+const MAX_PENDING_RESPONSES: usize = 100;
+
+/// Maximum requests per minute.
+const MAX_REQUESTS_PER_MINUTE: u32 = 60;
+
+/// Maximum content length for a single message.
+const MAX_CONTENT_BYTES: usize = 32 * 1024;
 
 impl HttpChannel {
     /// Create a new HTTP channel.
@@ -45,6 +67,7 @@ impl HttpChannel {
             .webhook_secret
             .as_ref()
             .map(|s| s.expose_secret().to_string());
+        let user_id = config.user_id.clone();
 
         Self {
             config,
@@ -53,6 +76,11 @@ impl HttpChannel {
                 pending_responses: RwLock::new(std::collections::HashMap::new()),
                 shutdown_tx: RwLock::new(None),
                 webhook_secret,
+                user_id,
+                rate_limit: tokio::sync::Mutex::new(RateLimitState {
+                    window_start: std::time::Instant::now(),
+                    request_count: 0,
+                }),
             }),
         }
     }
@@ -60,8 +88,9 @@ impl HttpChannel {
 
 #[derive(Debug, Deserialize)]
 struct WebhookRequest {
-    /// User or client identifier.
-    user_id: String,
+    /// User or client identifier (ignored, user is fixed by server config).
+    #[serde(default)]
+    user_id: Option<String>,
     /// Message content.
     content: String,
     /// Optional thread ID for conversation tracking.
@@ -100,6 +129,33 @@ async fn webhook_handler(
     State(state): State<Arc<HttpChannelState>>,
     Json(req): Json<WebhookRequest>,
 ) -> (StatusCode, Json<WebhookResponse>) {
+    // Rate limiting
+    {
+        let mut limiter = state.rate_limit.lock().await;
+        if limiter.window_start.elapsed() >= std::time::Duration::from_secs(60) {
+            limiter.window_start = std::time::Instant::now();
+            limiter.request_count = 0;
+        }
+        limiter.request_count += 1;
+        if limiter.request_count > MAX_REQUESTS_PER_MINUTE {
+            return (
+                StatusCode::TOO_MANY_REQUESTS,
+                Json(WebhookResponse {
+                    message_id: Uuid::nil(),
+                    status: "error".to_string(),
+                    response: Some("Rate limit exceeded".to_string()),
+                }),
+            );
+        }
+    }
+
+    let _ = req.user_id.as_ref().map(|user_id| {
+        tracing::debug!(
+            provided_user_id = %user_id,
+            "HTTP webhook request provided user_id, ignoring in favor of configured user_id"
+        );
+    });
+
     // Validate secret if configured
     if let Some(ref expected_secret) = state.webhook_secret {
         match &req.secret {
@@ -129,10 +185,22 @@ async fn webhook_handler(
         }
     }
 
-    let msg =
-        IncomingMessage::new("http", &req.user_id, &req.content).with_metadata(serde_json::json!({
+    if req.content.len() > MAX_CONTENT_BYTES {
+        return (
+            StatusCode::PAYLOAD_TOO_LARGE,
+            Json(WebhookResponse {
+                message_id: Uuid::nil(),
+                status: "error".to_string(),
+                response: Some("Content too large".to_string()),
+            }),
+        );
+    }
+
+    let msg = IncomingMessage::new("http", &state.user_id, &req.content).with_metadata(
+        serde_json::json!({
             "wait_for_response": req.wait_for_response,
-        }));
+        }),
+    );
 
     if let Some(thread_id) = &req.thread_id {
         let msg = msg.with_thread(thread_id);
@@ -151,6 +219,17 @@ async fn process_message(
 
     // Set up response channel if waiting
     let response_rx = if wait_for_response {
+        if state.pending_responses.read().await.len() >= MAX_PENDING_RESPONSES {
+            return (
+                StatusCode::TOO_MANY_REQUESTS,
+                Json(WebhookResponse {
+                    message_id: msg_id,
+                    status: "error".to_string(),
+                    response: Some("Too many pending requests".to_string()),
+                }),
+            );
+        }
+
         let (tx, rx) = oneshot::channel();
         state.pending_responses.write().await.insert(msg_id, tx);
         Some(rx)
@@ -194,6 +273,9 @@ async fn process_message(
         None
     };
 
+    // Ensure pending response entry is cleaned up on timeout or cancellation
+    let _ = state.pending_responses.write().await.remove(&msg_id);
+
     (
         StatusCode::OK,
         Json(WebhookResponse {
@@ -211,6 +293,13 @@ impl Channel for HttpChannel {
     }
 
     async fn start(&self) -> Result<MessageStream, ChannelError> {
+        if self.state.webhook_secret.is_none() {
+            return Err(ChannelError::StartupFailed {
+                name: "http".to_string(),
+                reason: "HTTP webhook secret is required (set HTTP_WEBHOOK_SECRET)".to_string(),
+            });
+        }
+
         let (tx, rx) = mpsc::channel(256);
         *self.state.tx.write().await = Some(tx);
 
@@ -242,6 +331,7 @@ impl Channel for HttpChannel {
         let app = Router::new()
             .route("/health", get(health_handler))
             .route("/webhook", post(webhook_handler))
+            .layer(DefaultBodyLimit::max(MAX_BODY_BYTES))
             .with_state(state.clone());
 
         // Create shutdown channel
@@ -297,5 +387,24 @@ impl Channel for HttpChannel {
         // Clear the message sender
         *self.state.tx.write().await = None;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn test_http_channel_requires_secret() {
+        let config = HttpConfig {
+            host: "127.0.0.1".to_string(),
+            port: 0,
+            webhook_secret: None,
+            user_id: "http".to_string(),
+        };
+
+        let channel = HttpChannel::new(config);
+        let result = channel.start().await;
+        assert!(result.is_err());
     }
 }
