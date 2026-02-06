@@ -14,7 +14,7 @@ use ironclaw::{
             WasmChannelRuntime, WasmChannelRuntimeConfig, WasmChannelServer,
         },
     },
-    cli::{Cli, Command, run_tool_command},
+    cli::{Cli, Command, run_mcp_command, run_tool_command},
     config::Config,
     context::ContextManager,
     history::Store,
@@ -25,6 +25,7 @@ use ironclaw::{
     setup::{SetupConfig, SetupWizard},
     tools::{
         ToolRegistry,
+        mcp::{McpClient, McpSessionManager, config::load_mcp_servers, is_authenticated},
         wasm::{WasmToolLoader, WasmToolRuntime},
     },
     workspace::{EmbeddingProvider, NearAiEmbeddings, OpenAiEmbeddings, Workspace},
@@ -50,6 +51,16 @@ async fn main() -> anyhow::Result<()> {
             // Config commands don't need logging setup
             return ironclaw::cli::run_config_command(config_cmd.clone())
                 .map_err(|e| anyhow::anyhow!("{}", e));
+        }
+        Some(Command::Mcp(mcp_cmd)) => {
+            // Simple logging for MCP commands
+            tracing_subscriber::fmt()
+                .with_env_filter(
+                    EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("warn")),
+                )
+                .init();
+
+            return run_mcp_command(mcp_cmd.clone()).await;
         }
         Some(Command::Setup {
             skip_auth,
@@ -310,6 +321,110 @@ async fn main() -> anyhow::Result<()> {
             }
         }
     }
+
+    // Create secrets store if master key is configured (needed for MCP auth and WASM channels)
+    let secrets_store: Option<Arc<dyn SecretsStore + Send + Sync>> =
+        if let (Some(store), Some(master_key)) = (&store, config.secrets.master_key()) {
+            match SecretsCrypto::new(master_key.clone()) {
+                Ok(crypto) => Some(Arc::new(PostgresSecretsStore::new(
+                    store.pool(),
+                    Arc::new(crypto),
+                ))),
+                Err(e) => {
+                    tracing::warn!("Failed to initialize secrets crypto: {}", e);
+                    None
+                }
+            }
+        } else {
+            None
+        };
+
+    // Load configured MCP servers
+    let mcp_session_manager = Arc::new(McpSessionManager::new());
+    if let Some(ref secrets) = secrets_store {
+        match load_mcp_servers().await {
+            Ok(servers) => {
+                let enabled_count = servers.servers.iter().filter(|s| s.enabled).count();
+                if enabled_count > 0 {
+                    tracing::info!("Loading {} configured MCP server(s)...", enabled_count);
+                }
+
+                for server in servers.enabled_servers() {
+                    tracing::debug!(
+                        "Checking authentication for MCP server '{}'...",
+                        server.name
+                    );
+                    // Check for stored tokens (from either pre-configured OAuth or DCR)
+                    let has_tokens = is_authenticated(server, secrets, "default").await;
+                    tracing::debug!("MCP server '{}' has_tokens={}", server.name, has_tokens);
+
+                    let client = if has_tokens || server.requires_auth() {
+                        // Use authenticated client if we have tokens or OAuth is configured
+                        McpClient::new_authenticated(
+                            server.clone(),
+                            Arc::clone(&mcp_session_manager),
+                            Arc::clone(secrets),
+                            "default",
+                        )
+                    } else {
+                        // No tokens and no OAuth - try unauthenticated
+                        McpClient::new_with_name(&server.name, &server.url)
+                    };
+
+                    tracing::debug!("Fetching tools from MCP server '{}'...", server.name);
+                    match client.list_tools().await {
+                        Ok(mcp_tools) => {
+                            tracing::debug!(
+                                "Got {} tools from MCP server '{}'",
+                                mcp_tools.len(),
+                                server.name
+                            );
+                            match client.create_tools().await {
+                                Ok(tool_impls) => {
+                                    for tool in tool_impls {
+                                        tools.register(tool).await;
+                                    }
+                                    tracing::info!(
+                                        "Loaded {} tools from MCP server '{}'",
+                                        mcp_tools.len(),
+                                        server.name
+                                    );
+                                }
+                                Err(e) => {
+                                    tracing::warn!(
+                                        "Failed to create tools from MCP server '{}': {}",
+                                        server.name,
+                                        e
+                                    );
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            // Check if it's an auth error
+                            let err_str = e.to_string();
+                            if err_str.contains("401") || err_str.contains("authentication") {
+                                tracing::warn!(
+                                    "MCP server '{}' requires authentication. Run: ironclaw mcp auth {}",
+                                    server.name,
+                                    server.name
+                                );
+                            } else {
+                                tracing::warn!(
+                                    "Failed to connect to MCP server '{}': {}",
+                                    server.name,
+                                    e
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+            Err(e) => {
+                tracing::debug!("No MCP servers configured ({})", e);
+            }
+        }
+    }
+
     tracing::info!(
         "Tool registry initialized with {} total tools",
         tools.count()
@@ -344,23 +459,6 @@ async fn main() -> anyhow::Result<()> {
             );
         }
     }
-
-    // Create secrets store if master key is configured (needed for Telegram webhook registration)
-    let secrets_store: Option<Arc<dyn SecretsStore + Send + Sync>> =
-        if let (Some(store), Some(master_key)) = (&store, config.secrets.master_key()) {
-            match SecretsCrypto::new(master_key.clone()) {
-                Ok(crypto) => Some(Arc::new(PostgresSecretsStore::new(
-                    store.pool(),
-                    Arc::new(crypto),
-                ))),
-                Err(e) => {
-                    tracing::warn!("Failed to initialize secrets crypto: {}", e);
-                    None
-                }
-            }
-        } else {
-            None
-        };
 
     // Load WASM channels if enabled
     if config.channels.wasm_channels_enabled && config.channels.wasm_channels_dir.exists() {

@@ -5,11 +5,14 @@
 //! - Interactive setup wizard (`setup`)
 //! - Managing configuration (`config list`, `config get`, `config set`)
 //! - Managing WASM tools (`tool install`, `tool list`, `tool remove`)
+//! - Managing MCP servers (`mcp add`, `mcp auth`, `mcp list`, `mcp test`)
 
 mod config;
+mod mcp;
 mod tool;
 
 pub use config::{ConfigCommand, run_config_command};
+pub use mcp::{McpCommand, run_mcp_command};
 pub use tool::{ToolCommand, run_tool_command};
 
 use clap::{Parser, Subcommand};
@@ -72,6 +75,10 @@ pub enum Command {
     /// Manage WASM tools
     #[command(subcommand)]
     Tool(ToolCommand),
+
+    /// Manage MCP servers (hosted tool providers)
+    #[command(subcommand)]
+    Mcp(McpCommand),
 }
 
 impl Cli {

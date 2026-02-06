@@ -13,7 +13,7 @@ tokio-stream = "0.1"
 futures = "0.3"
 
 # HTTP client
-reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream"] }
 
 # Serialization
 serde = { version = "1", features = ["derive"] }
@@ -97,6 +97,7 @@ hyper = { version = "1.5", features = ["server", "http1", "http2"] }
 hyper-util = { version = "0.1", features = ["server", "tokio", "http1", "http2"] }
 http-body-util = "0.1"
 bytes = "1"
+base64 = "0.22.1"
 
 # macOS keychain
 [target.'cfg(target_os = "macos")'.dependencies]

@@ -1,13 +1,18 @@
 //! Tool management CLI commands.
 //!
-//! Commands for installing, listing, and removing WASM tools.
+//! Commands for installing, listing, removing, and authenticating WASM tools.
 
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::Command as ProcessCommand;
+use std::sync::Arc;
 
 use clap::Subcommand;
 use tokio::fs;
 
+use crate::config::Config;
+use crate::history::Store;
+use crate::secrets::{CreateSecretParams, PostgresSecretsStore, SecretsCrypto, SecretsStore};
 use crate::tools::wasm::{CapabilitiesFile, compute_binary_hash};
 
 /// Default tools directory.
@@ -79,6 +84,20 @@ pub enum ToolCommand {
         #[arg(short, long)]
         dir: Option<PathBuf>,
     },
+
+    /// Configure authentication for a tool
+    Auth {
+        /// Name of the tool
+        name: String,
+
+        /// Directory to look for tool (default: ~/.ironclaw/tools/)
+        #[arg(short, long)]
+        dir: Option<PathBuf>,
+
+        /// User ID for storing the secret (default: "default")
+        #[arg(short, long, default_value = "default")]
+        user: String,
+    },
 }
 
 /// Run a tool command.
@@ -96,6 +115,7 @@ pub async fn run_tool_command(cmd: ToolCommand) -> anyhow::Result<()> {
         ToolCommand::List { dir, verbose } => list_tools(dir, verbose).await,
         ToolCommand::Remove { name, dir } => remove_tool(name, dir).await,
         ToolCommand::Info { name_or_path, dir } => show_tool_info(name_or_path, dir).await,
+        ToolCommand::Auth { name, dir, user } => auth_tool(name, dir, user).await,
     }
 }
 
@@ -656,6 +676,571 @@ fn print_capabilities_detail(caps: &CapabilitiesFile) {
             }
         }
     }
+}
+
+/// Configure authentication for a tool.
+async fn auth_tool(name: String, dir: Option<PathBuf>, user_id: String) -> anyhow::Result<()> {
+    let tools_dir = dir.unwrap_or_else(default_tools_dir);
+    let caps_path = tools_dir.join(format!("{}.capabilities.json", name));
+
+    if !caps_path.exists() {
+        anyhow::bail!(
+            "Tool '{}' not found or has no capabilities file at {}",
+            name,
+            caps_path.display()
+        );
+    }
+
+    // Parse capabilities
+    let content = fs::read_to_string(&caps_path).await?;
+    let caps = CapabilitiesFile::from_json(&content)
+        .map_err(|e| anyhow::anyhow!("Invalid capabilities file: {}", e))?;
+
+    // Check for auth section
+    let auth = caps.auth.ok_or_else(|| {
+        anyhow::anyhow!(
+            "Tool '{}' has no auth configuration.\n\
+             The tool may not require authentication, or auth setup is not defined.",
+            name
+        )
+    })?;
+
+    let display_name = auth.display_name.as_deref().unwrap_or(&name);
+
+    let header = format!("{} Authentication", display_name);
+    println!();
+    println!("╔════════════════════════════════════════════════════════════════╗");
+    println!("║  {:^62}║", header);
+    println!("╚════════════════════════════════════════════════════════════════╝");
+    println!();
+
+    // Initialize secrets store
+    let config = Config::from_env()?;
+    let master_key = config.secrets.master_key().ok_or_else(|| {
+        anyhow::anyhow!("SECRETS_MASTER_KEY not set. Run 'ironclaw setup' first or set it in .env")
+    })?;
+
+    let store = Store::new(&config.database).await?;
+    store.run_migrations().await?;
+
+    let crypto = SecretsCrypto::new(master_key.clone())?;
+    let secrets_store = Arc::new(PostgresSecretsStore::new(store.pool(), Arc::new(crypto)));
+
+    // Check if already configured
+    let already_configured = secrets_store
+        .exists(&user_id, &auth.secret_name)
+        .await
+        .unwrap_or(false);
+
+    if already_configured {
+        println!("  {} is already configured.", display_name);
+        println!();
+        print!("  Replace existing credentials? [y/N]: ");
+        std::io::stdout().flush()?;
+
+        let mut input = String::new();
+        std::io::stdin().read_line(&mut input)?;
+
+        if !input.trim().eq_ignore_ascii_case("y") {
+            println!();
+            println!("  Keeping existing credentials.");
+            return Ok(());
+        }
+        println!();
+    }
+
+    // Check for environment variable
+    if let Some(ref env_var) = auth.env_var {
+        if let Ok(token) = std::env::var(env_var) {
+            if !token.is_empty() {
+                println!("  Found {} in environment.", env_var);
+                println!();
+
+                // Validate if endpoint is provided
+                if let Some(ref validation) = auth.validation_endpoint {
+                    print!("  Validating token...");
+                    std::io::stdout().flush()?;
+
+                    match validate_token(&token, validation, &auth.secret_name).await {
+                        Ok(()) => {
+                            println!(" ✓");
+                        }
+                        Err(e) => {
+                            println!(" ✗");
+                            println!("  Validation failed: {}", e);
+                            println!();
+                            println!("  Falling back to manual entry...");
+                            return auth_tool_manual(&secrets_store, &user_id, &auth).await;
+                        }
+                    }
+                }
+
+                // Save the token
+                save_token(&secrets_store, &user_id, &auth, &token).await?;
+                print_success(display_name);
+                return Ok(());
+            }
+        }
+    }
+
+    // Check for OAuth configuration
+    if let Some(ref oauth) = auth.oauth {
+        return auth_tool_oauth(&secrets_store, &user_id, &auth, oauth).await;
+    }
+
+    // Fall back to manual entry
+    auth_tool_manual(&secrets_store, &user_id, &auth).await
+}
+
+/// OAuth browser-based login flow.
+async fn auth_tool_oauth(
+    store: &PostgresSecretsStore,
+    user_id: &str,
+    auth: &crate::tools::wasm::AuthCapabilitySchema,
+    oauth: &crate::tools::wasm::OAuthConfigSchema,
+) -> anyhow::Result<()> {
+    use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
+    use rand::RngCore;
+    use sha2::{Digest, Sha256};
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+    use tokio::net::TcpListener;
+
+    let display_name = auth.display_name.as_deref().unwrap_or(&auth.secret_name);
+
+    // Get client_id from config or env
+    let client_id = oauth
+        .client_id
+        .clone()
+        .or_else(|| {
+            oauth
+                .client_id_env
+                .as_ref()
+                .and_then(|env| std::env::var(env).ok())
+        })
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "OAuth client_id not configured.\n\
+                 Set it in the capabilities file or via environment variable."
+            )
+        })?;
+
+    // Get client_secret if provided
+    let client_secret = oauth.client_secret.clone().or_else(|| {
+        oauth
+            .client_secret_env
+            .as_ref()
+            .and_then(|env| std::env::var(env).ok())
+    });
+
+    println!("  Starting OAuth authentication...");
+    println!();
+
+    // Find an available port for the callback
+    let mut listener = None;
+    let mut port = 0;
+
+    for p in 9876..=9886 {
+        match TcpListener::bind(format!("127.0.0.1:{}", p)).await {
+            Ok(l) => {
+                listener = Some(l);
+                port = p;
+                break;
+            }
+            Err(_) => continue,
+        }
+    }
+
+    let listener = listener.ok_or_else(|| anyhow::anyhow!("Could not find available port"))?;
+    let redirect_uri = format!("http://localhost:{}/callback", port);
+
+    // Generate PKCE verifier and challenge
+    let (code_verifier, code_challenge) = if oauth.use_pkce {
+        let mut verifier_bytes = [0u8; 32];
+        rand::thread_rng().fill_bytes(&mut verifier_bytes);
+        let verifier = URL_SAFE_NO_PAD.encode(verifier_bytes);
+
+        let mut hasher = Sha256::new();
+        hasher.update(verifier.as_bytes());
+        let challenge = URL_SAFE_NO_PAD.encode(hasher.finalize());
+
+        (Some(verifier), Some(challenge))
+    } else {
+        (None, None)
+    };
+
+    // Build authorization URL
+    let mut auth_url = format!(
+        "{}?client_id={}&response_type=code&redirect_uri={}",
+        oauth.authorization_url,
+        urlencoding::encode(&client_id),
+        urlencoding::encode(&redirect_uri)
+    );
+
+    if !oauth.scopes.is_empty() {
+        auth_url.push_str(&format!(
+            "&scope={}",
+            urlencoding::encode(&oauth.scopes.join(" "))
+        ));
+    }
+
+    if let Some(ref challenge) = code_challenge {
+        auth_url.push_str(&format!(
+            "&code_challenge={}&code_challenge_method=S256",
+            challenge
+        ));
+    }
+
+    // Add extra params
+    for (key, value) in &oauth.extra_params {
+        auth_url.push_str(&format!(
+            "&{}={}",
+            urlencoding::encode(key),
+            urlencoding::encode(value)
+        ));
+    }
+
+    println!("  Opening browser for {} login...", display_name);
+    println!();
+
+    if let Err(e) = open::that(&auth_url) {
+        println!("  Could not open browser: {}", e);
+        println!("  Please open this URL manually:");
+        println!("  {}", auth_url);
+    }
+
+    println!("  Waiting for authorization...");
+
+    // Wait for callback with timeout
+    let timeout = std::time::Duration::from_secs(300);
+    let code = tokio::time::timeout(timeout, async {
+        loop {
+            let (mut socket, _) = listener.accept().await?;
+
+            let mut reader = BufReader::new(&mut socket);
+            let mut request_line = String::new();
+            reader.read_line(&mut request_line).await?;
+
+            // Parse GET /callback?code=xxx HTTP/1.1
+            if let Some(path) = request_line.split_whitespace().nth(1) {
+                if path.starts_with("/callback") {
+                    if let Some(query) = path.split('?').nth(1) {
+                        for param in query.split('&') {
+                            let parts: Vec<&str> = param.splitn(2, '=').collect();
+                            if parts.len() == 2 && parts[0] == "code" {
+                                let code = urlencoding::decode(parts[1])
+                                    .unwrap_or_else(|_| parts[1].into())
+                                    .into_owned();
+
+                                // Send success response
+                                let response = format!(
+                                    "HTTP/1.1 200 OK\r\n\
+                                     Content-Type: text/html\r\n\
+                                     \r\n\
+                                     <!DOCTYPE html><html><body style=\"font-family: sans-serif; \
+                                     display: flex; justify-content: center; align-items: center; \
+                                     height: 100vh; margin: 0; background: #191919; color: white;\">\
+                                     <div style=\"text-align: center;\">\
+                                     <h1>✓ {} Connected!</h1>\
+                                     <p>You can close this window.</p>\
+                                     </div></body></html>",
+                                    display_name
+                                );
+                                let _ = socket.write_all(response.as_bytes()).await;
+                                let _ = socket.shutdown().await;
+
+                                return Ok::<_, anyhow::Error>(code);
+                            }
+                        }
+
+                        // Check for error
+                        if query.contains("error=") {
+                            let response =
+                                "HTTP/1.1 400 Bad Request\r\n\r\nAuthorization denied";
+                            let _ = socket.write_all(response.as_bytes()).await;
+                            return Err(anyhow::anyhow!("Authorization denied by user"));
+                        }
+                    }
+                }
+            }
+
+            let response = "HTTP/1.1 404 Not Found\r\n\r\n";
+            let _ = socket.write_all(response.as_bytes()).await;
+        }
+    })
+    .await
+    .map_err(|_| anyhow::anyhow!("Timed out waiting for authorization"))??;
+
+    println!();
+    println!("  Exchanging code for token...");
+
+    // Exchange code for token
+    let client = reqwest::Client::new();
+    let mut token_params = vec![
+        ("grant_type", "authorization_code".to_string()),
+        ("code", code),
+        ("redirect_uri", redirect_uri),
+    ];
+
+    if let Some(ref verifier) = code_verifier {
+        token_params.push(("code_verifier", verifier.to_string()));
+    }
+
+    // Build token request
+    let mut request = client.post(&oauth.token_url);
+
+    // Use Basic auth if client_secret is provided, otherwise include client_id in body
+    if let Some(ref secret) = client_secret {
+        request = request.basic_auth(&client_id, Some(secret));
+    } else {
+        token_params.push(("client_id", client_id));
+    }
+
+    let token_response = request.form(&token_params).send().await?;
+
+    if !token_response.status().is_success() {
+        let status = token_response.status();
+        let body = token_response.text().await.unwrap_or_default();
+        return Err(anyhow::anyhow!(
+            "Token exchange failed: {} - {}",
+            status,
+            body
+        ));
+    }
+
+    let token_data: serde_json::Value = token_response.json().await?;
+    let access_token = token_data
+        .get(&oauth.access_token_field)
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "No {} in token response: {:?}",
+                oauth.access_token_field,
+                token_data
+            )
+        })?;
+
+    // Save the token
+    save_token(store, user_id, auth, access_token).await?;
+
+    // Extract any additional info for display
+    let workspace_name = token_data
+        .get("workspace_name")
+        .and_then(|v| v.as_str())
+        .or_else(|| token_data.get("team_name").and_then(|v| v.as_str()));
+
+    println!();
+    println!("  ✓ {} connected!", display_name);
+    if let Some(workspace) = workspace_name {
+        println!("    Workspace: {}", workspace);
+    }
+    println!();
+    println!("  The tool can now access the API.");
+    println!();
+
+    Ok(())
+}
+
+/// Manual token entry flow.
+async fn auth_tool_manual(
+    store: &PostgresSecretsStore,
+    user_id: &str,
+    auth: &crate::tools::wasm::AuthCapabilitySchema,
+) -> anyhow::Result<()> {
+    let display_name = auth.display_name.as_deref().unwrap_or(&auth.secret_name);
+
+    // Show instructions
+    if let Some(ref instructions) = auth.instructions {
+        println!("  Setup instructions:");
+        println!();
+        for line in instructions.lines() {
+            println!("    {}", line);
+        }
+        println!();
+    }
+
+    // Offer to open setup URL
+    if let Some(ref url) = auth.setup_url {
+        print!("  Press Enter to open setup page (or 's' to skip): ");
+        std::io::stdout().flush()?;
+
+        let mut input = String::new();
+        std::io::stdin().read_line(&mut input)?;
+
+        if !input.trim().eq_ignore_ascii_case("s") {
+            if let Err(e) = open::that(url) {
+                println!("  Could not open browser: {}", e);
+                println!("  Please open manually: {}", url);
+            } else {
+                println!("  Opening browser...");
+            }
+        }
+        println!();
+    }
+
+    // Show token hint
+    if let Some(ref hint) = auth.token_hint {
+        println!("  Token format: {}", hint);
+        println!();
+    }
+
+    // Prompt for token
+    print!("  Paste your token: ");
+    std::io::stdout().flush()?;
+
+    let token = read_hidden_input()?;
+    println!();
+
+    if token.is_empty() {
+        println!("  No token provided. Aborting.");
+        return Ok(());
+    }
+
+    // Validate if endpoint is provided
+    if let Some(ref validation) = auth.validation_endpoint {
+        print!("  Validating token...");
+        std::io::stdout().flush()?;
+
+        match validate_token(&token, validation, &auth.secret_name).await {
+            Ok(()) => {
+                println!(" ✓");
+            }
+            Err(e) => {
+                println!(" ✗");
+                println!("  Validation failed: {}", e);
+                println!();
+                print!("  Save anyway? [y/N]: ");
+                std::io::stdout().flush()?;
+
+                let mut confirm = String::new();
+                std::io::stdin().read_line(&mut confirm)?;
+
+                if !confirm.trim().eq_ignore_ascii_case("y") {
+                    println!("  Aborting.");
+                    return Ok(());
+                }
+            }
+        }
+    }
+
+    // Save the token
+    save_token(store, user_id, auth, &token).await?;
+    print_success(display_name);
+    Ok(())
+}
+
+/// Read input with hidden characters.
+fn read_hidden_input() -> anyhow::Result<String> {
+    use crossterm::{
+        event::{self, Event, KeyCode, KeyModifiers},
+        terminal,
+    };
+
+    let mut input = String::new();
+
+    terminal::enable_raw_mode()?;
+
+    loop {
+        if let Event::Key(key_event) = event::read()? {
+            match key_event.code {
+                KeyCode::Enter => {
+                    break;
+                }
+                KeyCode::Backspace => {
+                    if !input.is_empty() {
+                        input.pop();
+                        print!("\x08 \x08");
+                        std::io::stdout().flush()?;
+                    }
+                }
+                KeyCode::Char('c') if key_event.modifiers.contains(KeyModifiers::CONTROL) => {
+                    terminal::disable_raw_mode()?;
+                    return Err(anyhow::anyhow!("Interrupted"));
+                }
+                KeyCode::Char(c) => {
+                    input.push(c);
+                    print!("*");
+                    std::io::stdout().flush()?;
+                }
+                _ => {}
+            }
+        }
+    }
+
+    terminal::disable_raw_mode()?;
+
+    Ok(input)
+}
+
+/// Validate a token against the validation endpoint.
+async fn validate_token(
+    token: &str,
+    validation: &crate::tools::wasm::ValidationEndpointSchema,
+    _secret_name: &str,
+) -> anyhow::Result<()> {
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(10))
+        .build()?;
+
+    // Build request based on method
+    let request = match validation.method.to_uppercase().as_str() {
+        "GET" => client.get(&validation.url),
+        "POST" => client.post(&validation.url),
+        _ => client.get(&validation.url),
+    };
+
+    // Add authorization header (assume Bearer for now, could be extended)
+    let response = request
+        .header("Authorization", format!("Bearer {}", token))
+        .header("Notion-Version", "2022-06-28") // Notion-specific, but harmless for others
+        .send()
+        .await?;
+
+    if response.status().as_u16() == validation.success_status {
+        Ok(())
+    } else {
+        let status = response.status();
+        let body = response.text().await.unwrap_or_default();
+        Err(anyhow::anyhow!(
+            "HTTP {} (expected {}): {}",
+            status,
+            validation.success_status,
+            if body.len() > 100 {
+                format!("{}...", &body[..100])
+            } else {
+                body
+            }
+        ))
+    }
+}
+
+/// Save token to secrets store.
+async fn save_token(
+    store: &PostgresSecretsStore,
+    user_id: &str,
+    auth: &crate::tools::wasm::AuthCapabilitySchema,
+    token: &str,
+) -> anyhow::Result<()> {
+    let mut params = CreateSecretParams::new(&auth.secret_name, token);
+
+    if let Some(ref provider) = auth.provider {
+        params = params.with_provider(provider);
+    }
+
+    store
+        .create(user_id, params)
+        .await
+        .map_err(|e| anyhow::anyhow!("Failed to save token: {}", e))?;
+
+    Ok(())
+}
+
+/// Print success message.
+fn print_success(display_name: &str) {
+    println!();
+    println!("  ✓ {} connected!", display_name);
+    println!();
+    println!("  The tool can now access the API.");
+    println!();
 }
 
 #[cfg(test)]
