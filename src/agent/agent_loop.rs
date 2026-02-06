@@ -45,6 +45,7 @@ use crate::error::Error;
 use crate::history::Store;
 use crate::llm::{ChatMessage, LlmProvider, Reasoning, ReasoningContext, RespondResult};
 use crate::safety::SafetyLayer;
+use crate::skills::{SkillContext, SkillStore};
 use crate::tools::ToolRegistry;
 use crate::workspace::Workspace;
 
@@ -81,6 +82,8 @@ pub struct Agent {
     session_manager: Arc<SessionManager>,
     context_monitor: ContextMonitor,
     heartbeat_config: Option<HeartbeatConfig>,
+    skill_store: Arc<SkillStore>,
+    skill_context: Arc<tokio::sync::RwLock<SkillContext>>,
 }
 
 impl Agent {
@@ -107,6 +110,17 @@ impl Agent {
             deps.store.clone(),
         ));
 
+        let skill_store = match SkillStore::new(crate::skills::store::default_skills_dir()) {
+            Ok(store) => Arc::new(store),
+            Err(e) => {
+                tracing::warn!("Failed to initialize skill store: {}", e);
+                Arc::new(
+                    SkillStore::new(std::env::temp_dir().join("ironclaw-skills"))
+                        .expect("fallback skill store should work"),
+                )
+            }
+        };
+
         Self {
             config,
             deps,
@@ -117,6 +131,8 @@ impl Agent {
             session_manager: Arc::new(SessionManager::new()),
             context_monitor: ContextMonitor::new(),
             heartbeat_config,
+            skill_store,
+            skill_context: Arc::new(tokio::sync::RwLock::new(SkillContext::new())),
         }
     }
 
@@ -370,8 +386,32 @@ impl Agent {
             truncate(&message.content, 100)
         );
 
+        // Gather registered skill commands for dynamic slash command matching
+        let skill_commands = {
+            let ctx = self.skill_context.read().await;
+            let mut cmds = Vec::new();
+            // Include the active skill's command if any
+            if let Some(skill) = ctx.active_skill() {
+                if let Some(cmd) = skill.manifest.command() {
+                    cmds.push(cmd.to_string());
+                }
+            }
+            // Also include all installed skills' commands
+            if let Ok(skills) = self.skill_store.list_all() {
+                for s in skills {
+                    if let Some(cmd) = s.manifest.command() {
+                        if !cmds.contains(&cmd.to_string()) {
+                            cmds.push(cmd.to_string());
+                        }
+                    }
+                }
+            }
+            cmds
+        };
+
         // Parse submission type first
-        let submission = SubmissionParser::parse(&message.content);
+        let submission =
+            SubmissionParser::parse_with_skill_commands(&message.content, &skill_commands);
 
         // Resolve session and thread
         let (session, thread_id) = self
@@ -423,6 +463,19 @@ impl Agent {
                 self.process_approval(message, session, thread_id, None, approved, always)
                     .await
             }
+            Submission::SkillLoad { url } => self.process_skill_load(&url).await,
+            Submission::SkillActivate { name, args } => {
+                self.process_skill_activate(message, session, thread_id, &name, args)
+                    .await
+            }
+            Submission::SkillActivateByCommand { command, args } => {
+                self.process_skill_activate_by_command(message, session, thread_id, &command, args)
+                    .await
+            }
+            Submission::SkillDeactivate => self.process_skill_deactivate().await,
+            Submission::SkillList => self.process_skill_list().await,
+            Submission::SkillRemove { name } => self.process_skill_remove(&name).await,
+            Submission::SkillInfo { name } => self.process_skill_info(&name).await,
         };
 
         // Convert SubmissionResult to response string
@@ -717,6 +770,20 @@ impl Agent {
             reasoning = reasoning.with_system_prompt(prompt);
         }
 
+        // Inject skill prompt if a skill is active
+        {
+            let skill_ctx = self.skill_context.read().await;
+            if let Some(skill_prompt) = skill_ctx.build_prompt_section() {
+                reasoning = reasoning.with_skill_prompt(skill_prompt);
+            }
+        }
+
+        // Reset skill turn counter
+        {
+            let mut skill_ctx = self.skill_context.write().await;
+            skill_ctx.reset_turn();
+        }
+
         // Build context with messages that we'll mutate during the loop
         let mut context_messages = initial_messages;
 
@@ -752,7 +819,12 @@ impl Agent {
             }
 
             // Refresh tool definitions each iteration so newly built tools become visible
-            let tool_defs = self.tools().tool_definitions().await;
+            // Filter through skill context if a skill is active (Layer 2: registry level)
+            let tool_defs = {
+                let all_defs = self.tools().tool_definitions().await;
+                let skill_ctx = self.skill_context.read().await;
+                skill_ctx.filter_tool_definitions(all_defs)
+            };
 
             // Call LLM with current context
             let context = ReasoningContext::new()
@@ -808,8 +880,45 @@ impl Agent {
                         }
                     }
 
-                    // Execute each tool (with approval checking)
+                    // Execute each tool (with approval checking and skill enforcement)
                     for tc in tool_calls {
+                        // Layer 2: execution-level skill whitelist check
+                        {
+                            let skill_ctx = self.skill_context.read().await;
+                            if !skill_ctx.is_tool_allowed(&tc.name) {
+                                let skill_name =
+                                    skill_ctx.active_name().unwrap_or("unknown").to_string();
+                                tracing::warn!(
+                                    "Skill '{}' tried to call unauthorized tool '{}'",
+                                    skill_name,
+                                    tc.name
+                                );
+                                context_messages.push(ChatMessage::tool_result(
+                                    &tc.id,
+                                    &tc.name,
+                                    format!(
+                                        "Error: Tool '{}' is not allowed by the active skill '{}'.",
+                                        tc.name, skill_name
+                                    ),
+                                ));
+                                continue;
+                            }
+                        }
+
+                        // Layer 3: budget enforcement
+                        {
+                            let mut skill_ctx = self.skill_context.write().await;
+                            if let Err(e) = skill_ctx.record_tool_call() {
+                                tracing::warn!("Skill budget exhausted: {}", e);
+                                context_messages.push(ChatMessage::tool_result(
+                                    &tc.id,
+                                    &tc.name,
+                                    format!("Error: {}", e),
+                                ));
+                                continue;
+                            }
+                        }
+
                         // Check if tool requires approval
                         if let Some(tool) = self.tools().get(&tc.name).await {
                             if tool.requires_approval() {
@@ -1672,6 +1781,342 @@ impl Agent {
         }
     }
 
+    // -- Skill handlers --
+
+    async fn process_skill_load(&self, url: &str) -> Result<SubmissionResult, Error> {
+        let loader = crate::skills::SkillLoader::new();
+
+        // Load the manifest
+        let manifest = match loader.load_from_url(url).await {
+            Ok(m) => m,
+            Err(e) => {
+                return Ok(SubmissionResult::error(format!(
+                    "Failed to load skill: {}",
+                    e
+                )));
+            }
+        };
+
+        // Run static analysis (Layer 1)
+        let analyzer = crate::skills::SkillAnalyzer::new();
+        let report = analyzer.analyze(&manifest);
+
+        let perms = &manifest.permissions;
+        let tools_str = if perms.tools.is_empty() {
+            "(none, all tools available)".to_string()
+        } else {
+            perms.tools.join(", ")
+        };
+        let domains_str = if perms.domains.is_empty() {
+            "(none, all domains available)".to_string()
+        } else {
+            perms.domains.join(", ")
+        };
+        let paths_str = if perms.workspace_read.is_empty() {
+            "(none, all paths available)".to_string()
+        } else {
+            perms.workspace_read.join(", ")
+        };
+
+        let verdict_str = match report.verdict {
+            crate::skills::AnalysisVerdict::Pass => "PASS",
+            crate::skills::AnalysisVerdict::Warn => "WARN",
+            crate::skills::AnalysisVerdict::Block => "BLOCKED",
+        };
+
+        // Block if critical findings
+        if report.verdict == crate::skills::AnalysisVerdict::Block {
+            return Ok(SubmissionResult::response(format!(
+                "Skill '{}' blocked by security analysis:\n\n{}\n\nThis skill cannot be installed.",
+                manifest.name(),
+                report.display_findings()
+            )));
+        }
+
+        let findings_section = if report.findings.is_empty() {
+            String::new()
+        } else {
+            format!("\nFindings:\n{}\n", report.display_findings())
+        };
+
+        // Save to store
+        if let Err(e) = self.skill_store.save(&manifest) {
+            return Ok(SubmissionResult::error(format!(
+                "Failed to save skill: {}",
+                e
+            )));
+        }
+
+        // Auto-approve (user initiated the load, they're looking at the output)
+        if let Err(e) =
+            self.skill_store
+                .approve(manifest.name(), &manifest.prompt.content, report.verdict)
+        {
+            return Ok(SubmissionResult::error(format!(
+                "Failed to record approval: {}",
+                e
+            )));
+        }
+
+        let command_hint = match manifest.command() {
+            Some(cmd) => format!("Use /{} <args> or /skill activate {}", cmd, manifest.name()),
+            None => format!("Use /skill activate {}", manifest.name()),
+        };
+
+        Ok(SubmissionResult::response(format!(
+            "Skill installed: {} v{}\n\
+             Author: {}\n\
+             Description: {}\n\n\
+             Permissions:\n\
+             - Tools: {}\n\
+             - Domains: {}\n\
+             - Workspace read: {}\n\
+             - Max tool calls: {}\n\n\
+             Analysis: {}\n\
+             {}\
+             Prompt:\n```\n{}\n```\n\n{}",
+            manifest.name(),
+            manifest.skill.version,
+            manifest.skill.author.as_deref().unwrap_or("unknown"),
+            manifest.skill.description,
+            tools_str,
+            domains_str,
+            paths_str,
+            perms
+                .max_tool_calls
+                .map(|n| n.to_string())
+                .unwrap_or_else(|| "unlimited".to_string()),
+            verdict_str,
+            findings_section,
+            manifest.prompt.content,
+            command_hint,
+        )))
+    }
+
+    async fn process_skill_activate(
+        &self,
+        message: &IncomingMessage,
+        session: Arc<Mutex<Session>>,
+        thread_id: Uuid,
+        name: &str,
+        args: Option<String>,
+    ) -> Result<SubmissionResult, Error> {
+        // Load skill from store
+        let stored = match self.skill_store.load(name) {
+            Ok(s) => s,
+            Err(e) => return Ok(SubmissionResult::error(format!("{}", e))),
+        };
+
+        // Check approval (Layer 4)
+        let approval_hash = match self
+            .skill_store
+            .check_approval(name, &stored.manifest.prompt.content)
+        {
+            Some(hash) => hash,
+            None => {
+                return Ok(SubmissionResult::error(format!(
+                    "Skill '{}' requires re-approval (content may have changed). \
+                     Run `/skill load <url>` again to review and approve.",
+                    name
+                )));
+            }
+        };
+
+        // Activate skill
+        {
+            let mut skill_ctx = self.skill_context.write().await;
+            skill_ctx.activate(stored.manifest.clone(), approval_hash, args.clone());
+        }
+
+        // If args were provided, treat them as user input and process
+        if let Some(ref user_args) = args {
+            let arg_content = user_args.to_string();
+            return self
+                .process_user_input(message, session, thread_id, &arg_content)
+                .await;
+        }
+
+        Ok(SubmissionResult::ok_with_message(format!(
+            "Skill '{}' activated. {}",
+            name, stored.manifest.skill.description
+        )))
+    }
+
+    async fn process_skill_activate_by_command(
+        &self,
+        message: &IncomingMessage,
+        session: Arc<Mutex<Session>>,
+        thread_id: Uuid,
+        command: &str,
+        args: Option<String>,
+    ) -> Result<SubmissionResult, Error> {
+        // Find skill by command
+        let stored = match self.skill_store.find_by_command(command) {
+            Ok(Some(s)) => s,
+            Ok(None) => {
+                return Ok(SubmissionResult::error(format!(
+                    "No skill registered for command '/{}'. Use /skill list to see installed skills.",
+                    command
+                )));
+            }
+            Err(e) => return Ok(SubmissionResult::error(format!("{}", e))),
+        };
+
+        let name = stored.manifest.name().to_string();
+        self.process_skill_activate(message, session, thread_id, &name, args)
+            .await
+    }
+
+    async fn process_skill_deactivate(&self) -> Result<SubmissionResult, Error> {
+        let mut skill_ctx = self.skill_context.write().await;
+        if skill_ctx.is_active() {
+            let name = skill_ctx.active_name().unwrap_or("unknown").to_string();
+            skill_ctx.deactivate();
+            Ok(SubmissionResult::ok_with_message(format!(
+                "Skill '{}' deactivated.",
+                name
+            )))
+        } else {
+            Ok(SubmissionResult::ok_with_message(
+                "No skill is currently active.",
+            ))
+        }
+    }
+
+    async fn process_skill_list(&self) -> Result<SubmissionResult, Error> {
+        let skills = match self.skill_store.list_all() {
+            Ok(s) => s,
+            Err(e) => {
+                return Ok(SubmissionResult::error(format!(
+                    "Failed to list skills: {}",
+                    e
+                )));
+            }
+        };
+
+        if skills.is_empty() {
+            return Ok(SubmissionResult::ok_with_message(
+                "No skills installed. Use `/skill load <url>` to install one.",
+            ));
+        }
+
+        let active_name = {
+            let ctx = self.skill_context.read().await;
+            ctx.active_name().map(|s| s.to_string())
+        };
+
+        let mut output = String::from("Installed skills:\n");
+        for skill in &skills {
+            let name = skill.manifest.name();
+            let active_marker = if active_name.as_deref() == Some(name) {
+                " (active)"
+            } else {
+                ""
+            };
+            let cmd = skill
+                .manifest
+                .command()
+                .map(|c| format!(" [/{}]", c))
+                .unwrap_or_default();
+            let approved = if skill.approval.is_some() {
+                "approved"
+            } else {
+                "not approved"
+            };
+            output.push_str(&format!(
+                "  {} v{}{}{} ({})\n",
+                name, skill.manifest.skill.version, cmd, active_marker, approved
+            ));
+        }
+
+        Ok(SubmissionResult::response(output))
+    }
+
+    async fn process_skill_remove(&self, name: &str) -> Result<SubmissionResult, Error> {
+        // Deactivate if active
+        {
+            let mut skill_ctx = self.skill_context.write().await;
+            if skill_ctx.active_name() == Some(name) {
+                skill_ctx.deactivate();
+            }
+        }
+
+        match self.skill_store.remove(name) {
+            Ok(()) => Ok(SubmissionResult::ok_with_message(format!(
+                "Skill '{}' removed.",
+                name
+            ))),
+            Err(e) => Ok(SubmissionResult::error(format!(
+                "Failed to remove skill: {}",
+                e
+            ))),
+        }
+    }
+
+    async fn process_skill_info(&self, name: &str) -> Result<SubmissionResult, Error> {
+        let stored = match self.skill_store.load(name) {
+            Ok(s) => s,
+            Err(e) => return Ok(SubmissionResult::error(format!("{}", e))),
+        };
+
+        let manifest = &stored.manifest;
+        let perms = &manifest.permissions;
+
+        let approval_status = match &stored.approval {
+            Some(a) => format!("Approved at {}", a.approved_at.format("%Y-%m-%d %H:%M UTC")),
+            None => "Not approved".to_string(),
+        };
+
+        let is_active = {
+            let ctx = self.skill_context.read().await;
+            ctx.active_name() == Some(name)
+        };
+
+        Ok(SubmissionResult::response(format!(
+            "Skill: {} v{}\n\
+             Author: {}\n\
+             Description: {}\n\
+             Source: {}\n\
+             Command: {}\n\
+             Active: {}\n\
+             Status: {}\n\n\
+             Permissions:\n\
+             - Tools: {}\n\
+             - Domains: {}\n\
+             - Workspace read: {}\n\
+             - Max tool calls: {}\n\n\
+             Prompt:\n```\n{}\n```",
+            manifest.name(),
+            manifest.skill.version,
+            manifest.skill.author.as_deref().unwrap_or("unknown"),
+            manifest.skill.description,
+            manifest.skill.source_url.as_deref().unwrap_or("local"),
+            manifest.command().unwrap_or("none"),
+            is_active,
+            approval_status,
+            if perms.tools.is_empty() {
+                "all".to_string()
+            } else {
+                perms.tools.join(", ")
+            },
+            if perms.domains.is_empty() {
+                "all".to_string()
+            } else {
+                perms.domains.join(", ")
+            },
+            if perms.workspace_read.is_empty() {
+                "all".to_string()
+            } else {
+                perms.workspace_read.join(", ")
+            },
+            perms
+                .max_tool_calls
+                .map(|n| n.to_string())
+                .unwrap_or_else(|| "unlimited".to_string()),
+            manifest.prompt.content,
+        )))
+    }
+
     async fn handle_command(
         &self,
         command: &str,
@@ -1698,6 +2143,13 @@ impl Agent {
   /heartbeat      - Run heartbeat check now
   /summarize      - Summarize current thread
   /suggest        - Suggest next steps
+
+  /skill load <url>    - Install a skill from URL/GitHub
+  /skill list          - List installed skills
+  /skill <name> [args] - Activate a skill
+  /skill deactivate    - Deactivate current skill
+  /skill remove <name> - Remove a skill
+  /skill info <name>   - Show skill details
 
   /quit           - Exit"#
                     .to_string(),

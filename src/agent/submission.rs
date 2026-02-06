@@ -11,7 +11,16 @@ pub struct SubmissionParser;
 
 impl SubmissionParser {
     /// Parse message content into a Submission.
+    ///
+    /// If `skill_commands` is provided (list of registered skill command names),
+    /// unrecognized `/foo` commands will be checked against it to enable
+    /// `/review <args>` style skill activation.
     pub fn parse(content: &str) -> Submission {
+        Self::parse_with_skill_commands(content, &[])
+    }
+
+    /// Parse with awareness of registered skill slash commands.
+    pub fn parse_with_skill_commands(content: &str, skill_commands: &[String]) -> Submission {
         let trimmed = content.trim();
         let lower = trimmed.to_lowercase();
 
@@ -61,6 +70,23 @@ impl SubmissionParser {
             }
         }
 
+        // Skill commands
+        if let Some(rest) = lower.strip_prefix("/skill ") {
+            let rest = rest.trim();
+            if let Some(submission) = Self::parse_skill_command(rest, trimmed) {
+                return submission;
+            }
+        }
+
+        // Check if this is a dynamic skill slash command (e.g. /review <args>)
+        if lower.starts_with('/') {
+            if let Some(submission) =
+                Self::parse_dynamic_skill_command(&lower, trimmed, skill_commands)
+            {
+                return submission;
+            }
+        }
+
         // Approval responses (simple yes/no/always for pending approvals)
         // These are short enough to check explicitly
         match lower.as_str() {
@@ -89,6 +115,110 @@ impl SubmissionParser {
         Submission::UserInput {
             content: content.to_string(),
         }
+    }
+
+    /// Parse `/skill <subcommand>` forms.
+    fn parse_skill_command(rest: &str, _original: &str) -> Option<Submission> {
+        // /skill list
+        if rest == "list" {
+            return Some(Submission::SkillList);
+        }
+
+        // /skill deactivate
+        if rest == "deactivate" || rest == "off" {
+            return Some(Submission::SkillDeactivate);
+        }
+
+        // /skill load <url>
+        if let Some(url) = rest.strip_prefix("load ") {
+            let url = url.trim();
+            if !url.is_empty() {
+                return Some(Submission::SkillLoad {
+                    url: url.to_string(),
+                });
+            }
+        }
+
+        // /skill remove <name>
+        if let Some(name) = rest.strip_prefix("remove ") {
+            let name = name.trim();
+            if !name.is_empty() {
+                return Some(Submission::SkillRemove {
+                    name: name.to_string(),
+                });
+            }
+        }
+
+        // /skill info <name>
+        if let Some(name) = rest.strip_prefix("info ") {
+            let name = name.trim();
+            if !name.is_empty() {
+                return Some(Submission::SkillInfo {
+                    name: name.to_string(),
+                });
+            }
+        }
+
+        // /skill activate <name> [args]
+        if let Some(rest) = rest.strip_prefix("activate ") {
+            let rest = rest.trim();
+            if !rest.is_empty() {
+                let (name, args) = split_first_word(rest);
+                return Some(Submission::SkillActivate {
+                    name: name.to_string(),
+                    args: args.map(|s| s.to_string()),
+                });
+            }
+        }
+
+        // /skill <name> [args] (shorthand for activate)
+        if !rest.is_empty() {
+            let (name, args) = split_first_word(rest);
+            return Some(Submission::SkillActivate {
+                name: name.to_string(),
+                args: args.map(|s| s.to_string()),
+            });
+        }
+
+        None
+    }
+
+    /// Check if a `/command args` matches a registered skill command.
+    fn parse_dynamic_skill_command(
+        lower: &str,
+        original: &str,
+        skill_commands: &[String],
+    ) -> Option<Submission> {
+        // Extract the command word (without the leading /)
+        let without_slash = &lower[1..];
+        let (cmd, _) = split_first_word(without_slash);
+
+        if skill_commands.iter().any(|sc| sc == cmd) {
+            // Get args from the original (preserving case)
+            let original_without_slash = &original.trim()[1..];
+            let (_, args) = split_first_word(original_without_slash);
+            return Some(Submission::SkillActivateByCommand {
+                command: cmd.to_string(),
+                args: args.map(|s| s.to_string()),
+            });
+        }
+
+        None
+    }
+}
+
+/// Split a string into the first word and the rest.
+fn split_first_word(s: &str) -> (&str, Option<&str>) {
+    match s.find(char::is_whitespace) {
+        Some(idx) => {
+            let rest = s[idx..].trim();
+            if rest.is_empty() {
+                (&s[..idx], None)
+            } else {
+                (&s[..idx], Some(rest))
+            }
+        }
+        None => (s, None),
     }
 }
 
@@ -157,6 +287,46 @@ pub enum Submission {
 
     /// Suggest next steps based on the current thread.
     Suggest,
+
+    /// Load a skill from a URL.
+    SkillLoad {
+        /// URL to load the skill manifest from.
+        url: String,
+    },
+
+    /// Activate a skill by name.
+    SkillActivate {
+        /// Skill name.
+        name: String,
+        /// Optional arguments.
+        args: Option<String>,
+    },
+
+    /// Activate a skill via its registered slash command.
+    SkillActivateByCommand {
+        /// The slash command that matched.
+        command: String,
+        /// Optional arguments.
+        args: Option<String>,
+    },
+
+    /// Deactivate the currently active skill.
+    SkillDeactivate,
+
+    /// List installed skills.
+    SkillList,
+
+    /// Remove an installed skill.
+    SkillRemove {
+        /// Skill name.
+        name: String,
+    },
+
+    /// Show info about an installed skill.
+    SkillInfo {
+        /// Skill name.
+        name: String,
+    },
 }
 
 impl Submission {
@@ -223,6 +393,11 @@ impl Submission {
                 | Self::Heartbeat
                 | Self::Summarize
                 | Self::Suggest
+                | Self::SkillLoad { .. }
+                | Self::SkillDeactivate
+                | Self::SkillList
+                | Self::SkillRemove { .. }
+                | Self::SkillInfo { .. }
         )
     }
 }
@@ -406,5 +581,100 @@ mod tests {
         // Unknown command should become user input
         let submission = SubmissionParser::parse("/unknown");
         assert!(matches!(submission, Submission::UserInput { content } if content == "/unknown"));
+    }
+
+    #[test]
+    fn test_parser_skill_list() {
+        let submission = SubmissionParser::parse("/skill list");
+        assert!(matches!(submission, Submission::SkillList));
+    }
+
+    #[test]
+    fn test_parser_skill_load() {
+        let submission = SubmissionParser::parse(
+            "/skill load https://github.com/alice/skills/blob/main/review.toml",
+        );
+        assert!(matches!(submission, Submission::SkillLoad { url } if url.contains("github.com")));
+    }
+
+    #[test]
+    fn test_parser_skill_activate() {
+        let submission = SubmissionParser::parse("/skill activate pr-review");
+        assert!(
+            matches!(submission, Submission::SkillActivate { name, args } if name == "pr-review" && args.is_none())
+        );
+    }
+
+    #[test]
+    fn test_parser_skill_activate_with_args() {
+        let submission = SubmissionParser::parse(
+            "/skill activate pr-review https://github.com/org/repo/pull/123",
+        );
+        assert!(
+            matches!(submission, Submission::SkillActivate { name, args } if name == "pr-review" && args.is_some())
+        );
+    }
+
+    #[test]
+    fn test_parser_skill_shorthand() {
+        // /skill <name> is shorthand for /skill activate <name>
+        let submission = SubmissionParser::parse("/skill pr-review");
+        assert!(
+            matches!(submission, Submission::SkillActivate { name, .. } if name == "pr-review")
+        );
+    }
+
+    #[test]
+    fn test_parser_skill_deactivate() {
+        let submission = SubmissionParser::parse("/skill deactivate");
+        assert!(matches!(submission, Submission::SkillDeactivate));
+
+        let submission = SubmissionParser::parse("/skill off");
+        assert!(matches!(submission, Submission::SkillDeactivate));
+    }
+
+    #[test]
+    fn test_parser_skill_remove() {
+        let submission = SubmissionParser::parse("/skill remove pr-review");
+        assert!(matches!(submission, Submission::SkillRemove { name } if name == "pr-review"));
+    }
+
+    #[test]
+    fn test_parser_skill_info() {
+        let submission = SubmissionParser::parse("/skill info pr-review");
+        assert!(matches!(submission, Submission::SkillInfo { name } if name == "pr-review"));
+    }
+
+    #[test]
+    fn test_parser_dynamic_skill_command() {
+        let skill_commands = vec!["review".to_string(), "debug".to_string()];
+        let submission = SubmissionParser::parse_with_skill_commands(
+            "/review https://github.com/org/repo/pull/123",
+            &skill_commands,
+        );
+        assert!(matches!(
+            submission,
+            Submission::SkillActivateByCommand { command, args }
+                if command == "review" && args.as_deref() == Some("https://github.com/org/repo/pull/123")
+        ));
+    }
+
+    #[test]
+    fn test_parser_dynamic_skill_command_no_args() {
+        let skill_commands = vec!["debug".to_string()];
+        let submission = SubmissionParser::parse_with_skill_commands("/debug", &skill_commands);
+        assert!(matches!(
+            submission,
+            Submission::SkillActivateByCommand { command, args }
+                if command == "debug" && args.is_none()
+        ));
+    }
+
+    #[test]
+    fn test_parser_unknown_slash_not_skill() {
+        let skill_commands = vec!["review".to_string()];
+        // /unknown is not a skill command, becomes user input
+        let submission = SubmissionParser::parse_with_skill_commands("/unknown", &skill_commands);
+        assert!(matches!(submission, Submission::UserInput { .. }));
     }
 }

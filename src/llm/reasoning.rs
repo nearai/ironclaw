@@ -123,6 +123,8 @@ pub struct Reasoning {
     safety: Arc<SafetyLayer>,
     /// Optional workspace for loading identity/system prompts.
     workspace_system_prompt: Option<String>,
+    /// Optional skill prompt section (injected between identity and tools).
+    skill_prompt: Option<String>,
 }
 
 impl Reasoning {
@@ -132,6 +134,7 @@ impl Reasoning {
             llm,
             safety,
             workspace_system_prompt: None,
+            skill_prompt: None,
         }
     }
 
@@ -142,6 +145,17 @@ impl Reasoning {
     pub fn with_system_prompt(mut self, prompt: String) -> Self {
         if !prompt.is_empty() {
             self.workspace_system_prompt = Some(prompt);
+        }
+        self
+    }
+
+    /// Set the active skill's prompt section.
+    ///
+    /// This section is injected between the workspace identity and the tools
+    /// section, wrapped in `<external_skill>` tags with a reassertion block.
+    pub fn with_skill_prompt(mut self, prompt: String) -> Self {
+        if !prompt.is_empty() {
+            self.skill_prompt = Some(prompt);
         }
         self
     }
@@ -390,6 +404,13 @@ Respond with a JSON plan in this format:
             String::new()
         };
 
+        // Include skill prompt section if a skill is active
+        let skill_section = if let Some(ref skill) = self.skill_prompt {
+            format!("\n{}", skill)
+        } else {
+            String::new()
+        };
+
         format!(
             r#"You are NEAR AI Agent, an autonomous assistant.
 
@@ -412,8 +433,8 @@ Here's the solution: [actual response to user]
 - For code, use appropriate code blocks with language tags
 - Call tools when they would help accomplish the task{}
 
-The user sees ONLY content outside <thinking> tags.{}"#,
-            tools_section, identity_section
+The user sees ONLY content outside <thinking> tags.{}{}"#,
+            tools_section, identity_section, skill_section
         )
     }
 
