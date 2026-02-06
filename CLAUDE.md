@@ -151,6 +151,10 @@ src/
 
 ## Key Patterns
 
+### Architecture
+
+When designing new features or systems, always prefer generic/extensible architectures over hardcoding specific integrations. Ask clarifying questions about the desired abstraction level before implementing.
+
 ### Error Handling
 - Use `thiserror` for error types in `error.rs`
 - Never use `.unwrap()` in production code (tests are fine)

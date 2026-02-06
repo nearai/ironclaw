@@ -8,10 +8,10 @@ use tracing_subscriber::{EnvFilter, layer::SubscriberExt, util::SubscriberInitEx
 use ironclaw::{
     agent::{Agent, AgentDeps},
     channels::{
-        ChannelManager, HttpChannel, ReplChannel,
+        ChannelManager, HttpChannel, ReplChannel, WebhookServer, WebhookServerConfig,
         wasm::{
             RegisteredEndpoint, SharedWasmChannel, WasmChannelLoader, WasmChannelRouter,
-            WasmChannelRuntime, WasmChannelRuntimeConfig, WasmChannelServer,
+            WasmChannelRuntime, WasmChannelRuntimeConfig, create_wasm_channel_router,
         },
     },
     cli::{
@@ -476,19 +476,10 @@ async fn main() -> anyhow::Result<()> {
         }
     }
 
-    // Add HTTP channel if configured and not CLI-only mode
-    if !cli.cli_only {
-        if let Some(ref http_config) = config.channels.http {
-            channels.add(Box::new(HttpChannel::new(http_config.clone())));
-            tracing::info!(
-                "HTTP channel enabled on {}:{}",
-                http_config.host,
-                http_config.port
-            );
-        }
-    }
+    // Collect webhook route fragments; a single WebhookServer hosts them all.
+    let mut webhook_routes: Vec<axum::Router> = Vec::new();
 
-    // Load WASM channels if enabled
+    // Load WASM channels and register their webhook routes.
     if config.channels.wasm_channels_enabled && config.channels.wasm_channels_dir.exists() {
         match WasmChannelRuntime::new(WasmChannelRuntimeConfig::default()) {
             Ok(runtime) => {
@@ -500,7 +491,6 @@ async fn main() -> anyhow::Result<()> {
                     .await
                 {
                     Ok(results) => {
-                        // Create router for WASM channel webhooks
                         let wasm_router = Arc::new(WasmChannelRouter::new());
                         let mut has_webhook_channels = false;
 
@@ -508,10 +498,8 @@ async fn main() -> anyhow::Result<()> {
                             let channel_name = loaded.name().to_string();
                             tracing::info!("Loaded WASM channel: {}", channel_name);
 
-                            // Get webhook secret name from capabilities (generic)
                             let secret_name = loaded.webhook_secret_name();
 
-                            // Get webhook secret for this channel from secrets store
                             let webhook_secret = if let Some(ref secrets) = secrets_store {
                                 secrets
                                     .get_decrypted("default", &secret_name)
@@ -522,12 +510,9 @@ async fn main() -> anyhow::Result<()> {
                                 None
                             };
 
-                            // Get the secret header name from capabilities
                             let secret_header =
                                 loaded.webhook_secret_header().map(|s| s.to_string());
 
-                            // Register channel with router for webhook handling
-                            // Use known webhook path based on channel name
                             let webhook_path = format!("/webhook/{}", channel_name);
                             let endpoints = vec![RegisteredEndpoint {
                                 channel_name: channel_name.clone(),
@@ -538,8 +523,6 @@ async fn main() -> anyhow::Result<()> {
 
                             let channel_arc = Arc::new(loaded.channel);
 
-                            // Inject runtime config into the channel (tunnel_url, webhook_secret)
-                            // This must be done before start() is called
                             {
                                 let mut config_updates = std::collections::HashMap::new();
 
@@ -585,7 +568,6 @@ async fn main() -> anyhow::Result<()> {
                                 .await;
                             has_webhook_channels = true;
 
-                            // Inject credentials for this channel (generic pattern-based injection)
                             if let Some(ref secrets) = secrets_store {
                                 match inject_channel_credentials(
                                     &channel_arc,
@@ -613,38 +595,14 @@ async fn main() -> anyhow::Result<()> {
                                 }
                             }
 
-                            // Wrap in SharedWasmChannel for ChannelManager
-                            // Both the router and ChannelManager share the same underlying channel
                             channels.add(Box::new(SharedWasmChannel::new(channel_arc)));
                         }
 
-                        // Start WASM channel webhook server if we have channels with webhooks.
-                        // Skip when the HTTP channel already occupies port 8080.
-                        let http_uses_port =
-                            config.channels.http.as_ref().map(|h| h.port) == Some(8080);
-                        if has_webhook_channels
-                            && config.tunnel.public_url.is_some()
-                            && !http_uses_port
-                        {
-                            let mut server = WasmChannelServer::new(wasm_router);
-                            if let Some(ref ext_mgr) = extension_manager {
-                                server = server.with_extension_manager(Arc::clone(ext_mgr));
-                            }
-                            let addr = std::net::SocketAddr::from(([0, 0, 0, 0], 8080));
-                            match server.start(addr).await {
-                                Ok(_handle) => {
-                                    tracing::info!(
-                                        "WASM channel webhook server started on {}",
-                                        addr
-                                    );
-                                }
-                                Err(e) => {
-                                    tracing::error!(
-                                        "Failed to start WASM channel webhook server: {}",
-                                        e
-                                    );
-                                }
-                            }
+                        if has_webhook_channels && config.tunnel.public_url.is_some() {
+                            webhook_routes.push(create_wasm_channel_router(
+                                wasm_router,
+                                extension_manager.as_ref().map(Arc::clone),
+                            ));
                         }
 
                         for (path, err) in &results.errors {
@@ -665,6 +623,43 @@ async fn main() -> anyhow::Result<()> {
             }
         }
     }
+
+    // Add HTTP channel if configured and not CLI-only mode.
+    // Extract its routes for the unified server; the channel itself just
+    // provides the mpsc stream.
+    let mut webhook_server_addr: Option<std::net::SocketAddr> = None;
+    if !cli.cli_only {
+        if let Some(ref http_config) = config.channels.http {
+            let http_channel = HttpChannel::new(http_config.clone());
+            webhook_routes.push(http_channel.routes());
+            let (host, port) = http_channel.addr();
+            webhook_server_addr = Some(
+                format!("{}:{}", host, port)
+                    .parse()
+                    .expect("HttpConfig host:port must be a valid SocketAddr"),
+            );
+            channels.add(Box::new(http_channel));
+            tracing::info!(
+                "HTTP channel enabled on {}:{}",
+                http_config.host,
+                http_config.port
+            );
+        }
+    }
+
+    // Start the unified webhook server if any routes were registered.
+    let mut webhook_server = if !webhook_routes.is_empty() {
+        let addr =
+            webhook_server_addr.unwrap_or_else(|| std::net::SocketAddr::from(([0, 0, 0, 0], 8080)));
+        let mut server = WebhookServer::new(WebhookServerConfig { addr });
+        for routes in webhook_routes {
+            server.add_routes(routes);
+        }
+        server.start().await?;
+        Some(server)
+    } else {
+        None
+    };
 
     // Create workspace for agent (shared with memory tools)
     let workspace = store.as_ref().map(|s| {
@@ -714,6 +709,11 @@ async fn main() -> anyhow::Result<()> {
 
     // Run the agent (blocks until shutdown)
     agent.run().await?;
+
+    // Shut down the webhook server if one was started
+    if let Some(ref mut server) = webhook_server {
+        server.shutdown().await;
+    }
 
     tracing::info!("Agent shutdown complete");
     Ok(())
