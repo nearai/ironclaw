@@ -618,8 +618,14 @@ async fn main() -> anyhow::Result<()> {
                             channels.add(Box::new(SharedWasmChannel::new(channel_arc)));
                         }
 
-                        // Start WASM channel webhook server if we have channels with webhooks
-                        if has_webhook_channels && config.tunnel.public_url.is_some() {
+                        // Start WASM channel webhook server if we have channels with webhooks.
+                        // Skip when the HTTP channel already occupies port 8080.
+                        let http_uses_port =
+                            config.channels.http.as_ref().map(|h| h.port) == Some(8080);
+                        if has_webhook_channels
+                            && config.tunnel.public_url.is_some()
+                            && !http_uses_port
+                        {
                             let mut server = WasmChannelServer::new(wasm_router);
                             if let Some(ref ext_mgr) = extension_manager {
                                 server = server.with_extension_manager(Arc::clone(ext_mgr));

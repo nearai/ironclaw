@@ -30,7 +30,7 @@ use serde::{Deserialize, Serialize};
 // Re-export generated types
 use exports::near::agent::channel::{
     AgentResponse, ChannelConfig, Guest, HttpEndpointConfig, IncomingHttpRequest,
-    OutgoingHttpResponse,
+    OutgoingHttpResponse, StatusUpdate,
 };
 use near::agent::channel_host::{self, EmittedMessage};
 
@@ -416,6 +416,8 @@ impl Guest for WhatsAppChannel {
             Err(e) => Err(format!("HTTP request failed: {}", e)),
         }
     }
+
+    fn on_status(_update: StatusUpdate) {}
 
     fn on_shutdown() {
         channel_host::log(
