@@ -8,7 +8,7 @@ use tracing_subscriber::{EnvFilter, layer::SubscriberExt, util::SubscriberInitEx
 use ironclaw::{
     agent::{Agent, AgentDeps},
     channels::{
-        AppEvent, ChannelManager, HttpChannel, ReplChannel, TuiChannel,
+        ChannelManager, HttpChannel, ReplChannel,
         wasm::{
             RegisteredEndpoint, SharedWasmChannel, WasmChannelLoader, WasmChannelRouter,
             WasmChannelRuntime, WasmChannelRuntimeConfig, WasmChannelServer,
@@ -38,7 +38,7 @@ use ironclaw::{
 async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
 
-    // Handle non-agent commands first (they don't need TUI/full setup)
+    // Handle non-agent commands first (they don't need full setup)
     match &cli.command {
         Some(Command::Tool(tool_cmd)) => {
             // Simple logging for CLI commands
@@ -177,8 +177,7 @@ async fn main() -> anyhow::Result<()> {
         Err(e) => return Err(e.into()),
     };
 
-    // Initialize session manager and authenticate BEFORE TUI setup
-    // This allows the auth menu to display cleanly without TUI interference
+    // Initialize session manager and authenticate before channel setup
     let session_config = SessionConfig {
         auth_base_url: config.llm.nearai.auth_base_url.clone(),
         session_path: config.llm.nearai.session_path.clone(),
@@ -187,57 +186,24 @@ async fn main() -> anyhow::Result<()> {
     let session = create_session_manager(session_config).await;
 
     // Ensure we're authenticated before proceeding (may trigger login flow)
-    // This happens before TUI so the menu displays correctly
     session.ensure_authenticated().await?;
 
-    // Initialize tracing and channels based on mode
+    // Initialize tracing
     let env_filter = EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| EnvFilter::new("ironclaw=info,tower_http=debug"));
 
-    // Determine which mode to use: REPL, single message, or TUI
-    let use_repl = cli.repl || cli.message.is_some();
+    tracing_subscriber::registry()
+        .with(env_filter)
+        .with(tracing_subscriber::fmt::layer().with_target(false))
+        .init();
 
-    // Create appropriate channel based on mode
-    let (tui_channel, tui_event_sender, repl_channel) = if use_repl {
-        // REPL mode - use simple stdin/stdout
-        tracing_subscriber::registry()
-            .with(env_filter)
-            .with(tracing_subscriber::fmt::layer().with_target(false))
-            .init();
-
-        let repl = if let Some(ref msg) = cli.message {
-            ReplChannel::with_message(msg.clone())
-        } else {
-            ReplChannel::new()
-        };
-
-        (None, None, Some(repl))
+    // Create CLI channel
+    let repl_channel = if let Some(ref msg) = cli.message {
+        Some(ReplChannel::with_message(msg.clone()))
     } else if config.channels.cli.enabled {
-        // TUI mode
-        let channel = TuiChannel::new();
-        let log_writer = channel.log_writer();
-        let event_sender = channel.event_sender();
-
-        tracing_subscriber::registry()
-            .with(env_filter)
-            .with(
-                tracing_subscriber::fmt::layer()
-                    .with_writer(log_writer)
-                    .without_time()
-                    .with_target(false)
-                    .with_level(true),
-            )
-            .init();
-
-        (Some(channel), Some(event_sender), None)
+        Some(ReplChannel::new())
     } else {
-        // No CLI - just logging
-        tracing_subscriber::registry()
-            .with(env_filter)
-            .with(tracing_subscriber::fmt::layer().with_target(false))
-            .init();
-
-        (None, None, None)
+        None
     };
 
     tracing::info!("Starting IronClaw...");
@@ -258,34 +224,6 @@ async fn main() -> anyhow::Result<()> {
     // Initialize LLM provider (clone session so we can reuse it for embeddings)
     let llm = create_llm_provider(&config.llm, session.clone())?;
     tracing::info!("LLM provider initialized: {}", llm.model_name());
-
-    // Fetch available models and send to TUI (async, non-blocking)
-    if let Some(ref event_tx) = tui_event_sender {
-        let llm_for_models = llm.clone();
-        let event_tx = event_tx.clone();
-        tokio::spawn(async move {
-            match llm_for_models.list_models().await {
-                Ok(models) if !models.is_empty() => {
-                    let _ = event_tx.send(AppEvent::AvailableModels(models)).await;
-                }
-                Ok(_) => {
-                    let _ = event_tx
-                        .send(AppEvent::ErrorMessage(
-                            "No models available from API".into(),
-                        ))
-                        .await;
-                }
-                Err(e) => {
-                    let _ = event_tx
-                        .send(AppEvent::ErrorMessage(format!(
-                            "Failed to fetch models: {}",
-                            e
-                        )))
-                        .await;
-                }
-            }
-        });
-    }
 
     // Initialize safety layer
     let safety = Arc::new(SafetyLayer::new(&config.safety));
@@ -529,7 +467,6 @@ async fn main() -> anyhow::Result<()> {
     // Initialize channel manager
     let mut channels = ChannelManager::new();
 
-    // Add REPL channel if in REPL mode
     if let Some(repl) = repl_channel {
         channels.add(Box::new(repl));
         if cli.message.is_some() {
@@ -538,14 +475,9 @@ async fn main() -> anyhow::Result<()> {
             tracing::info!("REPL mode enabled");
         }
     }
-    // Add TUI channel if CLI is enabled (already created for logging hookup)
-    else if let Some(tui) = tui_channel {
-        channels.add(Box::new(tui));
-        tracing::info!("TUI channel enabled");
-    }
 
     // Add HTTP channel if configured and not CLI-only mode
-    if !cli.cli_only && !use_repl {
+    if !cli.cli_only {
         if let Some(ref http_config) = config.channels.http {
             channels.add(Box::new(HttpChannel::new(http_config.clone())));
             tracing::info!(
