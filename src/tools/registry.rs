@@ -6,13 +6,15 @@ use std::sync::Arc;
 use tokio::sync::RwLock;
 
 use crate::context::ContextManager;
+use crate::extensions::ExtensionManager;
 use crate::llm::{LlmProvider, ToolDefinition};
 use crate::safety::SafetyLayer;
 use crate::tools::builder::{BuildSoftwareTool, BuilderConfig, LlmSoftwareBuilder};
 use crate::tools::builtin::{
     ApplyPatchTool, CancelJobTool, CreateJobTool, EchoTool, HttpTool, JobStatusTool, JsonTool,
     ListDirTool, ListJobsTool, MemoryReadTool, MemorySearchTool, MemoryTreeTool, MemoryWriteTool,
-    ReadFileTool, ShellTool, TimeTool, WriteFileTool,
+    ReadFileTool, ShellTool, TimeTool, ToolActivateTool, ToolAuthTool, ToolInstallTool,
+    ToolListTool, ToolRemoveTool, ToolSearchTool, WriteFileTool,
 };
 use crate::tools::tool::Tool;
 use crate::tools::wasm::{
@@ -157,6 +159,19 @@ impl ToolRegistry {
         self.register_sync(Arc::new(CancelJobTool::new(context_manager)));
 
         tracing::info!("Registered 4 job management tools");
+    }
+
+    /// Register extension management tools (search, install, auth, activate, list, remove).
+    ///
+    /// These allow the LLM to manage MCP servers and WASM tools through conversation.
+    pub fn register_extension_tools(&self, manager: Arc<ExtensionManager>) {
+        self.register_sync(Arc::new(ToolSearchTool::new(Arc::clone(&manager))));
+        self.register_sync(Arc::new(ToolInstallTool::new(Arc::clone(&manager))));
+        self.register_sync(Arc::new(ToolAuthTool::new(Arc::clone(&manager))));
+        self.register_sync(Arc::new(ToolActivateTool::new(Arc::clone(&manager))));
+        self.register_sync(Arc::new(ToolListTool::new(Arc::clone(&manager))));
+        self.register_sync(Arc::new(ToolRemoveTool::new(manager)));
+        tracing::info!("Registered 6 extension management tools");
     }
 
     /// Register the software builder tool.

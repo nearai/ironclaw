@@ -467,7 +467,7 @@ pub async fn authorize_mcp_server(
 }
 
 /// Find an available port for the OAuth callback.
-async fn find_available_port() -> Result<(TcpListener, u16), AuthError> {
+pub async fn find_available_port() -> Result<(TcpListener, u16), AuthError> {
     for port in 9876..=9886 {
         if let Ok(listener) = TcpListener::bind(format!("127.0.0.1:{}", port)).await {
             return Ok((listener, port));
@@ -477,7 +477,7 @@ async fn find_available_port() -> Result<(TcpListener, u16), AuthError> {
 }
 
 /// Build the authorization URL with all required parameters.
-fn build_authorization_url(
+pub fn build_authorization_url(
     base_url: &str,
     client_id: &str,
     redirect_uri: &str,
@@ -518,7 +518,7 @@ fn build_authorization_url(
 }
 
 /// Wait for the authorization callback and extract the code.
-async fn wait_for_authorization_callback(
+pub async fn wait_for_authorization_callback(
     listener: TcpListener,
     server_name: &str,
 ) -> Result<String, AuthError> {
@@ -590,7 +590,7 @@ async fn wait_for_authorization_callback(
 }
 
 /// Exchange the authorization code for an access token.
-async fn exchange_code_for_token(
+pub async fn exchange_code_for_token(
     token_url: &str,
     client_id: &str,
     code: &str,
@@ -644,7 +644,7 @@ async fn exchange_code_for_token(
 }
 
 /// Store access and refresh tokens securely.
-async fn store_tokens(
+pub async fn store_tokens(
     secrets: &Arc<dyn SecretsStore + Send + Sync>,
     user_id: &str,
     server_config: &McpServerConfig,
@@ -675,7 +675,7 @@ async fn store_tokens(
 }
 
 /// Store the DCR client ID for future token refresh.
-async fn store_client_id(
+pub async fn store_client_id(
     secrets: &Arc<dyn SecretsStore + Send + Sync>,
     user_id: &str,
     server_config: &McpServerConfig,

@@ -19,6 +19,7 @@ use ironclaw::{
     },
     config::Config,
     context::ContextManager,
+    extensions::ExtensionManager,
     history::Store,
     llm::{SessionConfig, create_llm_provider, create_session_manager},
     safety::SafetyLayer,
@@ -356,8 +357,10 @@ async fn main() -> anyhow::Result<()> {
         tracing::info!("Builder mode enabled");
     }
 
-    // Load installed WASM tools
-    if config.wasm.enabled && config.wasm.tools_dir.exists() {
+    // Load installed WASM tools (save runtime handle for extension manager)
+    let wasm_tool_runtime: Option<Arc<WasmToolRuntime>> = if config.wasm.enabled
+        && config.wasm.tools_dir.exists()
+    {
         match WasmToolRuntime::new(config.wasm.to_runtime_config()) {
             Ok(runtime) => {
                 let runtime = Arc::new(runtime);
@@ -380,12 +383,17 @@ async fn main() -> anyhow::Result<()> {
                         tracing::warn!("Failed to scan WASM tools directory: {}", e);
                     }
                 }
+
+                Some(runtime)
             }
             Err(e) => {
                 tracing::warn!("Failed to initialize WASM runtime: {}", e);
+                None
             }
         }
-    }
+    } else {
+        None
+    };
 
     // Create secrets store if master key is configured (needed for MCP auth and WASM channels)
     let secrets_store: Option<Arc<dyn SecretsStore + Send + Sync>> =
@@ -489,6 +497,29 @@ async fn main() -> anyhow::Result<()> {
             }
         }
     }
+
+    // Create extension manager for in-chat discovery/install/auth/activate
+    let extension_manager = if let Some(ref secrets) = secrets_store {
+        let manager = Arc::new(ExtensionManager::new(
+            Arc::clone(&mcp_session_manager),
+            Arc::clone(secrets),
+            Arc::clone(&tools),
+            wasm_tool_runtime.clone(),
+            config.wasm.tools_dir.clone(),
+            config.channels.wasm_channels_dir.clone(),
+            config.tunnel.public_url.clone(),
+            "default".to_string(),
+        ));
+        tools.register_extension_tools(Arc::clone(&manager));
+        tracing::info!("Extension manager initialized with in-chat discovery tools");
+        Some(manager)
+    } else {
+        tracing::debug!(
+            "Extension manager not available (no secrets store). \
+             Extension tools won't be registered."
+        );
+        None
+    };
 
     tracing::info!(
         "Tool registry initialized with {} total tools",
@@ -657,7 +688,10 @@ async fn main() -> anyhow::Result<()> {
 
                         // Start WASM channel webhook server if we have channels with webhooks
                         if has_webhook_channels && config.tunnel.public_url.is_some() {
-                            let server = WasmChannelServer::new(wasm_router);
+                            let mut server = WasmChannelServer::new(wasm_router);
+                            if let Some(ref ext_mgr) = extension_manager {
+                                server = server.with_extension_manager(Arc::clone(ext_mgr));
+                            }
                             let addr = std::net::SocketAddr::from(([0, 0, 0, 0], 8080));
                             match server.start(addr).await {
                                 Ok(_handle) => {

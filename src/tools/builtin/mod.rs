@@ -2,6 +2,7 @@
 
 mod echo;
 mod ecommerce;
+pub mod extension_tools;
 mod file;
 mod http;
 mod job;
@@ -15,6 +16,9 @@ mod time;
 
 pub use echo::EchoTool;
 pub use ecommerce::EcommerceTool;
+pub use extension_tools::{
+    ToolActivateTool, ToolAuthTool, ToolInstallTool, ToolListTool, ToolRemoveTool, ToolSearchTool,
+};
 pub use file::{ApplyPatchTool, ListDirTool, ReadFileTool, WriteFileTool};
 pub use http::HttpTool;
 pub use job::{CancelJobTool, CreateJobTool, JobStatusTool, ListJobsTool};

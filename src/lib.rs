@@ -46,6 +46,7 @@ pub mod context;
 pub mod error;
 pub mod estimation;
 pub mod evaluation;
+pub mod extensions;
 pub mod history;
 pub mod llm;
 pub mod safety;
