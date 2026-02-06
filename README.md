@@ -43,7 +43,7 @@ IronClaw is the AI assistant you can actually trust with your personal and profe
 
 ### Always Available
 
-- **Multi-channel** - Reach your assistant via CLI, Telegram, WhatsApp, Slack, or HTTP webhooks
+- **Multi-channel** - REPL, HTTP webhooks, and extensible WASM channels (Telegram, Slack, and more)
 - **Heartbeat System** - Proactive background execution for monitoring and maintenance tasks
 - **Parallel Jobs** - Handle multiple requests concurrently with isolated contexts
 - **Self-repair** - Automatic detection and recovery of stuck operations
@@ -66,7 +66,7 @@ IronClaw is the AI assistant you can actually trust with your personal and profe
 
 - Rust 1.85+
 - PostgreSQL 15+ with pgvector extension
-- NEAR AI session token (or other LLM provider)
+- NEAR AI account (authentication handled via setup wizard)
 
 ### Build
 
@@ -90,36 +90,19 @@ createdb ironclaw
 
 # Enable pgvector
 psql ironclaw -c "CREATE EXTENSION IF NOT EXISTS vector;"
-
-# Run migrations
-refinery migrate -c refinery.toml
 ```
 
 ## Configuration
 
-Copy `.env.example` to `.env` and configure:
+Run the setup wizard to configure IronClaw:
 
 ```bash
-# Required
-DATABASE_URL=postgres://user:pass@localhost/ironclaw
-NEARAI_SESSION_TOKEN=sess_...
-
-# Optional: Enable channels
-TELEGRAM_BOT_TOKEN=...
-WHATSAPP_ACCESS_TOKEN=...
-SLACK_BOT_TOKEN=xoxb-...
-HTTP_PORT=8080
+ironclaw setup
 ```
 
-### Environment Variables
-
-| Variable | Description | Required |
-|----------|-------------|----------|
-| `DATABASE_URL` | PostgreSQL connection string | Yes |
-| `NEARAI_SESSION_TOKEN` | NEAR AI authentication token | Yes |
-| `NEARAI_MODEL` | Model to use (default: claude-3-5-sonnet) | No |
-| `AGENT_MAX_PARALLEL_JOBS` | Max concurrent jobs (default: 5) | No |
-| `SECRETS_MASTER_KEY` | 32+ byte key for secret encryption | For secrets |
+The wizard handles database connection, NEAR AI authentication (via browser OAuth),
+and secrets encryption (using your system keychain). All settings are saved to
+`~/.ironclaw/settings.toml`.
 
 ## Security
 
@@ -162,10 +145,10 @@ External content passes through multiple security layers:
 ```
 ┌─────────────────────────────────────────────────────────────────┐
 │                         Channels                                 │
-│  ┌─────┐  ┌──────────┐  ┌──────────┐  ┌───────┐                │
-│  │ CLI │  │ Telegram │  │ WhatsApp │  │ Slack │                │
-│  └──┬──┘  └────┬─────┘  └────┬─────┘  └───┬───┘                │
-│     └──────────┴─────────────┴────────────┘                     │
+│  ┌──────┐  ┌──────┐  ┌──────────────┐                           │
+│  │ REPL │  │ HTTP │  │ WASM Channels│                           │
+│  └──┬───┘  └──┬───┘  └──────┬───────┘                           │
+│     └─────────┴─────────────┘                                    │
 │                         │                                        │
 │                    ┌────▼────┐                                  │
 │                    │  Router │  Intent classification           │
@@ -206,26 +189,15 @@ External content passes through multiple security layers:
 
 ## Usage
 
-### CLI Mode
-
 ```bash
-# Start interactive CLI
+# First-time setup (configures database, auth, etc.)
+ironclaw setup
+
+# Start interactive REPL
 cargo run
 
 # With debug logging
 RUST_LOG=ironclaw=debug cargo run
-```
-
-### HTTP Server
-
-```bash
-# Start with HTTP webhook server
-HTTP_PORT=8080 cargo run
-
-# Send a request
-curl -X POST http://localhost:8080/webhook \
-  -H "Content-Type: application/json" \
-  -d '{"message": "Hello, IronClaw!"}'
 ```
 
 ## Development
