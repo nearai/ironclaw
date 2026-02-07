@@ -733,6 +733,413 @@ body {
   background: rgba(248, 81, 73, 0.15);
 }
 
+/* Clickable job rows */
+.job-row {
+  cursor: pointer;
+}
+
+/* Job Detail View */
+.job-detail-header {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 16px;
+}
+
+.job-detail-header h2 {
+  font-size: 18px;
+  font-weight: 600;
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.btn-back {
+  padding: 6px 12px;
+  background: var(--bg-secondary);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  color: var(--text);
+  cursor: pointer;
+  font-size: 13px;
+  flex-shrink: 0;
+}
+
+.btn-back:hover {
+  background: var(--bg-tertiary);
+}
+
+.job-detail-tabs {
+  display: flex;
+  gap: 0;
+  border-bottom: 1px solid var(--border);
+  margin-bottom: 16px;
+}
+
+.job-detail-tabs button {
+  padding: 8px 16px;
+  background: none;
+  border: none;
+  border-bottom: 2px solid transparent;
+  color: var(--text-secondary);
+  cursor: pointer;
+  font-size: 13px;
+}
+
+.job-detail-tabs button:hover {
+  color: var(--text);
+}
+
+.job-detail-tabs button.active {
+  color: var(--accent);
+  border-bottom-color: var(--accent);
+}
+
+.job-detail-content {
+  flex: 1;
+  overflow-y: auto;
+}
+
+/* Metadata grid */
+.job-meta-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
+  gap: 12px;
+  margin-bottom: 20px;
+}
+
+.meta-item {
+  background: var(--bg-secondary);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 10px 12px;
+}
+
+.meta-label {
+  font-size: 11px;
+  color: var(--text-secondary);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  margin-bottom: 4px;
+}
+
+.meta-value {
+  font-size: 14px;
+  color: var(--text);
+  word-break: break-all;
+}
+
+/* Job description */
+.job-description {
+  margin-bottom: 20px;
+}
+
+.job-description h3 {
+  font-size: 14px;
+  font-weight: 600;
+  margin-bottom: 8px;
+  color: var(--text);
+}
+
+.job-description-body {
+  background: var(--bg-secondary);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 12px 16px;
+  font-size: 14px;
+  line-height: 1.6;
+}
+
+/* State transitions timeline */
+.job-timeline-section {
+  margin-bottom: 20px;
+}
+
+.job-timeline-section h3 {
+  font-size: 14px;
+  font-weight: 600;
+  margin-bottom: 12px;
+  color: var(--text);
+}
+
+.timeline {
+  position: relative;
+  padding-left: 20px;
+  border-left: 2px solid var(--border);
+}
+
+.timeline-entry {
+  position: relative;
+  padding: 8px 0 8px 16px;
+}
+
+.timeline-dot {
+  position: absolute;
+  left: -27px;
+  top: 14px;
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: var(--accent);
+  border: 2px solid var(--bg);
+}
+
+.timeline-info {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+}
+
+.timeline-time {
+  color: var(--text-secondary);
+  font-size: 12px;
+  margin-left: 8px;
+}
+
+.timeline-reason {
+  width: 100%;
+  font-size: 12px;
+  color: var(--text-secondary);
+  margin-top: 2px;
+}
+
+/* Action cards */
+.action-card {
+  background: var(--bg-secondary);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  margin-bottom: 8px;
+  border-left: 3px solid var(--success);
+}
+
+.action-card.failure {
+  border-left-color: var(--danger);
+}
+
+.action-header {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 12px;
+  cursor: pointer;
+  font-size: 13px;
+}
+
+.action-header:hover {
+  background: var(--bg-tertiary);
+}
+
+.action-tool {
+  font-weight: 600;
+  color: var(--text);
+  font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+}
+
+.action-seq {
+  color: var(--text-secondary);
+  font-size: 11px;
+}
+
+.action-duration {
+  color: var(--text-secondary);
+  font-size: 12px;
+}
+
+.action-time {
+  color: var(--text-secondary);
+  font-size: 12px;
+  margin-left: auto;
+}
+
+.action-toggle {
+  color: var(--text-secondary);
+  font-size: 10px;
+  flex-shrink: 0;
+}
+
+.action-detail {
+  padding: 0 12px 12px;
+}
+
+.action-section {
+  margin-top: 8px;
+}
+
+.action-section strong {
+  font-size: 12px;
+  color: var(--text-secondary);
+  display: block;
+  margin-bottom: 4px;
+}
+
+.action-json {
+  background: var(--code-bg);
+  padding: 8px 12px;
+  border-radius: var(--radius);
+  font-size: 12px;
+  font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+  line-height: 1.4;
+  overflow-x: auto;
+  color: var(--text-secondary);
+  margin: 0;
+  white-space: pre-wrap;
+  word-break: break-all;
+  max-height: 300px;
+  overflow-y: auto;
+}
+
+.action-error {
+  background: rgba(248, 81, 73, 0.1);
+  padding: 8px 12px;
+  border-radius: var(--radius);
+  font-size: 12px;
+  font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+  line-height: 1.4;
+  color: var(--danger);
+  margin: 0;
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+
+/* Conversation messages */
+.conv-message {
+  padding: 10px 14px;
+  border-radius: var(--radius);
+  margin-bottom: 8px;
+  font-size: 14px;
+  line-height: 1.5;
+}
+
+.conv-role {
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  margin-bottom: 4px;
+}
+
+.conv-body {
+  word-wrap: break-word;
+}
+
+.conv-system {
+  background: var(--bg-tertiary);
+  border: 1px solid var(--border);
+}
+
+.conv-system .conv-role { color: var(--text-secondary); }
+.conv-system .conv-body { color: var(--text-secondary); font-size: 13px; }
+
+.conv-user {
+  background: rgba(88, 166, 255, 0.08);
+  border: 1px solid rgba(88, 166, 255, 0.2);
+}
+
+.conv-user .conv-role { color: var(--accent); }
+
+.conv-assistant {
+  background: var(--bg-secondary);
+  border: 1px solid var(--border);
+}
+
+.conv-assistant .conv-role { color: var(--success); }
+
+.conv-tool {
+  background: var(--bg-secondary);
+  border: 1px solid var(--border);
+  font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+  font-size: 13px;
+}
+
+.conv-tool .conv-role { color: var(--warning); }
+.conv-tool .conv-body { white-space: pre-wrap; word-break: break-all; max-height: 200px; overflow-y: auto; }
+
+.conv-tc-id {
+  font-size: 11px;
+  color: var(--text-secondary);
+  margin-bottom: 4px;
+  font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+}
+
+.conv-tool-calls {
+  margin-top: 8px;
+  border-top: 1px solid var(--border);
+  padding-top: 8px;
+}
+
+.conv-tc-entry {
+  margin-bottom: 6px;
+}
+
+.conv-tc-name {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--accent);
+  font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+}
+
+.conv-tc-args {
+  background: var(--code-bg);
+  padding: 6px 10px;
+  border-radius: var(--radius);
+  font-size: 11px;
+  font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+  line-height: 1.4;
+  margin: 4px 0 0;
+  color: var(--text-secondary);
+  white-space: pre-wrap;
+  word-break: break-all;
+  max-height: 150px;
+  overflow-y: auto;
+}
+
+/* Job files browser */
+.job-files {
+  display: flex;
+  height: calc(100vh - 280px);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  overflow: hidden;
+}
+
+.job-files-sidebar {
+  width: 240px;
+  border-right: 1px solid var(--border);
+  background: var(--bg-secondary);
+  overflow-y: auto;
+}
+
+.job-files-tree {
+  padding: 8px 0;
+}
+
+.job-files-viewer {
+  flex: 1;
+  overflow: auto;
+  padding: 12px 16px;
+}
+
+.job-files-path {
+  font-size: 12px;
+  color: var(--accent);
+  margin-bottom: 8px;
+  font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+}
+
+.job-files-content {
+  font-size: 13px;
+  font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  word-break: break-all;
+  color: var(--text);
+  margin: 0;
+}
+
 .empty-state {
   text-align: center;
   padding: 40px;

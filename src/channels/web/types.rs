@@ -186,6 +186,66 @@ pub struct JobSummaryResponse {
     pub stuck: usize,
 }
 
+#[derive(Debug, Serialize)]
+pub struct JobDetailResponse {
+    pub id: Uuid,
+    pub title: String,
+    pub description: String,
+    pub state: String,
+    pub category: Option<String>,
+    pub user_id: String,
+    pub created_at: String,
+    pub started_at: Option<String>,
+    pub completed_at: Option<String>,
+    pub elapsed_secs: Option<u64>,
+    pub actual_cost: String,
+    pub estimated_cost: Option<String>,
+    pub repair_attempts: u32,
+    pub transitions: Vec<TransitionInfo>,
+    pub actions: Vec<ActionInfo>,
+    pub conversation: Vec<MessageInfo>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct TransitionInfo {
+    pub from: String,
+    pub to: String,
+    pub timestamp: String,
+    pub reason: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ActionInfo {
+    pub id: Uuid,
+    pub sequence: u32,
+    pub tool_name: String,
+    pub input: serde_json::Value,
+    pub output: Option<String>,
+    pub duration_ms: u64,
+    pub success: bool,
+    pub error: Option<String>,
+    pub executed_at: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct MessageInfo {
+    pub role: String,
+    pub content: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tool_calls: Option<Vec<MessageToolCallInfo>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tool_call_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct MessageToolCallInfo {
+    pub id: String,
+    pub name: String,
+    pub arguments: serde_json::Value,
+}
+
 // --- Extensions ---
 
 #[derive(Debug, Serialize)]

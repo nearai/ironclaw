@@ -741,7 +741,12 @@ function removeExtension(name) {
 
 // --- Jobs ---
 
+let currentJobId = null;
+let currentJobSubTab = 'overview';
+let jobFilesTreeState = null;
+
 function loadJobs() {
+  currentJobId = null;
   Promise.all([
     apiFetch('/api/jobs/summary'),
     apiFetch('/api/jobs'),
@@ -782,9 +787,9 @@ function renderJobsList(jobs) {
     const shortId = job.id.substring(0, 8);
     const stateClass = job.state.replace(' ', '_');
     const cancelBtn = (job.state === 'pending' || job.state === 'in_progress')
-      ? '<button class="btn-cancel" onclick="cancelJob(\'' + job.id + '\')">Cancel</button>'
+      ? '<button class="btn-cancel" onclick="event.stopPropagation(); cancelJob(\'' + job.id + '\')">Cancel</button>'
       : '';
-    return '<tr>'
+    return '<tr class="job-row" onclick="openJobDetail(\'' + job.id + '\')">'
       + '<td title="' + escapeHtml(job.id) + '">' + shortId + '</td>'
       + '<td>' + escapeHtml(job.title) + '</td>'
       + '<td><span class="badge ' + stateClass + '">' + escapeHtml(job.state) + '</span></td>'
@@ -796,10 +801,361 @@ function renderJobsList(jobs) {
 
 function cancelJob(jobId) {
   apiFetch('/api/jobs/' + jobId + '/cancel', { method: 'POST' })
-    .then(() => loadJobs())
+    .then(() => {
+      if (currentJobId) openJobDetail(currentJobId);
+      else loadJobs();
+    })
     .catch((err) => {
       addMessage('system', 'Failed to cancel job: ' + err.message);
     });
+}
+
+function openJobDetail(jobId) {
+  currentJobId = jobId;
+  currentJobSubTab = 'overview';
+  apiFetch('/api/jobs/' + jobId).then((job) => {
+    renderJobDetail(job);
+  }).catch((err) => {
+    addMessage('system', 'Failed to load job: ' + err.message);
+    closeJobDetail();
+  });
+}
+
+function closeJobDetail() {
+  currentJobId = null;
+  jobFilesTreeState = null;
+  loadJobs();
+}
+
+function renderJobDetail(job) {
+  const container = document.querySelector('.jobs-container');
+  const stateClass = job.state.replace(' ', '_');
+
+  container.innerHTML = '';
+
+  // Header
+  const header = document.createElement('div');
+  header.className = 'job-detail-header';
+  header.innerHTML = '<button class="btn-back" onclick="closeJobDetail()">&larr; Back</button>'
+    + '<h2>' + escapeHtml(job.title) + '</h2>'
+    + '<span class="badge ' + stateClass + '">' + escapeHtml(job.state) + '</span>';
+  container.appendChild(header);
+
+  // Sub-tab bar
+  const tabs = document.createElement('div');
+  tabs.className = 'job-detail-tabs';
+  const subtabs = ['overview', 'actions', 'thinking', 'files'];
+  for (const st of subtabs) {
+    const btn = document.createElement('button');
+    btn.textContent = st.charAt(0).toUpperCase() + st.slice(1);
+    btn.className = st === currentJobSubTab ? 'active' : '';
+    btn.addEventListener('click', () => {
+      currentJobSubTab = st;
+      renderJobDetail(job);
+    });
+    tabs.appendChild(btn);
+  }
+  container.appendChild(tabs);
+
+  // Content
+  const content = document.createElement('div');
+  content.className = 'job-detail-content';
+  container.appendChild(content);
+
+  switch (currentJobSubTab) {
+    case 'overview': renderJobOverview(content, job); break;
+    case 'actions': renderJobActions(content, job); break;
+    case 'thinking': renderJobConversation(content, job); break;
+    case 'files': renderJobFiles(content); break;
+  }
+}
+
+function metaItem(label, value) {
+  return '<div class="meta-item"><div class="meta-label">' + escapeHtml(label)
+    + '</div><div class="meta-value">' + escapeHtml(String(value != null ? value : '-'))
+    + '</div></div>';
+}
+
+function formatDuration(secs) {
+  if (secs == null) return '-';
+  if (secs < 60) return secs + 's';
+  const m = Math.floor(secs / 60);
+  const s = secs % 60;
+  if (m < 60) return m + 'm ' + s + 's';
+  const h = Math.floor(m / 60);
+  return h + 'h ' + (m % 60) + 'm';
+}
+
+function renderJobOverview(container, job) {
+  // Metadata grid
+  const grid = document.createElement('div');
+  grid.className = 'job-meta-grid';
+  grid.innerHTML = metaItem('Job ID', job.id)
+    + metaItem('State', job.state)
+    + metaItem('Category', job.category || 'None')
+    + metaItem('Created', formatDate(job.created_at))
+    + metaItem('Started', formatDate(job.started_at))
+    + metaItem('Completed', formatDate(job.completed_at))
+    + metaItem('Duration', formatDuration(job.elapsed_secs))
+    + metaItem('Actual Cost', job.actual_cost)
+    + metaItem('Estimated Cost', job.estimated_cost || '-')
+    + metaItem('Repair Attempts', job.repair_attempts);
+  container.appendChild(grid);
+
+  // Description
+  if (job.description) {
+    const descSection = document.createElement('div');
+    descSection.className = 'job-description';
+    const descHeader = document.createElement('h3');
+    descHeader.textContent = 'Description';
+    descSection.appendChild(descHeader);
+    const descBody = document.createElement('div');
+    descBody.className = 'job-description-body';
+    descBody.innerHTML = renderMarkdown(job.description);
+    descSection.appendChild(descBody);
+    container.appendChild(descSection);
+  }
+
+  // State transitions timeline
+  if (job.transitions.length > 0) {
+    const timelineSection = document.createElement('div');
+    timelineSection.className = 'job-timeline-section';
+    const tlHeader = document.createElement('h3');
+    tlHeader.textContent = 'State Transitions';
+    timelineSection.appendChild(tlHeader);
+
+    const timeline = document.createElement('div');
+    timeline.className = 'timeline';
+    for (const t of job.transitions) {
+      const entry = document.createElement('div');
+      entry.className = 'timeline-entry';
+      const dot = document.createElement('div');
+      dot.className = 'timeline-dot';
+      entry.appendChild(dot);
+      const info = document.createElement('div');
+      info.className = 'timeline-info';
+      info.innerHTML = '<span class="badge ' + t.from.replace(' ', '_') + '">' + escapeHtml(t.from) + '</span>'
+        + ' &rarr; '
+        + '<span class="badge ' + t.to.replace(' ', '_') + '">' + escapeHtml(t.to) + '</span>'
+        + '<span class="timeline-time">' + formatDate(t.timestamp) + '</span>'
+        + (t.reason ? '<div class="timeline-reason">' + escapeHtml(t.reason) + '</div>' : '');
+      entry.appendChild(info);
+      timeline.appendChild(entry);
+    }
+    timelineSection.appendChild(timeline);
+    container.appendChild(timelineSection);
+  }
+}
+
+function renderJobActions(container, job) {
+  if (job.actions.length === 0) {
+    container.innerHTML = '<div class="empty-state">No actions recorded</div>';
+    return;
+  }
+
+  for (const action of job.actions) {
+    const card = document.createElement('div');
+    card.className = 'action-card ' + (action.success ? 'success' : 'failure');
+
+    const header = document.createElement('div');
+    header.className = 'action-header';
+    header.innerHTML = '<span class="action-tool">' + escapeHtml(action.tool_name) + '</span>'
+      + '<span class="action-seq">#' + action.sequence + '</span>'
+      + '<span class="action-duration">' + action.duration_ms + 'ms</span>'
+      + '<span class="action-time">' + formatDate(action.executed_at) + '</span>'
+      + '<span class="action-toggle">&#9660;</span>';
+
+    const detail = document.createElement('div');
+    detail.className = 'action-detail';
+    detail.style.display = 'none';
+
+    let detailHtml = '<div class="action-section"><strong>Input</strong><pre class="action-json">'
+      + escapeHtml(JSON.stringify(action.input, null, 2)) + '</pre></div>';
+
+    if (action.output) {
+      detailHtml += '<div class="action-section"><strong>Output</strong><pre class="action-json">'
+        + escapeHtml(action.output) + '</pre></div>';
+    }
+
+    if (action.error) {
+      detailHtml += '<div class="action-section"><strong>Error</strong><pre class="action-error">'
+        + escapeHtml(action.error) + '</pre></div>';
+    }
+
+    detail.innerHTML = detailHtml;
+
+    header.addEventListener('click', () => {
+      const visible = detail.style.display !== 'none';
+      detail.style.display = visible ? 'none' : 'block';
+      header.querySelector('.action-toggle').textContent = visible ? '\u25BC' : '\u25B2';
+    });
+
+    card.appendChild(header);
+    card.appendChild(detail);
+    container.appendChild(card);
+  }
+}
+
+function renderJobConversation(container, job) {
+  if (job.conversation.length === 0) {
+    container.innerHTML = '<div class="empty-state">No conversation history</div>';
+    return;
+  }
+
+  for (const msg of job.conversation) {
+    const div = document.createElement('div');
+    div.className = 'conv-message conv-' + msg.role;
+
+    const roleLabel = document.createElement('div');
+    roleLabel.className = 'conv-role';
+    roleLabel.textContent = msg.role;
+    div.appendChild(roleLabel);
+
+    const body = document.createElement('div');
+    body.className = 'conv-body';
+    if (msg.role === 'assistant') {
+      body.innerHTML = renderMarkdown(msg.content);
+    } else {
+      body.textContent = msg.content;
+    }
+    div.appendChild(body);
+
+    // Tool calls on assistant messages
+    if (msg.tool_calls && msg.tool_calls.length > 0) {
+      const tcBlock = document.createElement('div');
+      tcBlock.className = 'conv-tool-calls';
+      for (const tc of msg.tool_calls) {
+        const tcEntry = document.createElement('div');
+        tcEntry.className = 'conv-tc-entry';
+        tcEntry.innerHTML = '<span class="conv-tc-name">' + escapeHtml(tc.name) + '</span>'
+          + '<pre class="conv-tc-args">' + escapeHtml(JSON.stringify(tc.arguments, null, 2)) + '</pre>';
+        tcBlock.appendChild(tcEntry);
+      }
+      div.appendChild(tcBlock);
+    }
+
+    // Tool call id on tool messages
+    if (msg.tool_call_id) {
+      const tcId = document.createElement('div');
+      tcId.className = 'conv-tc-id';
+      tcId.textContent = (msg.name || 'tool') + ' result';
+      div.insertBefore(tcId, div.firstChild.nextSibling);
+    }
+
+    container.appendChild(div);
+  }
+}
+
+function renderJobFiles(container) {
+  container.innerHTML = '<div class="job-files">'
+    + '<div class="job-files-sidebar"><div class="job-files-tree"></div></div>'
+    + '<div class="job-files-viewer"><div class="empty-state">Select a file to view</div></div>'
+    + '</div>';
+
+  // Load tree
+  apiFetch('/api/memory/list?path=').then((data) => {
+    jobFilesTreeState = data.entries.map((e) => ({
+      name: e.name,
+      path: e.path,
+      is_dir: e.is_dir,
+      children: e.is_dir ? null : undefined,
+      expanded: false,
+      loaded: false,
+    }));
+    renderJobFilesTree();
+  }).catch(() => {});
+}
+
+function renderJobFilesTree() {
+  const treeContainer = document.querySelector('.job-files-tree');
+  if (!treeContainer) return;
+  treeContainer.innerHTML = '';
+  if (!jobFilesTreeState || jobFilesTreeState.length === 0) {
+    treeContainer.innerHTML = '<div class="tree-item" style="color:var(--text-secondary)">No files in workspace</div>';
+    return;
+  }
+  renderJobFileNodes(jobFilesTreeState, treeContainer, 0);
+}
+
+function renderJobFileNodes(nodes, container, depth) {
+  for (const node of nodes) {
+    const row = document.createElement('div');
+    row.className = 'tree-row';
+    row.style.paddingLeft = (depth * 16 + 8) + 'px';
+
+    if (node.is_dir) {
+      const arrow = document.createElement('span');
+      arrow.className = 'expand-arrow' + (node.expanded ? ' expanded' : '');
+      arrow.textContent = '\u25B6';
+      arrow.addEventListener('click', (e) => {
+        e.stopPropagation();
+        toggleJobFileExpand(node);
+      });
+      row.appendChild(arrow);
+
+      const label = document.createElement('span');
+      label.className = 'tree-label dir';
+      label.textContent = node.name;
+      label.addEventListener('click', () => toggleJobFileExpand(node));
+      row.appendChild(label);
+    } else {
+      const spacer = document.createElement('span');
+      spacer.className = 'expand-arrow-spacer';
+      row.appendChild(spacer);
+
+      const label = document.createElement('span');
+      label.className = 'tree-label file';
+      label.textContent = node.name;
+      label.addEventListener('click', () => readJobFile(node.path));
+      row.appendChild(label);
+    }
+
+    container.appendChild(row);
+
+    if (node.is_dir && node.expanded && node.children) {
+      const childContainer = document.createElement('div');
+      childContainer.className = 'tree-children';
+      renderJobFileNodes(node.children, childContainer, depth + 1);
+      container.appendChild(childContainer);
+    }
+  }
+}
+
+function toggleJobFileExpand(node) {
+  if (node.expanded) {
+    node.expanded = false;
+    renderJobFilesTree();
+    return;
+  }
+  if (node.loaded) {
+    node.expanded = true;
+    renderJobFilesTree();
+    return;
+  }
+  apiFetch('/api/memory/list?path=' + encodeURIComponent(node.path)).then((data) => {
+    node.children = data.entries.map((e) => ({
+      name: e.name,
+      path: e.path,
+      is_dir: e.is_dir,
+      children: e.is_dir ? null : undefined,
+      expanded: false,
+      loaded: false,
+    }));
+    node.loaded = true;
+    node.expanded = true;
+    renderJobFilesTree();
+  }).catch(() => {});
+}
+
+function readJobFile(path) {
+  const viewer = document.querySelector('.job-files-viewer');
+  if (!viewer) return;
+  apiFetch('/api/memory/read?path=' + encodeURIComponent(path)).then((data) => {
+    viewer.innerHTML = '<div class="job-files-path">' + escapeHtml(path) + '</div>'
+      + '<pre class="job-files-content">' + escapeHtml(data.content) + '</pre>';
+  }).catch((err) => {
+    viewer.innerHTML = '<div class="empty-state">Error: ' + escapeHtml(err.message) + '</div>';
+  });
 }
 
 // --- Utilities ---
