@@ -41,6 +41,23 @@ impl SseManager {
         self.connection_count.load(Ordering::Relaxed)
     }
 
+    /// Create a raw broadcast subscription for non-SSE consumers (e.g. WebSocket).
+    ///
+    /// Returns a stream of `SseEvent` values and increments/decrements the
+    /// connection counter on creation/drop, just like `subscribe()` does for SSE.
+    pub fn subscribe_raw(&self) -> impl Stream<Item = SseEvent> + Send + 'static + use<> {
+        let counter = Arc::clone(&self.connection_count);
+        counter.fetch_add(1, Ordering::Relaxed);
+        let rx = self.tx.subscribe();
+
+        let stream = BroadcastStream::new(rx).filter_map(|result| result.ok());
+
+        CountedStream {
+            inner: stream,
+            counter,
+        }
+    }
+
     /// Create a new SSE stream for a client connection.
     pub fn subscribe(
         &self,
@@ -143,5 +160,54 @@ mod tests {
             SseEvent::Status { message } => assert_eq!(message, "test"),
             _ => panic!("unexpected event type"),
         }
+    }
+
+    #[tokio::test]
+    async fn test_subscribe_raw_receives_events() {
+        let manager = SseManager::new();
+        let mut stream = Box::pin(manager.subscribe_raw());
+
+        assert_eq!(manager.connection_count(), 1);
+
+        manager.broadcast(SseEvent::Thinking {
+            message: "working".to_string(),
+        });
+
+        let event = stream.next().await.unwrap();
+        match event {
+            SseEvent::Thinking { message } => assert_eq!(message, "working"),
+            _ => panic!("Expected Thinking event"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_subscribe_raw_decrements_on_drop() {
+        let manager = SseManager::new();
+        {
+            let _stream = Box::pin(manager.subscribe_raw());
+            assert_eq!(manager.connection_count(), 1);
+        }
+        // Stream dropped, counter should decrement
+        assert_eq!(manager.connection_count(), 0);
+    }
+
+    #[tokio::test]
+    async fn test_subscribe_raw_multiple_subscribers() {
+        let manager = SseManager::new();
+        let mut s1 = Box::pin(manager.subscribe_raw());
+        let mut s2 = Box::pin(manager.subscribe_raw());
+        assert_eq!(manager.connection_count(), 2);
+
+        manager.broadcast(SseEvent::Heartbeat);
+
+        let e1 = s1.next().await.unwrap();
+        let e2 = s2.next().await.unwrap();
+        assert!(matches!(e1, SseEvent::Heartbeat));
+        assert!(matches!(e2, SseEvent::Heartbeat));
+
+        drop(s1);
+        assert_eq!(manager.connection_count(), 1);
+        drop(s2);
+        assert_eq!(manager.connection_count(), 0);
     }
 }

@@ -54,7 +54,7 @@ rustyline = { version = "17", features = ["derive", "with-file-history"] }
 termimad = "0.34"
 
 # Channel integrations
-axum = "0.8"
+axum = { version = "0.8", features = ["ws"] }
 tower = "0.5"
 tower-http = { version = "0.6", features = ["trace", "cors"] }
 
