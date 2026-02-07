@@ -877,8 +877,31 @@ impl Agent {
                             }
                         }
 
+                        let _ = self
+                            .channels
+                            .send_status(
+                                &message.channel,
+                                StatusUpdate::ToolStarted {
+                                    name: tc.name.clone(),
+                                },
+                                &message.metadata,
+                            )
+                            .await;
+
                         let tool_result = self
                             .execute_chat_tool(&tc.name, &tc.arguments, &job_ctx)
+                            .await;
+
+                        let _ = self
+                            .channels
+                            .send_status(
+                                &message.channel,
+                                StatusUpdate::ToolCompleted {
+                                    name: tc.name.clone(),
+                                    success: tool_result.is_ok(),
+                                },
+                                &message.metadata,
+                            )
                             .await;
 
                         // Record result in thread
@@ -1256,8 +1279,31 @@ impl Agent {
             let job_ctx =
                 JobContext::with_user(&message.user_id, "chat", "Interactive chat session");
 
+            let _ = self
+                .channels
+                .send_status(
+                    &message.channel,
+                    StatusUpdate::ToolStarted {
+                        name: pending.tool_name.clone(),
+                    },
+                    &message.metadata,
+                )
+                .await;
+
             let tool_result = self
                 .execute_chat_tool(&pending.tool_name, &pending.parameters, &job_ctx)
+                .await;
+
+            let _ = self
+                .channels
+                .send_status(
+                    &message.channel,
+                    StatusUpdate::ToolCompleted {
+                        name: pending.tool_name.clone(),
+                        success: tool_result.is_ok(),
+                    },
+                    &message.metadata,
+                )
                 .await;
 
             // Build context including the tool result
