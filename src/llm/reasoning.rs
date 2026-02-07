@@ -113,7 +113,12 @@ pub enum RespondResult {
     /// A text response (no tools needed).
     Text(String),
     /// The model wants to call tools. Caller should execute them and call back.
-    ToolCalls(Vec<ToolCall>),
+    /// Includes the optional content from the assistant message (some models
+    /// include explanatory text alongside tool calls).
+    ToolCalls {
+        tool_calls: Vec<ToolCall>,
+        content: Option<String>,
+    },
 }
 
 /// Reasoning engine for the agent.
@@ -270,7 +275,9 @@ Respond in JSON format:
     pub async fn respond(&self, context: &ReasoningContext) -> Result<String, LlmError> {
         match self.respond_with_tools(context).await? {
             RespondResult::Text(text) => Ok(text),
-            RespondResult::ToolCalls(calls) => {
+            RespondResult::ToolCalls {
+                tool_calls: calls, ..
+            } => {
                 // Format tool calls as text (legacy behavior for non-agentic callers)
                 let tool_info: Vec<String> = calls
                     .iter()
@@ -306,7 +313,10 @@ Respond in JSON format:
 
             // If there were tool calls, return them for execution
             if !response.tool_calls.is_empty() {
-                return Ok(RespondResult::ToolCalls(response.tool_calls));
+                return Ok(RespondResult::ToolCalls {
+                    tool_calls: response.tool_calls,
+                    content: response.content,
+                });
             }
 
             // No tool calls - clean up the response

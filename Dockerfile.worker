@@ -1,0 +1,58 @@
+# Multi-stage Dockerfile for the IronClaw worker container.
+#
+# This image runs the ironclaw binary in worker mode inside Docker containers.
+# The orchestrator creates instances of this image for sandboxed job execution.
+#
+# Build:
+#   docker build -f Dockerfile.worker -t ironclaw-worker .
+#
+# The image includes common development tools so workers can build software,
+# run tests, and execute shell commands.
+
+FROM rust:1.85-bookworm AS builder
+
+WORKDIR /build
+COPY . .
+
+# Build only the ironclaw binary (release mode)
+RUN cargo build --release --bin ironclaw
+
+# ---
+
+FROM debian:bookworm-slim
+
+# Install common development tools
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates \
+    curl \
+    git \
+    build-essential \
+    pkg-config \
+    libssl-dev \
+    nodejs \
+    npm \
+    python3 \
+    python3-pip \
+    python3-venv \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install Rust toolchain for the sandbox user
+ENV RUSTUP_HOME=/usr/local/rustup \
+    CARGO_HOME=/usr/local/cargo \
+    PATH=/usr/local/cargo/bin:$PATH
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain 1.85.0 \
+    && chmod -R a+r /usr/local/rustup /usr/local/cargo
+
+# Copy the binary
+COPY --from=builder /build/target/release/ironclaw /usr/local/bin/ironclaw
+
+# Create non-root user (UID 1000 matches the orchestrator's container config)
+RUN useradd -m -u 1000 -s /bin/bash sandbox \
+    && mkdir -p /workspace \
+    && chown sandbox:sandbox /workspace
+
+USER sandbox
+WORKDIR /workspace
+
+# The orchestrator passes the full command via Docker cmd.
+ENTRYPOINT ["ironclaw"]

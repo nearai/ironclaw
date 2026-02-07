@@ -39,6 +39,12 @@ pub enum Error {
 
     #[error("Workspace error: {0}")]
     Workspace(#[from] WorkspaceError),
+
+    #[error("Orchestrator error: {0}")]
+    Orchestrator(#[from] OrchestratorError),
+
+    #[error("Worker error: {0}")]
+    Worker(#[from] WorkerError),
 }
 
 /// Configuration-related errors.
@@ -306,6 +312,53 @@ pub enum WorkspaceError {
 
     #[error("Heartbeat error: {reason}")]
     HeartbeatError { reason: String },
+}
+
+/// Orchestrator errors (internal API, container management).
+#[derive(Debug, thiserror::Error)]
+pub enum OrchestratorError {
+    #[error("Container creation failed for job {job_id}: {reason}")]
+    ContainerCreationFailed { job_id: Uuid, reason: String },
+
+    #[error("Container not found for job {job_id}")]
+    ContainerNotFound { job_id: Uuid },
+
+    #[error("Container for job {job_id} is in unexpected state: {state}")]
+    InvalidContainerState { job_id: Uuid, state: String },
+
+    #[error("Worker authentication failed: {reason}")]
+    AuthFailed { reason: String },
+
+    #[error("Internal API error: {reason}")]
+    ApiError { reason: String },
+
+    #[error("Docker error: {reason}")]
+    Docker { reason: String },
+
+    #[error("Job {job_id} timed out in container")]
+    ContainerTimeout { job_id: Uuid },
+}
+
+/// Worker errors (container-side execution).
+#[derive(Debug, thiserror::Error)]
+pub enum WorkerError {
+    #[error("Failed to connect to orchestrator at {url}: {reason}")]
+    ConnectionFailed { url: String, reason: String },
+
+    #[error("LLM proxy request failed: {reason}")]
+    LlmProxyFailed { reason: String },
+
+    #[error("Secret resolution failed for {secret_name}: {reason}")]
+    SecretResolveFailed { secret_name: String, reason: String },
+
+    #[error("Orchestrator returned error for job {job_id}: {reason}")]
+    OrchestratorRejected { job_id: Uuid, reason: String },
+
+    #[error("Worker execution failed: {reason}")]
+    ExecutionFailed { reason: String },
+
+    #[error("Missing worker token (IRONCLAW_WORKER_TOKEN not set)")]
+    MissingToken,
 }
 
 /// Result type alias for the agent.

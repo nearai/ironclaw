@@ -272,13 +272,24 @@ Report when the job is complete or if you encounter issues you cannot resolve."#
                             ));
                         }
                     }
-                    RespondResult::ToolCalls(tool_calls) => {
+                    RespondResult::ToolCalls {
+                        tool_calls,
+                        content,
+                    } => {
                         // Model returned tool calls - execute them
                         tracing::debug!(
                             "Job {} respond_with_tools returned {} tool calls",
                             self.job_id,
                             tool_calls.len()
                         );
+
+                        // Add assistant message with tool_calls (OpenAI protocol)
+                        reason_ctx
+                            .messages
+                            .push(ChatMessage::assistant_with_tool_calls(
+                                content,
+                                tool_calls.clone(),
+                            ));
 
                         for tc in tool_calls {
                             let result = self.execute_tool(&tc.name, &tc.arguments).await;

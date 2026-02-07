@@ -784,8 +784,19 @@ impl Agent {
                     // Tools have been executed or we've tried multiple times, return response
                     return Ok(AgenticLoopResult::Response(text));
                 }
-                RespondResult::ToolCalls(tool_calls) => {
+                RespondResult::ToolCalls {
+                    tool_calls,
+                    content,
+                } => {
                     tools_executed = true;
+
+                    // Add the assistant message WITH tool_calls to the context.
+                    // The OpenAI protocol requires this message before tool results.
+                    context_messages.push(ChatMessage::assistant_with_tool_calls(
+                        content,
+                        tool_calls.clone(),
+                    ));
+
                     // Execute tools and add results to context
                     let _ = self
                         .channels

@@ -23,6 +23,10 @@ use ironclaw::{
     extensions::ExtensionManager,
     history::Store,
     llm::{SessionConfig, create_llm_provider, create_session_manager},
+    orchestrator::{
+        ContainerJobConfig, ContainerJobManager, OrchestratorApi, TokenStore,
+        api::OrchestratorState,
+    },
     safety::SafetyLayer,
     secrets::{PostgresSecretsStore, SecretsCrypto, SecretsStore},
     settings::Settings,
@@ -128,6 +132,43 @@ async fn main() -> anyhow::Result<()> {
                 .init();
 
             return run_status_command().await;
+        }
+        Some(Command::Worker {
+            job_id,
+            orchestrator_url,
+            max_iterations,
+        }) => {
+            // Worker mode: runs inside a Docker container.
+            // Simple logging (no TUI, no DB, no channels).
+            tracing_subscriber::fmt()
+                .with_env_filter(
+                    EnvFilter::try_from_default_env()
+                        .unwrap_or_else(|_| EnvFilter::new("ironclaw=info")),
+                )
+                .init();
+
+            tracing::info!(
+                "Starting worker for job {} (orchestrator: {})",
+                job_id,
+                orchestrator_url
+            );
+
+            let config = ironclaw::worker::runtime::WorkerConfig {
+                job_id: *job_id,
+                orchestrator_url: orchestrator_url.clone(),
+                max_iterations: *max_iterations,
+                timeout: std::time::Duration::from_secs(600),
+            };
+
+            let runtime = ironclaw::worker::WorkerRuntime::new(config)
+                .map_err(|e| anyhow::anyhow!("Worker init failed: {}", e))?;
+
+            runtime
+                .run()
+                .await
+                .map_err(|e| anyhow::anyhow!("Worker failed: {}", e))?;
+
+            return Ok(());
         }
         Some(Command::Onboard {
             skip_auth,
@@ -352,8 +393,11 @@ async fn main() -> anyhow::Result<()> {
         tools.register_memory_tools(workspace);
     }
 
-    // Register builder tool if enabled
-    if config.builder.enabled {
+    // Register builder tool if enabled.
+    // When sandbox is enabled and allow_local_tools is false, skip builder registration
+    // because register_builder_tool also registers dev tools (shell, file ops) that would
+    // bypass the sandbox. The builder runs inside containers instead.
+    if config.builder.enabled && (config.agent.allow_local_tools || !config.sandbox.enabled) {
         tools
             .register_builder_tool(
                 llm.clone(),
@@ -527,6 +571,46 @@ async fn main() -> anyhow::Result<()> {
         );
         None
     };
+
+    // Set up orchestrator for sandboxed job execution
+    // When allow_local_tools is false (default), the LLM uses run_in_sandbox for FS/shell work.
+    // When allow_local_tools is true, dev tools are also registered directly (current behavior).
+    if config.agent.allow_local_tools {
+        tools.register_dev_tools();
+        tracing::info!(
+            "Local tools enabled (allow_local_tools=true), dev tools registered directly"
+        );
+    }
+
+    if config.sandbox.enabled {
+        let token_store = TokenStore::new();
+        let job_config = ContainerJobConfig {
+            image: config.sandbox.image.clone(),
+            memory_limit_mb: config.sandbox.memory_limit_mb,
+            cpu_shares: config.sandbox.cpu_shares,
+            orchestrator_port: 50051,
+        };
+        let container_job_manager =
+            Arc::new(ContainerJobManager::new(job_config, token_store.clone()));
+
+        // Register the run_in_sandbox tool
+        tools.register_sandbox_tool(Arc::clone(&container_job_manager));
+
+        // Start the orchestrator internal API in the background
+        let orchestrator_state = OrchestratorState {
+            llm: llm.clone(),
+            job_manager: Arc::clone(&container_job_manager),
+            token_store,
+        };
+
+        tokio::spawn(async move {
+            if let Err(e) = OrchestratorApi::start(orchestrator_state, 50051).await {
+                tracing::error!("Orchestrator API failed: {}", e);
+            }
+        });
+
+        tracing::info!("Orchestrator API started on :50051, sandbox delegation enabled");
+    }
 
     tracing::info!(
         "Tool registry initialized with {} total tools",

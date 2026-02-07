@@ -13,7 +13,7 @@ pub mod session;
 pub use nearai::{ModelInfo, NearAiProvider};
 pub use nearai_chat::NearAiChatProvider;
 pub use provider::{
-    ChatMessage, CompletionRequest, CompletionResponse, LlmProvider, Role, ToolCall,
+    ChatMessage, CompletionRequest, CompletionResponse, FinishReason, LlmProvider, Role, ToolCall,
     ToolCompletionRequest, ToolCompletionResponse, ToolDefinition, ToolResult,
 };
 pub use reasoning::{ActionPlan, Reasoning, ReasoningContext, RespondResult, ToolSelection};

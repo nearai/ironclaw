@@ -65,6 +65,11 @@ impl NearAiChatProvider {
 
         tracing::debug!("Sending request to NEAR AI Chat: {}", url);
 
+        // Log the request body for debugging tool call issues
+        if let Ok(json) = serde_json::to_string(body) {
+            tracing::debug!("NEAR AI Chat request body: {}", json);
+        }
+
         let response = self
             .client
             .post(&url)
@@ -332,12 +337,37 @@ impl From<ChatMessage> for ChatCompletionMessage {
             Role::Assistant => "assistant",
             Role::Tool => "tool",
         };
+
+        // Convert ToolCall -> ChatCompletionToolCall for assistant messages
+        let tool_calls = msg.tool_calls.map(|calls| {
+            calls
+                .into_iter()
+                .map(|tc| ChatCompletionToolCall {
+                    id: tc.id,
+                    call_type: "function".to_string(),
+                    function: ChatCompletionToolCallFunction {
+                        name: tc.name,
+                        arguments: tc.arguments.to_string(),
+                    },
+                })
+                .collect()
+        });
+
+        // Per OpenAI protocol, assistant messages with tool_calls may have
+        // null/empty content. Only set content to None for assistant messages
+        // with tool_calls and empty content to match the API format.
+        let content = if role == "assistant" && tool_calls.is_some() && msg.content.is_empty() {
+            None
+        } else {
+            Some(msg.content)
+        };
+
         Self {
             role: role.to_string(),
-            content: Some(msg.content),
+            content,
             tool_call_id: msg.tool_call_id,
             name: msg.name,
-            tool_calls: None,
+            tool_calls,
         }
     }
 }

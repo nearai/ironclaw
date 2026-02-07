@@ -27,6 +27,10 @@ pub struct ChatMessage {
     /// Name of the tool for tool results.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
+    /// Tool calls made by the assistant (OpenAI protocol requires these
+    /// to appear on the assistant message preceding tool result messages).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tool_calls: Option<Vec<ToolCall>>,
 }
 
 impl ChatMessage {
@@ -37,6 +41,7 @@ impl ChatMessage {
             content: content.into(),
             tool_call_id: None,
             name: None,
+            tool_calls: None,
         }
     }
 
@@ -47,6 +52,7 @@ impl ChatMessage {
             content: content.into(),
             tool_call_id: None,
             name: None,
+            tool_calls: None,
         }
     }
 
@@ -57,6 +63,25 @@ impl ChatMessage {
             content: content.into(),
             tool_call_id: None,
             name: None,
+            tool_calls: None,
+        }
+    }
+
+    /// Create an assistant message that includes tool calls.
+    ///
+    /// Per the OpenAI protocol, an assistant message with tool_calls must
+    /// precede the corresponding tool result messages in the conversation.
+    pub fn assistant_with_tool_calls(content: Option<String>, tool_calls: Vec<ToolCall>) -> Self {
+        Self {
+            role: Role::Assistant,
+            content: content.unwrap_or_default(),
+            tool_call_id: None,
+            name: None,
+            tool_calls: if tool_calls.is_empty() {
+                None
+            } else {
+                Some(tool_calls)
+            },
         }
     }
 
@@ -71,6 +96,7 @@ impl ChatMessage {
             content: content.into(),
             tool_call_id: Some(tool_call_id.into()),
             name: Some(name.into()),
+            tool_calls: None,
         }
     }
 }

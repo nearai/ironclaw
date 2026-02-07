@@ -92,6 +92,22 @@ pub enum Command {
 
     /// Show system health and diagnostics
     Status,
+
+    /// Run as a sandboxed worker inside a Docker container (internal use).
+    /// This is invoked automatically by the orchestrator, not by users directly.
+    Worker {
+        /// Job ID to execute.
+        #[arg(long)]
+        job_id: uuid::Uuid,
+
+        /// URL of the orchestrator's internal API.
+        #[arg(long, default_value = "http://host.docker.internal:50051")]
+        orchestrator_url: String,
+
+        /// Maximum iterations before stopping.
+        #[arg(long, default_value = "50")]
+        max_iterations: u32,
+    },
 }
 
 impl Cli {

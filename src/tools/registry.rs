@@ -8,15 +8,16 @@ use tokio::sync::RwLock;
 use crate::context::ContextManager;
 use crate::extensions::ExtensionManager;
 use crate::llm::{LlmProvider, ToolDefinition};
+use crate::orchestrator::job_manager::ContainerJobManager;
 use crate::safety::SafetyLayer;
 use crate::tools::builder::{BuildSoftwareTool, BuilderConfig, LlmSoftwareBuilder};
 use crate::tools::builtin::{
     ApplyPatchTool, CancelJobTool, CreateJobTool, EchoTool, HttpTool, JobStatusTool, JsonTool,
     ListDirTool, ListJobsTool, MemoryReadTool, MemorySearchTool, MemoryTreeTool, MemoryWriteTool,
-    ReadFileTool, ShellTool, TimeTool, ToolActivateTool, ToolAuthTool, ToolInstallTool,
-    ToolListTool, ToolRemoveTool, ToolSearchTool, WriteFileTool,
+    ReadFileTool, RunInSandboxTool, ShellTool, TimeTool, ToolActivateTool, ToolAuthTool,
+    ToolInstallTool, ToolListTool, ToolRemoveTool, ToolSearchTool, WriteFileTool,
 };
-use crate::tools::tool::Tool;
+use crate::tools::tool::{Tool, ToolDomain};
 use crate::tools::wasm::{
     Capabilities, ResourceLimits, WasmError, WasmStorageError, WasmToolRuntime, WasmToolStore,
     WasmToolWrapper,
@@ -120,6 +121,39 @@ impl ToolRegistry {
         tracing::info!("Registered {} built-in tools", self.count());
     }
 
+    /// Register only orchestrator-domain tools (safe for the main process).
+    ///
+    /// This registers tools that don't touch the filesystem or run shell commands:
+    /// echo, time, json, http. Use this when `allow_local_tools = false` and
+    /// container-domain tools should only be available inside sandboxed containers.
+    pub fn register_orchestrator_tools(&self) {
+        self.register_builtin_tools();
+        // register_builtin_tools already only registers orchestrator-domain tools
+    }
+
+    /// Register container-domain tools (filesystem, shell, code).
+    ///
+    /// These tools are intended to run inside sandboxed Docker containers.
+    /// Call this in the worker process, not the orchestrator (unless `allow_local_tools = true`).
+    pub fn register_container_tools(&self) {
+        self.register_dev_tools();
+    }
+
+    /// Get tool definitions filtered by domain.
+    pub async fn tool_definitions_for_domain(&self, domain: ToolDomain) -> Vec<ToolDefinition> {
+        self.tools
+            .read()
+            .await
+            .values()
+            .filter(|tool| tool.domain() == domain)
+            .map(|tool| ToolDefinition {
+                name: tool.name().to_string(),
+                description: tool.description().to_string(),
+                parameters: tool.parameters_schema(),
+            })
+            .collect()
+    }
+
     /// Register development tools for building software.
     ///
     /// These tools provide shell access, file operations, and code editing
@@ -172,6 +206,15 @@ impl ToolRegistry {
         self.register_sync(Arc::new(ToolListTool::new(Arc::clone(&manager))));
         self.register_sync(Arc::new(ToolRemoveTool::new(manager)));
         tracing::info!("Registered 6 extension management tools");
+    }
+
+    /// Register the sandbox delegation tool.
+    ///
+    /// This tool allows the orchestrator LLM to delegate filesystem/shell work
+    /// to a sandboxed Docker container with its own sub-agent.
+    pub fn register_sandbox_tool(&self, job_manager: Arc<ContainerJobManager>) {
+        self.register_sync(Arc::new(RunInSandboxTool::new(job_manager)));
+        tracing::info!("Registered run_in_sandbox tool");
     }
 
     /// Register the software builder tool.
