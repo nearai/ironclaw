@@ -8,6 +8,7 @@
 //! ```text
 //! Browser ─── POST /api/chat/send ──► Agent Loop
 //!         ◄── GET  /api/chat/events ── SSE stream
+//!         ─── GET  /api/chat/ws ─────► WebSocket (bidirectional)
 //!         ─── GET  /api/memory/* ────► Workspace
 //!         ─── GET  /api/jobs/* ──────► ContextManager
 //!         ◄── GET  / ───────────────── Static HTML/CSS/JS
@@ -18,6 +19,7 @@ pub mod log_layer;
 pub mod server;
 pub mod sse;
 pub mod types;
+pub mod ws;
 
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -75,6 +77,7 @@ impl GatewayChannel {
             tool_registry: None,
             user_id: config.user_id.clone(),
             shutdown_tx: tokio::sync::RwLock::new(None),
+            ws_tracker: Some(Arc::new(ws::WsConnectionTracker::new())),
         });
 
         Self {
@@ -97,6 +100,7 @@ impl GatewayChannel {
             tool_registry: self.state.tool_registry.clone(),
             user_id: self.state.user_id.clone(),
             shutdown_tx: tokio::sync::RwLock::new(None),
+            ws_tracker: self.state.ws_tracker.clone(),
         };
         mutate(&mut new_state);
         self.state = Arc::new(new_state);
