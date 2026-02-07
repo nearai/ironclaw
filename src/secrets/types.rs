@@ -205,6 +205,8 @@ pub enum CredentialLocation {
     },
     /// Inject as a query parameter
     QueryParam { name: String },
+    /// Inject by replacing a placeholder in URL or body templates
+    UrlPath { placeholder: String },
 }
 
 impl Default for CredentialLocation {
