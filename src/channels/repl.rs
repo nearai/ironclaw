@@ -236,14 +236,14 @@ impl Channel for ReplChannel {
             }
             let _ = rl.load_history(&hist_path);
 
-            println!("IronClaw REPL - Type /help for commands, /quit to exit");
+            println!("\x1b[1mIronClaw\x1b[0m  /help for commands, /quit to exit");
             println!();
 
             loop {
                 let prompt = if debug_mode.load(Ordering::Relaxed) {
-                    "\x1b[33m[debug]\x1b[0m \x1b[36m>\x1b[0m "
+                    "\x1b[33m[debug]\x1b[0m \x1b[1;36m\u{203A}\x1b[0m "
                 } else {
-                    "\x1b[36m>\x1b[0m "
+                    "\x1b[1;36m\u{203A}\x1b[0m "
                 };
 
                 match rl.readline(prompt) {
@@ -264,9 +264,9 @@ impl Channel for ReplChannel {
                                 let current = debug_mode.load(Ordering::Relaxed);
                                 debug_mode.store(!current, Ordering::Relaxed);
                                 if !current {
-                                    println!("Debug mode ON - showing verbose tool output");
+                                    println!("\x1b[90mdebug mode on\x1b[0m");
                                 } else {
-                                    println!("Debug mode OFF");
+                                    println!("\x1b[90mdebug mode off\x1b[0m");
                                 }
                                 continue;
                             }
@@ -340,18 +340,16 @@ impl Channel for ReplChannel {
 
         match status {
             StatusUpdate::Thinking(msg) => {
-                if debug {
-                    eprintln!("\x1b[90m[thinking] {msg}\x1b[0m");
-                }
+                eprintln!("  \x1b[90m\u{25CB} {msg}\x1b[0m");
             }
             StatusUpdate::ToolStarted { name } => {
-                eprintln!("  \x1b[33m>> {name}\x1b[0m");
+                eprintln!("  \x1b[33m\u{25CB} {name}\x1b[0m");
             }
             StatusUpdate::ToolCompleted { name, success } => {
                 if success {
-                    eprintln!("  \x1b[32m<< {name}\x1b[0m");
+                    eprintln!("  \x1b[32m\u{25CF} {name}\x1b[0m");
                 } else {
-                    eprintln!("  \x1b[31m<< {name} failed\x1b[0m");
+                    eprintln!("  \x1b[31m\u{2717} {name} (failed)\x1b[0m");
                 }
             }
             StatusUpdate::StreamChunk(chunk) => {
@@ -361,7 +359,7 @@ impl Channel for ReplChannel {
             }
             StatusUpdate::Status(msg) => {
                 if debug || msg.contains("approval") || msg.contains("Approval") {
-                    eprintln!("\x1b[90m[status] {msg}\x1b[0m");
+                    eprintln!("  \x1b[90m{msg}\x1b[0m");
                 }
             }
             StatusUpdate::ApprovalNeeded {
@@ -381,18 +379,14 @@ impl Channel for ReplChannel {
                     params_preview
                 };
                 eprintln!();
-                eprintln!("\x1b[33m  Tool requires approval\x1b[0m");
-                eprintln!("  \x1b[1mTool:\x1b[0m {tool_name}");
-                eprintln!("  \x1b[1mDesc:\x1b[0m {description}");
-                eprintln!(
-                    "  \x1b[1mParams:\x1b[0m\n  {}",
-                    params_truncated.replace('\n', "\n  ")
-                );
+                eprintln!("  \x1b[33m\u{25CF} {tool_name} requires approval\x1b[0m");
+                eprintln!("  \x1b[90m{description}\x1b[0m");
+                eprintln!("    {}", params_truncated.replace('\n', "\n    "));
                 eprintln!();
                 eprintln!(
                     "  Reply: \x1b[32myes\x1b[0m / \x1b[34malways\x1b[0m / \x1b[31mno\x1b[0m"
                 );
-                eprintln!("  \x1b[90mRequest ID: {request_id}\x1b[0m");
+                eprintln!("  \x1b[90m{request_id}\x1b[0m");
                 eprintln!();
             }
         }
@@ -409,7 +403,7 @@ impl Channel for ReplChannel {
             .map(|(w, _)| w as usize)
             .unwrap_or(80);
 
-        eprintln!("\x1b[36m[notification]\x1b[0m");
+        eprintln!("\x1b[34m\u{25CF}\x1b[0m notification");
         let text = termimad::FmtText::from(&skin, &response.content, Some(width));
         eprint!("{text}");
         eprintln!();
