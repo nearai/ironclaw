@@ -8,7 +8,7 @@ use std::sync::Arc;
 
 use axum::{
     Json, Router,
-    extract::{Path, Query, State},
+    extract::{Path, Query, State, WebSocketUpgrade},
     http::{StatusCode, header},
     middleware,
     response::{
@@ -55,20 +55,31 @@ pub struct GatewayState {
     pub user_id: String,
     /// Shutdown signal sender.
     pub shutdown_tx: tokio::sync::RwLock<Option<oneshot::Sender<()>>>,
+    /// WebSocket connection tracker.
+    pub ws_tracker: Option<Arc<crate::channels::web::ws::WsConnectionTracker>>,
 }
 
 /// Start the gateway HTTP server.
+///
+/// Returns the actual bound `SocketAddr` (useful when binding to port 0).
 pub async fn start_server(
     addr: SocketAddr,
     state: Arc<GatewayState>,
     auth_token: String,
-) -> Result<(), crate::error::ChannelError> {
+) -> Result<SocketAddr, crate::error::ChannelError> {
     let listener = tokio::net::TcpListener::bind(addr).await.map_err(|e| {
         crate::error::ChannelError::StartupFailed {
             name: "gateway".to_string(),
             reason: format!("Failed to bind to {}: {}", addr, e),
         }
     })?;
+    let bound_addr =
+        listener
+            .local_addr()
+            .map_err(|e| crate::error::ChannelError::StartupFailed {
+                name: "gateway".to_string(),
+                reason: format!("Failed to get local addr: {}", e),
+            })?;
 
     // Public routes (no auth)
     let public = Router::new().route("/api/health", get(health_handler));
@@ -80,6 +91,7 @@ pub async fn start_server(
         .route("/api/chat/send", post(chat_send_handler))
         .route("/api/chat/approval", post(chat_approval_handler))
         .route("/api/chat/events", get(chat_events_handler))
+        .route("/api/chat/ws", get(chat_ws_handler))
         .route("/api/chat/history", get(chat_history_handler))
         .route("/api/chat/threads", get(chat_threads_handler))
         .route("/api/chat/thread/new", post(chat_new_thread_handler))
@@ -108,6 +120,8 @@ pub async fn start_server(
             "/api/extensions/{name}/remove",
             post(extensions_remove_handler),
         )
+        // Gateway control plane
+        .route("/api/gateway/status", get(gateway_status_handler))
         .route_layer(middleware::from_fn_with_state(auth_state, auth_middleware));
 
     // Static file routes (no auth, served from embedded strings)
@@ -137,7 +151,7 @@ pub async fn start_server(
         }
     });
 
-    Ok(())
+    Ok(bound_addr)
 }
 
 // --- Static file handlers ---
@@ -270,6 +284,13 @@ async fn chat_approval_handler(
 async fn chat_events_handler(State(state): State<Arc<GatewayState>>) -> impl IntoResponse {
     // subscribe() returns Sse<impl Stream + 'static + use<>> so no lifetime issues
     state.sse.subscribe()
+}
+
+async fn chat_ws_handler(
+    ws: WebSocketUpgrade,
+    State(state): State<Arc<GatewayState>>,
+) -> impl IntoResponse {
+    ws.on_upgrade(move |socket| crate::channels::web::ws::handle_ws_connection(socket, state))
 }
 
 #[derive(Deserialize)]
@@ -833,4 +854,30 @@ async fn extensions_remove_handler(
         Ok(message) => Ok(Json(ActionResponse::ok(message))),
         Err(e) => Ok(Json(ActionResponse::fail(e.to_string()))),
     }
+}
+
+// --- Gateway control plane handlers ---
+
+async fn gateway_status_handler(
+    State(state): State<Arc<GatewayState>>,
+) -> Json<GatewayStatusResponse> {
+    let sse_connections = state.sse.connection_count();
+    let ws_connections = state
+        .ws_tracker
+        .as_ref()
+        .map(|t| t.connection_count())
+        .unwrap_or(0);
+
+    Json(GatewayStatusResponse {
+        sse_connections,
+        ws_connections,
+        total_connections: sse_connections + ws_connections,
+    })
+}
+
+#[derive(serde::Serialize)]
+struct GatewayStatusResponse {
+    sse_connections: u64,
+    ws_connections: u64,
+    total_connections: u64,
 }

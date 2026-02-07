@@ -54,7 +54,7 @@ rustyline = { version = "17", features = ["derive", "with-file-history"] }
 termimad = "0.34"
 
 # Channel integrations
-axum = "0.8"
+axum = { version = "0.8", features = ["ws"] }
 tower = "0.5"
 tower-http = { version = "0.6", features = ["trace", "cors"] }
 
@@ -111,6 +111,7 @@ zbus = "4"
 
 [dev-dependencies]
 tokio-test = "0.4"
+tokio-tungstenite = "0.26"
 testcontainers-modules = { version = "0.11", features = ["postgres"] }
 pretty_assertions = "1"
 tempfile = "3"

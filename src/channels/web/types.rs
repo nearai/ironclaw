@@ -260,10 +260,218 @@ impl ActionResponse {
     }
 }
 
+// --- WebSocket ---
+
+/// Message sent by a WebSocket client to the server.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(tag = "type")]
+pub enum WsClientMessage {
+    /// Send a chat message to the agent.
+    #[serde(rename = "message")]
+    Message {
+        content: String,
+        thread_id: Option<String>,
+    },
+    /// Approve or deny a pending tool execution.
+    #[serde(rename = "approval")]
+    Approval {
+        request_id: String,
+        /// "approve", "always", or "deny"
+        action: String,
+    },
+    /// Client heartbeat ping.
+    #[serde(rename = "ping")]
+    Ping,
+}
+
+/// Message sent by the server to a WebSocket client.
+#[derive(Debug, Clone, Serialize)]
+#[serde(tag = "type")]
+pub enum WsServerMessage {
+    /// An SSE-style event forwarded over WebSocket.
+    #[serde(rename = "event")]
+    Event {
+        /// The event sub-type (response, thinking, tool_started, etc.)
+        event_type: String,
+        /// The event payload as a JSON value.
+        data: serde_json::Value,
+    },
+    /// Server heartbeat pong.
+    #[serde(rename = "pong")]
+    Pong,
+    /// Error message.
+    #[serde(rename = "error")]
+    Error { message: String },
+}
+
+impl WsServerMessage {
+    /// Create a WsServerMessage from an SseEvent.
+    pub fn from_sse_event(event: &SseEvent) -> Self {
+        let event_type = match event {
+            SseEvent::Response { .. } => "response",
+            SseEvent::Thinking { .. } => "thinking",
+            SseEvent::ToolStarted { .. } => "tool_started",
+            SseEvent::ToolCompleted { .. } => "tool_completed",
+            SseEvent::StreamChunk { .. } => "stream_chunk",
+            SseEvent::Status { .. } => "status",
+            SseEvent::ApprovalNeeded { .. } => "approval_needed",
+            SseEvent::Error { .. } => "error",
+            SseEvent::Heartbeat => "heartbeat",
+        };
+        let data = serde_json::to_value(event).unwrap_or(serde_json::Value::Null);
+        WsServerMessage::Event {
+            event_type: event_type.to_string(),
+            data,
+        }
+    }
+}
+
 // --- Health ---
 
 #[derive(Debug, Serialize)]
 pub struct HealthResponse {
     pub status: &'static str,
     pub channel: &'static str,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ---- WsClientMessage deserialization tests ----
+
+    #[test]
+    fn test_ws_client_message_parse() {
+        let json = r#"{"type":"message","content":"hello","thread_id":"t1"}"#;
+        let msg: WsClientMessage = serde_json::from_str(json).unwrap();
+        match msg {
+            WsClientMessage::Message { content, thread_id } => {
+                assert_eq!(content, "hello");
+                assert_eq!(thread_id.as_deref(), Some("t1"));
+            }
+            _ => panic!("Expected Message variant"),
+        }
+    }
+
+    #[test]
+    fn test_ws_client_message_no_thread() {
+        let json = r#"{"type":"message","content":"hi"}"#;
+        let msg: WsClientMessage = serde_json::from_str(json).unwrap();
+        match msg {
+            WsClientMessage::Message { content, thread_id } => {
+                assert_eq!(content, "hi");
+                assert!(thread_id.is_none());
+            }
+            _ => panic!("Expected Message variant"),
+        }
+    }
+
+    #[test]
+    fn test_ws_client_approval_parse() {
+        let json = r#"{"type":"approval","request_id":"abc-123","action":"approve"}"#;
+        let msg: WsClientMessage = serde_json::from_str(json).unwrap();
+        match msg {
+            WsClientMessage::Approval { request_id, action } => {
+                assert_eq!(request_id, "abc-123");
+                assert_eq!(action, "approve");
+            }
+            _ => panic!("Expected Approval variant"),
+        }
+    }
+
+    #[test]
+    fn test_ws_client_ping_parse() {
+        let json = r#"{"type":"ping"}"#;
+        let msg: WsClientMessage = serde_json::from_str(json).unwrap();
+        assert!(matches!(msg, WsClientMessage::Ping));
+    }
+
+    #[test]
+    fn test_ws_client_unknown_type_fails() {
+        let json = r#"{"type":"unknown"}"#;
+        let result: Result<WsClientMessage, _> = serde_json::from_str(json);
+        assert!(result.is_err());
+    }
+
+    // ---- WsServerMessage serialization tests ----
+
+    #[test]
+    fn test_ws_server_pong_serialize() {
+        let msg = WsServerMessage::Pong;
+        let json = serde_json::to_string(&msg).unwrap();
+        assert_eq!(json, r#"{"type":"pong"}"#);
+    }
+
+    #[test]
+    fn test_ws_server_error_serialize() {
+        let msg = WsServerMessage::Error {
+            message: "bad request".to_string(),
+        };
+        let json = serde_json::to_string(&msg).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed["type"], "error");
+        assert_eq!(parsed["message"], "bad request");
+    }
+
+    #[test]
+    fn test_ws_server_from_sse_response() {
+        let sse = SseEvent::Response {
+            content: "hello".to_string(),
+            thread_id: "t1".to_string(),
+        };
+        let ws = WsServerMessage::from_sse_event(&sse);
+        match ws {
+            WsServerMessage::Event { event_type, data } => {
+                assert_eq!(event_type, "response");
+                assert_eq!(data["content"], "hello");
+                assert_eq!(data["thread_id"], "t1");
+            }
+            _ => panic!("Expected Event variant"),
+        }
+    }
+
+    #[test]
+    fn test_ws_server_from_sse_thinking() {
+        let sse = SseEvent::Thinking {
+            message: "reasoning...".to_string(),
+        };
+        let ws = WsServerMessage::from_sse_event(&sse);
+        match ws {
+            WsServerMessage::Event { event_type, data } => {
+                assert_eq!(event_type, "thinking");
+                assert_eq!(data["message"], "reasoning...");
+            }
+            _ => panic!("Expected Event variant"),
+        }
+    }
+
+    #[test]
+    fn test_ws_server_from_sse_approval_needed() {
+        let sse = SseEvent::ApprovalNeeded {
+            request_id: "r1".to_string(),
+            tool_name: "shell".to_string(),
+            description: "Run ls".to_string(),
+            parameters: "{}".to_string(),
+        };
+        let ws = WsServerMessage::from_sse_event(&sse);
+        match ws {
+            WsServerMessage::Event { event_type, data } => {
+                assert_eq!(event_type, "approval_needed");
+                assert_eq!(data["tool_name"], "shell");
+            }
+            _ => panic!("Expected Event variant"),
+        }
+    }
+
+    #[test]
+    fn test_ws_server_from_sse_heartbeat() {
+        let sse = SseEvent::Heartbeat;
+        let ws = WsServerMessage::from_sse_event(&sse);
+        match ws {
+            WsServerMessage::Event { event_type, .. } => {
+                assert_eq!(event_type, "heartbeat");
+            }
+            _ => panic!("Expected Event variant"),
+        }
+    }
 }
