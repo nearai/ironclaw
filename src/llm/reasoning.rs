@@ -472,47 +472,107 @@ fn extract_json(text: &str) -> Option<&str> {
     }
 }
 
-/// Clean up LLM response by stripping thinking tags and reasoning patterns.
+/// Clean up LLM response by stripping model-internal tags and reasoning patterns.
+///
+/// Some models (GLM-4.7, etc.) emit XML-tagged internal state like
+/// `<tool_call>tool_list</tool_call>` or `<|tool_call|>` in the content field
+/// instead of using the standard OpenAI tool_calls array. We strip all of
+/// these before the response reaches channels/users.
 fn clean_response(text: &str) -> String {
-    let text = strip_thinking_tags(text);
+    let text = strip_internal_tags(text);
     strip_reasoning_patterns(&text)
 }
 
-/// Strip `<thinking>...</thinking>` blocks from LLM output.
+/// Tags that are model-internal and should never reach users.
+const INTERNAL_TAGS: &[&str] = &["thinking", "tool_call", "function_call", "tool_calls"];
+
+/// Strip all model-internal XML tags from LLM output.
 ///
-/// Some models (especially Claude with extended thinking) include internal
-/// reasoning in thinking tags. We strip these before showing to users.
-fn strip_thinking_tags(text: &str) -> String {
+/// Handles standard XML tags (`<tag>...</tag>`) and pipe-delimited variants
+/// (`<|tag|>...<|/tag|>`) used by some models (e.g. GLM-4.7).
+fn strip_internal_tags(text: &str) -> String {
+    let mut result = text.to_string();
+    for tag in INTERNAL_TAGS {
+        result = strip_xml_tag(&result, tag);
+        result = strip_pipe_tag(&result, tag);
+    }
+    // Collapse triple+ newlines left behind by removed blocks
+    while result.contains("\n\n\n") {
+        result = result.replace("\n\n\n", "\n\n");
+    }
+    result.trim().to_string()
+}
+
+/// Strip `<tag>...</tag>` and `<tag ...>...</tag>` blocks from text.
+fn strip_xml_tag(text: &str, tag: &str) -> String {
+    let open_exact = format!("<{}>", tag);
+    let open_prefix = format!("<{} ", tag); // for <tag attr="...">
+    let close = format!("</{}>", tag);
+
     let mut result = String::with_capacity(text.len());
     let mut remaining = text;
 
-    while let Some(start) = remaining.find("<thinking>") {
+    loop {
+        // Find the next opening tag (exact or with attributes)
+        let exact_pos = remaining.find(&open_exact);
+        let prefix_pos = remaining.find(&open_prefix);
+        let start = match (exact_pos, prefix_pos) {
+            (Some(a), Some(b)) => a.min(b),
+            (Some(a), None) => a,
+            (None, Some(b)) => b,
+            (None, None) => break,
+        };
+
         // Add everything before the tag
         result.push_str(&remaining[..start]);
 
+        // Find the end of the opening tag (the closing >)
+        let after_open = &remaining[start..];
+        let open_end = match after_open.find('>') {
+            Some(pos) => start + pos + 1,
+            None => break, // malformed, stop
+        };
+
         // Find the closing tag
-        if let Some(end_offset) = remaining[start..].find("</thinking>") {
-            // Skip past the closing tag (start + offset + tag length)
-            let end = start + end_offset + "</thinking>".len();
+        if let Some(close_offset) = remaining[open_end..].find(&close) {
+            let end = open_end + close_offset + close.len();
             remaining = &remaining[end..];
         } else {
-            // No closing tag found, discard everything from here
-            // (malformed, but handle gracefully by not including the unclosed tag)
+            // No closing tag, discard from here (malformed)
             remaining = "";
             break;
         }
     }
 
-    // Add any remaining content after the last thinking block
     result.push_str(remaining);
+    result
+}
 
-    // Clean up any double newlines left behind
-    let mut cleaned = result.trim().to_string();
-    while cleaned.contains("\n\n\n") {
-        cleaned = cleaned.replace("\n\n\n", "\n\n");
+/// Strip `<|tag|>...<|/tag|>` pipe-delimited blocks from text.
+///
+/// Some models (e.g. certain Chinese LLMs) use this format instead of
+/// standard XML tags.
+fn strip_pipe_tag(text: &str, tag: &str) -> String {
+    let open = format!("<|{}|>", tag);
+    let close = format!("<|/{}|>", tag);
+
+    let mut result = String::with_capacity(text.len());
+    let mut remaining = text;
+
+    while let Some(start) = remaining.find(&open) {
+        result.push_str(&remaining[..start]);
+
+        if let Some(close_offset) = remaining[start..].find(&close) {
+            let end = start + close_offset + close.len();
+            remaining = &remaining[end..];
+        } else {
+            remaining = "";
+            break;
+        }
     }
 
-    cleaned
+    result.push_str(remaining);
+    result
 }
 
 /// Strip any remaining reasoning that wasn't in proper <thinking> tags.
@@ -584,7 +644,7 @@ That's my plan."#;
     #[test]
     fn test_strip_thinking_tags_basic() {
         let input = "<thinking>Let me think about this...</thinking>Hello, user!";
-        let output = strip_thinking_tags(input);
+        let output = strip_internal_tags(input);
         assert_eq!(output, "Hello, user!");
     }
 
@@ -592,7 +652,7 @@ That's my plan."#;
     fn test_strip_thinking_tags_multiple() {
         let input =
             "<thinking>First thought</thinking>Hello<thinking>Second thought</thinking> world!";
-        let output = strip_thinking_tags(input);
+        let output = strip_internal_tags(input);
         assert_eq!(output, "Hello world!");
     }
 
@@ -604,14 +664,14 @@ I need to consider:
 2. How to respond
 </thinking>
 Here is my response to your question."#;
-        let output = strip_thinking_tags(input);
+        let output = strip_internal_tags(input);
         assert_eq!(output, "Here is my response to your question.");
     }
 
     #[test]
     fn test_strip_thinking_tags_no_tags() {
         let input = "Just a normal response without thinking tags.";
-        let output = strip_thinking_tags(input);
+        let output = strip_internal_tags(input);
         assert_eq!(output, "Just a normal response without thinking tags.");
     }
 
@@ -619,8 +679,75 @@ Here is my response to your question."#;
     fn test_strip_thinking_tags_unclosed() {
         // Malformed: unclosed tag should strip from there to end
         let input = "Hello <thinking>this never closes";
-        let output = strip_thinking_tags(input);
+        let output = strip_internal_tags(input);
         assert_eq!(output, "Hello");
+    }
+
+    #[test]
+    fn test_strip_tool_call_tags() {
+        // GLM-4.7 emits this garbage instead of using the tool_calls array
+        let input = "<tool_call>tool_list</tool_call>";
+        let output = strip_internal_tags(input);
+        assert_eq!(output, "");
+    }
+
+    #[test]
+    fn test_strip_tool_call_with_surrounding_text() {
+        let input = "Here is my answer.\n\n<tool_call>\n{\"name\": \"search\", \"arguments\": {}}\n</tool_call>";
+        let output = strip_internal_tags(input);
+        assert_eq!(output, "Here is my answer.");
+    }
+
+    #[test]
+    fn test_strip_multiple_internal_tags() {
+        let input = "<thinking>Let me think</thinking>Hello!\n<tool_call>some_tool</tool_call>";
+        let output = strip_internal_tags(input);
+        assert_eq!(output, "Hello!");
+    }
+
+    #[test]
+    fn test_strip_function_call_tags() {
+        let input = "Response text<function_call>{\"name\": \"foo\"}</function_call>";
+        let output = strip_internal_tags(input);
+        assert_eq!(output, "Response text");
+    }
+
+    #[test]
+    fn test_strip_tool_calls_plural() {
+        let input = "<tool_calls>[{\"id\": \"1\"}]</tool_calls>Actual response.";
+        let output = strip_internal_tags(input);
+        assert_eq!(output, "Actual response.");
+    }
+
+    #[test]
+    fn test_strip_pipe_delimited_tags() {
+        let input = "<|tool_call|>{\"name\": \"search\"}<|/tool_call|>Hello!";
+        let output = strip_internal_tags(input);
+        assert_eq!(output, "Hello!");
+    }
+
+    #[test]
+    fn test_strip_pipe_delimited_thinking() {
+        let input = "<|thinking|>reasoning here<|/thinking|>The answer is 42.";
+        let output = strip_internal_tags(input);
+        assert_eq!(output, "The answer is 42.");
+    }
+
+    #[test]
+    fn test_strip_xml_tag_with_attributes() {
+        let input = "<tool_call type=\"function\">search()</tool_call>Done.";
+        let output = strip_internal_tags(input);
+        assert_eq!(output, "Done.");
+    }
+
+    #[test]
+    fn test_clean_response_preserves_normal_content() {
+        let input = "The function tool_call_handler works great. No tags here!";
+        let output = clean_response(input);
+        assert_eq!(
+            output,
+            "The function tool_call_handler works great. No tags here!"
+        );
     }
 
     #[test]
