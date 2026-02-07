@@ -60,17 +60,26 @@ pub struct GatewayState {
 }
 
 /// Start the gateway HTTP server.
+///
+/// Returns the actual bound `SocketAddr` (useful when binding to port 0).
 pub async fn start_server(
     addr: SocketAddr,
     state: Arc<GatewayState>,
     auth_token: String,
-) -> Result<(), crate::error::ChannelError> {
+) -> Result<SocketAddr, crate::error::ChannelError> {
     let listener = tokio::net::TcpListener::bind(addr).await.map_err(|e| {
         crate::error::ChannelError::StartupFailed {
             name: "gateway".to_string(),
             reason: format!("Failed to bind to {}: {}", addr, e),
         }
     })?;
+    let bound_addr =
+        listener
+            .local_addr()
+            .map_err(|e| crate::error::ChannelError::StartupFailed {
+                name: "gateway".to_string(),
+                reason: format!("Failed to get local addr: {}", e),
+            })?;
 
     // Public routes (no auth)
     let public = Router::new().route("/api/health", get(health_handler));
@@ -142,7 +151,7 @@ pub async fn start_server(
         }
     });
 
-    Ok(())
+    Ok(bound_addr)
 }
 
 // --- Static file handlers ---

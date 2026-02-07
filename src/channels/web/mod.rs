@@ -173,9 +173,10 @@ impl Channel for GatewayChannel {
                 ),
             })?;
 
-        server::start_server(addr, self.state.clone(), self.auth_token.clone()).await?;
+        let bound_addr =
+            server::start_server(addr, self.state.clone(), self.auth_token.clone()).await?;
 
-        tracing::info!("Web gateway listening on http://{}", addr);
+        tracing::info!("Web gateway listening on http://{}", bound_addr);
         tracing::info!("Auth token: {}", self.auth_token);
 
         Ok(Box::pin(ReceiverStream::new(rx)))
