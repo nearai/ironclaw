@@ -49,12 +49,14 @@ pub mod evaluation;
 pub mod extensions;
 pub mod history;
 pub mod llm;
+pub mod orchestrator;
 pub mod safety;
 pub mod sandbox;
 pub mod secrets;
 pub mod settings;
 pub mod setup;
 pub mod tools;
+pub mod worker;
 pub mod workspace;
 
 pub use config::Config;

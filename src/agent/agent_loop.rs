@@ -239,53 +239,28 @@ impl Agent {
                     let channels = self.channels.clone();
                     tokio::spawn(async move {
                         while let Some(response) = notify_rx.recv().await {
-                            // Route notification to configured channel/user, or broadcast to all
-                            match (&notify_channel, &notify_user) {
-                                (Some(channel), Some(user)) => {
-                                    // Send to specific channel and user
-                                    if let Err(e) =
-                                        channels.broadcast(channel, user, response.clone()).await
-                                    {
+                            let user = notify_user.as_deref().unwrap_or("default");
+
+                            // Try the configured channel first, fall back to
+                            // broadcasting on all channels.
+                            let targeted_ok = if let Some(ref channel) = notify_channel {
+                                channels
+                                    .broadcast(channel, user, response.clone())
+                                    .await
+                                    .is_ok()
+                            } else {
+                                false
+                            };
+
+                            if !targeted_ok {
+                                let results = channels.broadcast_all(user, response).await;
+                                for (ch, result) in results {
+                                    if let Err(e) = result {
                                         tracing::warn!(
-                                            "Failed to send heartbeat to {}/{}: {}",
-                                            channel,
-                                            user,
+                                            "Failed to broadcast heartbeat to {}: {}",
+                                            ch,
                                             e
                                         );
-                                    } else {
-                                        tracing::debug!(
-                                            "Heartbeat notification sent to {}/{}",
-                                            channel,
-                                            user
-                                        );
-                                    }
-                                }
-                                (None, Some(user)) => {
-                                    // Broadcast to all channels for this user
-                                    let results = channels.broadcast_all(user, response).await;
-                                    for (ch, result) in results {
-                                        if let Err(e) = result {
-                                            tracing::warn!(
-                                                "Failed to broadcast heartbeat to {}: {}",
-                                                ch,
-                                                e
-                                            );
-                                        }
-                                    }
-                                }
-                                _ => {
-                                    // No explicit target, broadcast to all channels
-                                    // for the default user so notifications actually
-                                    // reach someone instead of vanishing into logs.
-                                    let results = channels.broadcast_all("default", response).await;
-                                    for (ch, result) in results {
-                                        if let Err(e) = result {
-                                            tracing::warn!(
-                                                "Failed to broadcast heartbeat to {}: {}",
-                                                ch,
-                                                e
-                                            );
-                                        }
                                     }
                                 }
                             }
@@ -426,6 +401,9 @@ impl Agent {
             Submission::UserInput { content } => {
                 self.process_user_input(message, session, thread_id, &content)
                     .await
+            }
+            Submission::SystemCommand { command, args } => {
+                self.handle_system_command(&command, &args).await
             }
             Submission::Undo => self.process_undo(session, thread_id).await,
             Submission::Redo => self.process_redo(session, thread_id).await,
@@ -815,13 +793,16 @@ impl Agent {
                     // Tools have been executed or we've tried multiple times, return response
                     return Ok(AgenticLoopResult::Response(text));
                 }
-                RespondResult::ToolCalls(tool_calls) => {
+                RespondResult::ToolCalls {
+                    tool_calls,
+                    content,
+                } => {
                     tools_executed = true;
 
                     // Add the assistant message with tool_calls to context.
-                    // OpenAI-compatible APIs require this before tool-result messages.
+                    // OpenAI protocol requires this before tool-result messages.
                     context_messages.push(ChatMessage::assistant_with_tool_calls(
-                        "",
+                        content,
                         tool_calls.clone(),
                     ));
 
@@ -1842,40 +1823,49 @@ impl Agent {
         }
     }
 
-    async fn handle_command(
+    /// Handle system commands that bypass thread-state checks entirely.
+    async fn handle_system_command(
         &self,
         command: &str,
-        _args: &[String],
-    ) -> Result<Option<String>, Error> {
+        args: &[String],
+    ) -> Result<SubmissionResult, Error> {
         match command {
-            "help" => Ok(Some(
-                r#"Commands:
-  /job <desc>     - Create a job
-  /status [id]    - Check job status
-  /cancel <id>    - Cancel a job
-  /list           - List all jobs
-  /help <job_id>  - Help a stuck job
+            "help" => Ok(SubmissionResult::response(concat!(
+                "System:\n",
+                "  /help             Show this help\n",
+                "  /model [name]     Show or switch the active model\n",
+                "  /version          Show version info\n",
+                "  /tools            List available tools\n",
+                "  /debug            Toggle debug mode\n",
+                "  /ping             Connectivity check\n",
+                "\n",
+                "Jobs:\n",
+                "  /job <desc>       Create a new job\n",
+                "  /status [id]      Check job status\n",
+                "  /cancel <id>      Cancel a job\n",
+                "  /list             List all jobs\n",
+                "\n",
+                "Session:\n",
+                "  /undo             Undo last turn\n",
+                "  /redo             Redo undone turn\n",
+                "  /compact          Compress context window\n",
+                "  /clear            Clear current thread\n",
+                "  /interrupt        Stop current operation\n",
+                "  /new              New conversation thread\n",
+                "  /thread <id>      Switch to thread\n",
+                "  /resume <id>      Resume from checkpoint\n",
+                "\n",
+                "Agent:\n",
+                "  /heartbeat        Run heartbeat check\n",
+                "  /summarize        Summarize current thread\n",
+                "  /suggest          Suggest next steps\n",
+                "\n",
+                "  /quit             Exit",
+            ))),
 
-  /undo           - Undo last turn
-  /redo           - Redo undone turn
-  /compact        - Compress context
-  /clear          - Clear thread
-  /interrupt      - Stop current turn
-  /thread new     - New thread
-  /thread <id>    - Switch thread
-  /resume <id>    - Resume checkpoint
+            "ping" => Ok(SubmissionResult::response("pong!")),
 
-  /heartbeat      - Run heartbeat check now
-  /summarize      - Summarize current thread
-  /suggest        - Suggest next steps
-
-  /quit           - Exit"#
-                    .to_string(),
-            )),
-
-            "ping" => Ok(Some("pong!".to_string())),
-
-            "version" => Ok(Some(format!(
+            "version" => Ok(SubmissionResult::response(format!(
                 "{} v{}",
                 env!("CARGO_PKG_NAME"),
                 env!("CARGO_PKG_VERSION")
@@ -1883,10 +1873,85 @@ impl Agent {
 
             "tools" => {
                 let tools = self.tools().list().await;
-                Ok(Some(format!("Available tools: {}", tools.join(", "))))
+                Ok(SubmissionResult::response(format!(
+                    "Available tools: {}",
+                    tools.join(", ")
+                )))
             }
 
-            _ => Ok(Some(format!("Unknown command: {}. Try /help", command))),
+            "debug" => {
+                // Debug toggle is handled client-side in the REPL.
+                // For non-REPL channels, just acknowledge.
+                Ok(SubmissionResult::ok_with_message(
+                    "Debug toggle is handled by your client.",
+                ))
+            }
+
+            "model" => {
+                if args.is_empty() {
+                    // Show current model
+                    let name = self.llm().active_model_name();
+                    Ok(SubmissionResult::response(format!(
+                        "Active model: {}",
+                        name
+                    )))
+                } else {
+                    let requested = &args[0];
+
+                    // Validate the model exists
+                    match self.llm().list_models().await {
+                        Ok(models) if !models.is_empty() => {
+                            if !models.iter().any(|m| m == requested) {
+                                return Ok(SubmissionResult::error(format!(
+                                    "Unknown model: {}. Available models:\n  {}",
+                                    requested,
+                                    models.join("\n  ")
+                                )));
+                            }
+                        }
+                        Ok(_) => {
+                            // Empty model list, can't validate but try anyway
+                        }
+                        Err(e) => {
+                            tracing::warn!("Could not fetch model list for validation: {}", e);
+                            // Proceed anyway, the provider will error on the next call if invalid
+                        }
+                    }
+
+                    match self.llm().set_model(requested) {
+                        Ok(()) => Ok(SubmissionResult::response(format!(
+                            "Switched model to: {}",
+                            requested
+                        ))),
+                        Err(e) => Ok(SubmissionResult::error(format!(
+                            "Failed to switch model: {}",
+                            e
+                        ))),
+                    }
+                }
+            }
+
+            _ => Ok(SubmissionResult::error(format!(
+                "Unknown command: {}. Try /help",
+                command
+            ))),
+        }
+    }
+
+    /// Handle legacy command routing from the Router (job commands that go through
+    /// process_user_input -> router -> handle_job_or_command -> here).
+    async fn handle_command(
+        &self,
+        command: &str,
+        args: &[String],
+    ) -> Result<Option<String>, Error> {
+        // System commands are now handled directly via Submission::SystemCommand,
+        // but the router may still send us unknown /commands.
+        match self.handle_system_command(command, args).await? {
+            SubmissionResult::Response { content } => Ok(Some(content)),
+            SubmissionResult::Ok { message } => Ok(message),
+            SubmissionResult::Error { message } => Ok(Some(format!("Error: {}", message))),
+            _ => Ok(None),
         }
     }
 }

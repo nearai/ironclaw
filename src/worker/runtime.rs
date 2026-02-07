@@ -1,0 +1,360 @@
+//! Worker runtime: the main execution loop inside a container.
+//!
+//! Reuses the existing `Reasoning` and `SafetyLayer` infrastructure but
+//! connects to the orchestrator for LLM calls instead of calling APIs directly.
+
+use std::sync::Arc;
+use std::time::Duration;
+
+use uuid::Uuid;
+
+use crate::config::SafetyConfig;
+use crate::context::JobContext;
+use crate::error::WorkerError;
+use crate::llm::{
+    ChatMessage, LlmProvider, Reasoning, ReasoningContext, RespondResult, ToolSelection,
+};
+use crate::safety::SafetyLayer;
+use crate::tools::ToolRegistry;
+use crate::worker::api::{CompletionReport, StatusUpdate, WorkerHttpClient};
+use crate::worker::proxy_llm::ProxyLlmProvider;
+
+/// Configuration for the worker runtime.
+pub struct WorkerConfig {
+    pub job_id: Uuid,
+    pub orchestrator_url: String,
+    pub max_iterations: u32,
+    pub timeout: Duration,
+}
+
+impl Default for WorkerConfig {
+    fn default() -> Self {
+        Self {
+            job_id: Uuid::nil(),
+            orchestrator_url: String::new(),
+            max_iterations: 50,
+            timeout: Duration::from_secs(600),
+        }
+    }
+}
+
+/// The worker runtime runs inside a Docker container.
+///
+/// It connects to the orchestrator over HTTP, fetches its job description,
+/// then runs a tool execution loop until the job is complete.
+pub struct WorkerRuntime {
+    config: WorkerConfig,
+    client: Arc<WorkerHttpClient>,
+    llm: Arc<dyn LlmProvider>,
+    safety: Arc<SafetyLayer>,
+    tools: Arc<ToolRegistry>,
+}
+
+impl WorkerRuntime {
+    /// Create a new worker runtime.
+    ///
+    /// Reads `IRONCLAW_WORKER_TOKEN` from the environment for auth.
+    pub fn new(config: WorkerConfig) -> Result<Self, WorkerError> {
+        let client = Arc::new(WorkerHttpClient::from_env(
+            config.orchestrator_url.clone(),
+            config.job_id,
+        )?);
+
+        let llm: Arc<dyn LlmProvider> = Arc::new(ProxyLlmProvider::new(
+            Arc::clone(&client),
+            "proxied".to_string(),
+        ));
+
+        let safety = Arc::new(SafetyLayer::new(&SafetyConfig {
+            max_output_length: 100_000,
+            injection_check_enabled: true,
+        }));
+
+        let tools = Arc::new(ToolRegistry::new());
+        // Register only container-safe tools
+        tools.register_container_tools();
+
+        Ok(Self {
+            config,
+            client,
+            llm,
+            safety,
+            tools,
+        })
+    }
+
+    /// Run the worker until the job is complete or an error occurs.
+    pub async fn run(self) -> Result<(), WorkerError> {
+        tracing::info!("Worker starting for job {}", self.config.job_id);
+
+        // Fetch job description from orchestrator
+        let job = self.client.get_job().await?;
+
+        tracing::info!(
+            "Received job: {} - {}",
+            job.title,
+            truncate(&job.description, 100)
+        );
+
+        // Report that we're starting
+        self.client
+            .report_status(&StatusUpdate {
+                state: "in_progress".to_string(),
+                message: Some("Worker started, beginning execution".to_string()),
+                iteration: 0,
+            })
+            .await?;
+
+        // Create reasoning engine
+        let reasoning = Reasoning::new(self.llm.clone(), self.safety.clone());
+
+        // Build initial context
+        let mut reason_ctx = ReasoningContext::new().with_job(&job.description);
+
+        reason_ctx.messages.push(ChatMessage::system(format!(
+            r#"You are an autonomous agent running inside a Docker container.
+
+Job: {}
+Description: {}
+
+You have tools for shell commands, file operations, and code editing.
+Work independently to complete this job. Report when done."#,
+            job.title, job.description
+        )));
+
+        // Run with timeout
+        let result = tokio::time::timeout(self.config.timeout, async {
+            self.execution_loop(&reasoning, &mut reason_ctx).await
+        })
+        .await;
+
+        match result {
+            Ok(Ok(output)) => {
+                tracing::info!("Worker completed job {} successfully", self.config.job_id);
+                self.client
+                    .report_complete(&CompletionReport {
+                        success: true,
+                        message: Some(output),
+                        iterations: 0,
+                    })
+                    .await?;
+            }
+            Ok(Err(e)) => {
+                tracing::error!("Worker failed for job {}: {}", self.config.job_id, e);
+                self.client
+                    .report_complete(&CompletionReport {
+                        success: false,
+                        message: Some(format!("Execution failed: {}", e)),
+                        iterations: 0,
+                    })
+                    .await?;
+            }
+            Err(_) => {
+                tracing::warn!("Worker timed out for job {}", self.config.job_id);
+                self.client
+                    .report_complete(&CompletionReport {
+                        success: false,
+                        message: Some("Execution timed out".to_string()),
+                        iterations: 0,
+                    })
+                    .await?;
+            }
+        }
+
+        Ok(())
+    }
+
+    async fn execution_loop(
+        &self,
+        reasoning: &Reasoning,
+        reason_ctx: &mut ReasoningContext,
+    ) -> Result<String, WorkerError> {
+        let max_iterations = self.config.max_iterations;
+        let mut last_output = String::new();
+
+        // Load tool definitions
+        reason_ctx.available_tools = self.tools.tool_definitions().await;
+
+        for iteration in 1..=max_iterations {
+            // Report progress
+            if iteration % 5 == 1 {
+                let _ = self
+                    .client
+                    .report_status(&StatusUpdate {
+                        state: "in_progress".to_string(),
+                        message: Some(format!("Iteration {}", iteration)),
+                        iteration,
+                    })
+                    .await;
+            }
+
+            // Refresh tools (in case WASM tools were built)
+            reason_ctx.available_tools = self.tools.tool_definitions().await;
+
+            // Ask the LLM what to do next
+            let selections = reasoning.select_tools(reason_ctx).await.map_err(|e| {
+                WorkerError::ExecutionFailed {
+                    reason: format!("tool selection failed: {}", e),
+                }
+            })?;
+
+            if selections.is_empty() {
+                // No tools selected, try direct response
+                let respond_result =
+                    reasoning
+                        .respond_with_tools(reason_ctx)
+                        .await
+                        .map_err(|e| WorkerError::ExecutionFailed {
+                            reason: format!("respond_with_tools failed: {}", e),
+                        })?;
+
+                match respond_result {
+                    RespondResult::Text(response) => {
+                        let response_lower = response.to_lowercase();
+                        if response_lower.contains("complete")
+                            || response_lower.contains("finished")
+                            || response_lower.contains("done")
+                        {
+                            if last_output.is_empty() {
+                                last_output = response.clone();
+                            }
+                            return Ok(last_output);
+                        }
+                        reason_ctx.messages.push(ChatMessage::assistant(&response));
+                    }
+                    RespondResult::ToolCalls {
+                        tool_calls,
+                        content,
+                    } => {
+                        // Add assistant message with tool_calls (OpenAI protocol)
+                        reason_ctx
+                            .messages
+                            .push(ChatMessage::assistant_with_tool_calls(
+                                content,
+                                tool_calls.clone(),
+                            ));
+
+                        for tc in tool_calls {
+                            let result = self.execute_tool(&tc.name, &tc.arguments).await;
+                            if let Ok(ref output) = result {
+                                last_output = output.clone();
+                            }
+                            let selection = ToolSelection {
+                                tool_name: tc.name.clone(),
+                                parameters: tc.arguments.clone(),
+                                reasoning: String::new(),
+                                alternatives: vec![],
+                            };
+                            self.process_result(reason_ctx, &selection, result);
+                        }
+                    }
+                }
+            } else {
+                // Execute selected tools
+                for selection in &selections {
+                    let result = self
+                        .execute_tool(&selection.tool_name, &selection.parameters)
+                        .await;
+
+                    if let Ok(ref output) = result {
+                        last_output = output.clone();
+                    }
+
+                    let completed = self.process_result(reason_ctx, selection, result);
+                    if completed {
+                        return Ok(last_output);
+                    }
+                }
+            }
+
+            // Brief pause between iterations
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+
+        Err(WorkerError::ExecutionFailed {
+            reason: format!("max iterations ({}) exceeded", max_iterations),
+        })
+    }
+
+    async fn execute_tool(
+        &self,
+        tool_name: &str,
+        params: &serde_json::Value,
+    ) -> Result<String, String> {
+        let tool = match self.tools.get(tool_name).await {
+            Some(t) => t,
+            None => return Err(format!("tool '{}' not found", tool_name)),
+        };
+
+        let ctx = JobContext::default();
+
+        // Validate params
+        let validation = self.safety.validator().validate_tool_params(params);
+        if !validation.is_valid {
+            let details = validation
+                .errors
+                .iter()
+                .map(|e| format!("{}: {}", e.field, e.message))
+                .collect::<Vec<_>>()
+                .join("; ");
+            return Err(format!("invalid parameters: {}", details));
+        }
+
+        // Execute with timeout
+        let result =
+            tokio::time::timeout(Duration::from_secs(60), tool.execute(params.clone(), &ctx)).await;
+
+        match result {
+            Ok(Ok(output)) => serde_json::to_string_pretty(&output.result)
+                .map_err(|e| format!("serialization error: {}", e)),
+            Ok(Err(e)) => Err(e.to_string()),
+            Err(_) => Err("tool execution timed out".to_string()),
+        }
+    }
+
+    /// Process a tool result into the reasoning context. Returns true if the job is complete.
+    fn process_result(
+        &self,
+        reason_ctx: &mut ReasoningContext,
+        selection: &ToolSelection,
+        result: Result<String, String>,
+    ) -> bool {
+        match result {
+            Ok(output) => {
+                let sanitized = self
+                    .safety
+                    .sanitize_tool_output(&selection.tool_name, &output);
+                let wrapped = self.safety.wrap_for_llm(
+                    &selection.tool_name,
+                    &sanitized.content,
+                    sanitized.was_modified,
+                );
+
+                reason_ctx.messages.push(ChatMessage::tool_result(
+                    "tool_call_id",
+                    &selection.tool_name,
+                    wrapped,
+                ));
+
+                output.contains("TASK_COMPLETE") || output.contains("JOB_DONE")
+            }
+            Err(e) => {
+                tracing::warn!("Tool {} failed: {}", selection.tool_name, e);
+                reason_ctx.messages.push(ChatMessage::tool_result(
+                    "tool_call_id",
+                    &selection.tool_name,
+                    format!("Error: {}", e),
+                ));
+                false
+            }
+        }
+    }
+}
+
+fn truncate(s: &str, max: usize) -> String {
+    if s.len() <= max {
+        s.to_string()
+    } else {
+        format!("{}...", &s[..max])
+    }
+}

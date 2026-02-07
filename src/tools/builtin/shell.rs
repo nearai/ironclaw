@@ -30,7 +30,7 @@ use tokio::process::Command;
 
 use crate::context::JobContext;
 use crate::sandbox::{SandboxManager, SandboxPolicy};
-use crate::tools::tool::{Tool, ToolError, ToolOutput};
+use crate::tools::tool::{Tool, ToolDomain, ToolError, ToolOutput};
 
 /// Maximum output size before truncation (64KB).
 const MAX_OUTPUT_SIZE: usize = 64 * 1024;
@@ -385,6 +385,10 @@ impl Tool for ShellTool {
 
     fn requires_sanitization(&self) -> bool {
         true // Shell output could contain anything
+    }
+
+    fn domain(&self) -> ToolDomain {
+        ToolDomain::Container
     }
 }
 

@@ -11,7 +11,7 @@ use async_trait::async_trait;
 use tokio::fs;
 
 use crate::context::JobContext;
-use crate::tools::tool::{Tool, ToolError, ToolOutput};
+use crate::tools::tool::{Tool, ToolDomain, ToolError, ToolOutput};
 use crate::workspace::paths as ws_paths;
 
 /// Well-known workspace filenames that must go through memory_write, not write_file.
@@ -246,6 +246,10 @@ impl Tool for ReadFileTool {
     fn requires_approval(&self) -> bool {
         true // Reading local files should require approval
     }
+
+    fn domain(&self) -> ToolDomain {
+        ToolDomain::Container
+    }
 }
 
 /// Write file contents tool.
@@ -359,6 +363,10 @@ impl Tool for WriteFileTool {
     fn requires_sanitization(&self) -> bool {
         false // We're writing, not reading external data
     }
+
+    fn domain(&self) -> ToolDomain {
+        ToolDomain::Container
+    }
 }
 
 /// List directory contents tool.
@@ -466,6 +474,10 @@ impl Tool for ListDirTool {
 
     fn requires_approval(&self) -> bool {
         true // Directory listings can leak filesystem structure
+    }
+
+    fn domain(&self) -> ToolDomain {
+        ToolDomain::Container
     }
 }
 
@@ -684,6 +696,10 @@ impl Tool for ApplyPatchTool {
 
     fn requires_sanitization(&self) -> bool {
         false // We're writing, not reading external data
+    }
+
+    fn domain(&self) -> ToolDomain {
+        ToolDomain::Container
     }
 }
 

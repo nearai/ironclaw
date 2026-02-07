@@ -42,12 +42,25 @@ const SLASH_COMMANDS: &[&str] = &[
     "/quit",
     "/exit",
     "/debug",
+    "/model",
     "/undo",
     "/redo",
     "/clear",
     "/compact",
     "/new",
     "/interrupt",
+    "/version",
+    "/tools",
+    "/ping",
+    "/job",
+    "/status",
+    "/cancel",
+    "/list",
+    "/heartbeat",
+    "/summarize",
+    "/suggest",
+    "/thread",
+    "/resume",
 ];
 
 /// Rustyline helper for slash-command tab completion.
@@ -155,35 +168,6 @@ impl Default for ReplChannel {
     }
 }
 
-fn print_help() {
-    println!(
-        r#"
-IronClaw REPL
-
-Commands:
-  /help          Show this help message
-  /quit, /exit   Exit the REPL
-  /debug         Toggle debug mode (verbose output)
-  /undo          Undo the last turn
-  /redo          Redo an undone turn
-  /clear         Clear the conversation
-  /compact       Compact the context window
-  /new           Start a new conversation thread
-  /interrupt     Stop the current operation
-
-Approval responses (when prompted):
-  yes, y         Approve the tool execution
-  no, n          Deny the tool execution
-  always         Approve and auto-approve this tool for the session
-
-Tips:
-  - Tool calls requiring approval will pause and wait for your response
-  - Use /debug to see detailed tool inputs and outputs
-  - Press Ctrl+C to interrupt a long-running operation
-"#
-    );
-}
-
 /// Get the history file path (~/.ironclaw/history).
 fn history_path() -> std::path::PathBuf {
     dirs::home_dir()
@@ -253,18 +237,15 @@ impl Channel for ReplChannel {
                             continue;
                         }
 
-                        // Handle local REPL commands
+                        // Handle local REPL commands (only commands that need
+                        // immediate local handling stay here)
                         match line.to_lowercase().as_str() {
                             "/quit" | "/exit" => break,
-                            "/help" | "/?" => {
-                                print_help();
-                                continue;
-                            }
                             "/debug" => {
                                 let current = debug_mode.load(Ordering::Relaxed);
                                 debug_mode.store(!current, Ordering::Relaxed);
                                 if !current {
-                                    println!("Debug mode ON - showing verbose tool output");
+                                    println!("Debug mode ON");
                                 } else {
                                     println!("Debug mode OFF");
                                 }

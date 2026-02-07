@@ -36,6 +36,7 @@ pub struct NearAiProvider {
     client: Client,
     config: NearAiConfig,
     session: Arc<SessionManager>,
+    active_model: std::sync::RwLock<String>,
 }
 
 impl NearAiProvider {
@@ -46,10 +47,12 @@ impl NearAiProvider {
             .build()
             .unwrap_or_else(|_| Client::new());
 
+        let active_model = std::sync::RwLock::new(config.model.clone());
         Self {
             client,
             config,
             session,
+            active_model,
         }
     }
 
@@ -321,7 +324,7 @@ impl LlmProvider for NearAiProvider {
         let (instructions, input) = split_messages(req.messages);
 
         let request = NearAiRequest {
-            model: self.config.model.clone(),
+            model: self.active_model_name(),
             instructions,
             input,
             temperature: req.temperature,
@@ -449,7 +452,7 @@ impl LlmProvider for NearAiProvider {
             .collect();
 
         let request = NearAiRequest {
-            model: self.config.model.clone(),
+            model: self.active_model_name(),
             instructions,
             input,
             temperature: req.temperature,
@@ -583,6 +586,22 @@ impl LlmProvider for NearAiProvider {
         // Use the inherent method and extract IDs
         let models = NearAiProvider::list_models(self).await?;
         Ok(models.into_iter().map(|m| m.name).collect())
+    }
+
+    fn active_model_name(&self) -> String {
+        self.active_model
+            .read()
+            .expect("active_model lock poisoned")
+            .clone()
+    }
+
+    fn set_model(&self, model: &str) -> Result<(), LlmError> {
+        let mut guard = self
+            .active_model
+            .write()
+            .expect("active_model lock poisoned");
+        *guard = model.to_string();
+        Ok(())
     }
 }
 

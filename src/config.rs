@@ -450,6 +450,10 @@ pub struct AgentConfig {
     pub use_planning: bool,
     /// Session idle timeout. Sessions inactive longer than this are pruned.
     pub session_idle_timeout: Duration,
+    /// Allow chat to use filesystem/shell tools directly (bypass sandbox).
+    /// When false (default), container-domain tools are only available inside
+    /// Docker containers. The orchestrator LLM uses `run_in_sandbox` instead.
+    pub allow_local_tools: bool,
 }
 
 impl AgentConfig {
@@ -523,6 +527,14 @@ impl AgentConfig {
                     })?
                     .unwrap_or(settings.agent.session_idle_timeout_secs),
             ),
+            allow_local_tools: optional_env("ALLOW_LOCAL_TOOLS")?
+                .map(|s| s.parse())
+                .transpose()
+                .map_err(|e| ConfigError::InvalidValue {
+                    key: "ALLOW_LOCAL_TOOLS".to_string(),
+                    message: format!("must be 'true' or 'false': {e}"),
+                })?
+                .unwrap_or(false),
         })
     }
 }

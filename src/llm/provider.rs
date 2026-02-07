@@ -27,9 +27,8 @@ pub struct ChatMessage {
     /// Name of the tool for tool results.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
-    /// Tool calls requested by the assistant (for conversation replay).
-    /// OpenAI-compatible APIs require the assistant message to include
-    /// tool_calls when followed by tool result messages.
+    /// Tool calls made by the assistant (OpenAI protocol requires these
+    /// to appear on the assistant message preceding tool result messages).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tool_calls: Option<Vec<ToolCall>>,
 }
@@ -68,17 +67,14 @@ impl ChatMessage {
         }
     }
 
-    /// Create an assistant message that requested tool calls.
+    /// Create an assistant message that includes tool calls.
     ///
-    /// OpenAI-compatible APIs require the assistant message to carry the
-    /// `tool_calls` array when followed by tool-result messages.
-    pub fn assistant_with_tool_calls(
-        content: impl Into<String>,
-        tool_calls: Vec<ToolCall>,
-    ) -> Self {
+    /// Per the OpenAI protocol, an assistant message with tool_calls must
+    /// precede the corresponding tool result messages in the conversation.
+    pub fn assistant_with_tool_calls(content: Option<String>, tool_calls: Vec<ToolCall>) -> Self {
         Self {
             role: Role::Assistant,
-            content: content.into(),
+            content: content.unwrap_or_default(),
             tool_call_id: None,
             name: None,
             tool_calls: if tool_calls.is_empty() {
@@ -236,6 +232,14 @@ pub struct ToolCompletionResponse {
     pub finish_reason: FinishReason,
 }
 
+/// Metadata about a model returned by the provider's API.
+#[derive(Debug, Clone)]
+pub struct ModelMetadata {
+    pub id: String,
+    /// Total context window size in tokens.
+    pub context_length: Option<u32>,
+}
+
 /// Trait for LLM providers.
 #[async_trait]
 pub trait LlmProvider: Send + Sync {
@@ -258,6 +262,31 @@ pub trait LlmProvider: Send + Sync {
     /// Default implementation returns empty list.
     async fn list_models(&self) -> Result<Vec<String>, LlmError> {
         Ok(Vec::new())
+    }
+
+    /// Fetch metadata for the current model (context length, etc.).
+    /// Default returns the model name with no size info.
+    async fn model_metadata(&self) -> Result<ModelMetadata, LlmError> {
+        Ok(ModelMetadata {
+            id: self.model_name().to_string(),
+            context_length: None,
+        })
+    }
+
+    /// Get the currently active model name.
+    ///
+    /// May differ from `model_name()` if the model was switched at runtime
+    /// via `set_model()`. Default returns `model_name()`.
+    fn active_model_name(&self) -> String {
+        self.model_name().to_string()
+    }
+
+    /// Switch the active model at runtime. Not all providers support this.
+    fn set_model(&self, _model: &str) -> Result<(), LlmError> {
+        Err(LlmError::RequestFailed {
+            provider: "unknown".to_string(),
+            reason: "Runtime model switching not supported by this provider".to_string(),
+        })
     }
 
     /// Calculate cost for a completion.

@@ -590,7 +590,7 @@ async fn jobs_summary_handler(
 async fn jobs_detail_handler(
     State(state): State<Arc<GatewayState>>,
     Path(id): Path<String>,
-) -> Result<Json<JobInfo>, (StatusCode, String)> {
+) -> Result<Json<JobDetailResponse>, (StatusCode, String)> {
     let context_manager = state.context_manager.as_ref().ok_or((
         StatusCode::SERVICE_UNAVAILABLE,
         "Context manager not available".to_string(),
@@ -608,13 +608,89 @@ async fn jobs_detail_handler(
         return Err((StatusCode::NOT_FOUND, "Job not found".to_string()));
     }
 
-    Ok(Json(JobInfo {
+    let transitions: Vec<TransitionInfo> = ctx
+        .transitions
+        .iter()
+        .map(|t| TransitionInfo {
+            from: t.from.to_string(),
+            to: t.to.to_string(),
+            timestamp: t.timestamp.to_rfc3339(),
+            reason: t.reason.clone(),
+        })
+        .collect();
+
+    let elapsed_secs = ctx.elapsed().map(|d| d.as_secs());
+
+    let memory = context_manager.get_memory(job_id).await.ok();
+
+    let actions: Vec<ActionInfo> = memory
+        .as_ref()
+        .map(|m| {
+            m.actions
+                .iter()
+                .map(|a| {
+                    let output = a
+                        .output_sanitized
+                        .as_ref()
+                        .map(|v| serde_json::to_string_pretty(v).unwrap_or_else(|_| v.to_string()));
+                    ActionInfo {
+                        id: a.id,
+                        sequence: a.sequence,
+                        tool_name: a.tool_name.clone(),
+                        input: a.input.clone(),
+                        output,
+                        duration_ms: a.duration.as_millis() as u64,
+                        success: a.success,
+                        error: a.error.clone(),
+                        executed_at: a.executed_at.to_rfc3339(),
+                    }
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+
+    let conversation: Vec<MessageInfo> = memory
+        .as_ref()
+        .map(|m| {
+            m.conversation
+                .messages()
+                .iter()
+                .map(|msg| MessageInfo {
+                    role: format!("{:?}", msg.role).to_lowercase(),
+                    content: msg.content.clone(),
+                    tool_calls: msg.tool_calls.as_ref().map(|tcs| {
+                        tcs.iter()
+                            .map(|tc| MessageToolCallInfo {
+                                id: tc.id.clone(),
+                                name: tc.name.clone(),
+                                arguments: tc.arguments.clone(),
+                            })
+                            .collect()
+                    }),
+                    tool_call_id: msg.tool_call_id.clone(),
+                    name: msg.name.clone(),
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+
+    Ok(Json(JobDetailResponse {
         id: ctx.job_id,
         title: ctx.title.clone(),
+        description: ctx.description.clone(),
         state: ctx.state.to_string(),
+        category: ctx.category.clone(),
         user_id: ctx.user_id.clone(),
         created_at: ctx.created_at.to_rfc3339(),
         started_at: ctx.started_at.map(|dt| dt.to_rfc3339()),
+        completed_at: ctx.completed_at.map(|dt| dt.to_rfc3339()),
+        elapsed_secs,
+        actual_cost: ctx.actual_cost.to_string(),
+        estimated_cost: ctx.estimated_cost.map(|c| c.to_string()),
+        repair_attempts: ctx.repair_attempts,
+        transitions,
+        actions,
+        conversation,
     }))
 }
 

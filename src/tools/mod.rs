@@ -23,4 +23,4 @@ pub use builder::{
 };
 pub use registry::ToolRegistry;
 pub use sandbox::ToolSandbox;
-pub use tool::{Tool, ToolError, ToolOutput};
+pub use tool::{Tool, ToolDomain, ToolError, ToolOutput};
