@@ -239,53 +239,28 @@ impl Agent {
                     let channels = self.channels.clone();
                     tokio::spawn(async move {
                         while let Some(response) = notify_rx.recv().await {
-                            // Route notification to configured channel/user, or broadcast to all
-                            match (&notify_channel, &notify_user) {
-                                (Some(channel), Some(user)) => {
-                                    // Send to specific channel and user
-                                    if let Err(e) =
-                                        channels.broadcast(channel, user, response.clone()).await
-                                    {
+                            let user = notify_user.as_deref().unwrap_or("default");
+
+                            // Try the configured channel first, fall back to
+                            // broadcasting on all channels.
+                            let targeted_ok = if let Some(ref channel) = notify_channel {
+                                channels
+                                    .broadcast(channel, user, response.clone())
+                                    .await
+                                    .is_ok()
+                            } else {
+                                false
+                            };
+
+                            if !targeted_ok {
+                                let results = channels.broadcast_all(user, response).await;
+                                for (ch, result) in results {
+                                    if let Err(e) = result {
                                         tracing::warn!(
-                                            "Failed to send heartbeat to {}/{}: {}",
-                                            channel,
-                                            user,
+                                            "Failed to broadcast heartbeat to {}: {}",
+                                            ch,
                                             e
                                         );
-                                    } else {
-                                        tracing::debug!(
-                                            "Heartbeat notification sent to {}/{}",
-                                            channel,
-                                            user
-                                        );
-                                    }
-                                }
-                                (None, Some(user)) => {
-                                    // Broadcast to all channels for this user
-                                    let results = channels.broadcast_all(user, response).await;
-                                    for (ch, result) in results {
-                                        if let Err(e) = result {
-                                            tracing::warn!(
-                                                "Failed to broadcast heartbeat to {}: {}",
-                                                ch,
-                                                e
-                                            );
-                                        }
-                                    }
-                                }
-                                _ => {
-                                    // No explicit target, broadcast to all channels
-                                    // for the default user so notifications actually
-                                    // reach someone instead of vanishing into logs.
-                                    let results = channels.broadcast_all("default", response).await;
-                                    for (ch, result) in results {
-                                        if let Err(e) = result {
-                                            tracing::warn!(
-                                                "Failed to broadcast heartbeat to {}: {}",
-                                                ch,
-                                                e
-                                            );
-                                        }
                                     }
                                 }
                             }

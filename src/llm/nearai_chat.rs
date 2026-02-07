@@ -13,8 +13,8 @@ use serde::{Deserialize, Serialize};
 use crate::config::NearAiConfig;
 use crate::error::LlmError;
 use crate::llm::provider::{
-    ChatMessage, CompletionRequest, CompletionResponse, FinishReason, LlmProvider, Role, ToolCall,
-    ToolCompletionRequest, ToolCompletionResponse,
+    ChatMessage, CompletionRequest, CompletionResponse, FinishReason, LlmProvider, ModelMetadata,
+    Role, ToolCall, ToolCompletionRequest, ToolCompletionResponse,
 };
 
 /// NEAR AI Chat Completions API provider.
@@ -116,8 +116,8 @@ impl NearAiChatProvider {
         })
     }
 
-    /// Fetch available models.
-    pub async fn list_models(&self) -> Result<Vec<String>, LlmError> {
+    /// Fetch available models with full metadata from the `/v1/models` endpoint.
+    async fn fetch_models(&self) -> Result<Vec<ApiModelEntry>, LlmError> {
         let url = self.api_url("models");
 
         let response = self
@@ -143,12 +143,7 @@ impl NearAiChatProvider {
 
         #[derive(Deserialize)]
         struct ModelsResponse {
-            data: Vec<ModelEntry>,
-        }
-
-        #[derive(Deserialize)]
-        struct ModelEntry {
-            id: String,
+            data: Vec<ApiModelEntry>,
         }
 
         let resp: ModelsResponse =
@@ -157,8 +152,16 @@ impl NearAiChatProvider {
                 reason: format!("JSON parse error: {}", e),
             })?;
 
-        Ok(resp.data.into_iter().map(|m| m.id).collect())
+        Ok(resp.data)
     }
+}
+
+/// Model entry as returned by the `/v1/models` API.
+#[derive(Debug, Deserialize)]
+struct ApiModelEntry {
+    id: String,
+    #[serde(default)]
+    context_length: Option<u32>,
 }
 
 #[async_trait]
@@ -296,7 +299,17 @@ impl LlmProvider for NearAiChatProvider {
     }
 
     async fn list_models(&self) -> Result<Vec<String>, LlmError> {
-        NearAiChatProvider::list_models(self).await
+        let models = self.fetch_models().await?;
+        Ok(models.into_iter().map(|m| m.id).collect())
+    }
+
+    async fn model_metadata(&self) -> Result<ModelMetadata, LlmError> {
+        let models = self.fetch_models().await?;
+        let current = models.iter().find(|m| m.id == self.config.model);
+        Ok(ModelMetadata {
+            id: self.config.model.clone(),
+            context_length: current.and_then(|m| m.context_length),
+        })
     }
 }
 

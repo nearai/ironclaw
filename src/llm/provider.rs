@@ -232,6 +232,14 @@ pub struct ToolCompletionResponse {
     pub finish_reason: FinishReason,
 }
 
+/// Metadata about a model returned by the provider's API.
+#[derive(Debug, Clone)]
+pub struct ModelMetadata {
+    pub id: String,
+    /// Total context window size in tokens.
+    pub context_length: Option<u32>,
+}
+
 /// Trait for LLM providers.
 #[async_trait]
 pub trait LlmProvider: Send + Sync {
@@ -254,6 +262,15 @@ pub trait LlmProvider: Send + Sync {
     /// Default implementation returns empty list.
     async fn list_models(&self) -> Result<Vec<String>, LlmError> {
         Ok(Vec::new())
+    }
+
+    /// Fetch metadata for the current model (context length, etc.).
+    /// Default returns the model name with no size info.
+    async fn model_metadata(&self) -> Result<ModelMetadata, LlmError> {
+        Ok(ModelMetadata {
+            id: self.model_name().to_string(),
+            context_length: None,
+        })
     }
 
     /// Calculate cost for a completion.
