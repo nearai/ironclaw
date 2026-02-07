@@ -1,11 +1,5 @@
 # IronClaw ↔ OpenClaw Feature Parity Matrix
 
-
-<!-- parity:auto:start -->
-> Auto-synced for PR #unknown at commit `unknown`.
-> Managed by `.github/workflows/update-feature-parity.yml`.
-<!-- parity:auto:end -->
-
 This document tracks feature parity between IronClaw (Rust implementation) and OpenClaw (TypeScript reference implementation). Use this to coordinate work across developers.
 
 **Legend:**
