@@ -241,6 +241,9 @@ pub enum CredentialLocationSchema {
 
     /// Query parameter.
     QueryParam { name: String },
+
+    /// URL/path placeholder replacement.
+    UrlPath { placeholder: String },
 }
 
 impl CredentialLocationSchema {
@@ -259,6 +262,9 @@ impl CredentialLocationSchema {
             CredentialLocationSchema::QueryParam { name } => {
                 CredentialLocation::QueryParam { name: name.clone() }
             }
+            CredentialLocationSchema::UrlPath { placeholder } => CredentialLocation::UrlPath {
+                placeholder: placeholder.clone(),
+            },
         }
     }
 }
@@ -562,6 +568,35 @@ mod tests {
                 assert_eq!(prefix, &Some("Key ".to_string()));
             }
             _ => panic!("Expected Header location"),
+        }
+    }
+
+    #[test]
+    fn test_parse_url_path_credential() {
+        let json = r#"{
+            "http": {
+                "allowlist": [{ "host": "api.telegram.org" }],
+                "credentials": {
+                    "telegram_bot": {
+                        "secret_name": "telegram_bot_token",
+                        "location": {
+                            "type": "url_path",
+                            "placeholder": "{TELEGRAM_BOT_TOKEN}"
+                        },
+                        "host_patterns": ["api.telegram.org"]
+                    }
+                }
+            }
+        }"#;
+
+        let caps = CapabilitiesFile::from_json(json).unwrap();
+        let http = caps.http.unwrap();
+        let cred = http.credentials.get("telegram_bot").unwrap();
+        match &cred.location {
+            CredentialLocationSchema::UrlPath { placeholder } => {
+                assert_eq!(placeholder, "{TELEGRAM_BOT_TOKEN}");
+            }
+            _ => panic!("Expected UrlPath location"),
         }
     }
 

@@ -200,6 +200,10 @@ fn inject_credential(
                 .query_params
                 .insert(name.clone(), secret.expose().to_string());
         }
+        CredentialLocation::UrlPath { .. } => {
+            // URL placeholder replacement is handled by channel/tool wrappers
+            // that substitute {PLACEHOLDER} values in templated strings.
+        }
     }
 }
 

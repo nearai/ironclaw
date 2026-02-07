@@ -9,13 +9,16 @@
 //! 6. Channel configuration
 //! 7. Heartbeat (background tasks)
 
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use deadpool_postgres::{Config as PoolConfig, Runtime};
 use secrecy::SecretString;
 use tokio_postgres::NoTls;
 
-use crate::channels::wasm::ChannelCapabilitiesFile;
+use crate::channels::wasm::{
+    ChannelCapabilitiesFile, bundled_channel_names, install_bundled_channel,
+};
 use crate::llm::{SessionConfig, SessionManager};
 use crate::secrets::SecretsCrypto;
 use crate::settings::{KeySource, Settings};
@@ -535,6 +538,8 @@ impl SetupWizard {
                 .ok_or_else(|| SetupError::Config("Database URL not configured".to_string()))?;
 
             self.test_database_connection(&url).await?;
+            // Ensure secrets-related tables exist for channels-only onboarding flows.
+            self.run_migrations().await?;
             self.db_pool.clone().unwrap()
         };
 
@@ -583,7 +588,12 @@ impl SetupWizard {
             .unwrap_or_default()
             .join(".ironclaw/channels");
 
-        let discovered_channels = discover_wasm_channels(&channels_dir).await;
+        let mut discovered_channels = discover_wasm_channels(&channels_dir).await;
+        let installed_names: HashSet<String> = discovered_channels
+            .iter()
+            .map(|(name, _)| name.clone())
+            .collect();
+        let wasm_channel_names = wasm_channel_option_names(&discovered_channels);
 
         // Build options list dynamically
         let mut options: Vec<(String, bool)> = vec![
@@ -594,8 +604,8 @@ impl SetupWizard {
             ),
         ];
 
-        // Add discovered WASM channels
-        for (name, _) in &discovered_channels {
+        // Add available WASM channels (installed + bundled)
+        for name in &wasm_channel_names {
             let is_enabled = self.settings.channels.wasm_channels.contains(name);
             let display_name = format!("{} (WASM)", capitalize_first(name));
             options.push((display_name, is_enabled));
@@ -607,8 +617,33 @@ impl SetupWizard {
         let selected = select_many("Which channels do you want to enable?", &options_refs)
             .map_err(SetupError::Io)?;
 
+        let selected_wasm_channels: Vec<String> = wasm_channel_names
+            .iter()
+            .enumerate()
+            .filter_map(|(idx, name)| {
+                if selected.contains(&(idx + 2)) {
+                    Some(name.clone())
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        if let Some(installed) = install_selected_bundled_channels(
+            &channels_dir,
+            &selected_wasm_channels,
+            &installed_names,
+        )
+        .await?
+        {
+            if !installed.is_empty() {
+                print_success(&format!("Installed channels: {}", installed.join(", ")));
+                discovered_channels = discover_wasm_channels(&channels_dir).await;
+            }
+        }
+
         // Determine if we need secrets context
-        let needs_secrets = selected.iter().any(|&i| i >= 1);
+        let needs_secrets = selected.contains(&1) || !selected_wasm_channels.is_empty();
         let secrets = if needs_secrets {
             match self.init_secrets_context().await {
                 Ok(ctx) => Some(ctx),
@@ -638,53 +673,53 @@ impl SetupWizard {
             self.settings.channels.http_enabled = false;
         }
 
-        // Process WASM channels (index 2 and above)
-        let mut enabled_wasm_channels = Vec::new();
-        for (idx, (channel_name, cap_file)) in discovered_channels.iter().enumerate() {
-            let option_idx = idx + 2; // Offset for CLI and HTTP
+        let discovered_by_name: HashMap<String, ChannelCapabilitiesFile> =
+            discovered_channels.into_iter().collect();
 
-            if selected.contains(&option_idx) {
-                println!();
-                if let Some(ref ctx) = secrets {
-                    // Use setup schema from capabilities if available
-                    let result = if !cap_file.setup.required_secrets.is_empty() {
-                        setup_wasm_channel(ctx, channel_name, &cap_file.setup)
+        // Process selected WASM channels
+        let mut enabled_wasm_channels = Vec::new();
+        for channel_name in selected_wasm_channels {
+            println!();
+            if let Some(ref ctx) = secrets {
+                let result = if let Some(cap_file) = discovered_by_name.get(&channel_name) {
+                    if !cap_file.setup.required_secrets.is_empty() {
+                        setup_wasm_channel(ctx, &channel_name, &cap_file.setup)
                             .await
                             .map_err(SetupError::Channel)?
-                    } else {
-                        // Fall back to legacy Telegram setup for backwards compatibility
-                        if channel_name == "telegram" {
-                            let telegram_result =
-                                setup_telegram(ctx).await.map_err(SetupError::Channel)?;
-                            crate::setup::channels::WasmChannelSetupResult {
-                                enabled: telegram_result.enabled,
-                                channel_name: "telegram".to_string(),
-                            }
-                        } else {
-                            print_info(&format!(
-                                "No setup configuration found for {}",
-                                channel_name
-                            ));
-                            crate::setup::channels::WasmChannelSetupResult {
-                                enabled: true,
-                                channel_name: channel_name.to_string(),
-                            }
+                    } else if channel_name == "telegram" {
+                        let telegram_result = setup_telegram(ctx).await.map_err(SetupError::Channel)?;
+                        crate::setup::channels::WasmChannelSetupResult {
+                            enabled: telegram_result.enabled,
+                            channel_name: "telegram".to_string(),
                         }
-                    };
-
-                    if result.enabled {
-                        enabled_wasm_channels.push(result.channel_name);
+                    } else {
+                        print_info(&format!("No setup configuration found for {}", channel_name));
+                        crate::setup::channels::WasmChannelSetupResult {
+                            enabled: true,
+                            channel_name: channel_name.clone(),
+                        }
                     }
                 } else {
-                    // No secrets context, just enable the channel
                     print_info(&format!(
-                        "{} enabled (configure tokens via environment)",
-                        capitalize_first(channel_name)
+                        "Channel '{}' is selected but not available on disk.",
+                        channel_name
                     ));
-                    enabled_wasm_channels.push(channel_name.clone());
+                    continue;
+                };
+
+                if result.enabled {
+                    enabled_wasm_channels.push(result.channel_name);
                 }
+            } else {
+                // No secrets context, just enable the channel
+                print_info(&format!(
+                    "{} enabled (configure tokens via environment)",
+                    capitalize_first(&channel_name)
+                ));
+                enabled_wasm_channels.push(channel_name.clone());
             }
         }
+
         self.settings.channels.wasm_channels = enabled_wasm_channels;
 
         Ok(())
@@ -933,7 +968,72 @@ fn capitalize_first(s: &str) -> String {
 }
 
 #[cfg(test)]
+async fn install_missing_bundled_channels(
+    channels_dir: &std::path::Path,
+    already_installed: &HashSet<String>,
+) -> Result<Vec<String>, SetupError> {
+    let mut installed = Vec::new();
+
+    for name in bundled_channel_names().iter().copied() {
+        if already_installed.contains(name) {
+            continue;
+        }
+
+        install_bundled_channel(name, channels_dir, false)
+            .await
+            .map_err(SetupError::Channel)?;
+        installed.push(name.to_string());
+    }
+
+    Ok(installed)
+}
+
+fn wasm_channel_option_names(discovered: &[(String, ChannelCapabilitiesFile)]) -> Vec<String> {
+    let mut names: Vec<String> = discovered.iter().map(|(name, _)| name.clone()).collect();
+
+    for bundled in bundled_channel_names().iter().copied() {
+        if !names.iter().any(|name| name == bundled) {
+            names.push(bundled.to_string());
+        }
+    }
+
+    names
+}
+
+async fn install_selected_bundled_channels(
+    channels_dir: &std::path::Path,
+    selected_channels: &[String],
+    already_installed: &HashSet<String>,
+) -> Result<Option<Vec<String>>, SetupError> {
+    let bundled: HashSet<&str> = bundled_channel_names().iter().copied().collect();
+    let selected_missing: HashSet<String> = selected_channels
+        .iter()
+        .filter(|name| bundled.contains(name.as_str()) && !already_installed.contains(*name))
+        .cloned()
+        .collect();
+
+    if selected_missing.is_empty() {
+        return Ok(None);
+    }
+
+    let mut installed = Vec::new();
+    for name in selected_missing {
+        install_bundled_channel(&name, channels_dir, false)
+            .await
+            .map_err(SetupError::Channel)?;
+        installed.push(name);
+    }
+
+    installed.sort();
+    Ok(Some(installed))
+}
+
+#[cfg(test)]
 mod tests {
+    use std::collections::HashSet;
+
+    use tempfile::tempdir;
+
     use super::*;
 
     #[test]
@@ -972,5 +1072,32 @@ mod tests {
         assert_eq!(capitalize_first("telegram"), "Telegram");
         assert_eq!(capitalize_first("CAPS"), "CAPS");
         assert_eq!(capitalize_first(""), "");
+    }
+
+    #[tokio::test]
+    async fn test_install_missing_bundled_channels_installs_telegram() {
+        let dir = tempdir().unwrap();
+        let installed = HashSet::<String>::new();
+
+        install_missing_bundled_channels(dir.path(), &installed)
+            .await
+            .unwrap();
+
+        assert!(dir.path().join("telegram.wasm").exists());
+        assert!(dir.path().join("telegram.capabilities.json").exists());
+    }
+
+    #[test]
+    fn test_wasm_channel_option_names_includes_bundled_when_missing() {
+        let discovered = Vec::new();
+        let options = wasm_channel_option_names(&discovered);
+        assert_eq!(options, vec!["telegram".to_string()]);
+    }
+
+    #[test]
+    fn test_wasm_channel_option_names_dedupes_bundled() {
+        let discovered = vec![(String::from("telegram"), ChannelCapabilitiesFile::default())];
+        let options = wasm_channel_option_names(&discovered);
+        assert_eq!(options, vec!["telegram".to_string()]);
     }
 }
