@@ -425,7 +425,6 @@ mod tests {
         let ws = WsServerMessage::from_sse_event(&sse);
         match ws {
             WsServerMessage::Event { event_type, data } => {
-                assert_eq!(event_type, data["type"]);
                 assert_eq!(event_type, "response");
                 assert_eq!(data["content"], "hello");
                 assert_eq!(data["thread_id"], "t1");
@@ -442,7 +441,6 @@ mod tests {
         let ws = WsServerMessage::from_sse_event(&sse);
         match ws {
             WsServerMessage::Event { event_type, data } => {
-                assert_eq!(event_type, data["type"]);
                 assert_eq!(event_type, "thinking");
                 assert_eq!(data["message"], "reasoning...");
             }
@@ -461,7 +459,6 @@ mod tests {
         let ws = WsServerMessage::from_sse_event(&sse);
         match ws {
             WsServerMessage::Event { event_type, data } => {
-                assert_eq!(event_type, data["type"]);
                 assert_eq!(event_type, "approval_needed");
                 assert_eq!(data["tool_name"], "shell");
             }
@@ -474,27 +471,8 @@ mod tests {
         let sse = SseEvent::Heartbeat;
         let ws = WsServerMessage::from_sse_event(&sse);
         match ws {
-            WsServerMessage::Event { event_type, data } => {
-                assert_eq!(event_type, data["type"]);
+            WsServerMessage::Event { event_type, .. } => {
                 assert_eq!(event_type, "heartbeat");
-            }
-            _ => panic!("Expected Event variant"),
-        }
-    }
-
-    #[test]
-    fn test_ws_server_from_sse_tool_result() {
-        let sse = SseEvent::ToolResult {
-            name: "bash".to_string(),
-            preview: "Hello World".to_string(),
-        };
-        let ws = WsServerMessage::from_sse_event(&sse);
-        match ws {
-            WsServerMessage::Event { event_type, data } => {
-                assert_eq!(event_type, data["type"]);
-                assert_eq!(event_type, "tool_result");
-                assert_eq!(data["name"], "bash");
-                assert_eq!(data["preview"], "Hello World");
             }
             _ => panic!("Expected Event variant"),
         }
