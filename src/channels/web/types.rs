@@ -78,6 +78,8 @@ pub enum SseEvent {
     ToolStarted { name: String },
     #[serde(rename = "tool_completed")]
     ToolCompleted { name: String, success: bool },
+    #[serde(rename = "tool_result")]
+    ToolResult { name: String, preview: String },
     #[serde(rename = "stream_chunk")]
     StreamChunk { content: String },
     #[serde(rename = "status")]

@@ -26,6 +26,23 @@ use crate::safety::SafetyLayer;
 use crate::tools::ToolRegistry;
 use crate::workspace::Workspace;
 
+/// Collapse a tool output string into a single-line preview for display.
+fn truncate_for_preview(output: &str, max_chars: usize) -> String {
+    let collapsed: String = output
+        .chars()
+        .take(max_chars + 50)
+        .map(|c| if c == '\n' { ' ' } else { c })
+        .collect::<String>()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    if collapsed.len() > max_chars {
+        format!("{}...", &collapsed[..max_chars])
+    } else {
+        collapsed
+    }
+}
+
 /// Result of the agentic loop execution.
 enum AgenticLoopResult {
     /// Completed with a response.
@@ -877,9 +894,48 @@ impl Agent {
                             }
                         }
 
+                        let _ = self
+                            .channels
+                            .send_status(
+                                &message.channel,
+                                StatusUpdate::ToolStarted {
+                                    name: tc.name.clone(),
+                                },
+                                &message.metadata,
+                            )
+                            .await;
+
                         let tool_result = self
                             .execute_chat_tool(&tc.name, &tc.arguments, &job_ctx)
                             .await;
+
+                        let _ = self
+                            .channels
+                            .send_status(
+                                &message.channel,
+                                StatusUpdate::ToolCompleted {
+                                    name: tc.name.clone(),
+                                    success: tool_result.is_ok(),
+                                },
+                                &message.metadata,
+                            )
+                            .await;
+
+                        if let Ok(ref output) = tool_result {
+                            if !output.is_empty() {
+                                let _ = self
+                                    .channels
+                                    .send_status(
+                                        &message.channel,
+                                        StatusUpdate::ToolResult {
+                                            name: tc.name.clone(),
+                                            preview: truncate_for_preview(output, 200),
+                                        },
+                                        &message.metadata,
+                                    )
+                                    .await;
+                            }
+                        }
 
                         // Record result in thread
                         {
@@ -1256,9 +1312,48 @@ impl Agent {
             let job_ctx =
                 JobContext::with_user(&message.user_id, "chat", "Interactive chat session");
 
+            let _ = self
+                .channels
+                .send_status(
+                    &message.channel,
+                    StatusUpdate::ToolStarted {
+                        name: pending.tool_name.clone(),
+                    },
+                    &message.metadata,
+                )
+                .await;
+
             let tool_result = self
                 .execute_chat_tool(&pending.tool_name, &pending.parameters, &job_ctx)
                 .await;
+
+            let _ = self
+                .channels
+                .send_status(
+                    &message.channel,
+                    StatusUpdate::ToolCompleted {
+                        name: pending.tool_name.clone(),
+                        success: tool_result.is_ok(),
+                    },
+                    &message.metadata,
+                )
+                .await;
+
+            if let Ok(ref output) = tool_result {
+                if !output.is_empty() {
+                    let _ = self
+                        .channels
+                        .send_status(
+                            &message.channel,
+                            StatusUpdate::ToolResult {
+                                name: pending.tool_name.clone(),
+                                preview: truncate_for_preview(output, 200),
+                            },
+                            &message.metadata,
+                        )
+                        .await;
+                }
+            }
 
             // Build context including the tool result
             let mut context_messages = pending.context_messages;

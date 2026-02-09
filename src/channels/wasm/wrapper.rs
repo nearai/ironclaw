@@ -1826,6 +1826,11 @@ fn status_to_wit(status: &StatusUpdate, metadata: &serde_json::Value) -> wit_cha
             message: format!("{}: {}", name, if *success { "ok" } else { "failed" }),
             metadata_json,
         },
+        StatusUpdate::ToolResult { name, preview } => wit_channel::StatusUpdate {
+            status: wit_channel::StatusType::ToolCompleted,
+            message: format!("{}: {}", name, preview),
+            metadata_json,
+        },
         StatusUpdate::StreamChunk(chunk) => wit_channel::StatusUpdate {
             status: wit_channel::StatusType::Thinking,
             message: chunk.clone(),

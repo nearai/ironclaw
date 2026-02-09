@@ -108,6 +108,8 @@ pub enum StatusUpdate {
     ToolStarted { name: String },
     /// Tool execution completed.
     ToolCompleted { name: String, success: bool },
+    /// Brief preview of tool execution output.
+    ToolResult { name: String, preview: String },
     /// Streaming text chunk.
     StreamChunk(String),
     /// General status message.
