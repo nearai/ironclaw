@@ -116,9 +116,15 @@ pub async fn start_server(
         .route("/style.css", get(css_handler))
         .route("/app.js", get(js_handler));
 
+    // Project file serving (no auth, local browsing of sandbox outputs)
+    let projects = Router::new()
+        .route("/projects/{project_id}", get(project_index_handler))
+        .route("/projects/{project_id}/{*path}", get(project_file_handler));
+
     let app = Router::new()
         .merge(public)
         .merge(statics)
+        .merge(projects)
         .merge(protected)
         .with_state(state.clone());
 
@@ -893,6 +899,55 @@ async fn extensions_activate_handler(
                 )))),
             }
         }
+    }
+}
+
+// --- Project file serving handlers ---
+
+/// Serve `index.html` when hitting `/projects/{project_id}` with no trailing path.
+async fn project_index_handler(Path(project_id): Path<String>) -> impl IntoResponse {
+    serve_project_file(&project_id, "index.html").await
+}
+
+/// Serve any file under `/projects/{project_id}/{path}`.
+async fn project_file_handler(
+    Path((project_id, path)): Path<(String, String)>,
+) -> impl IntoResponse {
+    serve_project_file(&project_id, &path).await
+}
+
+/// Shared logic: resolve the file inside `~/.ironclaw/projects/{project_id}/`,
+/// guard against path traversal, and stream the content with the right MIME type.
+async fn serve_project_file(project_id: &str, path: &str) -> axum::response::Response {
+    let base = dirs::home_dir()
+        .unwrap_or_else(|| std::path::PathBuf::from("."))
+        .join(".ironclaw")
+        .join("projects")
+        .join(project_id);
+
+    let file_path = base.join(path);
+
+    // Path traversal guard
+    let canonical = match file_path.canonicalize() {
+        Ok(p) => p,
+        Err(_) => return (StatusCode::NOT_FOUND, "Not found").into_response(),
+    };
+    let base_canonical = match base.canonicalize() {
+        Ok(p) => p,
+        Err(_) => return (StatusCode::NOT_FOUND, "Not found").into_response(),
+    };
+    if !canonical.starts_with(&base_canonical) {
+        return (StatusCode::FORBIDDEN, "Forbidden").into_response();
+    }
+
+    match tokio::fs::read(&canonical).await {
+        Ok(contents) => {
+            let mime = mime_guess::from_path(&canonical)
+                .first_or_octet_stream()
+                .to_string();
+            ([(header::CONTENT_TYPE, mime)], contents).into_response()
+        }
+        Err(_) => (StatusCode::NOT_FOUND, "Not found").into_response(),
     }
 }
 

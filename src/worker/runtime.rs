@@ -300,9 +300,9 @@ Work independently to complete this job. Report when done."#,
             return Err(format!("invalid parameters: {}", details));
         }
 
-        // Execute with timeout
-        let result =
-            tokio::time::timeout(Duration::from_secs(60), tool.execute(params.clone(), &ctx)).await;
+        // Execute with per-tool timeout
+        let tool_timeout = tool.execution_timeout();
+        let result = tokio::time::timeout(tool_timeout, tool.execute(params.clone(), &ctx)).await;
 
         match result {
             Ok(Ok(output)) => serde_json::to_string_pretty(&output.result)

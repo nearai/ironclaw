@@ -949,14 +949,15 @@ impl Agent {
             .into());
         }
 
-        // Execute with timeout
-        let result = tokio::time::timeout(std::time::Duration::from_secs(60), async {
+        // Execute with per-tool timeout
+        let timeout = tool.execution_timeout();
+        let result = tokio::time::timeout(timeout, async {
             tool.execute(params.clone(), job_ctx).await
         })
         .await
         .map_err(|_| crate::error::ToolError::Timeout {
             name: tool_name.to_string(),
-            timeout: std::time::Duration::from_secs(60),
+            timeout,
         })?
         .map_err(|e| crate::error::ToolError::ExecutionFailed {
             name: tool_name.to_string(),

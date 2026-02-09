@@ -99,6 +99,7 @@ hyper-util = { version = "0.1", features = ["server", "tokio", "http1", "http2"]
 http-body-util = "0.1"
 bytes = "1"
 base64 = "0.22.1"
+mime_guess = "2.0.5"
 
 # macOS keychain
 [target.'cfg(target_os = "macos")'.dependencies]

@@ -172,6 +172,13 @@ pub trait Tool: Send + Sync {
         false
     }
 
+    /// Maximum time this tool is allowed to run before the caller kills it.
+    /// Override for long-running tools like sandbox execution.
+    /// Default: 60 seconds.
+    fn execution_timeout(&self) -> Duration {
+        Duration::from_secs(60)
+    }
+
     /// Where this tool should execute.
     ///
     /// `Orchestrator` tools run in the main agent process (safe, no FS access).
@@ -263,5 +270,11 @@ mod tests {
 
         assert_eq!(schema.name, "echo");
         assert!(!schema.description.is_empty());
+    }
+
+    #[test]
+    fn test_execution_timeout_default() {
+        let tool = EchoTool;
+        assert_eq!(tool.execution_timeout(), Duration::from_secs(60));
     }
 }

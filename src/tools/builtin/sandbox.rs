@@ -8,6 +8,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
+use uuid::Uuid;
 
 use crate::context::JobContext;
 use crate::orchestrator::job_manager::ContainerJobManager;
@@ -26,6 +27,37 @@ impl RunInSandboxTool {
     pub fn new(job_manager: Arc<ContainerJobManager>) -> Self {
         Self { job_manager }
     }
+}
+
+/// Resolve the project directory, creating it if it doesn't exist.
+///
+/// If the caller supplied an explicit path, use that.
+/// Otherwise auto-create `~/.ironclaw/projects/{project_id}/` so every sandbox
+/// job has a persistent bind mount that survives container teardown.
+fn resolve_project_dir(
+    explicit: Option<PathBuf>,
+    project_id: Uuid,
+) -> Result<(PathBuf, String), ToolError> {
+    let dir = match explicit {
+        Some(d) => d,
+        None => dirs::home_dir()
+            .unwrap_or_else(|| PathBuf::from("."))
+            .join(".ironclaw")
+            .join("projects")
+            .join(project_id.to_string()),
+    };
+    std::fs::create_dir_all(&dir).map_err(|e| {
+        ToolError::ExecutionFailed(format!(
+            "failed to create project dir {}: {}",
+            dir.display(),
+            e
+        ))
+    })?;
+    let browse_id = dir
+        .file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_else(|| project_id.to_string());
+    Ok((dir, browse_id))
 }
 
 #[async_trait]
@@ -52,7 +84,8 @@ impl Tool for RunInSandboxTool {
                 "project_dir": {
                     "type": "string",
                     "description": "Host directory to bind mount into the container (optional). \
-                                    The directory will be available at /workspace inside the container."
+                                    The directory will be available at /workspace inside the container. \
+                                    If omitted, a directory is auto-created under ~/.ironclaw/projects/."
                 },
                 "wait": {
                     "type": "boolean",
@@ -62,6 +95,11 @@ impl Tool for RunInSandboxTool {
             },
             "required": ["task"]
         })
+    }
+
+    fn execution_timeout(&self) -> Duration {
+        // Sandbox polls for up to 10 min internally; give an extra 60s buffer.
+        Duration::from_secs(660)
     }
 
     async fn execute(
@@ -74,7 +112,7 @@ impl Tool for RunInSandboxTool {
             .and_then(|v| v.as_str())
             .ok_or_else(|| ToolError::InvalidParameters("missing 'task' parameter".into()))?;
 
-        let project_dir = params
+        let explicit_dir = params
             .get("project_dir")
             .and_then(|v| v.as_str())
             .map(PathBuf::from);
@@ -83,27 +121,35 @@ impl Tool for RunInSandboxTool {
 
         let start = std::time::Instant::now();
 
-        // Create the container job
+        // Resolve (and create) project directory before starting the container.
+        // We generate a project_id up front so the directory exists when the
+        // container bind-mounts it.
+        let project_id = Uuid::new_v4();
+        let (project_dir, browse_id) = resolve_project_dir(explicit_dir, project_id)?;
+        let project_dir_str = project_dir.display().to_string();
+
+        // Create the container job with the resolved project dir
         let (job_id, _token) = self
             .job_manager
-            .create_job(task, project_dir.clone())
+            .create_job(task, Some(project_dir))
             .await
             .map_err(|e| {
                 ToolError::ExecutionFailed(format!("failed to create container: {}", e))
             })?;
 
         if !wait {
-            // Fire-and-forget mode
             let result = serde_json::json!({
                 "job_id": job_id.to_string(),
                 "status": "started",
-                "message": "Container started. Use job tools to check status."
+                "message": "Container started. Use job tools to check status.",
+                "project_dir": project_dir_str,
+                "browse_url": format!("/projects/{}", browse_id),
             });
             return Ok(ToolOutput::success(result, start.elapsed()));
         }
 
         // Wait for completion by polling the container state
-        let timeout = Duration::from_secs(600); // 10 minute max
+        let timeout = Duration::from_secs(600);
         let poll_interval = Duration::from_secs(2);
         let deadline = tokio::time::Instant::now() + timeout;
 
@@ -139,7 +185,9 @@ impl Tool for RunInSandboxTool {
                             let result = serde_json::json!({
                                 "job_id": job_id.to_string(),
                                 "status": "completed",
-                                "output": message
+                                "output": message,
+                                "project_dir": project_dir_str,
+                                "browse_url": format!("/projects/{}", browse_id),
                             });
                             return Ok(ToolOutput::success(result, start.elapsed()));
                         } else {
@@ -166,7 +214,9 @@ impl Tool for RunInSandboxTool {
                     let result = serde_json::json!({
                         "job_id": job_id.to_string(),
                         "status": "completed",
-                        "output": "Container job completed"
+                        "output": "Container job completed",
+                        "project_dir": project_dir_str,
+                        "browse_url": format!("/projects/{}", browse_id),
                     });
                     return Ok(ToolOutput::success(result, start.elapsed()));
                 }
@@ -186,13 +236,15 @@ impl Tool for RunInSandboxTool {
 
 #[cfg(test)]
 mod tests {
+    use std::time::Duration;
+
+    use super::*;
+
     #[test]
     fn test_tool_metadata() {
-        // We can't easily test execution without Docker, but we can test the metadata
         let tool_name = "run_in_sandbox";
         assert_eq!(tool_name, "run_in_sandbox");
 
-        // Verify the schema has required fields
         let schema = serde_json::json!({
             "type": "object",
             "properties": {
@@ -206,5 +258,32 @@ mod tests {
         let required = schema.get("required").unwrap().as_array().unwrap();
         assert_eq!(required.len(), 1);
         assert_eq!(required[0].as_str().unwrap(), "task");
+    }
+
+    #[test]
+    fn test_execution_timeout_override() {
+        // Verify the sandbox timeout constant matches: 10 min polling + 60s buffer
+        assert_eq!(Duration::from_secs(660), Duration::from_secs(10 * 60 + 60));
+    }
+
+    #[test]
+    fn test_resolve_project_dir_explicit() {
+        let tmp = tempfile::tempdir().unwrap();
+        let explicit = tmp.path().join("my_project");
+        let (dir, browse_id) = resolve_project_dir(Some(explicit.clone()), Uuid::new_v4()).unwrap();
+        assert_eq!(dir, explicit);
+        assert!(dir.exists());
+        assert_eq!(browse_id, "my_project");
+    }
+
+    #[test]
+    fn test_resolve_project_dir_auto() {
+        let project_id = Uuid::new_v4();
+        let (dir, browse_id) = resolve_project_dir(None, project_id).unwrap();
+        assert!(dir.exists());
+        assert!(dir.ends_with(project_id.to_string()));
+        assert_eq!(browse_id, project_id.to_string());
+        // Cleanup
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

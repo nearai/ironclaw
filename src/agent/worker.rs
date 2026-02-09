@@ -428,9 +428,10 @@ Report when the job is complete or if you encounter issues you cannot resolve."#
             .into());
         }
 
-        // Execute with timeout and timing
+        // Execute with per-tool timeout and timing
+        let tool_timeout = tool.execution_timeout();
         let start = std::time::Instant::now();
-        let result = tokio::time::timeout(Duration::from_secs(60), async {
+        let result = tokio::time::timeout(tool_timeout, async {
             tool.execute(params.clone(), &job_ctx).await
         })
         .await;
@@ -490,7 +491,7 @@ Report when the job is complete or if you encounter issues you cannot resolve."#
         let output = result
             .map_err(|_| crate::error::ToolError::Timeout {
                 name: tool_name.to_string(),
-                timeout: Duration::from_secs(60),
+                timeout: tool_timeout,
             })?
             .map_err(|e| crate::error::ToolError::ExecutionFailed {
                 name: tool_name.to_string(),
