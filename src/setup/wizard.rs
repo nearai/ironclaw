@@ -687,13 +687,17 @@ impl SetupWizard {
                             .await
                             .map_err(SetupError::Channel)?
                     } else if channel_name == "telegram" {
-                        let telegram_result = setup_telegram(ctx).await.map_err(SetupError::Channel)?;
+                        let telegram_result =
+                            setup_telegram(ctx).await.map_err(SetupError::Channel)?;
                         crate::setup::channels::WasmChannelSetupResult {
                             enabled: telegram_result.enabled,
                             channel_name: "telegram".to_string(),
                         }
                     } else {
-                        print_info(&format!("No setup configuration found for {}", channel_name));
+                        print_info(&format!(
+                            "No setup configuration found for {}",
+                            channel_name
+                        ));
                         crate::setup::channels::WasmChannelSetupResult {
                             enabled: true,
                             channel_name: channel_name.clone(),
