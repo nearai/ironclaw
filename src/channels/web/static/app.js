@@ -104,6 +104,12 @@ function connectSSE() {
   eventSource.addEventListener('status', (e) => {
     const data = JSON.parse(e.data);
     setStatus(data.message);
+    // "Done" and "Awaiting approval" are terminal signals from the agent:
+    // the agentic loop finished, so re-enable input as a safety net in case
+    // the response SSE event is empty or lost.
+    if (data.message === 'Done' || data.message === 'Awaiting approval') {
+      enableChatInput();
+    }
   });
 
   eventSource.addEventListener('job_started', (e) => {
@@ -125,6 +131,7 @@ function connectSSE() {
     const data = JSON.parse(e.data);
     removeAuthCard(data.extension_name);
     showToast(data.message, 'success');
+    enableChatInput();
   });
 
   eventSource.addEventListener('error', (e) => {
@@ -520,6 +527,7 @@ function cancelAuth(extensionName) {
     body: { extension_name: extensionName },
   }).catch(() => {});
   removeAuthCard(extensionName);
+  enableChatInput();
 }
 
 function showAuthCardError(extensionName, message) {

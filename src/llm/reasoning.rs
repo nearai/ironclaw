@@ -324,6 +324,22 @@ Respond in JSON format:
                 .content
                 .unwrap_or_else(|| "I'm not sure how to respond to that.".to_string());
 
+            // Some models (e.g. GLM-4.7) emit tool calls as XML tags in content
+            // instead of using the structured tool_calls field. Try to recover
+            // them before giving up and returning plain text.
+            let recovered = recover_tool_calls_from_content(&content, &context.available_tools);
+            if !recovered.is_empty() {
+                let cleaned = clean_response(&content);
+                return Ok(RespondResult::ToolCalls {
+                    tool_calls: recovered,
+                    content: if cleaned.is_empty() {
+                        None
+                    } else {
+                        Some(cleaned)
+                    },
+                });
+            }
+
             Ok(RespondResult::Text(clean_response(&content)))
         } else {
             // No tools, use simple completion
@@ -475,6 +491,77 @@ fn extract_json(text: &str) -> Option<&str> {
 /// Clean up LLM response by stripping model-internal tags and reasoning patterns.
 ///
 /// Some models (GLM-4.7, etc.) emit XML-tagged internal state like
+/// Try to extract tool calls from content text where the model emitted them
+/// as XML tags instead of using the structured tool_calls field.
+///
+/// Handles these formats:
+/// - `<tool_call>tool_name</tool_call>` (bare name)
+/// - `<tool_call>{"name":"x","arguments":{}}</tool_call>` (JSON)
+/// - `<|tool_call|>...<|/tool_call|>` (pipe-delimited variant)
+/// - `<function_call>...</function_call>` (function_call variant)
+///
+/// Only returns calls whose name matches an available tool.
+fn recover_tool_calls_from_content(
+    content: &str,
+    available_tools: &[ToolDefinition],
+) -> Vec<ToolCall> {
+    let tool_names: std::collections::HashSet<&str> =
+        available_tools.iter().map(|t| t.name.as_str()).collect();
+    let mut calls = Vec::new();
+
+    for (open, close) in &[
+        ("<tool_call>", "</tool_call>"),
+        ("<|tool_call|>", "<|/tool_call|>"),
+        ("<function_call>", "</function_call>"),
+        ("<|function_call|>", "<|/function_call|>"),
+    ] {
+        let mut remaining = content;
+        while let Some(start) = remaining.find(open) {
+            let inner_start = start + open.len();
+            let after = &remaining[inner_start..];
+            let Some(end) = after.find(close) else {
+                break;
+            };
+            let inner = after[..end].trim();
+            remaining = &after[end + close.len()..];
+
+            if inner.is_empty() {
+                continue;
+            }
+
+            // Try JSON first: {"name":"x","arguments":{}}
+            if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(inner) {
+                if let Some(name) = parsed.get("name").and_then(|v| v.as_str()) {
+                    if tool_names.contains(name) {
+                        let arguments = parsed
+                            .get("arguments")
+                            .cloned()
+                            .unwrap_or(serde_json::Value::Object(Default::default()));
+                        calls.push(ToolCall {
+                            id: format!("recovered_{}", calls.len()),
+                            name: name.to_string(),
+                            arguments,
+                        });
+                        continue;
+                    }
+                }
+            }
+
+            // Bare tool name (e.g. "<tool_call>tool_list</tool_call>")
+            let name = inner.trim();
+            if tool_names.contains(name) {
+                calls.push(ToolCall {
+                    id: format!("recovered_{}", calls.len()),
+                    name: name.to_string(),
+                    arguments: serde_json::Value::Object(Default::default()),
+                });
+            }
+        }
+    }
+
+    calls
+}
+
 /// `<tool_call>tool_list</tool_call>` or `<|tool_call|>` in the content field
 /// instead of using the standard OpenAI tool_calls array. We strip all of
 /// these before the response reaches channels/users.
@@ -796,5 +883,93 @@ Here is my response to your question."#;
         let input = "<thinking>Internal thought</thinking>Some text.\n\nHere's the answer.";
         let output = clean_response(input);
         assert_eq!(output, "Here's the answer.");
+    }
+
+    // -- recover_tool_calls_from_content tests --
+
+    fn make_tools(names: &[&str]) -> Vec<ToolDefinition> {
+        names
+            .iter()
+            .map(|n| ToolDefinition {
+                name: n.to_string(),
+                description: String::new(),
+                parameters: serde_json::json!({}),
+            })
+            .collect()
+    }
+
+    #[test]
+    fn test_recover_bare_tool_name() {
+        let tools = make_tools(&["tool_list", "tool_auth"]);
+        let content = "<tool_call>tool_list</tool_call>";
+        let calls = recover_tool_calls_from_content(content, &tools);
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].name, "tool_list");
+        assert_eq!(calls[0].arguments, serde_json::json!({}));
+    }
+
+    #[test]
+    fn test_recover_json_tool_call() {
+        let tools = make_tools(&["memory_search"]);
+        let content =
+            r#"<tool_call>{"name": "memory_search", "arguments": {"query": "test"}}</tool_call>"#;
+        let calls = recover_tool_calls_from_content(content, &tools);
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].name, "memory_search");
+        assert_eq!(calls[0].arguments, serde_json::json!({"query": "test"}));
+    }
+
+    #[test]
+    fn test_recover_pipe_delimited() {
+        let tools = make_tools(&["tool_list"]);
+        let content = "<|tool_call|>tool_list<|/tool_call|>";
+        let calls = recover_tool_calls_from_content(content, &tools);
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].name, "tool_list");
+    }
+
+    #[test]
+    fn test_recover_unknown_tool_ignored() {
+        let tools = make_tools(&["tool_list"]);
+        let content = "<tool_call>nonexistent_tool</tool_call>";
+        let calls = recover_tool_calls_from_content(content, &tools);
+        assert!(calls.is_empty());
+    }
+
+    #[test]
+    fn test_recover_no_tags() {
+        let tools = make_tools(&["tool_list"]);
+        let content = "Just a normal response.";
+        let calls = recover_tool_calls_from_content(content, &tools);
+        assert!(calls.is_empty());
+    }
+
+    #[test]
+    fn test_recover_multiple_tool_calls() {
+        let tools = make_tools(&["tool_list", "tool_auth"]);
+        let content = "<tool_call>tool_list</tool_call>\n<tool_call>tool_auth</tool_call>";
+        let calls = recover_tool_calls_from_content(content, &tools);
+        assert_eq!(calls.len(), 2);
+        assert_eq!(calls[0].name, "tool_list");
+        assert_eq!(calls[1].name, "tool_auth");
+    }
+
+    #[test]
+    fn test_recover_function_call_variant() {
+        let tools = make_tools(&["shell"]);
+        let content =
+            r#"<function_call>{"name": "shell", "arguments": {"cmd": "ls"}}</function_call>"#;
+        let calls = recover_tool_calls_from_content(content, &tools);
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].name, "shell");
+    }
+
+    #[test]
+    fn test_recover_with_surrounding_text() {
+        let tools = make_tools(&["tool_list"]);
+        let content = "Let me check.\n\n<tool_call>tool_list</tool_call>\n\nDone.";
+        let calls = recover_tool_calls_from_content(content, &tools);
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].name, "tool_list");
     }
 }

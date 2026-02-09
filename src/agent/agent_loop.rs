@@ -2248,7 +2248,7 @@ fn detect_auth_awaiting(
     tool_name: &str,
     result: &Result<String, Error>,
 ) -> Option<(String, String)> {
-    if tool_name != "tool_auth" {
+    if tool_name != "tool_auth" && tool_name != "tool_activate" {
         return None;
     }
     let output = result.as_ref().ok()?;
@@ -2331,5 +2331,35 @@ mod tests {
 
         let (_, instructions) = detect_auth_awaiting("tool_auth", &result).unwrap();
         assert_eq!(instructions, "Please provide your API token/key.");
+    }
+
+    #[test]
+    fn test_detect_auth_awaiting_tool_activate() {
+        let result: Result<String, Error> = Ok(serde_json::json!({
+            "name": "slack",
+            "kind": "McpServer",
+            "awaiting_token": true,
+            "status": "awaiting_token",
+            "instructions": "Provide your Slack Bot token."
+        })
+        .to_string());
+
+        let detected = detect_auth_awaiting("tool_activate", &result);
+        assert!(detected.is_some());
+        let (name, instructions) = detected.unwrap();
+        assert_eq!(name, "slack");
+        assert!(instructions.contains("Slack Bot"));
+    }
+
+    #[test]
+    fn test_detect_auth_awaiting_tool_activate_not_awaiting() {
+        let result: Result<String, Error> = Ok(serde_json::json!({
+            "name": "slack",
+            "tools_loaded": ["slack_post_message"],
+            "message": "Activated"
+        })
+        .to_string());
+
+        assert!(detect_auth_awaiting("tool_activate", &result).is_none());
     }
 }

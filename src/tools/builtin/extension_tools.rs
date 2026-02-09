@@ -311,16 +311,53 @@ impl Tool for ToolActivateTool {
             .and_then(|v| v.as_str())
             .ok_or_else(|| ToolError::InvalidParameters("name is required".to_string()))?;
 
-        let result = self
-            .manager
-            .activate(name)
-            .await
-            .map_err(|e| ToolError::ExecutionFailed(e.to_string()))?;
+        match self.manager.activate(name).await {
+            Ok(result) => {
+                let output = serde_json::to_value(&result)
+                    .unwrap_or_else(|_| serde_json::json!({"error": "serialization failed"}));
+                Ok(ToolOutput::success(output, start.elapsed()))
+            }
+            Err(activate_err) => {
+                let err_str = activate_err.to_string();
+                let needs_auth = err_str.contains("authentication")
+                    || err_str.contains("401")
+                    || err_str.contains("Unauthorized")
+                    || err_str.contains("not authenticated");
 
-        let output = serde_json::to_value(&result)
-            .unwrap_or_else(|_| serde_json::json!({"error": "serialization failed"}));
+                if !needs_auth {
+                    return Err(ToolError::ExecutionFailed(err_str));
+                }
 
-        Ok(ToolOutput::success(output, start.elapsed()))
+                // Activation failed due to missing auth; initiate auth flow
+                // so the agent loop can show the auth card.
+                match self.manager.auth(name, None).await {
+                    Ok(auth_result) if auth_result.status == "authenticated" => {
+                        // Auth succeeded (e.g. env var was set); retry activation.
+                        let result = self
+                            .manager
+                            .activate(name)
+                            .await
+                            .map_err(|e| ToolError::ExecutionFailed(e.to_string()))?;
+                        let output = serde_json::to_value(&result).unwrap_or_else(
+                            |_| serde_json::json!({"error": "serialization failed"}),
+                        );
+                        Ok(ToolOutput::success(output, start.elapsed()))
+                    }
+                    Ok(auth_result) => {
+                        // Auth needs user input (awaiting_token). Return the auth
+                        // result so detect_auth_awaiting picks it up.
+                        let output = serde_json::to_value(&auth_result).unwrap_or_else(
+                            |_| serde_json::json!({"error": "serialization failed"}),
+                        );
+                        Ok(ToolOutput::success(output, start.elapsed()))
+                    }
+                    Err(auth_err) => Err(ToolError::ExecutionFailed(format!(
+                        "Activation failed ({}), and authentication also failed: {}",
+                        err_str, auth_err
+                    ))),
+                }
+            }
+        }
     }
 }
 
