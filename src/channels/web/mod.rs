@@ -34,6 +34,8 @@ use crate::config::GatewayConfig;
 use crate::context::ContextManager;
 use crate::error::ChannelError;
 use crate::extensions::ExtensionManager;
+use crate::history::Store;
+use crate::orchestrator::job_manager::ContainerJobManager;
 use crate::tools::ToolRegistry;
 use crate::workspace::Workspace;
 
@@ -75,6 +77,8 @@ impl GatewayChannel {
             log_broadcaster: None,
             extension_manager: None,
             tool_registry: None,
+            store: None,
+            job_manager: None,
             user_id: config.user_id.clone(),
             shutdown_tx: tokio::sync::RwLock::new(None),
             ws_tracker: Some(Arc::new(ws::WsConnectionTracker::new())),
@@ -98,6 +102,8 @@ impl GatewayChannel {
             log_broadcaster: self.state.log_broadcaster.clone(),
             extension_manager: self.state.extension_manager.clone(),
             tool_registry: self.state.tool_registry.clone(),
+            store: self.state.store.clone(),
+            job_manager: self.state.job_manager.clone(),
             user_id: self.state.user_id.clone(),
             shutdown_tx: tokio::sync::RwLock::new(None),
             ws_tracker: self.state.ws_tracker.clone(),
@@ -139,6 +145,18 @@ impl GatewayChannel {
     /// Inject the tool registry for the extensions API.
     pub fn with_tool_registry(mut self, tr: Arc<ToolRegistry>) -> Self {
         self.rebuild_state(|s| s.tool_registry = Some(tr));
+        self
+    }
+
+    /// Inject the database store for sandbox job persistence.
+    pub fn with_store(mut self, store: Arc<Store>) -> Self {
+        self.rebuild_state(|s| s.store = Some(store));
+        self
+    }
+
+    /// Inject the container job manager for sandbox operations.
+    pub fn with_job_manager(mut self, jm: Arc<ContainerJobManager>) -> Self {
+        self.rebuild_state(|s| s.job_manager = Some(jm));
         self
     }
 
@@ -210,6 +228,15 @@ impl Channel for GatewayChannel {
             }
             StatusUpdate::StreamChunk(content) => SseEvent::StreamChunk { content },
             StatusUpdate::Status(msg) => SseEvent::Status { message: msg },
+            StatusUpdate::JobStarted {
+                job_id,
+                title,
+                browse_url,
+            } => SseEvent::JobStarted {
+                job_id,
+                title,
+                browse_url,
+            },
             StatusUpdate::ApprovalNeeded {
                 request_id,
                 tool_name,

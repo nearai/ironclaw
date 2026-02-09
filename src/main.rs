@@ -265,6 +265,12 @@ async fn main() -> anyhow::Result<()> {
         let store = Store::new(&config.database).await?;
         store.run_migrations().await?;
         tracing::info!("Database connected and migrations applied");
+
+        // Mark any jobs left in "running" or "creating" state as "interrupted".
+        if let Err(e) = store.cleanup_stale_sandbox_jobs().await {
+            tracing::warn!("Failed to cleanup stale sandbox jobs: {}", e);
+        }
+
         Some(Arc::new(store))
     };
 
@@ -536,7 +542,7 @@ async fn main() -> anyhow::Result<()> {
         );
     }
 
-    if config.sandbox.enabled {
+    let container_job_manager: Option<Arc<ContainerJobManager>> = if config.sandbox.enabled {
         let token_store = TokenStore::new();
         let job_config = ContainerJobConfig {
             image: config.sandbox.image.clone(),
@@ -544,16 +550,15 @@ async fn main() -> anyhow::Result<()> {
             cpu_shares: config.sandbox.cpu_shares,
             orchestrator_port: 50051,
         };
-        let container_job_manager =
-            Arc::new(ContainerJobManager::new(job_config, token_store.clone()));
+        let jm = Arc::new(ContainerJobManager::new(job_config, token_store.clone()));
 
-        // Register the run_in_sandbox tool
-        tools.register_sandbox_tool(Arc::clone(&container_job_manager));
+        // Register the run_in_sandbox tool (with DB persistence if available)
+        tools.register_sandbox_tool(Arc::clone(&jm), store.clone());
 
         // Start the orchestrator internal API in the background
         let orchestrator_state = OrchestratorState {
             llm: llm.clone(),
-            job_manager: Arc::clone(&container_job_manager),
+            job_manager: Arc::clone(&jm),
             token_store,
         };
 
@@ -564,7 +569,10 @@ async fn main() -> anyhow::Result<()> {
         });
 
         tracing::info!("Orchestrator API started on :50051, sandbox delegation enabled");
-    }
+        Some(jm)
+    } else {
+        None
+    };
 
     tracing::info!(
         "Tool registry initialized with {} total tools",
@@ -812,11 +820,23 @@ async fn main() -> anyhow::Result<()> {
         if let Some(ref ext_mgr) = extension_manager {
             gw = gw.with_extension_manager(Arc::clone(ext_mgr));
         }
+        if let Some(ref s) = store {
+            gw = gw.with_store(Arc::clone(s));
+        }
+        if let Some(ref jm) = container_job_manager {
+            gw = gw.with_job_manager(Arc::clone(jm));
+        }
 
         tracing::info!(
             "Web gateway enabled on {}:{}",
             gw_config.host,
             gw_config.port
+        );
+        tracing::info!(
+            "Web UI: http://{}:{}/?token={}",
+            gw_config.host,
+            gw_config.port,
+            gw.auth_token()
         );
 
         channels.add(Box::new(gw));

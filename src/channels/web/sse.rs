@@ -79,6 +79,7 @@ impl SseManager {
                     SseEvent::Status { .. } => "status",
                     SseEvent::ApprovalNeeded { .. } => "approval_needed",
                     SseEvent::Error { .. } => "error",
+                    SseEvent::JobStarted { .. } => "job_started",
                     SseEvent::Heartbeat => "heartbeat",
                 };
                 Ok(Event::default().event(event_type).data(data))

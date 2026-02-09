@@ -112,6 +112,12 @@ pub enum StatusUpdate {
     StreamChunk(String),
     /// General status message.
     Status(String),
+    /// A sandbox job has started (shown as a clickable card in the UI).
+    JobStarted {
+        job_id: String,
+        title: String,
+        browse_url: String,
+    },
     /// Tool requires user approval before execution.
     ApprovalNeeded {
         request_id: String,

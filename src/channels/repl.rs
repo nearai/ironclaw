@@ -340,6 +340,15 @@ impl Channel for ReplChannel {
                 print!("{chunk}");
                 let _ = io::stdout().flush();
             }
+            StatusUpdate::JobStarted {
+                job_id,
+                title,
+                browse_url,
+            } => {
+                eprintln!(
+                    "  \x1b[36m[job]\x1b[0m {title} \x1b[90m({job_id})\x1b[0m \x1b[4m{browse_url}\x1b[0m"
+                );
+            }
             StatusUpdate::Status(msg) => {
                 if debug || msg.contains("approval") || msg.contains("Approval") {
                     eprintln!("\x1b[90m[status] {msg}\x1b[0m");

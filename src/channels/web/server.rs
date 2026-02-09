@@ -30,6 +30,8 @@ use crate::channels::web::sse::SseManager;
 use crate::channels::web::types::*;
 use crate::context::ContextManager;
 use crate::extensions::ExtensionManager;
+use crate::history::Store;
+use crate::orchestrator::job_manager::ContainerJobManager;
 use crate::tools::ToolRegistry;
 use crate::workspace::Workspace;
 
@@ -51,6 +53,10 @@ pub struct GatewayState {
     pub extension_manager: Option<Arc<ExtensionManager>>,
     /// Tool registry for listing registered tools.
     pub tool_registry: Option<Arc<ToolRegistry>>,
+    /// Database store for sandbox job persistence.
+    pub store: Option<Arc<Store>>,
+    /// Container job manager for sandbox operations.
+    pub job_manager: Option<Arc<ContainerJobManager>>,
     /// User ID for this gateway.
     pub user_id: String,
     /// Shutdown signal sender.
@@ -106,6 +112,9 @@ pub async fn start_server(
         .route("/api/jobs/summary", get(jobs_summary_handler))
         .route("/api/jobs/{id}", get(jobs_detail_handler))
         .route("/api/jobs/{id}/cancel", post(jobs_cancel_handler))
+        .route("/api/jobs/{id}/restart", post(jobs_restart_handler))
+        .route("/api/jobs/{id}/files/list", get(job_files_list_handler))
+        .route("/api/jobs/{id}/files/read", get(job_files_read_handler))
         // Logs
         .route("/api/logs/events", get(logs_events_handler))
         // Extensions
@@ -566,30 +575,64 @@ async fn memory_search_handler(
 }
 
 // --- Jobs handlers ---
+//
+// Jobs are read from the database (both "direct" and "sandbox" sources).
+// This replaces the old ContextManager-only approach.
 
 async fn jobs_list_handler(
     State(state): State<Arc<GatewayState>>,
 ) -> Result<Json<JobListResponse>, (StatusCode, String)> {
-    let context_manager = state.context_manager.as_ref().ok_or((
+    let store = state.store.as_ref().ok_or((
         StatusCode::SERVICE_UNAVAILABLE,
-        "Context manager not available".to_string(),
+        "Database not available".to_string(),
     ))?;
 
-    let job_ids = context_manager.all_jobs_for(&state.user_id).await;
-    let mut jobs = Vec::new();
+    // Fetch sandbox jobs from the DB.
+    let sandbox_jobs = store
+        .list_sandbox_jobs()
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
-    for job_id in job_ids {
-        if let Ok(ctx) = context_manager.get_context(job_id).await {
-            jobs.push(JobInfo {
-                id: ctx.job_id,
-                title: ctx.title.clone(),
-                state: ctx.state.to_string(),
-                user_id: ctx.user_id.clone(),
-                created_at: ctx.created_at.to_rfc3339(),
-                started_at: ctx.started_at.map(|dt| dt.to_rfc3339()),
-            });
+    let mut jobs: Vec<JobInfo> = sandbox_jobs
+        .iter()
+        .map(|j| {
+            let ui_state = match j.status.as_str() {
+                "creating" => "pending",
+                "running" => "in_progress",
+                s => s,
+            };
+            JobInfo {
+                id: j.id,
+                title: j.task.clone(),
+                state: ui_state.to_string(),
+                user_id: j.user_id.clone(),
+                source: "sandbox".to_string(),
+                created_at: j.created_at.to_rfc3339(),
+                started_at: j.started_at.map(|dt| dt.to_rfc3339()),
+            }
+        })
+        .collect();
+
+    // Also include "direct" jobs from ContextManager if available.
+    if let Some(ref cm) = state.context_manager {
+        let job_ids = cm.all_jobs_for(&state.user_id).await;
+        for job_id in job_ids {
+            if let Ok(ctx) = cm.get_context(job_id).await {
+                jobs.push(JobInfo {
+                    id: ctx.job_id,
+                    title: ctx.title.clone(),
+                    state: ctx.state.to_string(),
+                    user_id: ctx.user_id.clone(),
+                    source: "direct".to_string(),
+                    created_at: ctx.created_at.to_rfc3339(),
+                    started_at: ctx.started_at.map(|dt| dt.to_rfc3339()),
+                });
+            }
         }
     }
+
+    // Most recent first.
+    jobs.sort_by(|a, b| b.created_at.cmp(&a.created_at));
 
     Ok(Json(JobListResponse { jobs }))
 }
@@ -597,20 +640,42 @@ async fn jobs_list_handler(
 async fn jobs_summary_handler(
     State(state): State<Arc<GatewayState>>,
 ) -> Result<Json<JobSummaryResponse>, (StatusCode, String)> {
-    let context_manager = state.context_manager.as_ref().ok_or((
+    let store = state.store.as_ref().ok_or((
         StatusCode::SERVICE_UNAVAILABLE,
-        "Context manager not available".to_string(),
+        "Database not available".to_string(),
     ))?;
 
-    let summary = context_manager.summary_for(&state.user_id).await;
+    let s = store
+        .sandbox_job_summary()
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    // Map sandbox statuses to the UI model.
+    let mut total = s.total;
+    let mut pending = s.creating;
+    let mut in_progress = s.running;
+    let mut completed = s.completed;
+    let mut failed = s.failed + s.interrupted;
+    let mut stuck = 0usize;
+
+    // Merge in-memory direct jobs.
+    if let Some(ref cm) = state.context_manager {
+        let cm_summary = cm.summary_for(&state.user_id).await;
+        total += cm_summary.total;
+        pending += cm_summary.pending;
+        in_progress += cm_summary.in_progress;
+        completed += cm_summary.completed;
+        failed += cm_summary.failed;
+        stuck += cm_summary.stuck;
+    }
 
     Ok(Json(JobSummaryResponse {
-        total: summary.total,
-        pending: summary.pending,
-        in_progress: summary.in_progress,
-        completed: summary.completed,
-        failed: summary.failed,
-        stuck: summary.stuck,
+        total,
+        pending,
+        in_progress,
+        completed,
+        failed,
+        stuck,
     }))
 }
 
@@ -618,13 +683,76 @@ async fn jobs_detail_handler(
     State(state): State<Arc<GatewayState>>,
     Path(id): Path<String>,
 ) -> Result<Json<JobDetailResponse>, (StatusCode, String)> {
-    let context_manager = state.context_manager.as_ref().ok_or((
-        StatusCode::SERVICE_UNAVAILABLE,
-        "Context manager not available".to_string(),
-    ))?;
-
     let job_id = Uuid::parse_str(&id)
         .map_err(|_| (StatusCode::BAD_REQUEST, "Invalid job ID".to_string()))?;
+
+    // Try sandbox job from DB first.
+    if let Some(ref store) = state.store {
+        if let Ok(Some(job)) = store.get_sandbox_job(job_id).await {
+            let browse_id = std::path::Path::new(&job.project_dir)
+                .file_name()
+                .map(|n| n.to_string_lossy().to_string())
+                .unwrap_or_else(|| job.id.to_string());
+
+            let ui_state = match job.status.as_str() {
+                "creating" => "pending",
+                "running" => "in_progress",
+                s => s,
+            };
+
+            let elapsed_secs = job.started_at.map(|start| {
+                let end = job.completed_at.unwrap_or_else(chrono::Utc::now);
+                (end - start).num_seconds().max(0) as u64
+            });
+
+            // Synthesize transitions from timestamps.
+            let mut transitions = Vec::new();
+            if let Some(started) = job.started_at {
+                transitions.push(TransitionInfo {
+                    from: "creating".to_string(),
+                    to: "running".to_string(),
+                    timestamp: started.to_rfc3339(),
+                    reason: None,
+                });
+            }
+            if let Some(completed) = job.completed_at {
+                transitions.push(TransitionInfo {
+                    from: "running".to_string(),
+                    to: job.status.clone(),
+                    timestamp: completed.to_rfc3339(),
+                    reason: job.failure_reason.clone(),
+                });
+            }
+
+            return Ok(Json(JobDetailResponse {
+                id: job.id,
+                title: job.task.clone(),
+                description: String::new(),
+                state: ui_state.to_string(),
+                category: None,
+                user_id: job.user_id.clone(),
+                source: "sandbox".to_string(),
+                created_at: job.created_at.to_rfc3339(),
+                started_at: job.started_at.map(|dt| dt.to_rfc3339()),
+                completed_at: job.completed_at.map(|dt| dt.to_rfc3339()),
+                elapsed_secs,
+                actual_cost: "0".to_string(),
+                estimated_cost: None,
+                repair_attempts: 0,
+                project_dir: Some(job.project_dir.clone()),
+                browse_url: Some(format!("/projects/{}", browse_id)),
+                transitions,
+                actions: Vec::new(),
+                conversation: Vec::new(),
+            }));
+        }
+    }
+
+    // Fall back to ContextManager for "direct" jobs.
+    let context_manager = state
+        .context_manager
+        .as_ref()
+        .ok_or((StatusCode::NOT_FOUND, "Job not found".to_string()))?;
 
     let ctx = context_manager
         .get_context(job_id)
@@ -708,6 +836,7 @@ async fn jobs_detail_handler(
         state: ctx.state.to_string(),
         category: ctx.category.clone(),
         user_id: ctx.user_id.clone(),
+        source: "direct".to_string(),
         created_at: ctx.created_at.to_rfc3339(),
         started_at: ctx.started_at.map(|dt| dt.to_rfc3339()),
         completed_at: ctx.completed_at.map(|dt| dt.to_rfc3339()),
@@ -715,6 +844,8 @@ async fn jobs_detail_handler(
         actual_cost: ctx.actual_cost.to_string(),
         estimated_cost: ctx.estimated_cost.map(|c| c.to_string()),
         repair_attempts: ctx.repair_attempts,
+        project_dir: None,
+        browse_url: None,
         transitions,
         actions,
         conversation,
@@ -725,13 +856,41 @@ async fn jobs_cancel_handler(
     State(state): State<Arc<GatewayState>>,
     Path(id): Path<String>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    let context_manager = state.context_manager.as_ref().ok_or((
-        StatusCode::SERVICE_UNAVAILABLE,
-        "Context manager not available".to_string(),
-    ))?;
-
     let job_id = Uuid::parse_str(&id)
         .map_err(|_| (StatusCode::BAD_REQUEST, "Invalid job ID".to_string()))?;
+
+    // Try sandbox job cancellation.
+    if let Some(ref store) = state.store {
+        if let Ok(Some(job)) = store.get_sandbox_job(job_id).await {
+            if job.status == "running" || job.status == "creating" {
+                // Stop the container if we have a job manager.
+                if let Some(ref jm) = state.job_manager {
+                    let _ = jm.stop_job(job_id).await;
+                }
+                store
+                    .update_sandbox_job_status(
+                        job_id,
+                        "failed",
+                        Some(false),
+                        Some("Cancelled by user"),
+                        None,
+                        Some(chrono::Utc::now()),
+                    )
+                    .await
+                    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+            }
+            return Ok(Json(serde_json::json!({
+                "status": "cancelled",
+                "job_id": job_id,
+            })));
+        }
+    }
+
+    // Fall back to ContextManager.
+    let context_manager = state
+        .context_manager
+        .as_ref()
+        .ok_or((StatusCode::NOT_FOUND, "Job not found".to_string()))?;
 
     let ctx = context_manager
         .get_context(job_id)
@@ -754,6 +913,196 @@ async fn jobs_cancel_handler(
         "status": "cancelled",
         "job_id": job_id,
     })))
+}
+
+async fn jobs_restart_handler(
+    State(state): State<Arc<GatewayState>>,
+    Path(id): Path<String>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let store = state.store.as_ref().ok_or((
+        StatusCode::SERVICE_UNAVAILABLE,
+        "Database not available".to_string(),
+    ))?;
+    let jm = state.job_manager.as_ref().ok_or((
+        StatusCode::SERVICE_UNAVAILABLE,
+        "Sandbox not enabled".to_string(),
+    ))?;
+
+    let old_job_id = Uuid::parse_str(&id)
+        .map_err(|_| (StatusCode::BAD_REQUEST, "Invalid job ID".to_string()))?;
+
+    let old_job = store
+        .get_sandbox_job(old_job_id)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+        .ok_or((StatusCode::NOT_FOUND, "Job not found".to_string()))?;
+
+    if old_job.status != "interrupted" && old_job.status != "failed" {
+        return Err((
+            StatusCode::CONFLICT,
+            format!("Cannot restart job in state '{}'", old_job.status),
+        ));
+    }
+
+    // Create a new job with the same task and project_dir.
+    let new_job_id = Uuid::new_v4();
+    let now = chrono::Utc::now();
+
+    let record = crate::history::SandboxJobRecord {
+        id: new_job_id,
+        task: old_job.task.clone(),
+        status: "creating".to_string(),
+        user_id: old_job.user_id.clone(),
+        project_dir: old_job.project_dir.clone(),
+        success: None,
+        failure_reason: None,
+        created_at: now,
+        started_at: None,
+        completed_at: None,
+    };
+    store
+        .save_sandbox_job(&record)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    let project_dir = std::path::PathBuf::from(&old_job.project_dir);
+    let _token = jm
+        .create_job(new_job_id, &old_job.task, Some(project_dir))
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Failed to create container: {}", e),
+            )
+        })?;
+
+    store
+        .update_sandbox_job_status(new_job_id, "running", None, None, Some(now), None)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    Ok(Json(serde_json::json!({
+        "status": "restarted",
+        "old_job_id": old_job_id,
+        "new_job_id": new_job_id,
+    })))
+}
+
+// --- Project file handlers for sandbox jobs ---
+
+#[derive(Deserialize)]
+struct FilePathQuery {
+    path: Option<String>,
+}
+
+async fn job_files_list_handler(
+    State(state): State<Arc<GatewayState>>,
+    Path(id): Path<String>,
+    Query(query): Query<FilePathQuery>,
+) -> Result<Json<ProjectFilesResponse>, (StatusCode, String)> {
+    let store = state.store.as_ref().ok_or((
+        StatusCode::SERVICE_UNAVAILABLE,
+        "Database not available".to_string(),
+    ))?;
+
+    let job_id = Uuid::parse_str(&id)
+        .map_err(|_| (StatusCode::BAD_REQUEST, "Invalid job ID".to_string()))?;
+
+    let job = store
+        .get_sandbox_job(job_id)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+        .ok_or((StatusCode::NOT_FOUND, "Job not found".to_string()))?;
+
+    let base = std::path::PathBuf::from(&job.project_dir);
+    let rel_path = query.path.as_deref().unwrap_or("");
+    let target = base.join(rel_path);
+
+    // Path traversal guard.
+    let canonical = target
+        .canonicalize()
+        .map_err(|_| (StatusCode::NOT_FOUND, "Path not found".to_string()))?;
+    let base_canonical = base
+        .canonicalize()
+        .map_err(|_| (StatusCode::NOT_FOUND, "Project dir not found".to_string()))?;
+    if !canonical.starts_with(&base_canonical) {
+        return Err((StatusCode::FORBIDDEN, "Forbidden".to_string()));
+    }
+
+    let mut entries = Vec::new();
+    let mut read_dir = tokio::fs::read_dir(&canonical)
+        .await
+        .map_err(|_| (StatusCode::NOT_FOUND, "Cannot read directory".to_string()))?;
+
+    while let Ok(Some(entry)) = read_dir.next_entry().await {
+        let name = entry.file_name().to_string_lossy().to_string();
+        let is_dir = entry
+            .file_type()
+            .await
+            .map(|ft| ft.is_dir())
+            .unwrap_or(false);
+        let rel = if rel_path.is_empty() {
+            name.clone()
+        } else {
+            format!("{}/{}", rel_path, name)
+        };
+        entries.push(ProjectFileEntry {
+            name,
+            path: rel,
+            is_dir,
+        });
+    }
+
+    entries.sort_by(|a, b| b.is_dir.cmp(&a.is_dir).then_with(|| a.name.cmp(&b.name)));
+
+    Ok(Json(ProjectFilesResponse { entries }))
+}
+
+async fn job_files_read_handler(
+    State(state): State<Arc<GatewayState>>,
+    Path(id): Path<String>,
+    Query(query): Query<FilePathQuery>,
+) -> Result<Json<ProjectFileReadResponse>, (StatusCode, String)> {
+    let store = state.store.as_ref().ok_or((
+        StatusCode::SERVICE_UNAVAILABLE,
+        "Database not available".to_string(),
+    ))?;
+
+    let job_id = Uuid::parse_str(&id)
+        .map_err(|_| (StatusCode::BAD_REQUEST, "Invalid job ID".to_string()))?;
+
+    let job = store
+        .get_sandbox_job(job_id)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+        .ok_or((StatusCode::NOT_FOUND, "Job not found".to_string()))?;
+
+    let path = query.path.as_deref().ok_or((
+        StatusCode::BAD_REQUEST,
+        "path parameter required".to_string(),
+    ))?;
+
+    let base = std::path::PathBuf::from(&job.project_dir);
+    let file_path = base.join(path);
+
+    let canonical = file_path
+        .canonicalize()
+        .map_err(|_| (StatusCode::NOT_FOUND, "File not found".to_string()))?;
+    let base_canonical = base
+        .canonicalize()
+        .map_err(|_| (StatusCode::NOT_FOUND, "Project dir not found".to_string()))?;
+    if !canonical.starts_with(&base_canonical) {
+        return Err((StatusCode::FORBIDDEN, "Forbidden".to_string()));
+    }
+
+    let content = tokio::fs::read_to_string(&canonical)
+        .await
+        .map_err(|_| (StatusCode::NOT_FOUND, "Cannot read file".to_string()))?;
+
+    Ok(Json(ProjectFileReadResponse {
+        path: path.to_string(),
+        content,
+    }))
 }
 
 // --- Logs handlers ---

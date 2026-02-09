@@ -7,6 +7,7 @@ use tokio::sync::RwLock;
 
 use crate::context::ContextManager;
 use crate::extensions::ExtensionManager;
+use crate::history::Store;
 use crate::llm::{LlmProvider, ToolDefinition};
 use crate::orchestrator::job_manager::ContainerJobManager;
 use crate::safety::SafetyLayer;
@@ -212,8 +213,12 @@ impl ToolRegistry {
     ///
     /// This tool allows the orchestrator LLM to delegate filesystem/shell work
     /// to a sandboxed Docker container with its own sub-agent.
-    pub fn register_sandbox_tool(&self, job_manager: Arc<ContainerJobManager>) {
-        self.register_sync(Arc::new(RunInSandboxTool::new(job_manager)));
+    pub fn register_sandbox_tool(
+        &self,
+        job_manager: Arc<ContainerJobManager>,
+        store: Option<Arc<Store>>,
+    ) {
+        self.register_sync(Arc::new(RunInSandboxTool::new(job_manager, store)));
         tracing::info!("Registered run_in_sandbox tool");
     }
 

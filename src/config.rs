@@ -385,7 +385,7 @@ impl ChannelsConfig {
 
         let gateway = if optional_env("GATEWAY_ENABLED")?
             .map(|s| s.to_lowercase() == "true" || s == "1")
-            .unwrap_or(false)
+            .unwrap_or(true)
         {
             Some(GatewayConfig {
                 host: optional_env("GATEWAY_HOST")?.unwrap_or_else(|| "127.0.0.1".to_string()),

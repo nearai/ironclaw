@@ -8,9 +8,11 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
+use chrono::Utc;
 use uuid::Uuid;
 
 use crate::context::JobContext;
+use crate::history::{SandboxJobRecord, Store};
 use crate::orchestrator::job_manager::ContainerJobManager;
 use crate::tools::tool::{Tool, ToolError, ToolOutput};
 
@@ -21,11 +23,54 @@ use crate::tools::tool::{Tool, ToolError, ToolOutput};
 /// worker handles the actual execution in isolation.
 pub struct RunInSandboxTool {
     job_manager: Arc<ContainerJobManager>,
+    store: Option<Arc<Store>>,
 }
 
 impl RunInSandboxTool {
-    pub fn new(job_manager: Arc<ContainerJobManager>) -> Self {
-        Self { job_manager }
+    pub fn new(job_manager: Arc<ContainerJobManager>, store: Option<Arc<Store>>) -> Self {
+        Self { job_manager, store }
+    }
+
+    /// Persist a sandbox job record. Spawned as a fire-and-forget task so tool
+    /// execution is not blocked by DB latency.
+    fn persist_job(&self, record: SandboxJobRecord) {
+        if let Some(store) = self.store.clone() {
+            tokio::spawn(async move {
+                if let Err(e) = store.save_sandbox_job(&record).await {
+                    tracing::warn!(job_id = %record.id, "Failed to persist sandbox job: {}", e);
+                }
+            });
+        }
+    }
+
+    /// Update sandbox job status in DB (fire-and-forget).
+    fn update_status(
+        &self,
+        job_id: Uuid,
+        status: &str,
+        success: Option<bool>,
+        message: Option<String>,
+        started_at: Option<chrono::DateTime<Utc>>,
+        completed_at: Option<chrono::DateTime<Utc>>,
+    ) {
+        if let Some(store) = self.store.clone() {
+            let status = status.to_string();
+            tokio::spawn(async move {
+                if let Err(e) = store
+                    .update_sandbox_job_status(
+                        job_id,
+                        &status,
+                        success,
+                        message.as_deref(),
+                        started_at,
+                        completed_at,
+                    )
+                    .await
+                {
+                    tracing::warn!(job_id = %job_id, "Failed to update sandbox job status: {}", e);
+                }
+            });
+        }
     }
 }
 
@@ -121,21 +166,45 @@ impl Tool for RunInSandboxTool {
 
         let start = std::time::Instant::now();
 
-        // Resolve (and create) project directory before starting the container.
-        // We generate a project_id up front so the directory exists when the
-        // container bind-mounts it.
-        let project_id = Uuid::new_v4();
-        let (project_dir, browse_id) = resolve_project_dir(explicit_dir, project_id)?;
+        // Use a single UUID for everything: job_id, project directory, DB row.
+        let job_id = Uuid::new_v4();
+        let (project_dir, browse_id) = resolve_project_dir(explicit_dir, job_id)?;
         let project_dir_str = project_dir.display().to_string();
 
-        // Create the container job with the resolved project dir
-        let (job_id, _token) = self
+        // Persist the job to DB before creating the container.
+        self.persist_job(SandboxJobRecord {
+            id: job_id,
+            task: task.to_string(),
+            status: "creating".to_string(),
+            user_id: _ctx.user_id.clone(),
+            project_dir: project_dir_str.clone(),
+            success: None,
+            failure_reason: None,
+            created_at: Utc::now(),
+            started_at: None,
+            completed_at: None,
+        });
+
+        // Create the container job with the pre-determined job_id.
+        let _token = self
             .job_manager
-            .create_job(task, Some(project_dir))
+            .create_job(job_id, task, Some(project_dir))
             .await
             .map_err(|e| {
+                self.update_status(
+                    job_id,
+                    "failed",
+                    Some(false),
+                    Some(e.to_string()),
+                    None,
+                    Some(Utc::now()),
+                );
                 ToolError::ExecutionFailed(format!("failed to create container: {}", e))
             })?;
+
+        // Container started successfully.
+        let now = Utc::now();
+        self.update_status(job_id, "running", None, None, Some(now), None);
 
         if !wait {
             let result = serde_json::json!({
@@ -148,7 +217,7 @@ impl Tool for RunInSandboxTool {
             return Ok(ToolOutput::success(result, start.elapsed()));
         }
 
-        // Wait for completion by polling the container state
+        // Wait for completion by polling the container state.
         let timeout = Duration::from_secs(600);
         let poll_interval = Duration::from_secs(2);
         let deadline = tokio::time::Instant::now() + timeout;
@@ -157,6 +226,14 @@ impl Tool for RunInSandboxTool {
             if tokio::time::Instant::now() > deadline {
                 let _ = self.job_manager.stop_job(job_id).await;
                 self.job_manager.cleanup_job(job_id).await;
+                self.update_status(
+                    job_id,
+                    "failed",
+                    Some(false),
+                    Some("Timed out (10 minutes)".to_string()),
+                    None,
+                    Some(Utc::now()),
+                );
                 return Err(ToolError::ExecutionFailed(
                     "container execution timed out (10 minutes)".to_string(),
                 ));
@@ -181,7 +258,16 @@ impl Tool for RunInSandboxTool {
                             .unwrap_or(true);
                         self.job_manager.cleanup_job(job_id).await;
 
+                        let finished_at = Utc::now();
                         if success {
+                            self.update_status(
+                                job_id,
+                                "completed",
+                                Some(true),
+                                None,
+                                None,
+                                Some(finished_at),
+                            );
                             let result = serde_json::json!({
                                 "job_id": job_id.to_string(),
                                 "status": "completed",
@@ -191,6 +277,14 @@ impl Tool for RunInSandboxTool {
                             });
                             return Ok(ToolOutput::success(result, start.elapsed()));
                         } else {
+                            self.update_status(
+                                job_id,
+                                "failed",
+                                Some(false),
+                                Some(message.clone()),
+                                None,
+                                Some(finished_at),
+                            );
                             return Err(ToolError::ExecutionFailed(format!(
                                 "container job failed: {}",
                                 message
@@ -204,6 +298,14 @@ impl Tool for RunInSandboxTool {
                             .and_then(|r| r.message.clone())
                             .unwrap_or_else(|| "unknown failure".to_string());
                         self.job_manager.cleanup_job(job_id).await;
+                        self.update_status(
+                            job_id,
+                            "failed",
+                            Some(false),
+                            Some(message.clone()),
+                            None,
+                            Some(Utc::now()),
+                        );
                         return Err(ToolError::ExecutionFailed(format!(
                             "container job failed: {}",
                             message
@@ -211,6 +313,14 @@ impl Tool for RunInSandboxTool {
                     }
                 },
                 None => {
+                    self.update_status(
+                        job_id,
+                        "completed",
+                        Some(true),
+                        None,
+                        None,
+                        Some(Utc::now()),
+                    );
                     let result = serde_json::json!({
                         "job_id": job_id.to_string(),
                         "status": "completed",
@@ -236,8 +346,6 @@ impl Tool for RunInSandboxTool {
 
 #[cfg(test)]
 mod tests {
-    use std::time::Duration;
-
     use super::*;
 
     #[test]

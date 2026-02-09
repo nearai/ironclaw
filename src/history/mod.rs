@@ -9,4 +9,4 @@ mod analytics;
 mod store;
 
 pub use analytics::{JobStats, ToolStats};
-pub use store::{LlmCallRecord, Store};
+pub use store::{LlmCallRecord, SandboxJobRecord, SandboxJobSummary, Store};

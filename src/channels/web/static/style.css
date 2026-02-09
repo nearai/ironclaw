@@ -718,6 +718,9 @@ body {
 .badge.failed { background: rgba(248, 81, 73, 0.15); color: var(--danger); }
 .badge.stuck { background: rgba(210, 153, 34, 0.15); color: var(--warning); }
 .badge.cancelled { background: var(--bg-tertiary); color: var(--text-secondary); }
+.badge.interrupted { background: rgba(210, 153, 34, 0.15); color: var(--warning); }
+.badge.source-sandbox { background: rgba(136, 132, 216, 0.15); color: #b4b0e8; }
+.badge.source-direct { background: var(--bg-tertiary); color: var(--text-secondary); }
 
 .btn-cancel {
   padding: 4px 10px;
@@ -731,6 +734,95 @@ body {
 
 .btn-cancel:hover {
   background: rgba(248, 81, 73, 0.15);
+}
+
+.btn-restart {
+  padding: 4px 10px;
+  background: none;
+  border: 1px solid var(--accent);
+  border-radius: var(--radius);
+  color: var(--accent);
+  cursor: pointer;
+  font-size: 12px;
+}
+
+.btn-restart:hover {
+  background: rgba(88, 166, 255, 0.15);
+}
+
+.btn-browse {
+  padding: 4px 10px;
+  background: none;
+  border: 1px solid var(--success);
+  border-radius: var(--radius);
+  color: var(--success);
+  cursor: pointer;
+  font-size: 12px;
+  text-decoration: none;
+}
+
+.btn-browse:hover {
+  background: rgba(63, 185, 80, 0.15);
+}
+
+/* Job started card in chat */
+.job-card {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 12px 16px;
+  margin: 8px 0;
+  background: var(--bg-tertiary);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  border-left: 3px solid var(--accent);
+}
+
+.job-card-icon {
+  font-size: 20px;
+}
+
+.job-card-info {
+  flex: 1;
+}
+
+.job-card-title {
+  font-weight: 600;
+  font-size: 14px;
+}
+
+.job-card-id {
+  font-size: 12px;
+  color: var(--text-secondary);
+  font-family: monospace;
+}
+
+.job-card-view, .job-card-browse {
+  padding: 4px 12px;
+  border-radius: var(--radius);
+  font-size: 12px;
+  cursor: pointer;
+  text-decoration: none;
+}
+
+.job-card-view {
+  background: none;
+  border: 1px solid var(--accent);
+  color: var(--accent);
+}
+
+.job-card-view:hover {
+  background: rgba(88, 166, 255, 0.15);
+}
+
+.job-card-browse {
+  background: none;
+  border: 1px solid var(--success);
+  color: var(--success);
+}
+
+.job-card-browse:hover {
+  background: rgba(63, 185, 80, 0.15);
 }
 
 /* Clickable job rows */

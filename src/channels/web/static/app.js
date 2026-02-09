@@ -99,6 +99,11 @@ function connectSSE() {
     setStatus(data.message);
   });
 
+  eventSource.addEventListener('job_started', (e) => {
+    const data = JSON.parse(e.data);
+    showJobCard(data);
+  });
+
   eventSource.addEventListener('approval_needed', (e) => {
     const data = JSON.parse(e.data);
     showApproval(data);
@@ -263,6 +268,53 @@ function showApproval(data) {
   actions.appendChild(alwaysBtn);
   actions.appendChild(denyBtn);
   card.appendChild(actions);
+
+  container.appendChild(card);
+  container.scrollTop = container.scrollHeight;
+}
+
+function showJobCard(data) {
+  const container = document.getElementById('chat-messages');
+  const card = document.createElement('div');
+  card.className = 'job-card';
+
+  const icon = document.createElement('span');
+  icon.className = 'job-card-icon';
+  icon.textContent = '\u2692';
+  card.appendChild(icon);
+
+  const info = document.createElement('div');
+  info.className = 'job-card-info';
+
+  const title = document.createElement('div');
+  title.className = 'job-card-title';
+  title.textContent = data.title || 'Sandbox Job';
+  info.appendChild(title);
+
+  const id = document.createElement('div');
+  id.className = 'job-card-id';
+  id.textContent = (data.job_id || '').substring(0, 8);
+  info.appendChild(id);
+
+  card.appendChild(info);
+
+  const viewBtn = document.createElement('button');
+  viewBtn.className = 'job-card-view';
+  viewBtn.textContent = 'View Job';
+  viewBtn.addEventListener('click', () => {
+    switchTab('jobs');
+    openJobDetail(data.job_id);
+  });
+  card.appendChild(viewBtn);
+
+  if (data.browse_url) {
+    const browseBtn = document.createElement('a');
+    browseBtn.className = 'job-card-browse';
+    browseBtn.href = data.browse_url;
+    browseBtn.target = '_blank';
+    browseBtn.textContent = 'Browse';
+    card.appendChild(browseBtn);
+  }
 
   container.appendChild(card);
   container.scrollTop = container.scrollHeight;
@@ -747,6 +799,19 @@ let jobFilesTreeState = null;
 
 function loadJobs() {
   currentJobId = null;
+  jobFilesTreeState = null;
+
+  // Rebuild DOM if renderJobDetail() destroyed it (it wipes .jobs-container innerHTML).
+  const container = document.querySelector('.jobs-container');
+  if (!document.getElementById('jobs-summary')) {
+    container.innerHTML =
+      '<div class="jobs-summary" id="jobs-summary"></div>'
+      + '<table class="jobs-table" id="jobs-table"><thead><tr>'
+      + '<th>ID</th><th>Title</th><th>Source</th><th>Status</th><th>Created</th><th>Actions</th>'
+      + '</tr></thead><tbody id="jobs-tbody"></tbody></table>'
+      + '<div class="empty-state" id="jobs-empty" style="display:none">No jobs found</div>';
+  }
+
   Promise.all([
     apiFetch('/api/jobs/summary'),
     apiFetch('/api/jobs'),
@@ -786,15 +851,22 @@ function renderJobsList(jobs) {
   tbody.innerHTML = jobs.map((job) => {
     const shortId = job.id.substring(0, 8);
     const stateClass = job.state.replace(' ', '_');
-    const cancelBtn = (job.state === 'pending' || job.state === 'in_progress')
-      ? '<button class="btn-cancel" onclick="event.stopPropagation(); cancelJob(\'' + job.id + '\')">Cancel</button>'
-      : '';
+    const sourceClass = 'source-' + (job.source || 'direct');
+
+    let actionBtns = '';
+    if (job.state === 'pending' || job.state === 'in_progress') {
+      actionBtns = '<button class="btn-cancel" onclick="event.stopPropagation(); cancelJob(\'' + job.id + '\')">Cancel</button>';
+    } else if ((job.state === 'failed' || job.state === 'interrupted') && job.source === 'sandbox') {
+      actionBtns = '<button class="btn-restart" onclick="event.stopPropagation(); restartJob(\'' + job.id + '\')">Restart</button>';
+    }
+
     return '<tr class="job-row" onclick="openJobDetail(\'' + job.id + '\')">'
       + '<td title="' + escapeHtml(job.id) + '">' + shortId + '</td>'
       + '<td>' + escapeHtml(job.title) + '</td>'
+      + '<td><span class="badge ' + sourceClass + '">' + escapeHtml(job.source || 'direct') + '</span></td>'
       + '<td><span class="badge ' + stateClass + '">' + escapeHtml(job.state) + '</span></td>'
       + '<td>' + formatDate(job.created_at) + '</td>'
-      + '<td>' + cancelBtn + '</td>'
+      + '<td>' + actionBtns + '</td>'
       + '</tr>';
   }).join('');
 }
@@ -807,6 +879,17 @@ function cancelJob(jobId) {
     })
     .catch((err) => {
       addMessage('system', 'Failed to cancel job: ' + err.message);
+    });
+}
+
+function restartJob(jobId) {
+  apiFetch('/api/jobs/' + jobId + '/restart', { method: 'POST' })
+    .then((res) => {
+      addMessage('system', 'Job restarted as ' + (res.new_job_id || '').substring(0, 8));
+      loadJobs();
+    })
+    .catch((err) => {
+      addMessage('system', 'Failed to restart job: ' + err.message);
     });
 }
 
@@ -830,15 +913,27 @@ function closeJobDetail() {
 function renderJobDetail(job) {
   const container = document.querySelector('.jobs-container');
   const stateClass = job.state.replace(' ', '_');
+  const sourceClass = 'source-' + (job.source || 'direct');
 
   container.innerHTML = '';
 
   // Header
   const header = document.createElement('div');
   header.className = 'job-detail-header';
-  header.innerHTML = '<button class="btn-back" onclick="closeJobDetail()">&larr; Back</button>'
+
+  let headerHtml = '<button class="btn-back" onclick="closeJobDetail()">&larr; Back</button>'
     + '<h2>' + escapeHtml(job.title) + '</h2>'
+    + '<span class="badge ' + sourceClass + '">' + escapeHtml(job.source || 'direct') + '</span>'
     + '<span class="badge ' + stateClass + '">' + escapeHtml(job.state) + '</span>';
+
+  if ((job.state === 'failed' || job.state === 'interrupted') && job.source === 'sandbox') {
+    headerHtml += '<button class="btn-restart" onclick="restartJob(\'' + job.id + '\')">Restart</button>';
+  }
+  if (job.browse_url) {
+    headerHtml += '<a class="btn-browse" href="' + escapeHtml(job.browse_url) + '" target="_blank">Browse Files</a>';
+  }
+
+  header.innerHTML = headerHtml;
   container.appendChild(header);
 
   // Sub-tab bar
@@ -866,7 +961,7 @@ function renderJobDetail(job) {
     case 'overview': renderJobOverview(content, job); break;
     case 'actions': renderJobActions(content, job); break;
     case 'thinking': renderJobConversation(content, job); break;
-    case 'files': renderJobFiles(content); break;
+    case 'files': renderJobFiles(content, job); break;
   }
 }
 
@@ -892,6 +987,7 @@ function renderJobOverview(container, job) {
   grid.className = 'job-meta-grid';
   grid.innerHTML = metaItem('Job ID', job.id)
     + metaItem('State', job.state)
+    + metaItem('Source', job.source || 'direct')
     + metaItem('Category', job.category || 'None')
     + metaItem('Created', formatDate(job.created_at))
     + metaItem('Started', formatDate(job.started_at))
@@ -949,7 +1045,11 @@ function renderJobOverview(container, job) {
 
 function renderJobActions(container, job) {
   if (job.actions.length === 0) {
-    container.innerHTML = '<div class="empty-state">No actions recorded</div>';
+    if (job.source === 'sandbox') {
+      container.innerHTML = '<div class="empty-state">Task executed in Docker container. Actions are internal to the worker.</div>';
+    } else {
+      container.innerHTML = '<div class="empty-state">No actions recorded</div>';
+    }
     return;
   }
 
@@ -998,7 +1098,11 @@ function renderJobActions(container, job) {
 
 function renderJobConversation(container, job) {
   if (job.conversation.length === 0) {
-    container.innerHTML = '<div class="empty-state">No conversation history</div>';
+    if (job.source === 'sandbox') {
+      container.innerHTML = '<div class="empty-state">Conversation history is internal to the container worker.</div>';
+    } else {
+      container.innerHTML = '<div class="empty-state">No conversation history</div>';
+    }
     return;
   }
 
@@ -1046,14 +1150,23 @@ function renderJobConversation(container, job) {
   }
 }
 
-function renderJobFiles(container) {
+function renderJobFiles(container, job) {
   container.innerHTML = '<div class="job-files">'
     + '<div class="job-files-sidebar"><div class="job-files-tree"></div></div>'
     + '<div class="job-files-viewer"><div class="empty-state">Select a file to view</div></div>'
     + '</div>';
 
-  // Load tree
-  apiFetch('/api/memory/list?path=').then((data) => {
+  // For sandbox jobs with a project_dir, use the project files API.
+  // For direct jobs, fall back to workspace memory API.
+  const isSandbox = job && job.source === 'sandbox' && job.project_dir;
+  const listUrl = isSandbox
+    ? '/api/jobs/' + job.id + '/files/list?path='
+    : '/api/memory/list?path=';
+
+  // Stash the current job context so tree expand/read can use the right API.
+  container._jobFilesContext = { isSandbox, jobId: job ? job.id : null };
+
+  apiFetch(listUrl).then((data) => {
     jobFilesTreeState = data.entries.map((e) => ({
       name: e.name,
       path: e.path,
@@ -1063,7 +1176,12 @@ function renderJobFiles(container) {
       loaded: false,
     }));
     renderJobFilesTree();
-  }).catch(() => {});
+  }).catch(() => {
+    const treeContainer = document.querySelector('.job-files-tree');
+    if (treeContainer) {
+      treeContainer.innerHTML = '<div class="tree-item" style="color:var(--text-secondary)">No project files</div>';
+    }
+  });
 }
 
 function renderJobFilesTree() {
@@ -1121,6 +1239,11 @@ function renderJobFileNodes(nodes, container, depth) {
   }
 }
 
+function getJobFilesContext() {
+  const container = document.querySelector('.job-detail-content');
+  return (container && container._jobFilesContext) || { isSandbox: false, jobId: null };
+}
+
 function toggleJobFileExpand(node) {
   if (node.expanded) {
     node.expanded = false;
@@ -1132,7 +1255,12 @@ function toggleJobFileExpand(node) {
     renderJobFilesTree();
     return;
   }
-  apiFetch('/api/memory/list?path=' + encodeURIComponent(node.path)).then((data) => {
+  const ctx = getJobFilesContext();
+  const listUrl = ctx.isSandbox
+    ? '/api/jobs/' + ctx.jobId + '/files/list?path=' + encodeURIComponent(node.path)
+    : '/api/memory/list?path=' + encodeURIComponent(node.path);
+
+  apiFetch(listUrl).then((data) => {
     node.children = data.entries.map((e) => ({
       name: e.name,
       path: e.path,
@@ -1150,7 +1278,12 @@ function toggleJobFileExpand(node) {
 function readJobFile(path) {
   const viewer = document.querySelector('.job-files-viewer');
   if (!viewer) return;
-  apiFetch('/api/memory/read?path=' + encodeURIComponent(path)).then((data) => {
+  const ctx = getJobFilesContext();
+  const readUrl = ctx.isSandbox
+    ? '/api/jobs/' + ctx.jobId + '/files/read?path=' + encodeURIComponent(path)
+    : '/api/memory/read?path=' + encodeURIComponent(path);
+
+  apiFetch(readUrl).then((data) => {
     viewer.innerHTML = '<div class="job-files-path">' + escapeHtml(path) + '</div>'
       + '<pre class="job-files-content">' + escapeHtml(data.content) + '</pre>';
   }).catch((err) => {

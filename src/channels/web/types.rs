@@ -82,6 +82,12 @@ pub enum SseEvent {
     StreamChunk { content: String },
     #[serde(rename = "status")]
     Status { message: String },
+    #[serde(rename = "job_started")]
+    JobStarted {
+        job_id: String,
+        title: String,
+        browse_url: String,
+    },
     #[serde(rename = "approval_needed")]
     ApprovalNeeded {
         request_id: String,
@@ -167,6 +173,7 @@ pub struct JobInfo {
     pub title: String,
     pub state: String,
     pub user_id: String,
+    pub source: String,
     pub created_at: String,
     pub started_at: Option<String>,
 }
@@ -194,6 +201,7 @@ pub struct JobDetailResponse {
     pub state: String,
     pub category: Option<String>,
     pub user_id: String,
+    pub source: String,
     pub created_at: String,
     pub started_at: Option<String>,
     pub completed_at: Option<String>,
@@ -201,9 +209,33 @@ pub struct JobDetailResponse {
     pub actual_cost: String,
     pub estimated_cost: Option<String>,
     pub repair_attempts: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub project_dir: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub browse_url: Option<String>,
     pub transitions: Vec<TransitionInfo>,
     pub actions: Vec<ActionInfo>,
     pub conversation: Vec<MessageInfo>,
+}
+
+// --- Project Files ---
+
+#[derive(Debug, Serialize)]
+pub struct ProjectFileEntry {
+    pub name: String,
+    pub path: String,
+    pub is_dir: bool,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ProjectFilesResponse {
+    pub entries: Vec<ProjectFileEntry>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ProjectFileReadResponse {
+    pub path: String,
+    pub content: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -374,6 +406,7 @@ impl WsServerMessage {
             SseEvent::ToolCompleted { .. } => "tool_completed",
             SseEvent::StreamChunk { .. } => "stream_chunk",
             SseEvent::Status { .. } => "status",
+            SseEvent::JobStarted { .. } => "job_started",
             SseEvent::ApprovalNeeded { .. } => "approval_needed",
             SseEvent::Error { .. } => "error",
             SseEvent::Heartbeat => "heartbeat",

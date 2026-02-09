@@ -99,14 +99,14 @@ impl ContainerJobManager {
 
     /// Create and start a new container for a job.
     ///
-    /// Returns the job_id and the auth token for the worker.
+    /// The caller provides the `job_id` so it can be persisted to the database
+    /// before the container is created. Returns the auth token for the worker.
     pub async fn create_job(
         &self,
+        job_id: Uuid,
         task: &str,
         project_dir: Option<PathBuf>,
-    ) -> Result<(Uuid, String), OrchestratorError> {
-        let job_id = Uuid::new_v4();
-
+    ) -> Result<String, OrchestratorError> {
         // Generate auth token (stored in TokenStore, never logged)
         let token = self.token_store.create_token(job_id).await;
 
@@ -231,7 +231,7 @@ impl ContainerJobManager {
             "Created and started worker container"
         );
 
-        Ok((job_id, token))
+        Ok(token)
     }
 
     /// Stop a running container job.
