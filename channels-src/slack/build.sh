@@ -30,7 +30,7 @@ if [ -f "$WASM_PATH" ]; then
     wasm-tools strip slack.wasm -o slack.wasm
 
     echo "Built: slack.wasm ($(du -h slack.wasm | cut -f1))"
-    echo "Copy slack.wasm and slack.capabilities.json to ~/.near-agent/channels/"
+    echo "Copy slack.wasm and slack.capabilities.json to ~/.ironclaw/channels/"
 else
     echo "Error: WASM output not found at $WASM_PATH"
     exit 1
