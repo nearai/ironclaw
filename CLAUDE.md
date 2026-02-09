@@ -423,6 +423,39 @@ When running `ironclaw tool auth <tool>`:
 
 The agent reads auth config from the tool's capabilities file and provides the appropriate flow. No service-specific code in the main agent.
 
+### WASM Tools vs MCP Servers: When to Use Which
+
+Both are first-class in the extension system (`ironclaw tool install` handles both), but they have different strengths.
+
+**WASM Tools (IronClaw native)**
+
+- Sandboxed: fuel metering, memory limits, no access except what's allowlisted
+- Credentials injected by host runtime, tool code never sees the actual token
+- Output scanned for secret leakage before returning to the LLM
+- Auth (OAuth/manual) declared in `capabilities.json`, agent handles the flow
+- Single binary, no process management, works offline
+- Cost: must build yourself in Rust, no ecosystem, synchronous only
+
+**MCP Servers (Model Context Protocol)**
+
+- Growing ecosystem of pre-built servers (GitHub, Notion, Postgres, etc.)
+- Any language (TypeScript/Python most common)
+- Can do websockets, streaming, background polling
+- Cost: external process with full system access (no sandbox), manages own credentials, IronClaw can't prevent leaks
+
+**Decision guide:**
+
+| Scenario | Use |
+|----------|-----|
+| Good MCP server already exists | **MCP** |
+| Handles sensitive credentials (email send, banking) | **WASM** |
+| Quick prototype or one-off integration | **MCP** |
+| Core capability you'll maintain long-term | **WASM** |
+| Needs background connections (websockets, polling) | **MCP** |
+| Multiple tools share one OAuth token (e.g., Google suite) | **WASM** |
+
+The LLM-facing interface is identical for both (tool name, schema, execute), so swapping between them is transparent to the agent.
+
 ## Adding a New Channel
 
 1. Create `src/channels/my_channel.rs`
