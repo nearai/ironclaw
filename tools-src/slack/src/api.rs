@@ -9,6 +9,24 @@ use crate::types::*;
 
 const SLACK_API_BASE: &str = "https://slack.com/api";
 
+/// Percent-encode a string for use as a URL query parameter value.
+fn url_encode(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for b in s.bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(b as char);
+            }
+            _ => {
+                out.push('%');
+                out.push(char::from(b"0123456789ABCDEF"[(b >> 4) as usize]));
+                out.push(char::from(b"0123456789ABCDEF"[(b & 0xf) as usize]));
+            }
+        }
+    }
+    out
+}
+
 /// Make a Slack API call.
 fn slack_api_call(method: &str, endpoint: &str, body: Option<&str>) -> Result<String, String> {
     let url = format!("{}/{}", SLACK_API_BASE, endpoint);
@@ -22,7 +40,10 @@ fn slack_api_call(method: &str, endpoint: &str, body: Option<&str>) -> Result<St
 
     let body_bytes = body.map(|b| b.as_bytes().to_vec());
 
-    host::log(host::LogLevel::Debug, &format!("Slack API: {} {}", method, endpoint));
+    host::log(
+        host::LogLevel::Debug,
+        &format!("Slack API: {} {}", method, endpoint),
+    );
 
     let response = host::http_request(method, &url, headers, body_bytes.as_deref())?;
 
@@ -113,7 +134,11 @@ pub fn list_channels(limit: u32) -> Result<ListChannelsResult, String> {
 
 /// Get message history from a channel.
 pub fn get_channel_history(channel: &str, limit: u32) -> Result<ChannelHistoryResult, String> {
-    let url = format!("conversations.history?channel={}&limit={}", channel, limit);
+    let url = format!(
+        "conversations.history?channel={}&limit={}",
+        url_encode(channel),
+        limit
+    );
 
     let response = slack_api_call("GET", &url, None)?;
 
@@ -143,7 +168,11 @@ pub fn get_channel_history(channel: &str, limit: u32) -> Result<ChannelHistoryRe
 }
 
 /// Add a reaction to a message.
-pub fn post_reaction(channel: &str, timestamp: &str, emoji: &str) -> Result<PostReactionResult, String> {
+pub fn post_reaction(
+    channel: &str,
+    timestamp: &str,
+    emoji: &str,
+) -> Result<PostReactionResult, String> {
     let payload = serde_json::json!({
         "channel": channel,
         "timestamp": timestamp,
@@ -169,7 +198,7 @@ pub fn post_reaction(channel: &str, timestamp: &str, emoji: &str) -> Result<Post
 
 /// Get information about a user.
 pub fn get_user_info(user_id: &str) -> Result<GetUserInfoResult, String> {
-    let url = format!("users.info?user={}", user_id);
+    let url = format!("users.info?user={}", url_encode(user_id));
 
     let response = slack_api_call("GET", &url, None)?;
 

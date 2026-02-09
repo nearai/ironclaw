@@ -51,7 +51,7 @@ publish = false
 crate-type = ["cdylib"]
 
 [dependencies]
-wit-bindgen = "0.36"
+wit-bindgen = "=0.36"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 

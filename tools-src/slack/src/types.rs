@@ -138,10 +138,3 @@ pub struct GetUserInfoResult {
     pub ok: bool,
     pub user: UserInfo,
 }
-
-/// Generic Slack API error response.
-#[derive(Debug, Deserialize)]
-pub struct SlackApiError {
-    pub ok: bool,
-    pub error: String,
-}
