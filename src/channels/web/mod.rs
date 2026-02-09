@@ -203,6 +203,7 @@ impl Channel for GatewayChannel {
             StatusUpdate::ToolCompleted { name, success } => {
                 SseEvent::ToolCompleted { name, success }
             }
+            StatusUpdate::ToolResult { name, preview } => SseEvent::ToolResult { name, preview },
             StatusUpdate::StreamChunk(content) => SseEvent::StreamChunk { content },
             StatusUpdate::Status(msg) => SseEvent::Status { message: msg },
             StatusUpdate::ApprovalNeeded {

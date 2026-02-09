@@ -58,6 +58,7 @@ impl SseManager {
                     SseEvent::Thinking { .. } => "thinking",
                     SseEvent::ToolStarted { .. } => "tool_started",
                     SseEvent::ToolCompleted { .. } => "tool_completed",
+                    SseEvent::ToolResult { .. } => "tool_result",
                     SseEvent::StreamChunk { .. } => "stream_chunk",
                     SseEvent::Status { .. } => "status",
                     SseEvent::ApprovalNeeded { .. } => "approval_needed",

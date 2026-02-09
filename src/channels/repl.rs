@@ -112,7 +112,48 @@ fn make_skin() -> MadSkin {
         .set_fg(termimad::crossterm::style::Color::Green);
     skin.code_block
         .set_fg(termimad::crossterm::style::Color::Green);
+    skin.code_block.left_margin = 2;
     skin
+}
+
+/// Format JSON params as `key: value` lines for the approval card.
+fn format_json_params(params: &serde_json::Value, indent: &str) -> String {
+    match params {
+        serde_json::Value::Object(map) => {
+            let mut lines = Vec::new();
+            for (key, value) in map {
+                let val_str = match value {
+                    serde_json::Value::String(s) => {
+                        let display = if s.len() > 120 { &s[..120] } else { s };
+                        format!("\x1b[32m\"{display}\"\x1b[0m")
+                    }
+                    other => {
+                        let rendered = other.to_string();
+                        if rendered.len() > 120 {
+                            format!("{}...", &rendered[..120])
+                        } else {
+                            rendered
+                        }
+                    }
+                };
+                lines.push(format!("{indent}\x1b[36m{key}\x1b[0m: {val_str}"));
+            }
+            lines.join("\n")
+        }
+        other => {
+            let pretty = serde_json::to_string_pretty(other).unwrap_or_else(|_| other.to_string());
+            let truncated = if pretty.len() > 300 {
+                format!("{}...", &pretty[..300])
+            } else {
+                pretty
+            };
+            truncated
+                .lines()
+                .map(|l| format!("{indent}\x1b[90m{l}\x1b[0m"))
+                .collect::<Vec<_>>()
+                .join("\n")
+        }
+    }
 }
 
 /// REPL channel with line editing and markdown rendering.
@@ -156,32 +197,33 @@ impl Default for ReplChannel {
 }
 
 fn print_help() {
-    println!(
-        r#"
-IronClaw REPL
+    // Bold white for section headers, bold cyan for commands, dim gray for descriptions
+    let h = "\x1b[1m"; // bold (section headers)
+    let c = "\x1b[1;36m"; // bold cyan (commands)
+    let d = "\x1b[90m"; // dim gray (descriptions)
+    let r = "\x1b[0m"; // reset
 
-Commands:
-  /help          Show this help message
-  /quit, /exit   Exit the REPL
-  /debug         Toggle debug mode (verbose output)
-  /undo          Undo the last turn
-  /redo          Redo an undone turn
-  /clear         Clear the conversation
-  /compact       Compact the context window
-  /new           Start a new conversation thread
-  /interrupt     Stop the current operation
-
-Approval responses (when prompted):
-  yes, y         Approve the tool execution
-  no, n          Deny the tool execution
-  always         Approve and auto-approve this tool for the session
-
-Tips:
-  - Tool calls requiring approval will pause and wait for your response
-  - Use /debug to see detailed tool inputs and outputs
-  - Press Ctrl+C to interrupt a long-running operation
-"#
-    );
+    println!();
+    println!("  {h}IronClaw REPL{r}");
+    println!();
+    println!("  {h}Commands{r}");
+    println!("  {c}/help{r}              {d}show this help{r}");
+    println!("  {c}/debug{r}             {d}toggle verbose output{r}");
+    println!("  {c}/quit{r} {c}/exit{r}        {d}exit the repl{r}");
+    println!();
+    println!("  {h}Conversation{r}");
+    println!("  {c}/undo{r}              {d}undo the last turn{r}");
+    println!("  {c}/redo{r}              {d}redo an undone turn{r}");
+    println!("  {c}/clear{r}             {d}clear conversation{r}");
+    println!("  {c}/compact{r}           {d}compact context window{r}");
+    println!("  {c}/new{r}               {d}new conversation thread{r}");
+    println!("  {c}/interrupt{r}         {d}stop current operation{r}");
+    println!();
+    println!("  {h}Approval responses{r}");
+    println!("  {c}yes{r} ({c}y{r})            {d}approve tool execution{r}");
+    println!("  {c}no{r} ({c}n{r})             {d}deny tool execution{r}");
+    println!("  {c}always{r} ({c}a{r})         {d}approve for this session{r}");
+    println!();
 }
 
 /// Get the history file path (~/.ironclaw/history).
@@ -310,6 +352,10 @@ impl Channel for ReplChannel {
         _msg: &IncomingMessage,
         response: OutgoingResponse,
     ) -> Result<(), ChannelError> {
+        let width = crossterm::terminal::size()
+            .map(|(w, _)| w as usize)
+            .unwrap_or(80);
+
         // If we were streaming, the content was already printed via StreamChunk.
         // Just finish the line and reset.
         if self.is_streaming.swap(false, Ordering::Relaxed) {
@@ -318,14 +364,14 @@ impl Channel for ReplChannel {
             return Ok(());
         }
 
+        // Dim separator line before the response
+        let sep_width = width.min(80);
+        eprintln!("\x1b[90m{}\x1b[0m", "\u{2500}".repeat(sep_width));
+
         // Render markdown
         let skin = make_skin();
-        let width = crossterm::terminal::size()
-            .map(|(w, _)| w as usize)
-            .unwrap_or(80);
         let text = termimad::FmtText::from(&skin, &response.content, Some(width));
 
-        println!();
         print!("{text}");
         println!();
         Ok(())
@@ -352,8 +398,18 @@ impl Channel for ReplChannel {
                     eprintln!("  \x1b[31m\u{2717} {name} (failed)\x1b[0m");
                 }
             }
+            StatusUpdate::ToolResult { name: _, preview } => {
+                eprintln!("    \x1b[90m{preview}\x1b[0m");
+            }
             StatusUpdate::StreamChunk(chunk) => {
-                self.is_streaming.store(true, Ordering::Relaxed);
+                // Print separator on the false-to-true transition
+                if !self.is_streaming.swap(true, Ordering::Relaxed) {
+                    let width = crossterm::terminal::size()
+                        .map(|(w, _)| w as usize)
+                        .unwrap_or(80);
+                    let sep_width = width.min(80);
+                    eprintln!("\x1b[90m{}\x1b[0m", "\u{2500}".repeat(sep_width));
+                }
                 print!("{chunk}");
                 let _ = io::stdout().flush();
             }
@@ -368,25 +424,52 @@ impl Channel for ReplChannel {
                 description,
                 parameters,
             } => {
-                let params_preview = serde_json::to_string_pretty(&parameters)
-                    .unwrap_or_else(|_| parameters.to_string());
-                let params_truncated = if params_preview.chars().count() > 200 {
-                    format!(
-                        "{}...",
-                        params_preview.chars().take(200).collect::<String>()
-                    )
+                let term_width = crossterm::terminal::size()
+                    .map(|(w, _)| w as usize)
+                    .unwrap_or(80);
+                let box_width = (term_width.saturating_sub(4)).clamp(40, 60);
+
+                // Short request ID for the bottom border
+                let short_id = if request_id.len() > 8 {
+                    &request_id[..8]
                 } else {
-                    params_preview
+                    &request_id
                 };
-                eprintln!();
-                eprintln!("  \x1b[33m\u{25CF} {tool_name} requires approval\x1b[0m");
-                eprintln!("  \x1b[90m{description}\x1b[0m");
-                eprintln!("    {}", params_truncated.replace('\n', "\n    "));
-                eprintln!();
-                eprintln!(
-                    "  Reply: \x1b[32myes\x1b[0m / \x1b[34malways\x1b[0m / \x1b[31mno\x1b[0m"
+
+                // Top border: ┌ tool_name requires approval ───
+                let top_label = format!(" {tool_name} requires approval ");
+                let top_fill = box_width.saturating_sub(top_label.len() + 1);
+                let top_border = format!(
+                    "\u{250C}\x1b[33m{top_label}\x1b[0m{}",
+                    "\u{2500}".repeat(top_fill)
                 );
-                eprintln!("  \x1b[90m{request_id}\x1b[0m");
+
+                // Bottom border: └─ short_id ─────
+                let bot_label = format!(" {short_id} ");
+                let bot_fill = box_width.saturating_sub(bot_label.len() + 2);
+                let bot_border = format!(
+                    "\u{2514}\u{2500}\x1b[90m{bot_label}\x1b[0m{}",
+                    "\u{2500}".repeat(bot_fill)
+                );
+
+                eprintln!();
+                eprintln!("  {top_border}");
+                eprintln!("  \u{2502} \x1b[90m{description}\x1b[0m");
+                eprintln!("  \u{2502}");
+
+                // Params
+                let param_lines = format_json_params(&parameters, "  \u{2502}   ");
+                // The format_json_params already includes the indent prefix
+                // but we need to handle the case where each line already starts with it
+                for line in param_lines.lines() {
+                    eprintln!("{line}");
+                }
+
+                eprintln!("  \u{2502}");
+                eprintln!(
+                    "  \u{2502} \x1b[32myes\x1b[0m (y) / \x1b[34malways\x1b[0m (a) / \x1b[31mno\x1b[0m (n)"
+                );
+                eprintln!("  {bot_border}");
                 eprintln!();
             }
         }
