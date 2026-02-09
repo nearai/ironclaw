@@ -1,0 +1,21 @@
+[package]
+name = "google-slides-tool"
+version = "0.1.0"
+edition = "2021"
+description = "Google Slides integration tool for IronClaw (WASM component)"
+license = "MIT OR Apache-2.0"
+publish = false
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+wit-bindgen = "0.36"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[profile.release]
+opt-level = "s"
+lto = true
+strip = true
+codegen-units = 1
