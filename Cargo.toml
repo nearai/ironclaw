@@ -1,4 +1,5 @@
 [workspace]
+members = [".", "benchmarks"]
 exclude = [
     "channels-src/telegram",
     "channels-src/slack",
