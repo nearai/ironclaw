@@ -210,6 +210,7 @@ cargo fmt
 cargo clippy --all --benches --tests --examples --all-features
 
 # Run tests
+createdb ironclaw_test
 cargo test
 
 # Run specific test
