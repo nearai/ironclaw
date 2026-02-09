@@ -1,0 +1,46 @@
+{
+  "http": {
+    "allowlist": [
+      {
+        "host": "gmail.googleapis.com",
+        "path_prefix": "/gmail/v1/",
+        "methods": ["GET", "POST", "DELETE"]
+      }
+    ],
+    "credentials": {
+      "google_oauth_token": {
+        "secret_name": "google_oauth_token",
+        "location": { "type": "bearer" },
+        "host_patterns": ["gmail.googleapis.com"]
+      }
+    },
+    "rate_limit": {
+      "requests_per_minute": 60,
+      "requests_per_hour": 500
+    },
+    "timeout_secs": 30
+  },
+  "secrets": {
+    "allowed_names": ["google_oauth_token"]
+  },
+  "auth": {
+    "secret_name": "google_oauth_token",
+    "display_name": "Google",
+    "oauth": {
+      "authorization_url": "https://accounts.google.com/o/oauth2/v2/auth",
+      "token_url": "https://oauth2.googleapis.com/token",
+      "client_id_env": "GOOGLE_OAUTH_CLIENT_ID",
+      "client_secret_env": "GOOGLE_OAUTH_CLIENT_SECRET",
+      "scopes": [
+        "https://www.googleapis.com/auth/gmail.modify",
+        "https://www.googleapis.com/auth/gmail.compose"
+      ],
+      "use_pkce": false,
+      "extra_params": {
+        "access_type": "offline",
+        "prompt": "consent"
+      }
+    },
+    "env_var": "GOOGLE_OAUTH_TOKEN"
+  }
+}
