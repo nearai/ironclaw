@@ -55,7 +55,7 @@ use types::TelegramAction;
 
 wit_bindgen::generate!({
     world: "sandboxed-tool",
-    path: "../../../wit/tool.wit",
+    path: "../../wit/tool.wit",
 });
 
 struct TelegramTool;

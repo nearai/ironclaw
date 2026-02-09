@@ -32,7 +32,7 @@ use types::SlackAction;
 // This creates the `bindings` module with types and traits.
 wit_bindgen::generate!({
     world: "sandboxed-tool",
-    path: "../../../wit/tool.wit",
+    path: "../../wit/tool.wit",
 });
 
 /// Implementation of the tool interface.

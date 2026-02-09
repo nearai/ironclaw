@@ -11,7 +11,7 @@ Scaffold a new tool called `$ARGUMENTS` for the IronClaw agent. First, determine
 
 Ask the user which type of tool to create:
 
-- **WASM tool** (recommended) - Sandboxed, dynamically loadable, external API integrations. Lives in `tools-src/wasm-tools/<name>/`. This is the right choice for anything that talks to an external service (Notion, GitHub, Discord, etc.).
+- **WASM tool** (recommended) - Sandboxed, dynamically loadable, external API integrations. Lives in `tools-src/<name>/`. This is the right choice for anything that talks to an external service (Notion, GitHub, Discord, etc.).
 - **Built-in tool** - Compiled into the main binary. Only for core agent infrastructure (e.g., memory, file ops, shell). Lives in `src/tools/builtin/<name>.rs`.
 
 If the description clearly implies an external service integration, default to WASM. If it's a core agent capability, default to built-in.
@@ -22,10 +22,10 @@ If the description clearly implies an external service integration, default to W
 
 ### A1: Create directory structure
 
-Create `tools-src/wasm-tools/<name>/` with:
+Create `tools-src/<name>/` with:
 
 ```
-tools-src/wasm-tools/<name>/
+tools-src/<name>/
 ├── Cargo.toml
 ├── <name>-tool.capabilities.json
 └── src/
@@ -64,7 +64,7 @@ codegen-units = 1
 
 ### A3: Write `<name>-tool.capabilities.json`
 
-Declare the tool's security requirements. Determine what APIs it needs and create the allowlist. Reference `tools-src/wasm-tools/slack/slack-tool.capabilities.json` for the format.
+Declare the tool's security requirements. Determine what APIs it needs and create the allowlist. Reference `tools-src/slack/slack-tool.capabilities.json` for the format.
 
 Key sections to include:
 - `http.allowlist` - API endpoints (host, path_prefix, methods)
@@ -173,7 +173,7 @@ use types::<Name>Action;
 
 wit_bindgen::generate!({
     world: "sandboxed-tool",
-    path: "../../../wit/tool.wit",
+    path: "../../wit/tool.wit",
 });
 
 struct <Name>Tool;
@@ -226,7 +226,7 @@ fn execute_inner(params: &str) -> Result<String, String> {
 export!(<Name>Tool);
 ```
 
-Fill in the `schema()` with a proper JSON Schema using `oneOf` for each action variant. Reference `tools-src/wasm-tools/slack/src/lib.rs` for the exact pattern.
+Fill in the `schema()` with a proper JSON Schema using `oneOf` for each action variant. Reference `tools-src/slack/src/lib.rs` for the exact pattern.
 
 ### A7: Verify
 

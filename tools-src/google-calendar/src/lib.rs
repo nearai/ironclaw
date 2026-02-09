@@ -29,7 +29,7 @@ use types::GoogleCalendarAction;
 
 wit_bindgen::generate!({
     world: "sandboxed-tool",
-    path: "../../../wit/tool.wit",
+    path: "../../wit/tool.wit",
 });
 
 struct GoogleCalendarTool;

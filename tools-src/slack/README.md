@@ -34,7 +34,7 @@ A standalone WASM component that provides Slack integration for IronClaw. This s
 ## Building
 
 ```bash
-cd tools-src/wasm-tools/slack
+cd tools-src/slack
 cargo component build --release
 ```
 

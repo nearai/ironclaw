@@ -335,13 +335,13 @@ Key test patterns:
 
 WASM tools are the preferred way to add new capabilities. They run in a sandboxed environment with explicit capabilities.
 
-1. Create a new crate in `tools-src/wasm-tools/<name>/`
+1. Create a new crate in `tools-src/<name>/`
 2. Implement the WIT interface (`wit/tool.wit`)
 3. Create `<name>.capabilities.json` declaring required permissions
 4. Build with `cargo build --target wasm32-wasip2 --release`
 5. Install with `ironclaw tool install path/to/tool.wasm`
 
-See `tools-src/wasm-tools/` for examples.
+See `tools-src/` for examples.
 
 ## Tool Architecture Principles
 
