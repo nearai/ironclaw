@@ -16,7 +16,7 @@ All Google tools share `google_oauth_token` for authentication.
 For all messengers: receive notifications of new messages, read contacts, groups and 1:1 messages, send messages on behalf of the user. This is different from the channel because operates from the specific user's account. Be careful with accessing user's messages, make sure messages are kept unread.
 
 - [x] Slack - post messages, read channels, manage conversations
-- [ ] Telegram - Bot API for sending/receiving messages, managing chats
+- [x] Telegram - user-mode via direct MTProto over HTTPS (contacts, messages, send, search, forward, delete); no Docker needed
 - [ ] WhatsApp - Cloud API for messaging via Meta Business platform
 - [ ] Signal - messaging (note: no official public API exists)
 
