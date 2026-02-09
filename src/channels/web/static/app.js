@@ -4,7 +4,10 @@ let token = '';
 let eventSource = null;
 let logEventSource = null;
 let currentTab = 'chat';
-let claudeCodeEvents = new Map(); // job_id -> Array of events
+let currentThreadId = null;
+let jobEvents = new Map(); // job_id -> Array of events
+let jobListRefreshTimer = null;
+const JOB_EVENTS_CAP = 500;
 
 // --- Auth ---
 
@@ -22,6 +25,8 @@ function authenticate() {
       document.getElementById('app').style.display = 'flex';
       connectSSE();
       connectLogSSE();
+      startGatewayStatusPolling();
+      loadThreads();
       loadHistory();
       loadMemoryTree();
       loadJobs();
@@ -72,6 +77,7 @@ function connectSSE() {
     const data = JSON.parse(e.data);
     addMessage('assistant', data.content);
     setStatus('');
+    enableChatInput();
   });
 
   eventSource.addEventListener('thinking', (e) => {
@@ -118,30 +124,43 @@ function connectSSE() {
   eventSource.addEventListener('auth_completed', (e) => {
     const data = JSON.parse(e.data);
     removeAuthCard(data.extension_name);
-    addMessage('system', data.message);
+    showToast(data.message, 'success');
   });
 
   eventSource.addEventListener('error', (e) => {
     if (e.data) {
       const data = JSON.parse(e.data);
       addMessage('system', 'Error: ' + data.message);
+      enableChatInput();
     }
   });
 
-  // Claude Code event listeners
-  const ccEventTypes = [
-    'claude_code_message', 'claude_code_tool_use', 'claude_code_tool_result',
-    'claude_code_status', 'claude_code_result'
+  // Job event listeners (activity stream for all sandbox jobs)
+  const jobEventTypes = [
+    'job_message', 'job_tool_use', 'job_tool_result',
+    'job_status', 'job_result'
   ];
-  for (const evtType of ccEventTypes) {
+  for (const evtType of jobEventTypes) {
     eventSource.addEventListener(evtType, (e) => {
       const data = JSON.parse(e.data);
       const jobId = data.job_id;
       if (!jobId) return;
-      if (!claudeCodeEvents.has(jobId)) claudeCodeEvents.set(jobId, []);
-      claudeCodeEvents.get(jobId).push({ type: evtType, data: data, ts: Date.now() });
-      // If the Claude Code tab is currently visible for this job, refresh it
-      refreshClaudeCodeTab(jobId);
+      if (!jobEvents.has(jobId)) jobEvents.set(jobId, []);
+      const events = jobEvents.get(jobId);
+      events.push({ type: evtType, data: data, ts: Date.now() });
+      // Cap per-job events to prevent memory leak
+      while (events.length > JOB_EVENTS_CAP) events.shift();
+      // If the Activity tab is currently visible for this job, refresh it
+      refreshActivityTab(jobId);
+      // Auto-refresh job list when on jobs tab (debounced)
+      if ((evtType === 'job_result' || evtType === 'job_status') && currentTab === 'jobs' && !currentJobId) {
+        clearTimeout(jobListRefreshTimer);
+        jobListRefreshTimer = setTimeout(loadJobs, 200);
+      }
+      // Clean up finished job events after a viewing window
+      if (evtType === 'job_result') {
+        setTimeout(() => jobEvents.delete(jobId), 60000);
+      }
     });
   }
 }
@@ -150,6 +169,7 @@ function connectSSE() {
 
 function sendMessage() {
   const input = document.getElementById('chat-input');
+  const sendBtn = document.getElementById('send-btn');
   const content = input.value.trim();
   if (!content) return;
 
@@ -158,13 +178,25 @@ function sendMessage() {
   autoResizeTextarea(input);
   setStatus('Sending...', true);
 
+  sendBtn.disabled = true;
+  input.disabled = true;
+
   apiFetch('/api/chat/send', {
     method: 'POST',
-    body: { content },
+    body: { content, thread_id: currentThreadId || undefined },
   }).catch((err) => {
     addMessage('system', 'Failed to send: ' + err.message);
     setStatus('');
+    enableChatInput();
   });
+}
+
+function enableChatInput() {
+  const input = document.getElementById('chat-input');
+  const sendBtn = document.getElementById('send-btn');
+  sendBtn.disabled = false;
+  input.disabled = false;
+  input.focus();
 }
 
 function sendApprovalAction(requestId, action) {
@@ -193,9 +225,22 @@ function sendApprovalAction(requestId, action) {
 
 function renderMarkdown(text) {
   if (typeof marked !== 'undefined') {
-    return marked.parse(text);
+    let html = marked.parse(text);
+    // Inject copy buttons into <pre> blocks
+    html = html.replace(/<pre>/g, '<pre class="code-block-wrapper"><button class="copy-btn" onclick="copyCodeBlock(this)">Copy</button>');
+    return html;
   }
   return escapeHtml(text);
+}
+
+function copyCodeBlock(btn) {
+  const pre = btn.parentElement;
+  const code = pre.querySelector('code');
+  const text = code ? code.textContent : pre.textContent;
+  navigator.clipboard.writeText(text).then(() => {
+    btn.textContent = 'Copied!';
+    setTimeout(() => { btn.textContent = 'Copy'; }, 1500);
+  });
 }
 
 function addMessage(role, content) {
@@ -492,7 +537,10 @@ function showAuthCardError(extensionName, message) {
 }
 
 function loadHistory() {
-  apiFetch('/api/chat/history').then((data) => {
+  const historyUrl = currentThreadId
+    ? '/api/chat/history?thread_id=' + encodeURIComponent(currentThreadId)
+    : '/api/chat/history';
+  apiFetch(historyUrl).then((data) => {
     const container = document.getElementById('chat-messages');
     container.innerHTML = '';
     for (const turn of data.turns) {
@@ -504,6 +552,55 @@ function loadHistory() {
   }).catch(() => {
     // No history or no active thread, that's fine
   });
+}
+
+// --- Threads ---
+
+function loadThreads() {
+  apiFetch('/api/chat/threads').then((data) => {
+    const list = document.getElementById('thread-list');
+    list.innerHTML = '';
+    const threads = data.threads || [];
+    for (const thread of threads) {
+      const item = document.createElement('div');
+      item.className = 'thread-item' + (thread.id === currentThreadId ? ' active' : '');
+      const label = document.createElement('span');
+      label.className = 'thread-label';
+      label.textContent = thread.id.substring(0, 8);
+      label.title = thread.id;
+      item.appendChild(label);
+      const meta = document.createElement('span');
+      meta.className = 'thread-meta';
+      meta.textContent = (thread.turn_count || 0) + ' turns';
+      item.appendChild(meta);
+      item.addEventListener('click', () => switchThread(thread.id));
+      list.appendChild(item);
+    }
+  }).catch(() => {});
+}
+
+function switchThread(threadId) {
+  currentThreadId = threadId;
+  loadHistory();
+  loadThreads();
+}
+
+function createNewThread() {
+  apiFetch('/api/chat/thread/new', { method: 'POST' }).then((data) => {
+    currentThreadId = data.thread_id || null;
+    document.getElementById('chat-messages').innerHTML = '';
+    setStatus('');
+    loadThreads();
+  }).catch((err) => {
+    showToast('Failed to create thread: ' + err.message, 'error');
+  });
+}
+
+function toggleThreadSidebar() {
+  const sidebar = document.getElementById('thread-sidebar');
+  sidebar.classList.toggle('collapsed');
+  const btn = document.getElementById('thread-toggle-btn');
+  btn.innerHTML = sidebar.classList.contains('collapsed') ? '&raquo;' : '&laquo;';
 }
 
 // Chat input auto-resize and keyboard handling
@@ -541,12 +638,15 @@ function switchTab(tab) {
 
   if (tab === 'memory') loadMemoryTree();
   if (tab === 'jobs') loadJobs();
+  if (tab === 'logs') applyLogFilters();
   if (tab === 'extensions') loadExtensions();
 }
 
 // --- Memory (filesystem tree) ---
 
 let memorySearchTimeout = null;
+let currentMemoryPath = null;
+let currentMemoryContent = null;
 // Tree state: nested nodes persisted across renders
 // { name, path, is_dir, children: [] | null, expanded: bool, loaded: bool }
 let memoryTreeState = null;
@@ -660,13 +760,58 @@ function toggleExpand(node) {
 }
 
 function readMemoryFile(path) {
+  currentMemoryPath = path;
   // Update breadcrumb
-  document.getElementById('memory-breadcrumb').innerHTML = buildBreadcrumb(path);
+  document.getElementById('memory-breadcrumb-path').innerHTML = buildBreadcrumb(path);
+  document.getElementById('memory-edit-btn').style.display = 'inline-block';
+
+  // Exit edit mode if active
+  cancelMemoryEdit();
 
   apiFetch('/api/memory/read?path=' + encodeURIComponent(path)).then((data) => {
-    document.getElementById('memory-viewer').textContent = data.content;
+    currentMemoryContent = data.content;
+    const viewer = document.getElementById('memory-viewer');
+    // Render markdown if it's a .md file
+    if (path.endsWith('.md')) {
+      viewer.innerHTML = '<div class="memory-rendered">' + renderMarkdown(data.content) + '</div>';
+      viewer.classList.add('rendered');
+    } else {
+      viewer.textContent = data.content;
+      viewer.classList.remove('rendered');
+    }
   }).catch((err) => {
+    currentMemoryContent = null;
     document.getElementById('memory-viewer').innerHTML = '<div class="empty">Error: ' + escapeHtml(err.message) + '</div>';
+  });
+}
+
+function startMemoryEdit() {
+  if (!currentMemoryPath || currentMemoryContent === null) return;
+  document.getElementById('memory-viewer').style.display = 'none';
+  const editor = document.getElementById('memory-editor');
+  editor.style.display = 'flex';
+  const textarea = document.getElementById('memory-edit-textarea');
+  textarea.value = currentMemoryContent;
+  textarea.focus();
+}
+
+function cancelMemoryEdit() {
+  document.getElementById('memory-viewer').style.display = '';
+  document.getElementById('memory-editor').style.display = 'none';
+}
+
+function saveMemoryEdit() {
+  if (!currentMemoryPath) return;
+  const content = document.getElementById('memory-edit-textarea').value;
+  apiFetch('/api/memory/write', {
+    method: 'POST',
+    body: { path: currentMemoryPath, content: content },
+  }).then(() => {
+    showToast('Saved ' + currentMemoryPath, 'success');
+    cancelMemoryEdit();
+    readMemoryFile(currentMemoryPath);
+  }).catch((err) => {
+    showToast('Save failed: ' + err.message, 'error');
   });
 }
 
@@ -695,12 +840,33 @@ function searchMemory(query) {
     for (const result of data.results) {
       const item = document.createElement('div');
       item.className = 'search-result';
+      const snippet = snippetAround(result.content, query, 120);
       item.innerHTML = '<div class="path">' + escapeHtml(result.path) + '</div>'
-        + '<div class="snippet">' + escapeHtml(result.content.substring(0, 120)) + '</div>';
+        + '<div class="snippet">' + highlightQuery(snippet, query) + '</div>';
       item.addEventListener('click', () => readMemoryFile(result.path));
       tree.appendChild(item);
     }
   }).catch(() => {});
+}
+
+function snippetAround(text, query, len) {
+  const lower = text.toLowerCase();
+  const idx = lower.indexOf(query.toLowerCase());
+  if (idx < 0) return text.substring(0, len);
+  const start = Math.max(0, idx - Math.floor(len / 2));
+  const end = Math.min(text.length, start + len);
+  let s = text.substring(start, end);
+  if (start > 0) s = '...' + s;
+  if (end < text.length) s = s + '...';
+  return s;
+}
+
+function highlightQuery(text, query) {
+  if (!query) return escapeHtml(text);
+  const escaped = escapeHtml(text);
+  const queryEscaped = query.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const re = new RegExp('(' + queryEscaped + ')', 'gi');
+  return escaped.replace(re, '<mark>$1</mark>');
 }
 
 // --- Logs ---
@@ -797,6 +963,7 @@ function toggleLogsPause() {
 }
 
 function clearLogs() {
+  if (!confirm('Clear all logs?')) return;
   document.getElementById('logs-output').innerHTML = '';
   logBuffer = [];
 }
@@ -932,34 +1099,30 @@ function activateExtension(name) {
       }
 
       if (res.auth_url) {
-        addMessage(
-          'system',
-          'Opening authentication for **' + name + '**. Complete the flow in the opened tab, then click Activate again.'
-        );
+        showToast('Opening authentication for ' + name, 'info');
         window.open(res.auth_url, '_blank');
       } else if (res.awaiting_token) {
-        addMessage(
-          'system',
-          (res.instructions || 'Please provide an API token for **' + name + '**.') +
-            '\n\nYou can authenticate via chat: type `Authenticate ' + name + '` and follow the instructions.'
-        );
+        showToast(res.instructions || 'Please provide an API token for ' + name, 'info');
       } else {
-        addMessage('system', 'Activate failed: ' + res.message);
+        showToast('Activate failed: ' + res.message, 'error');
       }
       loadExtensions();
     })
-    .catch((err) => addMessage('system', 'Activate failed: ' + err.message));
+    .catch((err) => showToast('Activate failed: ' + err.message, 'error'));
 }
 
 function removeExtension(name) {
+  if (!confirm('Remove extension "' + name + '"?')) return;
   apiFetch('/api/extensions/' + encodeURIComponent(name) + '/remove', { method: 'POST' })
     .then((res) => {
       if (!res.success) {
-        addMessage('system', 'Remove failed: ' + res.message);
+        showToast('Remove failed: ' + res.message, 'error');
+      } else {
+        showToast('Removed ' + name, 'success');
       }
       loadExtensions();
     })
-    .catch((err) => addMessage('system', 'Remove failed: ' + err.message));
+    .catch((err) => showToast('Remove failed: ' + err.message, 'error'));
 }
 
 // --- Jobs ---
@@ -1043,24 +1206,26 @@ function renderJobsList(jobs) {
 }
 
 function cancelJob(jobId) {
+  if (!confirm('Cancel this job?')) return;
   apiFetch('/api/jobs/' + jobId + '/cancel', { method: 'POST' })
     .then(() => {
+      showToast('Job cancelled', 'success');
       if (currentJobId) openJobDetail(currentJobId);
       else loadJobs();
     })
     .catch((err) => {
-      addMessage('system', 'Failed to cancel job: ' + err.message);
+      showToast('Failed to cancel job: ' + err.message, 'error');
     });
 }
 
 function restartJob(jobId) {
   apiFetch('/api/jobs/' + jobId + '/restart', { method: 'POST' })
     .then((res) => {
-      addMessage('system', 'Job restarted as ' + (res.new_job_id || '').substring(0, 8));
+      showToast('Job restarted as ' + (res.new_job_id || '').substring(0, 8), 'success');
       loadJobs();
     })
     .catch((err) => {
-      addMessage('system', 'Failed to restart job: ' + err.message);
+      showToast('Failed to restart job: ' + err.message, 'error');
     });
 }
 
@@ -1068,6 +1233,10 @@ function openJobDetail(jobId) {
   currentJobId = jobId;
   currentJobSubTab = 'overview';
   apiFetch('/api/jobs/' + jobId).then((job) => {
+    // Sandbox jobs default to Activity tab where the live stream is
+    if (job.source === 'sandbox') {
+      currentJobSubTab = 'activity';
+    }
     renderJobDetail(job);
   }).catch((err) => {
     addMessage('system', 'Failed to load job: ' + err.message);
@@ -1110,14 +1279,14 @@ function renderJobDetail(job) {
   // Sub-tab bar
   const tabs = document.createElement('div');
   tabs.className = 'job-detail-tabs';
-  const subtabs = ['overview', 'actions', 'thinking', 'files'];
-  // Show Claude Code tab for claude_code mode jobs (check job_mode field from backend)
-  if (job && job.job_mode === 'claude_code') {
-    subtabs.push('claude_code');
-  }
+  // Sandbox jobs stream actions/conversation via events, so show Activity instead
+  // of the empty Actions/Thinking tabs.
+  const subtabs = (job && job.source === 'sandbox')
+    ? ['overview', 'activity', 'files']
+    : ['overview', 'actions', 'thinking', 'files'];
   for (const st of subtabs) {
     const btn = document.createElement('button');
-    btn.textContent = st === 'claude_code' ? 'Claude Code' : st.charAt(0).toUpperCase() + st.slice(1);
+    btn.textContent = st.charAt(0).toUpperCase() + st.slice(1);
     btn.className = st === currentJobSubTab ? 'active' : '';
     btn.addEventListener('click', () => {
       currentJobSubTab = st;
@@ -1137,7 +1306,7 @@ function renderJobDetail(job) {
     case 'actions': renderJobActions(content, job); break;
     case 'thinking': renderJobConversation(content, job); break;
     case 'files': renderJobFiles(content, job); break;
-    case 'claude_code': renderJobClaudeCode(content, job); break;
+    case 'activity': renderJobActivity(content, job); break;
   }
 }
 
@@ -1221,11 +1390,7 @@ function renderJobOverview(container, job) {
 
 function renderJobActions(container, job) {
   if (job.actions.length === 0) {
-    if (job.source === 'sandbox') {
-      container.innerHTML = '<div class="empty-state">Task executed in Docker container. Actions are internal to the worker.</div>';
-    } else {
-      container.innerHTML = '<div class="empty-state">No actions recorded</div>';
-    }
+    container.innerHTML = '<div class="empty-state">No actions recorded</div>';
     return;
   }
 
@@ -1274,11 +1439,7 @@ function renderJobActions(container, job) {
 
 function renderJobConversation(container, job) {
   if (job.conversation.length === 0) {
-    if (job.source === 'sandbox') {
-      container.innerHTML = '<div class="empty-state">Conversation history is internal to the container worker.</div>';
-    } else {
-      container.innerHTML = '<div class="empty-state">No conversation history</div>';
-    }
+    container.innerHTML = '<div class="empty-state">No conversation history</div>';
     return;
   }
 
@@ -1467,111 +1628,146 @@ function readJobFile(path) {
   });
 }
 
-// --- Claude Code tab ---
+// --- Activity tab (unified for all sandbox jobs) ---
 
-let claudeCodeCurrentJobId = null;
+let activityCurrentJobId = null;
+// Track how many live SSE events we've already rendered so refreshActivityTab
+// only appends new ones (avoids duplicates on each SSE tick).
+let activityRenderedLiveIndex = 0;
 
-function renderJobClaudeCode(container, job) {
-  claudeCodeCurrentJobId = job ? job.id : null;
+function renderJobActivity(container, job) {
+  activityCurrentJobId = job ? job.id : null;
+  activityRenderedLiveIndex = 0;
 
-  container.innerHTML = '<div class="cc-terminal" id="cc-terminal"></div>'
-    + '<div class="cc-input-bar" id="cc-input-bar">'
-    + '<input type="text" id="cc-prompt-input" placeholder="Send follow-up prompt..." />'
-    + '<button id="cc-send-btn">Send</button>'
-    + '<button id="cc-done-btn" title="Signal done">Done</button>'
+  container.innerHTML = '<div class="activity-toolbar">'
+    + '<select id="activity-type-filter">'
+    + '<option value="all">All Events</option>'
+    + '<option value="message">Messages</option>'
+    + '<option value="tool_use">Tool Calls</option>'
+    + '<option value="tool_result">Results</option>'
+    + '</select>'
+    + '<label class="logs-checkbox"><input type="checkbox" id="activity-autoscroll" checked> Auto-scroll</label>'
+    + '</div>'
+    + '<div class="activity-terminal" id="activity-terminal"></div>'
+    + '<div class="activity-input-bar" id="activity-input-bar">'
+    + '<input type="text" id="activity-prompt-input" placeholder="Send follow-up prompt..." />'
+    + '<button id="activity-send-btn">Send</button>'
+    + '<button id="activity-done-btn" title="Signal done">Done</button>'
     + '</div>';
 
-  const terminal = document.getElementById('cc-terminal');
-  const input = document.getElementById('cc-prompt-input');
-  const sendBtn = document.getElementById('cc-send-btn');
-  const doneBtn = document.getElementById('cc-done-btn');
+  document.getElementById('activity-type-filter').addEventListener('change', applyActivityFilter);
 
-  sendBtn.addEventListener('click', () => sendClaudeCodePrompt(job.id, false));
-  doneBtn.addEventListener('click', () => sendClaudeCodePrompt(job.id, true));
+  const terminal = document.getElementById('activity-terminal');
+  const input = document.getElementById('activity-prompt-input');
+  const sendBtn = document.getElementById('activity-send-btn');
+  const doneBtn = document.getElementById('activity-done-btn');
+
+  sendBtn.addEventListener('click', () => sendJobPrompt(job.id, false));
+  doneBtn.addEventListener('click', () => sendJobPrompt(job.id, true));
   input.addEventListener('keydown', (e) => {
-    if (e.key === 'Enter') sendClaudeCodePrompt(job.id, false);
+    if (e.key === 'Enter') sendJobPrompt(job.id, false);
   });
 
-  // Load persisted events from DB first
+  // Load persisted events from DB, then catch up with any live SSE events
   apiFetch('/api/jobs/' + job.id + '/events').then((data) => {
     if (data.events && data.events.length > 0) {
       for (const evt of data.events) {
-        appendClaudeCodeEvent(terminal, evt.event_type, evt.data);
+        appendActivityEvent(terminal, evt.event_type, evt.data);
       }
     }
-    // Then append any live SSE events buffered in memory
-    const live = claudeCodeEvents.get(job.id) || [];
-    for (const evt of live) {
-      appendClaudeCodeEvent(terminal, evt.type.replace('claude_code_', ''), evt.data);
-    }
-    terminal.scrollTop = terminal.scrollHeight;
+    appendNewLiveEvents(terminal, job.id);
   }).catch(() => {
-    // If DB load fails, still show live events
-    const live = claudeCodeEvents.get(job.id) || [];
-    for (const evt of live) {
-      appendClaudeCodeEvent(terminal, evt.type.replace('claude_code_', ''), evt.data);
-    }
+    appendNewLiveEvents(terminal, job.id);
   });
 }
 
-function appendClaudeCodeEvent(terminal, eventType, data) {
+function appendNewLiveEvents(terminal, jobId) {
+  const live = jobEvents.get(jobId) || [];
+  for (let i = activityRenderedLiveIndex; i < live.length; i++) {
+    const evt = live[i];
+    appendActivityEvent(terminal, evt.type.replace('job_', ''), evt.data);
+  }
+  activityRenderedLiveIndex = live.length;
+  const autoScroll = document.getElementById('activity-autoscroll');
+  if (!autoScroll || autoScroll.checked) {
+    terminal.scrollTop = terminal.scrollHeight;
+  }
+}
+
+function applyActivityFilter() {
+  const filter = document.getElementById('activity-type-filter').value;
+  const events = document.querySelectorAll('#activity-terminal .activity-event');
+  for (const el of events) {
+    if (filter === 'all') {
+      el.style.display = '';
+    } else {
+      el.style.display = el.getAttribute('data-event-type') === filter ? '' : 'none';
+    }
+  }
+}
+
+function appendActivityEvent(terminal, eventType, data) {
   if (!terminal) return;
   const el = document.createElement('div');
-  el.className = 'cc-event cc-event-' + eventType;
+  el.className = 'activity-event activity-event-' + eventType;
+  el.setAttribute('data-event-type', eventType);
+
+  // Respect current filter
+  const filterEl = document.getElementById('activity-type-filter');
+  if (filterEl && filterEl.value !== 'all' && filterEl.value !== eventType) {
+    el.style.display = 'none';
+  }
 
   switch (eventType) {
     case 'message':
-      el.innerHTML = '<span class="cc-role">' + escapeHtml(data.role || 'assistant') + '</span> '
-        + '<span class="cc-content">' + escapeHtml(data.content || '') + '</span>';
+      el.innerHTML = '<span class="activity-role">' + escapeHtml(data.role || 'assistant') + '</span> '
+        + '<span class="activity-content">' + escapeHtml(data.content || '') + '</span>';
       break;
     case 'tool_use':
-      el.innerHTML = '<details class="cc-tool-block"><summary>'
-        + '<span class="cc-tool-icon">&#9881;</span> '
+      el.innerHTML = '<details class="activity-tool-block"><summary>'
+        + '<span class="activity-tool-icon">&#9881;</span> '
         + escapeHtml(data.tool_name || 'tool')
-        + '</summary><pre class="cc-tool-input">'
+        + '</summary><pre class="activity-tool-input">'
         + escapeHtml(typeof data.input === 'string' ? data.input : JSON.stringify(data.input, null, 2))
         + '</pre></details>';
       break;
     case 'tool_result':
-      el.innerHTML = '<details class="cc-tool-block cc-tool-result"><summary>'
-        + '<span class="cc-tool-icon">&#10003;</span> '
+      el.innerHTML = '<details class="activity-tool-block activity-tool-result"><summary>'
+        + '<span class="activity-tool-icon">&#10003;</span> '
         + escapeHtml(data.tool_name || 'result')
-        + '</summary><pre class="cc-tool-output">'
+        + '</summary><pre class="activity-tool-output">'
         + escapeHtml(data.output || '')
         + '</pre></details>';
       break;
     case 'status':
-      el.innerHTML = '<span class="cc-status">' + escapeHtml(data.message || '') + '</span>';
+      el.innerHTML = '<span class="activity-status">' + escapeHtml(data.message || '') + '</span>';
       break;
     case 'result':
-      el.className += ' cc-final';
-      el.innerHTML = '<span class="cc-result-status">' + escapeHtml(data.status || 'done') + '</span>';
+      el.className += ' activity-final';
+      const success = data.success !== false;
+      el.innerHTML = '<span class="activity-result-status" data-success="' + success + '">'
+        + escapeHtml(data.message || data.status || 'done') + '</span>';
       if (data.session_id) {
-        el.innerHTML += ' <span class="cc-session-id">session: ' + escapeHtml(data.session_id) + '</span>';
+        el.innerHTML += ' <span class="activity-session-id">session: ' + escapeHtml(data.session_id) + '</span>';
       }
       break;
     default:
-      el.innerHTML = '<span class="cc-status">' + escapeHtml(JSON.stringify(data)) + '</span>';
+      el.innerHTML = '<span class="activity-status">' + escapeHtml(JSON.stringify(data)) + '</span>';
   }
 
   terminal.appendChild(el);
 }
 
-function refreshClaudeCodeTab(jobId) {
-  if (claudeCodeCurrentJobId !== jobId) return;
-  if (currentJobSubTab !== 'claude_code') return;
-  const terminal = document.getElementById('cc-terminal');
+function refreshActivityTab(jobId) {
+  if (activityCurrentJobId !== jobId) return;
+  if (currentJobSubTab !== 'activity') return;
+  const terminal = document.getElementById('activity-terminal');
   if (!terminal) return;
-  const live = claudeCodeEvents.get(jobId) || [];
-  if (live.length > 0) {
-    const lastEvt = live[live.length - 1];
-    appendClaudeCodeEvent(terminal, lastEvt.type.replace('claude_code_', ''), lastEvt.data);
-    terminal.scrollTop = terminal.scrollHeight;
-  }
+  appendNewLiveEvents(terminal, jobId);
 }
 
-function sendClaudeCodePrompt(jobId, done) {
-  const input = document.getElementById('cc-prompt-input');
+function sendJobPrompt(jobId, done) {
+  const input = document.getElementById('activity-prompt-input');
   const content = input ? input.value.trim() : '';
   if (!content && !done) return;
 
@@ -1581,15 +1777,130 @@ function sendClaudeCodePrompt(jobId, done) {
   }).then(() => {
     if (input) input.value = '';
     if (done) {
-      const bar = document.getElementById('cc-input-bar');
-      if (bar) bar.innerHTML = '<span class="cc-status">Done signal sent</span>';
+      const bar = document.getElementById('activity-input-bar');
+      if (bar) bar.innerHTML = '<span class="activity-status">Done signal sent</span>';
     }
   }).catch((err) => {
-    const terminal = document.getElementById('cc-terminal');
+    const terminal = document.getElementById('activity-terminal');
     if (terminal) {
-      appendClaudeCodeEvent(terminal, 'status', { message: 'Failed to send: ' + err.message });
+      appendActivityEvent(terminal, 'status', { message: 'Failed to send: ' + err.message });
     }
   });
+}
+
+// --- Gateway status widget ---
+
+let gatewayStatusInterval = null;
+
+function startGatewayStatusPolling() {
+  fetchGatewayStatus();
+  gatewayStatusInterval = setInterval(fetchGatewayStatus, 30000);
+}
+
+function fetchGatewayStatus() {
+  apiFetch('/api/gateway/status').then((data) => {
+    const popover = document.getElementById('gateway-popover');
+    popover.innerHTML = '<div class="gw-stat"><span>SSE clients</span><span>' + (data.sse_clients || 0) + '</span></div>'
+      + '<div class="gw-stat"><span>Log clients</span><span>' + (data.log_clients || 0) + '</span></div>'
+      + '<div class="gw-stat"><span>Uptime</span><span>' + formatDuration(data.uptime_secs) + '</span></div>';
+  }).catch(() => {});
+}
+
+// Show/hide popover on hover
+document.getElementById('gateway-status-trigger').addEventListener('mouseenter', () => {
+  document.getElementById('gateway-popover').classList.add('visible');
+});
+document.getElementById('gateway-status-trigger').addEventListener('mouseleave', () => {
+  document.getElementById('gateway-popover').classList.remove('visible');
+});
+
+// --- Extension install ---
+
+function installExtension() {
+  const name = document.getElementById('ext-install-name').value.trim();
+  if (!name) {
+    showToast('Extension name is required', 'error');
+    return;
+  }
+  const url = document.getElementById('ext-install-url').value.trim();
+  const kind = document.getElementById('ext-install-kind').value;
+
+  apiFetch('/api/extensions/install', {
+    method: 'POST',
+    body: { name, url: url || undefined, kind },
+  }).then((res) => {
+    if (res.success) {
+      showToast('Installed ' + name, 'success');
+      document.getElementById('ext-install-name').value = '';
+      document.getElementById('ext-install-url').value = '';
+      loadExtensions();
+    } else {
+      showToast('Install failed: ' + (res.message || 'unknown error'), 'error');
+    }
+  }).catch((err) => {
+    showToast('Install failed: ' + err.message, 'error');
+  });
+}
+
+// --- Keyboard shortcuts ---
+
+document.addEventListener('keydown', (e) => {
+  const mod = e.metaKey || e.ctrlKey;
+  const tag = (e.target.tagName || '').toLowerCase();
+  const inInput = tag === 'input' || tag === 'textarea';
+
+  // Mod+1-5: switch tabs
+  if (mod && e.key >= '1' && e.key <= '5') {
+    e.preventDefault();
+    const tabs = ['chat', 'memory', 'jobs', 'logs', 'extensions'];
+    const idx = parseInt(e.key) - 1;
+    if (tabs[idx]) switchTab(tabs[idx]);
+    return;
+  }
+
+  // Mod+K: focus chat input or memory search
+  if (mod && e.key === 'k') {
+    e.preventDefault();
+    if (currentTab === 'memory') {
+      document.getElementById('memory-search').focus();
+    } else {
+      document.getElementById('chat-input').focus();
+    }
+    return;
+  }
+
+  // Mod+N: new thread
+  if (mod && e.key === 'n' && currentTab === 'chat') {
+    e.preventDefault();
+    createNewThread();
+    return;
+  }
+
+  // Escape: close job detail or blur input
+  if (e.key === 'Escape') {
+    if (currentJobId) {
+      closeJobDetail();
+    } else if (inInput) {
+      e.target.blur();
+    }
+    return;
+  }
+});
+
+// --- Toasts ---
+
+function showToast(message, type) {
+  const container = document.getElementById('toasts');
+  const toast = document.createElement('div');
+  toast.className = 'toast toast-' + (type || 'info');
+  toast.textContent = message;
+  container.appendChild(toast);
+  // Trigger slide-in
+  requestAnimationFrame(() => toast.classList.add('visible'));
+  setTimeout(() => {
+    toast.classList.remove('visible');
+    toast.addEventListener('transitionend', () => toast.remove());
+  }, 4000);
 }
 
 // --- Utilities ---
