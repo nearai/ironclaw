@@ -21,9 +21,9 @@ use crate::context::JobContext;
 use crate::error::Error;
 use crate::extensions::ExtensionManager;
 use crate::history::Store;
+use crate::hooks::HookRegistry;
 use crate::llm::{ChatMessage, LlmProvider, Reasoning, ReasoningContext, RespondResult};
 use crate::safety::SafetyLayer;
-use crate::hooks::HookRegistry;
 use crate::tools::ToolRegistry;
 use crate::workspace::Workspace;
 
@@ -368,10 +368,12 @@ impl Agent {
                         thread_id: message.thread_id.clone(),
                     };
                     match self.hooks().run(&event).await {
-                        Err(crate::hooks::HookError::Rejected { .. }) => {
-                            // Hook rejected — suppress sending
+                        Err(err) => {
+                            tracing::warn!("BeforeOutbound hook blocked response: {}", err);
                         }
-                        Ok(crate::hooks::HookOutcome::Continue { modified: Some(new_content) }) => {
+                        Ok(crate::hooks::HookOutcome::Continue {
+                            modified: Some(new_content),
+                        }) => {
                             let _ = self
                                 .channels
                                 .respond(&message, OutgoingResponse::text(new_content))
@@ -432,8 +434,15 @@ impl Agent {
                 Err(crate::hooks::HookError::Rejected { reason }) => {
                     return Ok(Some(format!("[Message rejected: {}]", reason)));
                 }
-                Ok(crate::hooks::HookOutcome::Continue { modified: Some(new_content) }) => {
-                    submission = Submission::UserInput { content: new_content };
+                Err(err) => {
+                    return Ok(Some(format!("[Message blocked by hook policy: {}]", err)));
+                }
+                Ok(crate::hooks::HookOutcome::Continue {
+                    modified: Some(new_content),
+                }) => {
+                    submission = Submission::UserInput {
+                        content: new_content,
+                    };
                 }
                 _ => {} // Continue, fail-open errors already logged in registry
             }
@@ -750,9 +759,12 @@ impl Agent {
                         Err(crate::hooks::HookError::Rejected { reason }) => {
                             format!("[Response filtered: {}]", reason)
                         }
-                        Ok(crate::hooks::HookOutcome::Continue { modified: Some(new_response) }) => {
-                            new_response
+                        Err(err) => {
+                            format!("[Response blocked by hook policy: {}]", err)
                         }
+                        Ok(crate::hooks::HookOutcome::Continue {
+                            modified: Some(new_response),
+                        }) => new_response,
                         _ => response, // fail-open: use original
                     }
                 };
@@ -975,7 +987,17 @@ impl Agent {
                                     ));
                                     continue;
                                 }
-                                Ok(crate::hooks::HookOutcome::Continue { modified: Some(new_params) }) => {
+                                Err(err) => {
+                                    context_messages.push(ChatMessage::tool_result(
+                                        &tc.id,
+                                        &tc.name,
+                                        format!("Tool call blocked by hook policy: {}", err),
+                                    ));
+                                    continue;
+                                }
+                                Ok(crate::hooks::HookOutcome::Continue {
+                                    modified: Some(new_params),
+                                }) => {
                                     if let Ok(parsed) = serde_json::from_str(&new_params) {
                                         tc.arguments = parsed;
                                     }

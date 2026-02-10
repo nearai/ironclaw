@@ -398,7 +398,7 @@ Report when the job is complete or if you encounter issues you cannot resolve."#
 
         // Run BeforeToolCall hook
         let params = {
-            use crate::hooks::{HookEvent, HookOutcome};
+            use crate::hooks::{HookError, HookEvent, HookOutcome};
             let event = HookEvent::ToolCall {
                 tool_name: tool_name.to_string(),
                 parameters: params.clone(),
@@ -406,16 +406,23 @@ Report when the job is complete or if you encounter issues you cannot resolve."#
                 context: format!("job:{}", job_id),
             };
             match hooks.run(&event).await {
-                Ok(HookOutcome::Reject { reason }) => {
+                Err(HookError::Rejected { reason }) => {
                     return Err(crate::error::ToolError::ExecutionFailed {
                         name: tool_name.to_string(),
                         reason: format!("Blocked by hook: {}", reason),
                     }
                     .into());
                 }
-                Ok(HookOutcome::Continue { modified: Some(new_params) }) => {
-                    serde_json::from_str(&new_params).unwrap_or_else(|_| params.clone())
+                Err(err) => {
+                    return Err(crate::error::ToolError::ExecutionFailed {
+                        name: tool_name.to_string(),
+                        reason: format!("Blocked by hook failure mode: {}", err),
+                    }
+                    .into());
                 }
+                Ok(HookOutcome::Continue {
+                    modified: Some(new_params),
+                }) => serde_json::from_str(&new_params).unwrap_or_else(|_| params.clone()),
                 _ => params.clone(),
             }
         };
