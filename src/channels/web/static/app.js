@@ -5,6 +5,10 @@ let eventSource = null;
 let logEventSource = null;
 let currentTab = 'chat';
 let currentThreadId = null;
+let assistantThreadId = null;
+let hasMore = false;
+let oldestTimestamp = null;
+let loadingOlder = false;
 let jobEvents = new Map(); // job_id -> Array of events
 let jobListRefreshTimer = null;
 const JOB_EVENTS_CAP = 500;
@@ -89,6 +93,7 @@ function connectSSE() {
 
   eventSource.addEventListener('response', (e) => {
     const data = JSON.parse(e.data);
+    if (!isCurrentThread(data.thread_id)) return;
     addMessage('assistant', data.content);
     setStatus('');
     enableChatInput();
@@ -98,27 +103,32 @@ function connectSSE() {
 
   eventSource.addEventListener('thinking', (e) => {
     const data = JSON.parse(e.data);
+    if (!isCurrentThread(data.thread_id)) return;
     setStatus(data.message, true);
   });
 
   eventSource.addEventListener('tool_started', (e) => {
     const data = JSON.parse(e.data);
+    if (!isCurrentThread(data.thread_id)) return;
     setStatus('Running tool: ' + data.name, true);
   });
 
   eventSource.addEventListener('tool_completed', (e) => {
     const data = JSON.parse(e.data);
+    if (!isCurrentThread(data.thread_id)) return;
     const icon = data.success ? '\u2713' : '\u2717';
     setStatus('Tool ' + data.name + ' ' + icon);
   });
 
   eventSource.addEventListener('stream_chunk', (e) => {
     const data = JSON.parse(e.data);
+    if (!isCurrentThread(data.thread_id)) return;
     appendToLastAssistant(data.content);
   });
 
   eventSource.addEventListener('status', (e) => {
     const data = JSON.parse(e.data);
+    if (!isCurrentThread(data.thread_id)) return;
     setStatus(data.message);
     // "Done" and "Awaiting approval" are terminal signals from the agent:
     // the agentic loop finished, so re-enable input as a safety net in case
@@ -153,6 +163,7 @@ function connectSSE() {
   eventSource.addEventListener('error', (e) => {
     if (e.data) {
       const data = JSON.parse(e.data);
+      if (!isCurrentThread(data.thread_id)) return;
       addMessage('system', 'Error: ' + data.message);
       enableChatInput();
     }
@@ -186,6 +197,14 @@ function connectSSE() {
       }
     });
   }
+}
+
+// Check if an SSE event belongs to the currently viewed thread.
+// Events without a thread_id (legacy) are always shown.
+function isCurrentThread(threadId) {
+  if (!threadId) return true;
+  if (!currentThreadId) return true;
+  return threadId === currentThreadId;
 }
 
 // --- Chat ---
@@ -560,28 +579,91 @@ function showAuthCardError(extensionName, message) {
   }
 }
 
-function loadHistory() {
-  const historyUrl = currentThreadId
-    ? '/api/chat/history?thread_id=' + encodeURIComponent(currentThreadId)
-    : '/api/chat/history';
+function loadHistory(before) {
+  let historyUrl = '/api/chat/history?limit=50';
+  if (currentThreadId) {
+    historyUrl += '&thread_id=' + encodeURIComponent(currentThreadId);
+  }
+  if (before) {
+    historyUrl += '&before=' + encodeURIComponent(before);
+  }
+
+  const isPaginating = !!before;
+  if (isPaginating) loadingOlder = true;
+
   apiFetch(historyUrl).then((data) => {
     const container = document.getElementById('chat-messages');
-    container.innerHTML = '';
-    for (const turn of data.turns) {
-      addMessage('user', turn.user_input);
-      if (turn.response) {
-        addMessage('assistant', turn.response);
+
+    if (!isPaginating) {
+      // Fresh load: clear and render
+      container.innerHTML = '';
+      for (const turn of data.turns) {
+        addMessage('user', turn.user_input);
+        if (turn.response) {
+          addMessage('assistant', turn.response);
+        }
       }
+    } else {
+      // Pagination: prepend older messages
+      const savedHeight = container.scrollHeight;
+      const fragment = document.createDocumentFragment();
+      for (const turn of data.turns) {
+        const userDiv = createMessageElement('user', turn.user_input);
+        fragment.appendChild(userDiv);
+        if (turn.response) {
+          const assistantDiv = createMessageElement('assistant', turn.response);
+          fragment.appendChild(assistantDiv);
+        }
+      }
+      container.insertBefore(fragment, container.firstChild);
+      // Restore scroll position so the user doesn't jump
+      container.scrollTop = container.scrollHeight - savedHeight;
     }
+
+    hasMore = data.has_more || false;
+    oldestTimestamp = data.oldest_timestamp || null;
   }).catch(() => {
-    // No history or no active thread, that's fine
+    // No history or no active thread
+  }).finally(() => {
+    loadingOlder = false;
+    removeScrollSpinner();
   });
+}
+
+// Create a message DOM element without appending it (for prepend operations)
+function createMessageElement(role, content) {
+  const div = document.createElement('div');
+  div.className = 'message ' + role;
+  if (role === 'user') {
+    div.textContent = content;
+  } else {
+    div.setAttribute('data-raw', content);
+    div.innerHTML = renderMarkdown(content);
+  }
+  return div;
+}
+
+function removeScrollSpinner() {
+  const spinner = document.getElementById('scroll-load-spinner');
+  if (spinner) spinner.remove();
 }
 
 // --- Threads ---
 
 function loadThreads() {
   apiFetch('/api/chat/threads').then((data) => {
+    // Pinned assistant thread
+    if (data.assistant_thread) {
+      assistantThreadId = data.assistant_thread.id;
+      const el = document.getElementById('assistant-thread');
+      const isActive = currentThreadId === assistantThreadId;
+      el.className = 'assistant-item' + (isActive ? ' active' : '');
+      const meta = document.getElementById('assistant-meta');
+      const count = data.assistant_thread.turn_count || 0;
+      meta.textContent = count > 0 ? count + ' turns' : '';
+    }
+
+    // Regular threads
     const list = document.getElementById('thread-list');
     list.innerHTML = '';
     const threads = data.threads || [];
@@ -600,11 +682,27 @@ function loadThreads() {
       item.addEventListener('click', () => switchThread(thread.id));
       list.appendChild(item);
     }
+
+    // Default to assistant thread on first load if no thread selected
+    if (!currentThreadId && assistantThreadId) {
+      switchToAssistant();
+    }
   }).catch(() => {});
+}
+
+function switchToAssistant() {
+  if (!assistantThreadId) return;
+  currentThreadId = assistantThreadId;
+  hasMore = false;
+  oldestTimestamp = null;
+  loadHistory();
+  loadThreads();
 }
 
 function switchThread(threadId) {
   currentThreadId = threadId;
+  hasMore = false;
+  oldestTimestamp = null;
   loadHistory();
   loadThreads();
 }
@@ -636,6 +734,20 @@ chatInput.addEventListener('keydown', (e) => {
   }
 });
 chatInput.addEventListener('input', () => autoResizeTextarea(chatInput));
+
+// Infinite scroll: load older messages when scrolled near the top
+document.getElementById('chat-messages').addEventListener('scroll', function () {
+  if (this.scrollTop < 100 && hasMore && !loadingOlder) {
+    loadingOlder = true;
+    // Show spinner at top
+    const spinner = document.createElement('div');
+    spinner.id = 'scroll-load-spinner';
+    spinner.className = 'scroll-load-spinner';
+    spinner.innerHTML = '<div class="spinner"></div> Loading older messages...';
+    this.insertBefore(spinner, this.firstChild);
+    loadHistory(oldestTimestamp);
+  }
+});
 
 function autoResizeTextarea(el) {
   el.style.height = 'auto';

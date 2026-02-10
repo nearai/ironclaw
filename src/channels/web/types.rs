@@ -26,10 +26,15 @@ pub struct ThreadInfo {
     pub updated_at: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub thread_type: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
 pub struct ThreadListResponse {
+    /// The pinned assistant thread (always present after first load).
+    pub assistant_thread: Option<ThreadInfo>,
+    /// Regular conversation threads.
     pub threads: Vec<ThreadInfo>,
     pub active_thread: Option<Uuid>,
 }
@@ -56,6 +61,12 @@ pub struct ToolCallInfo {
 pub struct HistoryResponse {
     pub thread_id: Uuid,
     pub turns: Vec<TurnInfo>,
+    /// Whether there are older messages available.
+    #[serde(default)]
+    pub has_more: bool,
+    /// Cursor for the next page (ISO8601 timestamp of the oldest message returned).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub oldest_timestamp: Option<String>,
 }
 
 // --- Approval ---
@@ -75,17 +86,43 @@ pub enum SseEvent {
     #[serde(rename = "response")]
     Response { content: String, thread_id: String },
     #[serde(rename = "thinking")]
-    Thinking { message: String },
+    Thinking {
+        message: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        thread_id: Option<String>,
+    },
     #[serde(rename = "tool_started")]
-    ToolStarted { name: String },
+    ToolStarted {
+        name: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        thread_id: Option<String>,
+    },
     #[serde(rename = "tool_completed")]
-    ToolCompleted { name: String, success: bool },
+    ToolCompleted {
+        name: String,
+        success: bool,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        thread_id: Option<String>,
+    },
     #[serde(rename = "tool_result")]
-    ToolResult { name: String, preview: String },
+    ToolResult {
+        name: String,
+        preview: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        thread_id: Option<String>,
+    },
     #[serde(rename = "stream_chunk")]
-    StreamChunk { content: String },
+    StreamChunk {
+        content: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        thread_id: Option<String>,
+    },
     #[serde(rename = "status")]
-    Status { message: String },
+    Status {
+        message: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        thread_id: Option<String>,
+    },
     #[serde(rename = "job_started")]
     JobStarted {
         job_id: String,
@@ -116,7 +153,11 @@ pub enum SseEvent {
         message: String,
     },
     #[serde(rename = "error")]
-    Error { message: String },
+    Error {
+        message: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        thread_id: Option<String>,
+    },
     #[serde(rename = "heartbeat")]
     Heartbeat,
 
@@ -660,6 +701,7 @@ mod tests {
     fn test_ws_server_from_sse_thinking() {
         let sse = SseEvent::Thinking {
             message: "reasoning...".to_string(),
+            thread_id: None,
         };
         let ws = WsServerMessage::from_sse_event(&sse);
         match ws {

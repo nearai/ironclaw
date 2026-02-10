@@ -211,6 +211,7 @@ impl LlmProvider for NearAiChatProvider {
             finish_reason,
             input_tokens: response.usage.prompt_tokens,
             output_tokens: response.usage.completion_tokens,
+            response_id: None,
         })
     }
 
@@ -292,6 +293,7 @@ impl LlmProvider for NearAiChatProvider {
             finish_reason,
             input_tokens: response.usage.prompt_tokens,
             output_tokens: response.usage.completion_tokens,
+            response_id: None,
         })
     }
 

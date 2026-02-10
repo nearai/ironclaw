@@ -248,6 +248,7 @@ async fn chat_send_handler(
 
     if let Some(ref thread_id) = req.thread_id {
         msg = msg.with_thread(thread_id);
+        msg = msg.with_metadata(serde_json::json!({"thread_id": thread_id}));
     }
 
     let msg_id = msg.id;
@@ -430,6 +431,8 @@ async fn chat_ws_handler(
 #[derive(Deserialize)]
 struct HistoryQuery {
     thread_id: Option<String>,
+    limit: Option<usize>,
+    before: Option<String>,
 }
 
 async fn chat_history_handler(
@@ -444,6 +447,22 @@ async fn chat_history_handler(
     let session = session_manager.get_or_create_session(&state.user_id).await;
     let sess = session.lock().await;
 
+    let limit = query.limit.unwrap_or(50);
+    let before_cursor = query
+        .before
+        .as_deref()
+        .map(|s| {
+            chrono::DateTime::parse_from_rfc3339(s)
+                .map(|dt| dt.with_timezone(&chrono::Utc))
+                .map_err(|_| {
+                    (
+                        StatusCode::BAD_REQUEST,
+                        "Invalid 'before' timestamp".to_string(),
+                    )
+                })
+        })
+        .transpose()?;
+
     // Find the thread
     let thread_id = if let Some(ref tid) = query.thread_id {
         Uuid::parse_str(tid)
@@ -452,6 +471,25 @@ async fn chat_history_handler(
         sess.active_thread
             .ok_or((StatusCode::NOT_FOUND, "No active thread".to_string()))?
     };
+
+    // For paginated requests (before cursor set), always go to DB
+    if before_cursor.is_some() {
+        if let Some(ref store) = state.store {
+            let (messages, has_more) = store
+                .list_conversation_messages_paginated(thread_id, before_cursor, limit as i64)
+                .await
+                .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+            let oldest_timestamp = messages.first().map(|m| m.created_at.to_rfc3339());
+            let turns = build_turns_from_db_messages(&messages);
+            return Ok(Json(HistoryResponse {
+                thread_id,
+                turns,
+                has_more,
+                oldest_timestamp,
+            }));
+        }
+    }
 
     // Try in-memory first (freshest data for active threads)
     if let Some(thread) = sess.threads.get(&thread_id) {
@@ -478,17 +516,31 @@ async fn chat_history_handler(
                 })
                 .collect();
 
-            return Ok(Json(HistoryResponse { thread_id, turns }));
+            return Ok(Json(HistoryResponse {
+                thread_id,
+                turns,
+                has_more: false,
+                oldest_timestamp: None,
+            }));
         }
     }
 
-    // Fall back to DB for historical threads not in memory
+    // Fall back to DB for historical threads not in memory (paginated)
     if let Some(ref store) = state.store {
-        if let Ok(messages) = store.list_conversation_messages(thread_id).await {
-            if !messages.is_empty() {
-                let turns = build_turns_from_db_messages(&messages);
-                return Ok(Json(HistoryResponse { thread_id, turns }));
-            }
+        let (messages, has_more) = store
+            .list_conversation_messages_paginated(thread_id, None, limit as i64)
+            .await
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+        if !messages.is_empty() {
+            let oldest_timestamp = messages.first().map(|m| m.created_at.to_rfc3339());
+            let turns = build_turns_from_db_messages(&messages);
+            return Ok(Json(HistoryResponse {
+                thread_id,
+                turns,
+                has_more,
+                oldest_timestamp,
+            }));
         }
     }
 
@@ -496,6 +548,8 @@ async fn chat_history_handler(
     Ok(Json(HistoryResponse {
         thread_id,
         turns: Vec::new(),
+        has_more: false,
+        oldest_timestamp: None,
     }))
 }
 
@@ -552,32 +606,59 @@ async fn chat_threads_handler(
 
     // Try DB first for persistent thread list
     if let Some(ref store) = state.store {
+        // Auto-create assistant thread if it doesn't exist
+        let assistant_id = store
+            .get_or_create_assistant_conversation(&state.user_id, "gateway")
+            .await
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
         if let Ok(summaries) = store
             .list_conversations_with_preview(&state.user_id, "gateway", 50)
             .await
         {
-            if !summaries.is_empty() {
-                let threads: Vec<ThreadInfo> = summaries
-                    .iter()
-                    .map(|s| ThreadInfo {
-                        id: s.id,
-                        state: "Idle".to_string(),
-                        turn_count: (s.message_count / 2).max(0) as usize,
-                        created_at: s.started_at.to_rfc3339(),
-                        updated_at: s.last_activity.to_rfc3339(),
-                        title: s.title.clone(),
-                    })
-                    .collect();
+            let mut assistant_thread = None;
+            let mut threads = Vec::new();
 
-                return Ok(Json(ThreadListResponse {
-                    threads,
-                    active_thread: sess.active_thread,
-                }));
+            for s in &summaries {
+                let info = ThreadInfo {
+                    id: s.id,
+                    state: "Idle".to_string(),
+                    turn_count: (s.message_count / 2).max(0) as usize,
+                    created_at: s.started_at.to_rfc3339(),
+                    updated_at: s.last_activity.to_rfc3339(),
+                    title: s.title.clone(),
+                    thread_type: s.thread_type.clone(),
+                };
+
+                if s.id == assistant_id {
+                    assistant_thread = Some(info);
+                } else {
+                    threads.push(info);
+                }
             }
+
+            // If assistant wasn't in the list (0 messages), synthesize it
+            if assistant_thread.is_none() {
+                assistant_thread = Some(ThreadInfo {
+                    id: assistant_id,
+                    state: "Idle".to_string(),
+                    turn_count: 0,
+                    created_at: chrono::Utc::now().to_rfc3339(),
+                    updated_at: chrono::Utc::now().to_rfc3339(),
+                    title: None,
+                    thread_type: Some("assistant".to_string()),
+                });
+            }
+
+            return Ok(Json(ThreadListResponse {
+                assistant_thread,
+                threads,
+                active_thread: sess.active_thread,
+            }));
         }
     }
 
-    // Fallback: in-memory only
+    // Fallback: in-memory only (no assistant thread without DB)
     let threads: Vec<ThreadInfo> = sess
         .threads
         .values()
@@ -588,10 +669,12 @@ async fn chat_threads_handler(
             created_at: t.created_at.to_rfc3339(),
             updated_at: t.updated_at.to_rfc3339(),
             title: None,
+            thread_type: None,
         })
         .collect();
 
     Ok(Json(ThreadListResponse {
+        assistant_thread: None,
         threads,
         active_thread: sess.active_thread,
     }))
@@ -616,9 +699,10 @@ async fn chat_new_thread_handler(
         created_at: thread.created_at.to_rfc3339(),
         updated_at: thread.updated_at.to_rfc3339(),
         title: None,
+        thread_type: Some("thread".to_string()),
     };
 
-    // Persist the empty conversation row so it shows up in thread list
+    // Persist the empty conversation row with thread_type metadata
     if let Some(ref store) = state.store {
         let store = Arc::clone(store);
         let user_id = state.user_id.clone();
@@ -628,6 +712,13 @@ async fn chat_new_thread_handler(
                 .await
             {
                 tracing::warn!("Failed to persist new thread: {}", e);
+            }
+            let metadata_val = serde_json::json!("thread");
+            if let Err(e) = store
+                .update_conversation_metadata_field(thread_id, "thread_type", &metadata_val)
+                .await
+            {
+                tracing::warn!("Failed to set thread_type metadata: {}", e);
             }
         });
     }

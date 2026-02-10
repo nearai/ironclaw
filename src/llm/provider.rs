@@ -108,6 +108,8 @@ pub struct CompletionRequest {
     pub max_tokens: Option<u32>,
     pub temperature: Option<f32>,
     pub stop_sequences: Option<Vec<String>>,
+    /// Opaque metadata passed through to the provider (e.g. thread_id for chaining).
+    pub metadata: std::collections::HashMap<String, String>,
 }
 
 impl CompletionRequest {
@@ -118,6 +120,7 @@ impl CompletionRequest {
             max_tokens: None,
             temperature: None,
             stop_sequences: None,
+            metadata: std::collections::HashMap::new(),
         }
     }
 
@@ -141,6 +144,8 @@ pub struct CompletionResponse {
     pub input_tokens: u32,
     pub output_tokens: u32,
     pub finish_reason: FinishReason,
+    /// Provider-specific response ID (e.g. for NEAR AI response chaining).
+    pub response_id: Option<String>,
 }
 
 /// Why the completion finished.
@@ -187,6 +192,8 @@ pub struct ToolCompletionRequest {
     pub temperature: Option<f32>,
     /// How to handle tool use: "auto", "required", or "none".
     pub tool_choice: Option<String>,
+    /// Opaque metadata passed through to the provider (e.g. thread_id for chaining).
+    pub metadata: std::collections::HashMap<String, String>,
 }
 
 impl ToolCompletionRequest {
@@ -198,6 +205,7 @@ impl ToolCompletionRequest {
             max_tokens: None,
             temperature: None,
             tool_choice: None,
+            metadata: std::collections::HashMap::new(),
         }
     }
 
@@ -230,6 +238,8 @@ pub struct ToolCompletionResponse {
     pub input_tokens: u32,
     pub output_tokens: u32,
     pub finish_reason: FinishReason,
+    /// Provider-specific response ID (e.g. for NEAR AI response chaining).
+    pub response_id: Option<String>,
 }
 
 /// Metadata about a model returned by the provider's API.
@@ -287,6 +297,20 @@ pub trait LlmProvider: Send + Sync {
             provider: "unknown".to_string(),
             reason: "Runtime model switching not supported by this provider".to_string(),
         })
+    }
+
+    /// Seed a response chain for a thread (e.g. restoring from DB).
+    ///
+    /// Providers that support response chaining (e.g. NEAR AI `previous_response_id`)
+    /// store this so subsequent calls send only delta messages.
+    fn seed_response_chain(&self, _thread_id: &str, _response_id: String) {}
+
+    /// Get the last response chain ID for a thread.
+    ///
+    /// Returns `None` if the provider doesn't support chaining or has no
+    /// stored state for this thread.
+    fn get_response_chain_id(&self, _thread_id: &str) -> Option<String> {
+        None
     }
 
     /// Calculate cost for a completion.

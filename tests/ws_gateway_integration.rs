@@ -164,6 +164,7 @@ async fn test_ws_thinking_event() {
 
     state.sse.broadcast(SseEvent::Thinking {
         message: "analyzing...".to_string(),
+        thread_id: None,
     });
 
     let text = recv_text(&mut ws).await;
@@ -288,13 +289,16 @@ async fn test_ws_multiple_events_in_sequence() {
     // Broadcast multiple events rapidly
     state.sse.broadcast(SseEvent::Thinking {
         message: "step 1".to_string(),
+        thread_id: None,
     });
     state.sse.broadcast(SseEvent::ToolStarted {
         name: "shell".to_string(),
+        thread_id: None,
     });
     state.sse.broadcast(SseEvent::ToolCompleted {
         name: "shell".to_string(),
         success: true,
+        thread_id: None,
     });
     state.sse.broadcast(SseEvent::Response {
         content: "done".to_string(),

@@ -140,6 +140,7 @@ async fn llm_complete(
         max_tokens: req.max_tokens,
         temperature: req.temperature,
         stop_sequences: req.stop_sequences,
+        metadata: std::collections::HashMap::new(),
     };
 
     let resp = state.llm.complete(completion_req).await.map_err(|e| {
@@ -166,6 +167,7 @@ async fn llm_complete_with_tools(
         max_tokens: req.max_tokens,
         temperature: req.temperature,
         tool_choice: req.tool_choice,
+        metadata: std::collections::HashMap::new(),
     };
 
     let resp = state.llm.complete_with_tools(tool_req).await.map_err(|e| {

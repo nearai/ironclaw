@@ -195,6 +195,7 @@ impl WorkerHttpClient {
             input_tokens: proxy_resp.input_tokens,
             output_tokens: proxy_resp.output_tokens,
             finish_reason: parse_finish_reason(&proxy_resp.finish_reason),
+            response_id: None,
         })
     }
 
@@ -241,6 +242,7 @@ impl WorkerHttpClient {
             input_tokens: proxy_resp.input_tokens,
             output_tokens: proxy_resp.output_tokens,
             finish_reason: parse_finish_reason(&proxy_resp.finish_reason),
+            response_id: None,
         })
     }
 

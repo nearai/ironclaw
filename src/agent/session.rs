@@ -173,6 +173,10 @@ pub struct Thread {
     /// Pending auth token request (thread is in auth mode).
     #[serde(default)]
     pub pending_auth: Option<PendingAuth>,
+    /// Last NEAR AI response ID for response chaining. Persisted to DB
+    /// metadata so we can resume chaining across restarts.
+    #[serde(default)]
+    pub last_response_id: Option<String>,
 }
 
 impl Thread {
@@ -189,6 +193,7 @@ impl Thread {
             metadata: serde_json::Value::Null,
             pending_approval: None,
             pending_auth: None,
+            last_response_id: None,
         }
     }
 
@@ -205,6 +210,7 @@ impl Thread {
             metadata: serde_json::Value::Null,
             pending_approval: None,
             pending_auth: None,
+            last_response_id: None,
         }
     }
 

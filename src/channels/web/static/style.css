@@ -285,6 +285,25 @@ body {
   to { transform: rotate(360deg); }
 }
 
+.scroll-load-spinner {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: 8px;
+  color: var(--text-secondary);
+  font-size: 12px;
+}
+
+.scroll-load-spinner .spinner {
+  width: 12px;
+  height: 12px;
+  border: 2px solid var(--border);
+  border-top-color: var(--accent);
+  border-radius: 50%;
+  animation: spin 0.6s linear infinite;
+}
+
 /* Approval card (inline in chat) */
 .approval-card {
   align-self: flex-start;
@@ -1982,7 +2001,9 @@ mark {
 
 .thread-sidebar.collapsed .thread-sidebar-header span,
 .thread-sidebar.collapsed .thread-new-btn,
-.thread-sidebar.collapsed .thread-list {
+.thread-sidebar.collapsed .thread-list,
+.thread-sidebar.collapsed .assistant-item,
+.thread-sidebar.collapsed .threads-section-header {
   display: none;
 }
 
@@ -2018,6 +2039,50 @@ mark {
 
 .thread-new-btn:hover {
   background: rgba(88, 166, 255, 0.15);
+}
+
+.assistant-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 10px 12px;
+  cursor: pointer;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text);
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-secondary);
+}
+
+.assistant-item:hover {
+  background: var(--bg-tertiary);
+}
+
+.assistant-item.active {
+  background: rgba(88, 166, 255, 0.08);
+  color: var(--accent);
+  border-left: 2px solid var(--accent);
+}
+
+.assistant-label {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.assistant-meta {
+  font-size: 11px;
+  font-weight: 400;
+  color: var(--text-secondary);
+}
+
+.threads-section-header {
+  padding: 8px 12px 4px;
+  font-size: 11px;
+  font-weight: 500;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  color: var(--text-secondary);
 }
 
 .thread-toggle-btn {
@@ -2324,7 +2389,9 @@ mark {
 
   .thread-sidebar .thread-sidebar-header span,
   .thread-sidebar .thread-new-btn,
-  .thread-sidebar .thread-list {
+  .thread-sidebar .thread-list,
+  .thread-sidebar .assistant-item,
+  .thread-sidebar .threads-section-header {
     display: none;
   }
 
@@ -2339,7 +2406,9 @@ mark {
 
   .thread-sidebar.expanded-mobile .thread-sidebar-header span,
   .thread-sidebar.expanded-mobile .thread-new-btn,
-  .thread-sidebar.expanded-mobile .thread-list {
+  .thread-sidebar.expanded-mobile .thread-list,
+  .thread-sidebar.expanded-mobile .assistant-item,
+  .thread-sidebar.expanded-mobile .threads-section-header {
     display: flex;
   }
 

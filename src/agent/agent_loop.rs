@@ -645,6 +645,20 @@ impl Agent {
         let mut thread = crate::agent::session::Thread::with_id(thread_uuid, session_id);
         thread.restore_from_messages(chat_messages);
 
+        // Restore response chain from conversation metadata
+        if let Ok(Some(metadata)) = store.get_conversation_metadata(thread_uuid).await {
+            if let Some(rid) = metadata
+                .get("last_response_id")
+                .and_then(|v| v.as_str())
+                .map(String::from)
+            {
+                thread.last_response_id = Some(rid.clone());
+                self.llm()
+                    .seed_response_chain(&thread_uuid.to_string(), rid);
+                tracing::debug!("Restored response chain for thread {}", thread_uuid);
+            }
+        }
+
         // Insert into session and register with session manager
         {
             let mut sess = session.lock().await;
@@ -848,6 +862,7 @@ impl Agent {
         match result {
             Ok(AgenticLoopResult::Response(response)) => {
                 thread.complete_turn(&response);
+                self.persist_response_chain(thread);
                 let _ = self
                     .channels
                     .send_status(
@@ -940,6 +955,41 @@ impl Agent {
         });
     }
 
+    /// Sync the provider's response chain ID to the thread and DB metadata.
+    ///
+    /// Call after a successful agentic loop to persist the latest
+    /// `previous_response_id` so chaining survives restarts.
+    fn persist_response_chain(&self, thread: &mut crate::agent::session::Thread) {
+        let tid = thread.id.to_string();
+        let response_id = match self.llm().get_response_chain_id(&tid) {
+            Some(rid) => rid,
+            None => return,
+        };
+
+        // Update in-memory thread
+        thread.last_response_id = Some(response_id.clone());
+
+        // Fire-and-forget DB write
+        let store = match self.store() {
+            Some(s) => Arc::clone(s),
+            None => return,
+        };
+        let thread_id = thread.id;
+        tokio::spawn(async move {
+            let val = serde_json::json!(response_id);
+            if let Err(e) = store
+                .update_conversation_metadata_field(thread_id, "last_response_id", &val)
+                .await
+            {
+                tracing::warn!(
+                    "Failed to persist response chain for thread {}: {}",
+                    thread_id,
+                    e
+                );
+            }
+        });
+    }
+
     /// Run the agentic loop: call LLM, execute tools, repeat until text response.
     ///
     /// Returns `AgenticLoopResult::Response` on completion, or
@@ -1015,7 +1065,12 @@ impl Agent {
             // Call LLM with current context
             let context = ReasoningContext::new()
                 .with_messages(context_messages.clone())
-                .with_tools(tool_defs);
+                .with_tools(tool_defs)
+                .with_metadata({
+                    let mut m = std::collections::HashMap::new();
+                    m.insert("thread_id".to_string(), thread_id.to_string());
+                    m
+                });
 
             let result = reasoning.respond_with_tools(&context).await?;
 
@@ -1667,6 +1722,7 @@ impl Agent {
             match result {
                 Ok(AgenticLoopResult::Response(response)) => {
                     thread.complete_turn(&response);
+                    self.persist_response_chain(thread);
                     let _ = self
                         .channels
                         .send_status(

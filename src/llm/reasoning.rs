@@ -21,6 +21,8 @@ pub struct ReasoningContext {
     pub job_description: Option<String>,
     /// Current state description.
     pub current_state: Option<String>,
+    /// Opaque metadata forwarded to the LLM provider (e.g. thread_id for chaining).
+    pub metadata: std::collections::HashMap<String, String>,
 }
 
 impl ReasoningContext {
@@ -31,6 +33,7 @@ impl ReasoningContext {
             available_tools: Vec::new(),
             job_description: None,
             current_state: None,
+            metadata: std::collections::HashMap::new(),
         }
     }
 
@@ -55,6 +58,12 @@ impl ReasoningContext {
     /// Set job description.
     pub fn with_job(mut self, description: impl Into<String>) -> Self {
         self.job_description = Some(description.into());
+        self
+    }
+
+    /// Set metadata (forwarded to the LLM provider).
+    pub fn with_metadata(mut self, metadata: std::collections::HashMap<String, String>) -> Self {
+        self.metadata = metadata;
         self
     }
 }
@@ -197,10 +206,11 @@ impl Reasoning {
             return Ok(vec![]);
         }
 
-        let request =
+        let mut request =
             ToolCompletionRequest::new(context.messages.clone(), context.available_tools.clone())
                 .with_max_tokens(1024)
                 .with_tool_choice("auto");
+        request.metadata = context.metadata.clone();
 
         let response = self.llm.complete_with_tools(request).await?;
 
@@ -305,10 +315,11 @@ Respond in JSON format:
 
         // If we have tools, use tool completion mode
         if !context.available_tools.is_empty() {
-            let request = ToolCompletionRequest::new(messages, context.available_tools.clone())
+            let mut request = ToolCompletionRequest::new(messages, context.available_tools.clone())
                 .with_max_tokens(4096)
                 .with_temperature(0.7)
                 .with_tool_choice("auto");
+            request.metadata = context.metadata.clone();
 
             let response = self.llm.complete_with_tools(request).await?;
 
@@ -343,9 +354,10 @@ Respond in JSON format:
             Ok(RespondResult::Text(clean_response(&content)))
         } else {
             // No tools, use simple completion
-            let request = CompletionRequest::new(messages)
+            let mut request = CompletionRequest::new(messages)
                 .with_max_tokens(4096)
                 .with_temperature(0.7);
+            request.metadata = context.metadata.clone();
 
             let response = self.llm.complete(request).await?;
             Ok(RespondResult::Text(clean_response(&response.content)))

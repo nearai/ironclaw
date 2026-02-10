@@ -160,13 +160,14 @@ mod tests {
 
         manager.broadcast(SseEvent::Status {
             message: "test".to_string(),
+            thread_id: None,
         });
 
         let event = rx.next().await;
         assert!(event.is_some());
         let event = event.unwrap().unwrap();
         match event {
-            SseEvent::Status { message } => assert_eq!(message, "test"),
+            SseEvent::Status { message, .. } => assert_eq!(message, "test"),
             _ => panic!("unexpected event type"),
         }
     }
@@ -180,11 +181,12 @@ mod tests {
 
         manager.broadcast(SseEvent::Thinking {
             message: "working".to_string(),
+            thread_id: None,
         });
 
         let event = stream.next().await.unwrap();
         match event {
-            SseEvent::Thinking { message } => assert_eq!(message, "working"),
+            SseEvent::Thinking { message, .. } => assert_eq!(message, "working"),
             _ => panic!("Expected Thinking event"),
         }
     }

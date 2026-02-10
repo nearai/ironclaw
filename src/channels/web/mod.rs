@@ -223,17 +223,39 @@ impl Channel for GatewayChannel {
     async fn send_status(
         &self,
         status: StatusUpdate,
-        _metadata: &serde_json::Value,
+        metadata: &serde_json::Value,
     ) -> Result<(), ChannelError> {
+        let thread_id = metadata
+            .get("thread_id")
+            .and_then(|v| v.as_str())
+            .map(String::from);
         let event = match status {
-            StatusUpdate::Thinking(msg) => SseEvent::Thinking { message: msg },
-            StatusUpdate::ToolStarted { name } => SseEvent::ToolStarted { name },
-            StatusUpdate::ToolCompleted { name, success } => {
-                SseEvent::ToolCompleted { name, success }
-            }
-            StatusUpdate::ToolResult { name, preview } => SseEvent::ToolResult { name, preview },
-            StatusUpdate::StreamChunk(content) => SseEvent::StreamChunk { content },
-            StatusUpdate::Status(msg) => SseEvent::Status { message: msg },
+            StatusUpdate::Thinking(msg) => SseEvent::Thinking {
+                message: msg,
+                thread_id: thread_id.clone(),
+            },
+            StatusUpdate::ToolStarted { name } => SseEvent::ToolStarted {
+                name,
+                thread_id: thread_id.clone(),
+            },
+            StatusUpdate::ToolCompleted { name, success } => SseEvent::ToolCompleted {
+                name,
+                success,
+                thread_id: thread_id.clone(),
+            },
+            StatusUpdate::ToolResult { name, preview } => SseEvent::ToolResult {
+                name,
+                preview,
+                thread_id: thread_id.clone(),
+            },
+            StatusUpdate::StreamChunk(content) => SseEvent::StreamChunk {
+                content,
+                thread_id: thread_id.clone(),
+            },
+            StatusUpdate::Status(msg) => SseEvent::Status {
+                message: msg,
+                thread_id: thread_id.clone(),
+            },
             StatusUpdate::JobStarted {
                 job_id,
                 title,

@@ -3,6 +3,7 @@
 //! This provider uses the NEAR AI chat-api which provides a unified interface
 //! to multiple LLM models (OpenAI, Anthropic, etc.) with user authentication.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -31,12 +32,23 @@ pub struct ModelInfo {
     pub provider: Option<String>,
 }
 
+/// Per-thread chaining state: the last response ID and how many input
+/// messages were included in that request. This lets subsequent calls send
+/// only the delta (new messages since last call).
+struct ChainState {
+    response_id: String,
+    input_count: usize,
+}
+
 /// NEAR AI Chat API provider.
 pub struct NearAiProvider {
     client: Client,
     config: NearAiConfig,
     session: Arc<SessionManager>,
     active_model: std::sync::RwLock<String>,
+    /// Per-thread response ID chaining state.
+    /// Key is thread_id from request metadata.
+    response_chains: std::sync::RwLock<HashMap<String, ChainState>>,
 }
 
 impl NearAiProvider {
@@ -53,7 +65,56 @@ impl NearAiProvider {
             config,
             session,
             active_model,
+            response_chains: std::sync::RwLock::new(HashMap::new()),
         }
+    }
+
+    /// Seed a response chain for a thread (e.g. when restoring from DB).
+    pub fn seed_response_id(&self, thread_id: &str, response_id: String) {
+        let mut chains = self
+            .response_chains
+            .write()
+            .expect("response_chains lock poisoned");
+        chains.insert(
+            thread_id.to_string(),
+            ChainState {
+                response_id,
+                input_count: 0,
+            },
+        );
+    }
+
+    /// Get the last response ID for a thread (for persistence).
+    pub fn get_response_id(&self, thread_id: &str) -> Option<String> {
+        let chains = self
+            .response_chains
+            .read()
+            .expect("response_chains lock poisoned");
+        chains.get(thread_id).map(|c| c.response_id.clone())
+    }
+
+    /// Store a response chain state after a successful call.
+    fn store_chain(&self, thread_id: &str, response_id: String, input_count: usize) {
+        let mut chains = self
+            .response_chains
+            .write()
+            .expect("response_chains lock poisoned");
+        chains.insert(
+            thread_id.to_string(),
+            ChainState {
+                response_id,
+                input_count,
+            },
+        );
+    }
+
+    /// Clear the chain for a thread (on error / fallback).
+    fn clear_chain(&self, thread_id: &str) {
+        let mut chains = self
+            .response_chains
+            .write()
+            .expect("response_chains lock poisoned");
+        chains.remove(thread_id);
     }
 
     fn api_url(&self, path: &str) -> String {
@@ -294,18 +355,34 @@ impl NearAiProvider {
     }
 }
 
-/// Split messages into system instructions and non-system input messages.
+/// Split messages into system instructions and non-system input items.
 /// The OpenAI Responses API expects system prompts in an `instructions` field,
 /// not as a message with role "system" in the input array.
-fn split_messages(messages: Vec<ChatMessage>) -> (Option<String>, Vec<NearAiMessage>) {
+///
+/// When `chaining` is true, tool result messages (role=tool) are converted to
+/// `NearAiInputItem::FunctionCallOutput` for the Responses API protocol.
+fn split_messages(
+    messages: Vec<ChatMessage>,
+    chaining: bool,
+) -> (Option<String>, Vec<NearAiInputItem>) {
     let mut instructions: Vec<String> = Vec::new();
-    let mut input: Vec<NearAiMessage> = Vec::new();
+    let mut input: Vec<NearAiInputItem> = Vec::new();
 
     for msg in messages {
         if msg.role == Role::System {
             instructions.push(msg.content);
+        } else if chaining && msg.role == Role::Tool {
+            if let Some(ref call_id) = msg.tool_call_id {
+                input.push(NearAiInputItem::FunctionCallOutput {
+                    item_type: "function_call_output".to_string(),
+                    call_id: call_id.clone(),
+                    output: msg.content,
+                });
+            } else {
+                input.push(NearAiInputItem::Message(msg.into()));
+            }
         } else {
-            input.push(msg.into());
+            input.push(NearAiInputItem::Message(msg.into()));
         }
     }
 
@@ -321,12 +398,14 @@ fn split_messages(messages: Vec<ChatMessage>) -> (Option<String>, Vec<NearAiMess
 #[async_trait]
 impl LlmProvider for NearAiProvider {
     async fn complete(&self, req: CompletionRequest) -> Result<CompletionResponse, LlmError> {
-        let (instructions, input) = split_messages(req.messages);
+        let thread_id = req.metadata.get("thread_id").cloned();
+        let (instructions, input) = split_messages(req.messages, false);
 
         let request = NearAiRequest {
             model: self.active_model_name(),
             instructions,
             input,
+            previous_response_id: None,
             temperature: req.temperature,
             max_output_tokens: req.max_tokens,
             stream: Some(false),
@@ -353,6 +432,7 @@ impl LlmProvider for NearAiProvider {
                         finish_reason: FinishReason::Stop,
                         input_tokens: usage.input_tokens,
                         output_tokens: usage.output_tokens,
+                        response_id: None,
                     });
                 }
 
@@ -370,6 +450,7 @@ impl LlmProvider for NearAiProvider {
                     finish_reason: FinishReason::Stop,
                     input_tokens: 0,
                     output_tokens: 0,
+                    response_id: None,
                 });
             }
             Err(e) => return Err(e),
@@ -426,11 +507,17 @@ impl LlmProvider for NearAiProvider {
             );
         }
 
+        // Store response ID for chaining
+        if let Some(ref tid) = thread_id {
+            self.store_chain(tid, response.id.clone(), 0);
+        }
+
         Ok(CompletionResponse {
             content: text,
             finish_reason: FinishReason::Stop,
             input_tokens: response.usage.input_tokens,
             output_tokens: response.usage.output_tokens,
+            response_id: Some(response.id),
         })
     }
 
@@ -438,7 +525,33 @@ impl LlmProvider for NearAiProvider {
         &self,
         req: ToolCompletionRequest,
     ) -> Result<ToolCompletionResponse, LlmError> {
-        let (instructions, input) = split_messages(req.messages);
+        let thread_id = req.metadata.get("thread_id").cloned();
+
+        // Look up chaining state for this thread
+        let chain_state = thread_id.as_ref().and_then(|tid| {
+            let chains = self
+                .response_chains
+                .read()
+                .expect("response_chains lock poisoned");
+            chains
+                .get(tid)
+                .map(|c| (c.response_id.clone(), c.input_count))
+        });
+
+        let chaining = chain_state.is_some();
+        let (previous_response_id, prev_input_count) = chain_state
+            .map(|(rid, count)| (Some(rid), count))
+            .unwrap_or((None, 0));
+
+        // When chaining, only send new messages (the delta since last call).
+        // Tool results are converted to function_call_output items.
+        let (instructions, all_input) = split_messages(req.messages, chaining);
+        let input = if chaining && all_input.len() > prev_input_count {
+            all_input[prev_input_count..].to_vec()
+        } else {
+            all_input.clone()
+        };
+        let total_input_count = all_input.len();
 
         let tools: Vec<NearAiTool> = req
             .tools
@@ -453,17 +566,57 @@ impl LlmProvider for NearAiProvider {
 
         let request = NearAiRequest {
             model: self.active_model_name(),
-            instructions,
+            instructions: if chaining { None } else { instructions.clone() },
             input,
+            previous_response_id: previous_response_id.clone(),
             temperature: req.temperature,
             max_output_tokens: req.max_tokens,
             stream: Some(false),
-            tools: if tools.is_empty() { None } else { Some(tools) },
+            tools: if tools.is_empty() {
+                None
+            } else {
+                Some(tools.clone())
+            },
         };
 
-        // Try to get structured response, fall back to alternative formats
+        // Try to get structured response, fall back to alternative formats.
+        // If chaining fails (bad previous_response_id), retry with full history.
         let response: NearAiResponse = match self.send_request("responses", &request).await {
             Ok(r) => r,
+            Err(ref e) if chaining && is_chain_error(e) => {
+                tracing::warn!(
+                    "Response chaining failed, retrying with full history: {}",
+                    e
+                );
+                if let Some(ref tid) = thread_id {
+                    self.clear_chain(tid);
+                }
+                let (instructions_full, input_full) = split_messages(
+                    // Rebuild from the original input (non-chaining mode)
+                    {
+                        let mut msgs = Vec::new();
+                        if let Some(ref instr) = instructions {
+                            msgs.push(ChatMessage::system(instr.clone()));
+                        }
+                        for item in &all_input {
+                            msgs.push(item.to_chat_message());
+                        }
+                        msgs
+                    },
+                    false,
+                );
+                let retry_request = NearAiRequest {
+                    model: self.active_model_name(),
+                    instructions: instructions_full,
+                    input: input_full,
+                    previous_response_id: None,
+                    temperature: request.temperature,
+                    max_output_tokens: request.max_output_tokens,
+                    stream: Some(false),
+                    tools: request.tools.clone(),
+                };
+                self.send_request("responses", &retry_request).await?
+            }
             Err(LlmError::InvalidResponse { reason, .. }) if reason.contains("Raw: ") => {
                 let raw_text = reason.split("Raw: ").nth(1).unwrap_or("");
 
@@ -493,6 +646,7 @@ impl LlmProvider for NearAiProvider {
                         finish_reason,
                         input_tokens: usage.input_tokens,
                         output_tokens: usage.output_tokens,
+                        response_id: None,
                     });
                 }
 
@@ -510,6 +664,7 @@ impl LlmProvider for NearAiProvider {
                     finish_reason: FinishReason::Stop,
                     input_tokens: 0,
                     output_tokens: 0,
+                    response_id: None,
                 });
             }
             Err(e) => return Err(e),
@@ -563,12 +718,18 @@ impl LlmProvider for NearAiProvider {
             FinishReason::ToolUse
         };
 
+        // Store response ID for chaining on subsequent calls
+        if let Some(ref tid) = thread_id {
+            self.store_chain(tid, response.id.clone(), total_input_count);
+        }
+
         Ok(ToolCompletionResponse {
             content: if text.is_empty() { None } else { Some(text) },
             tool_calls,
             finish_reason,
             input_tokens: response.usage.input_tokens,
             output_tokens: response.usage.output_tokens,
+            response_id: Some(response.id),
         })
     }
 
@@ -603,6 +764,14 @@ impl LlmProvider for NearAiProvider {
         *guard = model.to_string();
         Ok(())
     }
+
+    fn seed_response_chain(&self, thread_id: &str, response_id: String) {
+        self.seed_response_id(thread_id, response_id);
+    }
+
+    fn get_response_chain_id(&self, thread_id: &str) -> Option<String> {
+        self.get_response_id(thread_id)
+    }
 }
 
 // NEAR AI API types
@@ -616,8 +785,11 @@ struct NearAiRequest {
     /// System instructions (replaces sending system role in input)
     #[serde(skip_serializing_if = "Option::is_none")]
     instructions: Option<String>,
-    /// Input messages (user/assistant/tool only, NOT system)
-    input: Vec<NearAiMessage>,
+    /// Input items: messages and/or function_call_output entries.
+    input: Vec<NearAiInputItem>,
+    /// Chain this request to a previous response (avoids resending full context).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    previous_response_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     temperature: Option<f32>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -628,7 +800,7 @@ struct NearAiRequest {
     tools: Option<Vec<NearAiTool>>,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, Clone)]
 struct NearAiMessage {
     role: String,
     content: String,
@@ -649,7 +821,68 @@ impl From<ChatMessage> for NearAiMessage {
     }
 }
 
-#[derive(Debug, Serialize)]
+/// Input item for the Responses API. Either a regular message or a
+/// function_call_output (for returning tool results when chaining).
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(untagged)]
+enum NearAiInputItem {
+    Message(NearAiMessage),
+    FunctionCallOutput {
+        #[serde(rename = "type")]
+        item_type: String,
+        call_id: String,
+        output: String,
+    },
+}
+
+impl NearAiInputItem {
+    /// Convert back to a ChatMessage (used for fallback retry).
+    fn to_chat_message(&self) -> ChatMessage {
+        match self {
+            NearAiInputItem::Message(msg) => {
+                let role = match msg.role.as_str() {
+                    "system" => Role::System,
+                    "user" => Role::User,
+                    "assistant" => Role::Assistant,
+                    "tool" => Role::Tool,
+                    _ => Role::User,
+                };
+                ChatMessage {
+                    role,
+                    content: msg.content.clone(),
+                    tool_call_id: None,
+                    name: None,
+                    tool_calls: None,
+                }
+            }
+            NearAiInputItem::FunctionCallOutput {
+                call_id, output, ..
+            } => ChatMessage {
+                role: Role::Tool,
+                content: output.clone(),
+                tool_call_id: Some(call_id.clone()),
+                name: None,
+                tool_calls: None,
+            },
+        }
+    }
+}
+
+/// Check if an LLM error is likely caused by an invalid previous_response_id.
+fn is_chain_error(err: &LlmError) -> bool {
+    match err {
+        LlmError::RequestFailed { reason, .. } => {
+            let lower = reason.to_lowercase();
+            lower.contains("previous_response_id")
+                || lower.contains("previous response")
+                || lower.contains("not found")
+                || lower.contains("invalid response id")
+        }
+        _ => false,
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
 struct NearAiTool {
     #[serde(rename = "type")]
     tool_type: String,
@@ -852,14 +1085,17 @@ mod tests {
             ChatMessage::user("Hello"),
             ChatMessage::assistant("Hi there!"),
         ];
-        let (instructions, input) = split_messages(messages);
+        let (instructions, input) = split_messages(messages, false);
         assert_eq!(
             instructions,
             Some("You are a helpful assistant".to_string())
         );
         assert_eq!(input.len(), 2);
-        assert_eq!(input[0].role, "user");
-        assert_eq!(input[1].role, "assistant");
+        // Verify the input items are messages
+        match &input[0] {
+            NearAiInputItem::Message(m) => assert_eq!(m.role, "user"),
+            _ => panic!("expected Message"),
+        }
     }
 
     #[test]
@@ -868,7 +1104,7 @@ mod tests {
             ChatMessage::user("Hello"),
             ChatMessage::assistant("Hi there!"),
         ];
-        let (instructions, input) = split_messages(messages);
+        let (instructions, input) = split_messages(messages, false);
         assert!(instructions.is_none());
         assert_eq!(input.len(), 2);
     }
@@ -880,11 +1116,44 @@ mod tests {
             ChatMessage::system("Second instruction"),
             ChatMessage::user("Hello"),
         ];
-        let (instructions, input) = split_messages(messages);
+        let (instructions, input) = split_messages(messages, false);
         assert_eq!(
             instructions,
             Some("First instruction\n\nSecond instruction".to_string())
         );
         assert_eq!(input.len(), 1);
+    }
+
+    #[test]
+    fn test_split_messages_chaining_converts_tool_results() {
+        let messages = vec![
+            ChatMessage::user("Hello"),
+            ChatMessage::tool_result("call_123", "my_tool", "result data"),
+        ];
+        let (_, input) = split_messages(messages, true);
+        assert_eq!(input.len(), 2);
+        match &input[1] {
+            NearAiInputItem::FunctionCallOutput {
+                call_id, output, ..
+            } => {
+                assert_eq!(call_id, "call_123");
+                assert_eq!(output, "result data");
+            }
+            _ => panic!("expected FunctionCallOutput"),
+        }
+    }
+
+    #[test]
+    fn test_split_messages_no_chaining_keeps_tool_as_message() {
+        let messages = vec![
+            ChatMessage::user("Hello"),
+            ChatMessage::tool_result("call_123", "my_tool", "result data"),
+        ];
+        let (_, input) = split_messages(messages, false);
+        assert_eq!(input.len(), 2);
+        match &input[1] {
+            NearAiInputItem::Message(m) => assert_eq!(m.role, "tool"),
+            _ => panic!("expected Message"),
+        }
     }
 }

@@ -44,6 +44,13 @@
           <button class="thread-new-btn" onclick="createNewThread()" title="New thread (Ctrl/Cmd+N)">+</button>
           <button class="thread-toggle-btn" id="thread-toggle-btn" onclick="toggleThreadSidebar()" title="Toggle sidebar">&laquo;</button>
         </div>
+        <div class="assistant-item" id="assistant-thread" onclick="switchToAssistant()">
+          <span class="assistant-label">Assistant</span>
+          <span class="assistant-meta" id="assistant-meta"></span>
+        </div>
+        <div class="threads-section-header">
+          <span>Conversations</span>
+        </div>
         <div class="thread-list" id="thread-list"></div>
       </div>
       <div class="chat-container">

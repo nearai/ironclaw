@@ -1108,6 +1108,8 @@ pub struct ConversationSummary {
     pub message_count: i64,
     pub started_at: DateTime<Utc>,
     pub last_activity: DateTime<Utc>,
+    /// Thread type extracted from metadata (e.g. "assistant", "thread").
+    pub thread_type: Option<String>,
 }
 
 /// A single message in a conversation.
@@ -1158,6 +1160,7 @@ impl Store {
                     c.id,
                     c.started_at,
                     c.last_activity,
+                    c.metadata,
                     (SELECT COUNT(*) FROM conversation_messages m WHERE m.conversation_id = c.id) AS message_count,
                     (SELECT LEFT(m2.content, 100)
                      FROM conversation_messages m2
@@ -1176,14 +1179,170 @@ impl Store {
 
         Ok(rows
             .iter()
-            .map(|r| ConversationSummary {
-                id: r.get("id"),
-                title: r.get("title"),
-                message_count: r.get("message_count"),
-                started_at: r.get("started_at"),
-                last_activity: r.get("last_activity"),
+            .map(|r| {
+                let metadata: serde_json::Value = r.get("metadata");
+                let thread_type = metadata
+                    .get("thread_type")
+                    .and_then(|v| v.as_str())
+                    .map(String::from);
+                ConversationSummary {
+                    id: r.get("id"),
+                    title: r.get("title"),
+                    message_count: r.get("message_count"),
+                    started_at: r.get("started_at"),
+                    last_activity: r.get("last_activity"),
+                    thread_type,
+                }
             })
             .collect())
+    }
+
+    /// Get or create the singleton "assistant" conversation for a user+channel.
+    ///
+    /// Looks for a conversation where `metadata->>'thread_type' = 'assistant'`.
+    /// Creates one if it doesn't exist.
+    pub async fn get_or_create_assistant_conversation(
+        &self,
+        user_id: &str,
+        channel: &str,
+    ) -> Result<Uuid, DatabaseError> {
+        let conn = self.conn().await?;
+
+        // Try to find existing assistant conversation
+        let row = conn
+            .query_opt(
+                r#"
+                SELECT id FROM conversations
+                WHERE user_id = $1 AND channel = $2 AND metadata->>'thread_type' = 'assistant'
+                LIMIT 1
+                "#,
+                &[&user_id, &channel],
+            )
+            .await?;
+
+        if let Some(row) = row {
+            return Ok(row.get("id"));
+        }
+
+        // Create a new assistant conversation
+        let id = Uuid::new_v4();
+        let metadata = serde_json::json!({"thread_type": "assistant", "title": "Assistant"});
+        conn.execute(
+            r#"
+            INSERT INTO conversations (id, channel, user_id, metadata)
+            VALUES ($1, $2, $3, $4)
+            "#,
+            &[&id, &channel, &user_id, &metadata],
+        )
+        .await?;
+
+        Ok(id)
+    }
+
+    /// Create a conversation with specific metadata.
+    pub async fn create_conversation_with_metadata(
+        &self,
+        channel: &str,
+        user_id: &str,
+        metadata: &serde_json::Value,
+    ) -> Result<Uuid, DatabaseError> {
+        let conn = self.conn().await?;
+        let id = Uuid::new_v4();
+
+        conn.execute(
+            "INSERT INTO conversations (id, channel, user_id, metadata) VALUES ($1, $2, $3, $4)",
+            &[&id, &channel, &user_id, metadata],
+        )
+        .await?;
+
+        Ok(id)
+    }
+
+    /// Load messages for a conversation with cursor-based pagination.
+    ///
+    /// Returns `(messages_oldest_first, has_more)`.
+    /// Pass `before` as a cursor to load older messages.
+    pub async fn list_conversation_messages_paginated(
+        &self,
+        conversation_id: Uuid,
+        before: Option<DateTime<Utc>>,
+        limit: i64,
+    ) -> Result<(Vec<ConversationMessage>, bool), DatabaseError> {
+        let conn = self.conn().await?;
+        let fetch_limit = limit + 1; // Fetch one extra to determine has_more
+
+        let rows = if let Some(before_ts) = before {
+            conn.query(
+                r#"
+                SELECT id, role, content, created_at
+                FROM conversation_messages
+                WHERE conversation_id = $1 AND created_at < $2
+                ORDER BY created_at DESC
+                LIMIT $3
+                "#,
+                &[&conversation_id, &before_ts, &fetch_limit],
+            )
+            .await?
+        } else {
+            conn.query(
+                r#"
+                SELECT id, role, content, created_at
+                FROM conversation_messages
+                WHERE conversation_id = $1
+                ORDER BY created_at DESC
+                LIMIT $2
+                "#,
+                &[&conversation_id, &fetch_limit],
+            )
+            .await?
+        };
+
+        let has_more = rows.len() as i64 > limit;
+        let take_count = (rows.len() as i64).min(limit) as usize;
+
+        // Rows come newest-first from DB; reverse so caller gets oldest-first
+        let mut messages: Vec<ConversationMessage> = rows
+            .iter()
+            .take(take_count)
+            .map(|r| ConversationMessage {
+                id: r.get("id"),
+                role: r.get("role"),
+                content: r.get("content"),
+                created_at: r.get("created_at"),
+            })
+            .collect();
+        messages.reverse();
+
+        Ok((messages, has_more))
+    }
+
+    /// Merge a single key into a conversation's metadata JSONB.
+    pub async fn update_conversation_metadata_field(
+        &self,
+        id: Uuid,
+        key: &str,
+        value: &serde_json::Value,
+    ) -> Result<(), DatabaseError> {
+        let conn = self.conn().await?;
+        let patch = serde_json::json!({ key: value });
+        conn.execute(
+            "UPDATE conversations SET metadata = metadata || $2 WHERE id = $1",
+            &[&id, &patch],
+        )
+        .await?;
+        Ok(())
+    }
+
+    /// Read the metadata JSONB for a conversation.
+    pub async fn get_conversation_metadata(
+        &self,
+        id: Uuid,
+    ) -> Result<Option<serde_json::Value>, DatabaseError> {
+        let conn = self.conn().await?;
+        let row = conn
+            .query_opt("SELECT metadata FROM conversations WHERE id = $1", &[&id])
+            .await?;
+        Ok(row.map(|r| r.get::<_, serde_json::Value>(0)))
     }
 
     /// Load all messages for a conversation, ordered chronologically.
