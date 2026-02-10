@@ -1,3 +1,6 @@
+[workspace]
+members = [".", "benchmarks"]
+
 [package]
 name = "ironclaw"
 version = "0.1.0"
