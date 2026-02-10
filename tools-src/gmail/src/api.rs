@@ -389,7 +389,7 @@ const BASE64URL_CHARS: &[u8; 64] =
 
 /// Base64url-encode bytes (no padding, URL-safe alphabet).
 fn base64url_encode(input: &[u8]) -> String {
-    let mut result = String::with_capacity((input.len() + 2) / 3 * 4);
+    let mut result = String::with_capacity(input.len().div_ceil(3) * 4);
 
     for chunk in input.chunks(3) {
         let b0 = chunk[0] as u32;

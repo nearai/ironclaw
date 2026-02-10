@@ -144,64 +144,68 @@ pub fn get_event(calendar_id: &str, event_id: &str) -> Result<EventResult, Strin
     })
 }
 
+/// Parameters for creating a calendar event.
+pub struct CreateEventParams<'a> {
+    pub calendar_id: &'a str,
+    pub summary: &'a str,
+    pub description: Option<&'a str>,
+    pub location: Option<&'a str>,
+    pub start_datetime: Option<&'a str>,
+    pub end_datetime: Option<&'a str>,
+    pub start_date: Option<&'a str>,
+    pub end_date: Option<&'a str>,
+    pub timezone: Option<&'a str>,
+    pub attendees: &'a [String],
+}
+
 /// Create a new event.
-pub fn create_event(
-    calendar_id: &str,
-    summary: &str,
-    description: Option<&str>,
-    location: Option<&str>,
-    start_datetime: Option<&str>,
-    end_datetime: Option<&str>,
-    start_date: Option<&str>,
-    end_date: Option<&str>,
-    timezone: Option<&str>,
-    attendees: &[String],
-) -> Result<EventResult, String> {
+pub fn create_event(p: &CreateEventParams<'_>) -> Result<EventResult, String> {
     let mut event = serde_json::json!({
-        "summary": summary,
+        "summary": p.summary,
     });
 
-    if let Some(desc) = description {
+    if let Some(desc) = p.description {
         event["description"] = serde_json::Value::String(desc.to_string());
     }
-    if let Some(loc) = location {
+    if let Some(loc) = p.location {
         event["location"] = serde_json::Value::String(loc.to_string());
     }
 
     // Build start/end, preferring datetime over date
-    if let Some(dt) = start_datetime {
+    if let Some(dt) = p.start_datetime {
         let mut start = serde_json::json!({ "dateTime": dt });
-        if let Some(tz) = timezone {
+        if let Some(tz) = p.timezone {
             start["timeZone"] = serde_json::Value::String(tz.to_string());
         }
         event["start"] = start;
-    } else if let Some(d) = start_date {
+    } else if let Some(d) = p.start_date {
         event["start"] = serde_json::json!({ "date": d });
     } else {
         return Err("Either start_datetime or start_date is required".to_string());
     }
 
-    if let Some(dt) = end_datetime {
+    if let Some(dt) = p.end_datetime {
         let mut end = serde_json::json!({ "dateTime": dt });
-        if let Some(tz) = timezone {
+        if let Some(tz) = p.timezone {
             end["timeZone"] = serde_json::Value::String(tz.to_string());
         }
         event["end"] = end;
-    } else if let Some(d) = end_date {
+    } else if let Some(d) = p.end_date {
         event["end"] = serde_json::json!({ "date": d });
     } else {
         return Err("Either end_datetime or end_date is required".to_string());
     }
 
-    if !attendees.is_empty() {
-        event["attendees"] = serde_json::json!(attendees
+    if !p.attendees.is_empty() {
+        event["attendees"] = serde_json::json!(p
+            .attendees
             .iter()
             .map(|e| serde_json::json!({ "email": e }))
             .collect::<Vec<_>>());
     }
 
     let body = serde_json::to_string(&event).map_err(|e| e.to_string())?;
-    let path = format!("calendars/{}/events", url_encode(calendar_id));
+    let path = format!("calendars/{}/events", url_encode(p.calendar_id));
 
     let response = api_call("POST", &path, Some(&body))?;
     let parsed: serde_json::Value =
@@ -212,53 +216,56 @@ pub fn create_event(
     })
 }
 
+/// Parameters for updating a calendar event.
+pub struct UpdateEventParams<'a> {
+    pub calendar_id: &'a str,
+    pub event_id: &'a str,
+    pub summary: Option<&'a str>,
+    pub description: Option<&'a str>,
+    pub location: Option<&'a str>,
+    pub start_datetime: Option<&'a str>,
+    pub end_datetime: Option<&'a str>,
+    pub start_date: Option<&'a str>,
+    pub end_date: Option<&'a str>,
+    pub timezone: Option<&'a str>,
+    pub attendees: Option<&'a [String]>,
+}
+
 /// Update an existing event (PATCH for partial updates).
-pub fn update_event(
-    calendar_id: &str,
-    event_id: &str,
-    summary: Option<&str>,
-    description: Option<&str>,
-    location: Option<&str>,
-    start_datetime: Option<&str>,
-    end_datetime: Option<&str>,
-    start_date: Option<&str>,
-    end_date: Option<&str>,
-    timezone: Option<&str>,
-    attendees: Option<&[String]>,
-) -> Result<EventResult, String> {
+pub fn update_event(p: &UpdateEventParams<'_>) -> Result<EventResult, String> {
     let mut patch = serde_json::json!({});
 
-    if let Some(s) = summary {
+    if let Some(s) = p.summary {
         patch["summary"] = serde_json::Value::String(s.to_string());
     }
-    if let Some(d) = description {
+    if let Some(d) = p.description {
         patch["description"] = serde_json::Value::String(d.to_string());
     }
-    if let Some(l) = location {
+    if let Some(l) = p.location {
         patch["location"] = serde_json::Value::String(l.to_string());
     }
 
-    if let Some(dt) = start_datetime {
+    if let Some(dt) = p.start_datetime {
         let mut start = serde_json::json!({ "dateTime": dt });
-        if let Some(tz) = timezone {
+        if let Some(tz) = p.timezone {
             start["timeZone"] = serde_json::Value::String(tz.to_string());
         }
         patch["start"] = start;
-    } else if let Some(d) = start_date {
+    } else if let Some(d) = p.start_date {
         patch["start"] = serde_json::json!({ "date": d });
     }
 
-    if let Some(dt) = end_datetime {
+    if let Some(dt) = p.end_datetime {
         let mut end = serde_json::json!({ "dateTime": dt });
-        if let Some(tz) = timezone {
+        if let Some(tz) = p.timezone {
             end["timeZone"] = serde_json::Value::String(tz.to_string());
         }
         patch["end"] = end;
-    } else if let Some(d) = end_date {
+    } else if let Some(d) = p.end_date {
         patch["end"] = serde_json::json!({ "date": d });
     }
 
-    if let Some(att) = attendees {
+    if let Some(att) = p.attendees {
         patch["attendees"] = serde_json::json!(att
             .iter()
             .map(|e| serde_json::json!({ "email": e }))
@@ -268,8 +275,8 @@ pub fn update_event(
     let body = serde_json::to_string(&patch).map_err(|e| e.to_string())?;
     let path = format!(
         "calendars/{}/events/{}",
-        url_encode(calendar_id),
-        url_encode(event_id)
+        url_encode(p.calendar_id),
+        url_encode(p.event_id)
     );
 
     let response = api_call("PATCH", &path, Some(&body))?;

@@ -108,7 +108,10 @@ struct SlackPostMessageResponse {
 #[derive(Debug, Deserialize)]
 struct SlackConfig {
     /// Name of secret containing signing secret (for verification by host).
+    /// Parsed from config for forward compatibility; not yet used in WASM
+    /// (host handles signature verification).
     #[serde(default = "default_signing_secret_name")]
+    #[allow(dead_code)]
     signing_secret_name: String,
 }
 
