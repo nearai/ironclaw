@@ -160,6 +160,21 @@ const POLLING_STATE_PATH: &str = "state/last_update_id";
 /// Workspace path for persisting owner_id across WASM callbacks.
 const OWNER_ID_PATH: &str = "state/owner_id";
 
+/// Workspace path for persisting dm_policy across WASM callbacks.
+const DM_POLICY_PATH: &str = "state/dm_policy";
+
+/// Workspace path for persisting allow_from (JSON array) across WASM callbacks.
+const ALLOW_FROM_PATH: &str = "state/allow_from";
+
+/// Channel name for pairing store (used by pairing host APIs).
+const CHANNEL_NAME: &str = "telegram";
+
+/// Workspace path for persisting bot_username for mention detection in groups.
+const BOT_USERNAME_PATH: &str = "state/bot_username";
+
+/// Workspace path for persisting respond_to_all_group_messages flag.
+const RESPOND_TO_ALL_GROUP_PATH: &str = "state/respond_to_all_group_messages";
+
 // ============================================================================
 // Channel Metadata
 // ============================================================================
@@ -195,6 +210,14 @@ struct TelegramConfig {
     /// user are processed. All others are silently dropped.
     #[serde(default)]
     owner_id: Option<i64>,
+
+    /// DM policy: "pairing" (default), "allowlist", or "open".
+    #[serde(default)]
+    dm_policy: Option<String>,
+
+    /// Allowed sender IDs/usernames from config (merged with pairing-approved store).
+    #[serde(default)]
+    allow_from: Option<Vec<String>>,
 
     /// Whether to respond to all group messages (not just mentions).
     #[serde(default)]
@@ -256,6 +279,28 @@ impl Guest for TelegramChannel {
                 "No owner_id configured, bot is open to all users",
             );
         }
+
+        // Persist dm_policy and allow_from for DM pairing in handle_message
+        let dm_policy = config
+            .dm_policy
+            .as_deref()
+            .unwrap_or("pairing")
+            .to_string();
+        let _ = channel_host::workspace_write(DM_POLICY_PATH, &dm_policy);
+
+        let allow_from_json = serde_json::to_string(&config.allow_from.unwrap_or_default())
+            .unwrap_or_else(|_| "[]".to_string());
+        let _ = channel_host::workspace_write(ALLOW_FROM_PATH, &allow_from_json);
+
+        // Persist bot_username and respond_to_all_group_messages for group handling
+        let _ = channel_host::workspace_write(
+            BOT_USERNAME_PATH,
+            &config.bot_username.unwrap_or_default(),
+        );
+        let _ = channel_host::workspace_write(
+            RESPOND_TO_ALL_GROUP_PATH,
+            &config.respond_to_all_group_messages.to_string(),
+        );
 
         // Mode is determined by whether the host injected a tunnel_url
         // If tunnel is configured, use webhooks. Otherwise, use polling.
@@ -701,6 +746,47 @@ fn register_webhook(tunnel_url: &str, webhook_secret: Option<&str>) -> Result<()
 }
 
 // ============================================================================
+// Pairing Reply
+// ============================================================================
+
+/// Send a pairing code message to a chat. Used when an unknown user DMs the bot.
+fn send_pairing_reply(chat_id: i64, code: &str) -> Result<(), String> {
+    let payload = serde_json::json!({
+        "chat_id": chat_id,
+        "text": format!(
+            "To pair with this bot, run: `ironclaw pairing approve telegram {}`",
+            code
+        ),
+        "parse_mode": "Markdown",
+    });
+
+    let payload_bytes = serde_json::to_vec(&payload)
+        .map_err(|e| format!("Failed to serialize payload: {}", e))?;
+
+    let headers = serde_json::json!({
+        "Content-Type": "application/json"
+    });
+
+    let result = channel_host::http_request(
+        "POST",
+        "https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
+        &headers.to_string(),
+        Some(&payload_bytes),
+    );
+
+    match result {
+        Ok(response) => {
+            if response.status != 200 {
+                let body_str = String::from_utf8_lossy(&response.body);
+                return Err(format!("HTTP {}: {}", response.status, body_str));
+            }
+            Ok(())
+        }
+        Err(e) => Err(format!("HTTP request failed: {}", e)),
+    }
+}
+
+// ============================================================================
 // Update Handling
 // ============================================================================
 
@@ -736,41 +822,111 @@ fn handle_message(message: TelegramMessage) {
         return;
     }
 
-    // Owner validation: silently drop messages from non-owner users
-    if let Some(owner_id_str) = channel_host::workspace_read(OWNER_ID_PATH) {
-        if !owner_id_str.is_empty() {
-            if let Ok(owner_id) = owner_id_str.parse::<i64>() {
-                if from.id != owner_id {
-                    channel_host::log(
-                        channel_host::LogLevel::Debug,
-                        &format!(
-                            "Dropping message from non-owner user {} (owner: {})",
-                            from.id, owner_id
-                        ),
-                    );
-                    return;
+    let is_private = message.chat.chat_type == "private";
+
+    // Owner validation: when owner_id is set, only that user can message
+    let owner_configured = channel_host::workspace_read(OWNER_ID_PATH)
+        .map(|s| !s.is_empty())
+        .unwrap_or(false);
+
+    if owner_configured {
+        if let Ok(owner_id) = channel_host::workspace_read(OWNER_ID_PATH)
+            .unwrap()
+            .parse::<i64>()
+        {
+            if from.id != owner_id {
+                channel_host::log(
+                    channel_host::LogLevel::Debug,
+                    &format!(
+                        "Dropping message from non-owner user {} (owner: {})",
+                        from.id, owner_id
+                    ),
+                );
+                return;
+            }
+        }
+    } else if is_private {
+        // No owner_id: apply dm_policy for private chats
+        let dm_policy = channel_host::workspace_read(DM_POLICY_PATH)
+            .unwrap_or_else(|| "pairing".to_string());
+
+        if dm_policy != "open" {
+            // Build effective allow list: config allow_from + pairing store
+            let mut allowed: Vec<String> = channel_host::workspace_read(ALLOW_FROM_PATH)
+                .and_then(|s| serde_json::from_str(&s).ok())
+                .unwrap_or_default();
+
+            if let Ok(store_allowed) = channel_host::pairing_read_allow_from(CHANNEL_NAME) {
+                allowed.extend(store_allowed);
+            }
+
+            let id_str = from.id.to_string();
+            let username_opt = from.username.as_deref();
+            let is_allowed = allowed.contains(&"*".to_string())
+                || allowed.contains(&id_str)
+                || username_opt.map_or(false, |u| allowed.contains(&u.to_string()));
+
+            if !is_allowed {
+                if dm_policy == "pairing" {
+                    // Upsert pairing request and send reply
+                    let meta = serde_json::json!({
+                        "chat_id": message.chat.id,
+                        "user_id": from.id,
+                        "username": username_opt,
+                    })
+                    .to_string();
+
+                    match channel_host::pairing_upsert_request(CHANNEL_NAME, &id_str, &meta) {
+                        Ok(result) => {
+                            channel_host::log(
+                                channel_host::LogLevel::Info,
+                                &format!(
+                                    "Pairing request for user {} (chat {}): code {}",
+                                    from.id, message.chat.id, result.code
+                                ),
+                            );
+                            if result.created {
+                                let _ = send_pairing_reply(message.chat.id, &result.code);
+                            }
+                        }
+                        Err(e) => {
+                            channel_host::log(
+                                channel_host::LogLevel::Error,
+                                &format!("Pairing upsert failed: {}", e),
+                            );
+                        }
+                    }
                 }
+                return;
             }
         }
     }
 
-    let is_private = message.chat.chat_type == "private";
-
-    // For group chats, check if the bot was mentioned
-    // TODO: Read bot_username from config and check mentions
-    // For now, process all messages in private chats and groups
+    // For group chats, only respond if bot was mentioned or respond_to_all is enabled
     if !is_private {
-        // In groups, only respond if there's a bot mention or command
-        // This is a simplified check - proper implementation would use entities
-        let has_command = text.starts_with('/');
-        let has_mention = text.contains('@');
+        let respond_to_all = channel_host::workspace_read(RESPOND_TO_ALL_GROUP_PATH)
+            .as_deref()
+            .unwrap_or("false")
+            == "true";
 
-        if !has_command && !has_mention {
-            channel_host::log(
-                channel_host::LogLevel::Debug,
-                &format!("Ignoring group message without mention: {}", text),
-            );
-            return;
+        if !respond_to_all {
+            let has_command = text.starts_with('/');
+            let bot_username = channel_host::workspace_read(BOT_USERNAME_PATH)
+                .unwrap_or_default();
+            let has_bot_mention = if bot_username.is_empty() {
+                text.contains('@')
+            } else {
+                let mention = format!("@{}", bot_username);
+                text.to_lowercase().contains(&mention.to_lowercase())
+            };
+
+            if !has_command && !has_bot_mention {
+                channel_host::log(
+                    channel_host::LogLevel::Debug,
+                    &format!("Ignoring group message without mention: {}", text),
+                );
+                return;
+            }
         }
     }
 

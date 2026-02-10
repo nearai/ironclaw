@@ -7,6 +7,7 @@ use tracing_subscriber::{EnvFilter, layer::SubscriberExt, util::SubscriberInitEx
 
 use ironclaw::{
     agent::{Agent, AgentDeps, SessionManager},
+    pairing::PairingStore,
     channels::{
         ChannelManager, GatewayChannel, HttpChannel, ReplChannel, WebhookServer,
         WebhookServerConfig,
@@ -17,7 +18,8 @@ use ironclaw::{
         web::log_layer::{LogBroadcaster, WebLogLayer},
     },
     cli::{
-        Cli, Command, run_mcp_command, run_memory_command, run_status_command, run_tool_command,
+        Cli, Command, run_mcp_command, run_memory_command, run_pairing_command, run_status_command,
+        run_tool_command,
     },
     config::Config,
     context::ContextManager,
@@ -119,6 +121,15 @@ async fn main() -> anyhow::Result<()> {
                 };
 
             return run_memory_command(mem_cmd.clone(), store.pool(), embeddings).await;
+        }
+        Some(Command::Pairing(pairing_cmd)) => {
+            tracing_subscriber::fmt()
+                .with_env_filter(
+                    EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("warn")),
+                )
+                .init();
+
+            return run_pairing_command(pairing_cmd.clone()).map_err(|e| anyhow::anyhow!("{}", e));
         }
         Some(Command::Status) => {
             let _ = dotenvy::dotenv();
@@ -507,7 +518,8 @@ async fn main() -> anyhow::Result<()> {
         match WasmChannelRuntime::new(WasmChannelRuntimeConfig::default()) {
             Ok(runtime) => {
                 let runtime = Arc::new(runtime);
-                let loader = WasmChannelLoader::new(Arc::clone(&runtime));
+                let pairing_store = Arc::new(PairingStore::new());
+                let loader = WasmChannelLoader::new(Arc::clone(&runtime), pairing_store);
 
                 match loader
                     .load_from_dir(&config.channels.wasm_channels_dir)

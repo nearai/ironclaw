@@ -42,6 +42,7 @@ pub mod agent;
 pub mod channels;
 pub mod cli;
 pub mod config;
+pub mod pairing;
 pub mod context;
 pub mod error;
 pub mod estimation;

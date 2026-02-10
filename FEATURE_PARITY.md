@@ -59,7 +59,7 @@ This document tracks feature parity between IronClaw (Rust implementation) and O
 | REPL (simple) | ✅ | ✅ | - | For testing |
 | WASM channels | ❌ | ✅ | - | IronClaw innovation |
 | WhatsApp | ✅ | ❌ | P1 | Baileys (Web) |
-| Telegram | ✅ | ❌ | P1 | grammY (Bot API) |
+| Telegram | ✅ | ✅ | - | WASM channel, Bot API |
 | Discord | ✅ | ❌ | P2 | discord.js |
 | Signal | ✅ | ❌ | P2 | signal-cli |
 | Slack | ✅ | 🚧 | P1 | Stub exists, needs implementation |
@@ -79,10 +79,10 @@ This document tracks feature parity between IronClaw (Rust implementation) and O
 
 | Feature | OpenClaw | IronClaw | Notes |
 |---------|----------|----------|-------|
-| DM pairing codes | ✅ | ❌ | Verification for unknown senders |
-| Allowlist/blocklist | ✅ | ❌ | Per-channel access control |
+| DM pairing codes | ✅ | ✅ | `ironclaw pairing list/approve`, host APIs |
+| Allowlist/blocklist | ✅ | 🚧 | allow_from + pairing store |
 | Self-message bypass | ✅ | ❌ | Own messages skip pairing |
-| Mention-based activation | ✅ | ❌ | Configurable patterns |
+| Mention-based activation | ✅ | ✅ | bot_username + respond_to_all_group_messages |
 | Per-group tool policies | ✅ | ❌ | Allow/deny specific tools |
 | Thread isolation | ✅ | ✅ | Separate sessions per thread |
 | Per-channel media limits | ✅ | ❌ | |

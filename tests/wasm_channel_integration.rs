@@ -10,6 +10,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use ironclaw::channels::Channel;
+use ironclaw::pairing::PairingStore;
 use ironclaw::channels::wasm::{
     ChannelCapabilities, EmitRateLimitConfig, PreparedChannelModule, RegisteredEndpoint,
     WasmChannel, WasmChannelRouter, WasmChannelRuntime, WasmChannelRuntimeConfig,
@@ -38,7 +39,13 @@ fn create_test_channel(
         capabilities = capabilities.with_path(path.to_string());
     }
 
-    WasmChannel::new(runtime, prepared, capabilities, "{}".to_string())
+    WasmChannel::new(
+        runtime,
+        prepared,
+        capabilities,
+        "{}".to_string(),
+        Arc::new(PairingStore::new()),
+    )
 }
 
 mod router_tests {
