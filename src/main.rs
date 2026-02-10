@@ -22,7 +22,11 @@ use ironclaw::{
     config::Config,
     context::ContextManager,
     extensions::ExtensionManager,
-    llm::{SessionConfig, create_llm_provider, create_session_manager},
+    history::Store,
+    llm::{
+        FailoverProvider, LlmProvider, SessionConfig, create_llm_provider,
+        create_llm_provider_with_config, create_session_manager,
+    },
     orchestrator::{
         ContainerJobConfig, ContainerJobManager, OrchestratorApi, TokenStore,
         api::OrchestratorState,
@@ -446,6 +450,22 @@ async fn main() -> anyhow::Result<()> {
     // Initialize LLM provider (clone session so we can reuse it for embeddings)
     let llm = create_llm_provider(&config.llm, session.clone())?;
     tracing::info!("LLM provider initialized: {}", llm.model_name());
+
+    // Wrap in failover if a fallback model is configured
+    let llm: Arc<dyn LlmProvider> =
+        if let Some(fallback_model) = config.llm.nearai.fallback_model.as_ref() {
+            let mut fallback_config = config.llm.nearai.clone();
+            fallback_config.model = fallback_model.clone();
+            let fallback = create_llm_provider_with_config(&fallback_config, session.clone())?;
+            tracing::info!(
+                primary = %llm.model_name(),
+                fallback = %fallback.model_name(),
+                "LLM failover enabled"
+            );
+            Arc::new(FailoverProvider::new(vec![llm, fallback])?)
+        } else {
+            llm
+        };
 
     // Initialize safety layer
     let safety = Arc::new(SafetyLayer::new(&config.safety));

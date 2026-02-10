@@ -653,6 +653,7 @@ impl SetupWizard {
                 session_path: crate::llm::session::default_session_path(),
                 api_mode: crate::config::NearAiApiMode::Responses,
                 api_key: None,
+                fallback_model: None,
             },
             openai: None,
             anthropic: None,
