@@ -23,7 +23,7 @@ use ironclaw::{
     context::ContextManager,
     extensions::ExtensionManager,
     history::Store,
-    llm::{SessionConfig, create_llm_provider, create_session_manager},
+    llm::{SessionConfig, create_llm_provider, create_cheap_llm_provider, create_session_manager},
     safety::SafetyLayer,
     secrets::{PostgresSecretsStore, SecretsCrypto, SecretsStore},
     settings::Settings,
@@ -187,7 +187,10 @@ async fn main() -> anyhow::Result<()> {
     let session = create_session_manager(session_config).await;
 
     // Ensure we're authenticated before proceeding (may trigger login flow)
-    session.ensure_authenticated().await?;
+    // Skip session auth when using API key (chat_completions mode)
+    if config.llm.nearai.api_mode == ironclaw::config::NearAiApiMode::Responses {
+        session.ensure_authenticated().await?;
+    }
 
     // Initialize tracing
     let env_filter = EnvFilter::try_from_default_env()
@@ -230,6 +233,12 @@ async fn main() -> anyhow::Result<()> {
     // Initialize LLM provider (clone session so we can reuse it for embeddings)
     let llm = create_llm_provider(&config.llm, session.clone())?;
     tracing::info!("LLM provider initialized: {}", llm.model_name());
+
+    // Initialize cheap LLM provider for lightweight tasks (heartbeat, evaluation)
+    let cheap_llm = create_cheap_llm_provider(&config.llm, session.clone())?;
+    if let Some(ref cheap) = cheap_llm {
+        tracing::info!("Cheap LLM provider initialized: {}", cheap.model_name());
+    }
 
     // Initialize safety layer
     let safety = Arc::new(SafetyLayer::new(&config.safety));
@@ -742,6 +751,7 @@ async fn main() -> anyhow::Result<()> {
     let deps = AgentDeps {
         store,
         llm,
+        cheap_llm,
         safety,
         tools,
         workspace,
@@ -791,9 +801,12 @@ fn check_onboard_needed() -> Option<&'static str> {
     }
 
     // First run (onboarding never completed and no session)
-    let session_path = ironclaw::llm::session::default_session_path();
-    if !settings.onboard_completed && !session_path.exists() {
-        return Some("First run");
+    // Skip if API key is configured (chat_completions mode doesn't need session)
+    if std::env::var("NEARAI_API_KEY").is_err() {
+        let session_path = ironclaw::llm::session::default_session_path();
+        if !settings.onboard_completed && !session_path.exists() {
+            return Some("First run");
+        }
     }
 
     None

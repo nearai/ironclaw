@@ -46,3 +46,30 @@ pub fn create_llm_provider(
         }
     }
 }
+
+/// Create a cheap/fast LLM provider for lightweight tasks (heartbeat, routing, evaluation).
+///
+/// Uses `NEARAI_CHEAP_MODEL` if set, otherwise falls back to the main provider.
+pub fn create_cheap_llm_provider(
+    config: &LlmConfig,
+    session: Arc<SessionManager>,
+) -> Result<Option<Arc<dyn LlmProvider>>, LlmError> {
+    let Some(ref cheap_model) = config.nearai.cheap_model else {
+        return Ok(None);
+    };
+
+    let mut cheap_config = config.nearai.clone();
+    cheap_config.model = cheap_model.clone();
+
+    tracing::info!("Cheap LLM provider: {}", cheap_model);
+
+    match cheap_config.api_mode {
+        NearAiApiMode::Responses => Ok(Some(Arc::new(NearAiProvider::new(
+            cheap_config,
+            session,
+        )))),
+        NearAiApiMode::ChatCompletions => {
+            Ok(Some(Arc::new(NearAiChatProvider::new(cheap_config)?)))
+        }
+    }
+}

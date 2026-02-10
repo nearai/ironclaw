@@ -60,6 +60,9 @@ enum AgenticLoopResult {
 pub struct AgentDeps {
     pub store: Option<Arc<Store>>,
     pub llm: Arc<dyn LlmProvider>,
+    /// Cheap/fast LLM for lightweight tasks (heartbeat, routing, evaluation).
+    /// Falls back to the main `llm` if None.
+    pub cheap_llm: Option<Arc<dyn LlmProvider>>,
     pub safety: Arc<SafetyLayer>,
     pub tools: Arc<ToolRegistry>,
     pub workspace: Option<Arc<Workspace>>,
@@ -126,6 +129,11 @@ impl Agent {
 
     fn llm(&self) -> &Arc<dyn LlmProvider> {
         &self.deps.llm
+    }
+
+    /// Get the cheap/fast LLM provider, falling back to the main one.
+    fn cheap_llm(&self) -> &Arc<dyn LlmProvider> {
+        self.deps.cheap_llm.as_ref().unwrap_or(&self.deps.llm)
     }
 
     fn safety(&self) -> &Arc<SafetyLayer> {
@@ -316,7 +324,7 @@ impl Agent {
                     Some(spawn_heartbeat(
                         config,
                         workspace.clone(),
-                        self.llm().clone(),
+                        self.cheap_llm().clone(),
                         Some(notify_tx),
                     ))
                 } else {
