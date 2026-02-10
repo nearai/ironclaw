@@ -65,7 +65,7 @@ IronClaw is the AI assistant you can actually trust with your personal and profe
 ### Prerequisites
 
 - Rust 1.85+
-- PostgreSQL 15+ with pgvector extension
+- PostgreSQL 15+ with [pgvector](https://github.com/pgvector/pgvector) extension
 - NEAR AI account (authentication handled via setup wizard)
 
 ### Build
@@ -97,7 +97,7 @@ psql ironclaw -c "CREATE EXTENSION IF NOT EXISTS vector;"
 Run the setup wizard to configure IronClaw:
 
 ```bash
-ironclaw setup
+ironclaw onboard
 ```
 
 The wizard handles database connection, NEAR AI authentication (via browser OAuth),
@@ -191,7 +191,7 @@ External content passes through multiple security layers:
 
 ```bash
 # First-time setup (configures database, auth, etc.)
-ironclaw setup
+ironclaw onboard
 
 # Start interactive REPL
 cargo run
@@ -210,6 +210,7 @@ cargo fmt
 cargo clippy --all --benches --tests --examples --all-features
 
 # Run tests
+createdb ironclaw_test
 cargo test
 
 # Run specific test
