@@ -19,7 +19,7 @@ mod tool;
 pub use config::{ConfigCommand, run_config_command};
 pub use mcp::{McpCommand, run_mcp_command};
 pub use memory::{MemoryCommand, run_memory_command};
-pub use pairing::{PairingCommand, run_pairing_command};
+pub use pairing::{PairingCommand, run_pairing_command, run_pairing_command_with_store};
 pub use status::run_status_command;
 pub use tool::{ToolCommand, run_tool_command};
 

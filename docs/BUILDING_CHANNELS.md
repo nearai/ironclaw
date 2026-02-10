@@ -246,13 +246,31 @@ Create `my-channel.capabilities.json`:
 
 ## Building and Deploying
 
+### Telegram Channel
+
+```bash
+# Add WASM target if needed
+rustup target add wasm32-wasip2
+
+# Build Telegram channel
+./channels-src/telegram/build.sh
+
+# Install (or use ironclaw onboard to install bundled channel)
+mkdir -p ~/.ironclaw/channels
+cp channels-src/telegram/telegram.wasm channels-src/telegram/telegram.capabilities.json ~/.ironclaw/channels/
+```
+
+**Note**: The main IronClaw binary bundles `telegram.wasm` via `include_bytes!`. When modifying the Telegram channel source, run `./channels-src/telegram/build.sh` **before** building the main crate, so the updated WASM is included.
+
+### Other Channels
+
 ```bash
 # Build the WASM component
-cd channels/my-channel
-cargo component build --release
+cd channels-src/my-channel
+cargo build --release --target wasm32-wasip2
 
 # Deploy to ~/.ironclaw/channels/
-cp target/wasm32-wasip1/release/my_channel.wasm ~/.ironclaw/channels/my-channel.wasm
+cp target/wasm32-wasip2/release/my_channel.wasm ~/.ironclaw/channels/my-channel.wasm
 cp my-channel.capabilities.json ~/.ironclaw/channels/
 ```
 
