@@ -72,6 +72,10 @@ struct TelegramMessage {
     /// Message text.
     text: Option<String>,
 
+    /// Caption for media (photo, video, document, etc.).
+    #[serde(default)]
+    caption: Option<String>,
+
     /// Original message if this is a reply.
     reply_to_message: Option<Box<TelegramMessage>>,
 
@@ -805,11 +809,16 @@ fn handle_update(update: TelegramUpdate) {
 
 /// Process a single message.
 fn handle_message(message: TelegramMessage) {
-    // Skip messages without text
-    let text = match message.text {
-        Some(t) if !t.is_empty() => t,
-        _ => return,
-    };
+    // Use text or caption (for media messages)
+    let content = message
+        .text
+        .filter(|t| !t.is_empty())
+        .or_else(|| message.caption.filter(|c| !c.is_empty()))
+        .unwrap_or_default();
+
+    if content.is_empty() {
+        return;
+    }
 
     // Skip messages without a sender (channel posts)
     let from = match message.from {
@@ -910,20 +919,20 @@ fn handle_message(message: TelegramMessage) {
             == "true";
 
         if !respond_to_all {
-            let has_command = text.starts_with('/');
+            let has_command = content.starts_with('/');
             let bot_username = channel_host::workspace_read(BOT_USERNAME_PATH)
                 .unwrap_or_default();
             let has_bot_mention = if bot_username.is_empty() {
-                text.contains('@')
+                content.contains('@')
             } else {
                 let mention = format!("@{}", bot_username);
-                text.to_lowercase().contains(&mention.to_lowercase())
+                content.to_lowercase().contains(&mention.to_lowercase())
             };
 
             if !has_command && !has_bot_mention {
                 channel_host::log(
                     channel_host::LogLevel::Debug,
-                    &format!("Ignoring group message without mention: {}", text),
+                    &format!("Ignoring group message without mention: {}", content),
                 );
                 return;
             }
@@ -948,17 +957,30 @@ fn handle_message(message: TelegramMessage) {
     let metadata_json = serde_json::to_string(&metadata).unwrap_or_else(|_| "{}".to_string());
 
     // Clean the message text (strip bot mentions and commands)
-    let cleaned_text = clean_message_text(&text);
+    let bot_username = channel_host::workspace_read(BOT_USERNAME_PATH).unwrap_or_default();
+    let cleaned_text = clean_message_text(
+        &content,
+        if bot_username.is_empty() {
+            None
+        } else {
+            Some(bot_username.as_str())
+        },
+    );
 
-    if cleaned_text.is_empty() {
+    // For /start with no args, emit placeholder so agent can respond with welcome
+    let content_to_emit = if cleaned_text.is_empty() && content.trim().starts_with('/') {
+        "[User started the bot]".to_string()
+    } else if cleaned_text.is_empty() {
         return;
-    }
+    } else {
+        cleaned_text
+    };
 
     // Emit the message to the agent
     channel_host::emit_message(&EmittedMessage {
         user_id: from.id.to_string(),
         user_name: Some(user_name),
-        content: cleaned_text,
+        content: content_to_emit,
         thread_id: None, // Telegram doesn't have threads in the same way
         metadata_json,
     });
@@ -973,7 +995,8 @@ fn handle_message(message: TelegramMessage) {
 }
 
 /// Clean message text by removing bot commands and @mentions at the start.
-fn clean_message_text(text: &str) -> String {
+/// When bot_username is set, only strips that specific mention; otherwise strips any leading @mention.
+fn clean_message_text(text: &str, bot_username: Option<&str>) -> String {
     let mut result = text.trim().to_string();
 
     // Remove leading /command
@@ -988,11 +1011,30 @@ fn clean_message_text(text: &str) -> String {
 
     // Remove leading @mention
     if result.starts_with('@') {
-        if let Some(space_idx) = result.find(' ') {
-            result = result[space_idx..].trim_start().to_string();
+        if let Some(bot) = bot_username {
+            let mention = format!("@{}", bot);
+            let mention_lower = mention.to_lowercase();
+            let result_lower = result.to_lowercase();
+            if result_lower.starts_with(&mention_lower) {
+                let rest = result[mention.len()..].trim_start();
+                if rest.is_empty() {
+                    return String::new();
+                }
+                result = rest.to_string();
+            } else if let Some(space_idx) = result.find(' ') {
+                // Different leading @mention - only strip if it's the bot
+                let first_word = &result[..space_idx];
+                if first_word.eq_ignore_ascii_case(&mention) {
+                    result = result[space_idx..].trim_start().to_string();
+                }
+            }
         } else {
-            // Just a mention with no text
-            return String::new();
+            // No bot_username: strip any leading @mention
+            if let Some(space_idx) = result.find(' ') {
+                result = result[space_idx..].trim_start().to_string();
+            } else {
+                return String::new();
+            }
         }
     }
 
@@ -1028,12 +1070,22 @@ mod tests {
 
     #[test]
     fn test_clean_message_text() {
-        assert_eq!(clean_message_text("/start hello"), "hello");
-        assert_eq!(clean_message_text("@bot hello world"), "hello world");
-        assert_eq!(clean_message_text("/start"), "");
-        assert_eq!(clean_message_text("@botname"), "");
-        assert_eq!(clean_message_text("just text"), "just text");
-        assert_eq!(clean_message_text("  spaced  "), "spaced");
+        // Without bot_username: strips any leading @mention
+        assert_eq!(clean_message_text("/start hello", None), "hello");
+        assert_eq!(clean_message_text("@bot hello world", None), "hello world");
+        assert_eq!(clean_message_text("/start", None), "");
+        assert_eq!(clean_message_text("@botname", None), "");
+        assert_eq!(clean_message_text("just text", None), "just text");
+        assert_eq!(clean_message_text("  spaced  ", None), "spaced");
+
+        // With bot_username: only strips @MyBot, not @alice
+        assert_eq!(clean_message_text("@MyBot hello", Some("MyBot")), "hello");
+        assert_eq!(clean_message_text("@mybot hi", Some("MyBot")), "hi");
+        assert_eq!(
+            clean_message_text("@alice hello", Some("MyBot")),
+            "@alice hello"
+        );
+        assert_eq!(clean_message_text("@MyBot", Some("MyBot")), "");
     }
 
     #[test]
@@ -1100,5 +1152,18 @@ mod tests {
         let from = message.from.unwrap();
         assert_eq!(from.id, 789);
         assert_eq!(from.first_name, "John");
+    }
+
+    #[test]
+    fn test_parse_message_with_caption() {
+        let json = r#"{
+            "message_id": 1,
+            "from": {"id": 1, "is_bot": false, "first_name": "A"},
+            "chat": {"id": 1, "type": "private"},
+            "caption": "What's in this image?"
+        }"#;
+        let msg: TelegramMessage = serde_json::from_str(json).unwrap();
+        assert_eq!(msg.text, None);
+        assert_eq!(msg.caption.as_deref(), Some("What's in this image?"));
     }
 }
