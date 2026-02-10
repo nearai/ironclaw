@@ -13,6 +13,7 @@ mod nearai;
 mod nearai_chat;
 mod provider;
 mod reasoning;
+mod retry;
 mod rig_adapter;
 pub mod session;
 
@@ -78,7 +79,6 @@ pub fn create_llm_provider_with_config(
                 "Using Chat Completions API (cloud-api) with API key auth"
             );
             Ok(Arc::new(NearAiChatProvider::new(config.clone())?))
-
         }
     }
 }

@@ -402,6 +402,8 @@ pub struct NearAiConfig {
     /// in a `FailoverProvider` so transient errors on the primary model
     /// automatically fall through to the fallback.
     pub fallback_model: Option<String>,
+    /// Maximum number of retries for transient errors (default: 3).
+    pub max_retries: u32,
 }
 
 impl LlmConfig {
@@ -447,6 +449,7 @@ impl LlmConfig {
             api_mode,
             api_key: nearai_api_key,
             fallback_model: optional_env("NEARAI_FALLBACK_MODEL")?,
+            max_retries: parse_optional_env("NEARAI_MAX_RETRIES", 3)?,
         };
 
         // Resolve provider-specific configs based on backend
