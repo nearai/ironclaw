@@ -953,7 +953,7 @@ impl SandboxModeConfig {
 
 // Helper functions
 
-fn optional_env(key: &str) -> Result<Option<String>, ConfigError> {
+pub(crate) fn optional_env(key: &str) -> Result<Option<String>, ConfigError> {
     match std::env::var(key) {
         Ok(val) if val.is_empty() => Ok(None),
         Ok(val) => Ok(Some(val)),
@@ -964,7 +964,7 @@ fn optional_env(key: &str) -> Result<Option<String>, ConfigError> {
     }
 }
 
-fn parse_optional_env<T>(key: &str, default: T) -> Result<T, ConfigError>
+pub(crate) fn parse_optional_env<T>(key: &str, default: T) -> Result<T, ConfigError>
 where
     T: std::str::FromStr,
     T::Err: std::fmt::Display,
@@ -978,4 +978,1039 @@ where
         })
         .transpose()
         .map(|opt| opt.unwrap_or(default))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Mutex;
+
+    // Env vars are process-global, so serialize tests that mutate them.
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    // --- optional_env tests ---
+
+    #[test]
+    fn optional_env_returns_none_for_missing_var() {
+        let _lock = ENV_LOCK.lock();
+        // Use a unique key that won't exist in the real environment.
+        unsafe { std::env::remove_var("_TEST_CFG_MISSING_42") };
+        let result = optional_env("_TEST_CFG_MISSING_42").unwrap();
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn optional_env_returns_none_for_empty_string() {
+        let _lock = ENV_LOCK.lock();
+        unsafe { std::env::set_var("_TEST_CFG_EMPTY_42", "") };
+        let result = optional_env("_TEST_CFG_EMPTY_42").unwrap();
+        assert!(result.is_none());
+        unsafe { std::env::remove_var("_TEST_CFG_EMPTY_42") };
+    }
+
+    #[test]
+    fn optional_env_returns_value_when_set() {
+        let _lock = ENV_LOCK.lock();
+        unsafe { std::env::set_var("_TEST_CFG_SET_42", "hello") };
+        let result = optional_env("_TEST_CFG_SET_42").unwrap();
+        assert_eq!(result, Some("hello".to_string()));
+        unsafe { std::env::remove_var("_TEST_CFG_SET_42") };
+    }
+
+    // --- parse_optional_env tests ---
+
+    #[test]
+    fn parse_optional_env_returns_default_when_missing() {
+        let _lock = ENV_LOCK.lock();
+        unsafe { std::env::remove_var("_TEST_CFG_PARSE_MISSING_42") };
+        let result: u64 = parse_optional_env("_TEST_CFG_PARSE_MISSING_42", 999).unwrap();
+        assert_eq!(result, 999);
+    }
+
+    #[test]
+    fn parse_optional_env_parses_value() {
+        let _lock = ENV_LOCK.lock();
+        unsafe { std::env::set_var("_TEST_CFG_PARSE_VAL_42", "42") };
+        let result: u64 = parse_optional_env("_TEST_CFG_PARSE_VAL_42", 0).unwrap();
+        assert_eq!(result, 42);
+        unsafe { std::env::remove_var("_TEST_CFG_PARSE_VAL_42") };
+    }
+
+    #[test]
+    fn parse_optional_env_returns_error_for_invalid_value() {
+        let _lock = ENV_LOCK.lock();
+        unsafe { std::env::set_var("_TEST_CFG_PARSE_BAD_42", "not_a_number") };
+        let result: Result<u64, _> = parse_optional_env("_TEST_CFG_PARSE_BAD_42", 0);
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(matches!(err, ConfigError::InvalidValue { .. }));
+        unsafe { std::env::remove_var("_TEST_CFG_PARSE_BAD_42") };
+    }
+
+    // --- NearAiApiMode::from_str tests ---
+
+    #[test]
+    fn nearai_api_mode_parses_responses() {
+        assert_eq!(
+            "responses".parse::<NearAiApiMode>().unwrap(),
+            NearAiApiMode::Responses
+        );
+        assert_eq!(
+            "response".parse::<NearAiApiMode>().unwrap(),
+            NearAiApiMode::Responses
+        );
+        assert_eq!(
+            "RESPONSES".parse::<NearAiApiMode>().unwrap(),
+            NearAiApiMode::Responses
+        );
+    }
+
+    #[test]
+    fn nearai_api_mode_parses_chat_completions() {
+        assert_eq!(
+            "chat_completions".parse::<NearAiApiMode>().unwrap(),
+            NearAiApiMode::ChatCompletions
+        );
+        assert_eq!(
+            "chatcompletions".parse::<NearAiApiMode>().unwrap(),
+            NearAiApiMode::ChatCompletions
+        );
+        assert_eq!(
+            "chat".parse::<NearAiApiMode>().unwrap(),
+            NearAiApiMode::ChatCompletions
+        );
+        assert_eq!(
+            "completions".parse::<NearAiApiMode>().unwrap(),
+            NearAiApiMode::ChatCompletions
+        );
+    }
+
+    #[test]
+    fn nearai_api_mode_rejects_invalid() {
+        assert!("unknown".parse::<NearAiApiMode>().is_err());
+        assert!("".parse::<NearAiApiMode>().is_err());
+    }
+
+    #[test]
+    fn nearai_api_mode_default_is_responses() {
+        assert_eq!(NearAiApiMode::default(), NearAiApiMode::Responses);
+    }
+
+    // --- TunnelConfig tests ---
+
+    #[test]
+    fn tunnel_is_enabled_when_url_set() {
+        let config = TunnelConfig {
+            public_url: Some("https://abc.ngrok.io".to_string()),
+        };
+        assert!(config.is_enabled());
+    }
+
+    #[test]
+    fn tunnel_is_disabled_when_url_none() {
+        let config = TunnelConfig { public_url: None };
+        assert!(!config.is_enabled());
+    }
+
+    #[test]
+    fn tunnel_webhook_url_combines_base_and_path() {
+        let config = TunnelConfig {
+            public_url: Some("https://abc.ngrok.io".to_string()),
+        };
+        assert_eq!(
+            config.webhook_url("/webhook/telegram"),
+            Some("https://abc.ngrok.io/webhook/telegram".to_string())
+        );
+    }
+
+    #[test]
+    fn tunnel_webhook_url_strips_trailing_slash() {
+        let config = TunnelConfig {
+            public_url: Some("https://abc.ngrok.io/".to_string()),
+        };
+        assert_eq!(
+            config.webhook_url("/webhook/slack"),
+            Some("https://abc.ngrok.io/webhook/slack".to_string())
+        );
+    }
+
+    #[test]
+    fn tunnel_webhook_url_returns_none_when_disabled() {
+        let config = TunnelConfig { public_url: None };
+        assert!(config.webhook_url("/webhook/test").is_none());
+    }
+
+    // --- EmbeddingsConfig default tests ---
+
+    #[test]
+    fn embeddings_config_defaults() {
+        let config = EmbeddingsConfig::default();
+        assert!(!config.enabled);
+        assert_eq!(config.provider, "openai");
+        assert!(config.openai_api_key.is_none());
+        assert_eq!(config.model, "text-embedding-3-small");
+    }
+
+    #[test]
+    fn embeddings_config_openai_api_key_accessor() {
+        let config = EmbeddingsConfig {
+            openai_api_key: Some(SecretString::from("sk-test123".to_string())),
+            ..Default::default()
+        };
+        assert_eq!(config.openai_api_key(), Some("sk-test123"));
+
+        let config_none = EmbeddingsConfig::default();
+        assert!(config_none.openai_api_key().is_none());
+    }
+
+    // --- WasmConfig default tests ---
+
+    #[test]
+    fn wasm_config_defaults() {
+        let config = WasmConfig::default();
+        assert!(config.enabled);
+        assert_eq!(config.default_memory_limit, 10 * 1024 * 1024);
+        assert_eq!(config.default_timeout_secs, 60);
+        assert_eq!(config.default_fuel_limit, 10_000_000);
+        assert!(config.cache_compiled);
+        assert!(config.cache_dir.is_none());
+    }
+
+    // --- BuilderModeConfig default tests ---
+
+    #[test]
+    fn builder_config_defaults() {
+        let config = BuilderModeConfig::default();
+        assert!(config.enabled);
+        assert!(config.build_dir.is_none());
+        assert_eq!(config.max_iterations, 20);
+        assert_eq!(config.timeout_secs, 600);
+        assert!(config.auto_register);
+    }
+
+    // --- HeartbeatConfig default tests ---
+
+    #[test]
+    fn heartbeat_config_defaults() {
+        let config = HeartbeatConfig::default();
+        assert!(!config.enabled);
+        assert_eq!(config.interval_secs, 1800);
+        assert!(config.notify_channel.is_none());
+        assert!(config.notify_user.is_none());
+    }
+
+    // --- SandboxModeConfig default tests ---
+
+    #[test]
+    fn sandbox_config_defaults() {
+        let config = SandboxModeConfig::default();
+        assert!(config.enabled);
+        assert_eq!(config.policy, "readonly");
+        assert_eq!(config.timeout_secs, 120);
+        assert_eq!(config.memory_limit_mb, 2048);
+        assert_eq!(config.cpu_shares, 1024);
+        assert_eq!(config.image, "ghcr.io/nearai/sandbox:latest");
+        assert!(config.auto_pull_image);
+        assert!(config.extra_allowed_domains.is_empty());
+    }
+
+    // --- SafetyConfig from_env (no env vars set, uses defaults) ---
+
+    #[test]
+    fn safety_config_defaults_without_env() {
+        let _lock = ENV_LOCK.lock();
+        // Clear relevant env vars to ensure defaults are used.
+        unsafe { std::env::remove_var("SAFETY_MAX_OUTPUT_LENGTH") };
+        unsafe { std::env::remove_var("SAFETY_INJECTION_CHECK_ENABLED") };
+
+        let config = SafetyConfig::from_env().unwrap();
+        assert_eq!(config.max_output_length, 100_000);
+        assert!(config.injection_check_enabled);
+    }
+
+    #[test]
+    fn safety_config_respects_env_vars() {
+        let _lock = ENV_LOCK.lock();
+        unsafe { std::env::set_var("SAFETY_MAX_OUTPUT_LENGTH", "5000") };
+        unsafe { std::env::set_var("SAFETY_INJECTION_CHECK_ENABLED", "false") };
+
+        let config = SafetyConfig::from_env().unwrap();
+        assert_eq!(config.max_output_length, 5000);
+        assert!(!config.injection_check_enabled);
+
+        unsafe { std::env::remove_var("SAFETY_MAX_OUTPUT_LENGTH") };
+        unsafe { std::env::remove_var("SAFETY_INJECTION_CHECK_ENABLED") };
+    }
+
+    #[test]
+    fn safety_config_invalid_bool_returns_error() {
+        let _lock = ENV_LOCK.lock();
+        unsafe { std::env::set_var("SAFETY_INJECTION_CHECK_ENABLED", "maybe") };
+
+        let result = SafetyConfig::from_env();
+        assert!(result.is_err());
+
+        unsafe { std::env::remove_var("SAFETY_INJECTION_CHECK_ENABLED") };
+    }
+
+    // --- SecretsConfig debug does not leak key ---
+
+    #[test]
+    fn secrets_config_debug_hides_key() {
+        let config = SecretsConfig {
+            master_key: Some(SecretString::from("supersecretkey1234567890abcdefghij")),
+            enabled: true,
+            source: crate::settings::KeySource::Env,
+        };
+        let debug = format!("{:?}", config);
+        assert!(!debug.contains("supersecretkey"));
+        assert!(debug.contains("true")); // master_key shows as `true` (is_some)
+    }
+
+    // --- DatabaseConfig.url() accessor ---
+
+    #[test]
+    fn database_config_url_exposes_secret() {
+        let config = DatabaseConfig {
+            url: SecretString::from("postgres://user:pass@localhost/db"),
+            pool_size: 5,
+        };
+        assert_eq!(config.url(), "postgres://user:pass@localhost/db");
+    }
+
+    // --- TunnelConfig default ---
+
+    #[test]
+    fn tunnel_config_default_is_disabled() {
+        let config = TunnelConfig::default();
+        assert!(!config.is_enabled());
+        assert!(config.public_url.is_none());
+    }
+
+    // --- Helper: set env vars, run closure, clean up ---
+    // NOTE: Callers must hold ENV_LOCK before calling these helpers.
+    // The helpers do NOT acquire the lock themselves so they can be nested.
+
+    fn with_env_vars<F, R>(vars: &[(&str, &str)], f: F) -> R
+    where
+        F: FnOnce() -> R,
+    {
+        for (key, val) in vars {
+            unsafe { std::env::set_var(key, val) };
+        }
+        let result = f();
+        for (key, _) in vars {
+            unsafe { std::env::remove_var(key) };
+        }
+        result
+    }
+
+    fn without_env_vars<F, R>(keys: &[&str], f: F) -> R
+    where
+        F: FnOnce() -> R,
+    {
+        let saved: Vec<(&str, Option<String>)> =
+            keys.iter().map(|k| (*k, std::env::var(k).ok())).collect();
+        for key in keys {
+            unsafe { std::env::remove_var(key) };
+        }
+        let result = f();
+        for (key, val) in &saved {
+            match val {
+                Some(v) => unsafe { std::env::set_var(key, v) },
+                None => unsafe { std::env::remove_var(key) },
+            }
+        }
+        result
+    }
+
+    // --- TunnelConfig::from_env validation ---
+
+    #[test]
+    fn tunnel_from_env_rejects_http_url() {
+        let _lock = ENV_LOCK.lock();
+        with_env_vars(&[("TUNNEL_URL", "http://example.com")], || {
+            let result = TunnelConfig::from_env();
+            assert!(result.is_err());
+            match result.unwrap_err() {
+                ConfigError::InvalidValue { key, message } => {
+                    assert_eq!(key, "TUNNEL_URL");
+                    assert!(message.contains("https://"));
+                }
+                other => panic!("expected InvalidValue, got: {other:?}"),
+            }
+        });
+    }
+
+    #[test]
+    fn tunnel_from_env_accepts_https_url() {
+        let _lock = ENV_LOCK.lock();
+        with_env_vars(&[("TUNNEL_URL", "https://my-tunnel.example.com")], || {
+            let cfg = TunnelConfig::from_env().unwrap();
+            assert_eq!(
+                cfg.public_url,
+                Some("https://my-tunnel.example.com".to_string())
+            );
+        });
+    }
+
+    // --- WasmConfig::from_env ---
+
+    #[test]
+    fn wasm_config_from_env_with_defaults() {
+        let _lock = ENV_LOCK.lock();
+        without_env_vars(
+            &[
+                "WASM_ENABLED",
+                "WASM_TOOLS_DIR",
+                "WASM_DEFAULT_MEMORY_LIMIT",
+                "WASM_DEFAULT_TIMEOUT_SECS",
+                "WASM_DEFAULT_FUEL_LIMIT",
+                "WASM_CACHE_COMPILED",
+                "WASM_CACHE_DIR",
+            ],
+            || {
+                let cfg = WasmConfig::from_env().unwrap();
+                assert!(cfg.enabled);
+                assert_eq!(cfg.default_memory_limit, 10 * 1024 * 1024);
+                assert_eq!(cfg.default_timeout_secs, 60);
+                assert_eq!(cfg.default_fuel_limit, 10_000_000);
+                assert!(cfg.cache_compiled);
+                assert!(cfg.cache_dir.is_none());
+            },
+        );
+    }
+
+    #[test]
+    fn wasm_config_from_env_custom_values() {
+        let _lock = ENV_LOCK.lock();
+        with_env_vars(
+            &[
+                ("WASM_ENABLED", "false"),
+                ("WASM_TOOLS_DIR", "/tmp/my-tools"),
+                ("WASM_DEFAULT_MEMORY_LIMIT", "5242880"),
+                ("WASM_DEFAULT_TIMEOUT_SECS", "30"),
+                ("WASM_DEFAULT_FUEL_LIMIT", "5000000"),
+                ("WASM_CACHE_COMPILED", "false"),
+                ("WASM_CACHE_DIR", "/tmp/cache"),
+            ],
+            || {
+                let cfg = WasmConfig::from_env().unwrap();
+                assert!(!cfg.enabled);
+                assert_eq!(cfg.tools_dir, PathBuf::from("/tmp/my-tools"));
+                assert_eq!(cfg.default_memory_limit, 5_242_880);
+                assert_eq!(cfg.default_timeout_secs, 30);
+                assert_eq!(cfg.default_fuel_limit, 5_000_000);
+                assert!(!cfg.cache_compiled);
+                assert_eq!(cfg.cache_dir, Some(PathBuf::from("/tmp/cache")));
+            },
+        );
+    }
+
+    #[test]
+    fn wasm_config_from_env_invalid_enabled() {
+        let _lock = ENV_LOCK.lock();
+        with_env_vars(&[("WASM_ENABLED", "maybe")], || {
+            let result = WasmConfig::from_env();
+            assert!(result.is_err());
+        });
+    }
+
+    // --- BuilderModeConfig::from_env ---
+
+    #[test]
+    fn builder_config_from_env_with_defaults() {
+        let _lock = ENV_LOCK.lock();
+        without_env_vars(
+            &[
+                "BUILDER_ENABLED",
+                "BUILDER_DIR",
+                "BUILDER_MAX_ITERATIONS",
+                "BUILDER_TIMEOUT_SECS",
+                "BUILDER_AUTO_REGISTER",
+            ],
+            || {
+                let cfg = BuilderModeConfig::from_env().unwrap();
+                assert!(cfg.enabled);
+                assert!(cfg.build_dir.is_none());
+                assert_eq!(cfg.max_iterations, 20);
+                assert_eq!(cfg.timeout_secs, 600);
+                assert!(cfg.auto_register);
+            },
+        );
+    }
+
+    #[test]
+    fn builder_config_from_env_custom_values() {
+        let _lock = ENV_LOCK.lock();
+        with_env_vars(
+            &[
+                ("BUILDER_ENABLED", "false"),
+                ("BUILDER_DIR", "/tmp/builds"),
+                ("BUILDER_MAX_ITERATIONS", "10"),
+                ("BUILDER_TIMEOUT_SECS", "300"),
+                ("BUILDER_AUTO_REGISTER", "false"),
+            ],
+            || {
+                let cfg = BuilderModeConfig::from_env().unwrap();
+                assert!(!cfg.enabled);
+                assert_eq!(cfg.build_dir, Some(PathBuf::from("/tmp/builds")));
+                assert_eq!(cfg.max_iterations, 10);
+                assert_eq!(cfg.timeout_secs, 300);
+                assert!(!cfg.auto_register);
+            },
+        );
+    }
+
+    #[test]
+    fn builder_config_from_env_invalid_max_iterations() {
+        let _lock = ENV_LOCK.lock();
+        with_env_vars(&[("BUILDER_MAX_ITERATIONS", "abc")], || {
+            let result = BuilderModeConfig::from_env();
+            assert!(result.is_err());
+        });
+    }
+
+    // --- HeartbeatConfig::from_env ---
+
+    #[test]
+    fn heartbeat_config_from_env_custom_values() {
+        let _lock = ENV_LOCK.lock();
+        with_env_vars(
+            &[
+                ("HEARTBEAT_ENABLED", "true"),
+                ("HEARTBEAT_INTERVAL_SECS", "900"),
+                ("HEARTBEAT_NOTIFY_CHANNEL", "telegram"),
+                ("HEARTBEAT_NOTIFY_USER", "user123"),
+            ],
+            || {
+                let cfg = HeartbeatConfig::from_env().unwrap();
+                assert!(cfg.enabled);
+                assert_eq!(cfg.interval_secs, 900);
+                assert_eq!(cfg.notify_channel, Some("telegram".to_string()));
+                assert_eq!(cfg.notify_user, Some("user123".to_string()));
+            },
+        );
+    }
+
+    #[test]
+    fn heartbeat_config_from_env_invalid_interval() {
+        let _lock = ENV_LOCK.lock();
+        with_env_vars(&[("HEARTBEAT_INTERVAL_SECS", "not_a_number")], || {
+            let result = HeartbeatConfig::from_env();
+            assert!(result.is_err());
+        });
+    }
+
+    #[test]
+    fn heartbeat_config_from_env_invalid_enabled() {
+        let _lock = ENV_LOCK.lock();
+        with_env_vars(&[("HEARTBEAT_ENABLED", "invalid")], || {
+            let result = HeartbeatConfig::from_env();
+            assert!(result.is_err());
+        });
+    }
+
+    // --- SandboxModeConfig::from_env ---
+
+    #[test]
+    fn sandbox_config_from_env_with_defaults() {
+        let _lock = ENV_LOCK.lock();
+        without_env_vars(
+            &[
+                "SANDBOX_ENABLED",
+                "SANDBOX_POLICY",
+                "SANDBOX_TIMEOUT_SECS",
+                "SANDBOX_MEMORY_LIMIT_MB",
+                "SANDBOX_CPU_SHARES",
+                "SANDBOX_IMAGE",
+                "SANDBOX_AUTO_PULL",
+                "SANDBOX_EXTRA_DOMAINS",
+            ],
+            || {
+                let cfg = SandboxModeConfig::from_env().unwrap();
+                assert!(cfg.enabled);
+                assert_eq!(cfg.policy, "readonly");
+                assert_eq!(cfg.timeout_secs, 120);
+                assert_eq!(cfg.memory_limit_mb, 2048);
+                assert_eq!(cfg.cpu_shares, 1024);
+                assert_eq!(cfg.image, "ghcr.io/nearai/sandbox:latest");
+                assert!(cfg.auto_pull_image);
+                assert!(cfg.extra_allowed_domains.is_empty());
+            },
+        );
+    }
+
+    #[test]
+    fn sandbox_config_from_env_custom_values() {
+        let _lock = ENV_LOCK.lock();
+        with_env_vars(
+            &[
+                ("SANDBOX_ENABLED", "false"),
+                ("SANDBOX_POLICY", "full_access"),
+                ("SANDBOX_TIMEOUT_SECS", "60"),
+                ("SANDBOX_MEMORY_LIMIT_MB", "4096"),
+                ("SANDBOX_CPU_SHARES", "512"),
+                ("SANDBOX_IMAGE", "custom-image:v1"),
+                ("SANDBOX_AUTO_PULL", "false"),
+                ("SANDBOX_EXTRA_DOMAINS", "api.example.com, cdn.example.com"),
+            ],
+            || {
+                let cfg = SandboxModeConfig::from_env().unwrap();
+                assert!(!cfg.enabled);
+                assert_eq!(cfg.policy, "full_access");
+                assert_eq!(cfg.timeout_secs, 60);
+                assert_eq!(cfg.memory_limit_mb, 4096);
+                assert_eq!(cfg.cpu_shares, 512);
+                assert_eq!(cfg.image, "custom-image:v1");
+                assert!(!cfg.auto_pull_image);
+                assert_eq!(
+                    cfg.extra_allowed_domains,
+                    vec!["api.example.com", "cdn.example.com"]
+                );
+            },
+        );
+    }
+
+    #[test]
+    fn sandbox_config_from_env_invalid_timeout() {
+        let _lock = ENV_LOCK.lock();
+        with_env_vars(&[("SANDBOX_TIMEOUT_SECS", "bad")], || {
+            let result = SandboxModeConfig::from_env();
+            assert!(result.is_err());
+        });
+    }
+
+    #[test]
+    fn sandbox_config_from_env_invalid_enabled() {
+        let _lock = ENV_LOCK.lock();
+        with_env_vars(&[("SANDBOX_ENABLED", "maybe")], || {
+            let result = SandboxModeConfig::from_env();
+            assert!(result.is_err());
+        });
+    }
+
+    // --- ChannelsConfig::from_env ---
+
+    #[test]
+    fn channels_config_no_http_when_not_configured() {
+        let _lock = ENV_LOCK.lock();
+        without_env_vars(
+            &[
+                "HTTP_PORT",
+                "HTTP_HOST",
+                "HTTP_WEBHOOK_SECRET",
+                "HTTP_USER_ID",
+                "CLI_ENABLED",
+                "GATEWAY_ENABLED",
+                "WASM_CHANNELS_DIR",
+                "WASM_CHANNELS_ENABLED",
+            ],
+            || {
+                let cfg = ChannelsConfig::from_env().unwrap();
+                assert!(cfg.http.is_none());
+                assert!(cfg.cli.enabled);
+                assert!(cfg.gateway.is_none());
+            },
+        );
+    }
+
+    #[test]
+    fn channels_config_http_from_port() {
+        let _lock = ENV_LOCK.lock();
+        with_env_vars(&[("HTTP_PORT", "9090")], || {
+            without_env_vars(&["HTTP_HOST", "HTTP_WEBHOOK_SECRET", "HTTP_USER_ID"], || {
+                let cfg = ChannelsConfig::from_env().unwrap();
+                let http = cfg.http.unwrap();
+                assert_eq!(http.port, 9090);
+                assert_eq!(http.host, "0.0.0.0");
+                assert_eq!(http.user_id, "http");
+                assert!(http.webhook_secret.is_none());
+            });
+        });
+    }
+
+    #[test]
+    fn channels_config_http_invalid_port() {
+        let _lock = ENV_LOCK.lock();
+        with_env_vars(&[("HTTP_PORT", "not_a_port")], || {
+            let result = ChannelsConfig::from_env();
+            assert!(result.is_err());
+        });
+    }
+
+    #[test]
+    fn channels_config_cli_disabled_with_false() {
+        let _lock = ENV_LOCK.lock();
+        with_env_vars(&[("CLI_ENABLED", "false")], || {
+            without_env_vars(&["HTTP_PORT", "HTTP_HOST", "GATEWAY_ENABLED"], || {
+                let cfg = ChannelsConfig::from_env().unwrap();
+                assert!(!cfg.cli.enabled);
+            });
+        });
+    }
+
+    #[test]
+    fn channels_config_cli_disabled_with_zero() {
+        let _lock = ENV_LOCK.lock();
+        with_env_vars(&[("CLI_ENABLED", "0")], || {
+            without_env_vars(&["HTTP_PORT", "HTTP_HOST", "GATEWAY_ENABLED"], || {
+                let cfg = ChannelsConfig::from_env().unwrap();
+                assert!(!cfg.cli.enabled);
+            });
+        });
+    }
+
+    #[test]
+    fn channels_config_gateway_enabled() {
+        let _lock = ENV_LOCK.lock();
+        with_env_vars(
+            &[
+                ("GATEWAY_ENABLED", "true"),
+                ("GATEWAY_PORT", "4000"),
+                ("GATEWAY_HOST", "0.0.0.0"),
+                ("GATEWAY_AUTH_TOKEN", "my-secret"),
+                ("GATEWAY_USER_ID", "admin"),
+            ],
+            || {
+                without_env_vars(&["HTTP_PORT", "HTTP_HOST"], || {
+                    let cfg = ChannelsConfig::from_env().unwrap();
+                    let gw = cfg.gateway.unwrap();
+                    assert_eq!(gw.port, 4000);
+                    assert_eq!(gw.host, "0.0.0.0");
+                    assert_eq!(gw.auth_token, Some("my-secret".to_string()));
+                    assert_eq!(gw.user_id, "admin");
+                });
+            },
+        );
+    }
+
+    #[test]
+    fn channels_config_gateway_invalid_port() {
+        let _lock = ENV_LOCK.lock();
+        with_env_vars(
+            &[("GATEWAY_ENABLED", "true"), ("GATEWAY_PORT", "xyz")],
+            || {
+                let result = ChannelsConfig::from_env();
+                assert!(result.is_err());
+            },
+        );
+    }
+
+    // --- LlmConfig::from_env ---
+
+    #[test]
+    fn llm_config_from_env_defaults() {
+        let _lock = ENV_LOCK.lock();
+        without_env_vars(
+            &[
+                "NEARAI_MODEL",
+                "NEARAI_BASE_URL",
+                "NEARAI_AUTH_URL",
+                "NEARAI_SESSION_PATH",
+                "NEARAI_API_MODE",
+                "NEARAI_API_KEY",
+            ],
+            || {
+                let cfg = LlmConfig::from_env().unwrap();
+                assert_eq!(cfg.nearai.api_mode, NearAiApiMode::Responses);
+                assert!(cfg.nearai.api_key.is_none());
+                assert_eq!(cfg.nearai.base_url, "https://cloud-api.near.ai");
+                assert_eq!(cfg.nearai.auth_base_url, "https://private.near.ai");
+            },
+        );
+    }
+
+    #[test]
+    fn llm_config_api_key_infers_chat_completions() {
+        let _lock = ENV_LOCK.lock();
+        with_env_vars(&[("NEARAI_API_KEY", "sk-test-key-123")], || {
+            without_env_vars(&["NEARAI_API_MODE"], || {
+                let cfg = LlmConfig::from_env().unwrap();
+                assert_eq!(cfg.nearai.api_mode, NearAiApiMode::ChatCompletions);
+                assert!(cfg.nearai.api_key.is_some());
+            });
+        });
+    }
+
+    #[test]
+    fn llm_config_explicit_mode_overrides_inference() {
+        let _lock = ENV_LOCK.lock();
+        with_env_vars(
+            &[
+                ("NEARAI_API_KEY", "sk-test-key-123"),
+                ("NEARAI_API_MODE", "responses"),
+            ],
+            || {
+                let cfg = LlmConfig::from_env().unwrap();
+                assert_eq!(cfg.nearai.api_mode, NearAiApiMode::Responses);
+            },
+        );
+    }
+
+    #[test]
+    fn llm_config_invalid_api_mode() {
+        let _lock = ENV_LOCK.lock();
+        with_env_vars(&[("NEARAI_API_MODE", "invalid_mode")], || {
+            let result = LlmConfig::from_env();
+            assert!(result.is_err());
+        });
+    }
+
+    #[test]
+    fn llm_config_custom_urls() {
+        let _lock = ENV_LOCK.lock();
+        with_env_vars(
+            &[
+                ("NEARAI_BASE_URL", "https://custom.api.ai"),
+                ("NEARAI_AUTH_URL", "https://custom.auth.ai"),
+                ("NEARAI_SESSION_PATH", "/tmp/session.json"),
+            ],
+            || {
+                without_env_vars(&["NEARAI_API_KEY", "NEARAI_API_MODE"], || {
+                    let cfg = LlmConfig::from_env().unwrap();
+                    assert_eq!(cfg.nearai.base_url, "https://custom.api.ai");
+                    assert_eq!(cfg.nearai.auth_base_url, "https://custom.auth.ai");
+                    assert_eq!(
+                        cfg.nearai.session_path,
+                        PathBuf::from("/tmp/session.json")
+                    );
+                });
+            },
+        );
+    }
+
+    // --- EmbeddingsConfig::from_env ---
+
+    #[test]
+    fn embeddings_config_auto_enables_with_api_key() {
+        let _lock = ENV_LOCK.lock();
+        with_env_vars(&[("OPENAI_API_KEY", "sk-test")], || {
+            without_env_vars(
+                &["EMBEDDING_ENABLED", "EMBEDDING_PROVIDER", "EMBEDDING_MODEL"],
+                || {
+                    let cfg = EmbeddingsConfig::from_env().unwrap();
+                    assert!(cfg.enabled);
+                    assert!(cfg.openai_api_key.is_some());
+                },
+            );
+        });
+    }
+
+    #[test]
+    fn embeddings_config_explicit_disabled_overrides_api_key() {
+        let _lock = ENV_LOCK.lock();
+        with_env_vars(
+            &[
+                ("OPENAI_API_KEY", "sk-test"),
+                ("EMBEDDING_ENABLED", "false"),
+            ],
+            || {
+                let cfg = EmbeddingsConfig::from_env().unwrap();
+                assert!(!cfg.enabled);
+            },
+        );
+    }
+
+    #[test]
+    fn embeddings_config_custom_provider_and_model() {
+        let _lock = ENV_LOCK.lock();
+        with_env_vars(
+            &[
+                ("EMBEDDING_PROVIDER", "nearai"),
+                ("EMBEDDING_MODEL", "text-embedding-3-large"),
+            ],
+            || {
+                without_env_vars(&["OPENAI_API_KEY", "EMBEDDING_ENABLED"], || {
+                    let cfg = EmbeddingsConfig::from_env().unwrap();
+                    assert_eq!(cfg.provider, "nearai");
+                    assert_eq!(cfg.model, "text-embedding-3-large");
+                });
+            },
+        );
+    }
+
+    #[test]
+    fn embeddings_config_invalid_enabled() {
+        let _lock = ENV_LOCK.lock();
+        with_env_vars(&[("EMBEDDING_ENABLED", "notbool")], || {
+            let result = EmbeddingsConfig::from_env();
+            assert!(result.is_err());
+        });
+    }
+
+    // --- AgentConfig::from_env ---
+
+    #[test]
+    fn agent_config_from_env_custom_values() {
+        let _lock = ENV_LOCK.lock();
+        with_env_vars(
+            &[
+                ("AGENT_NAME", "myagent"),
+                ("AGENT_MAX_PARALLEL_JOBS", "10"),
+                ("AGENT_JOB_TIMEOUT_SECS", "7200"),
+                ("AGENT_STUCK_THRESHOLD_SECS", "600"),
+                ("SELF_REPAIR_CHECK_INTERVAL_SECS", "120"),
+                ("SELF_REPAIR_MAX_ATTEMPTS", "5"),
+                ("AGENT_USE_PLANNING", "false"),
+                ("SESSION_IDLE_TIMEOUT_SECS", "86400"),
+            ],
+            || {
+                let cfg = AgentConfig::from_env().unwrap();
+                assert_eq!(cfg.name, "myagent");
+                assert_eq!(cfg.max_parallel_jobs, 10);
+                assert_eq!(cfg.job_timeout, Duration::from_secs(7200));
+                assert_eq!(cfg.stuck_threshold, Duration::from_secs(600));
+                assert_eq!(cfg.repair_check_interval, Duration::from_secs(120));
+                assert_eq!(cfg.max_repair_attempts, 5);
+                assert!(!cfg.use_planning);
+                assert_eq!(cfg.session_idle_timeout, Duration::from_secs(86400));
+            },
+        );
+    }
+
+    #[test]
+    fn agent_config_invalid_max_parallel_jobs() {
+        let _lock = ENV_LOCK.lock();
+        with_env_vars(&[("AGENT_MAX_PARALLEL_JOBS", "abc")], || {
+            let result = AgentConfig::from_env();
+            assert!(result.is_err());
+        });
+    }
+
+    #[test]
+    fn agent_config_invalid_use_planning() {
+        let _lock = ENV_LOCK.lock();
+        with_env_vars(&[("AGENT_USE_PLANNING", "maybe")], || {
+            let result = AgentConfig::from_env();
+            assert!(result.is_err());
+        });
+    }
+
+    // --- DatabaseConfig::from_env ---
+
+    #[test]
+    fn database_config_from_env_with_url() {
+        let _lock = ENV_LOCK.lock();
+        with_env_vars(
+            &[
+                ("DATABASE_URL", "postgres://user:pass@localhost/testdb"),
+                ("DATABASE_POOL_SIZE", "20"),
+            ],
+            || {
+                let cfg = DatabaseConfig::from_env().unwrap();
+                assert_eq!(cfg.url(), "postgres://user:pass@localhost/testdb");
+                assert_eq!(cfg.pool_size, 20);
+            },
+        );
+    }
+
+    #[test]
+    fn database_config_invalid_pool_size() {
+        let _lock = ENV_LOCK.lock();
+        with_env_vars(
+            &[
+                ("DATABASE_URL", "postgres://localhost/test"),
+                ("DATABASE_POOL_SIZE", "notanum"),
+            ],
+            || {
+                let result = DatabaseConfig::from_env();
+                assert!(result.is_err());
+            },
+        );
+    }
+
+    #[test]
+    fn database_config_default_pool_size() {
+        let _lock = ENV_LOCK.lock();
+        with_env_vars(&[("DATABASE_URL", "postgres://localhost/test")], || {
+            without_env_vars(&["DATABASE_POOL_SIZE"], || {
+                let cfg = DatabaseConfig::from_env().unwrap();
+                assert_eq!(cfg.pool_size, 10);
+            });
+        });
+    }
+
+    // --- SecretsConfig::from_env ---
+
+    #[test]
+    fn secrets_config_short_master_key_rejected() {
+        let _lock = ENV_LOCK.lock();
+        with_env_vars(&[("SECRETS_MASTER_KEY", "tooshort")], || {
+            let result = SecretsConfig::from_env();
+            assert!(result.is_err());
+            match result.unwrap_err() {
+                ConfigError::InvalidValue { key, message } => {
+                    assert_eq!(key, "SECRETS_MASTER_KEY");
+                    assert!(message.contains("32 bytes"));
+                }
+                other => panic!("expected InvalidValue, got: {other:?}"),
+            }
+        });
+    }
+
+    #[test]
+    fn secrets_config_valid_master_key() {
+        let _lock = ENV_LOCK.lock();
+        let key = "a".repeat(64);
+        with_env_vars(&[("SECRETS_MASTER_KEY", &key)], || {
+            let cfg = SecretsConfig::from_env().unwrap();
+            assert!(cfg.enabled);
+            assert!(cfg.master_key.is_some());
+            assert_eq!(cfg.source, crate::settings::KeySource::Env);
+        });
+    }
+
+    #[test]
+    fn secrets_config_disabled_when_no_key() {
+        let _lock = ENV_LOCK.lock();
+        without_env_vars(&["SECRETS_MASTER_KEY"], || {
+            let cfg = SecretsConfig::from_env().unwrap();
+            assert_eq!(cfg.enabled, cfg.master_key.is_some());
+        });
+    }
+
+    #[test]
+    fn secrets_config_master_key_accessor() {
+        let cfg = SecretsConfig {
+            master_key: Some(SecretString::from("a".repeat(64))),
+            enabled: true,
+            source: crate::settings::KeySource::Env,
+        };
+        assert!(cfg.master_key().is_some());
+
+        let cfg_none = SecretsConfig::default();
+        assert!(cfg_none.master_key().is_none());
+    }
+
+    // --- Default path helpers ---
+
+    #[test]
+    fn default_session_path_ends_with_expected() {
+        let path = default_session_path();
+        assert!(path.ends_with(".ironclaw/session.json"));
+    }
+
+    #[test]
+    fn default_tools_dir_ends_with_expected() {
+        let path = default_tools_dir();
+        assert!(path.ends_with(".ironclaw/tools"));
+    }
+
+    #[test]
+    fn default_channels_dir_ends_with_expected() {
+        let path = default_channels_dir();
+        assert!(path.ends_with(".ironclaw/channels"));
+    }
+
+    // --- Safety config invalid max output length ---
+
+    #[test]
+    fn safety_config_invalid_max_output_returns_error() {
+        let _lock = ENV_LOCK.lock();
+        with_env_vars(&[("SAFETY_MAX_OUTPUT_LENGTH", "not_a_number")], || {
+            let result = SafetyConfig::from_env();
+            assert!(result.is_err());
+        });
+    }
 }
