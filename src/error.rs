@@ -39,6 +39,9 @@ pub enum Error {
 
     #[error("Workspace error: {0}")]
     Workspace(#[from] WorkspaceError),
+
+    #[error("Key management error: {0}")]
+    Key(#[from] crate::keys::KeyError),
 }
 
 /// Configuration-related errors.

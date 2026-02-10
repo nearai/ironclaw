@@ -10,12 +10,14 @@
 //! - Checking system health (`status`)
 
 mod config;
+pub mod key;
 mod mcp;
 pub mod memory;
 pub mod status;
 mod tool;
 
 pub use config::{ConfigCommand, run_config_command};
+pub use key::{KeyCommand, run_key_command};
 pub use mcp::{McpCommand, run_mcp_command};
 pub use memory::{MemoryCommand, run_memory_command};
 pub use status::run_status_command;
@@ -77,6 +79,10 @@ pub enum Command {
     /// Manage WASM tools
     #[command(subcommand)]
     Tool(ToolCommand),
+
+    /// Manage NEAR blockchain keys
+    #[command(subcommand)]
+    Key(KeyCommand),
 
     /// Manage MCP servers (hosted tool providers)
     #[command(subcommand)]

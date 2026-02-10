@@ -35,7 +35,7 @@ use serde::{Deserialize, Serialize};
 use crate::secrets::{CredentialLocation, CredentialMapping};
 use crate::tools::wasm::{
     Capabilities, EndpointPattern, HttpCapability, RateLimitConfig, SecretsCapability,
-    ToolInvokeCapability, WorkspaceCapability,
+    SigningCapability, ToolInvokeCapability, WorkspaceCapability,
 };
 
 /// Root schema for a capabilities JSON file.
@@ -56,6 +56,10 @@ pub struct CapabilitiesFile {
     /// Workspace file read access.
     #[serde(default)]
     pub workspace: Option<WorkspaceCapabilitySchema>,
+
+    /// Payload signing using managed NEAR keys.
+    #[serde(default)]
+    pub signing: Option<SigningCapabilitySchema>,
 
     /// Authentication setup instructions.
     /// Used by `ironclaw config` to guide users through auth setup.
@@ -103,6 +107,14 @@ impl CapabilitiesFile {
             caps.workspace_read = Some(WorkspaceCapability {
                 allowed_prefixes: workspace.allowed_prefixes.clone(),
                 reader: None, // Injected at runtime
+            });
+        }
+
+        if let Some(signing) = &self.signing {
+            caps.signing = Some(SigningCapability {
+                allowed_key_labels: signing.allowed_key_labels.clone(),
+                max_signs_per_execution: signing.max_signs_per_execution.unwrap_or(5),
+                signer: None, // Injected at runtime
             });
         }
 
@@ -316,6 +328,32 @@ pub struct ToolInvokeCapabilitySchema {
     /// Rate limiting for tool calls.
     #[serde(default)]
     pub rate_limit: Option<RateLimitSchema>,
+}
+
+/// Signing capability schema.
+///
+/// Allows WASM tools to request payload signatures from managed NEAR keys.
+/// The private keys never enter WASM memory.
+///
+/// # Example
+///
+/// ```json
+/// {
+///   "signing": {
+///     "allowed_key_labels": ["intents-signer"],
+///     "max_signs_per_execution": 5
+///   }
+/// }
+/// ```
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct SigningCapabilitySchema {
+    /// Key labels this tool is allowed to use for signing.
+    #[serde(default)]
+    pub allowed_key_labels: Vec<String>,
+
+    /// Maximum sign operations per execution (default: 5).
+    #[serde(default)]
+    pub max_signs_per_execution: Option<u32>,
 }
 
 /// Workspace read capability schema.
@@ -753,5 +791,61 @@ mod tests {
         assert_eq!(auth.secret_name, "my_api_key");
         assert!(auth.display_name.is_none());
         assert!(auth.setup_url.is_none());
+    }
+
+    #[test]
+    fn test_parse_signing_capability() {
+        let json = r#"{
+            "signing": {
+                "allowed_key_labels": ["intents-signer", "trading-key"],
+                "max_signs_per_execution": 10
+            }
+        }"#;
+
+        let caps = CapabilitiesFile::from_json(json).unwrap();
+        let signing = caps.signing.unwrap();
+        assert_eq!(
+            signing.allowed_key_labels,
+            vec!["intents-signer", "trading-key"]
+        );
+        assert_eq!(signing.max_signs_per_execution, Some(10));
+    }
+
+    #[test]
+    fn test_parse_signing_defaults() {
+        let json = r#"{
+            "signing": {
+                "allowed_key_labels": ["default"]
+            }
+        }"#;
+
+        let caps = CapabilitiesFile::from_json(json).unwrap();
+        let signing = caps.signing.as_ref().unwrap();
+        assert_eq!(signing.max_signs_per_execution, None);
+
+        // Should default to 5 when converted
+        let runtime_caps = caps.to_capabilities();
+        let runtime_signing = runtime_caps.signing.unwrap();
+        assert_eq!(runtime_signing.max_signs_per_execution, 5);
+        assert!(runtime_signing.is_label_allowed("default"));
+        assert!(!runtime_signing.is_label_allowed("other"));
+    }
+
+    #[test]
+    fn test_signing_to_capabilities() {
+        let json = r#"{
+            "signing": {
+                "allowed_key_labels": ["signer-1"],
+                "max_signs_per_execution": 3
+            }
+        }"#;
+
+        let file = CapabilitiesFile::from_json(json).unwrap();
+        let caps = file.to_capabilities();
+
+        let signing = caps.signing.unwrap();
+        assert_eq!(signing.allowed_key_labels, vec!["signer-1"]);
+        assert_eq!(signing.max_signs_per_execution, 3);
+        assert!(signing.signer.is_none()); // Injected at runtime
     }
 }

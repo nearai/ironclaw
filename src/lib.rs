@@ -48,6 +48,7 @@ pub mod estimation;
 pub mod evaluation;
 pub mod extensions;
 pub mod history;
+pub mod keys;
 pub mod llm;
 pub mod safety;
 pub mod sandbox;

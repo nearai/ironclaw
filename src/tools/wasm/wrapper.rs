@@ -245,6 +245,26 @@ impl WasmToolWrapper {
                 WasmError::ConfigError(format!("Failed to add workspace-read function: {}", e))
             })?;
 
+        // host.sign-payload(key-label, payload, context-json) -> sign-result
+        // Returns a record { signature: option<string>, error: option<string>, approval-pending: bool }
+        linker
+            .root()
+            .func_wrap(
+                "sign-payload",
+                |mut ctx: wasmtime::StoreContextMut<'_, StoreData>,
+                 (key_label, payload, context_json): (String, String, String)|
+                 -> anyhow::Result<(Option<String>, Option<String>, bool)> {
+                    let result =
+                        ctx.data_mut()
+                            .host_state
+                            .sign_payload(&key_label, &payload, &context_json);
+                    Ok((result.signature, result.error, result.approval_pending))
+                },
+            )
+            .map_err(|e| {
+                WasmError::ConfigError(format!("Failed to add sign-payload function: {}", e))
+            })?;
+
         Ok(())
     }
 }

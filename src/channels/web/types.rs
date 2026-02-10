@@ -319,6 +319,7 @@ impl WsServerMessage {
             SseEvent::Status { .. } => "status",
             SseEvent::ApprovalNeeded { .. } => "approval_needed",
             SseEvent::Error { .. } => "error",
+            SseEvent::ToolResult { .. } => "tool_result",
             SseEvent::Heartbeat => "heartbeat",
         };
         let data = serde_json::to_value(event).unwrap_or(serde_json::Value::Null);

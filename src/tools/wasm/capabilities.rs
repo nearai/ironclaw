@@ -32,6 +32,8 @@ pub struct Capabilities {
     pub tool_invoke: Option<ToolInvokeCapability>,
     /// Check if secrets exist.
     pub secrets: Option<SecretsCapability>,
+    /// Sign payloads using managed NEAR keys.
+    pub signing: Option<SigningCapability>,
 }
 
 impl Capabilities {
@@ -68,6 +70,21 @@ impl Capabilities {
     pub fn with_secrets(mut self, allowed: Vec<String>) -> Self {
         self.secrets = Some(SecretsCapability {
             allowed_names: allowed,
+        });
+        self
+    }
+
+    /// Enable payload signing with the given key labels.
+    pub fn with_signing(
+        mut self,
+        allowed_labels: Vec<String>,
+        max_signs: u32,
+        signer: Option<Arc<dyn PayloadSigner>>,
+    ) -> Self {
+        self.signing = Some(SigningCapability {
+            allowed_key_labels: allowed_labels,
+            max_signs_per_execution: max_signs,
+            signer,
         });
         self
     }
@@ -299,6 +316,68 @@ impl SecretsCapability {
         }
         false
     }
+}
+
+/// Signing capability: allows WASM tools to request payload signatures from managed keys.
+///
+/// The private keys NEVER enter WASM memory. The host performs the signing and
+/// returns only the signature bytes.
+#[derive(Clone)]
+pub struct SigningCapability {
+    /// Key labels this tool is allowed to use for signing.
+    pub allowed_key_labels: Vec<String>,
+    /// Maximum number of sign operations per execution.
+    pub max_signs_per_execution: u32,
+    /// Implementation that performs the actual signing.
+    /// Injected at runtime. None means signing will always return an error.
+    pub signer: Option<Arc<dyn PayloadSigner>>,
+}
+
+impl std::fmt::Debug for SigningCapability {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SigningCapability")
+            .field("allowed_key_labels", &self.allowed_key_labels)
+            .field("max_signs_per_execution", &self.max_signs_per_execution)
+            .field("signer", &self.signer.is_some())
+            .finish()
+    }
+}
+
+impl SigningCapability {
+    /// Check if a key label is allowed.
+    pub fn is_label_allowed(&self, label: &str) -> bool {
+        self.allowed_key_labels.iter().any(|l| l == label)
+    }
+}
+
+/// Result of a payload signing operation.
+#[derive(Debug, Clone)]
+pub struct SignPayloadResult {
+    /// Base64-encoded signature (set on success).
+    pub signature: Option<String>,
+    /// Error message (set on failure).
+    pub error: Option<String>,
+    /// Whether user approval is needed before signing can proceed.
+    pub approval_pending: bool,
+}
+
+/// Trait for performing payload signing from the host boundary.
+///
+/// This is intentionally synchronous because WASM host functions run in a
+/// blocking context. Implementations that need async should use
+/// `Handle::block_on()` internally.
+pub trait PayloadSigner: Send + Sync {
+    /// Sign a payload using the specified key.
+    ///
+    /// The payload is raw bytes (decoded from the base64 the WASM tool sent).
+    /// Returns a `SignPayloadResult` which may contain a signature, an error,
+    /// or an approval-pending flag.
+    fn sign_payload(
+        &self,
+        key_label: &str,
+        payload: &[u8],
+        context_json: &str,
+    ) -> SignPayloadResult;
 }
 
 /// Rate limiting configuration.

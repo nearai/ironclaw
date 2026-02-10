@@ -98,6 +98,32 @@ interface host {
     ///
     /// Returns true if the secret exists and is accessible to this tool.
     secret-exists: func(name: string) -> bool;
+
+    // ==================== Signing Capability ====================
+
+    /// Result of a payload signing request.
+    record sign-result {
+        /// Base64-encoded signature bytes (set on success).
+        signature: option<string>,
+        /// Error message (set on failure).
+        error: option<string>,
+        /// True if user approval is needed before signing can proceed.
+        approval-pending: bool,
+    }
+
+    /// Sign a payload using a NEAR key managed by the host (if capability granted).
+    ///
+    /// Security:
+    /// - Private keys NEVER enter WASM memory; signing happens in host code only
+    /// - Only key labels declared in the tool's signing capability can be used
+    /// - Rate-limited per execution
+    /// - Subject to the host's transaction policy (may require user approval)
+    ///
+    /// The payload should be base64-encoded bytes to sign.
+    /// The context-json is optional metadata about what's being signed (for policy display).
+    ///
+    /// Returns sign-result with either signature or error/approval-pending.
+    sign-payload: func(key-label: string, payload: string, context-json: string) -> sign-result;
 }
 
 /// Tool interface that sandboxed tools must implement.

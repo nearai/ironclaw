@@ -67,6 +67,7 @@ pub struct LogEntry {
 ///
 /// This is the "VMLogic" equivalent, it tracks all side effects and enforces limits.
 /// Extended in V2 to support HTTP requests, tool invocation, and secret checks.
+/// Extended in V3 to support payload signing via managed NEAR keys.
 pub struct HostState {
     /// Collected log entries.
     logs: Vec<LogEntry>,
@@ -82,6 +83,8 @@ pub struct HostState {
     http_request_count: u32,
     /// Tool invoke count for rate limiting within this execution.
     tool_invoke_count: u32,
+    /// Signing request count for rate limiting within this execution.
+    sign_count: u32,
 }
 
 impl std::fmt::Debug for HostState {
@@ -93,6 +96,7 @@ impl std::fmt::Debug for HostState {
             .field("user_id", &self.user_id)
             .field("http_request_count", &self.http_request_count)
             .field("tool_invoke_count", &self.tool_invoke_count)
+            .field("sign_count", &self.sign_count)
             .finish()
     }
 }
@@ -108,6 +112,7 @@ impl HostState {
             user_id: None,
             http_request_count: 0,
             tool_invoke_count: 0,
+            sign_count: 0,
         }
     }
 
@@ -121,6 +126,7 @@ impl HostState {
             user_id: Some(user_id.into()),
             http_request_count: 0,
             tool_invoke_count: 0,
+            sign_count: 0,
         }
     }
 
@@ -221,6 +227,87 @@ impl HostState {
             Some(reader) => Ok(reader.read(path)),
             None => Ok(None), // No reader configured
         }
+    }
+
+    /// Sign a payload using a managed NEAR key.
+    ///
+    /// Checks signing capability, key label allowlist, and rate limit.
+    /// Delegates actual signing to the `PayloadSigner` if all checks pass.
+    ///
+    /// Private keys NEVER enter WASM memory. Only the signature is returned.
+    pub fn sign_payload(
+        &mut self,
+        key_label: &str,
+        payload_base64: &str,
+        context_json: &str,
+    ) -> crate::tools::wasm::capabilities::SignPayloadResult {
+        use crate::tools::wasm::capabilities::SignPayloadResult;
+
+        let capability = match &self.capabilities.signing {
+            Some(cap) => cap,
+            None => {
+                return SignPayloadResult {
+                    signature: None,
+                    error: Some("Signing capability not granted".to_string()),
+                    approval_pending: false,
+                };
+            }
+        };
+
+        // Check key label is allowed
+        if !capability.is_label_allowed(key_label) {
+            return SignPayloadResult {
+                signature: None,
+                error: Some(format!(
+                    "Key label '{}' not in allowed list for this tool",
+                    key_label
+                )),
+                approval_pending: false,
+            };
+        }
+
+        // Check rate limit
+        self.sign_count += 1;
+        if self.sign_count > capability.max_signs_per_execution {
+            return SignPayloadResult {
+                signature: None,
+                error: Some(format!(
+                    "Sign limit exceeded ({} per execution)",
+                    capability.max_signs_per_execution
+                )),
+                approval_pending: false,
+            };
+        }
+
+        // Decode base64 payload
+        let payload_bytes = match base64::Engine::decode(
+            &base64::engine::general_purpose::STANDARD,
+            payload_base64,
+        ) {
+            Ok(bytes) => bytes,
+            Err(e) => {
+                return SignPayloadResult {
+                    signature: None,
+                    error: Some(format!("Invalid base64 payload: {}", e)),
+                    approval_pending: false,
+                };
+            }
+        };
+
+        // Delegate to signer implementation
+        match &capability.signer {
+            Some(signer) => signer.sign_payload(key_label, &payload_bytes, context_json),
+            None => SignPayloadResult {
+                signature: None,
+                error: Some("No signing provider configured".to_string()),
+                approval_pending: false,
+            },
+        }
+    }
+
+    /// Get the sign count for this execution.
+    pub fn sign_count(&self) -> u32 {
+        self.sign_count
     }
 
     /// Get collected logs after execution.
@@ -602,5 +689,108 @@ mod tests {
     fn test_new_with_user() {
         let state = HostState::new_with_user(Capabilities::default(), "user123");
         assert_eq!(state.user_id(), Some("user123"));
+    }
+
+    #[test]
+    fn test_sign_payload_no_capability() {
+        let mut state = HostState::minimal();
+        let result = state.sign_payload("any-key", "AAAA", "{}");
+        assert!(result.error.is_some());
+        assert!(result.error.unwrap().contains("not granted"));
+    }
+
+    #[test]
+    fn test_sign_payload_label_not_allowed() {
+        let capabilities = Capabilities {
+            signing: Some(crate::tools::wasm::capabilities::SigningCapability {
+                allowed_key_labels: vec!["allowed-key".to_string()],
+                max_signs_per_execution: 5,
+                signer: None,
+            }),
+            ..Default::default()
+        };
+        let mut state = HostState::new(capabilities);
+        let result = state.sign_payload("forbidden-key", "AAAA", "{}");
+        assert!(result.error.is_some());
+        assert!(result.error.unwrap().contains("not in allowed list"));
+    }
+
+    #[test]
+    fn test_sign_payload_rate_limit() {
+        let capabilities = Capabilities {
+            signing: Some(crate::tools::wasm::capabilities::SigningCapability {
+                allowed_key_labels: vec!["key".to_string()],
+                max_signs_per_execution: 2,
+                signer: None,
+            }),
+            ..Default::default()
+        };
+        let mut state = HostState::new(capabilities);
+
+        // First two should hit "no signer" (not rate limit)
+        let r1 = state.sign_payload("key", "AAAA", "{}");
+        assert!(r1.error.as_deref().unwrap().contains("No signing provider"));
+
+        let r2 = state.sign_payload("key", "AAAA", "{}");
+        assert!(r2.error.as_deref().unwrap().contains("No signing provider"));
+
+        // Third should hit rate limit
+        let r3 = state.sign_payload("key", "AAAA", "{}");
+        assert!(r3.error.as_deref().unwrap().contains("limit exceeded"));
+    }
+
+    #[test]
+    fn test_sign_payload_invalid_base64() {
+        let capabilities = Capabilities {
+            signing: Some(crate::tools::wasm::capabilities::SigningCapability {
+                allowed_key_labels: vec!["key".to_string()],
+                max_signs_per_execution: 5,
+                signer: Some(Arc::new(MockSigner)),
+            }),
+            ..Default::default()
+        };
+        let mut state = HostState::new(capabilities);
+        let result = state.sign_payload("key", "not-valid-base64!!!", "{}");
+        assert!(result.error.is_some());
+        assert!(result.error.unwrap().contains("Invalid base64"));
+    }
+
+    #[test]
+    fn test_sign_payload_with_mock_signer() {
+        let capabilities = Capabilities {
+            signing: Some(crate::tools::wasm::capabilities::SigningCapability {
+                allowed_key_labels: vec!["test-key".to_string()],
+                max_signs_per_execution: 5,
+                signer: Some(Arc::new(MockSigner)),
+            }),
+            ..Default::default()
+        };
+        let mut state = HostState::new(capabilities);
+
+        // Encode some payload as base64
+        let payload =
+            base64::Engine::encode(&base64::engine::general_purpose::STANDARD, b"sign this");
+        let result = state.sign_payload("test-key", &payload, "{}");
+        assert!(result.signature.is_some());
+        assert!(result.error.is_none());
+        assert!(!result.approval_pending);
+        assert_eq!(result.signature.unwrap(), "mock-signature");
+    }
+
+    struct MockSigner;
+
+    impl crate::tools::wasm::capabilities::PayloadSigner for MockSigner {
+        fn sign_payload(
+            &self,
+            _key_label: &str,
+            _payload: &[u8],
+            _context_json: &str,
+        ) -> crate::tools::wasm::capabilities::SignPayloadResult {
+            crate::tools::wasm::capabilities::SignPayloadResult {
+                signature: Some("mock-signature".to_string()),
+                error: None,
+                approval_pending: false,
+            }
+        }
     }
 }

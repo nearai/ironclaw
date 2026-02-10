@@ -511,6 +511,14 @@ fn default_patterns() -> Vec<LeakPattern> {
             severity: LeakSeverity::High,
             action: LeakAction::Redact,
         },
+        // NEAR ed25519 private keys (base58 encoded, ~88 chars after prefix).
+        // Public keys are shorter (~44 chars), so this pattern is specific to secrets.
+        LeakPattern {
+            name: "near_ed25519_secret_key".to_string(),
+            regex: Regex::new(r"ed25519:[1-9A-HJ-NP-Za-km-z]{80,90}").unwrap(),
+            severity: LeakSeverity::Critical,
+            action: LeakAction::Block,
+        },
         // High entropy hex (potential secrets, warn only)
         // Uses word boundary since look-around isn't supported in the regex crate.
         // This catches standalone 64-char hex strings (like SHA256 hashes used as secrets).
@@ -694,6 +702,39 @@ mod tests {
             None,
         );
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_detect_near_ed25519_secret_key() {
+        let detector = LeakDetector::new();
+        // A realistic NEAR secret key (88 base58 chars after prefix)
+        let content = "key: ed25519:3D4YudUahN1nawWogh9MFV2MXJBMHCS2RE1KU7rWAiMi3t12UiSnMYCJ7BFXbsFhKfNUWDj8CCEbifTByREAMkTi";
+
+        let result = detector.scan(content);
+        assert!(!result.is_clean());
+        assert!(result.should_block);
+        assert!(
+            result
+                .matches
+                .iter()
+                .any(|m| m.pattern_name == "near_ed25519_secret_key")
+        );
+    }
+
+    #[test]
+    fn test_near_public_key_not_blocked() {
+        let detector = LeakDetector::new();
+        // Public keys are ~44 base58 chars, should NOT match the 80-90 char pattern
+        let content = "pubkey: ed25519:6E8sCci9badyRkXb3JoRpBj5p8C6Tw41ELDZoiihKEtp";
+
+        let result = detector.scan(content);
+        // Should not match near_ed25519_secret_key pattern
+        assert!(
+            !result
+                .matches
+                .iter()
+                .any(|m| m.pattern_name == "near_ed25519_secret_key")
+        );
     }
 
     #[test]

@@ -17,12 +17,14 @@ use ironclaw::{
         web::log_layer::{LogBroadcaster, WebLogLayer},
     },
     cli::{
-        Cli, Command, run_mcp_command, run_memory_command, run_status_command, run_tool_command,
+        Cli, Command, run_key_command, run_mcp_command, run_memory_command, run_status_command,
+        run_tool_command,
     },
     config::Config,
     context::ContextManager,
     extensions::ExtensionManager,
     history::Store,
+    keys::KeyManager,
     llm::{SessionConfig, create_llm_provider, create_session_manager},
     safety::SafetyLayer,
     secrets::{PostgresSecretsStore, SecretsCrypto, SecretsStore},
@@ -51,6 +53,16 @@ async fn main() -> anyhow::Result<()> {
                 .init();
 
             return run_tool_command(tool_cmd.clone()).await;
+        }
+        Some(Command::Key(key_cmd)) => {
+            let _ = dotenvy::dotenv();
+            tracing_subscriber::fmt()
+                .with_env_filter(
+                    EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("warn")),
+                )
+                .init();
+
+            return run_key_command(key_cmd.clone()).await;
         }
         Some(Command::Config(config_cmd)) => {
             // Config commands don't need logging setup
@@ -317,6 +329,11 @@ async fn main() -> anyhow::Result<()> {
         } else {
             None
         };
+
+    // Create key manager if secrets store is available.
+    let key_manager: Option<Arc<KeyManager>> = secrets_store
+        .as_ref()
+        .map(|store| Arc::new(KeyManager::new(Arc::clone(store), "default".to_string())));
 
     let mcp_session_manager = Arc::new(McpSessionManager::new());
 
@@ -746,6 +763,7 @@ async fn main() -> anyhow::Result<()> {
         tools,
         workspace,
         extension_manager,
+        key_manager,
     };
     let agent = Agent::new(
         config.agent.clone(),

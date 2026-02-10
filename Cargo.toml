@@ -90,6 +90,13 @@ sha2 = "0.10"
 blake3 = "1"
 rand = "0.8"
 
+# NEAR key management (ed25519 signing, borsh serialization, base58 encoding)
+ed25519-dalek = { version = "2", features = ["rand_core", "zeroize"] }
+borsh = { version = "1", features = ["derive"] }
+bs58 = "0.5"
+argon2 = "0.5"
+zeroize = { version = "1", features = ["derive"] }
+
 # Docker sandbox
 bollard = "0.18"
 
