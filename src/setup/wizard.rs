@@ -460,6 +460,7 @@ impl SetupWizard {
                 session_path: crate::llm::session::default_session_path(),
                 api_mode: crate::config::NearAiApiMode::Responses,
                 api_key: None,
+                max_retries: 3,
             },
         };
 

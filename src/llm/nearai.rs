@@ -4,8 +4,10 @@
 //! to multiple LLM models (OpenAI, Anthropic, etc.) with user authentication.
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use async_trait::async_trait;
+use rand::Rng;
 use reqwest::Client;
 use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
@@ -206,89 +208,160 @@ impl NearAiProvider {
         }
     }
 
-    /// Inner request implementation without retry logic.
+    /// Inner request implementation with retry logic for transient errors.
+    ///
+    /// Retries on HTTP 429, 500, 502, 503, 504 with exponential backoff.
+    /// Does not retry on client errors (400, 401, 403, 404) or parse errors.
     async fn send_request_inner<T: Serialize + std::fmt::Debug, R: for<'de> Deserialize<'de>>(
         &self,
         path: &str,
         body: &T,
     ) -> Result<R, LlmError> {
         let url = self.api_url(path);
-        let token = self.session.get_token().await?;
+        let max_retries = self.config.max_retries;
 
-        tracing::debug!("Sending request to NEAR AI: {}", url);
-        tracing::debug!("Request body: {:?}", body);
+        for attempt in 0..=max_retries {
+            let token = self.session.get_token().await?;
 
-        let response = self
-            .client
-            .post(&url)
-            .header("Authorization", format!("Bearer {}", token.expose_secret()))
-            .header("Content-Type", "application/json")
-            .json(body)
-            .send()
-            .await
-            .map_err(|e| {
-                tracing::error!("NEAR AI request failed: {}", e);
-                e
-            })?;
+            tracing::debug!("Sending request to NEAR AI: {} (attempt {})", url, attempt + 1);
+            tracing::debug!("Request body: {:?}", body);
 
-        let status = response.status();
-        let response_text = response.text().await.unwrap_or_default();
+            let response = self
+                .client
+                .post(&url)
+                .header("Authorization", format!("Bearer {}", token.expose_secret()))
+                .header("Content-Type", "application/json")
+                .json(body)
+                .send()
+                .await;
 
-        tracing::debug!("NEAR AI response status: {}", status);
-        tracing::debug!("NEAR AI response body: {}", response_text);
+            let response = match response {
+                Ok(r) => r,
+                Err(e) => {
+                    tracing::error!("NEAR AI request failed: {}", e);
+                    // Network errors (timeout, connection refused) are transient
+                    if attempt < max_retries {
+                        let delay = retry_backoff_delay(attempt);
+                        tracing::warn!(
+                            "NEAR AI request error (attempt {}/{}), retrying in {:?}: {}",
+                            attempt + 1,
+                            max_retries + 1,
+                            delay,
+                            e,
+                        );
+                        tokio::time::sleep(delay).await;
+                        continue;
+                    }
+                    return Err(e.into());
+                }
+            };
 
-        if !status.is_success() {
-            // Check for session expiration (401 with specific message patterns)
-            if status.as_u16() == 401 {
-                let is_session_expired = response_text.to_lowercase().contains("session")
-                    && (response_text.to_lowercase().contains("expired")
-                        || response_text.to_lowercase().contains("invalid"));
+            let status = response.status();
+            let response_text = response.text().await.unwrap_or_default();
 
-                if is_session_expired {
-                    return Err(LlmError::SessionExpired {
+            tracing::debug!("NEAR AI response status: {}", status);
+            tracing::debug!("NEAR AI response body: {}", response_text);
+
+            if !status.is_success() {
+                let status_code = status.as_u16();
+
+                // Check for session expiration (401 with specific message patterns)
+                if status_code == 401 {
+                    let is_session_expired = response_text.to_lowercase().contains("session")
+                        && (response_text.to_lowercase().contains("expired")
+                            || response_text.to_lowercase().contains("invalid"));
+
+                    if is_session_expired {
+                        return Err(LlmError::SessionExpired {
+                            provider: "nearai".to_string(),
+                        });
+                    }
+
+                    // Generic 401 -- not retryable
+                    return Err(LlmError::AuthFailed {
                         provider: "nearai".to_string(),
                     });
                 }
 
-                // Generic 401 without session expiration indication
-                return Err(LlmError::AuthFailed {
-                    provider: "nearai".to_string(),
-                });
-            }
+                // Check if this is a transient error worth retrying
+                if is_retryable_status(status_code) && attempt < max_retries {
+                    let delay = retry_backoff_delay(attempt);
+                    tracing::warn!(
+                        "NEAR AI returned HTTP {} (attempt {}/{}), retrying in {:?}",
+                        status_code,
+                        attempt + 1,
+                        max_retries + 1,
+                        delay,
+                    );
+                    tokio::time::sleep(delay).await;
+                    continue;
+                }
 
-            // Try to parse as JSON error
-            if let Ok(error) = serde_json::from_str::<NearAiErrorResponse>(&response_text) {
-                if status.as_u16() == 429 {
-                    return Err(LlmError::RateLimited {
+                // Non-retryable error or exhausted retries
+                if let Ok(error) = serde_json::from_str::<NearAiErrorResponse>(&response_text) {
+                    if status_code == 429 {
+                        return Err(LlmError::RateLimited {
+                            provider: "nearai".to_string(),
+                            retry_after: None,
+                        });
+                    }
+                    return Err(LlmError::RequestFailed {
                         provider: "nearai".to_string(),
-                        retry_after: None,
+                        reason: error.error,
                     });
                 }
+
                 return Err(LlmError::RequestFailed {
                     provider: "nearai".to_string(),
-                    reason: error.error,
+                    reason: format!("HTTP {}: {}", status, response_text),
                 });
             }
 
-            return Err(LlmError::RequestFailed {
-                provider: "nearai".to_string(),
-                reason: format!("HTTP {}: {}", status, response_text),
-            });
+            // Success -- parse the response
+            return match serde_json::from_str::<R>(&response_text) {
+                Ok(parsed) => Ok(parsed),
+                Err(e) => {
+                    tracing::debug!("Response is not expected JSON format: {}", e);
+                    tracing::debug!("Will try alternative parsing in caller");
+                    Err(LlmError::InvalidResponse {
+                        provider: "nearai".to_string(),
+                        reason: format!("Parse error: {}. Raw: {}", e, response_text),
+                    })
+                }
+            };
         }
 
-        // Try to parse as our expected type
-        match serde_json::from_str::<R>(&response_text) {
-            Ok(parsed) => Ok(parsed),
-            Err(e) => {
-                tracing::debug!("Response is not expected JSON format: {}", e);
-                tracing::debug!("Will try alternative parsing in caller");
-                Err(LlmError::InvalidResponse {
-                    provider: "nearai".to_string(),
-                    reason: format!("Parse error: {}. Raw: {}", e, response_text),
-                })
-            }
-        }
+        // This is unreachable because the loop always returns, but the compiler
+        // cannot prove that. Return a generic error as a safety net.
+        Err(LlmError::RequestFailed {
+            provider: "nearai".to_string(),
+            reason: "retry loop exited unexpectedly".to_string(),
+        })
     }
+}
+
+/// Returns `true` if the HTTP status code is transient and worth retrying.
+fn is_retryable_status(status: u16) -> bool {
+    matches!(status, 429 | 500 | 502 | 503 | 504)
+}
+
+/// Calculate exponential backoff delay with random jitter.
+///
+/// Base delay is 1 second, doubled each attempt, with +/-25% jitter.
+/// - attempt 0: ~1s (0.75s - 1.25s)
+/// - attempt 1: ~2s (1.5s - 2.5s)
+/// - attempt 2: ~4s (3.0s - 5.0s)
+fn retry_backoff_delay(attempt: u32) -> Duration {
+    let base_ms: u64 = 1000 * 2u64.saturating_pow(attempt);
+    let jitter_range = base_ms / 4; // 25%
+    let jitter = if jitter_range > 0 {
+        let offset = rand::thread_rng().gen_range(0..=jitter_range * 2);
+        offset as i64 - jitter_range as i64
+    } else {
+        0
+    };
+    let delay_ms = (base_ms as i64 + jitter).max(100) as u64;
+    Duration::from_millis(delay_ms)
 }
 
 /// Split messages into system instructions and non-system input messages.
@@ -867,5 +940,64 @@ mod tests {
             Some("First instruction\n\nSecond instruction".to_string())
         );
         assert_eq!(input.len(), 1);
+    }
+
+    #[test]
+    fn test_is_retryable_status() {
+        // Transient errors should be retryable
+        assert!(is_retryable_status(429));
+        assert!(is_retryable_status(500));
+        assert!(is_retryable_status(502));
+        assert!(is_retryable_status(503));
+        assert!(is_retryable_status(504));
+
+        // Client errors should not be retryable
+        assert!(!is_retryable_status(400));
+        assert!(!is_retryable_status(401));
+        assert!(!is_retryable_status(403));
+        assert!(!is_retryable_status(404));
+        assert!(!is_retryable_status(422));
+
+        // Success codes should not be retryable
+        assert!(!is_retryable_status(200));
+        assert!(!is_retryable_status(201));
+    }
+
+    #[test]
+    fn test_retry_backoff_delay_exponential_growth() {
+        // Run multiple samples to verify the range, accounting for jitter
+        for _ in 0..20 {
+            let d0 = retry_backoff_delay(0);
+            let d1 = retry_backoff_delay(1);
+            let d2 = retry_backoff_delay(2);
+
+            // Attempt 0: base 1000ms, jitter +/-250ms -> [750, 1250]
+            assert!(d0.as_millis() >= 750, "attempt 0 too low: {:?}", d0);
+            assert!(d0.as_millis() <= 1250, "attempt 0 too high: {:?}", d0);
+
+            // Attempt 1: base 2000ms, jitter +/-500ms -> [1500, 2500]
+            assert!(d1.as_millis() >= 1500, "attempt 1 too low: {:?}", d1);
+            assert!(d1.as_millis() <= 2500, "attempt 1 too high: {:?}", d1);
+
+            // Attempt 2: base 4000ms, jitter +/-1000ms -> [3000, 5000]
+            assert!(d2.as_millis() >= 3000, "attempt 2 too low: {:?}", d2);
+            assert!(d2.as_millis() <= 5000, "attempt 2 too high: {:?}", d2);
+        }
+    }
+
+    #[test]
+    fn test_retry_backoff_delay_minimum() {
+        // Even at attempt 0, delay should be at least 100ms (the minimum floor)
+        for _ in 0..20 {
+            let delay = retry_backoff_delay(0);
+            assert!(delay.as_millis() >= 100);
+        }
+    }
+
+    #[test]
+    fn test_retry_backoff_delay_no_overflow() {
+        // Very high attempt numbers should not panic from overflow
+        let delay = retry_backoff_delay(30);
+        assert!(delay.as_millis() >= 100);
     }
 }

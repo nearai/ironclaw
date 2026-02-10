@@ -212,6 +212,8 @@ pub struct NearAiConfig {
     pub api_mode: NearAiApiMode,
     /// API key for cloud-api (required for chat_completions mode)
     pub api_key: Option<SecretString>,
+    /// Maximum number of retries for transient errors (default: 3).
+    pub max_retries: u32,
 }
 
 impl LlmConfig {
@@ -250,6 +252,7 @@ impl LlmConfig {
                     .unwrap_or_else(default_session_path),
                 api_mode,
                 api_key,
+                max_retries: parse_optional_env("NEARAI_MAX_RETRIES", 3)?,
             },
         })
     }
