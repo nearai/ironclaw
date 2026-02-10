@@ -10,12 +10,19 @@
 <body>
   <!-- Auth Screen -->
   <div id="auth-screen">
-    <h1>IronClaw</h1>
-    <div class="auth-form">
-      <input type="password" id="token-input" placeholder="Auth token" autofocus>
-      <button onclick="authenticate()">Connect</button>
+    <div class="auth-card-login">
+      <div class="auth-brand">
+        <h1>IronClaw</h1>
+        <p class="auth-tagline">Secure AI Assistant</p>
+      </div>
+      <div class="auth-form">
+        <label for="token-input">Gateway Token</label>
+        <input type="password" id="token-input" placeholder="Paste your auth token" autofocus>
+        <button onclick="authenticate()">Connect</button>
+      </div>
+      <div id="auth-error"></div>
+      <p class="auth-hint">Enter the GATEWAY_AUTH_TOKEN from your .env configuration.</p>
     </div>
-    <div id="auth-error"></div>
   </div>
 
   <!-- Main App (hidden until authenticated) -->

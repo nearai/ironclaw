@@ -25,6 +25,7 @@ function authenticate() {
   // Test the token against the health-ish endpoint (chat/threads requires auth)
   apiFetch('/api/chat/threads')
     .then(() => {
+      sessionStorage.setItem('ironclaw_token', token);
       document.getElementById('auth-screen').style.display = 'none';
       document.getElementById('app').style.display = 'flex';
       // Strip token from URL so it's not visible in the address bar
@@ -35,11 +36,13 @@ function authenticate() {
       connectLogSSE();
       startGatewayStatusPolling();
       loadThreads();
-      loadHistory();
       loadMemoryTree();
       loadJobs();
     })
     .catch(() => {
+      sessionStorage.removeItem('ironclaw_token');
+      document.getElementById('auth-screen').style.display = '';
+      document.getElementById('app').style.display = 'none';
       document.getElementById('auth-error').textContent = 'Invalid token';
     });
 }
@@ -48,12 +51,22 @@ document.getElementById('token-input').addEventListener('keydown', (e) => {
   if (e.key === 'Enter') authenticate();
 });
 
-// Auto-authenticate from ?token= URL parameter
-(function autoAuthFromUrl() {
+// Auto-authenticate from URL param or saved session
+(function autoAuth() {
   const params = new URLSearchParams(window.location.search);
   const urlToken = params.get('token');
   if (urlToken) {
     document.getElementById('token-input').value = urlToken;
+    authenticate();
+    return;
+  }
+  const saved = sessionStorage.getItem('ironclaw_token');
+  if (saved) {
+    document.getElementById('token-input').value = saved;
+    // Hide auth screen immediately to prevent flash, authenticate() will
+    // restore it if the token turns out to be invalid.
+    document.getElementById('auth-screen').style.display = 'none';
+    document.getElementById('app').style.display = 'flex';
     authenticate();
   }
 })();

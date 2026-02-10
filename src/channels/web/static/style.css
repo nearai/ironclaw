@@ -39,28 +39,57 @@ body {
   align-items: center;
   justify-content: center;
   height: 100vh;
-  flex-direction: column;
-  gap: 16px;
 }
 
-#auth-screen h1 {
-  font-size: 24px;
-  font-weight: 600;
+.auth-card-login {
+  background: var(--bg-secondary);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 40px 36px 32px;
+  width: 100%;
+  max-width: 400px;
+  display: flex;
+  flex-direction: column;
+  gap: 24px;
+  box-shadow: 0 4px 24px rgba(0, 0, 0, 0.3);
+}
+
+.auth-brand {
+  text-align: center;
+}
+
+.auth-brand h1 {
+  font-size: 28px;
+  font-weight: 700;
+  color: var(--text);
+  margin-bottom: 4px;
+}
+
+.auth-tagline {
+  font-size: 14px;
+  color: var(--text-secondary);
 }
 
 #auth-screen .auth-form {
   display: flex;
+  flex-direction: column;
   gap: 8px;
 }
 
+#auth-screen .auth-form label {
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--text-secondary);
+}
+
 #auth-screen input {
-  padding: 8px 12px;
-  background: var(--bg-secondary);
+  padding: 10px 12px;
+  background: var(--bg);
   border: 1px solid var(--border);
   border-radius: var(--radius);
   color: var(--text);
   font-size: 14px;
-  width: 300px;
+  width: 100%;
 }
 
 #auth-screen input:focus {
@@ -69,13 +98,15 @@ body {
 }
 
 #auth-screen button {
-  padding: 8px 16px;
+  padding: 10px 16px;
   background: var(--accent);
   color: #fff;
   border: none;
   border-radius: var(--radius);
   cursor: pointer;
   font-size: 14px;
+  font-weight: 500;
+  margin-top: 4px;
 }
 
 #auth-screen button:hover {
@@ -86,6 +117,14 @@ body {
   color: var(--danger);
   font-size: 13px;
   min-height: 20px;
+  text-align: center;
+}
+
+.auth-hint {
+  font-size: 12px;
+  color: var(--text-secondary);
+  text-align: center;
+  line-height: 1.4;
 }
 
 /* Main App */

@@ -596,6 +596,11 @@ impl Agent {
     ///
     /// Called before `resolve_thread` so that the session manager finds the
     /// thread on lookup instead of creating a new one.
+    ///
+    /// Creates an in-memory thread with the exact UUID the frontend sent,
+    /// even when the conversation has zero messages (e.g. a brand-new
+    /// assistant thread). Without this, `resolve_thread` would mint a
+    /// fresh UUID and all messages would land in the wrong conversation.
     async fn maybe_hydrate_thread(&self, message: &IncomingMessage, external_thread_id: &str) {
         // Only hydrate UUID-shaped thread IDs (web gateway uses UUIDs)
         let thread_uuid = match Uuid::parse_str(external_thread_id) {
@@ -615,26 +620,27 @@ impl Agent {
             }
         }
 
-        // Try to load from DB
-        let store = match self.store() {
-            Some(s) => s,
-            None => return,
-        };
+        // Load history from DB (may be empty for a newly created thread).
+        let mut chat_messages: Vec<ChatMessage> = Vec::new();
+        let msg_count;
 
-        let db_messages = match store.list_conversation_messages(thread_uuid).await {
-            Ok(msgs) if !msgs.is_empty() => msgs,
-            _ => return,
-        };
-
-        // Build ChatMessage list from DB messages
-        let chat_messages: Vec<ChatMessage> = db_messages
-            .iter()
-            .filter_map(|m| match m.role.as_str() {
-                "user" => Some(ChatMessage::user(&m.content)),
-                "assistant" => Some(ChatMessage::assistant(&m.content)),
-                _ => None,
-            })
-            .collect();
+        if let Some(store) = self.store() {
+            let db_messages = store
+                .list_conversation_messages(thread_uuid)
+                .await
+                .unwrap_or_default();
+            msg_count = db_messages.len();
+            chat_messages = db_messages
+                .iter()
+                .filter_map(|m| match m.role.as_str() {
+                    "user" => Some(ChatMessage::user(&m.content)),
+                    "assistant" => Some(ChatMessage::assistant(&m.content)),
+                    _ => None,
+                })
+                .collect();
+        } else {
+            msg_count = 0;
+        }
 
         // Create thread with the historical ID and restore messages
         let session_id = {
@@ -643,19 +649,23 @@ impl Agent {
         };
 
         let mut thread = crate::agent::session::Thread::with_id(thread_uuid, session_id);
-        thread.restore_from_messages(chat_messages);
+        if !chat_messages.is_empty() {
+            thread.restore_from_messages(chat_messages);
+        }
 
         // Restore response chain from conversation metadata
-        if let Ok(Some(metadata)) = store.get_conversation_metadata(thread_uuid).await {
-            if let Some(rid) = metadata
-                .get("last_response_id")
-                .and_then(|v| v.as_str())
-                .map(String::from)
-            {
-                thread.last_response_id = Some(rid.clone());
-                self.llm()
-                    .seed_response_chain(&thread_uuid.to_string(), rid);
-                tracing::debug!("Restored response chain for thread {}", thread_uuid);
+        if let Some(store) = self.store() {
+            if let Ok(Some(metadata)) = store.get_conversation_metadata(thread_uuid).await {
+                if let Some(rid) = metadata
+                    .get("last_response_id")
+                    .and_then(|v| v.as_str())
+                    .map(String::from)
+                {
+                    thread.last_response_id = Some(rid.clone());
+                    self.llm()
+                        .seed_response_chain(&thread_uuid.to_string(), rid);
+                    tracing::debug!("Restored response chain for thread {}", thread_uuid);
+                }
             }
         }
 
@@ -679,7 +689,7 @@ impl Agent {
         tracing::debug!(
             "Hydrated thread {} from DB ({} messages)",
             thread_uuid,
-            db_messages.len()
+            msg_count
         );
     }
 
@@ -1305,20 +1315,59 @@ impl Agent {
             .into());
         }
 
+        tracing::debug!(
+            tool = %tool_name,
+            params = %params,
+            "Tool call started"
+        );
+
         // Execute with per-tool timeout
         let timeout = tool.execution_timeout();
+        let start = std::time::Instant::now();
         let result = tokio::time::timeout(timeout, async {
             tool.execute(params.clone(), job_ctx).await
         })
-        .await
-        .map_err(|_| crate::error::ToolError::Timeout {
-            name: tool_name.to_string(),
-            timeout,
-        })?
-        .map_err(|e| crate::error::ToolError::ExecutionFailed {
-            name: tool_name.to_string(),
-            reason: e.to_string(),
-        })?;
+        .await;
+        let elapsed = start.elapsed();
+
+        match &result {
+            Ok(Ok(output)) => {
+                let result_str = serde_json::to_string(&output.result)
+                    .unwrap_or_else(|_| "<serialize error>".to_string());
+                tracing::debug!(
+                    tool = %tool_name,
+                    elapsed_ms = elapsed.as_millis() as u64,
+                    result = %result_str,
+                    "Tool call succeeded"
+                );
+            }
+            Ok(Err(e)) => {
+                tracing::debug!(
+                    tool = %tool_name,
+                    elapsed_ms = elapsed.as_millis() as u64,
+                    error = %e,
+                    "Tool call failed"
+                );
+            }
+            Err(_) => {
+                tracing::debug!(
+                    tool = %tool_name,
+                    elapsed_ms = elapsed.as_millis() as u64,
+                    timeout_secs = timeout.as_secs(),
+                    "Tool call timed out"
+                );
+            }
+        }
+
+        let result = result
+            .map_err(|_| crate::error::ToolError::Timeout {
+                name: tool_name.to_string(),
+                timeout,
+            })?
+            .map_err(|e| crate::error::ToolError::ExecutionFailed {
+                name: tool_name.to_string(),
+                reason: e.to_string(),
+            })?;
 
         // Convert result to string
         serde_json::to_string_pretty(&result.result).map_err(|e| {

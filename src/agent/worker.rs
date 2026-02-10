@@ -428,6 +428,13 @@ Report when the job is complete or if you encounter issues you cannot resolve."#
             .into());
         }
 
+        tracing::debug!(
+            tool = %tool_name,
+            params = %params,
+            job = %job_id,
+            "Tool call started"
+        );
+
         // Execute with per-tool timeout and timing
         let tool_timeout = tool.execution_timeout();
         let start = std::time::Instant::now();
@@ -436,6 +443,35 @@ Report when the job is complete or if you encounter issues you cannot resolve."#
         })
         .await;
         let elapsed = start.elapsed();
+
+        match &result {
+            Ok(Ok(output)) => {
+                let result_str = serde_json::to_string(&output.result)
+                    .unwrap_or_else(|_| "<serialize error>".to_string());
+                tracing::debug!(
+                    tool = %tool_name,
+                    elapsed_ms = elapsed.as_millis() as u64,
+                    result = %result_str,
+                    "Tool call succeeded"
+                );
+            }
+            Ok(Err(e)) => {
+                tracing::debug!(
+                    tool = %tool_name,
+                    elapsed_ms = elapsed.as_millis() as u64,
+                    error = %e,
+                    "Tool call failed"
+                );
+            }
+            Err(_) => {
+                tracing::debug!(
+                    tool = %tool_name,
+                    elapsed_ms = elapsed.as_millis() as u64,
+                    timeout_secs = tool_timeout.as_secs(),
+                    "Tool call timed out"
+                );
+            }
+        }
 
         // Record action in memory and get the ActionRecord for persistence
         let action = match &result {
