@@ -23,6 +23,10 @@ function authenticate() {
     .then(() => {
       document.getElementById('auth-screen').style.display = 'none';
       document.getElementById('app').style.display = 'flex';
+      // Strip token from URL so it's not visible in the address bar
+      const cleaned = new URL(window.location);
+      cleaned.searchParams.delete('token');
+      window.history.replaceState({}, '', cleaned.pathname + cleaned.search);
       connectSSE();
       connectLogSSE();
       startGatewayStatusPolling();
@@ -39,6 +43,16 @@ function authenticate() {
 document.getElementById('token-input').addEventListener('keydown', (e) => {
   if (e.key === 'Enter') authenticate();
 });
+
+// Auto-authenticate from ?token= URL parameter
+(function autoAuthFromUrl() {
+  const params = new URLSearchParams(window.location.search);
+  const urlToken = params.get('token');
+  if (urlToken) {
+    document.getElementById('token-input').value = urlToken;
+    authenticate();
+  }
+})();
 
 // --- API helper ---
 

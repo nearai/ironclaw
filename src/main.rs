@@ -875,6 +875,19 @@ async fn main() -> anyhow::Result<()> {
         Arc::new(ws)
     });
 
+    // Seed workspace with core identity files on first boot
+    if let Some(ref ws) = workspace {
+        match ws.seed_if_empty().await {
+            Ok(count) if count > 0 => {
+                tracing::info!("Workspace seeded with {} core files", count);
+            }
+            Ok(_) => {}
+            Err(e) => {
+                tracing::warn!("Failed to seed workspace: {}", e);
+            }
+        }
+    }
+
     // Backfill embeddings if we just enabled the provider
     if let (Some(ws), Some(_)) = (&workspace, &embeddings) {
         match ws.backfill_embeddings().await {
