@@ -312,7 +312,12 @@ async fn chat_approval_handler(
         )
     })?;
 
-    let msg = IncomingMessage::new("gateway", &state.user_id, content);
+    let mut msg = IncomingMessage::new("gateway", &state.user_id, content);
+
+    if let Some(ref thread_id) = req.thread_id {
+        msg = msg.with_thread(thread_id);
+    }
+
     let msg_id = msg.id;
 
     let tx_guard = state.msg_tx.read().await;

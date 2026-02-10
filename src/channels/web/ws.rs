@@ -170,7 +170,11 @@ async fn handle_client_message(
                     .await;
             }
         }
-        WsClientMessage::Approval { request_id, action } => {
+        WsClientMessage::Approval {
+            request_id,
+            action,
+            thread_id,
+        } => {
             let (approved, always) = match action.as_str() {
                 "approve" => (true, false),
                 "always" => (true, true),
@@ -214,7 +218,10 @@ async fn handle_client_message(
                 }
             };
 
-            let msg = IncomingMessage::new("gateway", user_id, content);
+            let mut msg = IncomingMessage::new("gateway", user_id, content);
+            if let Some(ref tid) = thread_id {
+                msg = msg.with_thread(tid);
+            }
             let tx_guard = state.msg_tx.read().await;
             if let Some(ref tx) = *tx_guard {
                 let _ = tx.send(msg).await;
@@ -384,6 +391,7 @@ mod tests {
             WsClientMessage::Approval {
                 request_id: request_id.to_string(),
                 action: "approve".to_string(),
+                thread_id: Some("thread-42".to_string()),
             },
             &state,
             "user1",
@@ -394,6 +402,8 @@ mod tests {
         let incoming = agent_rx.recv().await.unwrap();
         // The content should be a serialized ExecApproval
         assert!(incoming.content.contains("ExecApproval"));
+        // Thread should be forwarded onto the IncomingMessage.
+        assert_eq!(incoming.thread_id.as_deref(), Some("thread-42"));
     }
 
     #[tokio::test]
@@ -405,6 +415,7 @@ mod tests {
             WsClientMessage::Approval {
                 request_id: Uuid::new_v4().to_string(),
                 action: "maybe".to_string(),
+                thread_id: None,
             },
             &state,
             "user1",
@@ -430,6 +441,7 @@ mod tests {
             WsClientMessage::Approval {
                 request_id: "not-a-uuid".to_string(),
                 action: "approve".to_string(),
+                thread_id: None,
             },
             &state,
             "user1",

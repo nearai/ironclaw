@@ -76,6 +76,8 @@ pub struct ApprovalRequest {
     pub request_id: String,
     /// "approve", "always", or "deny"
     pub action: String,
+    /// Thread that owns the pending approval (so the agent loop finds the right session).
+    pub thread_id: Option<String>,
 }
 
 // --- SSE Event Types ---
@@ -437,6 +439,8 @@ pub enum WsClientMessage {
         request_id: String,
         /// "approve", "always", or "deny"
         action: String,
+        /// Thread that owns the pending approval.
+        thread_id: Option<String>,
     },
     /// Submit an auth token for an extension (bypasses message pipeline).
     #[serde(rename = "auth_token")]
@@ -635,12 +639,36 @@ mod tests {
 
     #[test]
     fn test_ws_client_approval_parse() {
-        let json = r#"{"type":"approval","request_id":"abc-123","action":"approve"}"#;
+        let json =
+            r#"{"type":"approval","request_id":"abc-123","action":"approve","thread_id":"t1"}"#;
         let msg: WsClientMessage = serde_json::from_str(json).unwrap();
         match msg {
-            WsClientMessage::Approval { request_id, action } => {
+            WsClientMessage::Approval {
+                request_id,
+                action,
+                thread_id,
+            } => {
                 assert_eq!(request_id, "abc-123");
                 assert_eq!(action, "approve");
+                assert_eq!(thread_id.as_deref(), Some("t1"));
+            }
+            _ => panic!("Expected Approval variant"),
+        }
+    }
+
+    #[test]
+    fn test_ws_client_approval_parse_no_thread() {
+        let json = r#"{"type":"approval","request_id":"abc-123","action":"deny"}"#;
+        let msg: WsClientMessage = serde_json::from_str(json).unwrap();
+        match msg {
+            WsClientMessage::Approval {
+                request_id,
+                action,
+                thread_id,
+            } => {
+                assert_eq!(request_id, "abc-123");
+                assert_eq!(action, "deny");
+                assert!(thread_id.is_none());
             }
             _ => panic!("Expected Approval variant"),
         }

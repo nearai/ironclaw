@@ -244,7 +244,7 @@ function enableChatInput() {
 function sendApprovalAction(requestId, action) {
   apiFetch('/api/chat/approval', {
     method: 'POST',
-    body: { request_id: requestId, action: action },
+    body: { request_id: requestId, action: action, thread_id: currentThreadId },
   }).catch((err) => {
     addMessage('system', 'Failed to send approval: ' + err.message);
   });
