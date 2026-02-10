@@ -93,7 +93,7 @@ pub fn chunk_document(content: &str, config: ChunkConfig) -> Vec<String> {
 
         // Don't create tiny trailing chunks, merge with previous
         if chunk_words.len() < config.min_chunk_size && !chunks.is_empty() {
-            let last = chunks.pop().unwrap();
+            let last = chunks.pop().expect("checked non-empty above");
             let combined = format!("{} {}", last, chunk_words.join(" "));
             chunks.push(combined);
             break;
@@ -176,7 +176,7 @@ pub fn chunk_by_paragraphs(content: &str, config: ChunkConfig) -> Vec<String> {
     if !current_chunk.is_empty() {
         // If too small, merge with previous chunk if possible
         if current_word_count < config.min_chunk_size && !chunks.is_empty() {
-            let last = chunks.pop().unwrap();
+            let last = chunks.pop().expect("checked non-empty above");
             chunks.push(format!("{}\n\n{}", last, current_chunk.trim()));
         } else {
             chunks.push(current_chunk.trim().to_string());

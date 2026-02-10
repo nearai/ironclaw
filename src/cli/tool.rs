@@ -259,7 +259,7 @@ fn build_wasm_component(source_dir: &Path, release: bool) -> anyhow::Result<Path
         .args(["component", "--version"])
         .output();
 
-    if check.is_err() || !check.unwrap().status.success() {
+    if !check.as_ref().map_or(false, |o| o.status.success()) {
         anyhow::bail!(
             "cargo-component not found. Install with: cargo install cargo-component\n\
              Or use --skip-build with an existing .wasm file."

@@ -408,7 +408,7 @@ impl Repository {
             self.vector_search(
                 user_id,
                 agent_id,
-                embedding.unwrap(),
+                embedding.expect("checked is_some above"),
                 config.pre_fusion_limit,
             )
             .await?

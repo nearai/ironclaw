@@ -273,7 +273,7 @@ async fn handle_connect(
     Response::builder()
         .status(StatusCode::OK)
         .body(empty_body())
-        .unwrap()
+        .expect("valid empty CONNECT response")
 }
 
 /// Forward a request to the target server.
@@ -355,7 +355,7 @@ async fn forward_request(
                         }
                     }
 
-                    Ok(builder.body(full_body(body)).unwrap())
+                    Ok(builder.body(full_body(body)).expect("valid proxied response"))
                 }
                 Err(e) => {
                     tracing::error!("Proxy: failed to read response body: {}", e);
@@ -397,7 +397,7 @@ fn error_response(status: StatusCode, message: String) -> Response<BoxBody<Bytes
         .status(status)
         .header("Content-Type", "text/plain")
         .body(full_body(Bytes::from(message)))
-        .unwrap()
+        .expect("valid error response")
 }
 
 /// Create an empty body.

@@ -540,7 +540,7 @@ impl SetupWizard {
             self.test_database_connection(&url).await?;
             // Ensure secrets-related tables exist for channels-only onboarding flows.
             self.run_migrations().await?;
-            self.db_pool.clone().unwrap()
+            self.db_pool.clone().expect("db_pool set in previous step")
         };
 
         // Get crypto (should be set from step 2, or load from keychain/env)
@@ -561,7 +561,7 @@ impl SetupWizard {
             let crypto = SecretsCrypto::new(SecretString::from(key))
                 .map_err(|e| SetupError::Config(e.to_string()))?;
             self.secrets_crypto = Some(Arc::new(crypto));
-            Arc::clone(self.secrets_crypto.as_ref().unwrap())
+            Arc::clone(self.secrets_crypto.as_ref().expect("secrets_crypto set above"))
         };
 
         Ok(SecretsContext::new(pool, crypto, "default"))

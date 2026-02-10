@@ -409,105 +409,105 @@ fn default_patterns() -> Vec<LeakPattern> {
         // OpenAI API keys
         LeakPattern {
             name: "openai_api_key".to_string(),
-            regex: Regex::new(r"sk-(?:proj-)?[a-zA-Z0-9]{20,}(?:T3BlbkFJ[a-zA-Z0-9_-]*)?").unwrap(),
+            regex: Regex::new(r"sk-(?:proj-)?[a-zA-Z0-9]{20,}(?:T3BlbkFJ[a-zA-Z0-9_-]*)?").expect("valid openai_api_key regex"),
             severity: LeakSeverity::Critical,
             action: LeakAction::Block,
         },
         // Anthropic API keys
         LeakPattern {
             name: "anthropic_api_key".to_string(),
-            regex: Regex::new(r"sk-ant-api[a-zA-Z0-9_-]{90,}").unwrap(),
+            regex: Regex::new(r"sk-ant-api[a-zA-Z0-9_-]{90,}").expect("valid anthropic_api_key regex"),
             severity: LeakSeverity::Critical,
             action: LeakAction::Block,
         },
         // AWS Access Key ID
         LeakPattern {
             name: "aws_access_key".to_string(),
-            regex: Regex::new(r"AKIA[0-9A-Z]{16}").unwrap(),
+            regex: Regex::new(r"AKIA[0-9A-Z]{16}").expect("valid aws_access_key regex"),
             severity: LeakSeverity::Critical,
             action: LeakAction::Block,
         },
         // GitHub tokens
         LeakPattern {
             name: "github_token".to_string(),
-            regex: Regex::new(r"gh[pousr]_[A-Za-z0-9_]{36,}").unwrap(),
+            regex: Regex::new(r"gh[pousr]_[A-Za-z0-9_]{36,}").expect("valid github_token regex"),
             severity: LeakSeverity::Critical,
             action: LeakAction::Block,
         },
         // GitHub fine-grained PAT
         LeakPattern {
             name: "github_fine_grained_pat".to_string(),
-            regex: Regex::new(r"github_pat_[a-zA-Z0-9]{22}_[a-zA-Z0-9]{59}").unwrap(),
+            regex: Regex::new(r"github_pat_[a-zA-Z0-9]{22}_[a-zA-Z0-9]{59}").expect("valid github_fine_grained_pat regex"),
             severity: LeakSeverity::Critical,
             action: LeakAction::Block,
         },
         // Stripe keys
         LeakPattern {
             name: "stripe_api_key".to_string(),
-            regex: Regex::new(r"sk_(?:live|test)_[a-zA-Z0-9]{24,}").unwrap(),
+            regex: Regex::new(r"sk_(?:live|test)_[a-zA-Z0-9]{24,}").expect("valid stripe_api_key regex"),
             severity: LeakSeverity::Critical,
             action: LeakAction::Block,
         },
         // NEAR AI session tokens
         LeakPattern {
             name: "nearai_session".to_string(),
-            regex: Regex::new(r"sess_[a-zA-Z0-9]{32,}").unwrap(),
+            regex: Regex::new(r"sess_[a-zA-Z0-9]{32,}").expect("valid nearai_session regex"),
             severity: LeakSeverity::Critical,
             action: LeakAction::Block,
         },
         // PEM private keys
         LeakPattern {
             name: "pem_private_key".to_string(),
-            regex: Regex::new(r"-----BEGIN\s+(?:RSA\s+)?PRIVATE\s+KEY-----").unwrap(),
+            regex: Regex::new(r"-----BEGIN\s+(?:RSA\s+)?PRIVATE\s+KEY-----").expect("valid pem_private_key regex"),
             severity: LeakSeverity::Critical,
             action: LeakAction::Block,
         },
         // SSH private keys
         LeakPattern {
             name: "ssh_private_key".to_string(),
-            regex: Regex::new(r"-----BEGIN\s+(?:OPENSSH|EC|DSA)\s+PRIVATE\s+KEY-----").unwrap(),
+            regex: Regex::new(r"-----BEGIN\s+(?:OPENSSH|EC|DSA)\s+PRIVATE\s+KEY-----").expect("valid ssh_private_key regex"),
             severity: LeakSeverity::Critical,
             action: LeakAction::Block,
         },
         // Google API keys
         LeakPattern {
             name: "google_api_key".to_string(),
-            regex: Regex::new(r"AIza[0-9A-Za-z_-]{35}").unwrap(),
+            regex: Regex::new(r"AIza[0-9A-Za-z_-]{35}").expect("valid google_api_key regex"),
             severity: LeakSeverity::High,
             action: LeakAction::Block,
         },
         // Slack tokens
         LeakPattern {
             name: "slack_token".to_string(),
-            regex: Regex::new(r"xox[baprs]-[0-9a-zA-Z-]{10,}").unwrap(),
+            regex: Regex::new(r"xox[baprs]-[0-9a-zA-Z-]{10,}").expect("valid slack_token regex"),
             severity: LeakSeverity::High,
             action: LeakAction::Block,
         },
         // Twilio API keys
         LeakPattern {
             name: "twilio_api_key".to_string(),
-            regex: Regex::new(r"SK[a-fA-F0-9]{32}").unwrap(),
+            regex: Regex::new(r"SK[a-fA-F0-9]{32}").expect("valid twilio_api_key regex"),
             severity: LeakSeverity::High,
             action: LeakAction::Block,
         },
         // SendGrid API keys
         LeakPattern {
             name: "sendgrid_api_key".to_string(),
-            regex: Regex::new(r"SG\.[a-zA-Z0-9_-]{22}\.[a-zA-Z0-9_-]{43}").unwrap(),
+            regex: Regex::new(r"SG\.[a-zA-Z0-9_-]{22}\.[a-zA-Z0-9_-]{43}").expect("valid sendgrid_api_key regex"),
             severity: LeakSeverity::High,
             action: LeakAction::Block,
         },
         // Bearer tokens (redact instead of block, might be intentional)
         LeakPattern {
             name: "bearer_token".to_string(),
-            regex: Regex::new(r"Bearer\s+[a-zA-Z0-9_-]{20,}").unwrap(),
+            regex: Regex::new(r"Bearer\s+[a-zA-Z0-9_-]{20,}").expect("valid bearer_token regex"),
             severity: LeakSeverity::High,
             action: LeakAction::Redact,
         },
         // Authorization header with key
         LeakPattern {
             name: "auth_header".to_string(),
-            regex: Regex::new(r"(?i)authorization:\s*[a-zA-Z]+\s+[a-zA-Z0-9_-]{20,}").unwrap(),
+            regex: Regex::new(r"(?i)authorization:\s*[a-zA-Z]+\s+[a-zA-Z0-9_-]{20,}").expect("valid auth_header regex"),
             severity: LeakSeverity::High,
             action: LeakAction::Redact,
         },
@@ -516,7 +516,7 @@ fn default_patterns() -> Vec<LeakPattern> {
         // This catches standalone 64-char hex strings (like SHA256 hashes used as secrets).
         LeakPattern {
             name: "high_entropy_hex".to_string(),
-            regex: Regex::new(r"\b[a-fA-F0-9]{64}\b").unwrap(),
+            regex: Regex::new(r"\b[a-fA-F0-9]{64}\b").expect("valid high_entropy_hex regex"),
             severity: LeakSeverity::Medium,
             action: LeakAction::Warn,
         },

@@ -444,7 +444,7 @@ impl Guest for MyTool {
 
         // Return success
         Response {
-            output: Some(serde_json::to_string(&output).unwrap()),
+            output: Some(serde_json::to_string(&output).expect("serializable output")),
             error: None,
         }
     }
