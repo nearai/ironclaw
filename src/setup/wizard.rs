@@ -17,7 +17,7 @@ use secrecy::SecretString;
 use tokio_postgres::NoTls;
 
 use crate::channels::wasm::{
-    ChannelCapabilitiesFile, bundled_channel_names, install_bundled_channel,
+    ChannelCapabilitiesFile, available_channel_names, install_bundled_channel,
 };
 use crate::llm::{SessionConfig, SessionManager};
 use crate::secrets::SecretsCrypto;
@@ -981,7 +981,7 @@ async fn install_missing_bundled_channels(
 ) -> Result<Vec<String>, SetupError> {
     let mut installed = Vec::new();
 
-    for name in bundled_channel_names().iter().copied() {
+    for name in available_channel_names().iter().copied() {
         if already_installed.contains(name) {
             continue;
         }
@@ -998,7 +998,7 @@ async fn install_missing_bundled_channels(
 fn wasm_channel_option_names(discovered: &[(String, ChannelCapabilitiesFile)]) -> Vec<String> {
     let mut names: Vec<String> = discovered.iter().map(|(name, _)| name.clone()).collect();
 
-    for bundled in bundled_channel_names().iter().copied() {
+    for bundled in available_channel_names().iter().copied() {
         if !names.iter().any(|name| name == bundled) {
             names.push(bundled.to_string());
         }
@@ -1012,7 +1012,7 @@ async fn install_selected_bundled_channels(
     selected_channels: &[String],
     already_installed: &HashSet<String>,
 ) -> Result<Option<Vec<String>>, SetupError> {
-    let bundled: HashSet<&str> = bundled_channel_names().iter().copied().collect();
+    let bundled: HashSet<&str> = available_channel_names().iter().copied().collect();
     let selected_missing: HashSet<String> = selected_channels
         .iter()
         .filter(|name| bundled.contains(name.as_str()) && !already_installed.contains(*name))
@@ -1095,16 +1095,29 @@ mod tests {
     }
 
     #[test]
-    fn test_wasm_channel_option_names_includes_bundled_when_missing() {
+    fn test_wasm_channel_option_names_includes_available_when_missing() {
         let discovered = Vec::new();
         let options = wasm_channel_option_names(&discovered);
-        assert_eq!(options, vec!["telegram".to_string()]);
+        let available = available_channel_names();
+        // All available (built) channels should appear
+        for name in &available {
+            assert!(
+                options.contains(&name.to_string()),
+                "expected '{}' in options",
+                name
+            );
+        }
     }
 
     #[test]
-    fn test_wasm_channel_option_names_dedupes_bundled() {
+    fn test_wasm_channel_option_names_dedupes_available() {
         let discovered = vec![(String::from("telegram"), ChannelCapabilitiesFile::default())];
         let options = wasm_channel_option_names(&discovered);
-        assert_eq!(options, vec!["telegram".to_string()]);
+        // telegram should appear exactly once despite being both discovered and available
+        assert_eq!(
+            options.iter().filter(|n| *n == "telegram").count(),
+            1,
+            "telegram should not be duplicated"
+        );
     }
 }
