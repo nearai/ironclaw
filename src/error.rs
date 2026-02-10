@@ -39,6 +39,9 @@ pub enum Error {
 
     #[error("Workspace error: {0}")]
     Workspace(#[from] WorkspaceError),
+
+    #[error("Hook error: {0}")]
+    Hook(#[from] crate::hooks::HookError),
 }
 
 /// Configuration-related errors.

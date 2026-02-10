@@ -112,7 +112,7 @@ This document tracks feature parity between IronClaw (Rust implementation) and O
 | `pairing` | ✅ | ❌ | P3 | Node pairing |
 | `nodes` | ✅ | ❌ | P3 | Device management |
 | `plugins` | ✅ | ❌ | P3 | Plugin management |
-| `hooks` | ✅ | ❌ | P2 | Lifecycle hooks |
+| `hooks` | ✅ | ✅ | P2 | Lifecycle hooks |
 | `cron` | ✅ | ❌ | P2 | Scheduled jobs |
 | `webhooks` | ✅ | ❌ | P3 | Webhook config |
 | `message send` | ✅ | ❌ | P2 | Send to channels |
@@ -323,14 +323,14 @@ This document tracks feature parity between IronClaw (Rust implementation) and O
 | Cron jobs | ✅ | ❌ | P2 | Schedule-based tasks |
 | Timezone support | ✅ | ❌ | P2 | |
 | One-shot/recurring jobs | ✅ | ❌ | P2 | |
-| `beforeInbound` hook | ✅ | ❌ | P2 | |
-| `beforeOutbound` hook | ✅ | ❌ | P2 | |
-| `beforeToolCall` hook | ✅ | ❌ | P2 | |
+| `beforeInbound` hook | ✅ | ✅ | P2 | |
+| `beforeOutbound` hook | ✅ | ✅ | P2 | |
+| `beforeToolCall` hook | ✅ | ✅ | P2 | |
 | `onMessage` hook | ✅ | ❌ | P2 | |
-| `onSessionStart` hook | ✅ | ❌ | P2 | |
-| `onSessionEnd` hook | ✅ | ❌ | P2 | |
+| `onSessionStart` hook | ✅ | ✅ | P2 | |
+| `onSessionEnd` hook | ✅ | ✅ | P2 | |
 | `transcribeAudio` hook | ✅ | ❌ | P3 | |
-| `transformResponse` hook | ✅ | ❌ | P2 | |
+| `transformResponse` hook | ✅ | ✅ | P2 | |
 | Bundled hooks | ✅ | ❌ | P2 | |
 | Plugin hooks | ✅ | ❌ | P3 | |
 | Workspace hooks | ✅ | ❌ | P2 | Inline code |
@@ -411,7 +411,7 @@ This document tracks feature parity between IronClaw (Rust implementation) and O
 - ❌ WhatsApp channel
 - ❌ Multi-provider failover
 - ❌ Gateway control plane + WebSocket
-- ❌ Hooks system (beforeInbound, beforeToolCall, etc.)
+- ✅ Hooks system (beforeInbound, beforeToolCall, beforeOutbound, onSessionStart, onSessionEnd, transformResponse)
 
 ### P2 - Medium Priority
 - ❌ Cron job scheduling

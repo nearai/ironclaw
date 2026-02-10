@@ -47,6 +47,7 @@ pub mod error;
 pub mod estimation;
 pub mod evaluation;
 pub mod extensions;
+pub mod hooks;
 pub mod history;
 pub mod llm;
 pub mod safety;

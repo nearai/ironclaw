@@ -11,6 +11,7 @@ use uuid::Uuid;
 
 use crate::agent::session::Session;
 use crate::agent::undo::UndoManager;
+use crate::hooks::HookRegistry;
 
 /// Key for mapping external thread IDs to internal ones.
 #[derive(Clone, Hash, Eq, PartialEq)]
@@ -25,6 +26,7 @@ pub struct SessionManager {
     sessions: RwLock<HashMap<String, Arc<Mutex<Session>>>>,
     thread_map: RwLock<HashMap<ThreadKey, Uuid>>,
     undo_managers: RwLock<HashMap<Uuid, Arc<Mutex<UndoManager>>>>,
+    hooks: Option<Arc<HookRegistry>>,
 }
 
 impl SessionManager {
@@ -34,7 +36,14 @@ impl SessionManager {
             sessions: RwLock::new(HashMap::new()),
             thread_map: RwLock::new(HashMap::new()),
             undo_managers: RwLock::new(HashMap::new()),
+            hooks: None,
         }
+    }
+
+    /// Attach a hook registry for session lifecycle events.
+    pub fn with_hooks(mut self, hooks: Arc<HookRegistry>) -> Self {
+        self.hooks = Some(hooks);
+        self
     }
 
     /// Get or create a session for a user.
@@ -56,6 +65,23 @@ impl SessionManager {
 
         let session = Arc::new(Mutex::new(Session::new(user_id)));
         sessions.insert(user_id.to_string(), Arc::clone(&session));
+
+        // Fire OnSessionStart hook (fire-and-forget)
+        if let Some(ref hooks) = self.hooks {
+            let hooks = hooks.clone();
+            let uid = user_id.to_string();
+            tokio::spawn(async move {
+                use crate::hooks::HookEvent;
+                let event = HookEvent::SessionStart {
+                    user_id: uid,
+                    session_id: String::new(),
+                };
+                if let Err(e) = hooks.run(&event).await {
+                    tracing::warn!("OnSessionStart hook error: {}", e);
+                }
+            });
+        }
+
         session
     }
 
@@ -169,6 +195,24 @@ impl SessionManager {
                         stale_thread_ids.extend(sess.threads.keys());
                     }
                 }
+            }
+        }
+
+        // Fire OnSessionEnd hooks for stale sessions (fire-and-forget)
+        if let Some(ref hooks) = self.hooks {
+            for user_id in &stale_users {
+                let hooks = hooks.clone();
+                let uid = user_id.clone();
+                tokio::spawn(async move {
+                    use crate::hooks::HookEvent;
+                    let event = HookEvent::SessionEnd {
+                        user_id: uid,
+                        session_id: String::new(),
+                    };
+                    if let Err(e) = hooks.run(&event).await {
+                        tracing::warn!("OnSessionEnd hook error: {}", e);
+                    }
+                });
             }
         }
 

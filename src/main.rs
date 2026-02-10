@@ -7,6 +7,7 @@ use tracing_subscriber::{EnvFilter, layer::SubscriberExt, util::SubscriberInitEx
 
 use ironclaw::{
     agent::{Agent, AgentDeps, SessionManager},
+    hooks::HookRegistry,
     channels::{
         ChannelManager, GatewayChannel, HttpChannel, ReplChannel, WebhookServer,
         WebhookServerConfig,
@@ -709,8 +710,11 @@ async fn main() -> anyhow::Result<()> {
     // Create context manager (shared between job tools and agent)
     let context_manager = Arc::new(ContextManager::new(config.agent.max_parallel_jobs));
 
+    // Create hook registry
+    let hooks = Arc::new(HookRegistry::new());
+
     // Create session manager (shared between agent and web gateway)
-    let session_manager = Arc::new(SessionManager::new());
+    let session_manager = Arc::new(SessionManager::new().with_hooks(hooks.clone()));
 
     // Register job tools
     tools.register_job_tools(Arc::clone(&context_manager));
@@ -746,6 +750,7 @@ async fn main() -> anyhow::Result<()> {
         tools,
         workspace,
         extension_manager,
+        hooks,
     };
     let agent = Agent::new(
         config.agent.clone(),
