@@ -30,7 +30,6 @@ use ironclaw::{
     },
     safety::SafetyLayer,
     secrets::{PostgresSecretsStore, SecretsCrypto, SecretsStore},
-    settings::Settings,
     setup::{SetupConfig, SetupWizard},
     tools::{
         ToolRegistry,
@@ -57,9 +56,14 @@ async fn main() -> anyhow::Result<()> {
             return run_tool_command(tool_cmd.clone()).await;
         }
         Some(Command::Config(config_cmd)) => {
-            // Config commands don't need logging setup
-            return ironclaw::cli::run_config_command(config_cmd.clone())
-                .map_err(|e| anyhow::anyhow!("{}", e));
+            // Config commands need DB access for settings
+            tracing_subscriber::fmt()
+                .with_env_filter(
+                    EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("warn")),
+                )
+                .init();
+
+            return ironclaw::cli::run_config_command(config_cmd.clone()).await;
         }
         Some(Command::Mcp(mcp_cmd)) => {
             // Simple logging for MCP commands
@@ -305,6 +309,11 @@ async fn main() -> anyhow::Result<()> {
         let store = Store::new(&config.database).await?;
         store.run_migrations().await?;
         tracing::info!("Database connected and migrations applied");
+
+        // One-time migration: move disk config files into the DB settings table.
+        if let Err(e) = ironclaw::bootstrap::migrate_disk_to_db(&store, "default").await {
+            tracing::warn!("Disk-to-DB settings migration failed: {}", e);
+        }
 
         // Mark any jobs left in "running" or "creating" state as "interrupted".
         if let Err(e) = store.cleanup_stale_sandbox_jobs().await {
@@ -977,15 +986,15 @@ async fn main() -> anyhow::Result<()> {
 ///
 /// Returns `Some(reason)` if onboarding should be triggered, `None` otherwise.
 fn check_onboard_needed() -> Option<&'static str> {
-    let settings = Settings::load();
+    let bootstrap = ironclaw::bootstrap::BootstrapConfig::load();
 
     // Database not configured (and not in env)
-    if settings.database_url.is_none() && std::env::var("DATABASE_URL").is_err() {
+    if bootstrap.database_url.is_none() && std::env::var("DATABASE_URL").is_err() {
         return Some("Database not configured");
     }
 
     // Secrets not configured (and not in env)
-    if settings.secrets_master_key_source == ironclaw::settings::KeySource::None
+    if bootstrap.secrets_master_key_source == ironclaw::settings::KeySource::None
         && std::env::var("SECRETS_MASTER_KEY").is_err()
         && !ironclaw::secrets::keychain::has_master_key()
     {
@@ -995,7 +1004,7 @@ fn check_onboard_needed() -> Option<&'static str> {
 
     // First run (onboarding never completed and no session)
     let session_path = ironclaw::llm::session::default_session_path();
-    if !settings.onboard_completed && !session_path.exists() {
+    if !bootstrap.onboard_completed && !session_path.exists() {
         return Some("First run");
     }
 
