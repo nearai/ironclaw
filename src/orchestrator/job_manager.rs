@@ -186,10 +186,36 @@ impl ContainerJobManager {
             format!("IRONCLAW_ORCHESTRATOR_URL={}", orchestrator_url),
         ];
 
-        // Build volume mounts
+        // Build volume mounts (validate project_dir stays within ~/.ironclaw/projects/)
         let mut binds = Vec::new();
         if let Some(ref dir) = project_dir {
-            binds.push(format!("{}:/workspace:rw", dir.display()));
+            let canonical =
+                dir.canonicalize()
+                    .map_err(|e| OrchestratorError::ContainerCreationFailed {
+                        job_id,
+                        reason: format!(
+                            "failed to canonicalize project dir {}: {}",
+                            dir.display(),
+                            e
+                        ),
+                    })?;
+            let projects_base = dirs::home_dir()
+                .unwrap_or_else(|| PathBuf::from("."))
+                .join(".ironclaw")
+                .join("projects");
+            if let Ok(canonical_base) = projects_base.canonicalize() {
+                if !canonical.starts_with(&canonical_base) {
+                    return Err(OrchestratorError::ContainerCreationFailed {
+                        job_id,
+                        reason: format!(
+                            "project directory {} is outside allowed base {}",
+                            canonical.display(),
+                            canonical_base.display()
+                        ),
+                    });
+                }
+            }
+            binds.push(format!("{}:/workspace:rw", canonical.display()));
             env_vec.push("IRONCLAW_WORKSPACE=/workspace".to_string());
         }
 

@@ -17,7 +17,7 @@ use uuid::Uuid;
 use crate::channels::web::types::SseEvent;
 use crate::history::Store;
 use crate::llm::{CompletionRequest, LlmProvider, ToolCompletionRequest};
-use crate::orchestrator::auth::TokenStore;
+use crate::orchestrator::auth::{TokenStore, worker_auth_middleware};
 use crate::orchestrator::job_manager::ContainerJobManager;
 use crate::worker::api::JobEventPayload;
 use crate::worker::api::{
@@ -53,6 +53,7 @@ impl OrchestratorApi {
     /// Build the axum router for the internal API.
     pub fn router(state: OrchestratorState) -> Router {
         Router::new()
+            // Worker routes: authenticated via route_layer middleware.
             .route("/worker/{job_id}/job", get(get_job))
             .route("/worker/{job_id}/llm/complete", post(llm_complete))
             .route(
@@ -61,20 +62,38 @@ impl OrchestratorApi {
             )
             .route("/worker/{job_id}/status", post(report_status))
             .route("/worker/{job_id}/complete", post(report_complete))
-            // Sandbox job event endpoints (worker + Claude Code bridge)
             .route("/worker/{job_id}/event", post(job_event_handler))
             .route("/worker/{job_id}/prompt", get(get_prompt_handler))
+            .route_layer(axum::middleware::from_fn_with_state(
+                state.token_store.clone(),
+                worker_auth_middleware,
+            ))
+            // Unauthenticated routes (added after the layer).
             .route("/health", get(health_check))
             .with_state(state)
     }
 
     /// Start the internal API server on the given port.
+    ///
+    /// On macOS/Windows (Docker Desktop), binds to loopback only because
+    /// Docker Desktop routes `host.docker.internal` through its VM to the
+    /// host's `127.0.0.1`.
+    ///
+    /// On Linux, containers reach the host via the docker bridge gateway
+    /// (`172.17.0.1`), which is NOT loopback. Binding to `127.0.0.1`
+    /// would reject container traffic. We bind to all interfaces instead
+    /// and rely on `worker_auth_middleware` (applied as a route_layer on
+    /// every `/worker/` endpoint) to reject unauthenticated requests.
     pub async fn start(
         state: OrchestratorState,
         port: u16,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let router = Self::router(state);
-        let addr = std::net::SocketAddr::from(([0, 0, 0, 0], port));
+        let addr = if cfg!(target_os = "linux") {
+            std::net::SocketAddr::from(([0, 0, 0, 0], port))
+        } else {
+            std::net::SocketAddr::from(([127, 0, 0, 1], port))
+        };
 
         tracing::info!("Orchestrator internal API listening on {}", addr);
 
@@ -85,34 +104,10 @@ impl OrchestratorApi {
     }
 }
 
-// -- Auth helper --
-
-/// Validate the bearer token for a job. Returns 401 if invalid.
-async fn validate_token(
-    state: &OrchestratorState,
-    job_id: Uuid,
-    auth_header: Option<&str>,
-) -> Result<(), StatusCode> {
-    let token = auth_header
-        .and_then(|h| h.strip_prefix("Bearer "))
-        .ok_or(StatusCode::UNAUTHORIZED)?;
-
-    if !state.token_store.validate(job_id, token).await {
-        return Err(StatusCode::UNAUTHORIZED);
-    }
-
-    Ok(())
-}
-
-/// Extract the Authorization header value from headers.
-fn get_auth_header(headers: &axum::http::HeaderMap) -> Option<String> {
-    headers
-        .get("authorization")
-        .and_then(|v| v.to_str().ok())
-        .map(|s| s.to_string())
-}
-
 // -- Handlers --
+//
+// All /worker/ handlers below are behind the worker_auth_middleware route_layer,
+// so they don't need to validate tokens themselves.
 
 async fn health_check() -> &'static str {
     "ok"
@@ -121,11 +116,7 @@ async fn health_check() -> &'static str {
 async fn get_job(
     State(state): State<OrchestratorState>,
     Path(job_id): Path<Uuid>,
-    headers: axum::http::HeaderMap,
 ) -> Result<Json<JobDescription>, StatusCode> {
-    let auth = get_auth_header(&headers);
-    validate_token(&state, job_id, auth.as_deref()).await?;
-
     let handle = state
         .job_manager
         .get_handle(job_id)
@@ -142,12 +133,8 @@ async fn get_job(
 async fn llm_complete(
     State(state): State<OrchestratorState>,
     Path(job_id): Path<Uuid>,
-    headers: axum::http::HeaderMap,
     Json(req): Json<ProxyCompletionRequest>,
 ) -> Result<Json<ProxyCompletionResponse>, StatusCode> {
-    let auth = get_auth_header(&headers);
-    validate_token(&state, job_id, auth.as_deref()).await?;
-
     let completion_req = CompletionRequest {
         messages: req.messages,
         max_tokens: req.max_tokens,
@@ -171,12 +158,8 @@ async fn llm_complete(
 async fn llm_complete_with_tools(
     State(state): State<OrchestratorState>,
     Path(job_id): Path<Uuid>,
-    headers: axum::http::HeaderMap,
     Json(req): Json<ProxyToolCompletionRequest>,
 ) -> Result<Json<ProxyToolCompletionResponse>, StatusCode> {
-    let auth = get_auth_header(&headers);
-    validate_token(&state, job_id, auth.as_deref()).await?;
-
     let tool_req = ToolCompletionRequest {
         messages: req.messages,
         tools: req.tools,
@@ -200,14 +183,9 @@ async fn llm_complete_with_tools(
 }
 
 async fn report_status(
-    State(state): State<OrchestratorState>,
     Path(job_id): Path<Uuid>,
-    headers: axum::http::HeaderMap,
     Json(update): Json<StatusUpdate>,
 ) -> Result<StatusCode, StatusCode> {
-    let auth = get_auth_header(&headers);
-    validate_token(&state, job_id, auth.as_deref()).await?;
-
     tracing::debug!(
         job_id = %job_id,
         state = %update.state,
@@ -221,12 +199,8 @@ async fn report_status(
 async fn report_complete(
     State(state): State<OrchestratorState>,
     Path(job_id): Path<Uuid>,
-    headers: axum::http::HeaderMap,
     Json(report): Json<CompletionReport>,
 ) -> Result<StatusCode, StatusCode> {
-    let auth = get_auth_header(&headers);
-    validate_token(&state, job_id, auth.as_deref()).await?;
-
     if report.success {
         tracing::info!(
             job_id = %job_id,
@@ -256,12 +230,8 @@ async fn report_complete(
 async fn job_event_handler(
     State(state): State<OrchestratorState>,
     Path(job_id): Path<Uuid>,
-    headers: axum::http::HeaderMap,
     Json(payload): Json<JobEventPayload>,
 ) -> Result<StatusCode, StatusCode> {
-    let auth = get_auth_header(&headers);
-    validate_token(&state, job_id, auth.as_deref()).await?;
-
     tracing::debug!(
         job_id = %job_id,
         event_type = %payload.event_type,
@@ -365,11 +335,7 @@ async fn job_event_handler(
 async fn get_prompt_handler(
     State(state): State<OrchestratorState>,
     Path(job_id): Path<Uuid>,
-    headers: axum::http::HeaderMap,
 ) -> Result<(StatusCode, Json<serde_json::Value>), StatusCode> {
-    let auth = get_auth_header(&headers);
-    validate_token(&state, job_id, auth.as_deref()).await?;
-
     let mut queue = state.prompt_queue.lock().await;
     if let Some(prompts) = queue.get_mut(&job_id) {
         if let Some(prompt) = prompts.pop_front() {
@@ -395,5 +361,149 @@ fn format_finish_reason(reason: crate::llm::FinishReason) -> String {
         crate::llm::FinishReason::ToolUse => "tool_use".to_string(),
         crate::llm::FinishReason::ContentFilter => "content_filter".to_string(),
         crate::llm::FinishReason::Unknown => "unknown".to_string(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashMap;
+
+    use axum::body::Body;
+    use axum::http::Request;
+    use tower::ServiceExt;
+    use uuid::Uuid;
+
+    use crate::error::LlmError;
+    use crate::llm::{
+        CompletionRequest, CompletionResponse, ToolCompletionRequest, ToolCompletionResponse,
+    };
+    use crate::orchestrator::auth::TokenStore;
+    use crate::orchestrator::job_manager::{ContainerJobConfig, ContainerJobManager};
+
+    use super::*;
+
+    /// Stub LLM provider that panics if called (tests only exercise routing/auth).
+    struct StubLlm;
+
+    #[async_trait::async_trait]
+    impl crate::llm::LlmProvider for StubLlm {
+        fn model_name(&self) -> &str {
+            "stub"
+        }
+        fn cost_per_token(&self) -> (rust_decimal::Decimal, rust_decimal::Decimal) {
+            (rust_decimal::Decimal::ZERO, rust_decimal::Decimal::ZERO)
+        }
+        async fn complete(&self, _req: CompletionRequest) -> Result<CompletionResponse, LlmError> {
+            Err(LlmError::RequestFailed {
+                provider: "stub".into(),
+                reason: "not implemented".into(),
+            })
+        }
+        async fn complete_with_tools(
+            &self,
+            _req: ToolCompletionRequest,
+        ) -> Result<ToolCompletionResponse, LlmError> {
+            Err(LlmError::RequestFailed {
+                provider: "stub".into(),
+                reason: "not implemented".into(),
+            })
+        }
+    }
+
+    fn test_state() -> OrchestratorState {
+        let token_store = TokenStore::new();
+        let jm = ContainerJobManager::new(ContainerJobConfig::default(), token_store.clone());
+        OrchestratorState {
+            llm: Arc::new(StubLlm),
+            job_manager: Arc::new(jm),
+            token_store,
+            job_event_tx: None,
+            prompt_queue: Arc::new(Mutex::new(HashMap::new())),
+            store: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn health_requires_no_auth() {
+        let state = test_state();
+        let router = OrchestratorApi::router(state);
+
+        let req = Request::builder()
+            .uri("/health")
+            .body(Body::empty())
+            .unwrap();
+
+        let resp = router.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn worker_route_rejects_missing_token() {
+        let state = test_state();
+        let router = OrchestratorApi::router(state);
+
+        let job_id = Uuid::new_v4();
+        let req = Request::builder()
+            .uri(format!("/worker/{}/job", job_id))
+            .body(Body::empty())
+            .unwrap();
+
+        let resp = router.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn worker_route_rejects_wrong_token() {
+        let state = test_state();
+        let router = OrchestratorApi::router(state);
+
+        let job_id = Uuid::new_v4();
+        let req = Request::builder()
+            .uri(format!("/worker/{}/job", job_id))
+            .header("Authorization", "Bearer totally-bogus")
+            .body(Body::empty())
+            .unwrap();
+
+        let resp = router.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn worker_route_accepts_valid_token() {
+        let state = test_state();
+        let job_id = Uuid::new_v4();
+        let token = state.token_store.create_token(job_id).await;
+
+        let router = OrchestratorApi::router(state);
+
+        let req = Request::builder()
+            .uri(format!("/worker/{}/job", job_id))
+            .header("Authorization", format!("Bearer {}", token))
+            .body(Body::empty())
+            .unwrap();
+
+        let resp = router.oneshot(req).await.unwrap();
+        // 404 because no container exists for this job_id, but NOT 401.
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn token_for_job_a_rejected_on_job_b() {
+        let state = test_state();
+        let job_a = Uuid::new_v4();
+        let job_b = Uuid::new_v4();
+        let token_a = state.token_store.create_token(job_a).await;
+
+        let router = OrchestratorApi::router(state);
+
+        // Use job_a's token to hit job_b's endpoint
+        let req = Request::builder()
+            .uri(format!("/worker/{}/job", job_b))
+            .header("Authorization", format!("Bearer {}", token_a))
+            .body(Body::empty())
+            .unwrap();
+
+        let resp = router.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
     }
 }

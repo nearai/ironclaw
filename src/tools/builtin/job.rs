@@ -320,23 +320,42 @@ impl CreateJobTool {
     }
 }
 
+/// The base directory where all project directories must live.
+fn projects_base() -> PathBuf {
+    dirs::home_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join(".ironclaw")
+        .join("projects")
+}
+
 /// Resolve the project directory, creating it if it doesn't exist.
 ///
-/// If the caller supplied an explicit path, use that.
-/// Otherwise auto-create `~/.ironclaw/projects/{project_id}/` so every sandbox
-/// job has a persistent bind mount that survives container teardown.
+/// Auto-creates `~/.ironclaw/projects/{project_id}/` so every sandbox job has a
+/// persistent bind mount that survives container teardown.
+///
+/// When an explicit path is provided (e.g. job restarts reusing the old dir),
+/// it is validated to fall within `~/.ironclaw/projects/` after canonicalization.
 fn resolve_project_dir(
     explicit: Option<PathBuf>,
     project_id: Uuid,
 ) -> Result<(PathBuf, String), ToolError> {
+    let base = projects_base();
+    std::fs::create_dir_all(&base).map_err(|e| {
+        ToolError::ExecutionFailed(format!(
+            "failed to create projects base {}: {}",
+            base.display(),
+            e
+        ))
+    })?;
+    let canonical_base = base.canonicalize().map_err(|e| {
+        ToolError::ExecutionFailed(format!("failed to canonicalize projects base: {}", e))
+    })?;
+
     let dir = match explicit {
         Some(d) => d,
-        None => dirs::home_dir()
-            .unwrap_or_else(|| PathBuf::from("."))
-            .join(".ironclaw")
-            .join("projects")
-            .join(project_id.to_string()),
+        None => canonical_base.join(project_id.to_string()),
     };
+
     std::fs::create_dir_all(&dir).map_err(|e| {
         ToolError::ExecutionFailed(format!(
             "failed to create project dir {}: {}",
@@ -344,11 +363,28 @@ fn resolve_project_dir(
             e
         ))
     })?;
-    let browse_id = dir
+
+    // Canonicalize resolves symlinks, `..`, etc. so we can do a reliable prefix check.
+    let canonical_dir = dir.canonicalize().map_err(|e| {
+        ToolError::ExecutionFailed(format!(
+            "failed to canonicalize project dir {}: {}",
+            dir.display(),
+            e
+        ))
+    })?;
+
+    if !canonical_dir.starts_with(&canonical_base) {
+        return Err(ToolError::InvalidParameters(format!(
+            "project directory must be under {}",
+            canonical_base.display()
+        )));
+    }
+
+    let browse_id = canonical_dir
         .file_name()
         .map(|n| n.to_string_lossy().to_string())
         .unwrap_or_else(|| project_id.to_string());
-    Ok((dir, browse_id))
+    Ok((canonical_dir, browse_id))
 }
 
 #[async_trait]
@@ -383,12 +419,6 @@ impl Tool for CreateJobTool {
                     "description": {
                         "type": "string",
                         "description": "Full description of what needs to be done"
-                    },
-                    "project_dir": {
-                        "type": "string",
-                        "description": "Host directory to bind mount into the container (optional). \
-                                        The directory will be available at /workspace inside the container. \
-                                        If omitted, a directory is auto-created under ~/.ironclaw/projects/."
                     },
                     "wait": {
                         "type": "boolean",
@@ -449,12 +479,6 @@ impl Tool for CreateJobTool {
             })?;
 
         if self.sandbox_enabled() {
-            // Sandbox path: description is the task for the sub-agent.
-            let explicit_dir = params
-                .get("project_dir")
-                .and_then(|v| v.as_str())
-                .map(PathBuf::from);
-
             let wait = params.get("wait").and_then(|v| v.as_bool()).unwrap_or(true);
 
             let mode = match params.get("mode").and_then(|v| v.as_str()) {
@@ -464,8 +488,7 @@ impl Tool for CreateJobTool {
 
             // Combine title and description into the task prompt for the sub-agent.
             let task = format!("{}\n\n{}", title, description);
-            self.execute_sandbox(&task, explicit_dir, wait, mode, ctx)
-                .await
+            self.execute_sandbox(&task, None, wait, mode, ctx).await
         } else {
             self.execute_local(title, description, ctx).await
         }
@@ -786,7 +809,10 @@ mod tests {
         let props = schema.get("properties").unwrap().as_object().unwrap();
         assert!(props.contains_key("title"));
         assert!(props.contains_key("description"));
-        assert!(!props.contains_key("project_dir"));
+        assert!(
+            !props.contains_key("project_dir"),
+            "project_dir must not be exposed to the LLM"
+        );
         assert!(!props.contains_key("wait"));
         assert!(!props.contains_key("mode"));
     }
@@ -838,23 +864,65 @@ mod tests {
     }
 
     #[test]
-    fn test_resolve_project_dir_explicit() {
-        let tmp = tempfile::tempdir().unwrap();
-        let explicit = tmp.path().join("my_project");
-        let (dir, browse_id) = resolve_project_dir(Some(explicit.clone()), Uuid::new_v4()).unwrap();
-        assert_eq!(dir, explicit);
-        assert!(dir.exists());
-        assert_eq!(browse_id, "my_project");
-    }
-
-    #[test]
     fn test_resolve_project_dir_auto() {
         let project_id = Uuid::new_v4();
         let (dir, browse_id) = resolve_project_dir(None, project_id).unwrap();
         assert!(dir.exists());
         assert!(dir.ends_with(project_id.to_string()));
         assert_eq!(browse_id, project_id.to_string());
-        // Cleanup
+
+        // Must be under the projects base
+        let base = projects_base().canonicalize().unwrap();
+        assert!(dir.starts_with(&base));
+
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_resolve_project_dir_explicit_under_base() {
+        let base = projects_base();
+        std::fs::create_dir_all(&base).unwrap();
+        let explicit = base.join("test_explicit_project");
+        let project_id = Uuid::new_v4();
+
+        let (dir, browse_id) = resolve_project_dir(Some(explicit.clone()), project_id).unwrap();
+        assert!(dir.exists());
+        assert_eq!(browse_id, "test_explicit_project");
+
+        let canonical_base = base.canonicalize().unwrap();
+        assert!(dir.starts_with(&canonical_base));
+
+        let _ = std::fs::remove_dir_all(&explicit);
+    }
+
+    #[test]
+    fn test_resolve_project_dir_rejects_outside_base() {
+        let tmp = tempfile::tempdir().unwrap();
+        let escape_attempt = tmp.path().join("evil_project");
+
+        let result = resolve_project_dir(Some(escape_attempt), Uuid::new_v4());
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("must be under"),
+            "expected 'must be under' error, got: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn test_resolve_project_dir_rejects_traversal() {
+        // Attempt to escape via `..` components
+        let base = projects_base();
+        let traversal = base.join("legit").join("..").join("..").join(".ssh");
+
+        let result = resolve_project_dir(Some(traversal), Uuid::new_v4());
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("must be under"),
+            "expected 'must be under' error, got: {}",
+            err
+        );
     }
 }

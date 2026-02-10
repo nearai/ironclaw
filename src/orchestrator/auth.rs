@@ -9,8 +9,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use axum::body::Body;
-use axum::extract::Request;
+use axum::extract::{Request, State};
 use axum::http::StatusCode;
 use axum::middleware::Next;
 use axum::response::Response;
@@ -81,22 +80,16 @@ fn hex_encode(bytes: &[u8]) -> String {
 ///
 /// Extracts the job_id from the path (`/worker/{job_id}/...`) and validates
 /// the `Authorization: Bearer <token>` header against the token store.
+///
+/// Wire up with `axum::middleware::from_fn_with_state(token_store, worker_auth_middleware)`.
 pub async fn worker_auth_middleware(
-    request: Request<Body>,
+    State(token_store): State<TokenStore>,
+    request: Request,
     next: Next,
 ) -> Result<Response, StatusCode> {
-    // Extract token store from extensions
-    let token_store = request
-        .extensions()
-        .get::<TokenStore>()
-        .cloned()
-        .ok_or(StatusCode::INTERNAL_SERVER_ERROR)?;
-
-    // Extract job_id from path: /worker/{job_id}/...
     let path = request.uri().path().to_string();
     let job_id = extract_job_id_from_path(&path).ok_or(StatusCode::BAD_REQUEST)?;
 
-    // Extract bearer token from Authorization header
     let token = request
         .headers()
         .get("authorization")
@@ -104,7 +97,6 @@ pub async fn worker_auth_middleware(
         .and_then(|v| v.strip_prefix("Bearer "))
         .ok_or(StatusCode::UNAUTHORIZED)?;
 
-    // Validate
     if !token_store.validate(job_id, token).await {
         return Err(StatusCode::UNAUTHORIZED);
     }
