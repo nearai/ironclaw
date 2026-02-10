@@ -183,3 +183,40 @@ fn create_openai_compatible_provider(config: &LlmConfig) -> Result<Arc<dyn LlmPr
     );
     Ok(Arc::new(RigAdapter::new(model, &compat.model)))
 }
+
+/// Create a cheap/fast LLM provider for lightweight tasks (heartbeat, routing, evaluation).
+///
+/// Uses `NEARAI_CHEAP_MODEL` if set, otherwise falls back to the main provider.
+/// Currently only supports NEAR AI backends (Responses and ChatCompletions modes).
+pub fn create_cheap_llm_provider(
+    config: &LlmConfig,
+    session: Arc<SessionManager>,
+) -> Result<Option<Arc<dyn LlmProvider>>, LlmError> {
+    let Some(ref cheap_model) = config.nearai.cheap_model else {
+        return Ok(None);
+    };
+
+    if config.backend != LlmBackend::NearAi {
+        tracing::warn!(
+            "NEARAI_CHEAP_MODEL is set but LLM_BACKEND is {:?}, not NearAi. \
+             Cheap model setting will be ignored.",
+            config.backend
+        );
+        return Ok(None);
+    }
+
+    let mut cheap_config = config.nearai.clone();
+    cheap_config.model = cheap_model.clone();
+
+    tracing::info!("Cheap LLM provider: {}", cheap_model);
+
+    match cheap_config.api_mode {
+        NearAiApiMode::Responses => Ok(Some(Arc::new(NearAiProvider::new(
+            cheap_config,
+            session,
+        )))),
+        NearAiApiMode::ChatCompletions => {
+            Ok(Some(Arc::new(NearAiChatProvider::new(cheap_config)?)))
+        }
+    }
+}

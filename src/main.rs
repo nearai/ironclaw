@@ -23,8 +23,8 @@ use ironclaw::{
     context::ContextManager,
     extensions::ExtensionManager,
     llm::{
-        FailoverProvider, LlmProvider, SessionConfig, create_llm_provider,
-        create_llm_provider_with_config, create_session_manager,
+        FailoverProvider, LlmProvider, SessionConfig, create_cheap_llm_provider,
+        create_llm_provider, create_llm_provider_with_config, create_session_manager,
     },
     orchestrator::{
         ContainerJobConfig, ContainerJobManager, OrchestratorApi, TokenStore,
@@ -307,8 +307,11 @@ async fn main() -> anyhow::Result<()> {
     };
     let session = create_session_manager(session_config).await;
 
-    // Ensure we're authenticated before proceeding (only needed for NEAR AI backend)
-    if config.llm.backend == ironclaw::config::LlmBackend::NearAi {
+    // Session-based auth is only needed for NEAR AI backend without an API key.
+    // ChatCompletions mode with an API key skips session auth entirely.
+    if config.llm.backend == ironclaw::config::LlmBackend::NearAi
+        && config.llm.nearai.api_key.is_none()
+    {
         session.ensure_authenticated().await?;
     }
 
@@ -533,6 +536,12 @@ async fn main() -> anyhow::Result<()> {
         } else {
             llm
         };
+
+    // Initialize cheap LLM provider for lightweight tasks (heartbeat, evaluation)
+    let cheap_llm = create_cheap_llm_provider(&config.llm, session.clone())?;
+    if let Some(ref cheap) = cheap_llm {
+        tracing::info!("Cheap LLM provider initialized: {}", cheap.model_name());
+    }
 
     // Initialize safety layer
     let safety = Arc::new(SafetyLayer::new(&config.safety));
@@ -1185,6 +1194,7 @@ async fn main() -> anyhow::Result<()> {
     let deps = AgentDeps {
         store: db,
         llm,
+        cheap_llm,
         safety,
         tools,
         workspace,
@@ -1227,6 +1237,17 @@ fn check_onboard_needed() -> Option<&'static str> {
 
     if !has_db {
         return Some("Database not configured");
+    }
+
+    // First run (onboarding never completed and no session).
+    // Reads NEARAI_API_KEY env var directly because this function runs
+    // before Config is loaded -- Config::from_env() may fail without a
+    // database URL, which is what triggers onboarding in the first place.
+    if std::env::var("NEARAI_API_KEY").is_err() {
+        let session_path = ironclaw::llm::session::default_session_path();
+        if !settings.onboard_completed && !session_path.exists() {
+            return Some("First run");
+        }
     }
 
     None

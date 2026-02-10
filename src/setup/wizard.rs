@@ -1014,6 +1014,7 @@ impl SetupWizard {
             backend: crate::config::LlmBackend::NearAi,
             nearai: crate::config::NearAiConfig {
                 model: "dummy".to_string(),
+                cheap_model: None,
                 base_url,
                 auth_base_url,
                 session_path: crate::llm::session::default_session_path(),
