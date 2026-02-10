@@ -26,7 +26,7 @@ fn api_call(method: &str, path: &str, body: Option<&str>) -> Result<String, Stri
         &format!("Google Calendar API: {} {}", method, path),
     );
 
-    let response = host::http_request(method, &url, headers, body_bytes.as_deref())?;
+    let response = host::http_request(method, &url, headers, body_bytes.as_deref(), None)?;
 
     if response.status < 200 || response.status >= 300 {
         let body_text = String::from_utf8_lossy(&response.body);

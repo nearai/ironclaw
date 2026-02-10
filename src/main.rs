@@ -803,7 +803,7 @@ async fn main() -> anyhow::Result<()> {
                             channels.add(Box::new(SharedWasmChannel::new(channel_arc)));
                         }
 
-                        if has_webhook_channels && config.tunnel.public_url.is_some() {
+                        if has_webhook_channels {
                             webhook_routes.push(create_wasm_channel_router(
                                 wasm_router,
                                 extension_manager.as_ref().map(Arc::clone),

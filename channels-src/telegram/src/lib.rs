@@ -388,7 +388,9 @@ impl Guest for TelegramChannel {
 
         let headers = serde_json::json!({});
 
-        let result = channel_host::http_request("GET", &url, &headers.to_string(), None);
+        // 35s HTTP timeout outlives Telegram's 30s server-side long-poll
+        let result =
+            channel_host::http_request("GET", &url, &headers.to_string(), None, Some(35_000));
 
         match result {
             Ok(response) => {
@@ -466,24 +468,28 @@ impl Guest for TelegramChannel {
 
         // Try sending with Markdown first; fall back to plain text if Telegram
         // can't parse the entities (e.g. model leaked <tool_call> with underscores).
-        let result =
-            send_message(metadata.chat_id, &response.content, metadata.message_id, Some("Markdown"));
+        let result = send_message(
+            metadata.chat_id,
+            &response.content,
+            metadata.message_id,
+            Some("Markdown"),
+        );
 
         match result {
             Ok(msg_id) => {
                 channel_host::log(
                     channel_host::LogLevel::Debug,
-                    &format!("Sent message to chat {}: message_id={}", metadata.chat_id, msg_id),
+                    &format!(
+                        "Sent message to chat {}: message_id={}",
+                        metadata.chat_id, msg_id
+                    ),
                 );
                 Ok(())
             }
             Err(SendError::ParseEntities(detail)) => {
                 channel_host::log(
                     channel_host::LogLevel::Warn,
-                    &format!(
-                        "Markdown parse failed ({}), retrying as plain text",
-                        detail
-                    ),
+                    &format!("Markdown parse failed ({}), retrying as plain text", detail),
                 );
                 let msg_id = send_message(
                     metadata.chat_id,
@@ -544,6 +550,7 @@ impl Guest for TelegramChannel {
             "https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendChatAction",
             &headers.to_string(),
             Some(&payload_bytes),
+            None,
         );
 
         if let Err(e) = result {
@@ -614,6 +621,7 @@ fn send_message(
         "https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
         &headers.to_string(),
         Some(&payload_bytes),
+        None,
     );
 
     match result {
@@ -673,6 +681,7 @@ fn delete_webhook() -> Result<(), String> {
         "POST",
         "https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/deleteWebhook",
         &headers.to_string(),
+        None,
         None,
     );
 
@@ -736,6 +745,7 @@ fn register_webhook(tunnel_url: &str, webhook_secret: Option<&str>) -> Result<()
         "https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/setWebhook",
         &headers.to_string(),
         Some(&body_bytes),
+        None,
     );
 
     match result {

@@ -26,6 +26,7 @@
       "allowed_paths": ["/webhook/telegram"],
       "allow_polling": true,
       "min_poll_interval_ms": 30000,
+      "callback_timeout_secs": 45,
       "workspace_prefix": "channels/telegram/",
       "emit_rate_limit": {
         "messages_per_minute": 100,

@@ -175,11 +175,7 @@ impl Guest for SlackChannel {
             // Actual event callback
             "event_callback" => {
                 if let Some(event) = event_wrapper.event {
-                    handle_slack_event(
-                        event,
-                        event_wrapper.team_id,
-                        event_wrapper.event_id,
-                    );
+                    handle_slack_event(event, event_wrapper.team_id, event_wrapper.event_id);
                 }
                 // Always respond 200 quickly to Slack (they have a 3s timeout)
                 json_response(200, serde_json::json!({"ok": true}))
@@ -230,6 +226,7 @@ impl Guest for SlackChannel {
             "https://slack.com/api/chat.postMessage",
             &headers.to_string(),
             Some(&payload_bytes),
+            None,
         );
 
         match result {
@@ -243,14 +240,15 @@ impl Guest for SlackChannel {
 
                 // Parse Slack response
                 let slack_response: SlackPostMessageResponse =
-                    serde_json::from_slice(&http_response.body).map_err(|e| {
-                        format!("Failed to parse Slack response: {}", e)
-                    })?;
+                    serde_json::from_slice(&http_response.body)
+                        .map_err(|e| format!("Failed to parse Slack response: {}", e))?;
 
                 if !slack_response.ok {
                     return Err(format!(
                         "Slack API error: {}",
-                        slack_response.error.unwrap_or_else(|| "unknown".to_string())
+                        slack_response
+                            .error
+                            .unwrap_or_else(|| "unknown".to_string())
                     ));
                 }
 
@@ -277,17 +275,16 @@ impl Guest for SlackChannel {
 }
 
 /// Handle a Slack event and emit message if applicable.
-fn handle_slack_event(
-    event: SlackEvent,
-    team_id: Option<String>,
-    _event_id: Option<String>,
-) {
+fn handle_slack_event(event: SlackEvent, team_id: Option<String>, _event_id: Option<String>) {
     match event.event_type.as_str() {
         // Direct mention of the bot
         "app_mention" => {
-            if let (Some(user), Some(channel), Some(text), Some(ts)) =
-                (event.user, event.channel.clone(), event.text, event.ts.clone())
-            {
+            if let (Some(user), Some(channel), Some(text), Some(ts)) = (
+                event.user,
+                event.channel.clone(),
+                event.text,
+                event.ts.clone(),
+            ) {
                 emit_message(user, text, channel, event.thread_ts.or(Some(ts)), team_id);
             }
         }
@@ -299,9 +296,12 @@ fn handle_slack_event(
                 return;
             }
 
-            if let (Some(user), Some(channel), Some(text), Some(ts)) =
-                (event.user, event.channel.clone(), event.text, event.ts.clone())
-            {
+            if let (Some(user), Some(channel), Some(text), Some(ts)) = (
+                event.user,
+                event.channel.clone(),
+                event.text,
+                event.ts.clone(),
+            ) {
                 // Only process DMs (channel IDs starting with D)
                 if channel.starts_with('D') {
                     emit_message(user, text, channel, event.thread_ts.or(Some(ts)), team_id);
@@ -335,8 +335,7 @@ fn emit_message(
         team_id,
     };
 
-    let metadata_json =
-        serde_json::to_string(&metadata).unwrap_or_else(|_| "{}".to_string());
+    let metadata_json = serde_json::to_string(&metadata).unwrap_or_else(|_| "{}".to_string());
 
     // Strip @ mentions of the bot from the text for cleaner messages
     let cleaned_text = strip_bot_mention(&text);
