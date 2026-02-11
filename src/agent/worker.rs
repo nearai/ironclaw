@@ -252,12 +252,11 @@ Report when the job is complete or if you encounter issues you cannot resolve."#
 
                 match respond_result {
                     RespondResult::Text(response) => {
-                        // Check for completion keywords
-                        let response_lower = response.to_lowercase();
-                        if response_lower.contains("complete")
-                            || response_lower.contains("finished")
-                            || response_lower.contains("done")
-                        {
+                        // Check for explicit completion phrases. Use word-boundary
+                        // aware checks to avoid false positives like "incomplete",
+                        // "not done", or "unfinished". Only the LLM's own response
+                        // (not tool output) can trigger this.
+                        if llm_signals_completion(&response) {
                             self.mark_completed().await?;
                             return Ok(());
                         }
@@ -571,12 +570,9 @@ Report when the job is complete or if you encounter issues you cannot resolve."#
                     wrapped,
                 ));
 
-                // Check if job is complete
-                if output.contains("TASK_COMPLETE") || output.contains("JOB_DONE") {
-                    self.mark_completed().await?;
-                    return Ok(true);
-                }
-
+                // Tool output never drives job completion. A malicious tool could
+                // emit "TASK_COMPLETE" to force premature completion. Only the LLM's
+                // own structured response (in execution_loop) can mark a job done.
                 Ok(false)
             }
             Err(e) => {
@@ -680,11 +676,7 @@ Report when the job is complete or if you encounter issues you cannot resolve."#
         let response = reasoning.respond(reason_ctx).await?;
         reason_ctx.messages.push(ChatMessage::assistant(&response));
 
-        let response_lower = response.to_lowercase();
-        if response_lower.contains("complete")
-            || response_lower.contains("finished")
-            || response_lower.contains("done")
-        {
+        if llm_signals_completion(&response) {
             self.mark_completed().await?;
         } else {
             // Job not complete, could re-plan or fall back to direct selection
@@ -767,6 +759,55 @@ Report when the job is complete or if you encounter issues you cannot resolve."#
     }
 }
 
+/// Check if an LLM response explicitly signals job completion.
+///
+/// Uses phrase-level matching to avoid false positives from words like
+/// "incomplete", "not done", "unfinished", or tool output that happens
+/// to contain completion-like substrings.
+fn llm_signals_completion(response: &str) -> bool {
+    let lower = response.to_lowercase();
+    // Positive signals: explicit affirmative completion phrases.
+    let positive_phrases = [
+        "job is complete",
+        "job is done",
+        "job is finished",
+        "task is complete",
+        "task is done",
+        "task is finished",
+        "have completed the job",
+        "have completed the task",
+        "have finished the job",
+        "have finished the task",
+        "successfully completed",
+        "all steps are complete",
+        "all steps are done",
+        "work is complete",
+        "work is done",
+        "work is finished",
+    ];
+    // Negative signals: if any of these appear, don't treat as complete.
+    let negative_phrases = [
+        "not complete",
+        "not done",
+        "not finished",
+        "incomplete",
+        "unfinished",
+        "isn't complete",
+        "isn't done",
+        "isn't finished",
+        "not yet complete",
+        "not yet done",
+        "not yet finished",
+    ];
+
+    let has_negative = negative_phrases.iter().any(|p| lower.contains(p));
+    if has_negative {
+        return false;
+    }
+
+    positive_phrases.iter().any(|p| lower.contains(p))
+}
+
 /// Convert a TaskOutput to a string result for tool execution.
 impl From<TaskOutput> for Result<String, Error> {
     fn from(output: TaskOutput) -> Self {
@@ -777,5 +818,70 @@ impl From<TaskOutput> for Result<String, Error> {
             }
             .into()
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_completion_positive_signals() {
+        assert!(llm_signals_completion("The job is complete."));
+        assert!(llm_signals_completion(
+            "I have completed the task successfully."
+        ));
+        assert!(llm_signals_completion("The task is done."));
+        assert!(llm_signals_completion("The task is finished."));
+        assert!(llm_signals_completion(
+            "All steps are complete and verified."
+        ));
+        assert!(llm_signals_completion(
+            "I've done all the work. The work is done."
+        ));
+        assert!(llm_signals_completion(
+            "Successfully completed the migration."
+        ));
+    }
+
+    #[test]
+    fn test_completion_negative_signals_block_false_positives() {
+        // These contain completion keywords but also negation, should NOT trigger.
+        assert!(!llm_signals_completion("The task is not complete yet."));
+        assert!(!llm_signals_completion("This is not done."));
+        assert!(!llm_signals_completion("The work is incomplete."));
+        assert!(!llm_signals_completion(
+            "The migration is not yet finished."
+        ));
+        assert!(!llm_signals_completion("The job isn't done yet."));
+        assert!(!llm_signals_completion("This remains unfinished."));
+    }
+
+    #[test]
+    fn test_completion_does_not_match_bare_substrings() {
+        // Bare words embedded in other text should NOT trigger completion.
+        assert!(!llm_signals_completion(
+            "I need to complete more work first."
+        ));
+        assert!(!llm_signals_completion(
+            "Let me finish the remaining steps."
+        ));
+        assert!(!llm_signals_completion(
+            "I'm done analyzing, now let me fix it."
+        ));
+        assert!(!llm_signals_completion(
+            "I completed step 1 but step 2 remains."
+        ));
+    }
+
+    #[test]
+    fn test_completion_tool_output_injection() {
+        // A malicious tool output echoed by the LLM should not trigger
+        // completion unless it forms a genuine completion phrase.
+        assert!(!llm_signals_completion("TASK_COMPLETE"));
+        assert!(!llm_signals_completion("JOB_DONE"));
+        assert!(!llm_signals_completion(
+            "The tool returned: TASK_COMPLETE signal"
+        ));
     }
 }

@@ -289,23 +289,17 @@ impl ShellTool {
         // Determine timeout
         let timeout_duration = timeout.map(Duration::from_secs).unwrap_or(self.timeout);
 
-        // Try sandbox execution if available
+        // Use sandbox if configured; fail-closed (never silently fall through
+        // to unsandboxed execution when sandbox was intended).
         if let Some(ref sandbox) = self.sandbox {
             if sandbox.is_initialized() || sandbox.config().enabled {
-                match self
+                return self
                     .execute_sandboxed(sandbox, cmd, &cwd, timeout_duration)
-                    .await
-                {
-                    Ok((output, code)) => return Ok((output, code)),
-                    Err(e) => {
-                        // Log sandbox failure and fall through to direct execution
-                        tracing::warn!("Sandbox execution failed, falling back to direct: {}", e);
-                    }
-                }
+                    .await;
             }
         }
 
-        // Fallback to direct execution
+        // Only execute directly when no sandbox was configured at all.
         let (output, code) = self.execute_direct(cmd, &cwd, timeout_duration).await?;
         Ok((output, code as i64))
     }
@@ -392,17 +386,31 @@ impl Tool for ShellTool {
     }
 }
 
-/// Truncate output to fit within limits.
+/// Find the largest valid char boundary at or before `pos`.
+fn floor_char_boundary(s: &str, pos: usize) -> usize {
+    if pos >= s.len() {
+        return s.len();
+    }
+    let mut i = pos;
+    while i > 0 && !s.is_char_boundary(i) {
+        i -= 1;
+    }
+    i
+}
+
+/// Truncate output to fit within limits (UTF-8 safe).
 fn truncate_output(s: &str) -> String {
     if s.len() <= MAX_OUTPUT_SIZE {
         s.to_string()
     } else {
         let half = MAX_OUTPUT_SIZE / 2;
+        let head_end = floor_char_boundary(s, half);
+        let tail_start = floor_char_boundary(s, s.len() - half);
         format!(
             "{}\n\n... [truncated {} bytes] ...\n\n{}",
-            &s[..half],
+            &s[..head_end],
             s.len() - MAX_OUTPUT_SIZE,
-            &s[s.len() - half..]
+            &s[tail_start..]
         )
     }
 }

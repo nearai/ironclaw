@@ -8,7 +8,7 @@ use std::sync::Arc;
 
 use axum::{
     Json, Router,
-    extract::{Path, Query, State, WebSocketUpgrade},
+    extract::{DefaultBodyLimit, Path, Query, State, WebSocketUpgrade},
     http::{StatusCode, header},
     middleware,
     response::{
@@ -20,6 +20,7 @@ use axum::{
 use serde::Deserialize;
 use tokio::sync::{mpsc, oneshot};
 use tokio_stream::StreamExt;
+use tower_http::cors::{AllowHeaders, CorsLayer};
 use uuid::Uuid;
 
 use crate::agent::SessionManager;
@@ -168,7 +169,10 @@ pub async fn start_server(
         )
         // Gateway control plane
         .route("/api/gateway/status", get(gateway_status_handler))
-        .route_layer(middleware::from_fn_with_state(auth_state, auth_middleware));
+        .route_layer(middleware::from_fn_with_state(
+            auth_state.clone(),
+            auth_middleware,
+        ));
 
     // Static file routes (no auth, served from embedded strings)
     let statics = Router::new()
@@ -176,19 +180,48 @@ pub async fn start_server(
         .route("/style.css", get(css_handler))
         .route("/app.js", get(js_handler));
 
-    // Project file serving (no auth, local browsing of sandbox outputs).
-    // The trailing-slash route serves index.html; the bare route redirects so
-    // relative paths in the HTML (e.g. href="style.css") resolve correctly.
+    // Project file serving (behind auth to prevent unauthorized file access).
     let projects = Router::new()
         .route("/projects/{project_id}", get(project_redirect_handler))
         .route("/projects/{project_id}/", get(project_index_handler))
-        .route("/projects/{project_id}/{*path}", get(project_file_handler));
+        .route("/projects/{project_id}/{*path}", get(project_file_handler))
+        .route_layer(middleware::from_fn_with_state(
+            auth_state.clone(),
+            auth_middleware,
+        ));
+
+    // CORS: restrict to same-origin by default. Only localhost/127.0.0.1
+    // origins are allowed, since the gateway is a local-first service.
+    let cors = CorsLayer::new()
+        .allow_origin([
+            format!("http://{}:{}", addr.ip(), addr.port())
+                .parse()
+                .expect("valid origin"),
+            format!("http://localhost:{}", addr.port())
+                .parse()
+                .expect("valid origin"),
+            "http://localhost:3001".parse().expect("valid origin"),
+            "http://127.0.0.1:3001".parse().expect("valid origin"),
+        ])
+        .allow_methods([
+            axum::http::Method::GET,
+            axum::http::Method::POST,
+            axum::http::Method::PUT,
+            axum::http::Method::DELETE,
+        ])
+        .allow_headers(AllowHeaders::list([
+            header::CONTENT_TYPE,
+            header::AUTHORIZATION,
+        ]))
+        .allow_credentials(true);
 
     let app = Router::new()
         .merge(public)
         .merge(statics)
         .merge(projects)
         .merge(protected)
+        .layer(cors)
+        .layer(DefaultBodyLimit::max(1024 * 1024)) // 1 MB max request body
         .with_state(state.clone());
 
     let (shutdown_tx, shutdown_rx) = oneshot::channel();
@@ -421,16 +454,34 @@ pub async fn clear_auth_mode(state: &GatewayState) {
     }
 }
 
-async fn chat_events_handler(State(state): State<Arc<GatewayState>>) -> impl IntoResponse {
-    // subscribe() returns Sse<impl Stream + 'static + use<>> so no lifetime issues
-    state.sse.subscribe()
+async fn chat_events_handler(
+    State(state): State<Arc<GatewayState>>,
+) -> Result<impl IntoResponse, (StatusCode, String)> {
+    state.sse.subscribe().ok_or((
+        StatusCode::SERVICE_UNAVAILABLE,
+        "Too many connections".to_string(),
+    ))
 }
 
 async fn chat_ws_handler(
+    headers: axum::http::HeaderMap,
     ws: WebSocketUpgrade,
     State(state): State<Arc<GatewayState>>,
-) -> impl IntoResponse {
-    ws.on_upgrade(move |socket| crate::channels::web::ws::handle_ws_connection(socket, state))
+) -> Result<impl IntoResponse, (StatusCode, String)> {
+    // Validate Origin header to prevent cross-site WebSocket hijacking.
+    if let Some(origin) = headers.get("origin").and_then(|v| v.to_str().ok()) {
+        let is_local = origin.starts_with("http://localhost")
+            || origin.starts_with("http://127.0.0.1")
+            || origin.starts_with("http://[::1]")
+            || origin.starts_with("http://0.0.0.0");
+        if !is_local {
+            return Err((
+                StatusCode::FORBIDDEN,
+                "WebSocket origin not allowed".to_string(),
+            ));
+        }
+    }
+    Ok(ws.on_upgrade(move |socket| crate::channels::web::ws::handle_ws_connection(socket, state)))
 }
 
 #[derive(Deserialize)]
@@ -901,14 +952,16 @@ async fn jobs_list_handler(
         "Database not available".to_string(),
     ))?;
 
-    // Fetch sandbox jobs from the DB.
+    // Fetch sandbox jobs scoped to the authenticated user.
     let sandbox_jobs = store
-        .list_sandbox_jobs()
+        .list_sandbox_jobs_for_user(&state.user_id)
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
+    // Scope jobs to the authenticated user.
     let mut jobs: Vec<JobInfo> = sandbox_jobs
         .iter()
+        .filter(|j| j.user_id == state.user_id)
         .map(|j| {
             let ui_state = match j.status.as_str() {
                 "creating" => "pending",
@@ -941,7 +994,7 @@ async fn jobs_summary_handler(
     ))?;
 
     let s = store
-        .sandbox_job_summary()
+        .sandbox_job_summary_for_user(&state.user_id)
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
@@ -962,9 +1015,12 @@ async fn jobs_detail_handler(
     let job_id = Uuid::parse_str(&id)
         .map_err(|_| (StatusCode::BAD_REQUEST, "Invalid job ID".to_string()))?;
 
-    // Try sandbox job from DB first.
+    // Try sandbox job from DB first, scoped to the authenticated user.
     if let Some(ref store) = state.store {
         if let Ok(Some(job)) = store.get_sandbox_job(job_id).await {
+            if job.user_id != state.user_id {
+                return Err((StatusCode::NOT_FOUND, "Job not found".to_string()));
+            }
             let browse_id = std::path::Path::new(&job.project_dir)
                 .file_name()
                 .map(|n| n.to_string_lossy().to_string())
@@ -1031,13 +1087,18 @@ async fn jobs_cancel_handler(
     let job_id = Uuid::parse_str(&id)
         .map_err(|_| (StatusCode::BAD_REQUEST, "Invalid job ID".to_string()))?;
 
-    // Try sandbox job cancellation.
+    // Try sandbox job cancellation, scoped to the authenticated user.
     if let Some(ref store) = state.store {
         if let Ok(Some(job)) = store.get_sandbox_job(job_id).await {
+            if job.user_id != state.user_id {
+                return Err((StatusCode::NOT_FOUND, "Job not found".to_string()));
+            }
             if job.status == "running" || job.status == "creating" {
                 // Stop the container if we have a job manager.
                 if let Some(ref jm) = state.job_manager {
-                    let _ = jm.stop_job(job_id).await;
+                    if let Err(e) = jm.stop_job(job_id).await {
+                        tracing::warn!(job_id = %job_id, error = %e, "Failed to stop container during cancellation");
+                    }
                 }
                 store
                     .update_sandbox_job_status(
@@ -1082,6 +1143,11 @@ async fn jobs_restart_handler(
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
         .ok_or((StatusCode::NOT_FOUND, "Job not found".to_string()))?;
+
+    // Scope to the authenticated user.
+    if old_job.user_id != state.user_id {
+        return Err((StatusCode::NOT_FOUND, "Job not found".to_string()));
+    }
 
     if old_job.status != "interrupted" && old_job.status != "failed" {
         return Err((
@@ -1157,6 +1223,17 @@ async fn jobs_prompt_handler(
         .parse()
         .map_err(|_| (StatusCode::BAD_REQUEST, "Invalid job ID".to_string()))?;
 
+    // Verify user owns this job.
+    if let Some(ref store) = state.store {
+        if !store
+            .sandbox_job_belongs_to_user(job_id, &state.user_id)
+            .await
+            .unwrap_or(false)
+        {
+            return Err((StatusCode::NOT_FOUND, "Job not found".to_string()));
+        }
+    }
+
     let content = body
         .get("content")
         .and_then(|v| v.as_str())
@@ -1194,6 +1271,15 @@ async fn jobs_events_handler(
     let job_id: uuid::Uuid = id
         .parse()
         .map_err(|_| (StatusCode::BAD_REQUEST, "Invalid job ID".to_string()))?;
+
+    // Verify user owns this job.
+    if !store
+        .sandbox_job_belongs_to_user(job_id, &state.user_id)
+        .await
+        .unwrap_or(false)
+    {
+        return Err((StatusCode::NOT_FOUND, "Job not found".to_string()));
+    }
 
     let events = store
         .list_job_events(job_id)
@@ -1243,6 +1329,11 @@ async fn job_files_list_handler(
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
         .ok_or((StatusCode::NOT_FOUND, "Job not found".to_string()))?;
+
+    // Verify user owns this job.
+    if job.user_id != state.user_id {
+        return Err((StatusCode::NOT_FOUND, "Job not found".to_string()));
+    }
 
     let base = std::path::PathBuf::from(&job.project_dir);
     let rel_path = query.path.as_deref().unwrap_or("");
@@ -1306,6 +1397,11 @@ async fn job_files_read_handler(
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
         .ok_or((StatusCode::NOT_FOUND, "Job not found".to_string()))?;
+
+    // Verify user owns this job.
+    if job.user_id != state.user_id {
+        return Err((StatusCode::NOT_FOUND, "Job not found".to_string()));
+    }
 
     let path = query.path.as_deref().ok_or((
         StatusCode::BAD_REQUEST,
@@ -1525,6 +1621,15 @@ async fn project_file_handler(
 /// Shared logic: resolve the file inside `~/.ironclaw/projects/{project_id}/`,
 /// guard against path traversal, and stream the content with the right MIME type.
 async fn serve_project_file(project_id: &str, path: &str) -> axum::response::Response {
+    // Reject project_id values that could escape the projects directory.
+    if project_id.contains('/')
+        || project_id.contains('\\')
+        || project_id.contains("..")
+        || project_id.is_empty()
+    {
+        return (StatusCode::BAD_REQUEST, "Invalid project ID").into_response();
+    }
+
     let base = dirs::home_dir()
         .unwrap_or_else(|| std::path::PathBuf::from("."))
         .join(".ironclaw")

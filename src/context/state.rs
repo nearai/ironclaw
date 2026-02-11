@@ -189,6 +189,14 @@ impl JobContext {
         };
 
         self.transitions.push(transition);
+
+        // Cap transition history to prevent unbounded memory growth
+        const MAX_TRANSITIONS: usize = 200;
+        if self.transitions.len() > MAX_TRANSITIONS {
+            let drain_count = self.transitions.len() - MAX_TRANSITIONS;
+            self.transitions.drain(..drain_count);
+        }
+
         self.state = new_state;
 
         // Update timestamps
@@ -272,6 +280,23 @@ mod tests {
         ctx.transition_to(JobState::Completed, Some("Done".to_string()))
             .unwrap();
         assert_eq!(ctx.state, JobState::Completed);
+    }
+
+    #[test]
+    fn test_transition_history_capped() {
+        let mut ctx = JobContext::new("Test", "Transition cap test");
+        // Cycle through Pending -> InProgress -> Stuck -> InProgress -> Stuck ...
+        ctx.transition_to(JobState::InProgress, None).unwrap();
+        for i in 0..250 {
+            ctx.mark_stuck(format!("stuck {}", i)).unwrap();
+            ctx.attempt_recovery().unwrap();
+        }
+        // 1 initial + 250*2 = 501 transitions, should be capped at 200
+        assert!(
+            ctx.transitions.len() <= 200,
+            "transitions should be capped at 200, got {}",
+            ctx.transitions.len()
+        );
     }
 
     #[test]

@@ -13,10 +13,15 @@ use tokio_stream::wrappers::BroadcastStream;
 
 use crate::channels::web::types::SseEvent;
 
+/// Maximum number of concurrent SSE/WebSocket connections.
+/// Prevents resource exhaustion from connection flooding.
+const MAX_CONNECTIONS: u64 = 100;
+
 /// Manages SSE broadcast to all connected browser tabs.
 pub struct SseManager {
     tx: broadcast::Sender<SseEvent>,
     connection_count: Arc<AtomicU64>,
+    max_connections: u64,
 }
 
 impl SseManager {
@@ -27,6 +32,7 @@ impl SseManager {
         Self {
             tx,
             connection_count: Arc::new(AtomicU64::new(0)),
+            max_connections: MAX_CONNECTIONS,
         }
     }
 
@@ -45,23 +51,37 @@ impl SseManager {
     ///
     /// Returns a stream of `SseEvent` values and increments/decrements the
     /// connection counter on creation/drop, just like `subscribe()` does for SSE.
-    pub fn subscribe_raw(&self) -> impl Stream<Item = SseEvent> + Send + 'static + use<> {
+    ///
+    /// Returns `None` if the maximum connection limit has been reached.
+    pub fn subscribe_raw(&self) -> Option<impl Stream<Item = SseEvent> + Send + 'static + use<>> {
+        let current = self.connection_count.load(Ordering::Relaxed);
+        if current >= self.max_connections {
+            return None;
+        }
+
         let counter = Arc::clone(&self.connection_count);
         counter.fetch_add(1, Ordering::Relaxed);
         let rx = self.tx.subscribe();
 
         let stream = BroadcastStream::new(rx).filter_map(|result| result.ok());
 
-        CountedStream {
+        Some(CountedStream {
             inner: stream,
             counter,
-        }
+        })
     }
 
     /// Create a new SSE stream for a client connection.
+    ///
+    /// Returns `None` if the maximum connection limit has been reached.
     pub fn subscribe(
         &self,
-    ) -> Sse<impl Stream<Item = Result<Event, Infallible>> + Send + 'static + use<>> {
+    ) -> Option<Sse<impl Stream<Item = Result<Event, Infallible>> + Send + 'static + use<>>> {
+        let current = self.connection_count.load(Ordering::Relaxed);
+        if current >= self.max_connections {
+            return None;
+        }
+
         let counter = Arc::clone(&self.connection_count);
         counter.fetch_add(1, Ordering::Relaxed);
         let rx = self.tx.subscribe();
@@ -99,8 +119,10 @@ impl SseManager {
             counter,
         };
 
-        Sse::new(counted_stream)
-            .keep_alive(KeepAlive::new().interval(Duration::from_secs(30)).text(""))
+        Some(
+            Sse::new(counted_stream)
+                .keep_alive(KeepAlive::new().interval(Duration::from_secs(30)).text("")),
+        )
     }
 }
 
@@ -175,7 +197,7 @@ mod tests {
     #[tokio::test]
     async fn test_subscribe_raw_receives_events() {
         let manager = SseManager::new();
-        let mut stream = Box::pin(manager.subscribe_raw());
+        let mut stream = Box::pin(manager.subscribe_raw().expect("should subscribe"));
 
         assert_eq!(manager.connection_count(), 1);
 
@@ -195,7 +217,7 @@ mod tests {
     async fn test_subscribe_raw_decrements_on_drop() {
         let manager = SseManager::new();
         {
-            let _stream = Box::pin(manager.subscribe_raw());
+            let _stream = Box::pin(manager.subscribe_raw().expect("should subscribe"));
             assert_eq!(manager.connection_count(), 1);
         }
         // Stream dropped, counter should decrement
@@ -205,8 +227,8 @@ mod tests {
     #[tokio::test]
     async fn test_subscribe_raw_multiple_subscribers() {
         let manager = SseManager::new();
-        let mut s1 = Box::pin(manager.subscribe_raw());
-        let mut s2 = Box::pin(manager.subscribe_raw());
+        let mut s1 = Box::pin(manager.subscribe_raw().expect("should subscribe"));
+        let mut s2 = Box::pin(manager.subscribe_raw().expect("should subscribe"));
         assert_eq!(manager.connection_count(), 2);
 
         manager.broadcast(SseEvent::Heartbeat);
@@ -220,5 +242,19 @@ mod tests {
         assert_eq!(manager.connection_count(), 1);
         drop(s2);
         assert_eq!(manager.connection_count(), 0);
+    }
+
+    #[tokio::test]
+    async fn test_subscribe_raw_rejects_over_limit() {
+        let mut manager = SseManager::new();
+        manager.max_connections = 2; // Low limit for testing
+
+        let _s1 = Box::pin(manager.subscribe_raw().expect("first should succeed"));
+        let _s2 = Box::pin(manager.subscribe_raw().expect("second should succeed"));
+        assert_eq!(manager.connection_count(), 2);
+
+        // Third should be rejected
+        assert!(manager.subscribe_raw().is_none());
+        assert!(manager.subscribe().is_none());
     }
 }

@@ -21,6 +21,7 @@ impl HttpTool {
     pub fn new() -> Self {
         let client = Client::builder()
             .timeout(Duration::from_secs(30))
+            .redirect(reqwest::redirect::Policy::none())
             .build()
             .expect("Failed to create HTTP client");
 
@@ -202,6 +203,15 @@ impl Tool for HttpTool {
         })?;
 
         let status = response.status().as_u16();
+
+        // Block redirects: the server tried to send us elsewhere (potential SSRF)
+        if (300..400).contains(&status) {
+            return Err(ToolError::NotAuthorized(format!(
+                "request returned redirect (HTTP {}), which is blocked to prevent SSRF",
+                status
+            )));
+        }
+
         let headers: HashMap<String, String> = response
             .headers()
             .iter()

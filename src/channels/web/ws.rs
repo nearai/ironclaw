@@ -71,8 +71,13 @@ pub async fn handle_ws_connection(socket: WebSocket, state: Arc<GatewayState>) {
     }
     let tracker_for_drop = state.ws_tracker.clone();
 
-    // Subscribe to broadcast events (same source as SSE)
-    let mut event_stream = Box::pin(state.sse.subscribe_raw());
+    // Subscribe to broadcast events (same source as SSE).
+    // Reject if we've hit the connection limit.
+    let Some(raw_stream) = state.sse.subscribe_raw() else {
+        tracing::warn!("WebSocket rejected: too many connections");
+        return;
+    };
+    let mut event_stream = Box::pin(raw_stream);
 
     // Channel for the sender task to receive messages from both
     // the broadcast stream and any direct sends (like Pong)

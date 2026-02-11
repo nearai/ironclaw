@@ -24,6 +24,8 @@ use tokio::sync::broadcast;
 use tracing::field::{Field, Visit};
 use tracing_subscriber::Layer;
 
+use crate::safety::LeakDetector;
+
 /// Maximum number of recent log entries kept for late-joining SSE subscribers.
 const HISTORY_CAP: usize = 500;
 
@@ -46,6 +48,8 @@ pub struct LogEntry {
 pub struct LogBroadcaster {
     tx: broadcast::Sender<LogEntry>,
     recent: Mutex<VecDeque<LogEntry>>,
+    /// Scrubs secrets from log messages before broadcasting to SSE clients.
+    leak_detector: LeakDetector,
 }
 
 impl LogBroadcaster {
@@ -54,10 +58,19 @@ impl LogBroadcaster {
         Self {
             tx,
             recent: Mutex::new(VecDeque::with_capacity(HISTORY_CAP)),
+            leak_detector: LeakDetector::new(),
         }
     }
 
-    pub fn send(&self, entry: LogEntry) {
+    pub fn send(&self, mut entry: LogEntry) {
+        // Scrub secrets from the message before it reaches any subscriber.
+        // This is defense-in-depth: even if code elsewhere accidentally logs
+        // a secret, it won't be broadcast to SSE clients.
+        entry.message = self
+            .leak_detector
+            .scan_and_clean(&entry.message)
+            .unwrap_or_else(|_| "[log message redacted: contained blocked secret]".to_string());
+
         // Stash in ring buffer (for late joiners)
         if let Ok(mut buf) = self.recent.lock() {
             if buf.len() >= HISTORY_CAP {
@@ -145,13 +158,20 @@ impl Visit for MessageVisitor {
 ///
 /// Only forwards DEBUG and above. Attach to the tracing subscriber
 /// alongside the existing fmt layer.
+///
+/// All log messages are scrubbed through `LeakDetector` before broadcast
+/// to prevent accidental secret exfiltration via the SSE log stream.
 pub struct WebLogLayer {
     broadcaster: Arc<LogBroadcaster>,
+    leak_detector: LeakDetector,
 }
 
 impl WebLogLayer {
     pub fn new(broadcaster: Arc<LogBroadcaster>) -> Self {
-        Self { broadcaster }
+        Self {
+            broadcaster,
+            leak_detector: LeakDetector::new(),
+        }
     }
 }
 
@@ -171,10 +191,18 @@ impl<S: tracing::Subscriber> Layer<S> for WebLogLayer {
         let mut visitor = MessageVisitor::new();
         event.record(&mut visitor);
 
+        // Scrub secrets from the message before broadcasting to SSE clients.
+        // If the message would be blocked (critical secret), replace entirely.
+        let raw_message = visitor.finish();
+        let message = match self.leak_detector.scan_and_clean(&raw_message) {
+            Ok(cleaned) => cleaned,
+            Err(_) => "[log message redacted: potential secret detected]".to_string(),
+        };
+
         let entry = LogEntry {
             level: metadata.level().to_string().to_uppercase(),
             target: metadata.target().to_string(),
-            message: visitor.finish(),
+            message,
             timestamp: chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
         };
 
@@ -312,5 +340,31 @@ mod tests {
     fn test_message_visitor_finish_empty() {
         let v = MessageVisitor::new();
         assert_eq!(v.finish(), "");
+    }
+
+    #[test]
+    fn test_web_log_layer_has_leak_detector() {
+        let broadcaster = Arc::new(LogBroadcaster::new());
+        let layer = WebLogLayer::new(Arc::clone(&broadcaster));
+        // Verify the leak detector is initialized with default patterns
+        assert!(layer.leak_detector.pattern_count() > 0);
+    }
+
+    #[test]
+    fn test_leak_detector_scrubs_api_key_in_log() {
+        let detector = crate::safety::LeakDetector::new();
+        let msg = "Connecting with token sk-proj-test1234567890abcdefghij";
+        let result = detector.scan_and_clean(msg);
+        // Should be blocked (OpenAI key pattern)
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_leak_detector_passes_clean_log() {
+        let detector = crate::safety::LeakDetector::new();
+        let msg = "Request completed status=200 url=https://api.example.com/data";
+        let result = detector.scan_and_clean(msg);
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), msg);
     }
 }
