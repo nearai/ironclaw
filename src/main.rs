@@ -274,8 +274,10 @@ async fn main() -> anyhow::Result<()> {
     };
     let session = create_session_manager(session_config).await;
 
-    // Ensure we're authenticated before proceeding (may trigger login flow)
-    session.ensure_authenticated().await?;
+    // Ensure we're authenticated before proceeding (only needed for NEAR AI backend)
+    if config.llm.backend == ironclaw::config::LlmBackend::NearAi {
+        session.ensure_authenticated().await?;
+    }
 
     // Initialize tracing
     let env_filter = EnvFilter::try_from_default_env()
@@ -302,7 +304,7 @@ async fn main() -> anyhow::Result<()> {
 
     tracing::info!("Starting IronClaw...");
     tracing::info!("Loaded configuration for agent: {}", config.agent.name);
-    tracing::info!("NEAR AI session authenticated");
+    tracing::info!("LLM backend: {}", config.llm.backend);
 
     // Initialize database store (optional for testing)
     let store = if cli.no_db {

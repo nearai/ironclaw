@@ -453,6 +453,7 @@ impl SetupWizard {
             .unwrap_or_else(|_| "https://private.near.ai".to_string());
 
         let config = LlmConfig {
+            backend: crate::config::LlmBackend::NearAi,
             nearai: crate::config::NearAiConfig {
                 model: "dummy".to_string(),
                 base_url,
@@ -461,6 +462,10 @@ impl SetupWizard {
                 api_mode: crate::config::NearAiApiMode::Responses,
                 api_key: None,
             },
+            openai: None,
+            anthropic: None,
+            ollama: None,
+            openai_compatible: None,
         };
 
         match create_llm_provider(&config, Arc::clone(session)) {
