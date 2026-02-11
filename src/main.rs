@@ -33,7 +33,7 @@ use ironclaw::{
     setup::{SetupConfig, SetupWizard},
     tools::{
         ToolRegistry,
-        mcp::{McpClient, McpSessionManager, config::load_mcp_servers, is_authenticated},
+        mcp::{McpClient, McpSessionManager, config::load_mcp_servers_from_db, is_authenticated},
         wasm::{WasmToolLoader, WasmToolRuntime, load_dev_tools},
     },
     workspace::{EmbeddingProvider, NearAiEmbeddings, OpenAiEmbeddings, Workspace},
@@ -248,8 +248,11 @@ async fn main() -> anyhow::Result<()> {
         }
     }
 
-    // Load configuration (after potential setup)
-    let config = match Config::from_env() {
+    // Load bootstrap config (4 fields that must live on disk)
+    let bootstrap = ironclaw::bootstrap::BootstrapConfig::load();
+
+    // Load initial config from env + disk (before DB is available)
+    let mut config = match Config::from_env() {
         Ok(c) => c,
         Err(ironclaw::error::ConfigError::MissingRequired { key, hint }) => {
             eprintln!("Configuration error: Missing required setting '{}'", key);
@@ -315,12 +318,32 @@ async fn main() -> anyhow::Result<()> {
             tracing::warn!("Disk-to-DB settings migration failed: {}", e);
         }
 
+        // Reload config from DB now that we have a connection.
+        // Priority: env var > DB setting > default.
+        match Config::from_db(&store, "default", &bootstrap).await {
+            Ok(db_config) => {
+                config = db_config;
+                tracing::info!("Configuration reloaded from database");
+            }
+            Err(e) => {
+                tracing::warn!(
+                    "Failed to reload config from DB, keeping env-based config: {}",
+                    e
+                );
+            }
+        }
+
+        let store = Arc::new(store);
+
+        // Attach store to session manager so tokens save to DB too
+        session.attach_store(Arc::clone(&store), "default").await;
+
         // Mark any jobs left in "running" or "creating" state as "interrupted".
         if let Err(e) = store.cleanup_stale_sandbox_jobs().await {
             tracing::warn!("Failed to cleanup stale sandbox jobs: {}", e);
         }
 
-        Some(Arc::new(store))
+        Some(store)
     };
 
     // Initialize LLM provider (clone session so we can reuse it for embeddings)
@@ -477,7 +500,12 @@ async fn main() -> anyhow::Result<()> {
 
     let mcp_servers_future = async {
         if let Some(ref secrets) = secrets_store {
-            match load_mcp_servers().await {
+            let servers_result = if let Some(ref s) = store {
+                load_mcp_servers_from_db(s, "default").await
+            } else {
+                ironclaw::tools::mcp::config::load_mcp_servers().await
+            };
+            match servers_result {
                 Ok(servers) => {
                     let enabled: Vec<_> = servers.enabled_servers().cloned().collect();
                     if !enabled.is_empty() {
@@ -586,6 +614,7 @@ async fn main() -> anyhow::Result<()> {
             config.channels.wasm_channels_dir.clone(),
             config.tunnel.public_url.clone(),
             "default".to_string(),
+            store.clone(),
         ));
         tools.register_extension_tools(Arc::clone(&manager));
         tracing::info!("Extension manager initialized with in-chat discovery tools");
@@ -753,8 +782,7 @@ async fn main() -> anyhow::Result<()> {
                                 // Inject owner_id for Telegram so the bot only responds
                                 // to the bound user account.
                                 if channel_name == "telegram" {
-                                    let settings = ironclaw::settings::Settings::load();
-                                    if let Some(owner_id) = settings.channels.telegram_owner_id {
+                                    if let Some(owner_id) = config.channels.telegram_owner_id {
                                         config_updates.insert(
                                             "owner_id".to_string(),
                                             serde_json::json!(owner_id),

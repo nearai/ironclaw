@@ -586,6 +586,7 @@ mod tests {
             std::path::PathBuf::from("/tmp/ironclaw-test-channels"),
             None,
             "test".to_string(),
+            None,
         ))
     }
 }

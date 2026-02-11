@@ -78,7 +78,7 @@ impl Config {
             llm: LlmConfig::resolve(settings)?,
             embeddings: EmbeddingsConfig::resolve(settings)?,
             tunnel: TunnelConfig::resolve(settings)?,
-            channels: ChannelsConfig::resolve()?,
+            channels: ChannelsConfig::resolve(settings)?,
             agent: AgentConfig::resolve(settings)?,
             safety: SafetyConfig::resolve()?,
             wasm: WasmConfig::resolve()?,
@@ -334,6 +334,8 @@ pub struct ChannelsConfig {
     pub wasm_channels_dir: std::path::PathBuf,
     /// Whether WASM channels are enabled.
     pub wasm_channels_enabled: bool,
+    /// Telegram owner user ID. When set, the bot only responds to this user.
+    pub telegram_owner_id: Option<i64>,
 }
 
 #[derive(Debug, Clone)]
@@ -360,7 +362,7 @@ pub struct GatewayConfig {
 }
 
 impl ChannelsConfig {
-    fn resolve() -> Result<Self, ConfigError> {
+    fn resolve(settings: &Settings) -> Result<Self, ConfigError> {
         let http = if optional_env("HTTP_PORT")?.is_some() || optional_env("HTTP_HOST")?.is_some() {
             Some(HttpConfig {
                 host: optional_env("HTTP_HOST")?.unwrap_or_else(|| "0.0.0.0".to_string()),
@@ -421,6 +423,14 @@ impl ChannelsConfig {
                     message: format!("must be 'true' or 'false': {e}"),
                 })?
                 .unwrap_or(true),
+            telegram_owner_id: optional_env("TELEGRAM_OWNER_ID")?
+                .map(|s| s.parse())
+                .transpose()
+                .map_err(|e| ConfigError::InvalidValue {
+                    key: "TELEGRAM_OWNER_ID".to_string(),
+                    message: format!("must be an integer: {e}"),
+                })?
+                .or(settings.channels.telegram_owner_id),
         })
     }
 }
