@@ -90,11 +90,17 @@ interface channel-host {
     /// - Credentials are injected by the host; WASM never sees them
     /// - Response is scanned for leaked secrets before returning
     /// - Rate-limited per channel
+    ///
+    /// The optional timeout-ms parameter controls the HTTP client timeout
+    /// in milliseconds. Defaults to 30000 (30s) when not provided. Use a
+    /// longer timeout for long-polling requests (e.g., Telegram getUpdates).
+    /// Capped at the channel's callback_timeout to prevent hangs.
     http-request: func(
         method: string,
         url: string,
         headers-json: string,
-        body: option<list<u8>>
+        body: option<list<u8>>,
+        timeout-ms: option<u32>,
     ) -> result<http-response, string>;
 
     /// Check if a secret exists (if capability granted).

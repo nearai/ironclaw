@@ -327,6 +327,86 @@ pub async fn get_mcp_server(name: &str) -> Result<McpServerConfig, ConfigError> 
         })
 }
 
+// ==================== Database-backed MCP server config ====================
+
+/// Load MCP server configurations from the database settings table.
+///
+/// Falls back to the disk file if DB has no entry.
+pub async fn load_mcp_servers_from_db(
+    store: &crate::history::Store,
+    user_id: &str,
+) -> Result<McpServersFile, ConfigError> {
+    match store.get_setting(user_id, "mcp_servers").await {
+        Ok(Some(value)) => {
+            let config: McpServersFile = serde_json::from_value(value)?;
+            Ok(config)
+        }
+        Ok(None) => {
+            // No entry in DB, fall back to disk
+            load_mcp_servers().await
+        }
+        Err(e) => {
+            tracing::warn!(
+                "Failed to load MCP servers from DB: {}, falling back to disk",
+                e
+            );
+            load_mcp_servers().await
+        }
+    }
+}
+
+/// Save MCP server configurations to the database settings table.
+pub async fn save_mcp_servers_to_db(
+    store: &crate::history::Store,
+    user_id: &str,
+    config: &McpServersFile,
+) -> Result<(), ConfigError> {
+    let value = serde_json::to_value(config)?;
+    store
+        .set_setting(user_id, "mcp_servers", &value)
+        .await
+        .map_err(|e| {
+            ConfigError::Io(std::io::Error::new(
+                std::io::ErrorKind::Other,
+                e.to_string(),
+            ))
+        })?;
+    Ok(())
+}
+
+/// Add a new MCP server configuration (DB-backed).
+pub async fn add_mcp_server_db(
+    store: &crate::history::Store,
+    user_id: &str,
+    config: McpServerConfig,
+) -> Result<(), ConfigError> {
+    config.validate()?;
+
+    let mut servers = load_mcp_servers_from_db(store, user_id).await?;
+    servers.upsert(config);
+    save_mcp_servers_to_db(store, user_id, &servers).await?;
+
+    Ok(())
+}
+
+/// Remove an MCP server by name (DB-backed).
+pub async fn remove_mcp_server_db(
+    store: &crate::history::Store,
+    user_id: &str,
+    name: &str,
+) -> Result<(), ConfigError> {
+    let mut servers = load_mcp_servers_from_db(store, user_id).await?;
+
+    if !servers.remove(name) {
+        return Err(ConfigError::ServerNotFound {
+            name: name.to_string(),
+        });
+    }
+
+    save_mcp_servers_to_db(store, user_id, &servers).await?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

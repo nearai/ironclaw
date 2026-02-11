@@ -10,7 +10,7 @@
 //!         ◄── GET  /api/chat/events ── SSE stream
 //!         ─── GET  /api/chat/ws ─────► WebSocket (bidirectional)
 //!         ─── GET  /api/memory/* ────► Workspace
-//!         ─── GET  /api/jobs/* ──────► ContextManager
+//!         ─── GET  /api/jobs/* ──────► Database
 //!         ◄── GET  / ───────────────── Static HTML/CSS/JS
 //! ```
 
@@ -31,9 +31,10 @@ use tokio_stream::wrappers::ReceiverStream;
 use crate::agent::SessionManager;
 use crate::channels::{Channel, IncomingMessage, MessageStream, OutgoingResponse, StatusUpdate};
 use crate::config::GatewayConfig;
-use crate::context::ContextManager;
 use crate::error::ChannelError;
 use crate::extensions::ExtensionManager;
+use crate::history::Store;
+use crate::orchestrator::job_manager::ContainerJobManager;
 use crate::tools::ToolRegistry;
 use crate::workspace::Workspace;
 
@@ -70,11 +71,13 @@ impl GatewayChannel {
             msg_tx: tokio::sync::RwLock::new(None),
             sse: SseManager::new(),
             workspace: None,
-            context_manager: None,
             session_manager: None,
             log_broadcaster: None,
             extension_manager: None,
             tool_registry: None,
+            store: None,
+            job_manager: None,
+            prompt_queue: None,
             user_id: config.user_id.clone(),
             shutdown_tx: tokio::sync::RwLock::new(None),
             ws_tracker: Some(Arc::new(ws::WsConnectionTracker::new())),
@@ -93,11 +96,13 @@ impl GatewayChannel {
             msg_tx: tokio::sync::RwLock::new(None),
             sse: SseManager::new(),
             workspace: self.state.workspace.clone(),
-            context_manager: self.state.context_manager.clone(),
             session_manager: self.state.session_manager.clone(),
             log_broadcaster: self.state.log_broadcaster.clone(),
             extension_manager: self.state.extension_manager.clone(),
             tool_registry: self.state.tool_registry.clone(),
+            store: self.state.store.clone(),
+            job_manager: self.state.job_manager.clone(),
+            prompt_queue: self.state.prompt_queue.clone(),
             user_id: self.state.user_id.clone(),
             shutdown_tx: tokio::sync::RwLock::new(None),
             ws_tracker: self.state.ws_tracker.clone(),
@@ -109,12 +114,6 @@ impl GatewayChannel {
     /// Inject the workspace reference for the memory API.
     pub fn with_workspace(mut self, workspace: Arc<Workspace>) -> Self {
         self.rebuild_state(|s| s.workspace = Some(workspace));
-        self
-    }
-
-    /// Inject the context manager for the jobs API.
-    pub fn with_context_manager(mut self, cm: Arc<ContextManager>) -> Self {
-        self.rebuild_state(|s| s.context_manager = Some(cm));
         self
     }
 
@@ -139,6 +138,34 @@ impl GatewayChannel {
     /// Inject the tool registry for the extensions API.
     pub fn with_tool_registry(mut self, tr: Arc<ToolRegistry>) -> Self {
         self.rebuild_state(|s| s.tool_registry = Some(tr));
+        self
+    }
+
+    /// Inject the database store for sandbox job persistence.
+    pub fn with_store(mut self, store: Arc<Store>) -> Self {
+        self.rebuild_state(|s| s.store = Some(store));
+        self
+    }
+
+    /// Inject the container job manager for sandbox operations.
+    pub fn with_job_manager(mut self, jm: Arc<ContainerJobManager>) -> Self {
+        self.rebuild_state(|s| s.job_manager = Some(jm));
+        self
+    }
+
+    /// Inject the prompt queue for Claude Code follow-up prompts.
+    pub fn with_prompt_queue(
+        mut self,
+        pq: Arc<
+            tokio::sync::Mutex<
+                std::collections::HashMap<
+                    uuid::Uuid,
+                    std::collections::VecDeque<crate::orchestrator::api::PendingPrompt>,
+                >,
+            >,
+        >,
+    ) -> Self {
+        self.rebuild_state(|s| s.prompt_queue = Some(pq));
         self
     }
 
@@ -173,11 +200,7 @@ impl Channel for GatewayChannel {
                 ),
             })?;
 
-        let bound_addr =
-            server::start_server(addr, self.state.clone(), self.auth_token.clone()).await?;
-
-        tracing::info!("Web gateway listening on http://{}", bound_addr);
-        tracing::info!("Auth token: {}", self.auth_token);
+        server::start_server(addr, self.state.clone(), self.auth_token.clone()).await?;
 
         Ok(Box::pin(ReceiverStream::new(rx)))
     }
@@ -200,17 +223,48 @@ impl Channel for GatewayChannel {
     async fn send_status(
         &self,
         status: StatusUpdate,
-        _metadata: &serde_json::Value,
+        metadata: &serde_json::Value,
     ) -> Result<(), ChannelError> {
+        let thread_id = metadata
+            .get("thread_id")
+            .and_then(|v| v.as_str())
+            .map(String::from);
         let event = match status {
-            StatusUpdate::Thinking(msg) => SseEvent::Thinking { message: msg },
-            StatusUpdate::ToolStarted { name } => SseEvent::ToolStarted { name },
-            StatusUpdate::ToolCompleted { name, success } => {
-                SseEvent::ToolCompleted { name, success }
-            }
-            StatusUpdate::ToolResult { name, preview } => SseEvent::ToolResult { name, preview },
-            StatusUpdate::StreamChunk(content) => SseEvent::StreamChunk { content },
-            StatusUpdate::Status(msg) => SseEvent::Status { message: msg },
+            StatusUpdate::Thinking(msg) => SseEvent::Thinking {
+                message: msg,
+                thread_id: thread_id.clone(),
+            },
+            StatusUpdate::ToolStarted { name } => SseEvent::ToolStarted {
+                name,
+                thread_id: thread_id.clone(),
+            },
+            StatusUpdate::ToolCompleted { name, success } => SseEvent::ToolCompleted {
+                name,
+                success,
+                thread_id: thread_id.clone(),
+            },
+            StatusUpdate::ToolResult { name, preview } => SseEvent::ToolResult {
+                name,
+                preview,
+                thread_id: thread_id.clone(),
+            },
+            StatusUpdate::StreamChunk(content) => SseEvent::StreamChunk {
+                content,
+                thread_id: thread_id.clone(),
+            },
+            StatusUpdate::Status(msg) => SseEvent::Status {
+                message: msg,
+                thread_id: thread_id.clone(),
+            },
+            StatusUpdate::JobStarted {
+                job_id,
+                title,
+                browse_url,
+            } => SseEvent::JobStarted {
+                job_id,
+                title,
+                browse_url,
+            },
             StatusUpdate::ApprovalNeeded {
                 request_id,
                 tool_name,
@@ -222,6 +276,26 @@ impl Channel for GatewayChannel {
                 description,
                 parameters: serde_json::to_string_pretty(&parameters)
                     .unwrap_or_else(|_| parameters.to_string()),
+            },
+            StatusUpdate::AuthRequired {
+                extension_name,
+                instructions,
+                auth_url,
+                setup_url,
+            } => SseEvent::AuthRequired {
+                extension_name,
+                instructions,
+                auth_url,
+                setup_url,
+            },
+            StatusUpdate::AuthCompleted {
+                extension_name,
+                success,
+                message,
+            } => SseEvent::AuthCompleted {
+                extension_name,
+                success,
+                message,
             },
         };
 

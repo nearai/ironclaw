@@ -28,10 +28,21 @@ use crate::channels::web::auth::{AuthState, auth_middleware};
 use crate::channels::web::log_layer::LogBroadcaster;
 use crate::channels::web::sse::SseManager;
 use crate::channels::web::types::*;
-use crate::context::ContextManager;
 use crate::extensions::ExtensionManager;
+use crate::history::Store;
+use crate::orchestrator::job_manager::ContainerJobManager;
 use crate::tools::ToolRegistry;
 use crate::workspace::Workspace;
+
+/// Shared prompt queue: maps job IDs to pending follow-up prompts for Claude Code bridges.
+pub type PromptQueue = Arc<
+    tokio::sync::Mutex<
+        std::collections::HashMap<
+            uuid::Uuid,
+            std::collections::VecDeque<crate::orchestrator::api::PendingPrompt>,
+        >,
+    >,
+>;
 
 /// Shared state for all gateway handlers.
 pub struct GatewayState {
@@ -41,8 +52,6 @@ pub struct GatewayState {
     pub sse: SseManager,
     /// Workspace for memory API.
     pub workspace: Option<Arc<Workspace>>,
-    /// Context manager for jobs API.
-    pub context_manager: Option<Arc<ContextManager>>,
     /// Session manager for thread info.
     pub session_manager: Option<Arc<SessionManager>>,
     /// Log broadcaster for the logs SSE endpoint.
@@ -51,6 +60,12 @@ pub struct GatewayState {
     pub extension_manager: Option<Arc<ExtensionManager>>,
     /// Tool registry for listing registered tools.
     pub tool_registry: Option<Arc<ToolRegistry>>,
+    /// Database store for sandbox job persistence.
+    pub store: Option<Arc<Store>>,
+    /// Container job manager for sandbox operations.
+    pub job_manager: Option<Arc<ContainerJobManager>>,
+    /// Prompt queue for Claude Code follow-up prompts.
+    pub prompt_queue: Option<PromptQueue>,
     /// User ID for this gateway.
     pub user_id: String,
     /// Shutdown signal sender.
@@ -90,6 +105,8 @@ pub async fn start_server(
         // Chat
         .route("/api/chat/send", post(chat_send_handler))
         .route("/api/chat/approval", post(chat_approval_handler))
+        .route("/api/chat/auth-token", post(chat_auth_token_handler))
+        .route("/api/chat/auth-cancel", post(chat_auth_cancel_handler))
         .route("/api/chat/events", get(chat_events_handler))
         .route("/api/chat/ws", get(chat_ws_handler))
         .route("/api/chat/history", get(chat_history_handler))
@@ -106,6 +123,11 @@ pub async fn start_server(
         .route("/api/jobs/summary", get(jobs_summary_handler))
         .route("/api/jobs/{id}", get(jobs_detail_handler))
         .route("/api/jobs/{id}/cancel", post(jobs_cancel_handler))
+        .route("/api/jobs/{id}/restart", post(jobs_restart_handler))
+        .route("/api/jobs/{id}/prompt", post(jobs_prompt_handler))
+        .route("/api/jobs/{id}/events", get(jobs_events_handler))
+        .route("/api/jobs/{id}/files/list", get(job_files_list_handler))
+        .route("/api/jobs/{id}/files/read", get(job_files_read_handler))
         // Logs
         .route("/api/logs/events", get(logs_events_handler))
         // Extensions
@@ -120,6 +142,30 @@ pub async fn start_server(
             "/api/extensions/{name}/remove",
             post(extensions_remove_handler),
         )
+        // Routines
+        .route("/api/routines", get(routines_list_handler))
+        .route("/api/routines/summary", get(routines_summary_handler))
+        .route("/api/routines/{id}", get(routines_detail_handler))
+        .route("/api/routines/{id}/trigger", post(routines_trigger_handler))
+        .route("/api/routines/{id}/toggle", post(routines_toggle_handler))
+        .route(
+            "/api/routines/{id}",
+            axum::routing::delete(routines_delete_handler),
+        )
+        .route("/api/routines/{id}/runs", get(routines_runs_handler))
+        // Settings
+        .route("/api/settings", get(settings_list_handler))
+        .route("/api/settings/export", get(settings_export_handler))
+        .route("/api/settings/import", post(settings_import_handler))
+        .route("/api/settings/{key}", get(settings_get_handler))
+        .route(
+            "/api/settings/{key}",
+            axum::routing::put(settings_set_handler),
+        )
+        .route(
+            "/api/settings/{key}",
+            axum::routing::delete(settings_delete_handler),
+        )
         // Gateway control plane
         .route("/api/gateway/status", get(gateway_status_handler))
         .route_layer(middleware::from_fn_with_state(auth_state, auth_middleware));
@@ -130,9 +176,18 @@ pub async fn start_server(
         .route("/style.css", get(css_handler))
         .route("/app.js", get(js_handler));
 
+    // Project file serving (no auth, local browsing of sandbox outputs).
+    // The trailing-slash route serves index.html; the bare route redirects so
+    // relative paths in the HTML (e.g. href="style.css") resolve correctly.
+    let projects = Router::new()
+        .route("/projects/{project_id}", get(project_redirect_handler))
+        .route("/projects/{project_id}/", get(project_index_handler))
+        .route("/projects/{project_id}/{*path}", get(project_file_handler));
+
     let app = Router::new()
         .merge(public)
         .merge(statics)
+        .merge(projects)
         .merge(protected)
         .with_state(state.clone());
 
@@ -193,6 +248,7 @@ async fn chat_send_handler(
 
     if let Some(ref thread_id) = req.thread_id {
         msg = msg.with_thread(thread_id);
+        msg = msg.with_metadata(serde_json::json!({"thread_id": thread_id}));
     }
 
     let msg_id = msg.id;
@@ -256,7 +312,12 @@ async fn chat_approval_handler(
         )
     })?;
 
-    let msg = IncomingMessage::new("gateway", &state.user_id, content);
+    let mut msg = IncomingMessage::new("gateway", &state.user_id, content);
+
+    if let Some(ref thread_id) = req.thread_id {
+        msg = msg.with_thread(thread_id);
+    }
+
     let msg_id = msg.id;
 
     let tx_guard = state.msg_tx.read().await;
@@ -281,6 +342,85 @@ async fn chat_approval_handler(
     ))
 }
 
+/// Submit an auth token directly to the extension manager, bypassing the message pipeline.
+///
+/// The token never touches the LLM, chat history, or SSE stream.
+async fn chat_auth_token_handler(
+    State(state): State<Arc<GatewayState>>,
+    Json(req): Json<AuthTokenRequest>,
+) -> Result<Json<ActionResponse>, (StatusCode, String)> {
+    let ext_mgr = state.extension_manager.as_ref().ok_or((
+        StatusCode::SERVICE_UNAVAILABLE,
+        "Extension manager not available".to_string(),
+    ))?;
+
+    let result = ext_mgr
+        .auth(&req.extension_name, Some(&req.token))
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    if result.status == "authenticated" {
+        // Auto-activate so tools are available immediately
+        let msg = match ext_mgr.activate(&req.extension_name).await {
+            Ok(r) => format!(
+                "{} authenticated ({} tools loaded)",
+                req.extension_name,
+                r.tools_loaded.len()
+            ),
+            Err(e) => format!(
+                "{} authenticated but activation failed: {}",
+                req.extension_name, e
+            ),
+        };
+
+        // Clear auth mode on the active thread
+        clear_auth_mode(&state).await;
+
+        state.sse.broadcast(SseEvent::AuthCompleted {
+            extension_name: req.extension_name,
+            success: true,
+            message: msg.clone(),
+        });
+
+        Ok(Json(ActionResponse::ok(msg)))
+    } else {
+        // Re-emit auth_required for retry
+        state.sse.broadcast(SseEvent::AuthRequired {
+            extension_name: req.extension_name.clone(),
+            instructions: result.instructions.clone(),
+            auth_url: result.auth_url.clone(),
+            setup_url: result.setup_url.clone(),
+        });
+        Ok(Json(ActionResponse::fail(
+            result
+                .instructions
+                .unwrap_or_else(|| "Invalid token".to_string()),
+        )))
+    }
+}
+
+/// Cancel an in-progress auth flow.
+async fn chat_auth_cancel_handler(
+    State(state): State<Arc<GatewayState>>,
+    Json(_req): Json<AuthCancelRequest>,
+) -> Result<Json<ActionResponse>, (StatusCode, String)> {
+    clear_auth_mode(&state).await;
+    Ok(Json(ActionResponse::ok("Auth cancelled")))
+}
+
+/// Clear pending auth mode on the active thread.
+pub async fn clear_auth_mode(state: &GatewayState) {
+    if let Some(ref sm) = state.session_manager {
+        let session = sm.get_or_create_session(&state.user_id).await;
+        let mut sess = session.lock().await;
+        if let Some(thread_id) = sess.active_thread {
+            if let Some(thread) = sess.threads.get_mut(&thread_id) {
+                thread.pending_auth = None;
+            }
+        }
+    }
+}
+
 async fn chat_events_handler(State(state): State<Arc<GatewayState>>) -> impl IntoResponse {
     // subscribe() returns Sse<impl Stream + 'static + use<>> so no lifetime issues
     state.sse.subscribe()
@@ -296,6 +436,8 @@ async fn chat_ws_handler(
 #[derive(Deserialize)]
 struct HistoryQuery {
     thread_id: Option<String>,
+    limit: Option<usize>,
+    before: Option<String>,
 }
 
 async fn chat_history_handler(
@@ -310,6 +452,22 @@ async fn chat_history_handler(
     let session = session_manager.get_or_create_session(&state.user_id).await;
     let sess = session.lock().await;
 
+    let limit = query.limit.unwrap_or(50);
+    let before_cursor = query
+        .before
+        .as_deref()
+        .map(|s| {
+            chrono::DateTime::parse_from_rfc3339(s)
+                .map(|dt| dt.with_timezone(&chrono::Utc))
+                .map_err(|_| {
+                    (
+                        StatusCode::BAD_REQUEST,
+                        "Invalid 'before' timestamp".to_string(),
+                    )
+                })
+        })
+        .transpose()?;
+
     // Find the thread
     let thread_id = if let Some(ref tid) = query.thread_id {
         Uuid::parse_str(tid)
@@ -319,34 +477,125 @@ async fn chat_history_handler(
             .ok_or((StatusCode::NOT_FOUND, "No active thread".to_string()))?
     };
 
-    let thread = sess
-        .threads
-        .get(&thread_id)
-        .ok_or((StatusCode::NOT_FOUND, "Thread not found".to_string()))?;
+    // For paginated requests (before cursor set), always go to DB
+    if before_cursor.is_some() {
+        if let Some(ref store) = state.store {
+            let (messages, has_more) = store
+                .list_conversation_messages_paginated(thread_id, before_cursor, limit as i64)
+                .await
+                .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
-    let turns: Vec<TurnInfo> = thread
-        .turns
-        .iter()
-        .map(|t| TurnInfo {
-            turn_number: t.turn_number,
-            user_input: t.user_input.clone(),
-            response: t.response.clone(),
-            state: format!("{:?}", t.state),
-            started_at: t.started_at.to_rfc3339(),
-            completed_at: t.completed_at.map(|dt| dt.to_rfc3339()),
-            tool_calls: t
-                .tool_calls
+            let oldest_timestamp = messages.first().map(|m| m.created_at.to_rfc3339());
+            let turns = build_turns_from_db_messages(&messages);
+            return Ok(Json(HistoryResponse {
+                thread_id,
+                turns,
+                has_more,
+                oldest_timestamp,
+            }));
+        }
+    }
+
+    // Try in-memory first (freshest data for active threads)
+    if let Some(thread) = sess.threads.get(&thread_id) {
+        if !thread.turns.is_empty() {
+            let turns: Vec<TurnInfo> = thread
+                .turns
                 .iter()
-                .map(|tc| ToolCallInfo {
-                    name: tc.name.clone(),
-                    has_result: tc.result.is_some(),
-                    has_error: tc.error.is_some(),
+                .map(|t| TurnInfo {
+                    turn_number: t.turn_number,
+                    user_input: t.user_input.clone(),
+                    response: t.response.clone(),
+                    state: format!("{:?}", t.state),
+                    started_at: t.started_at.to_rfc3339(),
+                    completed_at: t.completed_at.map(|dt| dt.to_rfc3339()),
+                    tool_calls: t
+                        .tool_calls
+                        .iter()
+                        .map(|tc| ToolCallInfo {
+                            name: tc.name.clone(),
+                            has_result: tc.result.is_some(),
+                            has_error: tc.error.is_some(),
+                        })
+                        .collect(),
                 })
-                .collect(),
-        })
-        .collect();
+                .collect();
 
-    Ok(Json(HistoryResponse { thread_id, turns }))
+            return Ok(Json(HistoryResponse {
+                thread_id,
+                turns,
+                has_more: false,
+                oldest_timestamp: None,
+            }));
+        }
+    }
+
+    // Fall back to DB for historical threads not in memory (paginated)
+    if let Some(ref store) = state.store {
+        let (messages, has_more) = store
+            .list_conversation_messages_paginated(thread_id, None, limit as i64)
+            .await
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+        if !messages.is_empty() {
+            let oldest_timestamp = messages.first().map(|m| m.created_at.to_rfc3339());
+            let turns = build_turns_from_db_messages(&messages);
+            return Ok(Json(HistoryResponse {
+                thread_id,
+                turns,
+                has_more,
+                oldest_timestamp,
+            }));
+        }
+    }
+
+    // Empty thread (just created, no messages yet)
+    Ok(Json(HistoryResponse {
+        thread_id,
+        turns: Vec::new(),
+        has_more: false,
+        oldest_timestamp: None,
+    }))
+}
+
+/// Build TurnInfo pairs from flat DB messages (alternating user/assistant).
+fn build_turns_from_db_messages(messages: &[crate::history::ConversationMessage]) -> Vec<TurnInfo> {
+    let mut turns = Vec::new();
+    let mut turn_number = 0;
+    let mut iter = messages.iter().peekable();
+
+    while let Some(msg) = iter.next() {
+        if msg.role == "user" {
+            let mut turn = TurnInfo {
+                turn_number,
+                user_input: msg.content.clone(),
+                response: None,
+                state: "Completed".to_string(),
+                started_at: msg.created_at.to_rfc3339(),
+                completed_at: None,
+                tool_calls: Vec::new(),
+            };
+
+            // Check if next message is an assistant response
+            if let Some(next) = iter.peek() {
+                if next.role == "assistant" {
+                    let assistant_msg = iter.next().expect("peeked");
+                    turn.response = Some(assistant_msg.content.clone());
+                    turn.completed_at = Some(assistant_msg.created_at.to_rfc3339());
+                }
+            }
+
+            // Incomplete turn (user message without response)
+            if turn.response.is_none() {
+                turn.state = "Failed".to_string();
+            }
+
+            turns.push(turn);
+            turn_number += 1;
+        }
+    }
+
+    turns
 }
 
 async fn chat_threads_handler(
@@ -360,6 +609,61 @@ async fn chat_threads_handler(
     let session = session_manager.get_or_create_session(&state.user_id).await;
     let sess = session.lock().await;
 
+    // Try DB first for persistent thread list
+    if let Some(ref store) = state.store {
+        // Auto-create assistant thread if it doesn't exist
+        let assistant_id = store
+            .get_or_create_assistant_conversation(&state.user_id, "gateway")
+            .await
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+        if let Ok(summaries) = store
+            .list_conversations_with_preview(&state.user_id, "gateway", 50)
+            .await
+        {
+            let mut assistant_thread = None;
+            let mut threads = Vec::new();
+
+            for s in &summaries {
+                let info = ThreadInfo {
+                    id: s.id,
+                    state: "Idle".to_string(),
+                    turn_count: (s.message_count / 2).max(0) as usize,
+                    created_at: s.started_at.to_rfc3339(),
+                    updated_at: s.last_activity.to_rfc3339(),
+                    title: s.title.clone(),
+                    thread_type: s.thread_type.clone(),
+                };
+
+                if s.id == assistant_id {
+                    assistant_thread = Some(info);
+                } else {
+                    threads.push(info);
+                }
+            }
+
+            // If assistant wasn't in the list (0 messages), synthesize it
+            if assistant_thread.is_none() {
+                assistant_thread = Some(ThreadInfo {
+                    id: assistant_id,
+                    state: "Idle".to_string(),
+                    turn_count: 0,
+                    created_at: chrono::Utc::now().to_rfc3339(),
+                    updated_at: chrono::Utc::now().to_rfc3339(),
+                    title: None,
+                    thread_type: Some("assistant".to_string()),
+                });
+            }
+
+            return Ok(Json(ThreadListResponse {
+                assistant_thread,
+                threads,
+                active_thread: sess.active_thread,
+            }));
+        }
+    }
+
+    // Fallback: in-memory only (no assistant thread without DB)
     let threads: Vec<ThreadInfo> = sess
         .threads
         .values()
@@ -369,10 +673,13 @@ async fn chat_threads_handler(
             turn_count: t.turns.len(),
             created_at: t.created_at.to_rfc3339(),
             updated_at: t.updated_at.to_rfc3339(),
+            title: None,
+            thread_type: None,
         })
         .collect();
 
     Ok(Json(ThreadListResponse {
+        assistant_thread: None,
         threads,
         active_thread: sess.active_thread,
     }))
@@ -389,14 +696,39 @@ async fn chat_new_thread_handler(
     let session = session_manager.get_or_create_session(&state.user_id).await;
     let mut sess = session.lock().await;
     let thread = sess.create_thread();
-
-    Ok(Json(ThreadInfo {
+    let thread_id = thread.id;
+    let info = ThreadInfo {
         id: thread.id,
         state: format!("{:?}", thread.state),
         turn_count: thread.turns.len(),
         created_at: thread.created_at.to_rfc3339(),
         updated_at: thread.updated_at.to_rfc3339(),
-    }))
+        title: None,
+        thread_type: Some("thread".to_string()),
+    };
+
+    // Persist the empty conversation row with thread_type metadata
+    if let Some(ref store) = state.store {
+        let store = Arc::clone(store);
+        let user_id = state.user_id.clone();
+        tokio::spawn(async move {
+            if let Err(e) = store
+                .ensure_conversation(thread_id, "gateway", &user_id, None)
+                .await
+            {
+                tracing::warn!("Failed to persist new thread: {}", e);
+            }
+            let metadata_val = serde_json::json!("thread");
+            if let Err(e) = store
+                .update_conversation_metadata_field(thread_id, "thread_type", &metadata_val)
+                .await
+            {
+                tracing::warn!("Failed to set thread_type metadata: {}", e);
+            }
+        });
+    }
+
+    Ok(Json(info))
 }
 
 // --- Memory handlers ---
@@ -564,26 +896,38 @@ async fn memory_search_handler(
 async fn jobs_list_handler(
     State(state): State<Arc<GatewayState>>,
 ) -> Result<Json<JobListResponse>, (StatusCode, String)> {
-    let context_manager = state.context_manager.as_ref().ok_or((
+    let store = state.store.as_ref().ok_or((
         StatusCode::SERVICE_UNAVAILABLE,
-        "Context manager not available".to_string(),
+        "Database not available".to_string(),
     ))?;
 
-    let job_ids = context_manager.all_jobs_for(&state.user_id).await;
-    let mut jobs = Vec::new();
+    // Fetch sandbox jobs from the DB.
+    let sandbox_jobs = store
+        .list_sandbox_jobs()
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
-    for job_id in job_ids {
-        if let Ok(ctx) = context_manager.get_context(job_id).await {
-            jobs.push(JobInfo {
-                id: ctx.job_id,
-                title: ctx.title.clone(),
-                state: ctx.state.to_string(),
-                user_id: ctx.user_id.clone(),
-                created_at: ctx.created_at.to_rfc3339(),
-                started_at: ctx.started_at.map(|dt| dt.to_rfc3339()),
-            });
-        }
-    }
+    let mut jobs: Vec<JobInfo> = sandbox_jobs
+        .iter()
+        .map(|j| {
+            let ui_state = match j.status.as_str() {
+                "creating" => "pending",
+                "running" => "in_progress",
+                s => s,
+            };
+            JobInfo {
+                id: j.id,
+                title: j.task.clone(),
+                state: ui_state.to_string(),
+                user_id: j.user_id.clone(),
+                created_at: j.created_at.to_rfc3339(),
+                started_at: j.started_at.map(|dt| dt.to_rfc3339()),
+            }
+        })
+        .collect();
+
+    // Most recent first.
+    jobs.sort_by(|a, b| b.created_at.cmp(&a.created_at));
 
     Ok(Json(JobListResponse { jobs }))
 }
@@ -591,87 +935,404 @@ async fn jobs_list_handler(
 async fn jobs_summary_handler(
     State(state): State<Arc<GatewayState>>,
 ) -> Result<Json<JobSummaryResponse>, (StatusCode, String)> {
-    let context_manager = state.context_manager.as_ref().ok_or((
+    let store = state.store.as_ref().ok_or((
         StatusCode::SERVICE_UNAVAILABLE,
-        "Context manager not available".to_string(),
+        "Database not available".to_string(),
     ))?;
 
-    let summary = context_manager.summary_for(&state.user_id).await;
+    let s = store
+        .sandbox_job_summary()
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
     Ok(Json(JobSummaryResponse {
-        total: summary.total,
-        pending: summary.pending,
-        in_progress: summary.in_progress,
-        completed: summary.completed,
-        failed: summary.failed,
-        stuck: summary.stuck,
+        total: s.total,
+        pending: s.creating,
+        in_progress: s.running,
+        completed: s.completed,
+        failed: s.failed + s.interrupted,
+        stuck: 0,
     }))
 }
 
 async fn jobs_detail_handler(
     State(state): State<Arc<GatewayState>>,
     Path(id): Path<String>,
-) -> Result<Json<JobInfo>, (StatusCode, String)> {
-    let context_manager = state.context_manager.as_ref().ok_or((
-        StatusCode::SERVICE_UNAVAILABLE,
-        "Context manager not available".to_string(),
-    ))?;
-
+) -> Result<Json<JobDetailResponse>, (StatusCode, String)> {
     let job_id = Uuid::parse_str(&id)
         .map_err(|_| (StatusCode::BAD_REQUEST, "Invalid job ID".to_string()))?;
 
-    let ctx = context_manager
-        .get_context(job_id)
-        .await
-        .map_err(|_| (StatusCode::NOT_FOUND, "Job not found".to_string()))?;
+    // Try sandbox job from DB first.
+    if let Some(ref store) = state.store {
+        if let Ok(Some(job)) = store.get_sandbox_job(job_id).await {
+            let browse_id = std::path::Path::new(&job.project_dir)
+                .file_name()
+                .map(|n| n.to_string_lossy().to_string())
+                .unwrap_or_else(|| job.id.to_string());
 
-    if ctx.user_id != state.user_id {
-        return Err((StatusCode::NOT_FOUND, "Job not found".to_string()));
+            let ui_state = match job.status.as_str() {
+                "creating" => "pending",
+                "running" => "in_progress",
+                s => s,
+            };
+
+            let elapsed_secs = job.started_at.map(|start| {
+                let end = job.completed_at.unwrap_or_else(chrono::Utc::now);
+                (end - start).num_seconds().max(0) as u64
+            });
+
+            // Synthesize transitions from timestamps.
+            let mut transitions = Vec::new();
+            if let Some(started) = job.started_at {
+                transitions.push(TransitionInfo {
+                    from: "creating".to_string(),
+                    to: "running".to_string(),
+                    timestamp: started.to_rfc3339(),
+                    reason: None,
+                });
+            }
+            if let Some(completed) = job.completed_at {
+                transitions.push(TransitionInfo {
+                    from: "running".to_string(),
+                    to: job.status.clone(),
+                    timestamp: completed.to_rfc3339(),
+                    reason: job.failure_reason.clone(),
+                });
+            }
+
+            return Ok(Json(JobDetailResponse {
+                id: job.id,
+                title: job.task.clone(),
+                description: String::new(),
+                state: ui_state.to_string(),
+                user_id: job.user_id.clone(),
+                created_at: job.created_at.to_rfc3339(),
+                started_at: job.started_at.map(|dt| dt.to_rfc3339()),
+                completed_at: job.completed_at.map(|dt| dt.to_rfc3339()),
+                elapsed_secs,
+                project_dir: Some(job.project_dir.clone()),
+                browse_url: Some(format!("/projects/{}/", browse_id)),
+                job_mode: {
+                    let mode = store.get_sandbox_job_mode(job.id).await.ok().flatten();
+                    mode.filter(|m| m != "worker")
+                },
+                transitions,
+            }));
+        }
     }
 
-    Ok(Json(JobInfo {
-        id: ctx.job_id,
-        title: ctx.title.clone(),
-        state: ctx.state.to_string(),
-        user_id: ctx.user_id.clone(),
-        created_at: ctx.created_at.to_rfc3339(),
-        started_at: ctx.started_at.map(|dt| dt.to_rfc3339()),
-    }))
+    Err((StatusCode::NOT_FOUND, "Job not found".to_string()))
 }
 
 async fn jobs_cancel_handler(
     State(state): State<Arc<GatewayState>>,
     Path(id): Path<String>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    let context_manager = state.context_manager.as_ref().ok_or((
+    let job_id = Uuid::parse_str(&id)
+        .map_err(|_| (StatusCode::BAD_REQUEST, "Invalid job ID".to_string()))?;
+
+    // Try sandbox job cancellation.
+    if let Some(ref store) = state.store {
+        if let Ok(Some(job)) = store.get_sandbox_job(job_id).await {
+            if job.status == "running" || job.status == "creating" {
+                // Stop the container if we have a job manager.
+                if let Some(ref jm) = state.job_manager {
+                    let _ = jm.stop_job(job_id).await;
+                }
+                store
+                    .update_sandbox_job_status(
+                        job_id,
+                        "failed",
+                        Some(false),
+                        Some("Cancelled by user"),
+                        None,
+                        Some(chrono::Utc::now()),
+                    )
+                    .await
+                    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+            }
+            return Ok(Json(serde_json::json!({
+                "status": "cancelled",
+                "job_id": job_id,
+            })));
+        }
+    }
+
+    Err((StatusCode::NOT_FOUND, "Job not found".to_string()))
+}
+
+async fn jobs_restart_handler(
+    State(state): State<Arc<GatewayState>>,
+    Path(id): Path<String>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let store = state.store.as_ref().ok_or((
         StatusCode::SERVICE_UNAVAILABLE,
-        "Context manager not available".to_string(),
+        "Database not available".to_string(),
+    ))?;
+    let jm = state.job_manager.as_ref().ok_or((
+        StatusCode::SERVICE_UNAVAILABLE,
+        "Sandbox not enabled".to_string(),
+    ))?;
+
+    let old_job_id = Uuid::parse_str(&id)
+        .map_err(|_| (StatusCode::BAD_REQUEST, "Invalid job ID".to_string()))?;
+
+    let old_job = store
+        .get_sandbox_job(old_job_id)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+        .ok_or((StatusCode::NOT_FOUND, "Job not found".to_string()))?;
+
+    if old_job.status != "interrupted" && old_job.status != "failed" {
+        return Err((
+            StatusCode::CONFLICT,
+            format!("Cannot restart job in state '{}'", old_job.status),
+        ));
+    }
+
+    // Create a new job with the same task and project_dir.
+    let new_job_id = Uuid::new_v4();
+    let now = chrono::Utc::now();
+
+    let record = crate::history::SandboxJobRecord {
+        id: new_job_id,
+        task: old_job.task.clone(),
+        status: "creating".to_string(),
+        user_id: old_job.user_id.clone(),
+        project_dir: old_job.project_dir.clone(),
+        success: None,
+        failure_reason: None,
+        created_at: now,
+        started_at: None,
+        completed_at: None,
+    };
+    store
+        .save_sandbox_job(&record)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    // Look up the original job's mode so the restart uses the same mode.
+    let mode = match store.get_sandbox_job_mode(old_job_id).await {
+        Ok(Some(m)) if m == "claude_code" => crate::orchestrator::job_manager::JobMode::ClaudeCode,
+        _ => crate::orchestrator::job_manager::JobMode::Worker,
+    };
+
+    let project_dir = std::path::PathBuf::from(&old_job.project_dir);
+    let _token = jm
+        .create_job(new_job_id, &old_job.task, Some(project_dir), mode)
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Failed to create container: {}", e),
+            )
+        })?;
+
+    store
+        .update_sandbox_job_status(new_job_id, "running", None, None, Some(now), None)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    Ok(Json(serde_json::json!({
+        "status": "restarted",
+        "old_job_id": old_job_id,
+        "new_job_id": new_job_id,
+    })))
+}
+
+// --- Claude Code prompt and events handlers ---
+
+/// Submit a follow-up prompt to a running Claude Code sandbox job.
+async fn jobs_prompt_handler(
+    State(state): State<Arc<GatewayState>>,
+    Path(id): Path<String>,
+    Json(body): Json<serde_json::Value>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let prompt_queue = state.prompt_queue.as_ref().ok_or((
+        StatusCode::NOT_IMPLEMENTED,
+        "Claude Code not configured".to_string(),
+    ))?;
+
+    let job_id: uuid::Uuid = id
+        .parse()
+        .map_err(|_| (StatusCode::BAD_REQUEST, "Invalid job ID".to_string()))?;
+
+    let content = body
+        .get("content")
+        .and_then(|v| v.as_str())
+        .ok_or((
+            StatusCode::BAD_REQUEST,
+            "Missing 'content' field".to_string(),
+        ))?
+        .to_string();
+
+    let done = body.get("done").and_then(|v| v.as_bool()).unwrap_or(false);
+
+    let prompt = crate::orchestrator::api::PendingPrompt { content, done };
+
+    {
+        let mut queue = prompt_queue.lock().await;
+        queue.entry(job_id).or_default().push_back(prompt);
+    }
+
+    Ok(Json(serde_json::json!({
+        "status": "queued",
+        "job_id": job_id.to_string(),
+    })))
+}
+
+/// Load persisted job events for a job (for history replay on page open).
+async fn jobs_events_handler(
+    State(state): State<Arc<GatewayState>>,
+    Path(id): Path<String>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let store = state.store.as_ref().ok_or((
+        StatusCode::NOT_IMPLEMENTED,
+        "Database not available".to_string(),
+    ))?;
+
+    let job_id: uuid::Uuid = id
+        .parse()
+        .map_err(|_| (StatusCode::BAD_REQUEST, "Invalid job ID".to_string()))?;
+
+    let events = store
+        .list_job_events(job_id)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    let events_json: Vec<serde_json::Value> = events
+        .into_iter()
+        .map(|e| {
+            serde_json::json!({
+                "id": e.id,
+                "event_type": e.event_type,
+                "data": e.data,
+                "created_at": e.created_at.to_rfc3339(),
+            })
+        })
+        .collect();
+
+    Ok(Json(serde_json::json!({
+        "job_id": job_id.to_string(),
+        "events": events_json,
+    })))
+}
+
+// --- Project file handlers for sandbox jobs ---
+
+#[derive(Deserialize)]
+struct FilePathQuery {
+    path: Option<String>,
+}
+
+async fn job_files_list_handler(
+    State(state): State<Arc<GatewayState>>,
+    Path(id): Path<String>,
+    Query(query): Query<FilePathQuery>,
+) -> Result<Json<ProjectFilesResponse>, (StatusCode, String)> {
+    let store = state.store.as_ref().ok_or((
+        StatusCode::SERVICE_UNAVAILABLE,
+        "Database not available".to_string(),
     ))?;
 
     let job_id = Uuid::parse_str(&id)
         .map_err(|_| (StatusCode::BAD_REQUEST, "Invalid job ID".to_string()))?;
 
-    let ctx = context_manager
-        .get_context(job_id)
-        .await
-        .map_err(|_| (StatusCode::NOT_FOUND, "Job not found".to_string()))?;
-
-    if ctx.user_id != state.user_id {
-        return Err((StatusCode::NOT_FOUND, "Job not found".to_string()));
-    }
-
-    context_manager
-        .update_context(job_id, |ctx| {
-            ctx.transition_to(crate::context::JobState::Cancelled, None)
-        })
+    let job = store
+        .get_sandbox_job(job_id)
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
-        .map_err(|msg| (StatusCode::CONFLICT, msg))?;
+        .ok_or((StatusCode::NOT_FOUND, "Job not found".to_string()))?;
 
-    Ok(Json(serde_json::json!({
-        "status": "cancelled",
-        "job_id": job_id,
-    })))
+    let base = std::path::PathBuf::from(&job.project_dir);
+    let rel_path = query.path.as_deref().unwrap_or("");
+    let target = base.join(rel_path);
+
+    // Path traversal guard.
+    let canonical = target
+        .canonicalize()
+        .map_err(|_| (StatusCode::NOT_FOUND, "Path not found".to_string()))?;
+    let base_canonical = base
+        .canonicalize()
+        .map_err(|_| (StatusCode::NOT_FOUND, "Project dir not found".to_string()))?;
+    if !canonical.starts_with(&base_canonical) {
+        return Err((StatusCode::FORBIDDEN, "Forbidden".to_string()));
+    }
+
+    let mut entries = Vec::new();
+    let mut read_dir = tokio::fs::read_dir(&canonical)
+        .await
+        .map_err(|_| (StatusCode::NOT_FOUND, "Cannot read directory".to_string()))?;
+
+    while let Ok(Some(entry)) = read_dir.next_entry().await {
+        let name = entry.file_name().to_string_lossy().to_string();
+        let is_dir = entry
+            .file_type()
+            .await
+            .map(|ft| ft.is_dir())
+            .unwrap_or(false);
+        let rel = if rel_path.is_empty() {
+            name.clone()
+        } else {
+            format!("{}/{}", rel_path, name)
+        };
+        entries.push(ProjectFileEntry {
+            name,
+            path: rel,
+            is_dir,
+        });
+    }
+
+    entries.sort_by(|a, b| b.is_dir.cmp(&a.is_dir).then_with(|| a.name.cmp(&b.name)));
+
+    Ok(Json(ProjectFilesResponse { entries }))
+}
+
+async fn job_files_read_handler(
+    State(state): State<Arc<GatewayState>>,
+    Path(id): Path<String>,
+    Query(query): Query<FilePathQuery>,
+) -> Result<Json<ProjectFileReadResponse>, (StatusCode, String)> {
+    let store = state.store.as_ref().ok_or((
+        StatusCode::SERVICE_UNAVAILABLE,
+        "Database not available".to_string(),
+    ))?;
+
+    let job_id = Uuid::parse_str(&id)
+        .map_err(|_| (StatusCode::BAD_REQUEST, "Invalid job ID".to_string()))?;
+
+    let job = store
+        .get_sandbox_job(job_id)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+        .ok_or((StatusCode::NOT_FOUND, "Job not found".to_string()))?;
+
+    let path = query.path.as_deref().ok_or((
+        StatusCode::BAD_REQUEST,
+        "path parameter required".to_string(),
+    ))?;
+
+    let base = std::path::PathBuf::from(&job.project_dir);
+    let file_path = base.join(path);
+
+    let canonical = file_path
+        .canonicalize()
+        .map_err(|_| (StatusCode::NOT_FOUND, "File not found".to_string()))?;
+    let base_canonical = base
+        .canonicalize()
+        .map_err(|_| (StatusCode::NOT_FOUND, "Project dir not found".to_string()))?;
+    if !canonical.starts_with(&base_canonical) {
+        return Err((StatusCode::FORBIDDEN, "Forbidden".to_string()));
+    }
+
+    let content = tokio::fs::read_to_string(&canonical)
+        .await
+        .map_err(|_| (StatusCode::NOT_FOUND, "Cannot read file".to_string()))?;
+
+    Ok(Json(ProjectFileReadResponse {
+        path: path.to_string(),
+        content,
+    }))
 }
 
 // --- Logs handlers ---
@@ -841,6 +1502,61 @@ async fn extensions_activate_handler(
     }
 }
 
+// --- Project file serving handlers ---
+
+/// Redirect `/projects/{id}` to `/projects/{id}/` so relative paths in
+/// the served HTML resolve within the project namespace.
+async fn project_redirect_handler(Path(project_id): Path<String>) -> impl IntoResponse {
+    axum::response::Redirect::permanent(&format!("/projects/{project_id}/"))
+}
+
+/// Serve `index.html` when hitting `/projects/{project_id}/`.
+async fn project_index_handler(Path(project_id): Path<String>) -> impl IntoResponse {
+    serve_project_file(&project_id, "index.html").await
+}
+
+/// Serve any file under `/projects/{project_id}/{path}`.
+async fn project_file_handler(
+    Path((project_id, path)): Path<(String, String)>,
+) -> impl IntoResponse {
+    serve_project_file(&project_id, &path).await
+}
+
+/// Shared logic: resolve the file inside `~/.ironclaw/projects/{project_id}/`,
+/// guard against path traversal, and stream the content with the right MIME type.
+async fn serve_project_file(project_id: &str, path: &str) -> axum::response::Response {
+    let base = dirs::home_dir()
+        .unwrap_or_else(|| std::path::PathBuf::from("."))
+        .join(".ironclaw")
+        .join("projects")
+        .join(project_id);
+
+    let file_path = base.join(path);
+
+    // Path traversal guard
+    let canonical = match file_path.canonicalize() {
+        Ok(p) => p,
+        Err(_) => return (StatusCode::NOT_FOUND, "Not found").into_response(),
+    };
+    let base_canonical = match base.canonicalize() {
+        Ok(p) => p,
+        Err(_) => return (StatusCode::NOT_FOUND, "Not found").into_response(),
+    };
+    if !canonical.starts_with(&base_canonical) {
+        return (StatusCode::FORBIDDEN, "Forbidden").into_response();
+    }
+
+    match tokio::fs::read(&canonical).await {
+        Ok(contents) => {
+            let mime = mime_guess::from_path(&canonical)
+                .first_or_octet_stream()
+                .to_string();
+            ([(header::CONTENT_TYPE, mime)], contents).into_response()
+        }
+        Err(_) => (StatusCode::NOT_FOUND, "Not found").into_response(),
+    }
+}
+
 async fn extensions_remove_handler(
     State(state): State<Arc<GatewayState>>,
     Path(name): Path<String>,
@@ -854,6 +1570,446 @@ async fn extensions_remove_handler(
         Ok(message) => Ok(Json(ActionResponse::ok(message))),
         Err(e) => Ok(Json(ActionResponse::fail(e.to_string()))),
     }
+}
+
+// --- Routines handlers ---
+
+async fn routines_list_handler(
+    State(state): State<Arc<GatewayState>>,
+) -> Result<Json<RoutineListResponse>, (StatusCode, String)> {
+    let store = state.store.as_ref().ok_or((
+        StatusCode::SERVICE_UNAVAILABLE,
+        "Database not available".to_string(),
+    ))?;
+
+    let routines = store
+        .list_routines(&state.user_id)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    let items: Vec<RoutineInfo> = routines.iter().map(routine_to_info).collect();
+
+    Ok(Json(RoutineListResponse { routines: items }))
+}
+
+async fn routines_summary_handler(
+    State(state): State<Arc<GatewayState>>,
+) -> Result<Json<RoutineSummaryResponse>, (StatusCode, String)> {
+    let store = state.store.as_ref().ok_or((
+        StatusCode::SERVICE_UNAVAILABLE,
+        "Database not available".to_string(),
+    ))?;
+
+    let routines = store
+        .list_routines(&state.user_id)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    let total = routines.len() as u64;
+    let enabled = routines.iter().filter(|r| r.enabled).count() as u64;
+    let disabled = total - enabled;
+    let failing = routines
+        .iter()
+        .filter(|r| r.consecutive_failures > 0)
+        .count() as u64;
+
+    let today_start = chrono::Utc::now()
+        .date_naive()
+        .and_hms_opt(0, 0, 0)
+        .map(|dt| dt.and_utc());
+    let runs_today = if let Some(start) = today_start {
+        routines
+            .iter()
+            .filter(|r| r.last_run_at.is_some_and(|ts| ts >= start))
+            .count() as u64
+    } else {
+        0
+    };
+
+    Ok(Json(RoutineSummaryResponse {
+        total,
+        enabled,
+        disabled,
+        failing,
+        runs_today,
+    }))
+}
+
+async fn routines_detail_handler(
+    State(state): State<Arc<GatewayState>>,
+    Path(id): Path<String>,
+) -> Result<Json<RoutineDetailResponse>, (StatusCode, String)> {
+    let store = state.store.as_ref().ok_or((
+        StatusCode::SERVICE_UNAVAILABLE,
+        "Database not available".to_string(),
+    ))?;
+
+    let routine_id = Uuid::parse_str(&id)
+        .map_err(|_| (StatusCode::BAD_REQUEST, "Invalid routine ID".to_string()))?;
+
+    let routine = store
+        .get_routine(routine_id)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+        .ok_or((StatusCode::NOT_FOUND, "Routine not found".to_string()))?;
+
+    let runs = store
+        .list_routine_runs(routine_id, 20)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    let recent_runs: Vec<RoutineRunInfo> = runs
+        .iter()
+        .map(|run| RoutineRunInfo {
+            id: run.id,
+            trigger_type: run.trigger_type.clone(),
+            started_at: run.started_at.to_rfc3339(),
+            completed_at: run.completed_at.map(|dt| dt.to_rfc3339()),
+            status: format!("{:?}", run.status),
+            result_summary: run.result_summary.clone(),
+            tokens_used: run.tokens_used,
+        })
+        .collect();
+
+    Ok(Json(RoutineDetailResponse {
+        id: routine.id,
+        name: routine.name.clone(),
+        description: routine.description.clone(),
+        enabled: routine.enabled,
+        trigger: serde_json::to_value(&routine.trigger).unwrap_or_default(),
+        action: serde_json::to_value(&routine.action).unwrap_or_default(),
+        guardrails: serde_json::to_value(&routine.guardrails).unwrap_or_default(),
+        notify: serde_json::to_value(&routine.notify).unwrap_or_default(),
+        last_run_at: routine.last_run_at.map(|dt| dt.to_rfc3339()),
+        next_fire_at: routine.next_fire_at.map(|dt| dt.to_rfc3339()),
+        run_count: routine.run_count,
+        consecutive_failures: routine.consecutive_failures,
+        created_at: routine.created_at.to_rfc3339(),
+        recent_runs,
+    }))
+}
+
+async fn routines_trigger_handler(
+    State(state): State<Arc<GatewayState>>,
+    Path(id): Path<String>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let store = state.store.as_ref().ok_or((
+        StatusCode::SERVICE_UNAVAILABLE,
+        "Database not available".to_string(),
+    ))?;
+
+    let routine_id = Uuid::parse_str(&id)
+        .map_err(|_| (StatusCode::BAD_REQUEST, "Invalid routine ID".to_string()))?;
+
+    let routine = store
+        .get_routine(routine_id)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+        .ok_or((StatusCode::NOT_FOUND, "Routine not found".to_string()))?;
+
+    // Send the routine prompt through the message pipeline as a manual trigger.
+    let prompt = match &routine.action {
+        crate::agent::routine::RoutineAction::Lightweight { prompt, .. } => prompt.clone(),
+        crate::agent::routine::RoutineAction::FullJob {
+            title, description, ..
+        } => format!("{}: {}", title, description),
+    };
+
+    let content = format!("[routine:{}] {}", routine.name, prompt);
+    let msg = IncomingMessage::new("gateway", &state.user_id, content);
+
+    let tx_guard = state.msg_tx.read().await;
+    let tx = tx_guard.as_ref().ok_or((
+        StatusCode::SERVICE_UNAVAILABLE,
+        "Channel not started".to_string(),
+    ))?;
+
+    tx.send(msg).await.map_err(|_| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "Channel closed".to_string(),
+        )
+    })?;
+
+    Ok(Json(serde_json::json!({
+        "status": "triggered",
+        "routine_id": routine_id,
+    })))
+}
+
+#[derive(Deserialize)]
+struct ToggleRequest {
+    enabled: Option<bool>,
+}
+
+async fn routines_toggle_handler(
+    State(state): State<Arc<GatewayState>>,
+    Path(id): Path<String>,
+    body: Option<Json<ToggleRequest>>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let store = state.store.as_ref().ok_or((
+        StatusCode::SERVICE_UNAVAILABLE,
+        "Database not available".to_string(),
+    ))?;
+
+    let routine_id = Uuid::parse_str(&id)
+        .map_err(|_| (StatusCode::BAD_REQUEST, "Invalid routine ID".to_string()))?;
+
+    let mut routine = store
+        .get_routine(routine_id)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+        .ok_or((StatusCode::NOT_FOUND, "Routine not found".to_string()))?;
+
+    // If a specific value was provided, use it; otherwise toggle.
+    routine.enabled = match body {
+        Some(Json(req)) => req.enabled.unwrap_or(!routine.enabled),
+        None => !routine.enabled,
+    };
+
+    store
+        .update_routine(&routine)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    Ok(Json(serde_json::json!({
+        "status": if routine.enabled { "enabled" } else { "disabled" },
+        "routine_id": routine_id,
+    })))
+}
+
+async fn routines_delete_handler(
+    State(state): State<Arc<GatewayState>>,
+    Path(id): Path<String>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let store = state.store.as_ref().ok_or((
+        StatusCode::SERVICE_UNAVAILABLE,
+        "Database not available".to_string(),
+    ))?;
+
+    let routine_id = Uuid::parse_str(&id)
+        .map_err(|_| (StatusCode::BAD_REQUEST, "Invalid routine ID".to_string()))?;
+
+    let deleted = store
+        .delete_routine(routine_id)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    if deleted {
+        Ok(Json(serde_json::json!({
+            "status": "deleted",
+            "routine_id": routine_id,
+        })))
+    } else {
+        Err((StatusCode::NOT_FOUND, "Routine not found".to_string()))
+    }
+}
+
+async fn routines_runs_handler(
+    State(state): State<Arc<GatewayState>>,
+    Path(id): Path<String>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let store = state.store.as_ref().ok_or((
+        StatusCode::SERVICE_UNAVAILABLE,
+        "Database not available".to_string(),
+    ))?;
+
+    let routine_id = Uuid::parse_str(&id)
+        .map_err(|_| (StatusCode::BAD_REQUEST, "Invalid routine ID".to_string()))?;
+
+    let runs = store
+        .list_routine_runs(routine_id, 50)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    let run_infos: Vec<RoutineRunInfo> = runs
+        .iter()
+        .map(|run| RoutineRunInfo {
+            id: run.id,
+            trigger_type: run.trigger_type.clone(),
+            started_at: run.started_at.to_rfc3339(),
+            completed_at: run.completed_at.map(|dt| dt.to_rfc3339()),
+            status: format!("{:?}", run.status),
+            result_summary: run.result_summary.clone(),
+            tokens_used: run.tokens_used,
+        })
+        .collect();
+
+    Ok(Json(serde_json::json!({
+        "routine_id": routine_id,
+        "runs": run_infos,
+    })))
+}
+
+/// Convert a Routine to the trimmed RoutineInfo for list display.
+fn routine_to_info(r: &crate::agent::routine::Routine) -> RoutineInfo {
+    let (trigger_type, trigger_summary) = match &r.trigger {
+        crate::agent::routine::Trigger::Cron { schedule } => {
+            ("cron".to_string(), format!("cron: {}", schedule))
+        }
+        crate::agent::routine::Trigger::Event {
+            pattern, channel, ..
+        } => {
+            let ch = channel.as_deref().unwrap_or("any");
+            ("event".to_string(), format!("on {} /{}/", ch, pattern))
+        }
+        crate::agent::routine::Trigger::Webhook { path, .. } => {
+            let p = path.as_deref().unwrap_or("/");
+            ("webhook".to_string(), format!("webhook: {}", p))
+        }
+        crate::agent::routine::Trigger::Manual => ("manual".to_string(), "manual only".to_string()),
+    };
+
+    let action_type = match &r.action {
+        crate::agent::routine::RoutineAction::Lightweight { .. } => "lightweight",
+        crate::agent::routine::RoutineAction::FullJob { .. } => "full_job",
+    };
+
+    let status = if !r.enabled {
+        "disabled"
+    } else if r.consecutive_failures > 0 {
+        "failing"
+    } else {
+        "active"
+    };
+
+    RoutineInfo {
+        id: r.id,
+        name: r.name.clone(),
+        description: r.description.clone(),
+        enabled: r.enabled,
+        trigger_type,
+        trigger_summary,
+        action_type: action_type.to_string(),
+        last_run_at: r.last_run_at.map(|dt| dt.to_rfc3339()),
+        next_fire_at: r.next_fire_at.map(|dt| dt.to_rfc3339()),
+        run_count: r.run_count,
+        consecutive_failures: r.consecutive_failures,
+        status: status.to_string(),
+    }
+}
+
+// --- Settings handlers ---
+
+async fn settings_list_handler(
+    State(state): State<Arc<GatewayState>>,
+) -> Result<Json<SettingsListResponse>, StatusCode> {
+    let store = state
+        .store
+        .as_ref()
+        .ok_or(StatusCode::SERVICE_UNAVAILABLE)?;
+    let rows = store.list_settings(&state.user_id).await.map_err(|e| {
+        tracing::error!("Failed to list settings: {}", e);
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
+
+    let settings = rows
+        .into_iter()
+        .map(|r| SettingResponse {
+            key: r.key,
+            value: r.value,
+            updated_at: r.updated_at.to_rfc3339(),
+        })
+        .collect();
+
+    Ok(Json(SettingsListResponse { settings }))
+}
+
+async fn settings_get_handler(
+    State(state): State<Arc<GatewayState>>,
+    Path(key): Path<String>,
+) -> Result<Json<SettingResponse>, StatusCode> {
+    let store = state
+        .store
+        .as_ref()
+        .ok_or(StatusCode::SERVICE_UNAVAILABLE)?;
+    let row = store
+        .get_setting_full(&state.user_id, &key)
+        .await
+        .map_err(|e| {
+            tracing::error!("Failed to get setting '{}': {}", key, e);
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?
+        .ok_or(StatusCode::NOT_FOUND)?;
+
+    Ok(Json(SettingResponse {
+        key: row.key,
+        value: row.value,
+        updated_at: row.updated_at.to_rfc3339(),
+    }))
+}
+
+async fn settings_set_handler(
+    State(state): State<Arc<GatewayState>>,
+    Path(key): Path<String>,
+    Json(body): Json<SettingWriteRequest>,
+) -> Result<StatusCode, StatusCode> {
+    let store = state
+        .store
+        .as_ref()
+        .ok_or(StatusCode::SERVICE_UNAVAILABLE)?;
+    store
+        .set_setting(&state.user_id, &key, &body.value)
+        .await
+        .map_err(|e| {
+            tracing::error!("Failed to set setting '{}': {}", key, e);
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
+
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn settings_delete_handler(
+    State(state): State<Arc<GatewayState>>,
+    Path(key): Path<String>,
+) -> Result<StatusCode, StatusCode> {
+    let store = state
+        .store
+        .as_ref()
+        .ok_or(StatusCode::SERVICE_UNAVAILABLE)?;
+    store
+        .delete_setting(&state.user_id, &key)
+        .await
+        .map_err(|e| {
+            tracing::error!("Failed to delete setting '{}': {}", key, e);
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
+
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn settings_export_handler(
+    State(state): State<Arc<GatewayState>>,
+) -> Result<Json<SettingsExportResponse>, StatusCode> {
+    let store = state
+        .store
+        .as_ref()
+        .ok_or(StatusCode::SERVICE_UNAVAILABLE)?;
+    let settings = store.get_all_settings(&state.user_id).await.map_err(|e| {
+        tracing::error!("Failed to export settings: {}", e);
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
+
+    Ok(Json(SettingsExportResponse { settings }))
+}
+
+async fn settings_import_handler(
+    State(state): State<Arc<GatewayState>>,
+    Json(body): Json<SettingsImportRequest>,
+) -> Result<StatusCode, StatusCode> {
+    let store = state
+        .store
+        .as_ref()
+        .ok_or(StatusCode::SERVICE_UNAVAILABLE)?;
+    store
+        .set_all_settings(&state.user_id, &body.settings)
+        .await
+        .map_err(|e| {
+            tracing::error!("Failed to import settings: {}", e);
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
+
+    Ok(StatusCode::NO_CONTENT)
 }
 
 // --- Gateway control plane handlers ---
@@ -880,4 +2036,85 @@ struct GatewayStatusResponse {
     sse_connections: u64,
     ws_connections: u64,
     total_connections: u64,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_build_turns_from_db_messages_complete() {
+        let now = chrono::Utc::now();
+        let messages = vec![
+            crate::history::ConversationMessage {
+                id: Uuid::new_v4(),
+                role: "user".to_string(),
+                content: "Hello".to_string(),
+                created_at: now,
+            },
+            crate::history::ConversationMessage {
+                id: Uuid::new_v4(),
+                role: "assistant".to_string(),
+                content: "Hi there!".to_string(),
+                created_at: now + chrono::TimeDelta::seconds(1),
+            },
+            crate::history::ConversationMessage {
+                id: Uuid::new_v4(),
+                role: "user".to_string(),
+                content: "How are you?".to_string(),
+                created_at: now + chrono::TimeDelta::seconds(2),
+            },
+            crate::history::ConversationMessage {
+                id: Uuid::new_v4(),
+                role: "assistant".to_string(),
+                content: "Doing well!".to_string(),
+                created_at: now + chrono::TimeDelta::seconds(3),
+            },
+        ];
+
+        let turns = build_turns_from_db_messages(&messages);
+        assert_eq!(turns.len(), 2);
+        assert_eq!(turns[0].user_input, "Hello");
+        assert_eq!(turns[0].response.as_deref(), Some("Hi there!"));
+        assert_eq!(turns[0].state, "Completed");
+        assert_eq!(turns[1].user_input, "How are you?");
+        assert_eq!(turns[1].response.as_deref(), Some("Doing well!"));
+    }
+
+    #[test]
+    fn test_build_turns_from_db_messages_incomplete_last() {
+        let now = chrono::Utc::now();
+        let messages = vec![
+            crate::history::ConversationMessage {
+                id: Uuid::new_v4(),
+                role: "user".to_string(),
+                content: "Hello".to_string(),
+                created_at: now,
+            },
+            crate::history::ConversationMessage {
+                id: Uuid::new_v4(),
+                role: "assistant".to_string(),
+                content: "Hi!".to_string(),
+                created_at: now + chrono::TimeDelta::seconds(1),
+            },
+            crate::history::ConversationMessage {
+                id: Uuid::new_v4(),
+                role: "user".to_string(),
+                content: "Lost message".to_string(),
+                created_at: now + chrono::TimeDelta::seconds(2),
+            },
+        ];
+
+        let turns = build_turns_from_db_messages(&messages);
+        assert_eq!(turns.len(), 2);
+        assert_eq!(turns[1].user_input, "Lost message");
+        assert!(turns[1].response.is_none());
+        assert_eq!(turns[1].state, "Failed");
+    }
+
+    #[test]
+    fn test_build_turns_from_db_messages_empty() {
+        let turns = build_turns_from_db_messages(&[]);
+        assert!(turns.is_empty());
+    }
 }

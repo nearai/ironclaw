@@ -89,7 +89,7 @@ pub fn post_encrypted(
 
 /// HTTP POST with raw binary body via the WASM host's http-request capability.
 fn http_post_binary(url: &str, body: &[u8]) -> Result<Vec<u8>, String> {
-    let resp = host::http_request("POST", url, "{}", Some(body))?;
+    let resp = host::http_request("POST", url, "{}", Some(body), None)?;
 
     if resp.status < 200 || resp.status >= 300 {
         let body_text = String::from_utf8_lossy(&resp.body);

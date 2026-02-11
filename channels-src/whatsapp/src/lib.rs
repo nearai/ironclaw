@@ -361,6 +361,7 @@ impl Guest for WhatsAppChannel {
             &api_url,
             &headers.to_string(),
             Some(&payload_bytes),
+            None,
         );
 
         match result {

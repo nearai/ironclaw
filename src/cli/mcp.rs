@@ -13,9 +13,7 @@ use crate::secrets::{PostgresSecretsStore, SecretsCrypto, SecretsStore};
 use crate::tools::mcp::{
     McpClient, McpServerConfig, McpSessionManager, OAuthConfig,
     auth::{authorize_mcp_server, is_authenticated},
-    config::{
-        add_mcp_server, get_mcp_server, load_mcp_servers, remove_mcp_server, save_mcp_servers,
-    },
+    config::{self, McpServersFile},
 };
 
 #[derive(Subcommand, Debug, Clone)]
@@ -173,8 +171,11 @@ async fn add_server(
     // Validate
     config.validate()?;
 
-    // Save
-    add_mcp_server(config).await?;
+    // Save (DB if available, else disk)
+    let store = connect_store().await;
+    let mut servers = load_servers(store.as_ref()).await?;
+    servers.upsert(config);
+    save_servers(store.as_ref(), &servers).await?;
 
     println!();
     println!("  ✓ Added MCP server '{}'", name);
@@ -192,7 +193,12 @@ async fn add_server(
 
 /// Remove an MCP server.
 async fn remove_server(name: String) -> anyhow::Result<()> {
-    remove_mcp_server(&name).await?;
+    let store = connect_store().await;
+    let mut servers = load_servers(store.as_ref()).await?;
+    if !servers.remove(&name) {
+        anyhow::bail!("Server '{}' not found", name);
+    }
+    save_servers(store.as_ref(), &servers).await?;
 
     println!();
     println!("  ✓ Removed MCP server '{}'", name);
@@ -203,7 +209,8 @@ async fn remove_server(name: String) -> anyhow::Result<()> {
 
 /// List configured MCP servers.
 async fn list_servers(verbose: bool) -> anyhow::Result<()> {
-    let servers = load_mcp_servers().await?;
+    let store = connect_store().await;
+    let servers = load_servers(store.as_ref()).await?;
 
     if servers.servers.is_empty() {
         println!();
@@ -261,7 +268,12 @@ async fn list_servers(verbose: bool) -> anyhow::Result<()> {
 /// Authenticate with an MCP server.
 async fn auth_server(name: String, user_id: String) -> anyhow::Result<()> {
     // Get server config
-    let server = get_mcp_server(&name).await?;
+    let store = connect_store().await;
+    let servers = load_servers(store.as_ref()).await?;
+    let server = servers
+        .get(&name)
+        .cloned()
+        .ok_or_else(|| anyhow::anyhow!("Server '{}' not found", name))?;
 
     // Initialize secrets store
     let secrets = get_secrets_store().await?;
@@ -329,7 +341,12 @@ async fn auth_server(name: String, user_id: String) -> anyhow::Result<()> {
 /// Test connection to an MCP server.
 async fn test_server(name: String, user_id: String) -> anyhow::Result<()> {
     // Get server config
-    let server = get_mcp_server(&name).await?;
+    let store = connect_store().await;
+    let servers = load_servers(store.as_ref()).await?;
+    let server = servers
+        .get(&name)
+        .cloned()
+        .ok_or_else(|| anyhow::anyhow!("Server '{}' not found", name))?;
 
     println!();
     println!("  Testing connection to '{}'...", name);
@@ -420,7 +437,8 @@ async fn test_server(name: String, user_id: String) -> anyhow::Result<()> {
 
 /// Toggle server enabled/disabled state.
 async fn toggle_server(name: String, enable: bool, disable: bool) -> anyhow::Result<()> {
-    let mut servers = load_mcp_servers().await?;
+    let store = connect_store().await;
+    let mut servers = load_servers(store.as_ref()).await?;
 
     let server = servers
         .get_mut(&name)
@@ -435,7 +453,7 @@ async fn toggle_server(name: String, enable: bool, disable: bool) -> anyhow::Res
     };
 
     server.enabled = new_state;
-    save_mcp_servers(&servers).await?;
+    save_servers(store.as_ref(), &servers).await?;
 
     let status = if new_state { "enabled" } else { "disabled" };
     println!();
@@ -443,6 +461,37 @@ async fn toggle_server(name: String, enable: bool, disable: bool) -> anyhow::Res
     println!();
 
     Ok(())
+}
+
+const DEFAULT_USER_ID: &str = "default";
+
+/// Try to connect to the database store for DB-backed config.
+async fn connect_store() -> Option<Store> {
+    let config = Config::from_env().ok()?;
+    let store = Store::new(&config.database).await.ok()?;
+    store.run_migrations().await.ok()?;
+    Some(store)
+}
+
+/// Load MCP servers (DB if available, else disk).
+async fn load_servers(store: Option<&Store>) -> Result<McpServersFile, config::ConfigError> {
+    if let Some(store) = store {
+        config::load_mcp_servers_from_db(store, DEFAULT_USER_ID).await
+    } else {
+        config::load_mcp_servers().await
+    }
+}
+
+/// Save MCP servers (DB if available, else disk).
+async fn save_servers(
+    store: Option<&Store>,
+    servers: &McpServersFile,
+) -> Result<(), config::ConfigError> {
+    if let Some(store) = store {
+        config::save_mcp_servers_to_db(store, DEFAULT_USER_ID, servers).await
+    } else {
+        config::save_mcp_servers(servers).await
+    }
 }
 
 /// Initialize and return the secrets store.

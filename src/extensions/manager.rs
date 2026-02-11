@@ -23,9 +23,7 @@ use crate::tools::mcp::auth::{
     PkceChallenge, authorize_mcp_server, build_authorization_url, discover_full_oauth_metadata,
     find_available_port, is_authenticated, register_client,
 };
-use crate::tools::mcp::config::{
-    McpServerConfig, add_mcp_server, get_mcp_server, load_mcp_servers, remove_mcp_server,
-};
+use crate::tools::mcp::config::McpServerConfig;
 use crate::tools::mcp::session::McpSessionManager;
 use crate::tools::wasm::{WasmToolLoader, WasmToolRuntime, discover_tools};
 
@@ -58,6 +56,8 @@ pub struct ExtensionManager {
     /// Tunnel URL for remote OAuth callbacks (used in future iterations).
     _tunnel_url: Option<String>,
     user_id: String,
+    /// Optional database store for DB-backed MCP config.
+    store: Option<Arc<crate::history::Store>>,
 }
 
 impl ExtensionManager {
@@ -71,6 +71,7 @@ impl ExtensionManager {
         wasm_channels_dir: PathBuf,
         tunnel_url: Option<String>,
         user_id: String,
+        store: Option<Arc<crate::history::Store>>,
     ) -> Self {
         Self {
             registry: ExtensionRegistry::new(),
@@ -85,6 +86,7 @@ impl ExtensionManager {
             pending_auth: RwLock::new(HashMap::new()),
             _tunnel_url: tunnel_url,
             user_id,
+            store,
         }
     }
 
@@ -191,7 +193,7 @@ impl ExtensionManager {
 
         // List MCP servers
         if kind_filter.is_none() || kind_filter == Some(ExtensionKind::McpServer) {
-            match load_mcp_servers().await {
+            match self.load_mcp_servers().await {
                 Ok(servers) => {
                     for server in &servers.servers {
                         let authenticated =
@@ -304,7 +306,7 @@ impl ExtensionManager {
                 self.mcp_clients.write().await.remove(name);
 
                 // Remove from config
-                remove_mcp_server(name)
+                self.remove_mcp_server(name)
                     .await
                     .map_err(|e| ExtensionError::Config(e.to_string()))?;
 
@@ -339,6 +341,54 @@ impl ExtensionManager {
                 "Channel removal requires restart. Delete the .wasm file from ~/.ironclaw/channels/ and restart."
                     .to_string(),
             )),
+        }
+    }
+
+    // ── MCP config helpers (DB with disk fallback) ─────────────────────
+
+    async fn load_mcp_servers(
+        &self,
+    ) -> Result<crate::tools::mcp::config::McpServersFile, crate::tools::mcp::config::ConfigError>
+    {
+        if let Some(ref store) = self.store {
+            crate::tools::mcp::config::load_mcp_servers_from_db(store, &self.user_id).await
+        } else {
+            crate::tools::mcp::config::load_mcp_servers().await
+        }
+    }
+
+    async fn get_mcp_server(
+        &self,
+        name: &str,
+    ) -> Result<McpServerConfig, crate::tools::mcp::config::ConfigError> {
+        let servers = self.load_mcp_servers().await?;
+        servers.get(name).cloned().ok_or_else(|| {
+            crate::tools::mcp::config::ConfigError::ServerNotFound {
+                name: name.to_string(),
+            }
+        })
+    }
+
+    async fn add_mcp_server(
+        &self,
+        config: McpServerConfig,
+    ) -> Result<(), crate::tools::mcp::config::ConfigError> {
+        config.validate()?;
+        if let Some(ref store) = self.store {
+            crate::tools::mcp::config::add_mcp_server_db(store, &self.user_id, config).await
+        } else {
+            crate::tools::mcp::config::add_mcp_server(config).await
+        }
+    }
+
+    async fn remove_mcp_server(
+        &self,
+        name: &str,
+    ) -> Result<(), crate::tools::mcp::config::ConfigError> {
+        if let Some(ref store) = self.store {
+            crate::tools::mcp::config::remove_mcp_server_db(store, &self.user_id, name).await
+        } else {
+            crate::tools::mcp::config::remove_mcp_server(name).await
         }
     }
 
@@ -381,7 +431,7 @@ impl ExtensionManager {
         url: &str,
     ) -> Result<InstallResult, ExtensionError> {
         // Check if already installed
-        if get_mcp_server(name).await.is_ok() {
+        if self.get_mcp_server(name).await.is_ok() {
             return Err(ExtensionError::AlreadyInstalled(name.to_string()));
         }
 
@@ -390,7 +440,7 @@ impl ExtensionManager {
             .validate()
             .map_err(|e| ExtensionError::InvalidUrl(e.to_string()))?;
 
-        add_mcp_server(config)
+        self.add_mcp_server(config)
             .await
             .map_err(|e| ExtensionError::Config(e.to_string()))?;
 
@@ -465,7 +515,8 @@ impl ExtensionManager {
         name: &str,
         token: Option<&str>,
     ) -> Result<AuthResult, ExtensionError> {
-        let server = get_mcp_server(name)
+        let server = self
+            .get_mcp_server(name)
             .await
             .map_err(|e| ExtensionError::NotInstalled(e.to_string()))?;
 
@@ -784,7 +835,8 @@ impl ExtensionManager {
             }
         }
 
-        let server = get_mcp_server(name)
+        let server = self
+            .get_mcp_server(name)
             .await
             .map_err(|e| ExtensionError::NotInstalled(e.to_string()))?;
 
@@ -893,7 +945,7 @@ impl ExtensionManager {
     /// Determine what kind of installed extension this is.
     async fn determine_installed_kind(&self, name: &str) -> Result<ExtensionKind, ExtensionError> {
         // Check MCP servers first
-        if get_mcp_server(name).await.is_ok() {
+        if self.get_mcp_server(name).await.is_ok() {
             return Ok(ExtensionKind::McpServer);
         }
 

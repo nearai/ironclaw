@@ -45,7 +45,7 @@ fn slack_api_call(method: &str, endpoint: &str, body: Option<&str>) -> Result<St
         &format!("Slack API: {} {}", method, endpoint),
     );
 
-    let response = host::http_request(method, &url, headers, body_bytes.as_deref())?;
+    let response = host::http_request(method, &url, headers, body_bytes.as_deref(), None)?;
 
     if response.status < 200 || response.status >= 300 {
         return Err(format!(

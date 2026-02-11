@@ -21,6 +21,8 @@ pub struct ReasoningContext {
     pub job_description: Option<String>,
     /// Current state description.
     pub current_state: Option<String>,
+    /// Opaque metadata forwarded to the LLM provider (e.g. thread_id for chaining).
+    pub metadata: std::collections::HashMap<String, String>,
 }
 
 impl ReasoningContext {
@@ -31,6 +33,7 @@ impl ReasoningContext {
             available_tools: Vec::new(),
             job_description: None,
             current_state: None,
+            metadata: std::collections::HashMap::new(),
         }
     }
 
@@ -55,6 +58,12 @@ impl ReasoningContext {
     /// Set job description.
     pub fn with_job(mut self, description: impl Into<String>) -> Self {
         self.job_description = Some(description.into());
+        self
+    }
+
+    /// Set metadata (forwarded to the LLM provider).
+    pub fn with_metadata(mut self, metadata: std::collections::HashMap<String, String>) -> Self {
+        self.metadata = metadata;
         self
     }
 }
@@ -114,7 +123,12 @@ pub enum RespondResult {
     /// A text response (no tools needed).
     Text(String),
     /// The model wants to call tools. Caller should execute them and call back.
-    ToolCalls(Vec<ToolCall>),
+    /// Includes the optional content from the assistant message (some models
+    /// include explanatory text alongside tool calls).
+    ToolCalls {
+        tool_calls: Vec<ToolCall>,
+        content: Option<String>,
+    },
 }
 
 /// Reasoning engine for the agent.
@@ -192,10 +206,11 @@ impl Reasoning {
             return Ok(vec![]);
         }
 
-        let request =
+        let mut request =
             ToolCompletionRequest::new(context.messages.clone(), context.available_tools.clone())
                 .with_max_tokens(1024)
                 .with_tool_choice("auto");
+        request.metadata = context.metadata.clone();
 
         let response = self.llm.complete_with_tools(request).await?;
 
@@ -271,7 +286,9 @@ Respond in JSON format:
     pub async fn respond(&self, context: &ReasoningContext) -> Result<String, LlmError> {
         match self.respond_with_tools(context).await? {
             RespondResult::Text(text) => Ok(text),
-            RespondResult::ToolCalls(calls) => {
+            RespondResult::ToolCalls {
+                tool_calls: calls, ..
+            } => {
                 // Format tool calls as text (legacy behavior for non-agentic callers)
                 let tool_info: Vec<String> = calls
                     .iter()
@@ -298,28 +315,49 @@ Respond in JSON format:
 
         // If we have tools, use tool completion mode
         if !context.available_tools.is_empty() {
-            let request = ToolCompletionRequest::new(messages, context.available_tools.clone())
+            let mut request = ToolCompletionRequest::new(messages, context.available_tools.clone())
                 .with_max_tokens(4096)
                 .with_temperature(0.7)
                 .with_tool_choice("auto");
+            request.metadata = context.metadata.clone();
 
             let response = self.llm.complete_with_tools(request).await?;
 
             // If there were tool calls, return them for execution
             if !response.tool_calls.is_empty() {
-                return Ok(RespondResult::ToolCalls(response.tool_calls));
+                return Ok(RespondResult::ToolCalls {
+                    tool_calls: response.tool_calls,
+                    content: response.content,
+                });
             }
 
             let content = response
                 .content
                 .unwrap_or_else(|| "I'm not sure how to respond to that.".to_string());
 
+            // Some models (e.g. GLM-4.7) emit tool calls as XML tags in content
+            // instead of using the structured tool_calls field. Try to recover
+            // them before giving up and returning plain text.
+            let recovered = recover_tool_calls_from_content(&content, &context.available_tools);
+            if !recovered.is_empty() {
+                let cleaned = clean_response(&content);
+                return Ok(RespondResult::ToolCalls {
+                    tool_calls: recovered,
+                    content: if cleaned.is_empty() {
+                        None
+                    } else {
+                        Some(cleaned)
+                    },
+                });
+            }
+
             Ok(RespondResult::Text(clean_response(&content)))
         } else {
             // No tools, use simple completion
-            let request = CompletionRequest::new(messages)
+            let mut request = CompletionRequest::new(messages)
                 .with_max_tokens(4096)
                 .with_temperature(0.7);
+            request.metadata = context.metadata.clone();
 
             let response = self.llm.complete(request).await?;
             Ok(RespondResult::Text(clean_response(&response.content)))
@@ -462,47 +500,178 @@ fn extract_json(text: &str) -> Option<&str> {
     }
 }
 
-/// Clean up LLM response by stripping thinking tags and reasoning patterns.
+/// Clean up LLM response by stripping model-internal tags and reasoning patterns.
+///
+/// Some models (GLM-4.7, etc.) emit XML-tagged internal state like
+/// Try to extract tool calls from content text where the model emitted them
+/// as XML tags instead of using the structured tool_calls field.
+///
+/// Handles these formats:
+/// - `<tool_call>tool_name</tool_call>` (bare name)
+/// - `<tool_call>{"name":"x","arguments":{}}</tool_call>` (JSON)
+/// - `<|tool_call|>...<|/tool_call|>` (pipe-delimited variant)
+/// - `<function_call>...</function_call>` (function_call variant)
+///
+/// Only returns calls whose name matches an available tool.
+fn recover_tool_calls_from_content(
+    content: &str,
+    available_tools: &[ToolDefinition],
+) -> Vec<ToolCall> {
+    let tool_names: std::collections::HashSet<&str> =
+        available_tools.iter().map(|t| t.name.as_str()).collect();
+    let mut calls = Vec::new();
+
+    for (open, close) in &[
+        ("<tool_call>", "</tool_call>"),
+        ("<|tool_call|>", "<|/tool_call|>"),
+        ("<function_call>", "</function_call>"),
+        ("<|function_call|>", "<|/function_call|>"),
+    ] {
+        let mut remaining = content;
+        while let Some(start) = remaining.find(open) {
+            let inner_start = start + open.len();
+            let after = &remaining[inner_start..];
+            let Some(end) = after.find(close) else {
+                break;
+            };
+            let inner = after[..end].trim();
+            remaining = &after[end + close.len()..];
+
+            if inner.is_empty() {
+                continue;
+            }
+
+            // Try JSON first: {"name":"x","arguments":{}}
+            if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(inner) {
+                if let Some(name) = parsed.get("name").and_then(|v| v.as_str()) {
+                    if tool_names.contains(name) {
+                        let arguments = parsed
+                            .get("arguments")
+                            .cloned()
+                            .unwrap_or(serde_json::Value::Object(Default::default()));
+                        calls.push(ToolCall {
+                            id: format!("recovered_{}", calls.len()),
+                            name: name.to_string(),
+                            arguments,
+                        });
+                        continue;
+                    }
+                }
+            }
+
+            // Bare tool name (e.g. "<tool_call>tool_list</tool_call>")
+            let name = inner.trim();
+            if tool_names.contains(name) {
+                calls.push(ToolCall {
+                    id: format!("recovered_{}", calls.len()),
+                    name: name.to_string(),
+                    arguments: serde_json::Value::Object(Default::default()),
+                });
+            }
+        }
+    }
+
+    calls
+}
+
+/// `<tool_call>tool_list</tool_call>` or `<|tool_call|>` in the content field
+/// instead of using the standard OpenAI tool_calls array. We strip all of
+/// these before the response reaches channels/users.
 fn clean_response(text: &str) -> String {
-    let text = strip_thinking_tags(text);
+    let text = strip_internal_tags(text);
     strip_reasoning_patterns(&text)
 }
 
-/// Strip `<thinking>...</thinking>` blocks from LLM output.
+/// Tags that are model-internal and should never reach users.
+const INTERNAL_TAGS: &[&str] = &["thinking", "tool_call", "function_call", "tool_calls"];
+
+/// Strip all model-internal XML tags from LLM output.
 ///
-/// Some models (especially Claude with extended thinking) include internal
-/// reasoning in thinking tags. We strip these before showing to users.
-fn strip_thinking_tags(text: &str) -> String {
+/// Handles standard XML tags (`<tag>...</tag>`) and pipe-delimited variants
+/// (`<|tag|>...<|/tag|>`) used by some models (e.g. GLM-4.7).
+fn strip_internal_tags(text: &str) -> String {
+    let mut result = text.to_string();
+    for tag in INTERNAL_TAGS {
+        result = strip_xml_tag(&result, tag);
+        result = strip_pipe_tag(&result, tag);
+    }
+    // Collapse triple+ newlines left behind by removed blocks
+    while result.contains("\n\n\n") {
+        result = result.replace("\n\n\n", "\n\n");
+    }
+    result.trim().to_string()
+}
+
+/// Strip `<tag>...</tag>` and `<tag ...>...</tag>` blocks from text.
+fn strip_xml_tag(text: &str, tag: &str) -> String {
+    let open_exact = format!("<{}>", tag);
+    let open_prefix = format!("<{} ", tag); // for <tag attr="...">
+    let close = format!("</{}>", tag);
+
     let mut result = String::with_capacity(text.len());
     let mut remaining = text;
 
-    while let Some(start) = remaining.find("<thinking>") {
+    loop {
+        // Find the next opening tag (exact or with attributes)
+        let exact_pos = remaining.find(&open_exact);
+        let prefix_pos = remaining.find(&open_prefix);
+        let start = match (exact_pos, prefix_pos) {
+            (Some(a), Some(b)) => a.min(b),
+            (Some(a), None) => a,
+            (None, Some(b)) => b,
+            (None, None) => break,
+        };
+
         // Add everything before the tag
         result.push_str(&remaining[..start]);
 
+        // Find the end of the opening tag (the closing >)
+        let after_open = &remaining[start..];
+        let open_end = match after_open.find('>') {
+            Some(pos) => start + pos + 1,
+            None => break, // malformed, stop
+        };
+
         // Find the closing tag
-        if let Some(end_offset) = remaining[start..].find("</thinking>") {
-            // Skip past the closing tag (start + offset + tag length)
-            let end = start + end_offset + "</thinking>".len();
+        if let Some(close_offset) = remaining[open_end..].find(&close) {
+            let end = open_end + close_offset + close.len();
             remaining = &remaining[end..];
         } else {
-            // No closing tag found, discard everything from here
-            // (malformed, but handle gracefully by not including the unclosed tag)
+            // No closing tag, discard from here (malformed)
             remaining = "";
             break;
         }
     }
 
-    // Add any remaining content after the last thinking block
     result.push_str(remaining);
+    result
+}
 
-    // Clean up any double newlines left behind
-    let mut cleaned = result.trim().to_string();
-    while cleaned.contains("\n\n\n") {
-        cleaned = cleaned.replace("\n\n\n", "\n\n");
+/// Strip `<|tag|>...<|/tag|>` pipe-delimited blocks from text.
+///
+/// Some models (e.g. certain Chinese LLMs) use this format instead of
+/// standard XML tags.
+fn strip_pipe_tag(text: &str, tag: &str) -> String {
+    let open = format!("<|{}|>", tag);
+    let close = format!("<|/{}|>", tag);
+
+    let mut result = String::with_capacity(text.len());
+    let mut remaining = text;
+
+    while let Some(start) = remaining.find(&open) {
+        result.push_str(&remaining[..start]);
+
+        if let Some(close_offset) = remaining[start..].find(&close) {
+            let end = start + close_offset + close.len();
+            remaining = &remaining[end..];
+        } else {
+            remaining = "";
+            break;
+        }
     }
 
-    cleaned
+    result.push_str(remaining);
+    result
 }
 
 /// Strip any remaining reasoning that wasn't in proper <thinking> tags.
@@ -574,7 +743,7 @@ That's my plan."#;
     #[test]
     fn test_strip_thinking_tags_basic() {
         let input = "<thinking>Let me think about this...</thinking>Hello, user!";
-        let output = strip_thinking_tags(input);
+        let output = strip_internal_tags(input);
         assert_eq!(output, "Hello, user!");
     }
 
@@ -582,7 +751,7 @@ That's my plan."#;
     fn test_strip_thinking_tags_multiple() {
         let input =
             "<thinking>First thought</thinking>Hello<thinking>Second thought</thinking> world!";
-        let output = strip_thinking_tags(input);
+        let output = strip_internal_tags(input);
         assert_eq!(output, "Hello world!");
     }
 
@@ -594,14 +763,14 @@ I need to consider:
 2. How to respond
 </thinking>
 Here is my response to your question."#;
-        let output = strip_thinking_tags(input);
+        let output = strip_internal_tags(input);
         assert_eq!(output, "Here is my response to your question.");
     }
 
     #[test]
     fn test_strip_thinking_tags_no_tags() {
         let input = "Just a normal response without thinking tags.";
-        let output = strip_thinking_tags(input);
+        let output = strip_internal_tags(input);
         assert_eq!(output, "Just a normal response without thinking tags.");
     }
 
@@ -609,8 +778,75 @@ Here is my response to your question."#;
     fn test_strip_thinking_tags_unclosed() {
         // Malformed: unclosed tag should strip from there to end
         let input = "Hello <thinking>this never closes";
-        let output = strip_thinking_tags(input);
+        let output = strip_internal_tags(input);
         assert_eq!(output, "Hello");
+    }
+
+    #[test]
+    fn test_strip_tool_call_tags() {
+        // GLM-4.7 emits this garbage instead of using the tool_calls array
+        let input = "<tool_call>tool_list</tool_call>";
+        let output = strip_internal_tags(input);
+        assert_eq!(output, "");
+    }
+
+    #[test]
+    fn test_strip_tool_call_with_surrounding_text() {
+        let input = "Here is my answer.\n\n<tool_call>\n{\"name\": \"search\", \"arguments\": {}}\n</tool_call>";
+        let output = strip_internal_tags(input);
+        assert_eq!(output, "Here is my answer.");
+    }
+
+    #[test]
+    fn test_strip_multiple_internal_tags() {
+        let input = "<thinking>Let me think</thinking>Hello!\n<tool_call>some_tool</tool_call>";
+        let output = strip_internal_tags(input);
+        assert_eq!(output, "Hello!");
+    }
+
+    #[test]
+    fn test_strip_function_call_tags() {
+        let input = "Response text<function_call>{\"name\": \"foo\"}</function_call>";
+        let output = strip_internal_tags(input);
+        assert_eq!(output, "Response text");
+    }
+
+    #[test]
+    fn test_strip_tool_calls_plural() {
+        let input = "<tool_calls>[{\"id\": \"1\"}]</tool_calls>Actual response.";
+        let output = strip_internal_tags(input);
+        assert_eq!(output, "Actual response.");
+    }
+
+    #[test]
+    fn test_strip_pipe_delimited_tags() {
+        let input = "<|tool_call|>{\"name\": \"search\"}<|/tool_call|>Hello!";
+        let output = strip_internal_tags(input);
+        assert_eq!(output, "Hello!");
+    }
+
+    #[test]
+    fn test_strip_pipe_delimited_thinking() {
+        let input = "<|thinking|>reasoning here<|/thinking|>The answer is 42.";
+        let output = strip_internal_tags(input);
+        assert_eq!(output, "The answer is 42.");
+    }
+
+    #[test]
+    fn test_strip_xml_tag_with_attributes() {
+        let input = "<tool_call type=\"function\">search()</tool_call>Done.";
+        let output = strip_internal_tags(input);
+        assert_eq!(output, "Done.");
+    }
+
+    #[test]
+    fn test_clean_response_preserves_normal_content() {
+        let input = "The function tool_call_handler works great. No tags here!";
+        let output = clean_response(input);
+        assert_eq!(
+            output,
+            "The function tool_call_handler works great. No tags here!"
+        );
     }
 
     #[test]
@@ -659,5 +895,93 @@ Here is my response to your question."#;
         let input = "<thinking>Internal thought</thinking>Some text.\n\nHere's the answer.";
         let output = clean_response(input);
         assert_eq!(output, "Here's the answer.");
+    }
+
+    // -- recover_tool_calls_from_content tests --
+
+    fn make_tools(names: &[&str]) -> Vec<ToolDefinition> {
+        names
+            .iter()
+            .map(|n| ToolDefinition {
+                name: n.to_string(),
+                description: String::new(),
+                parameters: serde_json::json!({}),
+            })
+            .collect()
+    }
+
+    #[test]
+    fn test_recover_bare_tool_name() {
+        let tools = make_tools(&["tool_list", "tool_auth"]);
+        let content = "<tool_call>tool_list</tool_call>";
+        let calls = recover_tool_calls_from_content(content, &tools);
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].name, "tool_list");
+        assert_eq!(calls[0].arguments, serde_json::json!({}));
+    }
+
+    #[test]
+    fn test_recover_json_tool_call() {
+        let tools = make_tools(&["memory_search"]);
+        let content =
+            r#"<tool_call>{"name": "memory_search", "arguments": {"query": "test"}}</tool_call>"#;
+        let calls = recover_tool_calls_from_content(content, &tools);
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].name, "memory_search");
+        assert_eq!(calls[0].arguments, serde_json::json!({"query": "test"}));
+    }
+
+    #[test]
+    fn test_recover_pipe_delimited() {
+        let tools = make_tools(&["tool_list"]);
+        let content = "<|tool_call|>tool_list<|/tool_call|>";
+        let calls = recover_tool_calls_from_content(content, &tools);
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].name, "tool_list");
+    }
+
+    #[test]
+    fn test_recover_unknown_tool_ignored() {
+        let tools = make_tools(&["tool_list"]);
+        let content = "<tool_call>nonexistent_tool</tool_call>";
+        let calls = recover_tool_calls_from_content(content, &tools);
+        assert!(calls.is_empty());
+    }
+
+    #[test]
+    fn test_recover_no_tags() {
+        let tools = make_tools(&["tool_list"]);
+        let content = "Just a normal response.";
+        let calls = recover_tool_calls_from_content(content, &tools);
+        assert!(calls.is_empty());
+    }
+
+    #[test]
+    fn test_recover_multiple_tool_calls() {
+        let tools = make_tools(&["tool_list", "tool_auth"]);
+        let content = "<tool_call>tool_list</tool_call>\n<tool_call>tool_auth</tool_call>";
+        let calls = recover_tool_calls_from_content(content, &tools);
+        assert_eq!(calls.len(), 2);
+        assert_eq!(calls[0].name, "tool_list");
+        assert_eq!(calls[1].name, "tool_auth");
+    }
+
+    #[test]
+    fn test_recover_function_call_variant() {
+        let tools = make_tools(&["shell"]);
+        let content =
+            r#"<function_call>{"name": "shell", "arguments": {"cmd": "ls"}}</function_call>"#;
+        let calls = recover_tool_calls_from_content(content, &tools);
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].name, "shell");
+    }
+
+    #[test]
+    fn test_recover_with_surrounding_text() {
+        let tools = make_tools(&["tool_list"]);
+        let content = "Let me check.\n\n<tool_call>tool_list</tool_call>\n\nDone.";
+        let calls = recover_tool_calls_from_content(content, &tools);
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].name, "tool_list");
     }
 }

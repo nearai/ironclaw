@@ -7,7 +7,9 @@ use tokio::sync::RwLock;
 
 use crate::context::ContextManager;
 use crate::extensions::ExtensionManager;
+use crate::history::Store;
 use crate::llm::{LlmProvider, ToolDefinition};
+use crate::orchestrator::job_manager::ContainerJobManager;
 use crate::safety::SafetyLayer;
 use crate::tools::builder::{BuildSoftwareTool, BuilderConfig, LlmSoftwareBuilder};
 use crate::tools::builtin::{
@@ -16,7 +18,7 @@ use crate::tools::builtin::{
     ReadFileTool, ShellTool, TimeTool, ToolActivateTool, ToolAuthTool, ToolInstallTool,
     ToolListTool, ToolRemoveTool, ToolSearchTool, WriteFileTool,
 };
-use crate::tools::tool::Tool;
+use crate::tools::tool::{Tool, ToolDomain};
 use crate::tools::wasm::{
     Capabilities, ResourceLimits, WasmError, WasmStorageError, WasmToolRuntime, WasmToolStore,
     WasmToolWrapper,
@@ -120,6 +122,39 @@ impl ToolRegistry {
         tracing::info!("Registered {} built-in tools", self.count());
     }
 
+    /// Register only orchestrator-domain tools (safe for the main process).
+    ///
+    /// This registers tools that don't touch the filesystem or run shell commands:
+    /// echo, time, json, http. Use this when `allow_local_tools = false` and
+    /// container-domain tools should only be available inside sandboxed containers.
+    pub fn register_orchestrator_tools(&self) {
+        self.register_builtin_tools();
+        // register_builtin_tools already only registers orchestrator-domain tools
+    }
+
+    /// Register container-domain tools (filesystem, shell, code).
+    ///
+    /// These tools are intended to run inside sandboxed Docker containers.
+    /// Call this in the worker process, not the orchestrator (unless `allow_local_tools = true`).
+    pub fn register_container_tools(&self) {
+        self.register_dev_tools();
+    }
+
+    /// Get tool definitions filtered by domain.
+    pub async fn tool_definitions_for_domain(&self, domain: ToolDomain) -> Vec<ToolDefinition> {
+        self.tools
+            .read()
+            .await
+            .values()
+            .filter(|tool| tool.domain() == domain)
+            .map(|tool| ToolDefinition {
+                name: tool.name().to_string(),
+                description: tool.description().to_string(),
+                parameters: tool.parameters_schema(),
+            })
+            .collect()
+    }
+
     /// Register development tools for building software.
     ///
     /// These tools provide shell access, file operations, and code editing
@@ -151,9 +186,19 @@ impl ToolRegistry {
     /// Register job management tools.
     ///
     /// Job tools allow the LLM to create, list, check status, and cancel jobs.
-    /// These enable natural language job management without hardcoded intent parsing.
-    pub fn register_job_tools(&self, context_manager: Arc<ContextManager>) {
-        self.register_sync(Arc::new(CreateJobTool::new(Arc::clone(&context_manager))));
+    /// When sandbox deps are provided, `create_job` automatically delegates to
+    /// Docker containers. Otherwise it creates in-memory jobs via ContextManager.
+    pub fn register_job_tools(
+        &self,
+        context_manager: Arc<ContextManager>,
+        job_manager: Option<Arc<ContainerJobManager>>,
+        store: Option<Arc<Store>>,
+    ) {
+        let mut create_tool = CreateJobTool::new(Arc::clone(&context_manager));
+        if let Some(jm) = job_manager {
+            create_tool = create_tool.with_sandbox(jm, store);
+        }
+        self.register_sync(Arc::new(create_tool));
         self.register_sync(Arc::new(ListJobsTool::new(Arc::clone(&context_manager))));
         self.register_sync(Arc::new(JobStatusTool::new(Arc::clone(&context_manager))));
         self.register_sync(Arc::new(CancelJobTool::new(context_manager)));
@@ -172,6 +217,36 @@ impl ToolRegistry {
         self.register_sync(Arc::new(ToolListTool::new(Arc::clone(&manager))));
         self.register_sync(Arc::new(ToolRemoveTool::new(manager)));
         tracing::info!("Registered 6 extension management tools");
+    }
+
+    /// Register routine management tools.
+    ///
+    /// These allow the LLM to create, list, update, delete, and view history
+    /// of routines (scheduled and event-driven tasks).
+    pub fn register_routine_tools(
+        &self,
+        store: Arc<Store>,
+        engine: Arc<crate::agent::routine_engine::RoutineEngine>,
+    ) {
+        use crate::tools::builtin::{
+            RoutineCreateTool, RoutineDeleteTool, RoutineHistoryTool, RoutineListTool,
+            RoutineUpdateTool,
+        };
+        self.register_sync(Arc::new(RoutineCreateTool::new(
+            Arc::clone(&store),
+            Arc::clone(&engine),
+        )));
+        self.register_sync(Arc::new(RoutineListTool::new(Arc::clone(&store))));
+        self.register_sync(Arc::new(RoutineUpdateTool::new(
+            Arc::clone(&store),
+            Arc::clone(&engine),
+        )));
+        self.register_sync(Arc::new(RoutineDeleteTool::new(
+            Arc::clone(&store),
+            Arc::clone(&engine),
+        )));
+        self.register_sync(Arc::new(RoutineHistoryTool::new(store)));
+        tracing::info!("Registered 5 routine management tools");
     }
 
     /// Register the software builder tool.

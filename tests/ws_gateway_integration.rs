@@ -41,11 +41,13 @@ async fn start_test_server() -> (
         msg_tx: tokio::sync::RwLock::new(Some(agent_tx)),
         sse: SseManager::new(),
         workspace: None,
-        context_manager: None,
         session_manager: None,
         log_broadcaster: None,
         extension_manager: None,
         tool_registry: None,
+        store: None,
+        job_manager: None,
+        prompt_queue: None,
         user_id: "test-user".to_string(),
         shutdown_tx: tokio::sync::RwLock::new(None),
         ws_tracker: Some(Arc::new(WsConnectionTracker::new())),
@@ -162,6 +164,7 @@ async fn test_ws_thinking_event() {
 
     state.sse.broadcast(SseEvent::Thinking {
         message: "analyzing...".to_string(),
+        thread_id: None,
     });
 
     let text = recv_text(&mut ws).await;
@@ -286,13 +289,16 @@ async fn test_ws_multiple_events_in_sequence() {
     // Broadcast multiple events rapidly
     state.sse.broadcast(SseEvent::Thinking {
         message: "step 1".to_string(),
+        thread_id: None,
     });
     state.sse.broadcast(SseEvent::ToolStarted {
         name: "shell".to_string(),
+        thread_id: None,
     });
     state.sse.broadcast(SseEvent::ToolCompleted {
         name: "shell".to_string(),
         success: true,
+        thread_id: None,
     });
     state.sse.broadcast(SseEvent::Response {
         content: "done".to_string(),

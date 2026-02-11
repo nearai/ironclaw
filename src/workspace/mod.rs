@@ -442,6 +442,97 @@ impl Workspace {
         Ok(())
     }
 
+    // ==================== Seeding ====================
+
+    /// Seed any missing core identity files in the workspace.
+    ///
+    /// Called on every boot. Only creates files that don't already exist,
+    /// so user edits are never overwritten. Returns the number of files
+    /// created (0 if all core files already existed).
+    pub async fn seed_if_empty(&self) -> Result<usize, WorkspaceError> {
+        let seed_files: &[(&str, &str)] = &[
+            (
+                paths::README,
+                "# Workspace\n\n\
+                 This is your agent's persistent memory. Files here are indexed for search\n\
+                 and used to build the agent's context.\n\n\
+                 ## Structure\n\n\
+                 - `MEMORY.md` - Long-term notes and facts worth remembering\n\
+                 - `IDENTITY.md` - Agent name, nature, personality\n\
+                 - `SOUL.md` - Core values and principles\n\
+                 - `AGENTS.md` - Behavior instructions for the agent\n\
+                 - `USER.md` - Information about you (the user)\n\
+                 - `HEARTBEAT.md` - Periodic background task checklist\n\
+                 - `daily/` - Automatic daily session logs\n\
+                 - `context/` - Additional context documents\n\n\
+                 Edit these files to shape how your agent thinks and acts.",
+            ),
+            (
+                paths::MEMORY,
+                "# Memory\n\n\
+                 Long-term notes, decisions, and facts worth remembering.\n\
+                 The agent appends here during conversations.",
+            ),
+            (
+                paths::IDENTITY,
+                "# Identity\n\n\
+                 Name: IronClaw\n\
+                 Nature: A secure personal AI assistant\n\n\
+                 Edit this file to give your agent a custom name and personality.",
+            ),
+            (
+                paths::SOUL,
+                "# Core Values\n\n\
+                 - Protect user privacy and data security above all else\n\
+                 - Be honest about limitations and uncertainty\n\
+                 - Prefer action over lengthy deliberation\n\
+                 - Ask for clarification rather than guessing on important decisions\n\
+                 - Learn from mistakes and remember lessons",
+            ),
+            (
+                paths::AGENTS,
+                "# Agent Instructions\n\n\
+                 You are a personal AI assistant with access to tools and persistent memory.\n\n\
+                 ## Guidelines\n\n\
+                 - Always search memory before answering questions about prior conversations\n\
+                 - Write important facts and decisions to memory for future reference\n\
+                 - Use the daily log for session-level notes\n\
+                 - Be concise but thorough",
+            ),
+            (
+                paths::USER,
+                "# User Context\n\n\
+                 The agent will fill this in as it learns about you.\n\
+                 You can also edit this directly to provide context upfront.",
+            ),
+            (paths::HEARTBEAT, HEARTBEAT_SEED),
+        ];
+
+        let mut count = 0;
+        for (path, content) in seed_files {
+            // Skip files that already exist (never overwrite user edits)
+            match self.read(path).await {
+                Ok(_) => continue,
+                Err(WorkspaceError::DocumentNotFound { .. }) => {}
+                Err(e) => {
+                    tracing::warn!("Failed to check {}: {}", path, e);
+                    continue;
+                }
+            }
+
+            if let Err(e) = self.write(path, content).await {
+                tracing::warn!("Failed to seed {}: {}", path, e);
+            } else {
+                count += 1;
+            }
+        }
+
+        if count > 0 {
+            tracing::info!("Seeded {} workspace files", count);
+        }
+        Ok(count)
+    }
+
     /// Generate embeddings for chunks that don't have them yet.
     ///
     /// This is useful for backfilling embeddings after enabling the provider.

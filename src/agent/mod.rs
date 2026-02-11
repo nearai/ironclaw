@@ -6,6 +6,7 @@
 //! - Tool invocation with safety
 //! - Self-repair for stuck jobs
 //! - Proactive heartbeat execution
+//! - Routine-based scheduled and reactive jobs
 //! - Turn-based session management with undo
 //! - Context compaction for long conversations
 
@@ -14,6 +15,8 @@ pub mod compaction;
 pub mod context_monitor;
 mod heartbeat;
 mod router;
+pub mod routine;
+pub mod routine_engine;
 mod scheduler;
 mod self_repair;
 pub mod session;
@@ -28,6 +31,8 @@ pub use compaction::{CompactionResult, ContextCompactor};
 pub use context_monitor::{CompactionStrategy, ContextBreakdown, ContextMonitor};
 pub use heartbeat::{HeartbeatConfig, HeartbeatResult, HeartbeatRunner, spawn_heartbeat};
 pub use router::{MessageIntent, Router};
+pub use routine::{Routine, RoutineAction, RoutineRun, Trigger};
+pub use routine_engine::RoutineEngine;
 pub use scheduler::Scheduler;
 pub use self_repair::{BrokenTool, RepairResult, RepairTask, SelfRepair, StuckJob};
 pub use session::{PendingApproval, PendingAuth, Session, Thread, ThreadState, Turn, TurnState};

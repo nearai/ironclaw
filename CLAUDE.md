@@ -11,8 +11,13 @@
 - **Always available** - Multi-channel access with proactive background execution
 
 ### Features
-- **Multi-channel input**: TUI (Ratatui), HTTP webhooks, Telegram, WhatsApp, Slack (WASM channels)
+- **Multi-channel input**: TUI (Ratatui), HTTP webhooks, WASM channels (Telegram, Slack), web gateway
 - **Parallel job execution** with state machine and self-repair for stuck jobs
+- **Sandbox execution**: Docker container isolation with orchestrator/worker pattern
+- **Claude Code mode**: Delegate jobs to Claude CLI inside containers
+- **Routines**: Scheduled (cron) and reactive (event, webhook) task execution
+- **Web gateway**: Browser UI with SSE/WebSocket real-time streaming
+- **Extension management**: Install, auth, activate MCP/WASM extensions
 - **Extensible tools**: Built-in tools, WASM sandbox, MCP client, dynamic builder
 - **Persistent memory**: Workspace with hybrid search (FTS + vector via RRF)
 - **Prompt injection defense**: Sanitizer, validator, policy rules, leak detection
@@ -59,7 +64,9 @@ src/
 │   ├── context_monitor.rs # Memory pressure detection
 │   ├── undo.rs         # Turn-based undo/redo with checkpoints
 │   ├── submission.rs   # Submission parsing (undo, redo, compact, clear, etc.)
-│   └── task.rs         # Sub-task execution framework
+│   ├── task.rs         # Sub-task execution framework
+│   ├── routine.rs      # Routine types (Trigger, Action, Guardrails)
+│   └── routine_engine.rs # Routine execution (cron ticker, event matcher)
 │
 ├── channels/           # Multi-channel input
 │   ├── channel.rs      # Channel trait, IncomingMessage, OutgoingResponse
@@ -72,8 +79,33 @@ src/
 │   │   ├── overlay.rs  # Approval overlays
 │   │   └── composer.rs # Message composition
 │   ├── http.rs         # HTTP webhook (axum) with secret validation
-│   ├── slack.rs        # Stub
-│   └── telegram.rs     # Stub
+│   ├── repl.rs         # Simple REPL (for testing)
+│   ├── web/            # Web gateway (browser UI)
+│   │   ├── mod.rs      # Gateway builder, startup
+│   │   ├── server.rs   # Axum router, 40+ API endpoints
+│   │   ├── sse.rs      # SSE broadcast manager
+│   │   ├── ws.rs       # WebSocket gateway + connection tracking
+│   │   ├── types.rs    # Request/response types, SseEvent enum
+│   │   ├── auth.rs     # Bearer token auth middleware
+│   │   ├── log_layer.rs # Tracing layer for log streaming
+│   │   └── static/     # HTML, CSS, JS (single-page app)
+│   └── wasm/           # WASM channel runtime
+│       ├── mod.rs
+│       ├── bundled.rs  # Bundled channel discovery
+│       └── wrapper.rs  # Channel trait wrapper for WASM modules
+│
+├── orchestrator/       # Internal HTTP API for sandbox containers
+│   ├── mod.rs
+│   ├── api.rs          # Axum endpoints (LLM proxy, events, prompts)
+│   ├── auth.rs         # Per-job bearer token store
+│   └── job_manager.rs  # Container lifecycle (create, stop, cleanup)
+│
+├── worker/             # Runs inside Docker containers
+│   ├── mod.rs
+│   ├── runtime.rs      # Worker execution loop (tool calls, LLM)
+│   ├── claude_bridge.rs # Claude Code bridge (spawns claude CLI)
+│   ├── api.rs          # HTTP client to orchestrator
+│   └── proxy_llm.rs    # LlmProvider that proxies through orchestrator
 │
 ├── safety/             # Prompt injection defense
 │   ├── sanitizer.rs    # Pattern detection, content escaping
@@ -96,6 +128,9 @@ src/
 │   │   ├── file.rs     # ReadFile, WriteFile, ListDir, ApplyPatch
 │   │   ├── shell.rs    # Shell command execution
 │   │   ├── memory.rs   # Memory tools (search, write, read, tree)
+│   │   ├── job.rs      # CreateJob, ListJobs, JobStatus, CancelJob
+│   │   ├── routine.rs  # routine_create/list/update/delete/history
+│   │   ├── extension_tools.rs # Extension install/auth/activate/remove
 │   │   └── marketplace.rs, ecommerce.rs, taskrabbit.rs, restaurant.rs (stubs)
 │   ├── builder/        # Dynamic tool building
 │   │   ├── core.rs     # BuildRequirement, SoftwareType, Language
@@ -236,6 +271,30 @@ HEARTBEAT_ENABLED=true
 HEARTBEAT_INTERVAL_SECS=1800            # 30 minutes
 HEARTBEAT_NOTIFY_CHANNEL=tui
 HEARTBEAT_NOTIFY_USER=default
+
+# Web gateway
+GATEWAY_ENABLED=true
+GATEWAY_HOST=127.0.0.1
+GATEWAY_PORT=3001
+GATEWAY_AUTH_TOKEN=changeme           # Required for API access
+GATEWAY_USER_ID=default
+
+# Docker sandbox
+SANDBOX_ENABLED=true
+SANDBOX_IMAGE=ironclaw-worker:latest
+SANDBOX_MEMORY_LIMIT_MB=512
+SANDBOX_TIMEOUT_SECS=1800
+
+# Claude Code mode (runs inside sandbox containers)
+CLAUDE_CODE_ENABLED=false
+CLAUDE_CODE_MODEL=claude-sonnet-4-20250514
+CLAUDE_CODE_MAX_TURNS=50
+CLAUDE_CODE_CONFIG_DIR=/home/worker/.claude
+
+# Routines (scheduled/reactive execution)
+ROUTINES_ENABLED=true
+ROUTINES_CRON_INTERVAL=60            # Tick interval in seconds
+ROUTINES_MAX_CONCURRENT=3
 ```
 
 ### NEAR AI Provider
@@ -297,13 +356,14 @@ Key test patterns:
 
 ## Current Limitations / TODOs
 
-1. **Slack/Telegram channels** - Stubs only, need implementation
-2. **Domain-specific tools** - `marketplace.rs`, `restaurant.rs`, `taskrabbit.rs`, `ecommerce.rs` return placeholder responses; need real API integrations
-3. **Integration tests** - Need testcontainers setup for PostgreSQL
-4. **MCP stdio transport** - Only HTTP transport implemented
-5. **WIT bindgen integration** - Auto-extract tool description/schema from WASM modules (stubbed)
-6. **Capability granting after tool build** - Built tools get empty capabilities; need UX for granting HTTP/secrets access
-7. **Tool versioning workflow** - No version tracking or rollback for dynamically built tools
+1. **Domain-specific tools** - `marketplace.rs`, `restaurant.rs`, `taskrabbit.rs`, `ecommerce.rs` return placeholder responses; need real API integrations
+2. **Integration tests** - Need testcontainers setup for PostgreSQL
+3. **MCP stdio transport** - Only HTTP transport implemented
+4. **WIT bindgen integration** - Auto-extract tool description/schema from WASM modules (stubbed)
+5. **Capability granting after tool build** - Built tools get empty capabilities; need UX for granting HTTP/secrets access
+6. **Tool versioning workflow** - No version tracking or rollback for dynamically built tools
+7. **Webhook trigger endpoint** - Routines webhook trigger not yet exposed in web gateway
+8. **Full channel status view** - Gateway status widget exists, but no per-channel connection dashboard
 
 ### Completed
 
@@ -320,6 +380,13 @@ Key test patterns:
 - ✅ **Tool approval enforcement** - Tools with `requires_approval()` (shell, http, file write/patch, build_software) now gate execution, track auto-approved tools per session
 - ✅ **Tool definition refresh** - Tool definitions refreshed each iteration so newly built tools become visible in same session
 - ✅ **Worker tool call handling** - Uses `respond_with_tools()` to properly execute tool calls when `select_tools()` returns empty
+- ✅ **Gateway control plane** - Web gateway with 40+ API endpoints, SSE/WebSocket
+- ✅ **Web Control UI** - Browser-based dashboard with chat, memory, jobs, logs, extensions, routines
+- ✅ **Slack/Telegram channels** - Implemented as WASM tools
+- ✅ **Docker sandbox** - Orchestrator/worker containers with per-job auth
+- ✅ **Claude Code mode** - Delegate jobs to Claude CLI inside containers
+- ✅ **Routines system** - Cron, event, webhook, and manual triggers with guardrails
+- ✅ **Extension management** - Install, auth, activate MCP/WASM extensions via CLI and web UI
 
 ## Adding a New Tool
 

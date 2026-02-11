@@ -32,7 +32,7 @@ fn api_call(method: &str, path: &str, body: Option<&str>) -> Result<String, Stri
         &format!("Drive API: {} {}", method, path),
     );
 
-    let response = host::http_request(method, &url, headers, body_bytes.as_deref())?;
+    let response = host::http_request(method, &url, headers, body_bytes.as_deref(), None)?;
 
     if response.status < 200 || response.status >= 300 {
         let body_text = String::from_utf8_lossy(&response.body);
@@ -56,7 +56,7 @@ fn api_call_raw(method: &str, url: &str) -> Result<Vec<u8>, String> {
         &format!("Drive API raw: {} {}", method, url),
     );
 
-    let response = host::http_request(method, url, "{}", None)?;
+    let response = host::http_request(method, url, "{}", None, None)?;
 
     if response.status < 200 || response.status >= 300 {
         let body_text = String::from_utf8_lossy(&response.body);
@@ -262,7 +262,7 @@ pub fn upload_file(
         "Drive API: POST upload/files (multipart)",
     );
 
-    let response = host::http_request("POST", &url, &headers, Some(body.as_bytes()))?;
+    let response = host::http_request("POST", &url, &headers, Some(body.as_bytes()), None)?;
 
     if response.status < 200 || response.status >= 300 {
         let body_text = String::from_utf8_lossy(&response.body);
