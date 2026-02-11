@@ -34,7 +34,7 @@ use ironclaw::{
     tools::{
         ToolRegistry,
         mcp::{McpClient, McpSessionManager, config::load_mcp_servers, is_authenticated},
-        wasm::{WasmToolLoader, WasmToolRuntime},
+        wasm::{WasmToolLoader, WasmToolRuntime, load_dev_tools},
     },
     workspace::{EmbeddingProvider, NearAiEmbeddings, OpenAiEmbeddings, Workspace},
 };
@@ -438,6 +438,8 @@ async fn main() -> anyhow::Result<()> {
     let wasm_tools_future = async {
         if let Some(ref runtime) = wasm_tool_runtime {
             let loader = WasmToolLoader::new(Arc::clone(runtime), Arc::clone(&tools));
+
+            // Load installed tools from ~/.ironclaw/tools/
             match loader.load_from_dir(&config.wasm.tools_dir).await {
                 Ok(results) => {
                     if !results.loaded.is_empty() {
@@ -453,6 +455,21 @@ async fn main() -> anyhow::Result<()> {
                 }
                 Err(e) => {
                     tracing::warn!("Failed to scan WASM tools directory: {}", e);
+                }
+            }
+
+            // Load dev tools from build artifacts (overrides installed if newer)
+            match load_dev_tools(&loader, &config.wasm.tools_dir).await {
+                Ok(results) => {
+                    if !results.loaded.is_empty() {
+                        tracing::info!(
+                            "Loaded {} dev WASM tools from build artifacts",
+                            results.loaded.len()
+                        );
+                    }
+                }
+                Err(e) => {
+                    tracing::debug!("No dev WASM tools found: {}", e);
                 }
             }
         }

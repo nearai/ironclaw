@@ -2,6 +2,7 @@
 //!
 //! This module provides a way to load WASM tools dynamically at runtime from:
 //! - A directory containing `<name>.wasm` and `<name>.capabilities.json`
+//! - Build artifacts in `tools-src/` (dev mode, auto-detected)
 //! - Database storage (via [`WasmToolStore`])
 //!
 //! # Example: Loading from Directory
@@ -18,6 +19,13 @@
 //! let loader = WasmToolLoader::new(runtime, registry);
 //! loader.load_from_dir(Path::new("~/.ironclaw/tools/")).await?;
 //! ```
+//!
+//! # Dev Mode
+//!
+//! When `load_dev_tools()` is called, the loader scans `tools-src/*/` for build
+//! artifacts. Tools found there are loaded directly from the build output,
+//! skipping the install directory. This means during development you just
+//! rebuild the WASM and restart the host, no manual copy step needed.
 //!
 //! # Security
 //!
@@ -312,6 +320,159 @@ impl LoadResults {
     }
 }
 
+/// Compile-time project root, used to locate tools-src/ in dev builds.
+const CARGO_MANIFEST_DIR: &str = env!("CARGO_MANIFEST_DIR");
+
+/// Resolve the tools source directory.
+///
+/// Checks (in order):
+/// 1. `IRONCLAW_TOOLS_SRC` env var
+/// 2. `<CARGO_MANIFEST_DIR>/tools-src/` (dev builds)
+fn tools_src_dir() -> PathBuf {
+    if let Ok(dir) = std::env::var("IRONCLAW_TOOLS_SRC") {
+        return PathBuf::from(dir);
+    }
+    PathBuf::from(CARGO_MANIFEST_DIR).join("tools-src")
+}
+
+/// Discover WASM tools available as build artifacts in `tools-src/`.
+///
+/// Scans each subdirectory for:
+/// - `tools-src/<name>/target/wasm32-wasip2/release/<crate_name>_tool.wasm`
+/// - `tools-src/<name>/<name>-tool.capabilities.json`
+///
+/// Returns a map of install-name (e.g. "gmail-tool") to paths.
+pub async fn discover_dev_tools() -> Result<HashMap<String, DiscoveredTool>, std::io::Error> {
+    let src_dir = tools_src_dir();
+    let mut tools = HashMap::new();
+
+    if !src_dir.is_dir() {
+        return Ok(tools);
+    }
+
+    let mut entries = fs::read_dir(&src_dir).await?;
+    while let Some(entry) = entries.next_entry().await? {
+        let path = entry.path();
+        if !path.is_dir() {
+            continue;
+        }
+
+        let dir_name = match path.file_name().and_then(|n| n.to_str()) {
+            Some(n) => n.to_string(),
+            None => continue,
+        };
+
+        // Convention: crate name uses underscores, directory uses hyphens
+        let crate_name = dir_name.replace('-', "_");
+        let install_name = format!("{}-tool", dir_name);
+
+        let wasm_path = path
+            .join("target/wasm32-wasip2/release")
+            .join(format!("{}_tool.wasm", crate_name));
+
+        if !wasm_path.exists() {
+            continue;
+        }
+
+        let caps_path = path.join(format!("{}-tool.capabilities.json", dir_name));
+
+        tools.insert(
+            install_name,
+            DiscoveredTool {
+                wasm_path,
+                capabilities_path: if caps_path.exists() {
+                    Some(caps_path)
+                } else {
+                    None
+                },
+            },
+        );
+    }
+
+    Ok(tools)
+}
+
+/// Load WASM tools from build artifacts in `tools-src/`.
+///
+/// In dev mode, tools can be loaded directly from their build output without
+/// needing to install them to `~/.ironclaw/tools/` first. Build artifacts
+/// that are newer than installed copies take priority.
+///
+/// Set `IRONCLAW_TOOLS_SRC` env var to override the source directory.
+pub async fn load_dev_tools(
+    loader: &WasmToolLoader,
+    install_dir: &Path,
+) -> Result<LoadResults, WasmLoadError> {
+    let dev_tools = discover_dev_tools().await?;
+    let mut results = LoadResults::default();
+
+    if dev_tools.is_empty() {
+        return Ok(results);
+    }
+
+    for (name, discovered) in &dev_tools {
+        // Check if the build artifact is newer than the installed copy
+        let installed_path = install_dir.join(format!("{}.wasm", name));
+        let should_load = if installed_path.exists() {
+            // Compare modification times: prefer fresher build artifact
+            match (
+                fs::metadata(&discovered.wasm_path).await,
+                fs::metadata(&installed_path).await,
+            ) {
+                (Ok(dev_meta), Ok(inst_meta)) => {
+                    let dev_modified = dev_meta.modified().unwrap_or(std::time::UNIX_EPOCH);
+                    let inst_modified = inst_meta.modified().unwrap_or(std::time::UNIX_EPOCH);
+                    dev_modified > inst_modified
+                }
+                _ => true,
+            }
+        } else {
+            true
+        };
+
+        if !should_load {
+            continue;
+        }
+
+        tracing::info!(
+            name = name,
+            wasm_path = %discovered.wasm_path.display(),
+            "Loading dev tool from build artifacts (newer than installed)"
+        );
+
+        match loader
+            .load_from_files(
+                name,
+                &discovered.wasm_path,
+                discovered.capabilities_path.as_deref(),
+            )
+            .await
+        {
+            Ok(()) => {
+                results.loaded.push(name.clone());
+            }
+            Err(e) => {
+                tracing::error!(
+                    name = name,
+                    error = %e,
+                    "Failed to load dev tool"
+                );
+                results.errors.push((discovered.wasm_path.clone(), e));
+            }
+        }
+    }
+
+    if !results.loaded.is_empty() {
+        tracing::info!(
+            count = results.loaded.len(),
+            tools = ?results.loaded,
+            "Loaded dev tools from build artifacts"
+        );
+    }
+
+    Ok(results)
+}
+
 /// Discover WASM tool files in a directory without loading them.
 ///
 /// Returns a map of tool name -> (wasm_path, capabilities_path).
@@ -429,5 +590,32 @@ mod tests {
 
         let err = WasmLoadError::WasmNotFound(std::path::PathBuf::from("/foo/bar.wasm"));
         assert!(err.to_string().contains("/foo/bar.wasm"));
+    }
+
+    #[test]
+    fn test_tools_src_dir_default() {
+        let dir = super::tools_src_dir();
+        assert!(dir.ends_with("tools-src"));
+    }
+
+    #[tokio::test]
+    async fn test_discover_dev_tools_finds_build_artifacts() {
+        // This test relies on the actual tools-src/ directory in the repo.
+        // If build artifacts exist, they should be discovered.
+        let tools = super::discover_dev_tools().await.unwrap();
+
+        // If any tools have been built, they should appear with "-tool" suffix
+        for (name, discovered) in &tools {
+            assert!(
+                name.ends_with("-tool"),
+                "Dev tool name should end with -tool: {}",
+                name
+            );
+            assert!(
+                discovered.wasm_path.exists(),
+                "WASM should exist: {:?}",
+                discovered.wasm_path
+            );
+        }
     }
 }
