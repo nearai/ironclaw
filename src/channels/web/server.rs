@@ -72,6 +72,8 @@ pub struct GatewayState {
     pub shutdown_tx: tokio::sync::RwLock<Option<oneshot::Sender<()>>>,
     /// WebSocket connection tracker.
     pub ws_tracker: Option<Arc<crate::channels::web::ws::WsConnectionTracker>>,
+    /// LLM provider for OpenAI-compatible API proxy.
+    pub llm_provider: Option<Arc<dyn crate::llm::LlmProvider>>,
 }
 
 /// Start the gateway HTTP server.
@@ -168,6 +170,12 @@ pub async fn start_server(
         )
         // Gateway control plane
         .route("/api/gateway/status", get(gateway_status_handler))
+        // OpenAI-compatible API
+        .route(
+            "/v1/chat/completions",
+            post(super::openai_compat::chat_completions_handler),
+        )
+        .route("/v1/models", get(super::openai_compat::models_handler))
         .route_layer(middleware::from_fn_with_state(auth_state, auth_middleware));
 
     // Static file routes (no auth, served from embedded strings)
