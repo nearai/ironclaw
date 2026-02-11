@@ -378,23 +378,23 @@ impl Scheduler {
             .into());
         }
 
-        // Execute with timeout
-        let result = tokio::time::timeout(Duration::from_secs(60), async {
-            tool.execute(params, &job_ctx).await
-        })
-        .await
-        .map_err(|_| {
-            Error::Tool(crate::error::ToolError::Timeout {
-                name: tool_name.to_string(),
-                timeout: Duration::from_secs(60),
-            })
-        })?
-        .map_err(|e| {
-            Error::Tool(crate::error::ToolError::ExecutionFailed {
-                name: tool_name.to_string(),
-                reason: e.to_string(),
-            })
-        })?;
+        // Execute with per-tool timeout
+        let tool_timeout = tool.execution_timeout();
+        let result =
+            tokio::time::timeout(tool_timeout, async { tool.execute(params, &job_ctx).await })
+                .await
+                .map_err(|_| {
+                    Error::Tool(crate::error::ToolError::Timeout {
+                        name: tool_name.to_string(),
+                        timeout: tool_timeout,
+                    })
+                })?
+                .map_err(|e| {
+                    Error::Tool(crate::error::ToolError::ExecutionFailed {
+                        name: tool_name.to_string(),
+                        reason: e.to_string(),
+                    })
+                })?;
 
         Ok(TaskOutput::new(result.result, start.elapsed()))
     }

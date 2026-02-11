@@ -67,11 +67,16 @@ interface host {
     /// - Network error
     /// - Timeout
     /// - Secret leak detected in response
+    ///
+    /// The optional timeout-ms parameter controls the HTTP client timeout
+    /// in milliseconds. Defaults to 30000 (30s) when not provided.
+    /// Capped at the callback timeout to prevent hangs.
     http-request: func(
         method: string,
         url: string,
         headers-json: string,
-        body: option<list<u8>>
+        body: option<list<u8>>,
+        timeout-ms: option<u32>,
     ) -> result<http-response, string>;
 
     // ==================== Tool Invocation Capability ====================

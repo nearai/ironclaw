@@ -1,16 +1,23 @@
 //! WASM tool wrapper implementing the Tool trait.
 //!
+//! Uses wasmtime::component::bindgen! to generate typed bindings from the WIT
+//! interface, ensuring all host functions are properly registered under the
+//! correct `near:agent/host` namespace.
+//!
 //! Each execution creates a fresh instance (NEAR pattern) to ensure
 //! isolation and deterministic behavior.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use wasmtime::Store;
-use wasmtime::component::{Component, Linker, Val};
+use wasmtime::component::{Component, Linker};
+use wasmtime_wasi::{ResourceTable, WasiCtx, WasiCtxBuilder, WasiView};
 
 use crate::context::JobContext;
+use crate::safety::LeakDetector;
 use crate::tools::tool::{Tool, ToolError, ToolOutput};
 use crate::tools::wasm::capabilities::Capabilities;
 use crate::tools::wasm::error::WasmError;
@@ -18,20 +25,258 @@ use crate::tools::wasm::host::{HostState, LogLevel};
 use crate::tools::wasm::limits::{ResourceLimits, WasmResourceLimiter};
 use crate::tools::wasm::runtime::{PreparedModule, WasmToolRuntime};
 
-/// Store data for WASM execution.
+// Generate component model bindings from the WIT file.
+//
+// This creates:
+// - `near::agent::host::Host` trait + `add_to_linker()` for the import interface
+// - `SandboxedTool` struct with `instantiate()` for the world
+// - `exports::near::agent::tool::*` types for the export interface
+wasmtime::component::bindgen!({
+    path: "wit/tool.wit",
+    world: "sandboxed-tool",
+    async: false,
+    with: {},
+});
+
+// Alias the export interface types for convenience.
+use exports::near::agent::tool as wit_tool;
+
+/// Store data for WASM tool execution.
 ///
-/// Contains both the resource limiter and host state.
+/// Contains the resource limiter, host state, WASI context, and injected
+/// credentials. Fresh instance created per execution (NEAR pattern).
 struct StoreData {
     limiter: WasmResourceLimiter,
     host_state: HostState,
+    wasi: WasiCtx,
+    table: ResourceTable,
+    /// Injected credentials for URL/header substitution.
+    /// Keys are placeholder names like "GOOGLE_ACCESS_TOKEN".
+    credentials: HashMap<String, String>,
 }
 
 impl StoreData {
-    fn new(memory_limit: u64, capabilities: Capabilities) -> Self {
+    fn new(
+        memory_limit: u64,
+        capabilities: Capabilities,
+        credentials: HashMap<String, String>,
+    ) -> Self {
+        // Minimal WASI context: no filesystem, no env vars (security)
+        let wasi = WasiCtxBuilder::new().build();
+
         Self {
             limiter: WasmResourceLimiter::new(memory_limit),
             host_state: HostState::new(capabilities),
+            wasi,
+            table: ResourceTable::new(),
+            credentials,
         }
+    }
+
+    /// Inject credentials into a string by replacing placeholders.
+    ///
+    /// Replaces patterns like `{GOOGLE_ACCESS_TOKEN}` with actual values.
+    /// WASM tools reference credentials by placeholder, never seeing real values.
+    fn inject_credentials(&self, input: &str, context: &str) -> String {
+        let mut result = input.to_string();
+
+        for (name, value) in &self.credentials {
+            let placeholder = format!("{{{}}}", name);
+            if result.contains(&placeholder) {
+                tracing::debug!(
+                    placeholder = %placeholder,
+                    context = %context,
+                    "Replacing credential placeholder in tool request"
+                );
+                result = result.replace(&placeholder, value);
+            }
+        }
+
+        result
+    }
+
+    /// Replace injected credential values with `[REDACTED]` in text.
+    ///
+    /// Prevents credentials from leaking through error messages or logs.
+    /// reqwest::Error includes the full URL in its Display output, so any
+    /// error from an injected-URL request will contain the raw credential
+    /// unless we scrub it.
+    fn redact_credentials(&self, text: &str) -> String {
+        let mut result = text.to_string();
+        for (name, value) in &self.credentials {
+            if !value.is_empty() {
+                result = result.replace(value, &format!("[REDACTED:{}]", name));
+            }
+        }
+        result
+    }
+}
+
+// Provide WASI context for the WASM component.
+// Required because tools are compiled with wasm32-wasip2 target.
+impl WasiView for StoreData {
+    fn ctx(&mut self) -> &mut WasiCtx {
+        &mut self.wasi
+    }
+
+    fn table(&mut self) -> &mut ResourceTable {
+        &mut self.table
+    }
+}
+
+// Implement the generated Host trait from bindgen.
+//
+// This registers all 6 host functions under the `near:agent/host` namespace:
+// log, now-millis, workspace-read, http-request, secret-exists, tool-invoke
+impl near::agent::host::Host for StoreData {
+    fn log(&mut self, level: near::agent::host::LogLevel, message: String) {
+        let log_level = match level {
+            near::agent::host::LogLevel::Trace => LogLevel::Trace,
+            near::agent::host::LogLevel::Debug => LogLevel::Debug,
+            near::agent::host::LogLevel::Info => LogLevel::Info,
+            near::agent::host::LogLevel::Warn => LogLevel::Warn,
+            near::agent::host::LogLevel::Error => LogLevel::Error,
+        };
+        let _ = self.host_state.log(log_level, message);
+    }
+
+    fn now_millis(&mut self) -> u64 {
+        self.host_state.now_millis()
+    }
+
+    fn workspace_read(&mut self, path: String) -> Option<String> {
+        self.host_state.workspace_read(&path).ok().flatten()
+    }
+
+    fn http_request(
+        &mut self,
+        method: String,
+        url: String,
+        headers_json: String,
+        body: Option<Vec<u8>>,
+        timeout_ms: Option<u32>,
+    ) -> Result<near::agent::host::HttpResponse, String> {
+        // Inject credentials into URL (e.g., replace {TELEGRAM_BOT_TOKEN})
+        let injected_url = self.inject_credentials(&url, "url");
+
+        // Check HTTP allowlist
+        self.host_state
+            .check_http_allowed(&injected_url, &method)
+            .map_err(|e| format!("HTTP not allowed: {}", e))?;
+
+        // Record for rate limiting
+        self.host_state
+            .record_http_request()
+            .map_err(|e| format!("Rate limit exceeded: {}", e))?;
+
+        // Parse headers and inject credentials into header values
+        let raw_headers: HashMap<String, String> =
+            serde_json::from_str(&headers_json).unwrap_or_default();
+
+        let headers: HashMap<String, String> = raw_headers
+            .into_iter()
+            .map(|(k, v)| {
+                (
+                    k.clone(),
+                    self.inject_credentials(&v, &format!("header:{}", k)),
+                )
+            })
+            .collect();
+
+        let url = injected_url;
+        let leak_detector = LeakDetector::new();
+        let header_vec: Vec<(String, String)> = headers
+            .iter()
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect();
+
+        leak_detector
+            .scan_http_request(&url, &header_vec, body.as_deref())
+            .map_err(|e| format!("Potential secret leak blocked: {}", e))?;
+
+        // Make HTTP request using blocking I/O.
+        // We're inside a spawn_blocking context, so use block_on.
+        let result = tokio::runtime::Handle::current().block_on(async {
+            let client = reqwest::Client::new();
+
+            let mut request = match method.to_uppercase().as_str() {
+                "GET" => client.get(&url),
+                "POST" => client.post(&url),
+                "PUT" => client.put(&url),
+                "DELETE" => client.delete(&url),
+                "PATCH" => client.patch(&url),
+                "HEAD" => client.head(&url),
+                _ => return Err(format!("Unsupported HTTP method: {}", method)),
+            };
+
+            for (key, value) in headers {
+                request = request.header(&key, &value);
+            }
+
+            if let Some(body_bytes) = body {
+                request = request.body(body_bytes);
+            }
+
+            // Caller-specified timeout (default 30s)
+            let timeout = Duration::from_millis(timeout_ms.unwrap_or(30_000) as u64);
+            let response = request.timeout(timeout).send().await.map_err(|e| {
+                // Walk the full error chain for the actual root cause
+                let mut chain = format!("HTTP request failed: {}", e);
+                let mut source = std::error::Error::source(&e);
+                while let Some(cause) = source {
+                    chain.push_str(&format!(" -> {}", cause));
+                    source = cause.source();
+                }
+                chain
+            })?;
+
+            let status = response.status().as_u16();
+            let response_headers: HashMap<String, String> = response
+                .headers()
+                .iter()
+                .filter_map(|(k, v)| {
+                    v.to_str()
+                        .ok()
+                        .map(|v| (k.as_str().to_string(), v.to_string()))
+                })
+                .collect();
+            let headers_json = serde_json::to_string(&response_headers).unwrap_or_default();
+            let body = response
+                .bytes()
+                .await
+                .map_err(|e| format!("Failed to read response body: {}", e))?
+                .to_vec();
+
+            // Leak detection on response body
+            if let Ok(body_str) = std::str::from_utf8(&body) {
+                leak_detector
+                    .scan_and_clean(body_str)
+                    .map_err(|e| format!("Potential secret leak in response: {}", e))?;
+            }
+
+            Ok(near::agent::host::HttpResponse {
+                status,
+                headers_json,
+                body,
+            })
+        });
+
+        // Redact credentials from error messages before returning to WASM
+        result.map_err(|e| self.redact_credentials(&e))
+    }
+
+    fn tool_invoke(&mut self, alias: String, _params_json: String) -> Result<String, String> {
+        // Validate capability and resolve alias
+        let _real_name = self.host_state.check_tool_invoke_allowed(&alias)?;
+        self.host_state.record_tool_invoke()?;
+
+        // Tool invocation requires async context and access to the tool registry,
+        // which aren't available inside a synchronous WASM callback.
+        Err("Tool invocation from WASM tools is not yet supported".to_string())
+    }
+
+    fn secret_exists(&mut self, name: String) -> bool {
+        self.host_state.secret_exists(&name)
     }
 }
 
@@ -49,6 +294,9 @@ pub struct WasmToolWrapper {
     description: String,
     /// Cached schema (from PreparedModule or override).
     schema: serde_json::Value,
+    /// Injected credentials for HTTP requests (e.g., OAuth tokens).
+    /// Keys are placeholder names like "GOOGLE_ACCESS_TOKEN".
+    credentials: HashMap<String, String>,
 }
 
 impl WasmToolWrapper {
@@ -64,6 +312,7 @@ impl WasmToolWrapper {
             runtime,
             prepared,
             capabilities,
+            credentials: HashMap::new(),
         }
     }
 
@@ -79,9 +328,32 @@ impl WasmToolWrapper {
         self
     }
 
+    /// Set credentials for HTTP request injection.
+    pub fn with_credentials(mut self, credentials: HashMap<String, String>) -> Self {
+        self.credentials = credentials;
+        self
+    }
+
     /// Get the resource limits for this tool.
     pub fn limits(&self) -> &ResourceLimits {
         &self.prepared.limits
+    }
+
+    /// Add all host functions to the linker using generated bindings.
+    ///
+    /// Uses the bindgen-generated `add_to_linker` function to properly register
+    /// all host functions with correct component model signatures under the
+    /// `near:agent/host` namespace.
+    fn add_host_functions(linker: &mut Linker<StoreData>) -> Result<(), WasmError> {
+        // Add WASI support (required by components built with wasm32-wasip2)
+        wasmtime_wasi::add_to_linker_sync(linker)
+            .map_err(|e| WasmError::ConfigError(format!("Failed to add WASI functions: {}", e)))?;
+
+        // Add our custom host interface using the generated add_to_linker
+        near::agent::host::add_to_linker(linker, |state| state)
+            .map_err(|e| WasmError::ConfigError(format!("Failed to add host functions: {}", e)))?;
+
+        Ok(())
     }
 
     /// Execute the WASM tool synchronously (called from spawn_blocking).
@@ -94,7 +366,11 @@ impl WasmToolWrapper {
         let limits = &self.prepared.limits;
 
         // Create store with fresh state (NEAR pattern: fresh instance per call)
-        let store_data = StoreData::new(limits.memory_bytes, self.capabilities.clone());
+        let store_data = StoreData::new(
+            limits.memory_bytes,
+            self.capabilities.clone(),
+            self.credentials.clone(),
+        );
         let mut store = Store::new(engine, store_data);
 
         // Configure fuel if enabled
@@ -115,172 +391,46 @@ impl WasmToolWrapper {
         let component = Component::new(engine, self.prepared.component_bytes())
             .map_err(|e| WasmError::CompilationFailed(e.to_string()))?;
 
-        // Create linker and add host functions
+        // Create linker with all host functions properly namespaced
         let mut linker = Linker::new(engine);
-        self.add_host_functions(&mut linker)?;
+        Self::add_host_functions(&mut linker)?;
 
-        // Instantiate the component
-        let instance = linker
-            .instantiate(&mut store, &component)
+        // Instantiate using the generated bindings
+        let instance = SandboxedTool::instantiate(&mut store, &component, &linker)
             .map_err(|e| WasmError::InstantiationFailed(e.to_string()))?;
 
-        // Get the execute function
-        let execute_func = instance
-            .get_func(&mut store, "execute")
-            .ok_or_else(|| WasmError::MissingExport("execute".to_string()))?;
-
-        // Prepare request
+        // Prepare the request
         let params_json = serde_json::to_string(&params)
             .map_err(|e| WasmError::InvalidResponseJson(e.to_string()))?;
 
-        // Build request record
-        // Note: The exact calling convention depends on how WIT records are lowered.
-        // With component model, we'd use typed bindings from wit-bindgen.
-        // For now, we use the lower-level Val API.
-        let request_params = Val::String(params_json);
-        let request_context = match context_json {
-            Some(ctx) => Val::Option(Some(Box::new(Val::String(ctx)))),
-            None => Val::Option(None),
+        let request = wit_tool::Request {
+            params: params_json,
+            context: context_json,
         };
 
-        // Create request record (params, context)
-        let request = Val::Record(vec![
-            ("params".to_string(), request_params),
-            ("context".to_string(), request_context),
-        ]);
-
-        // Call the function
-        let mut results = vec![Val::Bool(false)]; // Placeholder for response
-        execute_func
-            .call(&mut store, &[request], &mut results)
-            .map_err(|e| {
-                // Check for specific trap types
-                let error_str = e.to_string();
-                if error_str.contains("out of fuel") {
-                    WasmError::FuelExhausted { limit: limits.fuel }
-                } else if error_str.contains("unreachable") {
-                    WasmError::Trapped("unreachable code executed".to_string())
-                } else {
-                    WasmError::Trapped(error_str)
-                }
-            })?;
-
-        // Post-call completion (cleanup)
-        execute_func
-            .post_return(&mut store)
-            .map_err(|e| WasmError::Trapped(format!("post_return failed: {}", e)))?;
-
-        // Extract response
-        let response = &results[0];
-        let (result_str, error_str) = extract_response(response)?;
+        // Call execute using the generated typed interface
+        let tool_iface = instance.near_agent_tool();
+        let response = tool_iface.call_execute(&mut store, &request).map_err(|e| {
+            let error_str = e.to_string();
+            if error_str.contains("out of fuel") {
+                WasmError::FuelExhausted { limit: limits.fuel }
+            } else if error_str.contains("unreachable") {
+                WasmError::Trapped("unreachable code executed".to_string())
+            } else {
+                WasmError::Trapped(error_str)
+            }
+        })?;
 
         // Get logs from host state
         let logs = store.data_mut().host_state.take_logs();
 
         // Check for tool-level error
-        if let Some(err) = error_str {
+        if let Some(err) = response.error {
             return Err(WasmError::ToolReturnedError(err));
         }
 
         // Return result (or empty string if none)
-        Ok((result_str.unwrap_or_default(), logs))
-    }
-
-    /// Add host functions to the linker.
-    fn add_host_functions(&self, linker: &mut Linker<StoreData>) -> Result<(), WasmError> {
-        // Note: With WIT bindgen, these would be generated automatically.
-        // For now, we manually define the host functions.
-        //
-        // Component model func_wrap signature: F: Fn(StoreContextMut<T>, Params) -> Result<Return>
-        // where Params is a tuple of the function arguments.
-
-        // host.log(level: log-level, message: string)
-        linker
-            .root()
-            .func_wrap(
-                "log",
-                |mut ctx: wasmtime::StoreContextMut<'_, StoreData>,
-                 (level, message): (i32, String)| {
-                    let log_level = match level {
-                        0 => LogLevel::Trace,
-                        1 => LogLevel::Debug,
-                        2 => LogLevel::Info,
-                        3 => LogLevel::Warn,
-                        4 => LogLevel::Error,
-                        _ => LogLevel::Info,
-                    };
-                    // Ignore errors from logging (rate limiting)
-                    let _ = ctx.data_mut().host_state.log(log_level, message);
-                    Ok(())
-                },
-            )
-            .map_err(|e| WasmError::ConfigError(format!("Failed to add log function: {}", e)))?;
-
-        // host.now-millis() -> u64
-        linker
-            .root()
-            .func_wrap(
-                "now-millis",
-                |ctx: wasmtime::StoreContextMut<'_, StoreData>, (): ()| -> anyhow::Result<(u64,)> {
-                    Ok((ctx.data().host_state.now_millis(),))
-                },
-            )
-            .map_err(|e| {
-                WasmError::ConfigError(format!("Failed to add now-millis function: {}", e))
-            })?;
-
-        // host.workspace-read(path: string) -> option<string>
-        linker
-            .root()
-            .func_wrap(
-                "workspace-read",
-                |ctx: wasmtime::StoreContextMut<'_, StoreData>,
-                 (path,): (String,)|
-                 -> anyhow::Result<(Option<String>,)> {
-                    let result = ctx.data().host_state.workspace_read(&path).ok().flatten();
-                    Ok((result,))
-                },
-            )
-            .map_err(|e| {
-                WasmError::ConfigError(format!("Failed to add workspace-read function: {}", e))
-            })?;
-
-        Ok(())
-    }
-}
-
-/// Extract result and error from a WIT response record.
-fn extract_response(response: &Val) -> Result<(Option<String>, Option<String>), WasmError> {
-    match response {
-        Val::Record(fields) => {
-            let mut result = None;
-            let mut error = None;
-
-            for (name, val) in fields {
-                match name.as_str() {
-                    "output" => {
-                        if let Val::Option(Some(inner)) = val {
-                            if let Val::String(s) = inner.as_ref() {
-                                result = Some(s.to_string());
-                            }
-                        }
-                    }
-                    "error" => {
-                        if let Val::Option(Some(inner)) = val {
-                            if let Val::String(s) = inner.as_ref() {
-                                error = Some(s.to_string());
-                            }
-                        }
-                    }
-                    _ => {}
-                }
-            }
-
-            Ok((result, error))
-        }
-        _ => Err(WasmError::InvalidResponseJson(
-            "Expected record response".to_string(),
-        )),
+        Ok((response.output.unwrap_or_default(), logs))
     }
 }
 
@@ -315,6 +465,7 @@ impl Tool for WasmToolWrapper {
         let capabilities = self.capabilities.clone();
         let description = self.description.clone();
         let schema = self.schema.clone();
+        let credentials = self.credentials.clone();
 
         // Execute in blocking task with timeout
         let result = tokio::time::timeout(timeout, async move {
@@ -324,6 +475,7 @@ impl Tool for WasmToolWrapper {
                 capabilities,
                 description,
                 schema,
+                credentials,
             };
 
             tokio::task::spawn_blocking(move || wrapper.execute_sync(params, context_json))
@@ -359,7 +511,7 @@ impl Tool for WasmToolWrapper {
     }
 
     fn requires_sanitization(&self) -> bool {
-        // WASM tools always require sanitization - they're untrusted by definition
+        // WASM tools always require sanitization, they're untrusted by definition
         true
     }
 

@@ -173,6 +173,10 @@ pub struct Thread {
     /// Pending auth token request (thread is in auth mode).
     #[serde(default)]
     pub pending_auth: Option<PendingAuth>,
+    /// Last NEAR AI response ID for response chaining. Persisted to DB
+    /// metadata so we can resume chaining across restarts.
+    #[serde(default)]
+    pub last_response_id: Option<String>,
 }
 
 impl Thread {
@@ -189,6 +193,24 @@ impl Thread {
             metadata: serde_json::Value::Null,
             pending_approval: None,
             pending_auth: None,
+            last_response_id: None,
+        }
+    }
+
+    /// Create a thread with a specific ID (for DB hydration).
+    pub fn with_id(id: Uuid, session_id: Uuid) -> Self {
+        let now = Utc::now();
+        Self {
+            id,
+            session_id,
+            state: ThreadState::Idle,
+            turns: Vec::new(),
+            created_at: now,
+            updated_at: now,
+            metadata: serde_json::Value::Null,
+            pending_approval: None,
+            pending_auth: None,
+            last_response_id: None,
         }
     }
 
@@ -592,5 +614,387 @@ mod tests {
         let json = json.replace(",\"pending_auth\":null", "");
         let restored: Thread = serde_json::from_str(&json).expect("should deserialize");
         assert!(restored.pending_auth.is_none());
+    }
+
+    #[test]
+    fn test_thread_with_id() {
+        let specific_id = Uuid::new_v4();
+        let session_id = Uuid::new_v4();
+        let thread = Thread::with_id(specific_id, session_id);
+
+        assert_eq!(thread.id, specific_id);
+        assert_eq!(thread.session_id, session_id);
+        assert_eq!(thread.state, ThreadState::Idle);
+        assert!(thread.turns.is_empty());
+    }
+
+    #[test]
+    fn test_thread_with_id_restore_messages() {
+        let thread_id = Uuid::new_v4();
+        let session_id = Uuid::new_v4();
+        let mut thread = Thread::with_id(thread_id, session_id);
+
+        let messages = vec![
+            ChatMessage::user("Hello from DB"),
+            ChatMessage::assistant("Restored response"),
+        ];
+        thread.restore_from_messages(messages);
+
+        assert_eq!(thread.id, thread_id);
+        assert_eq!(thread.turns.len(), 1);
+        assert_eq!(thread.turns[0].user_input, "Hello from DB");
+        assert_eq!(
+            thread.turns[0].response,
+            Some("Restored response".to_string())
+        );
+    }
+
+    #[test]
+    fn test_restore_from_messages_empty() {
+        let mut thread = Thread::new(Uuid::new_v4());
+
+        // Add a turn first, then restore with empty vec
+        thread.start_turn("hello");
+        thread.complete_turn("hi");
+        assert_eq!(thread.turns.len(), 1);
+
+        thread.restore_from_messages(Vec::new());
+
+        // Should clear all turns and stay idle
+        assert!(thread.turns.is_empty());
+        assert_eq!(thread.state, ThreadState::Idle);
+    }
+
+    #[test]
+    fn test_restore_from_messages_only_assistant_messages() {
+        let mut thread = Thread::new(Uuid::new_v4());
+
+        // Only assistant messages (no user messages to anchor turns)
+        let messages = vec![
+            ChatMessage::assistant("I'm here"),
+            ChatMessage::assistant("Still here"),
+        ];
+
+        thread.restore_from_messages(messages);
+
+        // Assistant-only messages have no user turn to attach to, so
+        // they should be skipped entirely.
+        assert!(thread.turns.is_empty());
+    }
+
+    #[test]
+    fn test_restore_from_messages_multiple_user_messages_in_a_row() {
+        let mut thread = Thread::new(Uuid::new_v4());
+
+        // Two user messages with no assistant response between them
+        let messages = vec![
+            ChatMessage::user("first"),
+            ChatMessage::user("second"),
+            ChatMessage::assistant("reply to second"),
+        ];
+
+        thread.restore_from_messages(messages);
+
+        // First user message becomes a turn with no response,
+        // second user message pairs with the assistant response.
+        assert_eq!(thread.turns.len(), 2);
+        assert_eq!(thread.turns[0].user_input, "first");
+        assert!(thread.turns[0].response.is_none());
+        assert_eq!(thread.turns[1].user_input, "second");
+        assert_eq!(
+            thread.turns[1].response,
+            Some("reply to second".to_string())
+        );
+    }
+
+    #[test]
+    fn test_thread_switch() {
+        let mut session = Session::new("user-1");
+
+        let t1_id = session.create_thread().id;
+        let t2_id = session.create_thread().id;
+
+        // After creating two threads, active should be the last one
+        assert_eq!(session.active_thread, Some(t2_id));
+
+        // Switch back to the first
+        assert!(session.switch_thread(t1_id));
+        assert_eq!(session.active_thread, Some(t1_id));
+
+        // Switching to a nonexistent thread should fail
+        let fake_id = Uuid::new_v4();
+        assert!(!session.switch_thread(fake_id));
+        // Active thread should remain unchanged
+        assert_eq!(session.active_thread, Some(t1_id));
+    }
+
+    #[test]
+    fn test_get_or_create_thread_idempotent() {
+        let mut session = Session::new("user-1");
+
+        let tid1 = session.get_or_create_thread().id;
+        let tid2 = session.get_or_create_thread().id;
+
+        // Should return the same thread (not create a new one each time)
+        assert_eq!(tid1, tid2);
+        assert_eq!(session.threads.len(), 1);
+    }
+
+    #[test]
+    fn test_truncate_turns() {
+        let mut thread = Thread::new(Uuid::new_v4());
+
+        for i in 0..5 {
+            thread.start_turn(format!("msg-{}", i));
+            thread.complete_turn(format!("resp-{}", i));
+        }
+        assert_eq!(thread.turns.len(), 5);
+
+        thread.truncate_turns(3);
+        assert_eq!(thread.turns.len(), 3);
+
+        // Should keep the most recent turns
+        assert_eq!(thread.turns[0].user_input, "msg-2");
+        assert_eq!(thread.turns[1].user_input, "msg-3");
+        assert_eq!(thread.turns[2].user_input, "msg-4");
+
+        // Turn numbers should be re-indexed
+        assert_eq!(thread.turns[0].turn_number, 0);
+        assert_eq!(thread.turns[1].turn_number, 1);
+        assert_eq!(thread.turns[2].turn_number, 2);
+    }
+
+    #[test]
+    fn test_truncate_turns_noop_when_fewer() {
+        let mut thread = Thread::new(Uuid::new_v4());
+
+        thread.start_turn("only one");
+        thread.complete_turn("response");
+
+        thread.truncate_turns(10);
+        assert_eq!(thread.turns.len(), 1);
+        assert_eq!(thread.turns[0].user_input, "only one");
+    }
+
+    #[test]
+    fn test_thread_interrupt_and_resume() {
+        let mut thread = Thread::new(Uuid::new_v4());
+
+        thread.start_turn("do something");
+        assert_eq!(thread.state, ThreadState::Processing);
+
+        thread.interrupt();
+        assert_eq!(thread.state, ThreadState::Interrupted);
+
+        let last_turn = thread.last_turn().unwrap();
+        assert_eq!(last_turn.state, TurnState::Interrupted);
+        assert!(last_turn.completed_at.is_some());
+
+        thread.resume();
+        assert_eq!(thread.state, ThreadState::Idle);
+    }
+
+    #[test]
+    fn test_resume_only_from_interrupted() {
+        let mut thread = Thread::new(Uuid::new_v4());
+
+        // Idle thread: resume should be a no-op
+        assert_eq!(thread.state, ThreadState::Idle);
+        thread.resume();
+        assert_eq!(thread.state, ThreadState::Idle);
+
+        // Processing thread: resume should not change state
+        thread.start_turn("work");
+        assert_eq!(thread.state, ThreadState::Processing);
+        thread.resume();
+        assert_eq!(thread.state, ThreadState::Processing);
+    }
+
+    #[test]
+    fn test_turn_fail() {
+        let mut thread = Thread::new(Uuid::new_v4());
+
+        thread.start_turn("risky operation");
+        thread.fail_turn("connection timed out");
+
+        assert_eq!(thread.state, ThreadState::Idle);
+
+        let turn = thread.last_turn().unwrap();
+        assert_eq!(turn.state, TurnState::Failed);
+        assert_eq!(turn.error, Some("connection timed out".to_string()));
+        assert!(turn.response.is_none());
+        assert!(turn.completed_at.is_some());
+    }
+
+    #[test]
+    fn test_messages_with_incomplete_last_turn() {
+        let mut thread = Thread::new(Uuid::new_v4());
+
+        thread.start_turn("first");
+        thread.complete_turn("first reply");
+        thread.start_turn("second (in progress)");
+
+        let messages = thread.messages();
+        // Should have 3 messages: user, assistant, user (no assistant for in-progress)
+        assert_eq!(messages.len(), 3);
+        assert_eq!(messages[0].content, "first");
+        assert_eq!(messages[1].content, "first reply");
+        assert_eq!(messages[2].content, "second (in progress)");
+    }
+
+    #[test]
+    fn test_thread_serialization_round_trip() {
+        let mut thread = Thread::new(Uuid::new_v4());
+
+        thread.start_turn("hello");
+        thread.complete_turn("world");
+        thread.last_response_id = Some("resp_abc123".to_string());
+
+        let json = serde_json::to_string(&thread).unwrap();
+        let restored: Thread = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(restored.id, thread.id);
+        assert_eq!(restored.session_id, thread.session_id);
+        assert_eq!(restored.turns.len(), 1);
+        assert_eq!(restored.turns[0].user_input, "hello");
+        assert_eq!(restored.turns[0].response, Some("world".to_string()));
+        assert_eq!(restored.last_response_id, Some("resp_abc123".to_string()));
+    }
+
+    #[test]
+    fn test_session_serialization_round_trip() {
+        let mut session = Session::new("user-ser");
+        session.create_thread();
+        session.auto_approve_tool("echo");
+
+        let json = serde_json::to_string(&session).unwrap();
+        let restored: Session = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(restored.user_id, "user-ser");
+        assert_eq!(restored.threads.len(), 1);
+        assert!(restored.is_tool_auto_approved("echo"));
+        assert!(!restored.is_tool_auto_approved("shell"));
+    }
+
+    #[test]
+    fn test_auto_approved_tools() {
+        let mut session = Session::new("user-1");
+
+        assert!(!session.is_tool_auto_approved("shell"));
+        session.auto_approve_tool("shell");
+        assert!(session.is_tool_auto_approved("shell"));
+
+        // Idempotent
+        session.auto_approve_tool("shell");
+        assert_eq!(session.auto_approved_tools.len(), 1);
+    }
+
+    #[test]
+    fn test_turn_tool_call_error() {
+        let mut turn = Turn::new(0, "test");
+        turn.record_tool_call("http", serde_json::json!({"url": "example.com"}));
+        turn.record_tool_error("timeout");
+
+        assert_eq!(turn.tool_calls.len(), 1);
+        assert_eq!(turn.tool_calls[0].error, Some("timeout".to_string()));
+        assert!(turn.tool_calls[0].result.is_none());
+    }
+
+    #[test]
+    fn test_turn_number_increments() {
+        let mut thread = Thread::new(Uuid::new_v4());
+
+        // Before any turns, turn_number() is 1 (1-indexed for display)
+        assert_eq!(thread.turn_number(), 1);
+
+        thread.start_turn("first");
+        thread.complete_turn("done");
+        assert_eq!(thread.turn_number(), 2);
+
+        thread.start_turn("second");
+        assert_eq!(thread.turn_number(), 3);
+    }
+
+    #[test]
+    fn test_complete_turn_on_empty_thread() {
+        let mut thread = Thread::new(Uuid::new_v4());
+
+        // Completing a turn when there are no turns should be a safe no-op
+        thread.complete_turn("phantom response");
+        assert_eq!(thread.state, ThreadState::Idle);
+        assert!(thread.turns.is_empty());
+    }
+
+    #[test]
+    fn test_fail_turn_on_empty_thread() {
+        let mut thread = Thread::new(Uuid::new_v4());
+
+        // Failing a turn when there are no turns should be a safe no-op
+        thread.fail_turn("phantom error");
+        assert_eq!(thread.state, ThreadState::Idle);
+        assert!(thread.turns.is_empty());
+    }
+
+    #[test]
+    fn test_pending_approval_flow() {
+        let mut thread = Thread::new(Uuid::new_v4());
+
+        let approval = PendingApproval {
+            request_id: Uuid::new_v4(),
+            tool_name: "shell".to_string(),
+            parameters: serde_json::json!({"command": "rm -rf /"}),
+            description: "dangerous command".to_string(),
+            tool_call_id: "call_123".to_string(),
+            context_messages: vec![ChatMessage::user("do it")],
+        };
+
+        thread.await_approval(approval);
+        assert_eq!(thread.state, ThreadState::AwaitingApproval);
+        assert!(thread.pending_approval.is_some());
+
+        let taken = thread.take_pending_approval();
+        assert!(taken.is_some());
+        assert_eq!(taken.unwrap().tool_name, "shell");
+        assert!(thread.pending_approval.is_none());
+    }
+
+    #[test]
+    fn test_clear_pending_approval() {
+        let mut thread = Thread::new(Uuid::new_v4());
+
+        let approval = PendingApproval {
+            request_id: Uuid::new_v4(),
+            tool_name: "http".to_string(),
+            parameters: serde_json::json!({}),
+            description: "test".to_string(),
+            tool_call_id: "call_456".to_string(),
+            context_messages: vec![],
+        };
+
+        thread.await_approval(approval);
+        thread.clear_pending_approval();
+
+        assert_eq!(thread.state, ThreadState::Idle);
+        assert!(thread.pending_approval.is_none());
+    }
+
+    #[test]
+    fn test_active_thread_accessors() {
+        let mut session = Session::new("user-1");
+
+        assert!(session.active_thread().is_none());
+        assert!(session.active_thread_mut().is_none());
+
+        let tid = session.create_thread().id;
+
+        assert!(session.active_thread().is_some());
+        assert_eq!(session.active_thread().unwrap().id, tid);
+
+        // Mutably modify through accessor
+        session.active_thread_mut().unwrap().start_turn("test");
+        assert_eq!(
+            session.active_thread().unwrap().state,
+            ThreadState::Processing
+        );
     }
 }

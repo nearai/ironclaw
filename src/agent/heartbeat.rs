@@ -29,7 +29,7 @@ use std::time::Duration;
 use tokio::sync::mpsc;
 
 use crate::channels::OutgoingResponse;
-use crate::llm::{ChatMessage, CompletionRequest, LlmProvider};
+use crate::llm::{ChatMessage, CompletionRequest, FinishReason, LlmProvider};
 use crate::workspace::Workspace;
 
 /// Configuration for the heartbeat runner.
@@ -217,9 +217,26 @@ impl HeartbeatRunner {
             ]
         };
 
+        // Use the model's context_length to set max_tokens. The API returns
+        // the total context window; we cap output at half of that (the rest is
+        // the prompt) with a floor of 4096.
+        let max_tokens = match self.llm.model_metadata().await {
+            Ok(meta) => {
+                let from_api = meta.context_length.map(|ctx| ctx / 2).unwrap_or(4096);
+                from_api.max(4096)
+            }
+            Err(e) => {
+                tracing::warn!(
+                    "Could not fetch model metadata, using default max_tokens: {}",
+                    e
+                );
+                4096
+            }
+        };
+
         let request = CompletionRequest::new(messages)
-            .with_max_tokens(1024)
-            .with_temperature(0.3); // Lower temperature for more focused responses
+            .with_max_tokens(max_tokens)
+            .with_temperature(0.3);
 
         let response = match self.llm.complete(request).await {
             Ok(r) => r,
@@ -227,6 +244,20 @@ impl HeartbeatRunner {
         };
 
         let content = response.content.trim();
+
+        // Guard against empty content. Reasoning models (e.g. GLM-4.7) may
+        // burn all output tokens on chain-of-thought and return content: null.
+        if content.is_empty() {
+            return if response.finish_reason == FinishReason::Length {
+                HeartbeatResult::Failed(
+                    "LLM response was truncated (finish_reason=length) with no content. \
+                     The model may have exhausted its token budget on reasoning."
+                        .to_string(),
+                )
+            } else {
+                HeartbeatResult::Failed("LLM returned empty content.".to_string())
+            };
+        }
 
         // Check if nothing needs attention
         if content == "HEARTBEAT_OK" || content.contains("HEARTBEAT_OK") {

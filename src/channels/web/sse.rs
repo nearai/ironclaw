@@ -79,7 +79,15 @@ impl SseManager {
                     SseEvent::StreamChunk { .. } => "stream_chunk",
                     SseEvent::Status { .. } => "status",
                     SseEvent::ApprovalNeeded { .. } => "approval_needed",
+                    SseEvent::AuthRequired { .. } => "auth_required",
+                    SseEvent::AuthCompleted { .. } => "auth_completed",
                     SseEvent::Error { .. } => "error",
+                    SseEvent::JobStarted { .. } => "job_started",
+                    SseEvent::JobMessage { .. } => "job_message",
+                    SseEvent::JobToolUse { .. } => "job_tool_use",
+                    SseEvent::JobToolResult { .. } => "job_tool_result",
+                    SseEvent::JobStatus { .. } => "job_status",
+                    SseEvent::JobResult { .. } => "job_result",
                     SseEvent::Heartbeat => "heartbeat",
                 };
                 Ok(Event::default().event(event_type).data(data))
@@ -152,13 +160,14 @@ mod tests {
 
         manager.broadcast(SseEvent::Status {
             message: "test".to_string(),
+            thread_id: None,
         });
 
         let event = rx.next().await;
         assert!(event.is_some());
         let event = event.unwrap().unwrap();
         match event {
-            SseEvent::Status { message } => assert_eq!(message, "test"),
+            SseEvent::Status { message, .. } => assert_eq!(message, "test"),
             _ => panic!("unexpected event type"),
         }
     }
@@ -172,11 +181,12 @@ mod tests {
 
         manager.broadcast(SseEvent::Thinking {
             message: "working".to_string(),
+            thread_id: None,
         });
 
         let event = stream.next().await.unwrap();
         match event {
-            SseEvent::Thinking { message } => assert_eq!(message, "working"),
+            SseEvent::Thinking { message, .. } => assert_eq!(message, "working"),
             _ => panic!("Expected Thinking event"),
         }
     }

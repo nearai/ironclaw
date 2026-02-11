@@ -89,7 +89,7 @@ mod schema;
 mod wrapper;
 
 // Core types
-pub use bundled::{bundled_channel_names, install_bundled_channel};
+pub use bundled::{available_channel_names, bundled_channel_names, install_bundled_channel};
 pub use capabilities::{ChannelCapabilities, EmitRateLimitConfig, HttpEndpointConfig, PollConfig};
 pub use error::WasmChannelError;
 pub use host::{ChannelEmitRateLimiter, ChannelHostState, EmittedMessage};

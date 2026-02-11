@@ -42,12 +42,25 @@ const SLASH_COMMANDS: &[&str] = &[
     "/quit",
     "/exit",
     "/debug",
+    "/model",
     "/undo",
     "/redo",
     "/clear",
     "/compact",
     "/new",
     "/interrupt",
+    "/version",
+    "/tools",
+    "/ping",
+    "/job",
+    "/status",
+    "/cancel",
+    "/list",
+    "/heartbeat",
+    "/summarize",
+    "/suggest",
+    "/thread",
+    "/resume",
 ];
 
 /// Rustyline helper for slash-command tab completion.
@@ -295,10 +308,11 @@ impl Channel for ReplChannel {
                             continue;
                         }
 
-                        // Handle local REPL commands
+                        // Handle local REPL commands (only commands that need
+                        // immediate local handling stay here)
                         match line.to_lowercase().as_str() {
                             "/quit" | "/exit" => break,
-                            "/help" | "/?" => {
+                            "/help" => {
                                 print_help();
                                 continue;
                             }
@@ -413,6 +427,15 @@ impl Channel for ReplChannel {
                 print!("{chunk}");
                 let _ = io::stdout().flush();
             }
+            StatusUpdate::JobStarted {
+                job_id,
+                title,
+                browse_url,
+            } => {
+                eprintln!(
+                    "  \x1b[36m[job]\x1b[0m {title} \x1b[90m({job_id})\x1b[0m \x1b[4m{browse_url}\x1b[0m"
+                );
+            }
             StatusUpdate::Status(msg) => {
                 if debug || msg.contains("approval") || msg.contains("Approval") {
                     eprintln!("  \x1b[90m{msg}\x1b[0m");
@@ -471,6 +494,33 @@ impl Channel for ReplChannel {
                 );
                 eprintln!("  {bot_border}");
                 eprintln!();
+            }
+            StatusUpdate::AuthRequired {
+                extension_name,
+                instructions,
+                setup_url,
+                ..
+            } => {
+                eprintln!();
+                eprintln!("\x1b[33m  Authentication required for {extension_name}\x1b[0m");
+                if let Some(ref instr) = instructions {
+                    eprintln!("  {instr}");
+                }
+                if let Some(ref url) = setup_url {
+                    eprintln!("  \x1b[4m{url}\x1b[0m");
+                }
+                eprintln!();
+            }
+            StatusUpdate::AuthCompleted {
+                extension_name,
+                success,
+                message,
+            } => {
+                if success {
+                    eprintln!("\x1b[32m  {extension_name}: {message}\x1b[0m");
+                } else {
+                    eprintln!("\x1b[31m  {extension_name}: {message}\x1b[0m");
+                }
             }
         }
         Ok(())

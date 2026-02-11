@@ -9,13 +9,14 @@ use uuid::Uuid;
 use crate::agent::compaction::ContextCompactor;
 use crate::agent::context_monitor::ContextMonitor;
 use crate::agent::heartbeat::spawn_heartbeat;
+use crate::agent::routine_engine::{RoutineEngine, spawn_cron_ticker};
 use crate::agent::self_repair::{DefaultSelfRepair, RepairResult, SelfRepair};
 use crate::agent::session::{PendingApproval, Session, ThreadState};
 use crate::agent::session_manager::SessionManager;
 use crate::agent::submission::{Submission, SubmissionParser, SubmissionResult};
 use crate::agent::{HeartbeatConfig as AgentHeartbeatConfig, MessageIntent, Router, Scheduler};
 use crate::channels::{ChannelManager, IncomingMessage, OutgoingResponse, StatusUpdate};
-use crate::config::{AgentConfig, HeartbeatConfig};
+use crate::config::{AgentConfig, HeartbeatConfig, RoutineConfig};
 use crate::context::ContextManager;
 use crate::context::JobContext;
 use crate::error::Error;
@@ -79,6 +80,7 @@ pub struct Agent {
     session_manager: Arc<SessionManager>,
     context_monitor: ContextMonitor,
     heartbeat_config: Option<HeartbeatConfig>,
+    routine_config: Option<RoutineConfig>,
 }
 
 impl Agent {
@@ -91,6 +93,7 @@ impl Agent {
         deps: AgentDeps,
         channels: ChannelManager,
         heartbeat_config: Option<HeartbeatConfig>,
+        routine_config: Option<RoutineConfig>,
         context_manager: Option<Arc<ContextManager>>,
         session_manager: Option<Arc<SessionManager>>,
     ) -> Self {
@@ -119,6 +122,7 @@ impl Agent {
             session_manager,
             context_monitor: ContextMonitor::new(),
             heartbeat_config,
+            routine_config,
         }
     }
 
@@ -263,53 +267,28 @@ impl Agent {
                     let channels = self.channels.clone();
                     tokio::spawn(async move {
                         while let Some(response) = notify_rx.recv().await {
-                            // Route notification to configured channel/user, or broadcast to all
-                            match (&notify_channel, &notify_user) {
-                                (Some(channel), Some(user)) => {
-                                    // Send to specific channel and user
-                                    if let Err(e) =
-                                        channels.broadcast(channel, user, response.clone()).await
-                                    {
+                            let user = notify_user.as_deref().unwrap_or("default");
+
+                            // Try the configured channel first, fall back to
+                            // broadcasting on all channels.
+                            let targeted_ok = if let Some(ref channel) = notify_channel {
+                                channels
+                                    .broadcast(channel, user, response.clone())
+                                    .await
+                                    .is_ok()
+                            } else {
+                                false
+                            };
+
+                            if !targeted_ok {
+                                let results = channels.broadcast_all(user, response).await;
+                                for (ch, result) in results {
+                                    if let Err(e) = result {
                                         tracing::warn!(
-                                            "Failed to send heartbeat to {}/{}: {}",
-                                            channel,
-                                            user,
+                                            "Failed to broadcast heartbeat to {}: {}",
+                                            ch,
                                             e
                                         );
-                                    } else {
-                                        tracing::debug!(
-                                            "Heartbeat notification sent to {}/{}",
-                                            channel,
-                                            user
-                                        );
-                                    }
-                                }
-                                (None, Some(user)) => {
-                                    // Broadcast to all channels for this user
-                                    let results = channels.broadcast_all(user, response).await;
-                                    for (ch, result) in results {
-                                        if let Err(e) = result {
-                                            tracing::warn!(
-                                                "Failed to broadcast heartbeat to {}: {}",
-                                                ch,
-                                                e
-                                            );
-                                        }
-                                    }
-                                }
-                                _ => {
-                                    // No explicit target, broadcast to all channels
-                                    // for the default user so notifications actually
-                                    // reach someone instead of vanishing into logs.
-                                    let results = channels.broadcast_all("default", response).await;
-                                    for (ch, result) in results {
-                                        if let Err(e) = result {
-                                            tracing::warn!(
-                                                "Failed to broadcast heartbeat to {}: {}",
-                                                ch,
-                                                e
-                                            );
-                                        }
                                     }
                                 }
                             }
@@ -336,6 +315,85 @@ impl Agent {
         } else {
             None
         };
+
+        // Spawn routine engine if enabled
+        let routine_handle = if let Some(ref rt_config) = self.routine_config {
+            if rt_config.enabled {
+                if let (Some(store), Some(workspace)) = (self.store(), self.workspace()) {
+                    // Set up notification channel (same pattern as heartbeat)
+                    let (notify_tx, mut notify_rx) =
+                        tokio::sync::mpsc::channel::<OutgoingResponse>(32);
+
+                    let engine = Arc::new(RoutineEngine::new(
+                        rt_config.clone(),
+                        Arc::clone(store),
+                        self.llm().clone(),
+                        Arc::clone(workspace),
+                        notify_tx,
+                    ));
+
+                    // Register routine tools
+                    self.deps
+                        .tools
+                        .register_routine_tools(Arc::clone(store), Arc::clone(&engine));
+
+                    // Load initial event cache
+                    engine.refresh_event_cache().await;
+
+                    // Spawn notification forwarder
+                    let channels = self.channels.clone();
+                    tokio::spawn(async move {
+                        while let Some(response) = notify_rx.recv().await {
+                            let user = response
+                                .metadata
+                                .get("notify_user")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("default")
+                                .to_string();
+                            let results = channels.broadcast_all(&user, response).await;
+                            for (ch, result) in results {
+                                if let Err(e) = result {
+                                    tracing::warn!(
+                                        "Failed to broadcast routine notification to {}: {}",
+                                        ch,
+                                        e
+                                    );
+                                }
+                            }
+                        }
+                    });
+
+                    // Spawn cron ticker
+                    let cron_interval =
+                        std::time::Duration::from_secs(rt_config.cron_check_interval_secs);
+                    let cron_handle = spawn_cron_ticker(Arc::clone(&engine), cron_interval);
+
+                    // Store engine reference for event trigger checking
+                    // Safety: we're in run() which takes self, no other reference exists
+                    let engine_ref = Arc::clone(&engine);
+                    // SAFETY: self is consumed by run(), we can smuggle the engine in
+                    // via a local to use in the message loop below.
+
+                    tracing::info!(
+                        "Routines enabled: cron ticker every {}s, max {} concurrent",
+                        rt_config.cron_check_interval_secs,
+                        rt_config.max_concurrent_routines
+                    );
+
+                    Some((cron_handle, engine_ref))
+                } else {
+                    tracing::warn!("Routines enabled but store/workspace not available");
+                    None
+                }
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
+        // Extract engine ref for use in message loop
+        let routine_engine_for_loop = routine_handle.as_ref().map(|(_, e)| Arc::clone(e));
 
         // Main message loop
         tracing::info!("Agent {} ready and listening", self.config.name);
@@ -403,6 +461,14 @@ impl Agent {
                         .await;
                 }
             }
+
+            // Check event triggers (cheap in-memory regex, fires async if matched)
+            if let Some(ref engine) = routine_engine_for_loop {
+                let fired = engine.check_event_triggers(&message).await;
+                if fired > 0 {
+                    tracing::debug!("Fired {} event-triggered routines", fired);
+                }
+            }
         }
 
         // Cleanup
@@ -411,6 +477,9 @@ impl Agent {
         pruning_handle.abort();
         if let Some(handle) = heartbeat_handle {
             handle.abort();
+        }
+        if let Some((cron_handle, _)) = routine_handle {
+            cron_handle.abort();
         }
         self.scheduler.stop_all().await;
         self.channels.shutdown_all().await?;
@@ -446,6 +515,11 @@ impl Agent {
                 }
                 _ => {} // Continue, fail-open errors already logged in registry
             }
+        }
+
+        // Hydrate thread from DB if it's a historical thread not in memory
+        if let Some(ref external_thread_id) = message.thread_id {
+            self.maybe_hydrate_thread(message, external_thread_id).await;
         }
 
         // Resolve session and thread
@@ -498,6 +572,9 @@ impl Agent {
             Submission::UserInput { content } => {
                 self.process_user_input(message, session, thread_id, &content)
                     .await
+            }
+            Submission::SystemCommand { command, args } => {
+                self.handle_system_command(&command, &args).await
             }
             Submission::Undo => self.process_undo(session, thread_id).await,
             Submission::Redo => self.process_redo(session, thread_id).await,
@@ -568,6 +645,107 @@ impl Agent {
                 Ok(Some(String::new()))
             }
         }
+    }
+
+    /// Hydrate a historical thread from DB into memory if not already present.
+    ///
+    /// Called before `resolve_thread` so that the session manager finds the
+    /// thread on lookup instead of creating a new one.
+    ///
+    /// Creates an in-memory thread with the exact UUID the frontend sent,
+    /// even when the conversation has zero messages (e.g. a brand-new
+    /// assistant thread). Without this, `resolve_thread` would mint a
+    /// fresh UUID and all messages would land in the wrong conversation.
+    async fn maybe_hydrate_thread(&self, message: &IncomingMessage, external_thread_id: &str) {
+        // Only hydrate UUID-shaped thread IDs (web gateway uses UUIDs)
+        let thread_uuid = match Uuid::parse_str(external_thread_id) {
+            Ok(id) => id,
+            Err(_) => return,
+        };
+
+        // Check if already in memory
+        let session = self
+            .session_manager
+            .get_or_create_session(&message.user_id)
+            .await;
+        {
+            let sess = session.lock().await;
+            if sess.threads.contains_key(&thread_uuid) {
+                return;
+            }
+        }
+
+        // Load history from DB (may be empty for a newly created thread).
+        let mut chat_messages: Vec<ChatMessage> = Vec::new();
+        let msg_count;
+
+        if let Some(store) = self.store() {
+            let db_messages = store
+                .list_conversation_messages(thread_uuid)
+                .await
+                .unwrap_or_default();
+            msg_count = db_messages.len();
+            chat_messages = db_messages
+                .iter()
+                .filter_map(|m| match m.role.as_str() {
+                    "user" => Some(ChatMessage::user(&m.content)),
+                    "assistant" => Some(ChatMessage::assistant(&m.content)),
+                    _ => None,
+                })
+                .collect();
+        } else {
+            msg_count = 0;
+        }
+
+        // Create thread with the historical ID and restore messages
+        let session_id = {
+            let sess = session.lock().await;
+            sess.id
+        };
+
+        let mut thread = crate::agent::session::Thread::with_id(thread_uuid, session_id);
+        if !chat_messages.is_empty() {
+            thread.restore_from_messages(chat_messages);
+        }
+
+        // Restore response chain from conversation metadata
+        if let Some(store) = self.store() {
+            if let Ok(Some(metadata)) = store.get_conversation_metadata(thread_uuid).await {
+                if let Some(rid) = metadata
+                    .get("last_response_id")
+                    .and_then(|v| v.as_str())
+                    .map(String::from)
+                {
+                    thread.last_response_id = Some(rid.clone());
+                    self.llm()
+                        .seed_response_chain(&thread_uuid.to_string(), rid);
+                    tracing::debug!("Restored response chain for thread {}", thread_uuid);
+                }
+            }
+        }
+
+        // Insert into session and register with session manager
+        {
+            let mut sess = session.lock().await;
+            sess.threads.insert(thread_uuid, thread);
+            sess.active_thread = Some(thread_uuid);
+            sess.last_active_at = chrono::Utc::now();
+        }
+
+        self.session_manager
+            .register_thread(
+                &message.user_id,
+                &message.channel,
+                thread_uuid,
+                Arc::clone(&session),
+            )
+            .await;
+
+        tracing::debug!(
+            "Hydrated thread {} from DB ({} messages)",
+            thread_uuid,
+            msg_count
+        );
     }
 
     async fn process_user_input(
@@ -770,6 +948,7 @@ impl Agent {
                 };
 
                 thread.complete_turn(&response);
+                self.persist_response_chain(thread);
                 let _ = self
                     .channels
                     .send_status(
@@ -778,6 +957,10 @@ impl Agent {
                         &message.metadata,
                     )
                     .await;
+
+                // Fire-and-forget: persist turn to DB
+                self.persist_turn(thread_id, &message.user_id, content, Some(&response));
+
                 Ok(SubmissionResult::response(response))
             }
             Ok(AgenticLoopResult::NeedApproval { pending }) => {
@@ -804,9 +987,93 @@ impl Agent {
             }
             Err(e) => {
                 thread.fail_turn(e.to_string());
+
+                // Persist the user message even on failure
+                self.persist_turn(thread_id, &message.user_id, content, None);
+
                 Ok(SubmissionResult::error(e.to_string()))
             }
         }
+    }
+
+    /// Fire-and-forget: persist a turn (user message + optional assistant response) to the DB.
+    fn persist_turn(
+        &self,
+        thread_id: Uuid,
+        user_id: &str,
+        user_input: &str,
+        response: Option<&str>,
+    ) {
+        let store = match self.store() {
+            Some(s) => Arc::clone(s),
+            None => return,
+        };
+
+        let user_id = user_id.to_string();
+        let user_input = user_input.to_string();
+        let response = response.map(String::from);
+
+        tokio::spawn(async move {
+            if let Err(e) = store
+                .ensure_conversation(thread_id, "gateway", &user_id, None)
+                .await
+            {
+                tracing::warn!("Failed to ensure conversation {}: {}", thread_id, e);
+                return;
+            }
+
+            if let Err(e) = store
+                .add_conversation_message(thread_id, "user", &user_input)
+                .await
+            {
+                tracing::warn!("Failed to persist user message: {}", e);
+                return;
+            }
+
+            if let Some(ref resp) = response {
+                if let Err(e) = store
+                    .add_conversation_message(thread_id, "assistant", resp)
+                    .await
+                {
+                    tracing::warn!("Failed to persist assistant message: {}", e);
+                }
+            }
+        });
+    }
+
+    /// Sync the provider's response chain ID to the thread and DB metadata.
+    ///
+    /// Call after a successful agentic loop to persist the latest
+    /// `previous_response_id` so chaining survives restarts.
+    fn persist_response_chain(&self, thread: &mut crate::agent::session::Thread) {
+        let tid = thread.id.to_string();
+        let response_id = match self.llm().get_response_chain_id(&tid) {
+            Some(rid) => rid,
+            None => return,
+        };
+
+        // Update in-memory thread
+        thread.last_response_id = Some(response_id.clone());
+
+        // Fire-and-forget DB write
+        let store = match self.store() {
+            Some(s) => Arc::clone(s),
+            None => return,
+        };
+        let thread_id = thread.id;
+        tokio::spawn(async move {
+            let val = serde_json::json!(response_id);
+            if let Err(e) = store
+                .update_conversation_metadata_field(thread_id, "last_response_id", &val)
+                .await
+            {
+                tracing::warn!(
+                    "Failed to persist response chain for thread {}: {}",
+                    thread_id,
+                    e
+                );
+            }
+        });
     }
 
     /// Run the agentic loop: call LLM, execute tools, repeat until text response.
@@ -884,7 +1151,12 @@ impl Agent {
             // Call LLM with current context
             let context = ReasoningContext::new()
                 .with_messages(context_messages.clone())
-                .with_tools(tool_defs);
+                .with_tools(tool_defs)
+                .with_metadata({
+                    let mut m = std::collections::HashMap::new();
+                    m.insert("thread_id".to_string(), thread_id.to_string());
+                    m
+                });
 
             let result = reasoning.respond_with_tools(&context).await?;
 
@@ -908,13 +1180,16 @@ impl Agent {
                     // Tools have been executed or we've tried multiple times, return response
                     return Ok(AgenticLoopResult::Response(text));
                 }
-                RespondResult::ToolCalls(tool_calls) => {
+                RespondResult::ToolCalls {
+                    tool_calls,
+                    content,
+                } => {
                     tools_executed = true;
 
                     // Add the assistant message with tool_calls to context.
-                    // OpenAI-compatible APIs require this before tool-result messages.
+                    // OpenAI protocol requires this before tool-result messages.
                     context_messages.push(ChatMessage::assistant_with_tool_calls(
-                        "",
+                        content,
                         tool_calls.clone(),
                     ));
 
@@ -1072,10 +1347,26 @@ impl Agent {
                         if let Some((ext_name, instructions)) =
                             detect_auth_awaiting(&tc.name, &tool_result)
                         {
-                            let mut sess = session.lock().await;
-                            if let Some(thread) = sess.threads.get_mut(&thread_id) {
-                                thread.enter_auth_mode(ext_name);
+                            let auth_data = parse_auth_result(&tool_result);
+                            {
+                                let mut sess = session.lock().await;
+                                if let Some(thread) = sess.threads.get_mut(&thread_id) {
+                                    thread.enter_auth_mode(ext_name.clone());
+                                }
                             }
+                            let _ = self
+                                .channels
+                                .send_status(
+                                    &message.channel,
+                                    StatusUpdate::AuthRequired {
+                                        extension_name: ext_name,
+                                        instructions: Some(instructions.clone()),
+                                        auth_url: auth_data.auth_url,
+                                        setup_url: auth_data.setup_url,
+                                    },
+                                    &message.metadata,
+                                )
+                                .await;
                             return Ok(AgenticLoopResult::Response(instructions));
                         }
 
@@ -1136,19 +1427,59 @@ impl Agent {
             .into());
         }
 
-        // Execute with timeout
-        let result = tokio::time::timeout(std::time::Duration::from_secs(60), async {
+        tracing::debug!(
+            tool = %tool_name,
+            params = %params,
+            "Tool call started"
+        );
+
+        // Execute with per-tool timeout
+        let timeout = tool.execution_timeout();
+        let start = std::time::Instant::now();
+        let result = tokio::time::timeout(timeout, async {
             tool.execute(params.clone(), job_ctx).await
         })
-        .await
-        .map_err(|_| crate::error::ToolError::Timeout {
-            name: tool_name.to_string(),
-            timeout: std::time::Duration::from_secs(60),
-        })?
-        .map_err(|e| crate::error::ToolError::ExecutionFailed {
-            name: tool_name.to_string(),
-            reason: e.to_string(),
-        })?;
+        .await;
+        let elapsed = start.elapsed();
+
+        match &result {
+            Ok(Ok(output)) => {
+                let result_str = serde_json::to_string(&output.result)
+                    .unwrap_or_else(|_| "<serialize error>".to_string());
+                tracing::debug!(
+                    tool = %tool_name,
+                    elapsed_ms = elapsed.as_millis() as u64,
+                    result = %result_str,
+                    "Tool call succeeded"
+                );
+            }
+            Ok(Err(e)) => {
+                tracing::debug!(
+                    tool = %tool_name,
+                    elapsed_ms = elapsed.as_millis() as u64,
+                    error = %e,
+                    "Tool call failed"
+                );
+            }
+            Err(_) => {
+                tracing::debug!(
+                    tool = %tool_name,
+                    elapsed_ms = elapsed.as_millis() as u64,
+                    timeout_secs = timeout.as_secs(),
+                    "Tool call timed out"
+                );
+            }
+        }
+
+        let result = result
+            .map_err(|_| crate::error::ToolError::Timeout {
+                name: tool_name.to_string(),
+                timeout,
+            })?
+            .map_err(|e| crate::error::ToolError::ExecutionFailed {
+                name: tool_name.to_string(),
+                reason: e.to_string(),
+            })?;
 
         // Convert result to string
         serde_json::to_string_pretty(&result.result).map_err(|e| {
@@ -1492,10 +1823,11 @@ impl Agent {
             if let Some((ext_name, instructions)) =
                 detect_auth_awaiting(&pending.tool_name, &tool_result)
             {
+                let auth_data = parse_auth_result(&tool_result);
                 {
                     let mut sess = session.lock().await;
                     if let Some(thread) = sess.threads.get_mut(&thread_id) {
-                        thread.enter_auth_mode(ext_name);
+                        thread.enter_auth_mode(ext_name.clone());
                         thread.complete_turn(&instructions);
                     }
                 }
@@ -1503,7 +1835,12 @@ impl Agent {
                     .channels
                     .send_status(
                         &message.channel,
-                        StatusUpdate::Status("Awaiting token".into()),
+                        StatusUpdate::AuthRequired {
+                            extension_name: ext_name,
+                            instructions: Some(instructions.clone()),
+                            auth_url: auth_data.auth_url,
+                            setup_url: auth_data.setup_url,
+                        },
                         &message.metadata,
                     )
                     .await;
@@ -1546,6 +1883,7 @@ impl Agent {
             match result {
                 Ok(AgenticLoopResult::Response(response)) => {
                     thread.complete_turn(&response);
+                    self.persist_response_chain(thread);
                     let _ = self
                         .channels
                         .send_status(
@@ -1644,16 +1982,6 @@ impl Agent {
                     pending.extension_name
                 );
 
-                // Notify via channel status so the response doesn't echo the token
-                let _ = self
-                    .channels
-                    .send_status(
-                        &message.channel,
-                        StatusUpdate::Status("Authenticated, loading tools...".into()),
-                        &message.metadata,
-                    )
-                    .await;
-
                 // Auto-activate so tools are available immediately after auth
                 match ext_mgr.activate(&pending.extension_name).await {
                     Ok(activate_result) => {
@@ -1663,10 +1991,23 @@ impl Agent {
                         } else {
                             format!("\n\nTools: {}", activate_result.tools_loaded.join(", "))
                         };
-                        Ok(Some(format!(
+                        let msg = format!(
                             "{} authenticated and activated ({} tools loaded).{}",
                             pending.extension_name, tool_count, tool_list
-                        )))
+                        );
+                        let _ = self
+                            .channels
+                            .send_status(
+                                &message.channel,
+                                StatusUpdate::AuthCompleted {
+                                    extension_name: pending.extension_name.clone(),
+                                    success: true,
+                                    message: msg.clone(),
+                                },
+                                &message.metadata,
+                            )
+                            .await;
+                        Ok(Some(msg))
                     }
                     Err(e) => {
                         tracing::warn!(
@@ -1674,16 +2015,29 @@ impl Agent {
                             pending.extension_name,
                             e
                         );
-                        Ok(Some(format!(
+                        let msg = format!(
                             "{} authenticated successfully, but activation failed: {}. \
                              Try activating manually.",
                             pending.extension_name, e
-                        )))
+                        );
+                        let _ = self
+                            .channels
+                            .send_status(
+                                &message.channel,
+                                StatusUpdate::AuthCompleted {
+                                    extension_name: pending.extension_name.clone(),
+                                    success: true,
+                                    message: msg.clone(),
+                                },
+                                &message.metadata,
+                            )
+                            .await;
+                        Ok(Some(msg))
                     }
                 }
             }
             Ok(result) => {
-                // Unexpected state, re-enter auth mode
+                // Invalid token, re-enter auth mode
                 {
                     let mut sess = session.lock().await;
                     if let Some(thread) = sess.threads.get_mut(&thread_id) {
@@ -1692,13 +2046,43 @@ impl Agent {
                 }
                 let msg = result
                     .instructions
+                    .clone()
                     .unwrap_or_else(|| "Invalid token. Please try again.".to_string());
+                // Re-emit AuthRequired so web UI re-shows the card
+                let _ = self
+                    .channels
+                    .send_status(
+                        &message.channel,
+                        StatusUpdate::AuthRequired {
+                            extension_name: pending.extension_name.clone(),
+                            instructions: Some(msg.clone()),
+                            auth_url: result.auth_url,
+                            setup_url: result.setup_url,
+                        },
+                        &message.metadata,
+                    )
+                    .await;
                 Ok(Some(msg))
             }
-            Err(e) => Ok(Some(format!(
-                "Authentication failed for {}: {}",
-                pending.extension_name, e
-            ))),
+            Err(e) => {
+                let msg = format!(
+                    "Authentication failed for {}: {}",
+                    pending.extension_name, e
+                );
+                let _ = self
+                    .channels
+                    .send_status(
+                        &message.channel,
+                        StatusUpdate::AuthCompleted {
+                            extension_name: pending.extension_name.clone(),
+                            success: false,
+                            message: msg.clone(),
+                        },
+                        &message.metadata,
+                    )
+                    .await;
+                Ok(Some(msg))
+            }
         }
     }
 
@@ -2049,40 +2433,49 @@ impl Agent {
         }
     }
 
-    async fn handle_command(
+    /// Handle system commands that bypass thread-state checks entirely.
+    async fn handle_system_command(
         &self,
         command: &str,
-        _args: &[String],
-    ) -> Result<Option<String>, Error> {
+        args: &[String],
+    ) -> Result<SubmissionResult, Error> {
         match command {
-            "help" => Ok(Some(
-                r#"Commands:
-  /job <desc>     - Create a job
-  /status [id]    - Check job status
-  /cancel <id>    - Cancel a job
-  /list           - List all jobs
-  /help <job_id>  - Help a stuck job
+            "help" => Ok(SubmissionResult::response(concat!(
+                "System:\n",
+                "  /help             Show this help\n",
+                "  /model [name]     Show or switch the active model\n",
+                "  /version          Show version info\n",
+                "  /tools            List available tools\n",
+                "  /debug            Toggle debug mode\n",
+                "  /ping             Connectivity check\n",
+                "\n",
+                "Jobs:\n",
+                "  /job <desc>       Create a new job\n",
+                "  /status [id]      Check job status\n",
+                "  /cancel <id>      Cancel a job\n",
+                "  /list             List all jobs\n",
+                "\n",
+                "Session:\n",
+                "  /undo             Undo last turn\n",
+                "  /redo             Redo undone turn\n",
+                "  /compact          Compress context window\n",
+                "  /clear            Clear current thread\n",
+                "  /interrupt        Stop current operation\n",
+                "  /new              New conversation thread\n",
+                "  /thread <id>      Switch to thread\n",
+                "  /resume <id>      Resume from checkpoint\n",
+                "\n",
+                "Agent:\n",
+                "  /heartbeat        Run heartbeat check\n",
+                "  /summarize        Summarize current thread\n",
+                "  /suggest          Suggest next steps\n",
+                "\n",
+                "  /quit             Exit",
+            ))),
 
-  /undo           - Undo last turn
-  /redo           - Redo undone turn
-  /compact        - Compress context
-  /clear          - Clear thread
-  /interrupt      - Stop current turn
-  /thread new     - New thread
-  /thread <id>    - Switch thread
-  /resume <id>    - Resume checkpoint
+            "ping" => Ok(SubmissionResult::response("pong!")),
 
-  /heartbeat      - Run heartbeat check now
-  /summarize      - Summarize current thread
-  /suggest        - Suggest next steps
-
-  /quit           - Exit"#
-                    .to_string(),
-            )),
-
-            "ping" => Ok(Some("pong!".to_string())),
-
-            "version" => Ok(Some(format!(
+            "version" => Ok(SubmissionResult::response(format!(
                 "{} v{}",
                 env!("CARGO_PKG_NAME"),
                 env!("CARGO_PKG_VERSION")
@@ -2090,11 +2483,112 @@ impl Agent {
 
             "tools" => {
                 let tools = self.tools().list().await;
-                Ok(Some(format!("Available tools: {}", tools.join(", "))))
+                Ok(SubmissionResult::response(format!(
+                    "Available tools: {}",
+                    tools.join(", ")
+                )))
             }
 
-            _ => Ok(Some(format!("Unknown command: {}. Try /help", command))),
+            "debug" => {
+                // Debug toggle is handled client-side in the REPL.
+                // For non-REPL channels, just acknowledge.
+                Ok(SubmissionResult::ok_with_message(
+                    "Debug toggle is handled by your client.",
+                ))
+            }
+
+            "model" => {
+                if args.is_empty() {
+                    // Show current model
+                    let name = self.llm().active_model_name();
+                    Ok(SubmissionResult::response(format!(
+                        "Active model: {}",
+                        name
+                    )))
+                } else {
+                    let requested = &args[0];
+
+                    // Validate the model exists
+                    match self.llm().list_models().await {
+                        Ok(models) if !models.is_empty() => {
+                            if !models.iter().any(|m| m == requested) {
+                                return Ok(SubmissionResult::error(format!(
+                                    "Unknown model: {}. Available models:\n  {}",
+                                    requested,
+                                    models.join("\n  ")
+                                )));
+                            }
+                        }
+                        Ok(_) => {
+                            // Empty model list, can't validate but try anyway
+                        }
+                        Err(e) => {
+                            tracing::warn!("Could not fetch model list for validation: {}", e);
+                            // Proceed anyway, the provider will error on the next call if invalid
+                        }
+                    }
+
+                    match self.llm().set_model(requested) {
+                        Ok(()) => Ok(SubmissionResult::response(format!(
+                            "Switched model to: {}",
+                            requested
+                        ))),
+                        Err(e) => Ok(SubmissionResult::error(format!(
+                            "Failed to switch model: {}",
+                            e
+                        ))),
+                    }
+                }
+            }
+
+            _ => Ok(SubmissionResult::error(format!(
+                "Unknown command: {}. Try /help",
+                command
+            ))),
         }
+    }
+
+    /// Handle legacy command routing from the Router (job commands that go through
+    /// process_user_input -> router -> handle_job_or_command -> here).
+    async fn handle_command(
+        &self,
+        command: &str,
+        args: &[String],
+    ) -> Result<Option<String>, Error> {
+        // System commands are now handled directly via Submission::SystemCommand,
+        // but the router may still send us unknown /commands.
+        match self.handle_system_command(command, args).await? {
+            SubmissionResult::Response { content } => Ok(Some(content)),
+            SubmissionResult::Ok { message } => Ok(message),
+            SubmissionResult::Error { message } => Ok(Some(format!("Error: {}", message))),
+            _ => Ok(None),
+        }
+    }
+}
+
+/// Parsed auth result fields for emitting StatusUpdate::AuthRequired.
+struct ParsedAuthData {
+    auth_url: Option<String>,
+    setup_url: Option<String>,
+}
+
+/// Extract auth_url and setup_url from a tool_auth result JSON string.
+fn parse_auth_result(result: &Result<String, Error>) -> ParsedAuthData {
+    let parsed = result
+        .as_ref()
+        .ok()
+        .and_then(|s| serde_json::from_str::<serde_json::Value>(s).ok());
+    ParsedAuthData {
+        auth_url: parsed
+            .as_ref()
+            .and_then(|v| v.get("auth_url"))
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string()),
+        setup_url: parsed
+            .as_ref()
+            .and_then(|v| v.get("setup_url"))
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string()),
     }
 }
 
@@ -2106,7 +2600,7 @@ fn detect_auth_awaiting(
     tool_name: &str,
     result: &Result<String, Error>,
 ) -> Option<(String, String)> {
-    if tool_name != "tool_auth" {
+    if tool_name != "tool_auth" && tool_name != "tool_activate" {
         return None;
     }
     let output = result.as_ref().ok()?;
@@ -2189,5 +2683,35 @@ mod tests {
 
         let (_, instructions) = detect_auth_awaiting("tool_auth", &result).unwrap();
         assert_eq!(instructions, "Please provide your API token/key.");
+    }
+
+    #[test]
+    fn test_detect_auth_awaiting_tool_activate() {
+        let result: Result<String, Error> = Ok(serde_json::json!({
+            "name": "slack",
+            "kind": "McpServer",
+            "awaiting_token": true,
+            "status": "awaiting_token",
+            "instructions": "Provide your Slack Bot token."
+        })
+        .to_string());
+
+        let detected = detect_auth_awaiting("tool_activate", &result);
+        assert!(detected.is_some());
+        let (name, instructions) = detected.unwrap();
+        assert_eq!(name, "slack");
+        assert!(instructions.contains("Slack Bot"));
+    }
+
+    #[test]
+    fn test_detect_auth_awaiting_tool_activate_not_awaiting() {
+        let result: Result<String, Error> = Ok(serde_json::json!({
+            "name": "slack",
+            "tools_loaded": ["slack_post_message"],
+            "message": "Activated"
+        })
+        .to_string());
+
+        assert!(detect_auth_awaiting("tool_activate", &result).is_none());
     }
 }

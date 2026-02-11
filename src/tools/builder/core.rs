@@ -689,8 +689,19 @@ Create alongside the .wasm file to grant capabilities:
                         .messages
                         .push(ChatMessage::user("Continue with the next step."));
                 }
-                RespondResult::ToolCalls(tool_calls) => {
+                RespondResult::ToolCalls {
+                    tool_calls,
+                    content,
+                } => {
                     tools_executed = true;
+
+                    // Add assistant message with tool_calls (OpenAI protocol)
+                    reason_ctx
+                        .messages
+                        .push(ChatMessage::assistant_with_tool_calls(
+                            content,
+                            tool_calls.clone(),
+                        ));
 
                     // Execute each tool call
                     for tc in tool_calls {

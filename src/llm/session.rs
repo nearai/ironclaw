@@ -61,6 +61,10 @@ pub struct SessionManager {
     token: RwLock<Option<SecretString>>,
     /// Prevents thundering herd during concurrent 401s.
     renewal_lock: Mutex<()>,
+    /// Optional database store for persisting session to the settings table.
+    store: RwLock<Option<Arc<crate::history::Store>>>,
+    /// User ID for DB settings (default: "default").
+    user_id: RwLock<String>,
 }
 
 impl SessionManager {
@@ -74,6 +78,8 @@ impl SessionManager {
                 .unwrap_or_else(|_| Client::new()),
             token: RwLock::new(None),
             renewal_lock: Mutex::new(()),
+            store: RwLock::new(None),
+            user_id: RwLock::new("default".to_string()),
         };
 
         // Try to load existing session synchronously during construction
@@ -103,6 +109,8 @@ impl SessionManager {
                 .unwrap_or_else(|_| Client::new()),
             token: RwLock::new(None),
             renewal_lock: Mutex::new(()),
+            store: RwLock::new(None),
+            user_id: RwLock::new("default".to_string()),
         };
 
         if let Err(e) = manager.load_session().await {
@@ -110,6 +118,21 @@ impl SessionManager {
         }
 
         manager
+    }
+
+    /// Attach a database store for persisting session tokens.
+    ///
+    /// When a store is attached, session tokens are saved to the `settings`
+    /// table (key: `nearai.session_token`) in addition to the disk file.
+    /// On load, DB is preferred over disk.
+    pub async fn attach_store(&self, store: Arc<crate::history::Store>, user_id: &str) {
+        *self.store.write().await = Some(store);
+        *self.user_id.write().await = user_id.to_string();
+
+        // Try to load from DB (may have been saved by a previous run)
+        if let Err(e) = self.load_session_from_db().await {
+            tracing::debug!("No session in DB: {}", e);
+        }
     }
 
     /// Get the current session token, returning an error if not authenticated.
@@ -460,7 +483,7 @@ impl SessionManager {
         Ok(())
     }
 
-    /// Save session data to disk.
+    /// Save session data to disk and (if available) to the database.
     async fn save_session(&self, token: &str, auth_provider: Option<&str>) -> Result<(), LlmError> {
         let session = SessionData {
             session_token: token.to_string(),
@@ -468,7 +491,7 @@ impl SessionManager {
             auth_provider: auth_provider.map(String::from),
         };
 
-        // Ensure parent directory exists
+        // Save to disk (always, as bootstrap fallback)
         if let Some(parent) = self.config.session_path.parent() {
             tokio::fs::create_dir_all(parent).await.map_err(|e| {
                 LlmError::Io(std::io::Error::new(
@@ -498,6 +521,58 @@ impl SessionManager {
             })?;
 
         tracing::debug!("Session saved to {}", self.config.session_path.display());
+
+        // Also save to DB if a store is attached
+        if let Some(ref store) = *self.store.read().await {
+            let user_id = self.user_id.read().await.clone();
+            let session_json = serde_json::to_value(&session)
+                .unwrap_or(serde_json::Value::String(token.to_string()));
+            if let Err(e) = store
+                .set_setting(&user_id, "nearai.session_token", &session_json)
+                .await
+            {
+                tracing::warn!("Failed to save session to DB: {}", e);
+            } else {
+                tracing::debug!("Session also saved to DB settings");
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Try to load session from the database.
+    async fn load_session_from_db(&self) -> Result<(), LlmError> {
+        let store_guard = self.store.read().await;
+        let store = store_guard
+            .as_ref()
+            .ok_or_else(|| LlmError::SessionRenewalFailed {
+                provider: "nearai".to_string(),
+                reason: "No DB store attached".to_string(),
+            })?;
+
+        let user_id = self.user_id.read().await.clone();
+        let value = store
+            .get_setting(&user_id, "nearai.session_token")
+            .await
+            .map_err(|e| LlmError::SessionRenewalFailed {
+                provider: "nearai".to_string(),
+                reason: format!("DB query failed: {}", e),
+            })?
+            .ok_or_else(|| LlmError::SessionRenewalFailed {
+                provider: "nearai".to_string(),
+                reason: "No session in DB".to_string(),
+            })?;
+
+        let session: SessionData =
+            serde_json::from_value(value).map_err(|e| LlmError::SessionRenewalFailed {
+                provider: "nearai".to_string(),
+                reason: format!("Failed to parse DB session: {}", e),
+            })?;
+
+        let mut guard = self.token.write().await;
+        *guard = Some(SecretString::from(session.session_token));
+        tracing::info!("Loaded session from DB settings");
+
         Ok(())
     }
 
