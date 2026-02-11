@@ -149,6 +149,11 @@ pub struct ChannelSettings {
     #[serde(default)]
     pub http_host: Option<String>,
 
+    /// Telegram owner user ID. When set, the bot only responds to this user.
+    /// Captured during setup by having the user message the bot.
+    #[serde(default)]
+    pub telegram_owner_id: Option<i64>,
+
     /// Enabled WASM channels by name.
     /// Channels not in this list but present in the channels directory will still load.
     /// This is primarily used by the setup wizard to track which channels were configured.
@@ -490,6 +495,51 @@ impl Settings {
             .join("settings.json")
     }
 
+    /// Reconstruct Settings from a flat key-value map (as stored in the DB).
+    ///
+    /// Each key is a dotted path (e.g., "agent.name"), value is a JSONB value.
+    /// Missing keys get their default value.
+    pub fn from_db_map(map: &std::collections::HashMap<String, serde_json::Value>) -> Self {
+        // Start with defaults, then overlay each DB setting
+        let mut settings = Self::default();
+
+        for (key, value) in map {
+            // Convert the JSONB value to a string for the existing set() method
+            let value_str = match value {
+                serde_json::Value::String(s) => s.clone(),
+                serde_json::Value::Bool(b) => b.to_string(),
+                serde_json::Value::Number(n) => n.to_string(),
+                serde_json::Value::Null => "null".to_string(),
+                other => other.to_string(),
+            };
+
+            if let Err(e) = settings.set(key, &value_str) {
+                tracing::warn!(
+                    "Failed to apply DB setting '{}' = '{}': {}",
+                    key,
+                    value_str,
+                    e
+                );
+            }
+        }
+
+        settings
+    }
+
+    /// Flatten Settings into a key-value map suitable for DB storage.
+    ///
+    /// Each entry is a (dotted_path, JSONB value) pair.
+    pub fn to_db_map(&self) -> std::collections::HashMap<String, serde_json::Value> {
+        let json = match serde_json::to_value(self) {
+            Ok(v) => v,
+            Err(_) => return std::collections::HashMap::new(),
+        };
+
+        let mut map = std::collections::HashMap::new();
+        collect_settings_json(&json, String::new(), &mut map);
+        map
+    }
+
     /// Load settings from disk, returning default if not found.
     pub fn load() -> Self {
         Self::load_from(&Self::default_path())
@@ -656,6 +706,29 @@ impl Settings {
     }
 }
 
+/// Recursively collect settings paths with their JSON values (for DB storage).
+fn collect_settings_json(
+    value: &serde_json::Value,
+    prefix: String,
+    results: &mut std::collections::HashMap<String, serde_json::Value>,
+) {
+    match value {
+        serde_json::Value::Object(obj) => {
+            for (key, val) in obj {
+                let path = if prefix.is_empty() {
+                    key.clone()
+                } else {
+                    format!("{}.{}", prefix, key)
+                };
+                collect_settings_json(val, path, results);
+            }
+        }
+        other => {
+            results.insert(prefix, other.clone());
+        }
+    }
+}
+
 /// Recursively collect settings paths and values.
 fn collect_settings(
     value: &serde_json::Value,
@@ -798,5 +871,33 @@ mod tests {
         assert!(!settings.embeddings.enabled);
         assert_eq!(settings.embeddings.provider, "nearai");
         assert_eq!(settings.embeddings.model, "text-embedding-3-small");
+    }
+
+    #[test]
+    fn test_telegram_owner_id_round_trip() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+
+        let mut settings = Settings::default();
+        settings.channels.telegram_owner_id = Some(123456789);
+        settings.save_to(&path).unwrap();
+
+        let loaded = Settings::load_from(&path);
+        assert_eq!(loaded.channels.telegram_owner_id, Some(123456789));
+    }
+
+    #[test]
+    fn test_telegram_owner_id_default_none() {
+        let settings = Settings::default();
+        assert_eq!(settings.channels.telegram_owner_id, None);
+    }
+
+    #[test]
+    fn test_telegram_owner_id_via_set() {
+        let mut settings = Settings::default();
+        settings
+            .set("channels.telegram_owner_id", "987654321")
+            .unwrap();
+        assert_eq!(settings.channels.telegram_owner_id, Some(987654321));
     }
 }

@@ -52,6 +52,16 @@ impl SecretsContext {
             .await
             .unwrap_or(false)
     }
+
+    /// Read a secret from the database (decrypted).
+    pub async fn get_secret(&self, name: &str) -> Result<SecretString, String> {
+        let decrypted = self
+            .store
+            .get_decrypted(&self.user_id, name)
+            .await
+            .map_err(|e| format!("Failed to read secret: {}", e))?;
+        Ok(SecretString::from(decrypted.expose().to_string()))
+    }
 }
 
 /// Result of Telegram setup.
@@ -60,6 +70,7 @@ pub struct TelegramSetupResult {
     pub enabled: bool,
     pub bot_username: Option<String>,
     pub webhook_secret: Option<String>,
+    pub owner_id: Option<i64>,
 }
 
 /// Telegram Bot API response for getMe.
@@ -74,6 +85,32 @@ struct TelegramUser {
     username: Option<String>,
     #[allow(dead_code)]
     first_name: String,
+}
+
+/// Telegram Bot API response for getUpdates.
+#[derive(Debug, Deserialize)]
+struct TelegramGetUpdatesResponse {
+    ok: bool,
+    result: Vec<TelegramUpdate>,
+}
+
+#[derive(Debug, Deserialize)]
+struct TelegramUpdate {
+    #[allow(dead_code)]
+    update_id: i64,
+    message: Option<TelegramUpdateMessage>,
+}
+
+#[derive(Debug, Deserialize)]
+struct TelegramUpdateMessage {
+    from: Option<TelegramUpdateUser>,
+}
+
+#[derive(Debug, Deserialize)]
+struct TelegramUpdateUser {
+    id: i64,
+    first_name: String,
+    username: Option<String>,
 }
 
 /// Set up Telegram bot channel.
@@ -96,12 +133,14 @@ pub async fn setup_telegram(secrets: &SecretsContext) -> Result<TelegramSetupRes
     if secrets.secret_exists("telegram_bot_token").await {
         print_info("Existing Telegram token found in database.");
         if !confirm("Replace existing token?", false).map_err(|e| e.to_string())? {
-            // Still offer to configure webhook secret if not already done
+            // Still offer to configure webhook secret and owner binding
             let webhook_secret = setup_telegram_webhook_secret(secrets).await?;
+            let owner_id = bind_telegram_owner_flow(secrets).await?;
             return Ok(TelegramSetupResult {
                 enabled: true,
                 bot_username: None,
                 webhook_secret,
+                owner_id,
             });
         }
     }
@@ -122,6 +161,9 @@ pub async fn setup_telegram(secrets: &SecretsContext) -> Result<TelegramSetupRes
             secrets.save_secret("telegram_bot_token", &token).await?;
             print_success("Token saved to database");
 
+            // Bind bot to owner's Telegram account
+            let owner_id = bind_telegram_owner(&token).await?;
+
             // Offer webhook secret configuration
             let webhook_secret = setup_telegram_webhook_secret(secrets).await?;
 
@@ -129,6 +171,7 @@ pub async fn setup_telegram(secrets: &SecretsContext) -> Result<TelegramSetupRes
                 enabled: true,
                 bot_username: username,
                 webhook_secret,
+                owner_id,
             })
         }
         Err(e) => {
@@ -141,10 +184,126 @@ pub async fn setup_telegram(secrets: &SecretsContext) -> Result<TelegramSetupRes
                     enabled: false,
                     bot_username: None,
                     webhook_secret: None,
+                    owner_id: None,
                 })
             }
         }
     }
+}
+
+/// Bind the bot to the owner's Telegram account by having them send a message.
+///
+/// Polls `getUpdates` until a message arrives, then captures the sender's user ID.
+/// Returns `None` if the user declines or the flow times out.
+async fn bind_telegram_owner(token: &SecretString) -> Result<Option<i64>, String> {
+    println!();
+    print_info("Account Binding (recommended):");
+    print_info("Binding restricts the bot so only YOU can use it.");
+    print_info("Without this, anyone who finds your bot can send it messages.");
+    println!();
+
+    if !confirm("Bind bot to your Telegram account?", true).map_err(|e| e.to_string())? {
+        print_info("Skipping account binding. Bot will accept messages from all users.");
+        return Ok(None);
+    }
+
+    print_info("Send any message (e.g. /start) to your bot in Telegram.");
+    print_info("Waiting for your message (up to 120 seconds)...");
+
+    let client = Client::builder()
+        .timeout(std::time::Duration::from_secs(35))
+        .build()
+        .map_err(|e| format!("Failed to create HTTP client: {}", e))?;
+
+    // Clear any existing webhook so getUpdates works
+    let delete_url = format!(
+        "https://api.telegram.org/bot{}/deleteWebhook",
+        token.expose_secret()
+    );
+    let _ = client.post(&delete_url).send().await;
+
+    let updates_url = format!(
+        "https://api.telegram.org/bot{}/getUpdates",
+        token.expose_secret()
+    );
+
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
+
+    while std::time::Instant::now() < deadline {
+        let response = client
+            .get(&updates_url)
+            .query(&[("timeout", "30"), ("allowed_updates", "[\"message\"]")])
+            .send()
+            .await
+            .map_err(|e| format!("getUpdates request failed: {}", e))?;
+
+        if !response.status().is_success() {
+            return Err(format!("getUpdates returned status {}", response.status()));
+        }
+
+        let body: TelegramGetUpdatesResponse = response
+            .json()
+            .await
+            .map_err(|e| format!("Failed to parse getUpdates response: {}", e))?;
+
+        if !body.ok {
+            return Err("Telegram API returned error for getUpdates".to_string());
+        }
+
+        // Find the first message with a sender
+        for update in &body.result {
+            if let Some(ref msg) = update.message {
+                if let Some(ref from) = msg.from {
+                    let display_name = from
+                        .username
+                        .as_ref()
+                        .map(|u| format!("@{}", u))
+                        .unwrap_or_else(|| from.first_name.clone());
+
+                    print_success(&format!(
+                        "Received message from {} (ID: {})",
+                        display_name, from.id
+                    ));
+
+                    // Acknowledge the update so it doesn't pile up
+                    let ack_url = format!(
+                        "https://api.telegram.org/bot{}/getUpdates",
+                        token.expose_secret()
+                    );
+                    let _ = client
+                        .get(&ack_url)
+                        .query(&[("offset", &(update.update_id + 1).to_string())])
+                        .send()
+                        .await;
+
+                    return Ok(Some(from.id));
+                }
+            }
+        }
+    }
+
+    print_error("Timed out waiting for a message. You can re-run setup to try again.");
+    print_info("Bot will accept messages from all users until owner is bound.");
+    Ok(None)
+}
+
+/// Bind flow when the token already exists (reads from secrets store).
+///
+/// Retrieves the saved bot token and delegates to `bind_telegram_owner`.
+async fn bind_telegram_owner_flow(secrets: &SecretsContext) -> Result<Option<i64>, String> {
+    // Check current settings first
+    let settings = Settings::load();
+    if settings.channels.telegram_owner_id.is_some() {
+        print_info("Bot is already bound to a Telegram account.");
+        if !confirm("Re-bind to a different account?", false).map_err(|e| e.to_string())? {
+            return Ok(settings.channels.telegram_owner_id);
+        }
+    }
+
+    // We need the token to poll getUpdates
+    let token = secrets.get_secret("telegram_bot_token").await?;
+
+    bind_telegram_owner(&token).await
 }
 
 /// Set up a tunnel for exposing the agent to the internet.

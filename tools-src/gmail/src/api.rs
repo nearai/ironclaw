@@ -26,7 +26,7 @@ fn api_call(method: &str, path: &str, body: Option<&str>) -> Result<String, Stri
         &format!("Gmail API: {} {}", method, path),
     );
 
-    let response = host::http_request(method, &url, headers, body_bytes.as_deref())?;
+    let response = host::http_request(method, &url, headers, body_bytes.as_deref(), None)?;
 
     if response.status < 200 || response.status >= 300 {
         let body_text = String::from_utf8_lossy(&response.body);
@@ -389,7 +389,7 @@ const BASE64URL_CHARS: &[u8; 64] =
 
 /// Base64url-encode bytes (no padding, URL-safe alphabet).
 fn base64url_encode(input: &[u8]) -> String {
-    let mut result = String::with_capacity((input.len() + 2) / 3 * 4);
+    let mut result = String::with_capacity(input.len().div_ceil(3) * 4);
 
     for chunk in input.chunks(3) {
         let b0 = chunk[0] as u32;

@@ -279,18 +279,18 @@ fn execute_inner(params: &str) -> Result<String, String> {
             timezone,
             attendees,
         } => {
-            let result = api::create_event(
-                &calendar_id,
-                &summary,
-                description.as_deref(),
-                location.as_deref(),
-                start_datetime.as_deref(),
-                end_datetime.as_deref(),
-                start_date.as_deref(),
-                end_date.as_deref(),
-                timezone.as_deref(),
-                &attendees,
-            )?;
+            let result = api::create_event(&api::CreateEventParams {
+                calendar_id: &calendar_id,
+                summary: &summary,
+                description: description.as_deref(),
+                location: location.as_deref(),
+                start_datetime: start_datetime.as_deref(),
+                end_datetime: end_datetime.as_deref(),
+                start_date: start_date.as_deref(),
+                end_date: end_date.as_deref(),
+                timezone: timezone.as_deref(),
+                attendees: &attendees,
+            })?;
             serde_json::to_string(&result).map_err(|e| e.to_string())?
         }
 
@@ -307,19 +307,19 @@ fn execute_inner(params: &str) -> Result<String, String> {
             timezone,
             attendees,
         } => {
-            let result = api::update_event(
-                &calendar_id,
-                &event_id,
-                summary.as_deref(),
-                description.as_deref(),
-                location.as_deref(),
-                start_datetime.as_deref(),
-                end_datetime.as_deref(),
-                start_date.as_deref(),
-                end_date.as_deref(),
-                timezone.as_deref(),
-                attendees.as_deref(),
-            )?;
+            let result = api::update_event(&api::UpdateEventParams {
+                calendar_id: &calendar_id,
+                event_id: &event_id,
+                summary: summary.as_deref(),
+                description: description.as_deref(),
+                location: location.as_deref(),
+                start_datetime: start_datetime.as_deref(),
+                end_datetime: end_datetime.as_deref(),
+                start_date: start_date.as_deref(),
+                end_date: end_date.as_deref(),
+                timezone: timezone.as_deref(),
+                attendees: attendees.as_deref(),
+            })?;
             serde_json::to_string(&result).map_err(|e| e.to_string())?
         }
 

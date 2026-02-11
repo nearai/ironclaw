@@ -146,6 +146,22 @@ impl ChannelStoreData {
 
         result
     }
+
+    /// Replace injected credential values with `[REDACTED]` in text.
+    ///
+    /// Prevents credentials from leaking through error messages, logs, or
+    /// return values to WASM. reqwest::Error includes the full URL in its
+    /// Display output, so any error from an injected-URL request will
+    /// contain the raw credential unless we scrub it.
+    fn redact_credentials(&self, text: &str) -> String {
+        let mut result = text.to_string();
+        for (name, value) in &self.credentials {
+            if !value.is_empty() {
+                result = result.replace(value, &format!("[REDACTED:{}]", name));
+            }
+        }
+        result
+    }
 }
 
 // Implement WasiView to provide WASI context and resource table
@@ -192,6 +208,7 @@ impl near::agent::channel_host::Host for ChannelStoreData {
         url: String,
         headers_json: String,
         body: Option<Vec<u8>>,
+        timeout_ms: Option<u32>,
     ) -> Result<near::agent::channel_host::HttpResponse, String> {
         tracing::info!(
             method = %method,
@@ -281,12 +298,21 @@ impl near::agent::channel_host::Host for ChannelStoreData {
                 request = request.body(body_bytes);
             }
 
-            // Send request with timeout
-            let response = request
-                .timeout(std::time::Duration::from_secs(30))
-                .send()
-                .await
-                .map_err(|e| format!("HTTP request failed: {}", e))?;
+            // Send request with caller-specified timeout (default 30s).
+            // Cap at callback_timeout to prevent outliving the host wrapper.
+            let timeout = std::time::Duration::from_millis(timeout_ms.unwrap_or(30_000) as u64);
+            let response = request.timeout(timeout).send().await.map_err(|e| {
+                // Walk the full error chain so we get the actual root cause
+                // (DNS, TLS, connection refused, etc.) instead of just
+                // "error sending request for url (...)".
+                let mut chain = format!("HTTP request failed: {}", e);
+                let mut source = std::error::Error::source(&e);
+                while let Some(cause) = source {
+                    chain.push_str(&format!(" -> {}", cause));
+                    source = cause.source();
+                }
+                chain
+            })?;
 
             let status = response.status().as_u16();
             let response_headers: std::collections::HashMap<String, String> = response
@@ -334,6 +360,11 @@ impl near::agent::channel_host::Host for ChannelStoreData {
                 body,
             })
         });
+
+        // Scrub credential values from error messages before logging or returning
+        // to WASM. reqwest::Error includes the full URL (with injected credentials)
+        // in its Display output.
+        let result = result.map_err(|e| self.redact_credentials(&e));
 
         match &result {
             Ok(resp) => {
@@ -1953,6 +1984,29 @@ fn status_to_wit(status: &StatusUpdate, metadata: &serde_json::Value) -> wit_cha
             message: format!("Approval needed: {} - {}", tool_name, description),
             metadata_json,
         },
+        StatusUpdate::JobStarted { job_id, title, .. } => wit_channel::StatusUpdate {
+            status: wit_channel::StatusType::Thinking,
+            message: format!("Job started: {} ({})", title, job_id),
+            metadata_json,
+        },
+        StatusUpdate::AuthRequired { extension_name, .. } => wit_channel::StatusUpdate {
+            status: wit_channel::StatusType::Thinking,
+            message: format!("Auth required: {}", extension_name),
+            metadata_json,
+        },
+        StatusUpdate::AuthCompleted {
+            extension_name,
+            success,
+            ..
+        } => wit_channel::StatusUpdate {
+            status: wit_channel::StatusType::Thinking,
+            message: format!(
+                "Auth {}: {}",
+                if *success { "completed" } else { "failed" },
+                extension_name
+            ),
+            metadata_json,
+        },
     }
 }
 
@@ -2458,5 +2512,79 @@ mod tests {
         assert!(matches!(cloned.status, wit_channel::StatusType::Thinking));
         assert_eq!(cloned.message, "hello");
         assert_eq!(cloned.metadata_json, "{\"a\":1}");
+    }
+
+    #[test]
+    fn test_redact_credentials_replaces_values() {
+        use super::ChannelStoreData;
+
+        let mut creds = std::collections::HashMap::new();
+        creds.insert(
+            "TELEGRAM_BOT_TOKEN".to_string(),
+            "8218490433:AAEZeUxwqZ5OO3mOCXv7fKvpdhDgsmBBNis".to_string(),
+        );
+        creds.insert("OTHER_SECRET".to_string(), "s3cret".to_string());
+
+        let store =
+            ChannelStoreData::new(1024 * 1024, "test", ChannelCapabilities::default(), creds);
+
+        let error = "HTTP request failed: error sending request for url \
+            (https://api.telegram.org/bot8218490433:AAEZeUxwqZ5OO3mOCXv7fKvpdhDgsmBBNis/getUpdates)";
+
+        let redacted = store.redact_credentials(error);
+
+        assert!(
+            !redacted.contains("8218490433:AAEZeUxwqZ5OO3mOCXv7fKvpdhDgsmBBNis"),
+            "credential value should be redacted"
+        );
+        assert!(
+            redacted.contains("[REDACTED:TELEGRAM_BOT_TOKEN]"),
+            "redacted text should contain placeholder name"
+        );
+        assert!(
+            !redacted.contains("s3cret"),
+            "other credentials should also be redacted"
+        );
+    }
+
+    #[test]
+    fn test_redact_credentials_no_op_without_credentials() {
+        use super::ChannelStoreData;
+
+        let store = ChannelStoreData::new(
+            1024 * 1024,
+            "test",
+            ChannelCapabilities::default(),
+            std::collections::HashMap::new(),
+        );
+
+        let input = "some error message";
+        assert_eq!(store.redact_credentials(input), input);
+    }
+
+    #[test]
+    fn test_redact_credentials_skips_empty_values() {
+        use super::ChannelStoreData;
+
+        let mut creds = std::collections::HashMap::new();
+        creds.insert("EMPTY_TOKEN".to_string(), String::new());
+
+        let store =
+            ChannelStoreData::new(1024 * 1024, "test", ChannelCapabilities::default(), creds);
+
+        let input = "should not match anything";
+        assert_eq!(store.redact_credentials(input), input);
+    }
+
+    /// Verify that the block_on-inside-spawn_blocking pattern used by the WASM
+    /// channel HTTP host function doesn't deadlock or panic.
+    #[tokio::test]
+    async fn test_block_on_inside_spawn_blocking_does_not_deadlock() {
+        let result = tokio::task::spawn_blocking(|| {
+            tokio::runtime::Handle::current().block_on(async { 42 })
+        })
+        .await
+        .expect("spawn_blocking panicked");
+        assert_eq!(result, 42);
     }
 }

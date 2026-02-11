@@ -272,13 +272,24 @@ Report when the job is complete or if you encounter issues you cannot resolve."#
                             ));
                         }
                     }
-                    RespondResult::ToolCalls(tool_calls) => {
+                    RespondResult::ToolCalls {
+                        tool_calls,
+                        content,
+                    } => {
                         // Model returned tool calls - execute them
                         tracing::debug!(
                             "Job {} respond_with_tools returned {} tool calls",
                             self.job_id,
                             tool_calls.len()
                         );
+
+                        // Add assistant message with tool_calls (OpenAI protocol)
+                        reason_ctx
+                            .messages
+                            .push(ChatMessage::assistant_with_tool_calls(
+                                content,
+                                tool_calls.clone(),
+                            ));
 
                         for tc in tool_calls {
                             let result = self.execute_tool(&tc.name, &tc.arguments).await;
@@ -417,13 +428,50 @@ Report when the job is complete or if you encounter issues you cannot resolve."#
             .into());
         }
 
-        // Execute with timeout and timing
+        tracing::debug!(
+            tool = %tool_name,
+            params = %params,
+            job = %job_id,
+            "Tool call started"
+        );
+
+        // Execute with per-tool timeout and timing
+        let tool_timeout = tool.execution_timeout();
         let start = std::time::Instant::now();
-        let result = tokio::time::timeout(Duration::from_secs(60), async {
+        let result = tokio::time::timeout(tool_timeout, async {
             tool.execute(params.clone(), &job_ctx).await
         })
         .await;
         let elapsed = start.elapsed();
+
+        match &result {
+            Ok(Ok(output)) => {
+                let result_str = serde_json::to_string(&output.result)
+                    .unwrap_or_else(|_| "<serialize error>".to_string());
+                tracing::debug!(
+                    tool = %tool_name,
+                    elapsed_ms = elapsed.as_millis() as u64,
+                    result = %result_str,
+                    "Tool call succeeded"
+                );
+            }
+            Ok(Err(e)) => {
+                tracing::debug!(
+                    tool = %tool_name,
+                    elapsed_ms = elapsed.as_millis() as u64,
+                    error = %e,
+                    "Tool call failed"
+                );
+            }
+            Err(_) => {
+                tracing::debug!(
+                    tool = %tool_name,
+                    elapsed_ms = elapsed.as_millis() as u64,
+                    timeout_secs = tool_timeout.as_secs(),
+                    "Tool call timed out"
+                );
+            }
+        }
 
         // Record action in memory and get the ActionRecord for persistence
         let action = match &result {
@@ -479,7 +527,7 @@ Report when the job is complete or if you encounter issues you cannot resolve."#
         let output = result
             .map_err(|_| crate::error::ToolError::Timeout {
                 name: tool_name.to_string(),
-                timeout: Duration::from_secs(60),
+                timeout: tool_timeout,
             })?
             .map_err(|e| crate::error::ToolError::ExecutionFailed {
                 name: tool_name.to_string(),

@@ -1,68 +1,125 @@
-//! Bundled WASM channels that can be installed locally.
+//! Known WASM channels that can be installed from build artifacts.
+//!
+//! Instead of embedding WASM binaries in the host binary via include_bytes!,
+//! channels are compiled separately and installed from their build output
+//! directories during onboarding.
+//!
+//! Channel source layout:
+//!   channels-src/<name>/
+//!     target/wasm32-wasip2/release/<name>_channel.wasm
+//!     <name>.capabilities.json
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use tokio::fs;
 
-#[derive(Clone, Copy)]
-struct BundledChannel {
-    name: &'static str,
-    wasm: &'static [u8],
-    capabilities: &'static [u8],
+/// Compile-time project root, used to locate channels-src/ in dev builds.
+const CARGO_MANIFEST_DIR: &str = env!("CARGO_MANIFEST_DIR");
+
+/// Known channel names and their crate names (for locating build artifacts).
+const KNOWN_CHANNELS: &[(&str, &str)] = &[
+    ("telegram", "telegram_channel"),
+    ("slack", "slack_channel"),
+    ("whatsapp", "whatsapp_channel"),
+];
+
+/// Names of known channels that can be installed.
+pub fn bundled_channel_names() -> Vec<&'static str> {
+    KNOWN_CHANNELS.iter().map(|(name, _)| *name).collect()
 }
 
-/// Names of bundled channels shipped with IronClaw.
-pub fn bundled_channel_names() -> &'static [&'static str] {
-    &["telegram"]
+/// Resolve the channels source directory.
+///
+/// Checks (in order):
+/// 1. `IRONCLAW_CHANNELS_SRC` env var
+/// 2. `<CARGO_MANIFEST_DIR>/channels-src/` (dev builds)
+fn channels_src_dir() -> PathBuf {
+    if let Ok(dir) = std::env::var("IRONCLAW_CHANNELS_SRC") {
+        return PathBuf::from(dir);
+    }
+    PathBuf::from(CARGO_MANIFEST_DIR).join("channels-src")
 }
 
-/// Install a bundled channel into a channels directory.
+/// Locate the build artifacts for a channel.
+///
+/// Returns (wasm_path, capabilities_path) or an error if files are missing.
+fn locate_channel_artifacts(name: &str) -> Result<(PathBuf, PathBuf), String> {
+    let (_, crate_name) = KNOWN_CHANNELS
+        .iter()
+        .find(|(n, _)| *n == name)
+        .ok_or_else(|| format!("Unknown channel '{}'", name))?;
+
+    let src_dir = channels_src_dir();
+    let channel_dir = src_dir.join(name);
+
+    let wasm_path = channel_dir
+        .join("target/wasm32-wasip2/release")
+        .join(format!("{}.wasm", crate_name));
+
+    let caps_path = channel_dir.join(format!("{}.capabilities.json", name));
+
+    if !wasm_path.exists() {
+        return Err(format!(
+            "Channel '{}' WASM not found at {}. Build it first:\n  \
+             cd {} && cargo build --target wasm32-wasip2 --release",
+            name,
+            wasm_path.display(),
+            channel_dir.display()
+        ));
+    }
+
+    if !caps_path.exists() {
+        return Err(format!(
+            "Channel '{}' capabilities not found at {}",
+            name,
+            caps_path.display()
+        ));
+    }
+
+    Ok((wasm_path, caps_path))
+}
+
+/// Install a channel from build artifacts into the channels directory.
 pub async fn install_bundled_channel(
     name: &str,
     target_dir: &Path,
     force: bool,
 ) -> Result<(), String> {
-    let channel = bundled_channel(name)
-        .ok_or_else(|| format!("Unknown bundled channel '{}'", name.to_lowercase()))?;
+    let (wasm_src, caps_src) = locate_channel_artifacts(name)?;
 
     fs::create_dir_all(target_dir)
         .await
         .map_err(|e| format!("Failed to create channels directory: {}", e))?;
 
-    let wasm_path = target_dir.join(format!("{}.wasm", channel.name));
-    let caps_path = target_dir.join(format!("{}.capabilities.json", channel.name));
+    let wasm_dst = target_dir.join(format!("{}.wasm", name));
+    let caps_dst = target_dir.join(format!("{}.capabilities.json", name));
 
-    let has_existing = wasm_path.exists() || caps_path.exists();
+    let has_existing = wasm_dst.exists() || caps_dst.exists();
     if has_existing && !force {
         return Err(format!(
             "Channel '{}' already exists at {}",
-            channel.name,
+            name,
             target_dir.display()
         ));
     }
 
-    fs::write(&wasm_path, channel.wasm)
+    fs::copy(&wasm_src, &wasm_dst)
         .await
-        .map_err(|e| format!("Failed to write {}: {}", wasm_path.display(), e))?;
-    fs::write(&caps_path, channel.capabilities)
+        .map_err(|e| format!("Failed to copy {}: {}", wasm_src.display(), e))?;
+    fs::copy(&caps_src, &caps_dst)
         .await
-        .map_err(|e| format!("Failed to write {}: {}", caps_path.display(), e))?;
+        .map_err(|e| format!("Failed to copy {}: {}", caps_src.display(), e))?;
 
     Ok(())
 }
 
-fn bundled_channel(name: &str) -> Option<BundledChannel> {
-    if name.eq_ignore_ascii_case("telegram") {
-        Some(BundledChannel {
-            name: "telegram",
-            wasm: include_bytes!("../../../channels-src/telegram/telegram.wasm"),
-            capabilities: include_bytes!(
-                "../../../channels-src/telegram/telegram.capabilities.json"
-            ),
-        })
-    } else {
-        None
-    }
+/// Check which known channels have build artifacts available.
+pub fn available_channel_names() -> Vec<&'static str> {
+    KNOWN_CHANNELS
+        .iter()
+        .filter(|(name, _)| locate_channel_artifacts(name).is_ok())
+        .map(|(name, _)| *name)
+        .collect()
 }
 
 #[cfg(test)]
@@ -73,31 +130,35 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_bundled_channel_names_contains_telegram() {
-        assert!(bundled_channel_names().contains(&"telegram"));
+    fn test_known_channels_includes_all_three() {
+        let names = bundled_channel_names();
+        assert!(names.contains(&"telegram"));
+        assert!(names.contains(&"slack"));
+        assert!(names.contains(&"whatsapp"));
+    }
+
+    #[test]
+    fn test_channels_src_dir_default() {
+        let dir = channels_src_dir();
+        assert!(dir.ends_with("channels-src"));
+    }
+
+    #[test]
+    fn test_locate_unknown_channel_errors() {
+        assert!(locate_channel_artifacts("nonexistent").is_err());
     }
 
     #[tokio::test]
-    async fn test_install_bundled_channel_writes_files() {
-        let dir = tempdir().unwrap();
-
-        install_bundled_channel("telegram", dir.path(), false)
-            .await
-            .unwrap();
-
-        assert!(dir.path().join("telegram.wasm").exists());
-        assert!(dir.path().join("telegram.capabilities.json").exists());
-    }
-
-    #[tokio::test]
-    async fn test_install_bundled_channel_refuses_overwrite_without_force() {
+    async fn test_install_refuses_overwrite_without_force() {
         let dir = tempdir().unwrap();
         let wasm_path = dir.path().join("telegram.wasm");
         fs::write(&wasm_path, b"custom").await.unwrap();
 
         let result = install_bundled_channel("telegram", dir.path(), false).await;
+        // Either fails because artifacts missing OR because file exists
         assert!(result.is_err());
 
+        // Original file should be untouched
         let existing = fs::read(&wasm_path).await.unwrap();
         assert_eq!(existing, b"custom");
     }

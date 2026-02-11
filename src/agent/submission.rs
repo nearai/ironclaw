@@ -43,6 +43,49 @@ impl SubmissionParser {
         if lower == "/thread new" || lower == "/new" {
             return Submission::NewThread;
         }
+        // System commands (bypass thread-state checks)
+        if lower == "/help" || lower == "/?" {
+            return Submission::SystemCommand {
+                command: "help".to_string(),
+                args: vec![],
+            };
+        }
+        if lower == "/version" {
+            return Submission::SystemCommand {
+                command: "version".to_string(),
+                args: vec![],
+            };
+        }
+        if lower == "/tools" {
+            return Submission::SystemCommand {
+                command: "tools".to_string(),
+                args: vec![],
+            };
+        }
+        if lower == "/ping" {
+            return Submission::SystemCommand {
+                command: "ping".to_string(),
+                args: vec![],
+            };
+        }
+        if lower == "/debug" {
+            return Submission::SystemCommand {
+                command: "debug".to_string(),
+                args: vec![],
+            };
+        }
+        if lower.starts_with("/model") {
+            let args: Vec<String> = trimmed
+                .split_whitespace()
+                .skip(1)
+                .map(|s| s.to_string())
+                .collect();
+            return Submission::SystemCommand {
+                command: "model".to_string(),
+                args,
+            };
+        }
+
         if lower == "/quit" || lower == "/exit" || lower == "/shutdown" {
             return Submission::Quit;
         }
@@ -172,6 +215,15 @@ pub enum Submission {
 
     /// Quit the agent. Bypasses thread-state checks.
     Quit,
+
+    /// System command (help, model, version, tools, ping, debug).
+    /// Bypasses thread-state checks and safety validation.
+    SystemCommand {
+        /// The command name (e.g. "help", "model", "version").
+        command: String,
+        /// Arguments to the command.
+        args: Vec<String>,
+    },
 }
 
 impl Submission {
@@ -238,6 +290,7 @@ impl Submission {
                 | Self::Heartbeat
                 | Self::Summarize
                 | Self::Suggest
+                | Self::SystemCommand { .. }
         )
     }
 }
@@ -502,6 +555,84 @@ mod tests {
             "Expected ExecApproval, got {:?}",
             parsed
         );
+    }
+
+    #[test]
+    fn test_parser_system_command_help() {
+        let submission = SubmissionParser::parse("/help");
+        assert!(
+            matches!(submission, Submission::SystemCommand { command, args } if command == "help" && args.is_empty())
+        );
+
+        let submission = SubmissionParser::parse("/?");
+        assert!(
+            matches!(submission, Submission::SystemCommand { command, .. } if command == "help")
+        );
+
+        let submission = SubmissionParser::parse("/HELP");
+        assert!(
+            matches!(submission, Submission::SystemCommand { command, .. } if command == "help")
+        );
+    }
+
+    #[test]
+    fn test_parser_system_command_model() {
+        // No args: show current model
+        let submission = SubmissionParser::parse("/model");
+        assert!(
+            matches!(submission, Submission::SystemCommand { command, args } if command == "model" && args.is_empty())
+        );
+
+        // With args: switch model
+        let submission = SubmissionParser::parse("/model gpt-4o");
+        assert!(
+            matches!(submission, Submission::SystemCommand { command, args } if command == "model" && args == vec!["gpt-4o"])
+        );
+
+        // Case insensitive command, preserves arg case
+        let submission = SubmissionParser::parse("/MODEL Claude-3.5");
+        assert!(
+            matches!(submission, Submission::SystemCommand { command, args } if command == "model" && args == vec!["Claude-3.5"])
+        );
+    }
+
+    #[test]
+    fn test_parser_system_command_version() {
+        let submission = SubmissionParser::parse("/version");
+        assert!(
+            matches!(submission, Submission::SystemCommand { command, args } if command == "version" && args.is_empty())
+        );
+    }
+
+    #[test]
+    fn test_parser_system_command_tools() {
+        let submission = SubmissionParser::parse("/tools");
+        assert!(
+            matches!(submission, Submission::SystemCommand { command, args } if command == "tools" && args.is_empty())
+        );
+    }
+
+    #[test]
+    fn test_parser_system_command_ping() {
+        let submission = SubmissionParser::parse("/ping");
+        assert!(
+            matches!(submission, Submission::SystemCommand { command, args } if command == "ping" && args.is_empty())
+        );
+    }
+
+    #[test]
+    fn test_parser_system_command_debug() {
+        let submission = SubmissionParser::parse("/debug");
+        assert!(
+            matches!(submission, Submission::SystemCommand { command, args } if command == "debug" && args.is_empty())
+        );
+    }
+
+    #[test]
+    fn test_parser_system_command_is_control() {
+        let submission = SubmissionParser::parse("/help");
+        assert!(submission.is_control());
+        assert!(!submission.starts_turn());
     }
 
     #[test]

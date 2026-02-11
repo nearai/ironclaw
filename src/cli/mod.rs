@@ -94,6 +94,42 @@ pub enum Command {
 
     /// Show system health and diagnostics
     Status,
+
+    /// Run as a sandboxed worker inside a Docker container (internal use).
+    /// This is invoked automatically by the orchestrator, not by users directly.
+    Worker {
+        /// Job ID to execute.
+        #[arg(long)]
+        job_id: uuid::Uuid,
+
+        /// URL of the orchestrator's internal API.
+        #[arg(long, default_value = "http://host.docker.internal:50051")]
+        orchestrator_url: String,
+
+        /// Maximum iterations before stopping.
+        #[arg(long, default_value = "50")]
+        max_iterations: u32,
+    },
+
+    /// Run as a Claude Code bridge inside a Docker container (internal use).
+    /// Spawns the `claude` CLI and streams output back to the orchestrator.
+    ClaudeBridge {
+        /// Job ID to execute.
+        #[arg(long)]
+        job_id: uuid::Uuid,
+
+        /// URL of the orchestrator's internal API.
+        #[arg(long, default_value = "http://host.docker.internal:50051")]
+        orchestrator_url: String,
+
+        /// Maximum agentic turns for Claude Code.
+        #[arg(long, default_value = "50")]
+        max_turns: u32,
+
+        /// Claude model to use (e.g. "sonnet", "opus").
+        #[arg(long, default_value = "sonnet")]
+        model: String,
+    },
 }
 
 impl Cli {

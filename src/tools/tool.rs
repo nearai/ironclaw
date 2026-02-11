@@ -9,6 +9,18 @@ use thiserror::Error;
 
 use crate::context::JobContext;
 
+/// Where a tool should execute: orchestrator process or inside a container.
+///
+/// Orchestrator tools run in the main agent process (memory access, job mgmt, etc).
+/// Container tools run inside Docker containers (shell, file ops, code mods).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ToolDomain {
+    /// Safe to run in the orchestrator (pure functions, memory, job management).
+    Orchestrator,
+    /// Must run inside a sandboxed container (filesystem, shell, code).
+    Container,
+}
+
 /// Error type for tool execution.
 #[derive(Debug, Error)]
 pub enum ToolError {
@@ -160,6 +172,23 @@ pub trait Tool: Send + Sync {
         false
     }
 
+    /// Maximum time this tool is allowed to run before the caller kills it.
+    /// Override for long-running tools like sandbox execution.
+    /// Default: 60 seconds.
+    fn execution_timeout(&self) -> Duration {
+        Duration::from_secs(60)
+    }
+
+    /// Where this tool should execute.
+    ///
+    /// `Orchestrator` tools run in the main agent process (safe, no FS access).
+    /// `Container` tools run inside Docker containers (shell, file ops).
+    ///
+    /// Default: `Orchestrator` (safe for the main process).
+    fn domain(&self) -> ToolDomain {
+        ToolDomain::Orchestrator
+    }
+
     /// Get the tool schema for LLM function calling.
     fn schema(&self) -> ToolSchema {
         ToolSchema {
@@ -241,5 +270,11 @@ mod tests {
 
         assert_eq!(schema.name, "echo");
         assert!(!schema.description.is_empty());
+    }
+
+    #[test]
+    fn test_execution_timeout_default() {
+        let tool = EchoTool;
+        assert_eq!(tool.execution_timeout(), Duration::from_secs(60));
     }
 }

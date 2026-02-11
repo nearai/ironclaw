@@ -16,8 +16,8 @@ This document tracks feature parity between IronClaw (Rust implementation) and O
 
 | Feature | OpenClaw | IronClaw | Notes |
 |---------|----------|----------|-------|
-| Hub-and-spoke architecture | ✅ | 🚧 | IronClaw has channels but no central gateway |
-| WebSocket control plane | ✅ | ❌ | Gateway with ws://127.0.0.1:18789 |
+| Hub-and-spoke architecture | ✅ | ✅ | Web gateway as central hub |
+| WebSocket control plane | ✅ | ✅ | Gateway with WebSocket + SSE |
 | Single-user system | ✅ | ✅ | |
 | Multi-agent routing | ✅ | ❌ | Workspace isolation per-agent |
 | Session-based messaging | ✅ | ✅ | Per-sender sessions |
@@ -31,9 +31,9 @@ This document tracks feature parity between IronClaw (Rust implementation) and O
 
 | Feature | OpenClaw | IronClaw | Notes |
 |---------|----------|----------|-------|
-| Gateway control plane | ✅ | ❌ | Central WebSocket server |
-| HTTP endpoints for Control UI | ✅ | ❌ | Web dashboard |
-| Channel connection lifecycle | ✅ | 🚧 | ChannelManager handles streams |
+| Gateway control plane | ✅ | ✅ | Web gateway with 40+ API endpoints |
+| HTTP endpoints for Control UI | ✅ | ✅ | Web dashboard with chat, memory, jobs, logs, extensions |
+| Channel connection lifecycle | ✅ | ✅ | ChannelManager + WebSocket tracker |
 | Session management/routing | ✅ | ✅ | SessionManager exists |
 | Configuration hot-reload | ✅ | ❌ | |
 | Network modes (loopback/LAN/remote) | ✅ | 🚧 | HTTP only |
@@ -43,7 +43,7 @@ This document tracks feature parity between IronClaw (Rust implementation) and O
 | launchd/systemd integration | ✅ | ❌ | |
 | Bonjour/mDNS discovery | ✅ | ❌ | |
 | Tailscale integration | ✅ | ❌ | |
-| Health check endpoints | ✅ | ❌ | |
+| Health check endpoints | ✅ | ✅ | /api/health + /api/gateway/status |
 | `doctor` diagnostics | ✅ | ❌ | |
 
 ### Owner: _Unassigned_
@@ -59,14 +59,14 @@ This document tracks feature parity between IronClaw (Rust implementation) and O
 | REPL (simple) | ✅ | ✅ | - | For testing |
 | WASM channels | ❌ | ✅ | - | IronClaw innovation |
 | WhatsApp | ✅ | ❌ | P1 | Baileys (Web) |
-| Telegram | ✅ | ✅ | - | WASM channel, DM pairing, caption, /start, bot_username |
+| Telegram | ✅ | ✅ | - | WASM channel(MTProto), DM pairing, caption, /start, bot_username |
 | Discord | ✅ | ❌ | P2 | discord.js |
 | Signal | ✅ | ❌ | P2 | signal-cli |
-| Slack | ✅ | 🚧 | P1 | Stub exists, needs implementation |
+| Slack | ✅ | ✅ | - | WASM tool |
 | iMessage | ✅ | ❌ | P3 | BlueBubbles recommended |
 | Feishu/Lark | ✅ | ❌ | P3 | |
 | LINE | ✅ | ❌ | P3 | |
-| WebChat | ✅ | ❌ | P2 | Browser-based chat |
+| WebChat | ✅ | ✅ | - | Web gateway chat |
 | Matrix | ✅ | ❌ | P3 | E2EE support |
 | Mattermost | ✅ | ❌ | P3 | |
 | Google Chat | ✅ | ❌ | P3 | |
@@ -99,15 +99,15 @@ This document tracks feature parity between IronClaw (Rust implementation) and O
 | `run` (agent) | ✅ | ✅ | - | Default command |
 | `tool install/list/remove` | ✅ | ✅ | - | WASM tools |
 | `gateway start/stop` | ✅ | ❌ | P2 | |
-| `onboard` (wizard) | ✅ | ❌ | P2 | Interactive setup |
+| `onboard` (wizard) | ✅ | ✅ | - | Interactive setup |
 | `tui` | ✅ | ✅ | - | Ratatui TUI |
-| `config` | ✅ | ❌ | P2 | Read/write config |
+| `config` | ✅ | ✅ | - | Read/write config |
 | `channels` | ✅ | ❌ | P2 | Channel management |
 | `models` | ✅ | 🚧 | - | Model selector in TUI |
-| `status` | ✅ | ❌ | P2 | System status |
+| `status` | ✅ | ✅ | - | System status |
 | `agents` | ✅ | ❌ | P3 | Multi-agent management |
 | `sessions` | ✅ | ❌ | P3 | Session listing |
-| `memory` | ✅ | ❌ | P2 | Memory search CLI |
+| `memory` | ✅ | ✅ | - | Memory search CLI |
 | `skills` | ✅ | ❌ | P3 | Agent skills |
 | `pairing` | ✅ | ✅ | - | list/approve for channel DM pairing |
 | `nodes` | ✅ | ❌ | P3 | Device management |
@@ -132,7 +132,7 @@ This document tracks feature parity between IronClaw (Rust implementation) and O
 | Feature | OpenClaw | IronClaw | Notes |
 |---------|----------|----------|-------|
 | Pi agent runtime | ✅ | ➖ | IronClaw uses custom runtime |
-| RPC-based execution | ✅ | 🚧 | Worker isolation |
+| RPC-based execution | ✅ | ✅ | Orchestrator/worker pattern |
 | Multi-provider failover | ✅ | ❌ | Provider fallback chains |
 | Per-sender sessions | ✅ | ✅ | |
 | Global sessions | ✅ | ❌ | Optional shared context |
@@ -303,13 +303,13 @@ This document tracks feature parity between IronClaw (Rust implementation) and O
 
 | Feature | OpenClaw | IronClaw | Priority | Notes |
 |---------|----------|----------|----------|-------|
-| Control UI Dashboard | ✅ | ❌ | P2 | Web status/config |
-| Channel status view | ✅ | ❌ | P2 | |
+| Control UI Dashboard | ✅ | ✅ | - | Web gateway with chat, memory, jobs, logs, extensions |
+| Channel status view | ✅ | 🚧 | P2 | Gateway status widget, full channel view pending |
 | Agent management | ✅ | ❌ | P3 | |
 | Model selection | ✅ | ✅ | - | TUI only |
 | Config editing | ✅ | ❌ | P3 | |
-| Debug/logs viewer | ✅ | ❌ | P3 | |
-| WebChat interface | ✅ | ❌ | P2 | Browser chat |
+| Debug/logs viewer | ✅ | ✅ | - | Real-time log streaming with level/target filters |
+| WebChat interface | ✅ | ✅ | - | Web gateway chat with SSE/WebSocket |
 | Canvas system (A2UI) | ✅ | ❌ | P3 | Agent-driven UI |
 
 ### Owner: _Unassigned_
@@ -320,13 +320,13 @@ This document tracks feature parity between IronClaw (Rust implementation) and O
 
 | Feature | OpenClaw | IronClaw | Priority | Notes |
 |---------|----------|----------|----------|-------|
-| Cron jobs | ✅ | ❌ | P2 | Schedule-based tasks |
-| Timezone support | ✅ | ❌ | P2 | |
-| One-shot/recurring jobs | ✅ | ❌ | P2 | |
+| Cron jobs | ✅ | ✅ | - | Routines with cron trigger |
+| Timezone support | ✅ | ✅ | - | Via cron expressions |
+| One-shot/recurring jobs | ✅ | ✅ | - | Manual + cron triggers |
 | `beforeInbound` hook | ✅ | ❌ | P2 | |
 | `beforeOutbound` hook | ✅ | ❌ | P2 | |
 | `beforeToolCall` hook | ✅ | ❌ | P2 | |
-| `onMessage` hook | ✅ | ❌ | P2 | |
+| `onMessage` hook | ✅ | ✅ | - | Routines with event trigger |
 | `onSessionStart` hook | ✅ | ❌ | P2 | |
 | `onSessionEnd` hook | ✅ | ❌ | P2 | |
 | `transcribeAudio` hook | ✅ | ❌ | P3 | |
@@ -346,7 +346,7 @@ This document tracks feature parity between IronClaw (Rust implementation) and O
 
 | Feature | OpenClaw | IronClaw | Notes |
 |---------|----------|----------|-------|
-| Gateway token auth | ✅ | 🚧 | HTTP webhook secret |
+| Gateway token auth | ✅ | ✅ | Bearer token auth on web gateway |
 | Device pairing | ✅ | ❌ | |
 | Tailscale identity | ✅ | ❌ | |
 | OAuth flows | ✅ | 🚧 | NEAR AI OAuth |
@@ -357,7 +357,7 @@ This document tracks feature parity between IronClaw (Rust implementation) and O
 | TLS 1.3 minimum | ✅ | ✅ | reqwest rustls |
 | SSRF protection | ✅ | ✅ | WASM allowlist |
 | Loopback-first | ✅ | 🚧 | HTTP binds 0.0.0.0 |
-| Docker sandbox | ✅ | ❌ | Uses WASM sandbox |
+| Docker sandbox | ✅ | ✅ | Orchestrator/worker containers |
 | WASM sandbox | ❌ | ✅ | IronClaw innovation |
 | Tool policies | ✅ | ✅ | |
 | Elevated mode | ✅ | ❌ | |
@@ -405,13 +405,21 @@ This document tracks feature parity between IronClaw (Rust implementation) and O
 - ✅ Session management
 - ✅ Context compaction
 - ✅ Model selection
+- ✅ Gateway control plane + WebSocket
+- ✅ Web Control UI (chat, memory, jobs, logs, extensions, routines)
+- ✅ WebChat channel (web gateway)
+- ✅ Slack channel (WASM tool)
+- ✅ Telegram channel (WASM tool, MTProto)
+- ✅ Docker sandbox (orchestrator/worker)
+- ✅ Cron job scheduling (routines)
+- ✅ CLI subcommands (onboard, config, status, memory)
+- ✅ Gateway token auth
 
 ### P1 - High Priority
 - ❌ Slack channel (real implementation)
 - ✅ Telegram channel (WASM, DM pairing, caption, /start)
 - ❌ WhatsApp channel
 - ❌ Multi-provider failover
-- ❌ Gateway control plane + WebSocket
 - ❌ Hooks system (beforeInbound, beforeToolCall, etc.)
 
 ### P2 - Medium Priority
@@ -422,6 +430,7 @@ This document tracks feature parity between IronClaw (Rust implementation) and O
 - ❌ CLI subcommands (config, status, memory, doctor)
 - ❌ Ollama/local model support
 - ❌ Configuration hot-reload
+- ❌ Webhook trigger endpoint in web gateway
 
 ### P3 - Lower Priority
 - ❌ Discord channel

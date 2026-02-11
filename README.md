@@ -43,7 +43,10 @@ IronClaw is the AI assistant you can actually trust with your personal and profe
 
 ### Always Available
 
-- **Multi-channel** - REPL, HTTP webhooks, and extensible WASM channels (Telegram, Slack, and more)
+- **Multi-channel** - REPL, HTTP webhooks, WASM channels (Telegram, Slack), and web gateway
+- **Docker Sandbox** - Isolated container execution with per-job tokens and orchestrator/worker pattern
+- **Web Gateway** - Browser UI with real-time SSE/WebSocket streaming
+- **Routines** - Cron schedules, event triggers, webhook handlers for background automation
 - **Heartbeat System** - Proactive background execution for monitoring and maintenance tasks
 - **Parallel Jobs** - Handle multiple requests concurrently with isolated contexts
 - **Self-repair** - Automatic detection and recovery of stuck operations
@@ -145,37 +148,42 @@ External content passes through multiple security layers:
 ## Architecture
 
 ```
-┌─────────────────────────────────────────────────────────────────┐
-│                         Channels                                 │
-│  ┌──────┐  ┌──────┐  ┌──────────────┐                           │
-│  │ REPL │  │ HTTP │  │ WASM Channels│                           │
-│  └──┬───┘  └──┬───┘  └──────┬───────┘                           │
-│     └─────────┴─────────────┘                                    │
-│                         │                                        │
-│                    ┌────▼────┐                                  │
-│                    │  Router │  Intent classification           │
-│                    └────┬────┘                                  │
-│                         │                                        │
-│              ┌──────────▼──────────┐                            │
-│              │     Scheduler       │  Parallel job management   │
-│              └──────────┬──────────┘                            │
-│                         │                                        │
-│         ┌───────────────┼───────────────┐                       │
-│         ▼               ▼               ▼                       │
-│    ┌─────────┐    ┌─────────┐    ┌─────────┐                   │
-│    │ Worker  │    │ Worker  │    │ Worker  │  LLM reasoning    │
-│    └────┬────┘    └────┬────┘    └────┬────┘                   │
-│         └───────────────┼───────────────┘                       │
-│                         │                                        │
-│              ┌──────────▼──────────┐                            │
-│              │   Tool Registry     │                            │
-│              │  ┌───────────────┐  │                            │
-│              │  │ Built-in      │  │                            │
-│              │  │ MCP           │  │                            │
-│              │  │ WASM Sandbox  │  │                            │
-│              │  └───────────────┘  │                            │
-│              └─────────────────────┘                            │
-└─────────────────────────────────────────────────────────────────┘
+┌────────────────────────────────────────────────────────────────────┐
+│                          Channels                                  │
+│  ┌──────┐  ┌──────┐  ┌─────────────┐  ┌─────────────┐            │
+│  │ REPL │  │ HTTP │  │WASM Channels│  │ Web Gateway │            │
+│  └──┬───┘  └──┬───┘  └──────┬──────┘  │ (SSE + WS) │            │
+│     │         │              │         └──────┬──────┘            │
+│     └─────────┴──────────────┴────────────────┘                   │
+│                              │                                     │
+│                    ┌─────────▼─────────┐                          │
+│                    │    Agent Loop     │  Intent routing           │
+│                    └────┬─────────┬────┘                          │
+│                         │         │                                │
+│              ┌──────────▼───┐  ┌──▼──────────────┐               │
+│              │  Scheduler   │  │ Routines Engine  │               │
+│              │(parallel jobs)│  │(cron, event, wh) │               │
+│              └──────┬───────┘  └────────┬─────────┘               │
+│                     │                   │                          │
+│       ┌─────────────┼───────────────────┘                         │
+│       │             │                                              │
+│   ┌───▼────┐   ┌────▼────────────────┐                           │
+│   │ Local  │   │    Orchestrator     │                           │
+│   │Workers │   │  ┌───────────────┐  │                           │
+│   │(in-proc)│   │  │ Docker Sandbox│  │                           │
+│   └───┬────┘   │  │   Containers  │  │                           │
+│       │        │  │ ┌───────────┐ │  │                           │
+│       │        │  │ │Worker / CC│ │  │                           │
+│       │        │  │ └───────────┘ │  │                           │
+│       │        │  └───────────────┘  │                           │
+│       │        └─────────┬───────────┘                           │
+│       └──────────────────┤                                        │
+│                          │                                        │
+│              ┌───────────▼──────────┐                             │
+│              │    Tool Registry     │                             │
+│              │  Built-in, MCP, WASM │                             │
+│              └──────────────────────┘                             │
+└────────────────────────────────────────────────────────────────────┘
 ```
 
 ### Core Components
@@ -186,6 +194,9 @@ External content passes through multiple security layers:
 | **Router** | Classifies user intent (command, query, task) |
 | **Scheduler** | Manages parallel job execution with priorities |
 | **Worker** | Executes jobs with LLM reasoning and tool calls |
+| **Orchestrator** | Container lifecycle, LLM proxying, per-job auth |
+| **Web Gateway** | Browser UI with chat, memory, jobs, logs, extensions, routines |
+| **Routines Engine** | Scheduled (cron) and reactive (event, webhook) background tasks |
 | **Workspace** | Persistent memory with hybrid search |
 | **Safety Layer** | Prompt injection defense and content sanitization |
 

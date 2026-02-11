@@ -437,7 +437,9 @@ impl Guest for TelegramChannel {
 
         let headers = serde_json::json!({});
 
-        let result = channel_host::http_request("GET", &url, &headers.to_string(), None);
+        // 35s HTTP timeout outlives Telegram's 30s server-side long-poll
+        let result =
+            channel_host::http_request("GET", &url, &headers.to_string(), None, Some(35_000));
 
         match result {
             Ok(response) => {
@@ -510,72 +512,52 @@ impl Guest for TelegramChannel {
     }
 
     fn on_respond(response: AgentResponse) -> Result<(), String> {
-        // Parse metadata to get chat info
         let metadata: TelegramMessageMetadata = serde_json::from_str(&response.metadata_json)
             .map_err(|e| format!("Failed to parse metadata: {}", e))?;
 
-        // Build sendMessage payload
-        let mut payload = serde_json::json!({
-            "chat_id": metadata.chat_id,
-            "text": response.content,
-            "parse_mode": "Markdown",
-        });
-
-        // Reply to the original message for context
-        payload["reply_to_message_id"] = serde_json::Value::Number(metadata.message_id.into());
-
-        let payload_bytes = serde_json::to_vec(&payload)
-            .map_err(|e| format!("Failed to serialize payload: {}", e))?;
-
-        // Make HTTP request to Telegram API
-        // The bot token is injected into the URL by the host
-        let headers = serde_json::json!({
-            "Content-Type": "application/json"
-        });
-
-        let result = channel_host::http_request(
-            "POST",
-            "https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
-            &headers.to_string(),
-            Some(&payload_bytes),
+        // Try sending with Markdown first; fall back to plain text if Telegram
+        // can't parse the entities (e.g. model leaked <tool_call> with underscores).
+        let result = send_message(
+            metadata.chat_id,
+            &response.content,
+            metadata.message_id,
+            Some("Markdown"),
         );
 
         match result {
-            Ok(http_response) => {
-                if http_response.status != 200 {
-                    let body_str = String::from_utf8_lossy(&http_response.body);
-                    return Err(format!(
-                        "Telegram API returned status {}: {}",
-                        http_response.status, body_str
-                    ));
-                }
-
-                // Parse Telegram response
-                let api_response: TelegramApiResponse<SentMessage> =
-                    serde_json::from_slice(&http_response.body)
-                        .map_err(|e| format!("Failed to parse Telegram response: {}", e))?;
-
-                if !api_response.ok {
-                    return Err(format!(
-                        "Telegram API error: {}",
-                        api_response
-                            .description
-                            .unwrap_or_else(|| "unknown".to_string())
-                    ));
-                }
-
+            Ok(msg_id) => {
                 channel_host::log(
                     channel_host::LogLevel::Debug,
                     &format!(
                         "Sent message to chat {}: message_id={}",
-                        metadata.chat_id,
-                        api_response.result.map(|r| r.message_id).unwrap_or(0)
+                        metadata.chat_id, msg_id
                     ),
                 );
-
                 Ok(())
             }
-            Err(e) => Err(format!("HTTP request failed: {}", e)),
+            Err(SendError::ParseEntities(detail)) => {
+                channel_host::log(
+                    channel_host::LogLevel::Warn,
+                    &format!("Markdown parse failed ({}), retrying as plain text", detail),
+                );
+                let msg_id = send_message(
+                    metadata.chat_id,
+                    &response.content,
+                    metadata.message_id,
+                    None,
+                )
+                .map_err(|e| format!("Plain-text retry also failed: {}", e))?;
+
+                channel_host::log(
+                    channel_host::LogLevel::Debug,
+                    &format!(
+                        "Sent plain-text message to chat {}: message_id={}",
+                        metadata.chat_id, msg_id
+                    ),
+                );
+                Ok(())
+            }
+            Err(e) => Err(e.to_string()),
         }
     }
 
@@ -617,6 +599,7 @@ impl Guest for TelegramChannel {
             "https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendChatAction",
             &headers.to_string(),
             Some(&payload_bytes),
+            None,
         );
 
         if let Err(e) = result {
@@ -632,6 +615,101 @@ impl Guest for TelegramChannel {
             channel_host::LogLevel::Info,
             "Telegram channel shutting down",
         );
+    }
+}
+
+// ============================================================================
+// Send Message Helper
+// ============================================================================
+
+/// Errors from send_message, split so callers can match on parse-entity failures.
+enum SendError {
+    /// Telegram returned 400 with "can't parse entities" (Markdown issue).
+    ParseEntities(String),
+    /// Any other failure.
+    Other(String),
+}
+
+impl std::fmt::Display for SendError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            SendError::ParseEntities(detail) => write!(f, "parse entities error: {}", detail),
+            SendError::Other(msg) => write!(f, "{}", msg),
+        }
+    }
+}
+
+/// Send a message via the Telegram Bot API.
+///
+/// Returns the sent message_id on success. When `parse_mode` is set and
+/// Telegram returns a 400 "can't parse entities" error, returns
+/// `SendError::ParseEntities` so the caller can retry without formatting.
+fn send_message(
+    chat_id: i64,
+    text: &str,
+    reply_to_message_id: i64,
+    parse_mode: Option<&str>,
+) -> Result<i64, SendError> {
+    let mut payload = serde_json::json!({
+        "chat_id": chat_id,
+        "text": text,
+        "reply_to_message_id": reply_to_message_id,
+    });
+
+    if let Some(mode) = parse_mode {
+        payload["parse_mode"] = serde_json::Value::String(mode.to_string());
+    }
+
+    let payload_bytes = serde_json::to_vec(&payload)
+        .map_err(|e| SendError::Other(format!("Failed to serialize payload: {}", e)))?;
+
+    let headers = serde_json::json!({ "Content-Type": "application/json" });
+
+    let result = channel_host::http_request(
+        "POST",
+        "https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
+        &headers.to_string(),
+        Some(&payload_bytes),
+        None,
+    );
+
+    match result {
+        Ok(http_response) => {
+            if http_response.status == 400 {
+                let body_str = String::from_utf8_lossy(&http_response.body);
+                if body_str.contains("can't parse entities") {
+                    return Err(SendError::ParseEntities(body_str.to_string()));
+                }
+                return Err(SendError::Other(format!(
+                    "Telegram API returned 400: {}",
+                    body_str
+                )));
+            }
+
+            if http_response.status != 200 {
+                let body_str = String::from_utf8_lossy(&http_response.body);
+                return Err(SendError::Other(format!(
+                    "Telegram API returned status {}: {}",
+                    http_response.status, body_str
+                )));
+            }
+
+            let api_response: TelegramApiResponse<SentMessage> =
+                serde_json::from_slice(&http_response.body)
+                    .map_err(|e| SendError::Other(format!("Failed to parse response: {}", e)))?;
+
+            if !api_response.ok {
+                return Err(SendError::Other(format!(
+                    "Telegram API error: {}",
+                    api_response
+                        .description
+                        .unwrap_or_else(|| "unknown".to_string())
+                )));
+            }
+
+            Ok(api_response.result.map(|r| r.message_id).unwrap_or(0))
+        }
+        Err(e) => Err(SendError::Other(format!("HTTP request failed: {}", e))),
     }
 }
 
@@ -652,6 +730,7 @@ fn delete_webhook() -> Result<(), String> {
         "POST",
         "https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/deleteWebhook",
         &headers.to_string(),
+        None,
         None,
     );
 
@@ -715,6 +794,7 @@ fn register_webhook(tunnel_url: &str, webhook_secret: Option<&str>) -> Result<()
         "https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/setWebhook",
         &headers.to_string(),
         Some(&body_bytes),
+        None,
     );
 
     match result {

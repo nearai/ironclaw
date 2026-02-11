@@ -13,14 +13,15 @@ use serde::{Deserialize, Serialize};
 use crate::config::NearAiConfig;
 use crate::error::LlmError;
 use crate::llm::provider::{
-    ChatMessage, CompletionRequest, CompletionResponse, FinishReason, LlmProvider, Role, ToolCall,
-    ToolCompletionRequest, ToolCompletionResponse,
+    ChatMessage, CompletionRequest, CompletionResponse, FinishReason, LlmProvider, ModelMetadata,
+    Role, ToolCall, ToolCompletionRequest, ToolCompletionResponse,
 };
 
 /// NEAR AI Chat Completions API provider.
 pub struct NearAiChatProvider {
     client: Client,
     config: NearAiConfig,
+    active_model: std::sync::RwLock<String>,
 }
 
 impl NearAiChatProvider {
@@ -37,7 +38,12 @@ impl NearAiChatProvider {
             .build()
             .unwrap_or_else(|_| Client::new());
 
-        Ok(Self { client, config })
+        let active_model = std::sync::RwLock::new(config.model.clone());
+        Ok(Self {
+            client,
+            config,
+            active_model,
+        })
     }
 
     fn api_url(&self, path: &str) -> String {
@@ -64,6 +70,11 @@ impl NearAiChatProvider {
         let url = self.api_url("chat/completions");
 
         tracing::debug!("Sending request to NEAR AI Chat: {}", url);
+
+        // Log the request body for debugging tool call issues
+        if let Ok(json) = serde_json::to_string(body) {
+            tracing::debug!("NEAR AI Chat request body: {}", json);
+        }
 
         let response = self
             .client
@@ -111,8 +122,8 @@ impl NearAiChatProvider {
         })
     }
 
-    /// Fetch available models.
-    pub async fn list_models(&self) -> Result<Vec<String>, LlmError> {
+    /// Fetch available models with full metadata from the `/v1/models` endpoint.
+    async fn fetch_models(&self) -> Result<Vec<ApiModelEntry>, LlmError> {
         let url = self.api_url("models");
 
         let response = self
@@ -138,12 +149,7 @@ impl NearAiChatProvider {
 
         #[derive(Deserialize)]
         struct ModelsResponse {
-            data: Vec<ModelEntry>,
-        }
-
-        #[derive(Deserialize)]
-        struct ModelEntry {
-            id: String,
+            data: Vec<ApiModelEntry>,
         }
 
         let resp: ModelsResponse =
@@ -152,8 +158,16 @@ impl NearAiChatProvider {
                 reason: format!("JSON parse error: {}", e),
             })?;
 
-        Ok(resp.data.into_iter().map(|m| m.id).collect())
+        Ok(resp.data)
     }
+}
+
+/// Model entry as returned by the `/v1/models` API.
+#[derive(Debug, Deserialize)]
+struct ApiModelEntry {
+    id: String,
+    #[serde(default)]
+    context_length: Option<u32>,
 }
 
 #[async_trait]
@@ -163,7 +177,7 @@ impl LlmProvider for NearAiChatProvider {
             req.messages.into_iter().map(|m| m.into()).collect();
 
         let request = ChatCompletionRequest {
-            model: self.config.model.clone(),
+            model: self.active_model_name(),
             messages,
             temperature: req.temperature,
             max_tokens: req.max_tokens,
@@ -197,6 +211,7 @@ impl LlmProvider for NearAiChatProvider {
             finish_reason,
             input_tokens: response.usage.prompt_tokens,
             output_tokens: response.usage.completion_tokens,
+            response_id: None,
         })
     }
 
@@ -221,7 +236,7 @@ impl LlmProvider for NearAiChatProvider {
             .collect();
 
         let request = ChatCompletionRequest {
-            model: self.config.model.clone(),
+            model: self.active_model_name(),
             messages,
             temperature: req.temperature,
             max_tokens: req.max_tokens,
@@ -278,6 +293,7 @@ impl LlmProvider for NearAiChatProvider {
             finish_reason,
             input_tokens: response.usage.prompt_tokens,
             output_tokens: response.usage.completion_tokens,
+            response_id: None,
         })
     }
 
@@ -291,7 +307,34 @@ impl LlmProvider for NearAiChatProvider {
     }
 
     async fn list_models(&self) -> Result<Vec<String>, LlmError> {
-        NearAiChatProvider::list_models(self).await
+        let models = self.fetch_models().await?;
+        Ok(models.into_iter().map(|m| m.id).collect())
+    }
+
+    async fn model_metadata(&self) -> Result<ModelMetadata, LlmError> {
+        let active = self.active_model_name();
+        let models = self.fetch_models().await?;
+        let current = models.iter().find(|m| m.id == active);
+        Ok(ModelMetadata {
+            id: active,
+            context_length: current.and_then(|m| m.context_length),
+        })
+    }
+
+    fn active_model_name(&self) -> String {
+        self.active_model
+            .read()
+            .expect("active_model lock poisoned")
+            .clone()
+    }
+
+    fn set_model(&self, model: &str) -> Result<(), crate::error::LlmError> {
+        let mut guard = self
+            .active_model
+            .write()
+            .expect("active_model lock poisoned");
+        *guard = model.to_string();
+        Ok(())
     }
 }
 
@@ -332,6 +375,7 @@ impl From<ChatMessage> for ChatCompletionMessage {
             Role::Assistant => "assistant",
             Role::Tool => "tool",
         };
+
         let tool_calls = msg.tool_calls.map(|calls| {
             calls
                 .into_iter()
@@ -345,9 +389,16 @@ impl From<ChatMessage> for ChatCompletionMessage {
                 })
                 .collect()
         });
+
+        let content = if role == "assistant" && tool_calls.is_some() && msg.content.is_empty() {
+            None
+        } else {
+            Some(msg.content)
+        };
+
         Self {
             role: role.to_string(),
-            content: Some(msg.content),
+            content,
             tool_call_id: msg.tool_call_id,
             name: msg.name,
             tool_calls,
@@ -454,7 +505,7 @@ mod tests {
             },
         ];
 
-        let msg = ChatMessage::assistant_with_tool_calls("", tool_calls);
+        let msg = ChatMessage::assistant_with_tool_calls(None, tool_calls);
         let chat_msg: ChatCompletionMessage = msg.into();
 
         assert_eq!(chat_msg.role, "assistant");
@@ -484,7 +535,7 @@ mod tests {
             name: "test".to_string(),
             arguments: serde_json::json!({"key": "value"}),
         };
-        let msg = ChatMessage::assistant_with_tool_calls("", vec![tc]);
+        let msg = ChatMessage::assistant_with_tool_calls(None, vec![tc]);
         let chat_msg: ChatCompletionMessage = msg.into();
 
         let calls = chat_msg.tool_calls.unwrap();

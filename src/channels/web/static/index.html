@@ -10,12 +10,19 @@
 <body>
   <!-- Auth Screen -->
   <div id="auth-screen">
-    <h1>IronClaw</h1>
-    <div class="auth-form">
-      <input type="password" id="token-input" placeholder="Auth token" autofocus>
-      <button onclick="authenticate()">Connect</button>
+    <div class="auth-card-login">
+      <div class="auth-brand">
+        <h1>IronClaw</h1>
+        <p class="auth-tagline">Secure AI Assistant</p>
+      </div>
+      <div class="auth-form">
+        <label for="token-input">Gateway Token</label>
+        <input type="password" id="token-input" placeholder="Paste your auth token" autofocus>
+        <button onclick="authenticate()">Connect</button>
+      </div>
+      <div id="auth-error"></div>
+      <p class="auth-hint">Enter the GATEWAY_AUTH_TOKEN from your .env configuration.</p>
     </div>
-    <div id="auth-error"></div>
   </div>
 
   <!-- Main App (hidden until authenticated) -->
@@ -26,16 +33,33 @@
       <button data-tab="memory">Memory</button>
       <button data-tab="jobs">Jobs</button>
       <button data-tab="logs">Logs</button>
+      <button data-tab="routines">Routines</button>
       <button data-tab="extensions">Extensions</button>
       <div class="spacer"></div>
-      <div class="status">
+      <div class="status" id="gateway-status-trigger">
         <div class="dot" id="sse-dot"></div>
         <span id="sse-status">Connected</span>
+        <div class="gateway-popover" id="gateway-popover"></div>
       </div>
     </div>
 
     <!-- Chat Tab -->
     <div class="tab-panel active" id="tab-chat">
+      <div class="thread-sidebar" id="thread-sidebar">
+        <div class="thread-sidebar-header">
+          <span>Threads</span>
+          <button class="thread-new-btn" onclick="createNewThread()" title="New thread (Ctrl/Cmd+N)">+</button>
+          <button class="thread-toggle-btn" id="thread-toggle-btn" onclick="toggleThreadSidebar()" title="Toggle sidebar">&laquo;</button>
+        </div>
+        <div class="assistant-item" id="assistant-thread" onclick="switchToAssistant()">
+          <span class="assistant-label">Assistant</span>
+          <span class="assistant-meta" id="assistant-meta"></span>
+        </div>
+        <div class="threads-section-header">
+          <span>Conversations</span>
+        </div>
+        <div class="thread-list" id="thread-list"></div>
+      </div>
       <div class="chat-container">
         <div class="chat-messages" id="chat-messages"></div>
         <div class="chat-status" id="chat-status"></div>
@@ -56,9 +80,19 @@
           <div class="memory-tree" id="memory-tree"></div>
         </div>
         <div class="memory-content">
-          <div class="memory-breadcrumb" id="memory-breadcrumb">workspace /</div>
+          <div class="memory-breadcrumb" id="memory-breadcrumb">
+            <span id="memory-breadcrumb-path">workspace /</span>
+            <button class="memory-edit-btn" id="memory-edit-btn" style="display:none" onclick="startMemoryEdit()">Edit</button>
+          </div>
           <div class="memory-viewer" id="memory-viewer">
             <div class="empty">Select a file to view its contents</div>
+          </div>
+          <div class="memory-editor" id="memory-editor" style="display:none">
+            <textarea id="memory-edit-textarea"></textarea>
+            <div class="memory-editor-actions">
+              <button class="btn-save" onclick="saveMemoryEdit()">Save</button>
+              <button class="btn-cancel-edit" onclick="cancelMemoryEdit()">Cancel</button>
+            </div>
           </div>
         </div>
       </div>
@@ -73,6 +107,7 @@
             <tr>
               <th>ID</th>
               <th>Title</th>
+              <th>Source</th>
               <th>Status</th>
               <th>Created</th>
               <th>Actions</th>
@@ -104,9 +139,48 @@
       </div>
     </div>
 
+    <!-- Routines Tab -->
+    <div class="tab-panel" id="tab-routines">
+      <div class="routines-container">
+        <div class="routines-summary" id="routines-summary"></div>
+        <table class="routines-table" id="routines-table">
+          <thead>
+            <tr>
+              <th>Name</th>
+              <th>Trigger</th>
+              <th>Action</th>
+              <th>Last Run</th>
+              <th>Next Run</th>
+              <th>Runs</th>
+              <th>Status</th>
+              <th>Actions</th>
+            </tr>
+          </thead>
+          <tbody id="routines-tbody"></tbody>
+        </table>
+        <div class="empty-state" id="routines-empty" style="display:none">
+          No routines configured. Ask the assistant to create one.
+        </div>
+        <div class="routine-detail" id="routine-detail" style="display:none"></div>
+      </div>
+    </div>
+
     <!-- Extensions Tab -->
     <div class="tab-panel" id="tab-extensions">
       <div class="extensions-container">
+        <div class="extensions-section">
+          <h3>Install Extension</h3>
+          <div class="ext-install-form" id="ext-install-form">
+            <input type="text" id="ext-install-name" placeholder="Extension name (required)">
+            <input type="text" id="ext-install-url" placeholder="URL (optional)">
+            <select id="ext-install-kind">
+              <option value="mcp_server">MCP Server</option>
+              <option value="wasm_tool">WASM Tool</option>
+              <option value="wasm_channel">WASM Channel</option>
+            </select>
+            <button onclick="installExtension()">Install</button>
+          </div>
+        </div>
         <div class="extensions-section">
           <h3>Installed Extensions</h3>
           <div class="extensions-list" id="extensions-list">
@@ -130,6 +204,7 @@
     </div>
   </div>
 
+  <div id="toasts"></div>
   <script src="/app.js"></script>
 </body>
 </html>
