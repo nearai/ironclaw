@@ -83,12 +83,16 @@ fn run_list(store: &PairingStore, channel: &str, json: bool) -> Result<(), Strin
 }
 
 fn run_approve(store: &PairingStore, channel: &str, code: &str) -> Result<(), String> {
-    match store.approve(channel, code).map_err(|e| e.to_string())? {
-        Some(entry) => {
+    match store.approve(channel, code) {
+        Ok(Some(entry)) => {
             println!("Approved {} sender {}.", channel, entry.id);
             Ok(())
         }
-        None => Err(format!("No pending pairing request found for code: {}", code)),
+        Ok(None) => Err(format!("No pending pairing request found for code: {}", code)),
+        Err(crate::pairing::PairingStoreError::ApproveRateLimited) => Err(
+            "Too many failed approve attempts. Wait a few minutes before trying again.".to_string(),
+        ),
+        Err(e) => Err(e.to_string()),
     }
 }
 

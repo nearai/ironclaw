@@ -14,8 +14,13 @@ use serde::{Deserialize, Serialize};
 
 const PAIRING_CODE_LENGTH: usize = 8;
 const PAIRING_ALPHABET: &[u8] = b"ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
-const PAIRING_PENDING_TTL_SECS: u64 = 60 * 60;
+/// TTL for pending pairing requests (minutes, not hours — reduces brute-force window).
+const PAIRING_PENDING_TTL_SECS: u64 = 15 * 60;
 const PAIRING_PENDING_MAX: usize = 3;
+/// Max failed approve attempts per channel before rate limit kicks in.
+const PAIRING_APPROVE_RATE_LIMIT: usize = 10;
+/// Time window for rate limit (seconds).
+const PAIRING_APPROVE_RATE_WINDOW_SECS: u64 = 5 * 60;
 
 /// Error from pairing store operations.
 #[derive(Debug, thiserror::Error)]
@@ -28,6 +33,9 @@ pub enum PairingStoreError {
 
     #[error("JSON error: {0}")]
     Json(#[from] serde_json::Error),
+
+    #[error("Rate limit: too many failed approve attempts; try again later")]
+    ApproveRateLimited,
 }
 
 /// Result of upserting a pairing request.
@@ -94,6 +102,16 @@ fn pairing_path(base_dir: &PathBuf, channel: &str) -> Result<PathBuf, PairingSto
 fn allow_from_path(base_dir: &PathBuf, channel: &str) -> Result<PathBuf, PairingStoreError> {
     let key = safe_channel_key(channel)?;
     Ok(base_dir.join(format!("{}-allowFrom.json", key)))
+}
+
+fn approve_attempts_path(base_dir: &PathBuf, channel: &str) -> Result<PathBuf, PairingStoreError> {
+    let key = safe_channel_key(channel)?;
+    Ok(base_dir.join(format!("{}-approve-attempts.json", key)))
+}
+
+#[derive(Debug, Default, Serialize, Deserialize)]
+struct ApproveAttemptsFile {
+    failed_at: Vec<u64>,
 }
 
 fn now_iso() -> String {
@@ -281,6 +299,43 @@ impl PairingStore {
         Ok(UpsertResult { code, created: true })
     }
 
+    fn is_approve_rate_limited(&self, channel: &str) -> Result<bool, PairingStoreError> {
+        let path = approve_attempts_path(&self.base_dir, channel)?;
+        let content = match fs::read_to_string(&path) {
+            Ok(c) => c,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+            Err(e) => return Err(e.into()),
+        };
+        let mut data: ApproveAttemptsFile =
+            serde_json::from_str(&content).unwrap_or_default();
+        let now = now_secs();
+        let cutoff = now.saturating_sub(PAIRING_APPROVE_RATE_WINDOW_SECS);
+        data.failed_at.retain(|&t| t >= cutoff);
+        Ok(data.failed_at.len() >= PAIRING_APPROVE_RATE_LIMIT)
+    }
+
+    fn record_failed_approve(&self, channel: &str) -> Result<(), PairingStoreError> {
+        let path = approve_attempts_path(&self.base_dir, channel)?;
+        fs::create_dir_all(path.parent().unwrap())?;
+        let file = fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .open(&path)?;
+        file.lock_exclusive()?;
+        let content = fs::read_to_string(&path).unwrap_or_default();
+        let mut data: ApproveAttemptsFile =
+            serde_json::from_str(&content).unwrap_or_default();
+        let now = now_secs();
+        data.failed_at.push(now);
+        let cutoff = now.saturating_sub(PAIRING_APPROVE_RATE_WINDOW_SECS);
+        data.failed_at.retain(|&t| t >= cutoff);
+        let json = serde_json::to_string_pretty(&data)?;
+        fs::write(&path, json)?;
+        fs4::FileExt::unlock(&file)?;
+        Ok(())
+    }
+
     /// Approve a pairing code and add the sender to allowFrom.
     pub fn approve(
         &self,
@@ -290,6 +345,10 @@ impl PairingStore {
         let code = code.trim().to_uppercase();
         if code.is_empty() {
             return Ok(None);
+        }
+
+        if self.is_approve_rate_limited(channel)? {
+            return Err(PairingStoreError::ApproveRateLimited);
         }
 
         let path = pairing_path(&self.base_dir, channel)?;
@@ -326,6 +385,7 @@ impl PairingStore {
             Some(i) => store.requests.remove(i),
             None => {
                 fs4::FileExt::unlock(&file)?;
+                self.record_failed_approve(channel)?;
                 return Ok(None);
             }
         };
@@ -552,8 +612,19 @@ mod tests {
     fn test_approve_invalid_code_returns_none() {
         let (store, _) = test_store();
         store.upsert_request("telegram", "user123", None).unwrap();
-        let approved = store.approve("telegram", "badcode1").unwrap();
+        let approved = store.approve("telegram", "BADCODE1").unwrap();
         assert!(approved.is_none());
+    }
+
+    #[test]
+    fn test_approve_rate_limited_after_many_failures() {
+        let (store, _) = test_store();
+        store.upsert_request("telegram", "user123", None).unwrap();
+        for _ in 0..PAIRING_APPROVE_RATE_LIMIT {
+            let _ = store.approve("telegram", "WRONG01");
+        }
+        let err = store.approve("telegram", "WRONG02").unwrap_err();
+        assert!(matches!(err, PairingStoreError::ApproveRateLimited));
     }
 
     #[test]
