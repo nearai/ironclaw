@@ -1,0 +1,23 @@
+name: Code Style
+on:
+  pull_request:
+
+jobs:
+  codestyle:
+    name: Code Style (fmt + clippy)
+    runs-on: ubuntu-latest
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v2
+    - name: Install Rust
+      uses: actions-rs/toolchain@v1
+      with:
+        toolchain: stable
+        override: true
+        profile: minimal
+        components: rustfmt
+    - name: Check formatting
+      run: |
+        cargo fmt --all -- --check
+    - name: Check lints (cargo clippy)
+      run: cargo clippy -- -D warnings

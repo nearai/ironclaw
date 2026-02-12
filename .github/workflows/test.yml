@@ -1,0 +1,22 @@
+name: Run Tests
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+jobs:
+  tests:
+    name: Run Tests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v2
+      - name: Install Rust
+        uses: actions-rs/toolchain@v1
+        with:
+          toolchain: stable
+          override: true
+          profile: minimal
+      - name: Run Tests
+        run: cargo test --all-features -- --nocapture
