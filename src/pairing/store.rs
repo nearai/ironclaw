@@ -320,28 +320,30 @@ impl PairingStore {
     fn record_failed_approve(&self, channel: &str) -> Result<(), PairingStoreError> {
         let path = approve_attempts_path(&self.base_dir, channel)?;
         fs::create_dir_all(path.parent().unwrap())?;
+<<<<<<< HEAD
 
-        // Open (or create) and lock before reading so concurrent callers
-        // don't clobber each other's writes.
-        let file = fs::OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create(true)
-            .truncate(false)
-            .open(&path)?;
-        file.lock_exclusive()?;
+        // Read existing content BEFORE opening with truncate (which clears the file)
+        let content = fs::read_to_string(&path).unwrap_or_default();
+        let mut data: ApproveAttemptsFile = serde_json::from_str(&content).unwrap_or_default();
 
-        let mut data: ApproveAttemptsFile = fs::read_to_string(&path)
-            .ok()
-            .and_then(|c| serde_json::from_str(&c).ok())
-            .unwrap_or_default();
-
+=======
+        // Read existing content BEFORE opening with truncate (which clears the file)
+        let content = fs::read_to_string(&path).unwrap_or_default();
+        let mut data: ApproveAttemptsFile = serde_json::from_str(&content).unwrap_or_default();
+>>>>>>> 48e5434 (Fix failing tests: rate limit tracking and bundled channel installation)
         let now = now_secs();
         data.failed_at.push(now);
         let cutoff = now.saturating_sub(PAIRING_APPROVE_RATE_WINDOW_SECS);
         data.failed_at.retain(|&t| t >= cutoff);
 
         let json = serde_json::to_string_pretty(&data)?;
+        // Now open with truncate and write
+        let file = fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .open(&path)?;
+        file.lock_exclusive()?;
         fs::write(&path, json)?;
         fs4::FileExt::unlock(&file)?;
         Ok(())
