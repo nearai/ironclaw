@@ -146,7 +146,6 @@ lto = "thin"
 [workspace.metadata.dist]
 # The preferred dist version to use in CI (Cargo.toml SemVer syntax)
 cargo-dist-version = "0.30.3"
-allow-dirty = ["ci"]
 # CI backends to support
 ci = "github"
 # The installers to generate for each app
@@ -171,7 +170,7 @@ pr-run-mode = "upload"
 # Path that installers should place binaries in
 install-path = "CARGO_HOME"
 # Whether to install an updater program
-install-updater = false
+install-updater = true
 
 [workspace.metadata.dist.github-custom-runners]
 aarch64-unknown-linux-gnu = "ubuntu-24.04-arm"
