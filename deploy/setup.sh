@@ -11,6 +11,12 @@
 
 set -euo pipefail
 
+# Must run as root
+if [ "$(id -u)" -ne 0 ]; then
+  echo "ERROR: This script must be run as root (sudo bash setup.sh)"
+  exit 1
+fi
+
 echo "==> Installing Docker"
 apt-get update
 apt-get install -y docker.io
