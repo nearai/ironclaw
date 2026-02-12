@@ -68,7 +68,9 @@ pub enum SkillRegistryError {
     #[error("Symlink detected in skills directory: {path}")]
     SymlinkDetected { path: String },
 
-    #[error("Cannot replace skill '{name}' (trust={existing_trust}) with lower trust ({new_trust})")]
+    #[error(
+        "Cannot replace skill '{name}' (trust={existing_trust}) with lower trust ({new_trust})"
+    )]
     TrustDowngrade {
         name: String,
         existing_trust: String,
@@ -246,12 +248,11 @@ impl SkillRegistry {
             });
         }
 
-        let manifest_content = String::from_utf8(manifest_bytes).map_err(|e| {
-            SkillRegistryError::ReadError {
+        let manifest_content =
+            String::from_utf8(manifest_bytes).map_err(|e| SkillRegistryError::ReadError {
                 path: manifest_path.display().to_string(),
                 reason: format!("Invalid UTF-8: {}", e),
-            }
-        })?;
+            })?;
 
         let mut manifest: SkillManifest =
             toml::from_str(&manifest_content).map_err(|e| SkillRegistryError::InvalidManifest {
@@ -273,12 +274,13 @@ impl SkillRegistry {
         manifest.skill.tags.truncate(10);
 
         // Read prompt bytes and check size atomically (no TOCTOU gap)
-        let prompt_bytes = tokio::fs::read(prompt_path).await.map_err(|e| {
-            SkillRegistryError::ReadError {
-                path: prompt_path.display().to_string(),
-                reason: e.to_string(),
-            }
-        })?;
+        let prompt_bytes =
+            tokio::fs::read(prompt_path)
+                .await
+                .map_err(|e| SkillRegistryError::ReadError {
+                    path: prompt_path.display().to_string(),
+                    reason: e.to_string(),
+                })?;
 
         if prompt_bytes.len() as u64 > MAX_PROMPT_FILE_SIZE {
             return Err(SkillRegistryError::PromptTooLarge {
@@ -288,12 +290,11 @@ impl SkillRegistry {
             });
         }
 
-        let raw_prompt = String::from_utf8(prompt_bytes).map_err(|e| {
-            SkillRegistryError::ReadError {
+        let raw_prompt =
+            String::from_utf8(prompt_bytes).map_err(|e| SkillRegistryError::ReadError {
                 path: prompt_path.display().to_string(),
                 reason: format!("Invalid UTF-8: {}", e),
-            }
-        })?;
+            })?;
 
         // Normalize line endings before hashing for cross-platform consistency
         let prompt_content = normalize_line_endings(&raw_prompt);
@@ -375,6 +376,39 @@ impl SkillRegistry {
                 manifest.skill.name,
                 scan_result.summary
             );
+        }
+
+        // Scan permission patterns for suspicious declarations
+        let perm_warnings = self.scanner.scan_permission_patterns(&manifest.permissions);
+        if !perm_warnings.is_empty() {
+            let has_critical = perm_warnings
+                .iter()
+                .any(|w| w.severity == crate::safety::Severity::Critical);
+
+            if has_critical && trust != SkillTrust::Local {
+                return Err(SkillRegistryError::Blocked {
+                    name: manifest.skill.name.clone(),
+                    reason: format!(
+                        "Suspicious permission patterns: {}",
+                        perm_warnings
+                            .iter()
+                            .map(|w| w.description.as_str())
+                            .collect::<Vec<_>>()
+                            .join("; ")
+                    ),
+                });
+            }
+
+            for w in &perm_warnings {
+                tracing::warn!(
+                    skill_name = %manifest.skill.name,
+                    trust = %trust,
+                    category = %w.category,
+                    severity = ?w.severity,
+                    "Permission pattern warning: {}",
+                    w.description
+                );
+            }
         }
 
         // Pre-compile regex patterns at load time to avoid per-message compilation

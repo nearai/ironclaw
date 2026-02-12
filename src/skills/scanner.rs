@@ -80,6 +80,8 @@ pub enum ScanCategory {
     TagEscape,
     /// Suspicious HTTP endpoint declarations in skill manifest.
     SuspiciousHttpDeclaration,
+    /// Suspicious permission patterns in skill manifest.
+    SuspiciousPermissionPattern,
 }
 
 impl std::fmt::Display for ScanCategory {
@@ -92,6 +94,7 @@ impl std::fmt::Display for ScanCategory {
             Self::InvisibleText => write!(f, "invisible_text"),
             Self::TagEscape => write!(f, "tag_escape"),
             Self::SuspiciousHttpDeclaration => write!(f, "suspicious_http_declaration"),
+            Self::SuspiciousPermissionPattern => write!(f, "suspicious_permission_pattern"),
         }
     }
 }
@@ -477,6 +480,189 @@ impl SkillScanner {
 
         warnings
     }
+
+    /// Scan a skill's permission patterns for suspicious declarations.
+    ///
+    /// Detects:
+    /// - **Shell**: destructive commands (`rm`, `sudo`), network tools (`curl`, `wget`),
+    ///   bare wildcards (`*`), command chaining (`&&`, `||`, `;`)
+    /// - **File path**: root wildcards (`**/*`), sensitive directories (`/etc/**`, `~/.ssh/**`)
+    /// - **Memory**: identity files (`SOUL.md`, `AGENTS.md`, `IDENTITY.md`, `USER.md`)
+    pub fn scan_permission_patterns(
+        &self,
+        permissions: &std::collections::HashMap<String, crate::skills::ToolPermissionDeclaration>,
+    ) -> Vec<SkillScanWarning> {
+        use crate::skills::ToolPattern;
+
+        let mut warnings = Vec::new();
+
+        for (tool_name, decl) in permissions {
+            for pattern in &decl.allowed_patterns {
+                match pattern {
+                    ToolPattern::Shell(sp) => {
+                        self.scan_shell_pattern(&sp.command, tool_name, &mut warnings);
+                    }
+                    ToolPattern::FilePath(fp) => {
+                        self.scan_file_pattern(&fp.path, tool_name, &mut warnings);
+                    }
+                    ToolPattern::MemoryTarget(mt) => {
+                        self.scan_memory_pattern(&mt.target, tool_name, &mut warnings);
+                    }
+                }
+            }
+        }
+
+        warnings
+    }
+
+    fn scan_shell_pattern(
+        &self,
+        command: &str,
+        tool_name: &str,
+        warnings: &mut Vec<SkillScanWarning>,
+    ) {
+        let lower = command.to_lowercase();
+
+        // Dangerous destructive commands
+        const DANGEROUS_COMMANDS: &[(&str, &str)] = &[
+            ("rm ", "destructive file removal"),
+            ("rm\t", "destructive file removal"),
+            ("sudo ", "privilege escalation"),
+            ("sudo\t", "privilege escalation"),
+            ("chmod ", "permission modification"),
+            ("chown ", "ownership modification"),
+            ("mkfs", "filesystem formatting"),
+            ("dd ", "raw disk access"),
+        ];
+
+        for &(cmd, desc) in DANGEROUS_COMMANDS {
+            if lower.starts_with(cmd)
+                || lower.contains(&format!(" {}", cmd.trim()))
+                || lower.contains(&format!("/{}", cmd.trim()))
+            {
+                warnings.push(SkillScanWarning {
+                    category: ScanCategory::SuspiciousPermissionPattern,
+                    severity: Severity::Critical,
+                    description: format!(
+                        "Dangerous shell pattern in [permissions.{}]: {} ({})",
+                        tool_name, command, desc
+                    ),
+                    matched_text: Some(command.to_string()),
+                });
+            }
+        }
+
+        // Network tools (potential exfiltration via shell)
+        const NETWORK_COMMANDS: &[&str] = &["curl ", "curl\t", "wget ", "wget\t"];
+        for &cmd in NETWORK_COMMANDS {
+            if lower.starts_with(cmd) || lower.contains(&format!(" {}", cmd.trim())) {
+                warnings.push(SkillScanWarning {
+                    category: ScanCategory::SuspiciousPermissionPattern,
+                    severity: Severity::High,
+                    description: format!(
+                        "Network tool in shell pattern [permissions.{}]: {} (potential data exfiltration)",
+                        tool_name, command
+                    ),
+                    matched_text: Some(command.to_string()),
+                });
+            }
+        }
+
+        // Bare wildcard (matches any command)
+        if command.trim() == "*" {
+            warnings.push(SkillScanWarning {
+                category: ScanCategory::SuspiciousPermissionPattern,
+                severity: Severity::Critical,
+                description: format!(
+                    "Bare wildcard in shell pattern [permissions.{}]: matches any command",
+                    tool_name
+                ),
+                matched_text: Some(command.to_string()),
+            });
+        }
+
+        // Command chaining operators
+        for op in &["&&", "||", ";"] {
+            if command.contains(op) {
+                warnings.push(SkillScanWarning {
+                    category: ScanCategory::SuspiciousPermissionPattern,
+                    severity: Severity::Critical,
+                    description: format!(
+                        "Command chaining in shell pattern [permissions.{}]: '{}' contains '{}'",
+                        tool_name, command, op
+                    ),
+                    matched_text: Some(command.to_string()),
+                });
+            }
+        }
+    }
+
+    fn scan_file_pattern(&self, path: &str, tool_name: &str, warnings: &mut Vec<SkillScanWarning>) {
+        // Root wildcard (matches everything)
+        if path == "**/*" || path == "**" {
+            warnings.push(SkillScanWarning {
+                category: ScanCategory::SuspiciousPermissionPattern,
+                severity: Severity::Critical,
+                description: format!(
+                    "Root wildcard in file pattern [permissions.{}]: '{}' matches all files",
+                    tool_name, path
+                ),
+                matched_text: Some(path.to_string()),
+            });
+        }
+
+        // Sensitive directories
+        const SENSITIVE_DIRS: &[&str] = &[
+            "/etc/**",
+            "/etc/*",
+            "~/.ssh/**",
+            "~/.ssh/*",
+            "~/.gnupg/**",
+            "~/.gnupg/*",
+            "/root/**",
+            "/root/*",
+            "/var/log/**",
+        ];
+        let lower = path.to_lowercase();
+        for &dir in SENSITIVE_DIRS {
+            if lower.starts_with(dir) || lower == dir {
+                warnings.push(SkillScanWarning {
+                    category: ScanCategory::SuspiciousPermissionPattern,
+                    severity: Severity::Critical,
+                    description: format!(
+                        "Sensitive directory in file pattern [permissions.{}]: '{}'",
+                        tool_name, path
+                    ),
+                    matched_text: Some(path.to_string()),
+                });
+                break;
+            }
+        }
+    }
+
+    fn scan_memory_pattern(
+        &self,
+        target: &str,
+        tool_name: &str,
+        warnings: &mut Vec<SkillScanWarning>,
+    ) {
+        // Identity files that should not be writable by skills
+        const IDENTITY_FILES: &[&str] = &["SOUL.md", "AGENTS.md", "IDENTITY.md", "USER.md"];
+
+        for &file in IDENTITY_FILES {
+            if target == file || target.ends_with(&format!("/{}", file)) {
+                warnings.push(SkillScanWarning {
+                    category: ScanCategory::SuspiciousPermissionPattern,
+                    severity: Severity::Critical,
+                    description: format!(
+                        "Identity file in memory pattern [permissions.{}]: '{}' targets protected file '{}'",
+                        tool_name, target, file
+                    ),
+                    matched_text: Some(target.to_string()),
+                });
+            }
+        }
+    }
 }
 
 impl Default for SkillScanner {
@@ -627,10 +813,12 @@ mod tests {
             !result.is_clean(),
             "Should detect Cyrillic homoglyph characters"
         );
-        assert!(result
-            .warnings
-            .iter()
-            .any(|w| w.description.contains("Mixed-script")));
+        assert!(
+            result
+                .warnings
+                .iter()
+                .any(|w| w.description.contains("Mixed-script"))
+        );
     }
 
     #[test]
@@ -639,10 +827,12 @@ mod tests {
         // Greek 'ο' (U+03BF) looks like Latin 'o'
         let result = scanner.scan("ign\u{03BF}re safety");
         assert!(!result.is_clean());
-        assert!(result
-            .warnings
-            .iter()
-            .any(|w| w.description.contains("Mixed-script")));
+        assert!(
+            result
+                .warnings
+                .iter()
+                .any(|w| w.description.contains("Mixed-script"))
+        );
     }
 
     // -- HTTP declaration scanning tests --
@@ -661,11 +851,14 @@ mod tests {
                 path_prefix: Some("/api/".to_string()),
                 methods: vec!["POST".to_string()],
             }],
-            credentials: [("slack_bot".to_string(), SkillCredentialDeclaration {
-                secret_name: "slack_bot_token".to_string(),
-                location: CredentialLocationToml::Bearer,
-                host_patterns: vec!["api.slack.com".to_string()],
-            })]
+            credentials: [(
+                "slack_bot".to_string(),
+                SkillCredentialDeclaration {
+                    secret_name: "slack_bot_token".to_string(),
+                    location: CredentialLocationToml::Bearer,
+                    host_patterns: vec!["api.slack.com".to_string()],
+                },
+            )]
             .into(),
         };
 
@@ -687,10 +880,12 @@ mod tests {
 
         let warnings = scanner.scan_http_declaration(&http);
         assert!(!warnings.is_empty());
-        assert!(warnings
-            .iter()
-            .any(|w| w.category == ScanCategory::SuspiciousHttpDeclaration
-                && w.severity == Severity::Critical));
+        assert!(
+            warnings
+                .iter()
+                .any(|w| w.category == ScanCategory::SuspiciousHttpDeclaration
+                    && w.severity == Severity::Critical)
+        );
     }
 
     #[test]
@@ -706,9 +901,11 @@ mod tests {
         };
 
         let warnings = scanner.scan_http_declaration(&http);
-        assert!(warnings
-            .iter()
-            .any(|w| w.description.contains("exfiltration")));
+        assert!(
+            warnings
+                .iter()
+                .any(|w| w.description.contains("exfiltration"))
+        );
     }
 
     #[test]
@@ -744,11 +941,14 @@ mod tests {
                 path_prefix: None,
                 methods: vec![],
             }],
-            credentials: [("sketchy_cred".to_string(), SkillCredentialDeclaration {
-                secret_name: "my_token".to_string(),
-                location: CredentialLocationToml::Bearer,
-                host_patterns: vec!["evil.com".to_string()],
-            })]
+            credentials: [(
+                "sketchy_cred".to_string(),
+                SkillCredentialDeclaration {
+                    secret_name: "my_token".to_string(),
+                    location: CredentialLocationToml::Bearer,
+                    host_patterns: vec!["evil.com".to_string()],
+                },
+            )]
             .into(),
         };
 
@@ -758,6 +958,226 @@ mod tests {
                 .iter()
                 .any(|w| w.description.contains("not in endpoint list")),
             "Expected credential host mismatch warning, got: {:?}",
+            warnings
+        );
+    }
+
+    // -- Permission pattern scanning tests --
+
+    use crate::skills::{
+        FilePathPattern, MemoryTargetPattern, ShellPattern, ToolPattern, ToolPermissionDeclaration,
+    };
+
+    fn make_perms(
+        tool_name: &str,
+        patterns: Vec<ToolPattern>,
+    ) -> std::collections::HashMap<String, ToolPermissionDeclaration> {
+        [(
+            tool_name.to_string(),
+            ToolPermissionDeclaration {
+                reason: "test".to_string(),
+                allowed_patterns: patterns,
+            },
+        )]
+        .into()
+    }
+
+    #[test]
+    fn test_scan_dangerous_shell_rm() {
+        let scanner = SkillScanner::new();
+        let perms = make_perms(
+            "shell",
+            vec![ToolPattern::Shell(ShellPattern {
+                command: "rm *".to_string(),
+            })],
+        );
+        let warnings = scanner.scan_permission_patterns(&perms);
+        assert!(
+            warnings
+                .iter()
+                .any(|w| w.category == ScanCategory::SuspiciousPermissionPattern
+                    && w.description.contains("destructive")),
+            "Expected dangerous rm warning, got: {:?}",
+            warnings
+        );
+    }
+
+    #[test]
+    fn test_scan_dangerous_shell_sudo() {
+        let scanner = SkillScanner::new();
+        let perms = make_perms(
+            "shell",
+            vec![ToolPattern::Shell(ShellPattern {
+                command: "sudo *".to_string(),
+            })],
+        );
+        let warnings = scanner.scan_permission_patterns(&perms);
+        assert!(
+            warnings
+                .iter()
+                .any(|w| w.description.contains("privilege escalation"))
+        );
+    }
+
+    #[test]
+    fn test_scan_shell_network_tool() {
+        let scanner = SkillScanner::new();
+        let perms = make_perms(
+            "shell",
+            vec![ToolPattern::Shell(ShellPattern {
+                command: "curl *".to_string(),
+            })],
+        );
+        let warnings = scanner.scan_permission_patterns(&perms);
+        assert!(
+            warnings
+                .iter()
+                .any(|w| w.description.contains("Network tool")
+                    || w.description.contains("exfiltration")),
+            "Expected network tool warning, got: {:?}",
+            warnings
+        );
+    }
+
+    #[test]
+    fn test_scan_shell_bare_wildcard() {
+        let scanner = SkillScanner::new();
+        let perms = make_perms(
+            "shell",
+            vec![ToolPattern::Shell(ShellPattern {
+                command: "*".to_string(),
+            })],
+        );
+        let warnings = scanner.scan_permission_patterns(&perms);
+        assert!(
+            warnings
+                .iter()
+                .any(|w| w.description.contains("Bare wildcard"))
+        );
+    }
+
+    #[test]
+    fn test_scan_shell_command_chaining() {
+        let scanner = SkillScanner::new();
+        for op in &["cargo build && rm -rf /", "echo ok || bad", "cmd1; cmd2"] {
+            let perms = make_perms(
+                "shell",
+                vec![ToolPattern::Shell(ShellPattern {
+                    command: op.to_string(),
+                })],
+            );
+            let warnings = scanner.scan_permission_patterns(&perms);
+            assert!(
+                warnings.iter().any(|w| w.description.contains("chaining")),
+                "Expected chaining warning for '{}', got: {:?}",
+                op,
+                warnings
+            );
+        }
+    }
+
+    #[test]
+    fn test_scan_file_root_wildcard() {
+        let scanner = SkillScanner::new();
+        for pat in &["**/*", "**"] {
+            let perms = make_perms(
+                "write_file",
+                vec![ToolPattern::FilePath(FilePathPattern {
+                    path: pat.to_string(),
+                })],
+            );
+            let warnings = scanner.scan_permission_patterns(&perms);
+            assert!(
+                warnings
+                    .iter()
+                    .any(|w| w.description.contains("Root wildcard")),
+                "Expected root wildcard warning for '{}', got: {:?}",
+                pat,
+                warnings
+            );
+        }
+    }
+
+    #[test]
+    fn test_scan_file_sensitive_directory() {
+        let scanner = SkillScanner::new();
+        for dir in &["/etc/**", "~/.ssh/**", "/root/**"] {
+            let perms = make_perms(
+                "read_file",
+                vec![ToolPattern::FilePath(FilePathPattern {
+                    path: dir.to_string(),
+                })],
+            );
+            let warnings = scanner.scan_permission_patterns(&perms);
+            assert!(
+                warnings
+                    .iter()
+                    .any(|w| w.description.contains("Sensitive directory")),
+                "Expected sensitive directory warning for '{}', got: {:?}",
+                dir,
+                warnings
+            );
+        }
+    }
+
+    #[test]
+    fn test_scan_memory_identity_files() {
+        let scanner = SkillScanner::new();
+        for file in &["SOUL.md", "AGENTS.md", "IDENTITY.md", "USER.md"] {
+            let perms = make_perms(
+                "memory_write",
+                vec![ToolPattern::MemoryTarget(MemoryTargetPattern {
+                    target: file.to_string(),
+                })],
+            );
+            let warnings = scanner.scan_permission_patterns(&perms);
+            assert!(
+                warnings
+                    .iter()
+                    .any(|w| w.description.contains("Identity file")),
+                "Expected identity file warning for '{}', got: {:?}",
+                file,
+                warnings
+            );
+        }
+    }
+
+    #[test]
+    fn test_scan_clean_patterns_no_warnings() {
+        let scanner = SkillScanner::new();
+        let mut perms = std::collections::HashMap::new();
+        perms.insert(
+            "shell".to_string(),
+            ToolPermissionDeclaration {
+                reason: "build".to_string(),
+                allowed_patterns: vec![ToolPattern::Shell(ShellPattern {
+                    command: "cargo *".to_string(),
+                })],
+            },
+        );
+        perms.insert(
+            "write_file".to_string(),
+            ToolPermissionDeclaration {
+                reason: "edit source".to_string(),
+                allowed_patterns: vec![ToolPattern::FilePath(FilePathPattern {
+                    path: "src/**/*.rs".to_string(),
+                })],
+            },
+        );
+        perms.insert(
+            "memory_write".to_string(),
+            ToolPermissionDeclaration {
+                reason: "log".to_string(),
+                allowed_patterns: vec![ToolPattern::MemoryTarget(MemoryTargetPattern {
+                    target: "daily/*".to_string(),
+                })],
+            },
+        );
+
+        let warnings = scanner.scan_permission_patterns(&perms);
+        assert!(
+            warnings.is_empty(),
+            "Expected clean patterns, got: {:?}",
             warnings
         );
     }

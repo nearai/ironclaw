@@ -371,6 +371,11 @@ Work independently to complete this job. Report when done."#,
         })
     }
 
+    // TODO(Phase 3): Add SkillPermissionEnforcer support here.
+    // The worker runs inside Docker containers and already blocks `requires_approval()`
+    // tools (shell, http, file). Permission enforcement here is lower priority but
+    // should be added for defense in depth once the orchestrator passes skill context
+    // to workers.
     async fn execute_tool(
         &self,
         tool_name: &str,

@@ -1079,6 +1079,19 @@ impl Agent {
             None
         };
 
+        // Build permission enforcer for active skills (parameter-level enforcement)
+        let skill_permission_enforcer = if !active_skills.is_empty() {
+            let enforcer =
+                crate::skills::SkillPermissionEnforcer::from_active_skills(&active_skills);
+            if enforcer.has_enforcement() {
+                Some(enforcer)
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
         // Build skill context block and compute trust attenuation
         let (skill_context, skill_trust) = if !active_skills.is_empty() {
             let min_trust = active_skills
@@ -1323,6 +1336,7 @@ impl Agent {
                                 &tc.arguments,
                                 &job_ctx,
                                 skill_http_scopes.as_ref(),
+                                skill_permission_enforcer.as_ref(),
                             )
                             .await;
 
@@ -1433,6 +1447,7 @@ impl Agent {
         params: &serde_json::Value,
         job_ctx: &JobContext,
         http_scopes: Option<&crate::skills::SkillHttpScopes>,
+        permission_enforcer: Option<&crate::skills::SkillPermissionEnforcer>,
     ) -> Result<String, Error> {
         let tool =
             self.tools()
@@ -1484,6 +1499,18 @@ impl Agent {
                     })?;
                 }
             }
+        }
+
+        // Enforce skill permission patterns (parameter-level enforcement)
+        if let Some(enforcer) = permission_enforcer {
+            enforcer.validate_tool_call(tool_name, params).map_err(
+                |e: crate::skills::enforcer::PermissionError| {
+                    crate::error::ToolError::ExecutionFailed {
+                        name: tool_name.to_string(),
+                        reason: e.to_string(),
+                    }
+                },
+            )?;
         }
 
         tracing::debug!(
@@ -1826,11 +1853,13 @@ impl Agent {
                 .await;
 
             // User explicitly approved this tool call, so skip HTTP scoping
+            // and permission enforcement
             let tool_result = self
                 .execute_chat_tool(
                     &pending.tool_name,
                     &pending.parameters,
                     &job_ctx,
+                    None,
                     None,
                 )
                 .await;
