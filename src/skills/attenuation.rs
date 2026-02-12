@@ -16,6 +16,13 @@ use crate::llm::ToolDefinition;
 use crate::skills::{LoadedSkill, SkillTrust};
 
 /// Tools that are always safe -- read-only, no side effects.
+///
+/// **Maintenance note**: This list is intentionally hardcoded and conservative.
+/// When adding new tools to IronClaw, they default to *excluded* from the
+/// read-only list (i.e., blocked under Community/Verified ceilings). A tool
+/// should only be added here if it is provably free of side effects -- it must
+/// not write files, make network requests, execute commands, or modify any state.
+/// Review by the security team is required before expanding this list.
 const READ_ONLY_TOOLS: &[&str] = &[
     "memory_search",
     "memory_read",

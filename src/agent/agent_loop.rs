@@ -1087,6 +1087,27 @@ impl Agent {
                     crate::skills::SkillTrust::Community => "UNTRUSTED",
                 };
 
+                // Surface scan warnings as structured tracing events
+                if !skill.scan_warnings.is_empty() {
+                    tracing::warn!(
+                        skill_name = skill.name(),
+                        trust = %skill.trust,
+                        warning_count = skill.scan_warnings.len(),
+                        warnings = ?skill.scan_warnings,
+                        "Skill has scanner warnings"
+                    );
+                }
+
+                // Structured audit event for skill activation
+                tracing::info!(
+                    skill_name = skill.name(),
+                    skill_version = skill.version(),
+                    trust = %skill.trust,
+                    trust_label = trust_label,
+                    scan_warnings = skill.scan_warnings.len(),
+                    "Skill activated"
+                );
+
                 // Escape name/version for XML attribute injection prevention
                 let safe_name = crate::skills::escape_xml_attr(skill.name());
                 let safe_version = crate::skills::escape_xml_attr(skill.version());
@@ -1164,9 +1185,15 @@ impl Agent {
             // Tools above the trust ceiling are removed entirely from the LLM tool list.
             let tool_defs = if !active_skills.is_empty() {
                 let result = crate::skills::attenuate_tools(&tool_defs, &active_skills);
-                if !result.removed_tools.is_empty() {
-                    tracing::info!("Skill attenuation: {}", result.explanation);
-                }
+                // Structured audit event for tool attenuation
+                tracing::info!(
+                    min_trust = %result.min_trust,
+                    tools_available = result.tools.len(),
+                    tools_removed = result.removed_tools.len(),
+                    removed = ?result.removed_tools,
+                    explanation = %result.explanation,
+                    "Tool attenuation applied"
+                );
                 result.tools
             } else {
                 tool_defs

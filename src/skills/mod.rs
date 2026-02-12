@@ -27,7 +27,7 @@ pub use selector::prefilter_skills;
 
 use std::path::PathBuf;
 
-use regex::Regex;
+use regex::{Regex, RegexBuilder};
 use serde::{Deserialize, Serialize};
 
 /// Maximum number of keywords allowed per skill to prevent scoring manipulation.
@@ -35,6 +35,9 @@ const MAX_KEYWORDS_PER_SKILL: usize = 20;
 
 /// Maximum number of regex patterns allowed per skill.
 const MAX_PATTERNS_PER_SKILL: usize = 5;
+
+/// Maximum number of tags allowed per skill to prevent scoring manipulation.
+const MAX_TAGS_PER_SKILL: usize = 10;
 
 /// Maximum file size for prompt.md (64 KiB).
 pub const MAX_PROMPT_FILE_SIZE: u64 = 64 * 1024;
@@ -77,6 +80,9 @@ pub enum SkillSource {
     /// Local filesystem (~/.ironclaw/skills/).
     Local(PathBuf),
     /// Downloaded from marketplace.
+    ///
+    /// NOTE: URL validation (scheme allowlist, hostname checks) will be enforced
+    /// by the marketplace client in Phase 3. The registry does not validate URLs.
     Marketplace { url: String },
 }
 
@@ -100,10 +106,11 @@ pub struct ActivationCriteria {
 }
 
 impl ActivationCriteria {
-    /// Enforce limits on keywords and patterns to prevent scoring manipulation.
+    /// Enforce limits on keywords, patterns, and tags to prevent scoring manipulation.
     pub fn enforce_limits(&mut self) {
         self.keywords.truncate(MAX_KEYWORDS_PER_SKILL);
         self.patterns.truncate(MAX_PATTERNS_PER_SKILL);
+        self.tags.truncate(MAX_TAGS_PER_SKILL);
     }
 }
 
@@ -118,6 +125,11 @@ pub struct ToolPermissionDeclaration {
     #[serde(default)]
     pub reason: String,
     /// Constrained parameter patterns (e.g., allowed commands).
+    ///
+    /// NOTE: These patterns are parsed and stored but **not yet enforced** at runtime.
+    /// Enforcement is planned for Phase 2 (permission system). Until then, the trust
+    /// ceiling (attenuation) is the primary defense -- tools above the trust level are
+    /// removed from the LLM tool list entirely.
     #[serde(default)]
     pub allowed_patterns: Vec<serde_json::Value>,
 }
@@ -203,15 +215,22 @@ impl LoadedSkill {
             .collect()
     }
 
-    /// Compile regex patterns from activation criteria. Invalid patterns are logged and skipped.
+    /// Compile regex patterns from activation criteria. Invalid or oversized patterns
+    /// are logged and skipped. A size limit of 64 KiB is imposed on compiled regex
+    /// state to prevent ReDoS via pathological patterns.
     pub fn compile_patterns(patterns: &[String]) -> Vec<Regex> {
+        /// Maximum compiled regex size (64 KiB) to prevent ReDoS.
+        const MAX_REGEX_SIZE: usize = 1 << 16;
+
         patterns
             .iter()
-            .filter_map(|p| match Regex::new(p) {
-                Ok(re) => Some(re),
-                Err(e) => {
-                    tracing::warn!("Invalid activation regex pattern '{}': {}", p, e);
-                    None
+            .filter_map(|p| {
+                match RegexBuilder::new(p).size_limit(MAX_REGEX_SIZE).build() {
+                    Ok(re) => Some(re),
+                    Err(e) => {
+                        tracing::warn!("Invalid activation regex pattern '{}': {}", p, e);
+                        None
+                    }
                 }
             })
             .collect()
@@ -229,16 +248,24 @@ pub fn escape_xml_attr(s: &str) -> String {
 }
 
 /// Escape prompt content to prevent tag breakout from `<skill>` delimiters.
-/// Replaces `</skill` sequences that could close the wrapper tag.
+///
+/// Uses a case-insensitive regex to catch all variants of `</skill` including
+/// mixed case and optional whitespace/null bytes between `</` and `skill`.
+/// The `<` is replaced with `&lt;` to neutralize the closing tag.
 pub fn escape_skill_content(content: &str) -> String {
-    // Replace closing tag variants that could break structural isolation
-    content
-        .replace("</skill>", "&lt;/skill&gt;")
-        .replace("</skill ", "&lt;/skill ")
-        .replace("</SKILL>", "&lt;/SKILL&gt;")
-        .replace("</SKILL ", "&lt;/SKILL ")
-        .replace("</Skill>", "&lt;/Skill&gt;")
-        .replace("</Skill ", "&lt;/Skill ")
+    static SKILL_CLOSE_RE: std::sync::LazyLock<Regex> = std::sync::LazyLock::new(|| {
+        // Match `</` followed by optional whitespace/control chars, then `skill`
+        // (case-insensitive), catching variants like `</ skill>`, `</\0skill>`, etc.
+        Regex::new(r"(?i)</[\s\x00]*skill").unwrap()
+    });
+
+    SKILL_CLOSE_RE
+        .replace_all(content, |caps: &regex::Captures| {
+            // Replace leading `<` with `&lt;` to neutralize the tag
+            let matched = caps.get(0).unwrap().as_str();
+            format!("&lt;{}", &matched[1..])
+        })
+        .into_owned()
 }
 
 /// Normalize line endings to LF before hashing to ensure cross-platform consistency.
@@ -365,9 +392,18 @@ reason = "need http"
         assert_eq!(escape_skill_content("normal text"), "normal text");
         assert_eq!(
             escape_skill_content("</skill>breakout"),
-            "&lt;/skill&gt;breakout"
+            "&lt;/skill>breakout"
         );
-        assert_eq!(escape_skill_content("</SKILL>UPPER"), "&lt;/SKILL&gt;UPPER");
+        assert_eq!(escape_skill_content("</SKILL>UPPER"), "&lt;/SKILL>UPPER");
+        // Mixed case
+        assert_eq!(escape_skill_content("</sKiLl>mixed"), "&lt;/sKiLl>mixed");
+        // Whitespace between </ and skill
+        assert_eq!(escape_skill_content("</ skill>space"), "&lt;/ skill>space");
+        // Null byte between </ and skill
+        assert_eq!(
+            escape_skill_content("</\x00skill>null"),
+            "&lt;/\x00skill>null"
+        );
     }
 
     #[test]
@@ -382,11 +418,13 @@ reason = "need http"
         let mut criteria = ActivationCriteria {
             keywords: (0..30).map(|i| format!("kw{}", i)).collect(),
             patterns: (0..10).map(|i| format!("pat{}", i)).collect(),
+            tags: (0..20).map(|i| format!("tag{}", i)).collect(),
             ..Default::default()
         };
         criteria.enforce_limits();
         assert_eq!(criteria.keywords.len(), MAX_KEYWORDS_PER_SKILL);
         assert_eq!(criteria.patterns.len(), MAX_PATTERNS_PER_SKILL);
+        assert_eq!(criteria.tags.len(), MAX_TAGS_PER_SKILL);
     }
 
     #[test]

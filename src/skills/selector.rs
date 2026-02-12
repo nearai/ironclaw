@@ -19,6 +19,9 @@ pub const MAX_SKILL_CONTEXT_TOKENS: usize = 4000;
 /// Even if a skill has 20 keywords, it can earn at most this many keyword points.
 const MAX_KEYWORD_SCORE: u32 = 30;
 
+/// Maximum tag score cap per skill (parallel to keyword cap).
+const MAX_TAG_SCORE: u32 = 15;
+
 /// Result of prefiltering with score information.
 #[derive(Debug)]
 pub struct ScoredSkill<'a> {
@@ -65,7 +68,20 @@ pub fn prefilter_skills<'a>(
         if result.len() >= max_candidates {
             break;
         }
-        let token_cost = entry.skill.manifest.activation.max_context_tokens;
+        let declared_tokens = entry.skill.manifest.activation.max_context_tokens;
+        // Rough token estimate: ~0.75 tokens per byte for English prose
+        let approx_tokens = (entry.skill.prompt_content.len() as f64 * 0.75) as usize;
+        let token_cost = if approx_tokens > declared_tokens * 2 {
+            tracing::warn!(
+                "Skill '{}' declares max_context_tokens={} but prompt is ~{} tokens; using actual estimate",
+                entry.skill.name(),
+                declared_tokens,
+                approx_tokens,
+            );
+            approx_tokens
+        } else {
+            declared_tokens
+        };
         if token_cost <= budget_remaining {
             budget_remaining -= token_cost;
             result.push(entry.skill);
@@ -97,7 +113,7 @@ fn score_skill(skill: &LoadedSkill, message_lower: &str, message_original: &str)
     }
     score += keyword_score.min(MAX_KEYWORD_SCORE);
 
-    // Tag scoring (from manifest.skill.tags merged with activation.tags)
+    // Tag scoring (from manifest.skill.tags merged with activation.tags), with cap
     let all_tags: Vec<&str> = criteria
         .tags
         .iter()
@@ -105,12 +121,14 @@ fn score_skill(skill: &LoadedSkill, message_lower: &str, message_original: &str)
         .map(|s| s.as_str())
         .collect();
 
+    let mut tag_score: u32 = 0;
     for tag in &all_tags {
         let tag_lower = tag.to_lowercase();
         if message_lower.contains(&tag_lower) {
-            score += 3;
+            tag_score += 3;
         }
     }
+    score += tag_score.min(MAX_TAG_SCORE);
 
     // Regex pattern scoring using pre-compiled patterns (cached at load time)
     for re in &skill.compiled_patterns {
@@ -305,5 +323,23 @@ mod tests {
         );
         assert_eq!(result.len(), 1);
         // Score should be capped at MAX_KEYWORD_SCORE (30), not 16 * 10 = 160
+    }
+
+    #[test]
+    fn test_tag_score_capped() {
+        // A skill with many tags should not get an unbounded score
+        let many_tags: Vec<&str> = vec![
+            "alpha", "bravo", "charlie", "delta", "echo", "foxtrot", "golf", "hotel",
+        ];
+        let skill = make_skill("tag-spammer", &[], &many_tags, &[]);
+        let skills = vec![skill];
+        let result = prefilter_skills(
+            "alpha bravo charlie delta echo foxtrot golf hotel",
+            &skills,
+            3,
+            MAX_SKILL_CONTEXT_TOKENS,
+        );
+        assert_eq!(result.len(), 1);
+        // Tag score should be capped at MAX_TAG_SCORE (15), not 8 * 3 = 24
     }
 }
