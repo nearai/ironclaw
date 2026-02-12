@@ -143,20 +143,12 @@ pub enum HttpScopeError {
         reason: String,
     },
     /// A credential was requested for a host not in scope.
-    CredentialDenied {
-        secret_name: String,
-        host: String,
-    },
+    CredentialDenied { secret_name: String, host: String },
     /// No active skill declares a scope for the given URL.
-    NoScopeForUrl {
-        url: String,
-    },
+    NoScopeForUrl { url: String },
     /// A shell command was denied because it contains HTTP access patterns
     /// (e.g. `curl`, `wget`) targeting non-allowlisted hosts.
-    ShellCommandDenied {
-        command: String,
-        reason: String,
-    },
+    ShellCommandDenied { command: String, reason: String },
 }
 
 impl fmt::Display for HttpScopeError {
@@ -181,11 +173,7 @@ impl fmt::Display for HttpScopeError {
                 )
             }
             Self::NoScopeForUrl { url } => {
-                write!(
-                    f,
-                    "No active skill declares HTTP scope for URL: {}",
-                    url
-                )
+                write!(f, "No active skill declares HTTP scope for URL: {}", url)
             }
             Self::ShellCommandDenied { command, reason } => {
                 write!(
@@ -203,11 +191,7 @@ impl std::error::Error for HttpScopeError {}
 
 /// Truncate a command string for display in error messages.
 fn truncate_cmd(s: &str, max: usize) -> &str {
-    if s.len() <= max {
-        s
-    } else {
-        &s[..max]
-    }
+    if s.len() <= max { s } else { &s[..max] }
 }
 
 // ---------------------------------------------------------------------------
@@ -616,15 +600,21 @@ mod tests {
         );
         let scopes = SkillHttpScopes::from_active_skills(&[skill]);
 
-        assert!(scopes
-            .validate_http_request("https://api.example.com/v1/data", "GET")
-            .is_ok());
-        assert!(scopes
-            .validate_http_request("https://sub.api.example.com/v1/data", "GET")
-            .is_ok());
-        assert!(scopes
-            .validate_http_request("https://other.com/v1/data", "GET")
-            .is_err());
+        assert!(
+            scopes
+                .validate_http_request("https://api.example.com/v1/data", "GET")
+                .is_ok()
+        );
+        assert!(
+            scopes
+                .validate_http_request("https://sub.api.example.com/v1/data", "GET")
+                .is_ok()
+        );
+        assert!(
+            scopes
+                .validate_http_request("https://other.com/v1/data", "GET")
+                .is_err()
+        );
     }
 
     #[test]
@@ -680,8 +670,11 @@ host_patterns = ["hooks.slack.com"]
             CredentialLocation::AuthorizationBearer
         ));
 
-        let patterns: Vec<EndpointPattern> =
-            decl.endpoints.iter().map(|e| e.to_endpoint_pattern()).collect();
+        let patterns: Vec<EndpointPattern> = decl
+            .endpoints
+            .iter()
+            .map(|e| e.to_endpoint_pattern())
+            .collect();
         assert_eq!(patterns.len(), 2);
         assert!(patterns[0].matches("slack.com", "/api/chat.postMessage", "POST"));
         assert!(!patterns[0].matches("slack.com", "/api/chat.postMessage", "GET"));
