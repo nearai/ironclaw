@@ -5,18 +5,14 @@
 //! documents that client_secret for "Desktop App" / "Installed App" types
 //! is NOT actually secret.
 //!
-//! # Setting credentials
+//! # Overriding credentials
 //!
-//! Option A (compile-time): Set env vars before building:
-//!   IRONCLAW_GOOGLE_CLIENT_ID=xxx.apps.googleusercontent.com
-//!   IRONCLAW_GOOGLE_CLIENT_SECRET=xxx
-//!   cargo build --release
+//! Default credentials are hardcoded below. They can be overridden at:
 //!
-//! Option B (hardcode): Replace the `option_env!` calls below with `Some("value")`.
-//!
-//! Option C (runtime override): Users can always override with runtime env vars
-//! (GOOGLE_OAUTH_CLIENT_ID / GOOGLE_OAUTH_CLIENT_SECRET), which take priority
-//! over built-in defaults.
+//! - **Compile time**: Set IRONCLAW_GOOGLE_CLIENT_ID / IRONCLAW_GOOGLE_CLIENT_SECRET
+//!   env vars before building to replace the hardcoded defaults.
+//! - **Runtime**: Users can set GOOGLE_OAUTH_CLIENT_ID / GOOGLE_OAUTH_CLIENT_SECRET
+//!   env vars, which take priority over built-in defaults.
 
 pub struct OAuthCredentials {
     pub client_id: &'static str,
@@ -24,8 +20,15 @@ pub struct OAuthCredentials {
 }
 
 /// Google OAuth "Desktop App" credentials, shared across all Google tools.
-const GOOGLE_CLIENT_ID: Option<&str> = option_env!("IRONCLAW_GOOGLE_CLIENT_ID");
-const GOOGLE_CLIENT_SECRET: Option<&str> = option_env!("IRONCLAW_GOOGLE_CLIENT_SECRET");
+/// Compile-time env vars override the hardcoded defaults below.
+const GOOGLE_CLIENT_ID: &str = match option_env!("IRONCLAW_GOOGLE_CLIENT_ID") {
+    Some(v) => v,
+    None => "564604149681-efo25d43rs85v0tibdepsmdv5dsrhhr0.apps.googleusercontent.com",
+};
+const GOOGLE_CLIENT_SECRET: &str = match option_env!("IRONCLAW_GOOGLE_CLIENT_SECRET") {
+    Some(v) => v,
+    None => "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",
+};
 
 /// Returns built-in OAuth credentials for a provider, keyed by secret_name.
 ///
@@ -34,8 +37,8 @@ const GOOGLE_CLIENT_SECRET: Option<&str> = option_env!("IRONCLAW_GOOGLE_CLIENT_S
 pub fn builtin_credentials(secret_name: &str) -> Option<OAuthCredentials> {
     match secret_name {
         "google_oauth_token" => Some(OAuthCredentials {
-            client_id: GOOGLE_CLIENT_ID?,
-            client_secret: GOOGLE_CLIENT_SECRET?,
+            client_id: GOOGLE_CLIENT_ID,
+            client_secret: GOOGLE_CLIENT_SECRET,
         }),
         _ => None,
     }
