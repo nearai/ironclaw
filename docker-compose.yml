@@ -1,3 +1,4 @@
+# Local development only — do NOT use these credentials in production.
 services:
   postgres:
     image: pgvector/pgvector:pg16
@@ -6,7 +7,7 @@ services:
     environment:
       POSTGRES_DB: ironclaw
       POSTGRES_USER: ironclaw
-      POSTGRES_PASSWORD: ironclaw
+      POSTGRES_PASSWORD: ironclaw  # dev-only, change for any non-local deployment
     volumes:
       - pgdata:/var/lib/postgresql/data
     healthcheck:

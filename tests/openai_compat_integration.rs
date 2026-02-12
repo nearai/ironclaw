@@ -143,7 +143,7 @@ async fn test_chat_completions_basic() {
         .post(&url)
         .bearer_auth(AUTH_TOKEN)
         .json(&serde_json::json!({
-            "model": "test",
+            "model": "mock-model-v1",
             "messages": [
                 {"role": "user", "content": "Hello world"}
             ]
@@ -183,7 +183,7 @@ async fn test_chat_completions_with_system_message() {
         .post(&url)
         .bearer_auth(AUTH_TOKEN)
         .json(&serde_json::json!({
-            "model": "test",
+            "model": "mock-model-v1",
             "messages": [
                 {"role": "system", "content": "You are helpful."},
                 {"role": "user", "content": "What is 2+2?"}
@@ -212,7 +212,7 @@ async fn test_chat_completions_with_tools() {
         .post(&url)
         .bearer_auth(AUTH_TOKEN)
         .json(&serde_json::json!({
-            "model": "test",
+            "model": "mock-model-v1",
             "messages": [
                 {"role": "user", "content": "What's the weather?"}
             ],
@@ -255,7 +255,7 @@ async fn test_chat_completions_streaming() {
         .post(&url)
         .bearer_auth(AUTH_TOKEN)
         .json(&serde_json::json!({
-            "model": "test",
+            "model": "mock-model-v1",
             "messages": [
                 {"role": "user", "content": "Stream test"}
             ],
@@ -266,6 +266,13 @@ async fn test_chat_completions_streaming() {
         .unwrap();
 
     assert_eq!(resp.status(), 200);
+
+    // Check simulated streaming header
+    assert_eq!(
+        resp.headers().get("x-ironclaw-streaming").and_then(|v| v.to_str().ok()),
+        Some("simulated"),
+        "Expected x-ironclaw-streaming: simulated header"
+    );
 
     let text = resp.text().await.unwrap();
 
@@ -307,7 +314,7 @@ async fn test_chat_completions_empty_messages() {
         .post(&url)
         .bearer_auth(AUTH_TOKEN)
         .json(&serde_json::json!({
-            "model": "test",
+            "model": "mock-model-v1",
             "messages": []
         }))
         .send()
@@ -323,6 +330,31 @@ async fn test_chat_completions_empty_messages() {
 }
 
 #[tokio::test]
+async fn test_chat_completions_model_mismatch() {
+    let (addr, _state) = start_test_server().await;
+    let url = format!("http://{}/v1/chat/completions", addr);
+
+    let resp = client()
+        .post(&url)
+        .bearer_auth(AUTH_TOKEN)
+        .json(&serde_json::json!({
+            "model": "gpt-4",
+            "messages": [{"role": "user", "content": "Hi"}]
+        }))
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), 404);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(body["error"]["code"], "model_not_found");
+    assert!(body["error"]["message"]
+        .as_str()
+        .unwrap()
+        .contains("mock-model-v1"));
+}
+
+#[tokio::test]
 async fn test_chat_completions_no_auth() {
     let (addr, _state) = start_test_server().await;
     let url = format!("http://{}/v1/chat/completions", addr);
@@ -331,7 +363,7 @@ async fn test_chat_completions_no_auth() {
         .post(&url)
         // No auth header
         .json(&serde_json::json!({
-            "model": "test",
+            "model": "mock-model-v1",
             "messages": [{"role": "user", "content": "Hi"}]
         }))
         .send()
@@ -403,7 +435,7 @@ async fn test_no_llm_provider_returns_503() {
         .post(&url)
         .bearer_auth(AUTH_TOKEN)
         .json(&serde_json::json!({
-            "model": "test",
+            "model": "mock-model-v1",
             "messages": [{"role": "user", "content": "Hi"}]
         }))
         .send()
@@ -411,4 +443,25 @@ async fn test_no_llm_provider_returns_503() {
         .unwrap();
 
     assert_eq!(resp.status(), 503);
+}
+
+#[tokio::test]
+async fn test_chat_completions_body_too_large() {
+    let (addr, _state) = start_test_server().await;
+    let url = format!("http://{}/v1/chat/completions", addr);
+
+    // Build a payload over 2 MB (axum's default body limit)
+    let big_content = "x".repeat(3 * 1024 * 1024);
+    let resp = client()
+        .post(&url)
+        .bearer_auth(AUTH_TOKEN)
+        .json(&serde_json::json!({
+            "model": "mock-model-v1",
+            "messages": [{"role": "user", "content": big_content}]
+        }))
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), 413);
 }

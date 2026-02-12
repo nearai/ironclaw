@@ -9,7 +9,7 @@ use std::sync::Arc;
 use axum::{
     Json,
     extract::State,
-    http::StatusCode,
+    http::{HeaderValue, StatusCode},
     response::{
         IntoResponse,
         sse::{Event, KeepAlive, Sse},
@@ -30,7 +30,6 @@ use super::server::GatewayState;
 
 #[derive(Debug, Deserialize)]
 pub struct OpenAiChatRequest {
-    #[allow(dead_code)]
     pub model: String,
     pub messages: Vec<OpenAiMessage>,
     #[serde(default)]
@@ -407,6 +406,26 @@ pub async fn chat_completions_handler(
         ));
     }
 
+    // Validate the requested model matches the active model.
+    // Per-request model switching is not yet supported (see GH issue).
+    let active_model = llm.active_model_name();
+    if req.model != active_model {
+        return Err((
+            StatusCode::NOT_FOUND,
+            Json(OpenAiErrorResponse {
+                error: OpenAiErrorDetail {
+                    message: format!(
+                        "Model '{}' not found. The active model is '{}'.",
+                        req.model, active_model
+                    ),
+                    error_type: "invalid_request_error".to_string(),
+                    param: Some("model".to_string()),
+                    code: Some("model_not_found".to_string()),
+                },
+            }),
+        ));
+    }
+
     let has_tools = req.tools.as_ref().is_some_and(|t| !t.is_empty());
     let stream = req.stream.unwrap_or(false);
 
@@ -626,7 +645,9 @@ async fn handle_streaming(
                         },
                     })
                     .unwrap_or_default();
-                    let _ = tx.send(Ok(Event::default().data(err_data))).await;
+                    let _ = tx
+                        .send(Ok(Event::default().event("error").data(err_data)))
+                        .await;
                 }
             }
         } else {
@@ -656,7 +677,9 @@ async fn handle_streaming(
                         },
                     })
                     .unwrap_or_default();
-                    let _ = tx.send(Ok(Event::default().data(err_data))).await;
+                    let _ = tx
+                        .send(Ok(Event::default().event("error").data(err_data)))
+                        .await;
                 }
             }
         }
@@ -666,7 +689,13 @@ async fn handle_streaming(
     });
 
     let stream = tokio_stream::wrappers::ReceiverStream::new(rx);
-    Sse::new(stream).keep_alive(KeepAlive::new().text(""))
+    let sse = Sse::new(stream).keep_alive(KeepAlive::new().text(""));
+    let mut response = sse.into_response();
+    response.headers_mut().insert(
+        "x-ironclaw-streaming",
+        HeaderValue::from_static("simulated"),
+    );
+    response
 }
 
 /// Split content into word-boundary chunks and send as SSE events.
