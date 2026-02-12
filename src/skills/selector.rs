@@ -5,10 +5,10 @@
 //! skill could influence which skills get loaded.
 //!
 //! Scoring:
-//! - Keyword exact match: 10 points (capped, then normalized by keyword count)
-//! - Keyword substring match: 5 points (capped, then normalized by keyword count)
-//! - Tag match: 3 points
-//! - Regex pattern match: 20 points (uses pre-compiled regexes from LoadedSkill)
+//! - Keyword exact match: 10 points (capped at 30 total)
+//! - Keyword substring match: 5 points (capped at 30 total)
+//! - Tag match: 3 points (capped at 15 total)
+//! - Regex pattern match: 20 points (capped at 40 total)
 
 use crate::skills::LoadedSkill;
 
@@ -21,6 +21,10 @@ const MAX_KEYWORD_SCORE: u32 = 30;
 
 /// Maximum tag score cap per skill (parallel to keyword cap).
 const MAX_TAG_SCORE: u32 = 15;
+
+/// Maximum regex pattern score cap per skill. Without a cap, 5 patterns at
+/// 20 points each could yield 100 points, dominating keyword+tag scores.
+const MAX_REGEX_SCORE: u32 = 40;
 
 /// Result of prefiltering with score information.
 #[derive(Debug)]
@@ -71,7 +75,7 @@ pub fn prefilter_skills<'a>(
         let declared_tokens = entry.skill.manifest.activation.max_context_tokens;
         // Rough token estimate: ~0.75 tokens per byte for English prose
         let approx_tokens = (entry.skill.prompt_content.len() as f64 * 0.75) as usize;
-        let token_cost = if approx_tokens > declared_tokens * 2 {
+        let raw_cost = if approx_tokens > declared_tokens * 2 {
             tracing::warn!(
                 "Skill '{}' declares max_context_tokens={} but prompt is ~{} tokens; using actual estimate",
                 entry.skill.name(),
@@ -82,6 +86,8 @@ pub fn prefilter_skills<'a>(
         } else {
             declared_tokens
         };
+        // Enforce a minimum token cost so max_context_tokens=0 can't bypass budgeting
+        let token_cost = raw_cost.max(1);
         if token_cost <= budget_remaining {
             budget_remaining -= token_cost;
             result.push(entry.skill);
@@ -130,12 +136,14 @@ fn score_skill(skill: &LoadedSkill, message_lower: &str, message_original: &str)
     }
     score += tag_score.min(MAX_TAG_SCORE);
 
-    // Regex pattern scoring using pre-compiled patterns (cached at load time)
+    // Regex pattern scoring using pre-compiled patterns (cached at load time), with cap
+    let mut regex_score: u32 = 0;
     for re in &skill.compiled_patterns {
         if re.is_match(message_original) {
-            score += 20;
+            regex_score += 20;
         }
     }
+    score += regex_score.min(MAX_REGEX_SCORE);
 
     score
 }
@@ -341,5 +349,48 @@ mod tests {
         );
         assert_eq!(result.len(), 1);
         // Tag score should be capped at MAX_TAG_SCORE (15), not 8 * 3 = 24
+    }
+
+    #[test]
+    fn test_regex_score_capped() {
+        // A skill with many regex patterns should have its score capped
+        let skill = make_skill(
+            "regex-spammer",
+            &[],
+            &[],
+            &[
+                r"(?i)\bwrite\b",
+                r"(?i)\bdraft\b",
+                r"(?i)\bedit\b",
+                r"(?i)\bcompose\b",
+                r"(?i)\bauthor\b",
+            ],
+        );
+        let skills = vec![skill];
+        let result = prefilter_skills(
+            "write draft edit compose author",
+            &skills,
+            3,
+            MAX_SKILL_CONTEXT_TOKENS,
+        );
+        assert_eq!(result.len(), 1);
+        // Regex score should be capped at MAX_REGEX_SCORE (40), not 5 * 20 = 100
+    }
+
+    #[test]
+    fn test_zero_context_tokens_still_costs_budget() {
+        // Edge case: empty prompt + max_context_tokens=0 should still cost
+        // at least 1 token so it can't bypass budget limits entirely.
+        let mut skill = make_skill("free", &["test"], &[], &[]);
+        skill.manifest.activation.max_context_tokens = 0;
+        skill.prompt_content = String::new();
+        let mut skill2 = make_skill("also_free", &["test"], &[], &[]);
+        skill2.manifest.activation.max_context_tokens = 0;
+        skill2.prompt_content = String::new();
+
+        let skills = vec![skill, skill2];
+        // Budget of 1 should only fit one skill (each costs at least 1)
+        let result = prefilter_skills("test", &skills, 5, 1);
+        assert_eq!(result.len(), 1);
     }
 }

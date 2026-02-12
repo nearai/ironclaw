@@ -23,6 +23,12 @@ use crate::skills::{LoadedSkill, SkillTrust};
 /// should only be added here if it is provably free of side effects -- it must
 /// not write files, make network requests, execute commands, or modify any state.
 /// Review by the security team is required before expanding this list.
+///
+/// **`skill_list` note**: This tool returns skill metadata (names, descriptions,
+/// tags, authors) which comes from potentially untrusted manifest files. The
+/// `skill_list` tool implementation MUST sanitize all manifest-derived fields
+/// before returning them to the LLM. The scanner (`scanner.rs`) covers manifest
+/// metadata scanning at load time, but display-time sanitization is also required.
 const READ_ONLY_TOOLS: &[&str] = &[
     "memory_search",
     "memory_read",
