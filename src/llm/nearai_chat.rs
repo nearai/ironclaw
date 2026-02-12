@@ -420,10 +420,7 @@ fn flatten_tool_messages(messages: Vec<ChatCompletionMessage>) -> Vec<ChatComple
                 let result = msg.content.as_deref().unwrap_or("");
                 ChatCompletionMessage {
                     role: "user".to_string(),
-                    content: Some(format!(
-                        "[Tool `{}` returned: {}]",
-                        tool_name, result
-                    )),
+                    content: Some(format!("[Tool `{}` returned: {}]", tool_name, result)),
                     tool_call_id: None,
                     name: None,
                     tool_calls: None,
@@ -676,12 +673,24 @@ mod tests {
         // Assistant tool_calls → plain assistant text
         assert_eq!(result[1].role, "assistant");
         assert!(result[1].tool_calls.is_none());
-        assert!(result[1].content.as_ref().unwrap().contains("[Called tool `echo`"));
+        assert!(
+            result[1]
+                .content
+                .as_ref()
+                .unwrap()
+                .contains("[Called tool `echo`")
+        );
 
         // Tool result → user message
         assert_eq!(result[2].role, "user");
         assert!(result[2].tool_call_id.is_none());
-        assert!(result[2].content.as_ref().unwrap().contains("[Tool `echo` returned: hi]"));
+        assert!(
+            result[2]
+                .content
+                .as_ref()
+                .unwrap()
+                .contains("[Tool `echo` returned: hi]")
+        );
     }
 
     #[test]
