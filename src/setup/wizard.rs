@@ -782,12 +782,9 @@ impl SetupWizard {
     fn save_and_summarize(&mut self) -> Result<(), SetupError> {
         self.settings.onboard_completed = true;
 
-        self.settings.save().map_err(|e| {
-            SetupError::Io(std::io::Error::new(
-                std::io::ErrorKind::Other,
-                format!("Failed to save settings: {}", e),
-            ))
-        })?;
+        self.settings
+            .save()
+            .map_err(|e| std::io::Error::other(format!("Failed to save settings: {}", e)))?;
 
         println!();
         print_success("Configuration saved to ~/.ironclaw/");
