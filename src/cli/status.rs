@@ -34,15 +34,6 @@ pub async fn run_status_command() -> anyhow::Result<()> {
         println!("not configured");
     }
 
-    // Session / Auth
-    print!("  Session:     ");
-    let session_path = crate::llm::session::default_session_path();
-    if session_path.exists() {
-        println!("found ({})", session_path.display());
-    } else {
-        println!("not found (run `ironclaw onboard`)");
-    }
-
     // Secrets
     print!("  Secrets:     ");
     let secrets_configured = settings.secrets_master_key_source != crate::settings::KeySource::None

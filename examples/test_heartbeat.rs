@@ -10,10 +10,7 @@
 use std::sync::Arc;
 
 use ironclaw::{
-    agent::HeartbeatRunner,
-    config::Config,
-    history::Store,
-    llm::{SessionConfig, create_llm_provider, create_session_manager},
+    agent::HeartbeatRunner, config::Config, history::Store, llm::create_llm_provider,
     workspace::Workspace,
 };
 
@@ -28,7 +25,9 @@ async fn main() -> anyhow::Result<()> {
     println!("=== Heartbeat Integration Test ===\n");
 
     // 1. Load config
-    let config = Config::from_env().await.map_err(|e| anyhow::anyhow!("Config: {}", e))?;
+    let config = Config::from_env()
+        .await
+        .map_err(|e| anyhow::anyhow!("Config: {}", e))?;
     println!("[1/6] Config loaded");
     println!("  heartbeat.enabled = {}", config.heartbeat.enabled);
     println!(
@@ -76,13 +75,7 @@ async fn main() -> anyhow::Result<()> {
     }
 
     // 5. Create LLM provider
-    let session = create_session_manager(SessionConfig {
-        auth_base_url: config.llm.nearai.auth_base_url.clone(),
-        session_path: config.llm.nearai.session_path.clone(),
-        ..Default::default()
-    })
-    .await;
-    let llm = create_llm_provider(&config.llm, session)?;
+    let llm = create_llm_provider(&config.llm)?;
     println!("[5/6] LLM provider created (model: {})", llm.model_name());
 
     // 6. Run heartbeat check

@@ -7,7 +7,6 @@ use tracing_subscriber::{EnvFilter, layer::SubscriberExt, util::SubscriberInitEx
 
 use ironclaw::{
     agent::{Agent, AgentDeps, SessionManager},
-    pairing::PairingStore,
     channels::{
         ChannelManager, GatewayChannel, HttpChannel, ReplChannel, WebhookServer,
         WebhookServerConfig,
@@ -25,11 +24,12 @@ use ironclaw::{
     context::ContextManager,
     extensions::ExtensionManager,
     history::Store,
-    llm::{SessionConfig, create_llm_provider, create_session_manager},
+    llm::create_llm_provider,
     orchestrator::{
         ContainerJobConfig, ContainerJobManager, OrchestratorApi, TokenStore,
         api::OrchestratorState,
     },
+    pairing::PairingStore,
     safety::SafetyLayer,
     secrets::{PostgresSecretsStore, SecretsCrypto, SecretsStore},
     setup::{SetupConfig, SetupWizard},
@@ -38,7 +38,7 @@ use ironclaw::{
         mcp::{McpClient, McpSessionManager, config::load_mcp_servers_from_db, is_authenticated},
         wasm::{WasmToolLoader, WasmToolRuntime, load_dev_tools},
     },
-    workspace::{EmbeddingProvider, NearAiEmbeddings, OpenAiEmbeddings, Workspace},
+    workspace::{EmbeddingProvider, OpenAiEmbeddings, Workspace},
 };
 
 #[tokio::main]
@@ -86,43 +86,27 @@ async fn main() -> anyhow::Result<()> {
 
             // Memory commands need database (and optionally embeddings)
             let _ = dotenvy::dotenv();
-            let config = Config::from_env().await.map_err(|e| anyhow::anyhow!("{}", e))?;
+            let config = Config::from_env()
+                .await
+                .map_err(|e| anyhow::anyhow!("{}", e))?;
             let store = ironclaw::history::Store::new(&config.database).await?;
             store.run_migrations().await?;
 
             // Set up embeddings if available
-            let session = ironclaw::llm::create_session_manager(ironclaw::llm::SessionConfig {
-                auth_base_url: config.llm.nearai.auth_base_url.clone(),
-                session_path: config.llm.nearai.session_path.clone(),
-                ..Default::default()
-            })
-            .await;
-
             let embeddings: Option<Arc<dyn ironclaw::workspace::EmbeddingProvider>> =
                 if config.embeddings.enabled {
-                    match config.embeddings.provider.as_str() {
-                        "nearai" => Some(Arc::new(
-                            ironclaw::workspace::NearAiEmbeddings::new(
-                                &config.llm.nearai.base_url,
-                                session,
-                            )
-                            .with_model(&config.embeddings.model, 1536),
-                        )),
-                        _ => {
-                            if let Some(api_key) = config.embeddings.openai_api_key() {
-                                let dim = match config.embeddings.model.as_str() {
-                                    "text-embedding-3-large" => 3072,
-                                    _ => 1536,
-                                };
-                                Some(Arc::new(ironclaw::workspace::OpenAiEmbeddings::with_model(
-                                    api_key,
-                                    &config.embeddings.model,
-                                    dim,
-                                )))
-                            } else {
-                                None
-                            }
-                        }
+                    if let Some(api_key) = config.embeddings.openai_api_key() {
+                        let dim = match config.embeddings.model.as_str() {
+                            "text-embedding-3-large" => 3072,
+                            _ => 1536,
+                        };
+                        Some(Arc::new(ironclaw::workspace::OpenAiEmbeddings::with_model(
+                            api_key,
+                            &config.embeddings.model,
+                            dim,
+                        )))
+                    } else {
+                        None
                     }
                 } else {
                     None
@@ -277,19 +261,6 @@ async fn main() -> anyhow::Result<()> {
         Err(e) => return Err(e.into()),
     };
 
-    // Initialize session manager and authenticate before channel setup
-    let session_config = SessionConfig {
-        auth_base_url: config.llm.nearai.auth_base_url.clone(),
-        session_path: config.llm.nearai.session_path.clone(),
-        ..Default::default()
-    };
-    let session = create_session_manager(session_config).await;
-
-    // Ensure we're authenticated before proceeding (only needed for NEAR AI backend)
-    if config.llm.backend == ironclaw::config::LlmBackend::NearAi {
-        session.ensure_authenticated().await?;
-    }
-
     // Initialize tracing
     let env_filter = EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| EnvFilter::new("ironclaw=info,tower_http=debug"));
@@ -348,9 +319,6 @@ async fn main() -> anyhow::Result<()> {
 
         let store = Arc::new(store);
 
-        // Attach store to session manager so tokens save to DB too
-        session.attach_store(Arc::clone(&store), "default").await;
-
         // Mark any jobs left in "running" or "creating" state as "interrupted".
         if let Err(e) = store.cleanup_stale_sandbox_jobs().await {
             tracing::warn!("Failed to cleanup stale sandbox jobs: {}", e);
@@ -359,8 +327,8 @@ async fn main() -> anyhow::Result<()> {
         Some(store)
     };
 
-    // Initialize LLM provider (clone session so we can reuse it for embeddings)
-    let llm = create_llm_provider(&config.llm, session.clone())?;
+    // Initialize LLM provider
+    let llm = create_llm_provider(&config.llm)?;
     tracing::info!("LLM provider initialized: {}", llm.model_name());
 
     // Initialize safety layer
@@ -374,37 +342,22 @@ async fn main() -> anyhow::Result<()> {
 
     // Create embeddings provider if configured
     let embeddings: Option<Arc<dyn EmbeddingProvider>> = if config.embeddings.enabled {
-        match config.embeddings.provider.as_str() {
-            "nearai" => {
-                tracing::info!(
-                    "Embeddings enabled via NEAR AI (model: {})",
-                    config.embeddings.model
-                );
-                Some(Arc::new(
-                    NearAiEmbeddings::new(&config.llm.nearai.base_url, session.clone())
-                        .with_model(&config.embeddings.model, 1536),
-                ))
-            }
-            _ => {
-                // Default to OpenAI for unknown providers
-                if let Some(api_key) = config.embeddings.openai_api_key() {
-                    tracing::info!(
-                        "Embeddings enabled via OpenAI (model: {})",
-                        config.embeddings.model
-                    );
-                    Some(Arc::new(OpenAiEmbeddings::with_model(
-                        api_key,
-                        &config.embeddings.model,
-                        match config.embeddings.model.as_str() {
-                            "text-embedding-3-large" => 3072,
-                            _ => 1536, // text-embedding-3-small and ada-002
-                        },
-                    )))
-                } else {
-                    tracing::warn!("Embeddings configured but OPENAI_API_KEY not set");
-                    None
-                }
-            }
+        if let Some(api_key) = config.embeddings.openai_api_key() {
+            tracing::info!(
+                "Embeddings enabled via OpenAI (model: {})",
+                config.embeddings.model
+            );
+            Some(Arc::new(OpenAiEmbeddings::with_model(
+                api_key,
+                &config.embeddings.model,
+                match config.embeddings.model.as_str() {
+                    "text-embedding-3-large" => 3072,
+                    _ => 1536, // text-embedding-3-small and ada-002
+                },
+            )))
+        } else {
+            tracing::warn!("Embeddings configured but OPENAI_API_KEY not set");
+            None
         }
     } else {
         tracing::info!("Embeddings disabled (set OPENAI_API_KEY or EMBEDDING_ENABLED=true)");
@@ -1074,9 +1027,8 @@ async fn check_onboard_needed() -> Option<&'static str> {
         // For now, we don't require it for first run
     }
 
-    // First run (onboarding never completed and no session)
-    let session_path = ironclaw::llm::session::default_session_path();
-    if !bootstrap.onboard_completed && !session_path.exists() {
+    // First run (onboarding never completed)
+    if !bootstrap.onboard_completed {
         return Some("First run");
     }
 

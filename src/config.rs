@@ -174,16 +174,14 @@ impl DatabaseConfig {
 
 /// Which LLM backend to use.
 ///
-/// Defaults to `NearAi` to keep IronClaw close to the NEAR ecosystem.
-/// Users can override with `LLM_BACKEND` env var to use their own API keys.
+/// Defaults to `Anthropic` (Claude).
+/// Users can override with `LLM_BACKEND` env var to use other providers.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum LlmBackend {
-    /// NEAR AI proxy (default) -- session or API key auth
-    #[default]
-    NearAi,
     /// Direct OpenAI API
     OpenAi,
-    /// Direct Anthropic API
+    /// Direct Anthropic API (default)
+    #[default]
     Anthropic,
     /// Local Ollama instance
     Ollama,
@@ -196,13 +194,12 @@ impl std::str::FromStr for LlmBackend {
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s.to_lowercase().as_str() {
-            "nearai" | "near_ai" | "near" => Ok(Self::NearAi),
             "openai" | "open_ai" => Ok(Self::OpenAi),
             "anthropic" | "claude" => Ok(Self::Anthropic),
             "ollama" => Ok(Self::Ollama),
             "openai_compatible" | "openai-compatible" | "compatible" => Ok(Self::OpenAiCompatible),
             _ => Err(format!(
-                "invalid LLM backend '{}', expected one of: nearai, openai, anthropic, ollama, openai_compatible",
+                "invalid LLM backend '{}', expected one of: openai, anthropic, ollama, openai_compatible",
                 s
             )),
         }
@@ -212,7 +209,6 @@ impl std::str::FromStr for LlmBackend {
 impl std::fmt::Display for LlmBackend {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::NearAi => write!(f, "nearai"),
             Self::OpenAi => write!(f, "openai"),
             Self::Anthropic => write!(f, "anthropic"),
             Self::Ollama => write!(f, "ollama"),
@@ -252,14 +248,12 @@ pub struct OpenAiCompatibleConfig {
 
 /// LLM provider configuration.
 ///
-/// NEAR AI remains the default backend. Users can switch to other providers
-/// by setting `LLM_BACKEND` (e.g. `openai`, `anthropic`, `ollama`).
+/// Anthropic is the default backend. Users can switch to other providers
+/// by setting `LLM_BACKEND` (e.g. `openai`, `ollama`).
 #[derive(Debug, Clone)]
 pub struct LlmConfig {
-    /// Which backend to use (default: NearAi)
+    /// Which backend to use (default: Anthropic)
     pub backend: LlmBackend,
-    /// NEAR AI config (always populated for NEAR AI embeddings, etc.)
-    pub nearai: NearAiConfig,
     /// Direct OpenAI config (populated when backend=openai)
     pub openai: Option<OpenAiDirectConfig>,
     /// Direct Anthropic config (populated when backend=anthropic)
@@ -270,92 +264,16 @@ pub struct LlmConfig {
     pub openai_compatible: Option<OpenAiCompatibleConfig>,
 }
 
-/// API mode for NEAR AI.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum NearAiApiMode {
-    /// Use the Responses API (chat-api proxy) - session-based auth
-    #[default]
-    Responses,
-    /// Use the Chat Completions API (cloud-api) - API key auth
-    ChatCompletions,
-}
-
-impl std::str::FromStr for NearAiApiMode {
-    type Err = String;
-
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        match s.to_lowercase().as_str() {
-            "responses" | "response" => Ok(Self::Responses),
-            "chat_completions" | "chatcompletions" | "chat" | "completions" => {
-                Ok(Self::ChatCompletions)
-            }
-            _ => Err(format!(
-                "invalid API mode '{}', expected 'responses' or 'chat_completions'",
-                s
-            )),
-        }
-    }
-}
-
-/// NEAR AI chat-api configuration.
-#[derive(Debug, Clone)]
-pub struct NearAiConfig {
-    /// Model to use (e.g., "claude-3-5-sonnet-20241022", "gpt-4o")
-    pub model: String,
-    /// Base URL for the NEAR AI API (default: https://api.near.ai)
-    pub base_url: String,
-    /// Base URL for auth/refresh endpoints (default: https://private.near.ai)
-    pub auth_base_url: String,
-    /// Path to session file (default: ~/.ironclaw/session.json)
-    pub session_path: PathBuf,
-    /// API mode: "responses" (chat-api) or "chat_completions" (cloud-api)
-    pub api_mode: NearAiApiMode,
-    /// API key for cloud-api (required for chat_completions mode)
-    pub api_key: Option<SecretString>,
-}
-
 impl LlmConfig {
-    fn resolve(settings: &Settings) -> Result<Self, ConfigError> {
-        // Determine backend (default: NearAi)
+    fn resolve(_settings: &Settings) -> Result<Self, ConfigError> {
+        // Determine backend (default: Anthropic)
         let backend: LlmBackend = if let Some(b) = optional_env("LLM_BACKEND")? {
             b.parse().map_err(|e| ConfigError::InvalidValue {
                 key: "LLM_BACKEND".to_string(),
                 message: e,
             })?
         } else {
-            LlmBackend::NearAi
-        };
-
-        // Always resolve NEAR AI config (used as fallback and for embeddings)
-        let nearai_api_key = optional_env("NEARAI_API_KEY")?.map(SecretString::from);
-
-        let api_mode = if let Some(mode_str) = optional_env("NEARAI_API_MODE")? {
-            mode_str.parse().map_err(|e| ConfigError::InvalidValue {
-                key: "NEARAI_API_MODE".to_string(),
-                message: e,
-            })?
-        } else if nearai_api_key.is_some() {
-            NearAiApiMode::ChatCompletions
-        } else {
-            NearAiApiMode::Responses
-        };
-
-        let nearai = NearAiConfig {
-            model: optional_env("NEARAI_MODEL")?
-                .or_else(|| settings.selected_model.clone())
-                .unwrap_or_else(|| {
-                    "fireworks::accounts/fireworks/models/llama4-maverick-instruct-basic"
-                        .to_string()
-                }),
-            base_url: optional_env("NEARAI_BASE_URL")?
-                .unwrap_or_else(|| "https://cloud-api.near.ai".to_string()),
-            auth_base_url: optional_env("NEARAI_AUTH_URL")?
-                .unwrap_or_else(|| "https://private.near.ai".to_string()),
-            session_path: optional_env("NEARAI_SESSION_PATH")?
-                .map(PathBuf::from)
-                .unwrap_or_else(default_session_path),
-            api_mode,
-            api_key: nearai_api_key,
+            LlmBackend::Anthropic
         };
 
         // Resolve provider-specific configs based on backend
@@ -380,7 +298,7 @@ impl LlmConfig {
                     hint: "Set ANTHROPIC_API_KEY when LLM_BACKEND=anthropic".to_string(),
                 })?;
             let model = optional_env("ANTHROPIC_MODEL")?
-                .unwrap_or_else(|| "claude-sonnet-4-20250514".to_string());
+                .unwrap_or_else(|| "claude-sonnet-4-5-20250929".to_string());
             Some(AnthropicDirectConfig { api_key, model })
         } else {
             None
@@ -414,7 +332,6 @@ impl LlmConfig {
 
         Ok(Self {
             backend,
-            nearai,
             openai,
             anthropic,
             ollama,
@@ -428,7 +345,7 @@ impl LlmConfig {
 pub struct EmbeddingsConfig {
     /// Whether embeddings are enabled.
     pub enabled: bool,
-    /// Provider to use: "openai" or "nearai"
+    /// Provider to use (e.g. "openai")
     pub provider: String,
     /// OpenAI API key (for OpenAI provider).
     pub openai_api_key: Option<SecretString>,
@@ -478,14 +395,6 @@ impl EmbeddingsConfig {
     pub fn openai_api_key(&self) -> Option<&str> {
         self.openai_api_key.as_ref().map(|s| s.expose_secret())
     }
-}
-
-/// Get the default session file path (~/.ironclaw/session.json).
-fn default_session_path() -> PathBuf {
-    dirs::home_dir()
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join(".ironclaw")
-        .join("session.json")
 }
 
 /// Channel configurations.

@@ -48,7 +48,7 @@ mod search;
 
 pub use chunker::{ChunkConfig, chunk_document};
 pub use document::{MemoryChunk, MemoryDocument, WorkspaceEntry, paths};
-pub use embeddings::{EmbeddingProvider, MockEmbeddings, NearAiEmbeddings, OpenAiEmbeddings};
+pub use embeddings::{EmbeddingProvider, MockEmbeddings, OpenAiEmbeddings};
 pub use repository::Repository;
 pub use search::{SearchConfig, SearchResult};
 

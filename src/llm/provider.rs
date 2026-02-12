@@ -299,20 +299,6 @@ pub trait LlmProvider: Send + Sync {
         })
     }
 
-    /// Seed a response chain for a thread (e.g. restoring from DB).
-    ///
-    /// Providers that support response chaining (e.g. NEAR AI `previous_response_id`)
-    /// store this so subsequent calls send only delta messages.
-    fn seed_response_chain(&self, _thread_id: &str, _response_id: String) {}
-
-    /// Get the last response chain ID for a thread.
-    ///
-    /// Returns `None` if the provider doesn't support chaining or has no
-    /// stored state for this thread.
-    fn get_response_chain_id(&self, _thread_id: &str) -> Option<String> {
-        None
-    }
-
     /// Calculate cost for a completion.
     fn calculate_cost(&self, input_tokens: u32, output_tokens: u32) -> Decimal {
         let (input_cost, output_cost) = self.cost_per_token();

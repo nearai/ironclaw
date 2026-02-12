@@ -19,7 +19,6 @@ use tokio_postgres::NoTls;
 use crate::channels::wasm::{
     ChannelCapabilitiesFile, available_channel_names, install_bundled_channel,
 };
-use crate::llm::{SessionConfig, SessionManager};
 use crate::secrets::SecretsCrypto;
 use crate::settings::{KeySource, Settings};
 use crate::setup::channels::{
@@ -65,7 +64,6 @@ pub struct SetupConfig {
 pub struct SetupWizard {
     config: SetupConfig,
     settings: Settings,
-    session_manager: Option<Arc<SessionManager>>,
     /// Database pool (created during setup).
     db_pool: Option<deadpool_postgres::Pool>,
     /// Secrets crypto (created during setup).
@@ -78,7 +76,6 @@ impl SetupWizard {
         Self {
             config: SetupConfig::default(),
             settings: Settings::load(),
-            session_manager: None,
             db_pool: None,
             secrets_crypto: None,
         }
@@ -89,16 +86,9 @@ impl SetupWizard {
         Self {
             config,
             settings: Settings::load(),
-            session_manager: None,
             db_pool: None,
             secrets_crypto: None,
         }
-    }
-
-    /// Set the session manager (for reusing existing auth).
-    pub fn with_session(mut self, session: Arc<SessionManager>) -> Self {
-        self.session_manager = Some(session);
-        self
     }
 
     /// Run the setup wizard.
@@ -106,11 +96,11 @@ impl SetupWizard {
         print_header("IronClaw Setup Wizard");
 
         if self.config.channels_only {
-            // Channels-only mode: just step 6
+            // Channels-only mode: just step 4
             print_step(1, 1, "Channel Configuration");
             self.step_channels().await?;
         } else {
-            let total_steps = 7;
+            let total_steps = 5;
 
             // Step 1: Database
             print_step(1, total_steps, "Database Connection");
@@ -120,28 +110,16 @@ impl SetupWizard {
             print_step(2, total_steps, "Security");
             self.step_security().await?;
 
-            // Step 3: Authentication (unless skipped)
-            if !self.config.skip_auth {
-                print_step(3, total_steps, "NEAR AI Authentication");
-                self.step_authentication().await?;
-            } else {
-                print_info("Skipping authentication (using existing session)");
-            }
-
-            // Step 4: Model selection
-            print_step(4, total_steps, "Model Selection");
-            self.step_model_selection().await?;
-
-            // Step 5: Embeddings
-            print_step(5, total_steps, "Embeddings (Semantic Search)");
+            // Step 3: Embeddings
+            print_step(3, total_steps, "Embeddings (Semantic Search)");
             self.step_embeddings()?;
 
-            // Step 6: Channel configuration
-            print_step(6, total_steps, "Channel Configuration");
+            // Step 4: Channel configuration
+            print_step(4, total_steps, "Channel Configuration");
             self.step_channels().await?;
 
-            // Step 7: Heartbeat
-            print_step(7, total_steps, "Background Tasks");
+            // Step 5: Heartbeat
+            print_step(5, total_steps, "Background Tasks");
             self.step_heartbeat()?;
         }
 
@@ -341,156 +319,10 @@ impl SetupWizard {
         Ok(())
     }
 
-    /// Step 3: NEAR AI authentication.
-    async fn step_authentication(&mut self) -> Result<(), SetupError> {
-        // Check if we already have a session
-        if let Some(ref session) = self.session_manager {
-            if session.has_token().await {
-                print_info("Existing session found. Validating...");
-                match session.ensure_authenticated().await {
-                    Ok(()) => {
-                        print_success("Session valid");
-                        return Ok(());
-                    }
-                    Err(e) => {
-                        print_info(&format!("Session invalid: {}. Re-authenticating...", e));
-                    }
-                }
-            }
-        }
-
-        // Create session manager if we don't have one
-        let session = if let Some(ref s) = self.session_manager {
-            Arc::clone(s)
-        } else {
-            let config = SessionConfig::default();
-            Arc::new(SessionManager::new(config))
-        };
-
-        // Trigger authentication flow
-        session
-            .ensure_authenticated()
-            .await
-            .map_err(|e| SetupError::Auth(e.to_string()))?;
-
-        self.session_manager = Some(session);
-        Ok(())
-    }
-
-    /// Step 4: Model selection.
-    async fn step_model_selection(&mut self) -> Result<(), SetupError> {
-        // Show current model if already configured
-        if let Some(ref current) = self.settings.selected_model {
-            print_info(&format!("Current model: {}", current));
-            println!();
-
-            let options = ["Keep current model", "Change model"];
-            let choice =
-                select_one("What would you like to do?", &options).map_err(SetupError::Io)?;
-
-            if choice == 0 {
-                print_success(&format!("Keeping {}", current));
-                return Ok(());
-            }
-        }
-
-        // Try to fetch available models
-        let models = if let Some(ref session) = self.session_manager {
-            self.fetch_available_models(session).await
-        } else {
-            vec![]
-        };
-
-        // Default models if we couldn't fetch
-        let default_models = [
-            (
-                "fireworks::accounts/fireworks/models/llama4-maverick-instruct-basic",
-                "Llama 4 Maverick (default, fast)",
-            ),
-            (
-                "anthropic::claude-sonnet-4-20250514",
-                "Claude Sonnet 4 (best quality)",
-            ),
-            ("openai::gpt-4o", "GPT-4o"),
-        ];
-
-        println!("Available models:");
-        println!();
-
-        let options: Vec<&str> = if models.is_empty() {
-            default_models.iter().map(|(_, desc)| *desc).collect()
-        } else {
-            models.iter().map(|m| m.as_str()).collect()
-        };
-
-        // Add custom option
-        let mut all_options = options.clone();
-        all_options.push("Custom model ID");
-
-        let choice = select_one("Select a model:", &all_options).map_err(SetupError::Io)?;
-
-        let selected_model = if choice == all_options.len() - 1 {
-            // Custom model
-            input("Enter model ID").map_err(SetupError::Io)?
-        } else if models.is_empty() {
-            default_models[choice].0.to_string()
-        } else {
-            models[choice].clone()
-        };
-
-        self.settings.selected_model = Some(selected_model.clone());
-        print_success(&format!("Selected {}", selected_model));
-
-        Ok(())
-    }
-
-    /// Fetch available models from the API.
-    async fn fetch_available_models(&self, session: &Arc<SessionManager>) -> Vec<String> {
-        use crate::config::LlmConfig;
-        use crate::llm::create_llm_provider;
-
-        let base_url = std::env::var("NEARAI_BASE_URL")
-            .unwrap_or_else(|_| "https://cloud-api.near.ai".to_string());
-        let auth_base_url = std::env::var("NEARAI_AUTH_URL")
-            .unwrap_or_else(|_| "https://private.near.ai".to_string());
-
-        let config = LlmConfig {
-            backend: crate::config::LlmBackend::NearAi,
-            nearai: crate::config::NearAiConfig {
-                model: "dummy".to_string(),
-                base_url,
-                auth_base_url,
-                session_path: crate::llm::session::default_session_path(),
-                api_mode: crate::config::NearAiApiMode::Responses,
-                api_key: None,
-            },
-            openai: None,
-            anthropic: None,
-            ollama: None,
-            openai_compatible: None,
-        };
-
-        match create_llm_provider(&config, Arc::clone(session)) {
-            Ok(provider) => match provider.list_models().await {
-                Ok(models) => models,
-                Err(e) => {
-                    print_info(&format!("Could not fetch models: {}. Using defaults.", e));
-                    vec![]
-                }
-            },
-            Err(e) => {
-                print_info(&format!(
-                    "Could not initialize provider: {}. Using defaults.",
-                    e
-                ));
-                vec![]
-            }
-        }
-    }
-
-    /// Step 5: Embeddings configuration.
+    /// Embeddings configuration.
     fn step_embeddings(&mut self) -> Result<(), SetupError> {
         print_info("Embeddings enable semantic search in your workspace memory.");
+        print_info("Requires an OpenAI API key for text-embedding-3-small.");
         println!();
 
         if !confirm("Enable semantic search?", true).map_err(SetupError::Io)? {
@@ -499,33 +331,15 @@ impl SetupWizard {
             return Ok(());
         }
 
-        let options = [
-            "NEAR AI (uses same auth, no extra cost)",
-            "OpenAI (requires API key)",
-        ];
-
-        let choice = select_one("Select embeddings provider:", &options).map_err(SetupError::Io)?;
-
-        match choice {
-            0 => {
-                self.settings.embeddings.enabled = true;
-                self.settings.embeddings.provider = "nearai".to_string();
-                self.settings.embeddings.model = "text-embedding-3-small".to_string();
-                print_success("Embeddings enabled via NEAR AI");
-            }
-            1 => {
-                // Check if API key is set
-                if std::env::var("OPENAI_API_KEY").is_err() {
-                    print_info("OPENAI_API_KEY not set in environment.");
-                    print_info("Add it to your .env file or environment to enable embeddings.");
-                }
-                self.settings.embeddings.enabled = true;
-                self.settings.embeddings.provider = "openai".to_string();
-                self.settings.embeddings.model = "text-embedding-3-small".to_string();
-                print_success("Embeddings configured for OpenAI");
-            }
-            _ => unreachable!(),
+        // Check if API key is set
+        if std::env::var("OPENAI_API_KEY").is_err() {
+            print_info("OPENAI_API_KEY not set in environment.");
+            print_info("Add it to your .env file or environment to enable embeddings.");
         }
+        self.settings.embeddings.enabled = true;
+        self.settings.embeddings.provider = "openai".to_string();
+        self.settings.embeddings.model = "text-embedding-3-small".to_string();
+        print_success("Embeddings configured for OpenAI");
 
         Ok(())
     }

@@ -1,72 +1,38 @@
 //! LLM integration for the agent.
 //!
 //! Supports multiple backends:
-//! - **NEAR AI** (default): Session-based or API key auth via NEAR AI proxy
+//! - **Anthropic** (default): Direct API access with your own key
 //! - **OpenAI**: Direct API access with your own key
-//! - **Anthropic**: Direct API access with your own key
 //! - **Ollama**: Local model inference
 //! - **OpenAI-compatible**: Any endpoint that speaks the OpenAI API
 
 mod costs;
-mod nearai;
-mod nearai_chat;
 mod provider;
 mod reasoning;
 mod rig_adapter;
-pub mod session;
 
-pub use nearai::{ModelInfo, NearAiProvider};
-pub use nearai_chat::NearAiChatProvider;
 pub use provider::{
     ChatMessage, CompletionRequest, CompletionResponse, FinishReason, LlmProvider, ModelMetadata,
     Role, ToolCall, ToolCompletionRequest, ToolCompletionResponse, ToolDefinition, ToolResult,
 };
 pub use reasoning::{ActionPlan, Reasoning, ReasoningContext, RespondResult, ToolSelection};
 pub use rig_adapter::RigAdapter;
-pub use session::{SessionConfig, SessionManager, create_session_manager};
 
 use std::sync::Arc;
 
 use rig::client::CompletionClient;
 use secrecy::ExposeSecret;
 
-use crate::config::{LlmBackend, LlmConfig, NearAiApiMode};
+use crate::config::{LlmBackend, LlmConfig};
 use crate::error::LlmError;
 
 /// Create an LLM provider based on configuration.
-///
-/// - `NearAi` backend: Uses session manager for authentication (Responses API)
-///   or API key (Chat Completions API)
-/// - Other backends: Use rig-core adapter with provider-specific clients
-pub fn create_llm_provider(
-    config: &LlmConfig,
-    session: Arc<SessionManager>,
-) -> Result<Arc<dyn LlmProvider>, LlmError> {
+pub fn create_llm_provider(config: &LlmConfig) -> Result<Arc<dyn LlmProvider>, LlmError> {
     match config.backend {
-        LlmBackend::NearAi => create_nearai_provider(config, session),
         LlmBackend::OpenAi => create_openai_provider(config),
         LlmBackend::Anthropic => create_anthropic_provider(config),
         LlmBackend::Ollama => create_ollama_provider(config),
         LlmBackend::OpenAiCompatible => create_openai_compatible_provider(config),
-    }
-}
-
-fn create_nearai_provider(
-    config: &LlmConfig,
-    session: Arc<SessionManager>,
-) -> Result<Arc<dyn LlmProvider>, LlmError> {
-    match config.nearai.api_mode {
-        NearAiApiMode::Responses => {
-            tracing::info!("Using NEAR AI Responses API (chat-api) with session auth");
-            Ok(Arc::new(NearAiProvider::new(
-                config.nearai.clone(),
-                session,
-            )))
-        }
-        NearAiApiMode::ChatCompletions => {
-            tracing::info!("Using NEAR AI Chat Completions API (cloud-api) with API key auth");
-            Ok(Arc::new(NearAiChatProvider::new(config.nearai.clone())?))
-        }
     }
 }
 

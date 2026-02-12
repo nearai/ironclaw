@@ -113,11 +113,11 @@ src/
 │   ├── policy.rs       # PolicyRule system with severity/actions
 │   └── leak_detector.rs # Secret detection (API keys, tokens, etc.)
 │
-├── llm/                # LLM integration (NEAR AI only)
+├── llm/                # LLM integration (multi-provider via rig-core)
 │   ├── provider.rs     # LlmProvider trait, message types
-│   ├── nearai.rs       # NEAR AI chat-api implementation
+│   ├── costs.rs        # Per-model cost lookup table
 │   ├── reasoning.rs    # Planning, tool selection, evaluation
-│   └── session.rs      # Session token management with auto-renewal
+│   └── rig_adapter.rs  # rig-core adapter for all providers
 │
 ├── tools/              # Extensible tool system
 │   ├── tool.rs         # Tool trait, ToolOutput, ToolError
@@ -155,7 +155,7 @@ src/
 │   ├── mod.rs          # Workspace struct, memory operations
 │   ├── document.rs     # MemoryDocument, MemoryChunk, WorkspaceEntry
 │   ├── chunker.rs      # Document chunking (800 tokens, 15% overlap)
-│   ├── embeddings.rs   # EmbeddingProvider trait, OpenAI implementation
+│   ├── embeddings.rs   # EmbeddingProvider trait, OpenAI/Mock implementations
 │   ├── search.rs       # Hybrid search with RRF algorithm
 │   └── repository.rs   # PostgreSQL CRUD and search operations
 │
@@ -250,20 +250,29 @@ Environment variables (see `.env.example`):
 ```bash
 DATABASE_URL=postgres://user:pass@localhost/ironclaw
 
-# NEAR AI (required)
-NEARAI_SESSION_TOKEN=sess_...
-NEARAI_MODEL=claude-3-5-sonnet-20241022
-NEARAI_BASE_URL=https://private.near.ai
+# LLM Backend (anthropic, openai, ollama, openai_compatible)
+LLM_BACKEND=anthropic
+
+# Anthropic (default)
+ANTHROPIC_API_KEY=sk-ant-...
+ANTHROPIC_MODEL=claude-sonnet-4-5-20250929
+
+# OpenAI (alternative)
+# OPENAI_API_KEY=sk-...
+# OPENAI_MODEL=gpt-4o
+
+# Ollama (local)
+# OLLAMA_BASE_URL=http://localhost:11434
+# OLLAMA_MODEL=llama3
 
 # Agent settings
 AGENT_NAME=ironclaw
 MAX_PARALLEL_JOBS=5
 
 # Embeddings (for semantic memory search)
-OPENAI_API_KEY=sk-...                   # For OpenAI embeddings
-# Or use NEAR AI embeddings:
-# EMBEDDING_PROVIDER=nearai
-# EMBEDDING_ENABLED=true
+OPENAI_API_KEY=sk-...
+EMBEDDING_PROVIDER=openai
+EMBEDDING_ENABLED=true
 EMBEDDING_MODEL=text-embedding-3-small  # or text-embedding-3-large
 
 # Heartbeat (proactive periodic execution)
@@ -287,7 +296,7 @@ SANDBOX_TIMEOUT_SECS=1800
 
 # Claude Code mode (runs inside sandbox containers)
 CLAUDE_CODE_ENABLED=false
-CLAUDE_CODE_MODEL=claude-sonnet-4-20250514
+CLAUDE_CODE_MODEL=claude-sonnet-4-5-20250929
 CLAUDE_CODE_MAX_TURNS=50
 CLAUDE_CODE_CONFIG_DIR=/home/worker/.claude
 
@@ -296,15 +305,6 @@ ROUTINES_ENABLED=true
 ROUTINES_CRON_INTERVAL=60            # Tick interval in seconds
 ROUTINES_MAX_CONCURRENT=3
 ```
-
-### NEAR AI Provider
-
-Uses the NEAR AI chat-api (`https://api.near.ai/v1/responses`) which provides:
-- Unified access to multiple models (OpenAI, Anthropic, etc.)
-- User authentication via session tokens
-- Usage tracking and billing through NEAR AI
-
-Session tokens have the format `sess_xxx` (37 characters). They are authenticated against the NEAR AI auth service.
 
 ## Database
 
@@ -371,7 +371,7 @@ Key test patterns:
 - ✅ **WASM sandboxing** - Full implementation in `tools/wasm/` with fuel metering, memory limits, capabilities
 - ✅ **Dynamic tool building** - `tools/builder/` has LlmSoftwareBuilder with iterative build loop
 - ✅ **HTTP webhook security** - Secret validation implemented, proper error handling (no panics)
-- ✅ **Embeddings integration** - OpenAI and NEAR AI providers wired to workspace for semantic search
+- ✅ **Embeddings integration** - OpenAI provider wired to workspace for semantic search
 - ✅ **Workspace system prompt** - Identity files (AGENTS.md, SOUL.md, USER.md, IDENTITY.md) injected into LLM context
 - ✅ **Heartbeat notifications** - Route through channel manager (broadcast API) instead of logging-only
 - ✅ **Auto-context compaction** - Triggers automatically when context exceeds threshold
