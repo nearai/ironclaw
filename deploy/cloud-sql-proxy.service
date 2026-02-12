@@ -4,7 +4,7 @@ After=network.target
 
 [Service]
 Type=simple
-User=root
+DynamicUser=yes
 ExecStart=/usr/local/bin/cloud-sql-proxy ironclaw-prod:us-central1:ironclaw-db --port=5432
 Restart=always
 RestartSec=5

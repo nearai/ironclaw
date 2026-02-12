@@ -36,6 +36,8 @@ echo "==> Configuring Docker registry auth"
 gcloud auth configure-docker us-central1-docker.pkg.dev --quiet
 
 echo "==> Creating config directory"
+# Owned by root, readable only by root. Docker reads --env-file as root
+# before dropping to uid 1000 (ironclaw) inside the container.
 mkdir -p /opt/ironclaw
 chmod 700 /opt/ironclaw
 
