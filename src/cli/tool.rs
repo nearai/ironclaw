@@ -850,91 +850,6 @@ async fn combine_provider_scopes(
     combined
 }
 
-/// HTML landing page shown in the browser after an OAuth redirect.
-fn oauth_landing_html(provider_name: &str, success: bool) -> String {
-    let (icon, heading, subtitle, accent) = if success {
-        (
-            r##"<div style="width:64px;height:64px;border-radius:50%;background:#22c55e;display:flex;align-items:center;justify-content:center;margin:0 auto 24px">
-                <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>
-              </div>"##,
-            format!("{} Connected", provider_name),
-            "You can close this window and return to your terminal.",
-            "#22c55e",
-        )
-    } else {
-        (
-            r##"<div style="width:64px;height:64px;border-radius:50%;background:#ef4444;display:flex;align-items:center;justify-content:center;margin:0 auto 24px">
-                <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
-              </div>"##,
-            "Authorization Failed".to_string(),
-            "The request was denied. You can close this window and try again.",
-            "#ef4444",
-        )
-    };
-
-    format!(
-        r#"<!DOCTYPE html>
-<html lang="en">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1">
-<title>IronClaw - {heading}</title>
-<style>
-  * {{ margin:0; padding:0; box-sizing:border-box }}
-  body {{
-    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
-    background: #0a0a0a;
-    color: #e5e5e5;
-    display: flex;
-    justify-content: center;
-    align-items: center;
-    min-height: 100vh;
-  }}
-  .card {{
-    text-align: center;
-    padding: 48px 40px;
-    max-width: 420px;
-    border: 1px solid #262626;
-    border-radius: 16px;
-    background: #141414;
-  }}
-  h1 {{
-    font-size: 22px;
-    font-weight: 600;
-    margin-bottom: 8px;
-    color: #fafafa;
-  }}
-  p {{
-    font-size: 14px;
-    color: #a3a3a3;
-    line-height: 1.5;
-  }}
-  .accent {{ color: {accent}; }}
-  .brand {{
-    margin-top: 32px;
-    font-size: 12px;
-    color: #525252;
-    letter-spacing: 0.5px;
-    text-transform: uppercase;
-  }}
-</style>
-</head>
-<body>
-  <div class="card">
-    {icon}
-    <h1>{heading}</h1>
-    <p>{subtitle}</p>
-    <div class="brand">IronClaw</div>
-  </div>
-</body>
-</html>"#,
-        heading = heading,
-        icon = icon,
-        subtitle = subtitle,
-        accent = accent,
-    )
-}
-
 /// OAuth browser-based login flow.
 async fn auth_tool_oauth(
     store: &PostgresSecretsStore,
@@ -945,13 +860,13 @@ async fn auth_tool_oauth(
     use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
     use rand::RngCore;
     use sha2::{Digest, Sha256};
-    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-    use tokio::net::TcpListener;
+
+    use crate::cli::oauth_defaults::{self, OAUTH_CALLBACK_PORT};
 
     let display_name = auth.display_name.as_deref().unwrap_or(&auth.secret_name);
 
     // Get client_id: capabilities file > runtime env var > built-in defaults
-    let builtin = crate::cli::oauth_defaults::builtin_credentials(&auth.secret_name);
+    let builtin = oauth_defaults::builtin_credentials(&auth.secret_name);
 
     let client_id = oauth
         .client_id
@@ -986,19 +901,7 @@ async fn auth_tool_oauth(
     println!("  Starting OAuth authentication...");
     println!();
 
-    // Bind the OAuth callback listener on a fixed port.
-    // The matching redirect URI (http://localhost:9876/callback) must be registered
-    // in the provider's OAuth app configuration.
-    const OAUTH_CALLBACK_PORT: u16 = 9876;
-    let listener = TcpListener::bind(format!("127.0.0.1:{}", OAUTH_CALLBACK_PORT))
-        .await
-        .map_err(|e| {
-            anyhow::anyhow!(
-                "Port {} is in use (another auth flow running?): {}",
-                OAUTH_CALLBACK_PORT,
-                e
-            )
-        })?;
+    let listener = oauth_defaults::bind_callback_listener().await?;
     let redirect_uri = format!("http://localhost:{}/callback", OAUTH_CALLBACK_PORT);
 
     // Generate PKCE verifier and challenge
@@ -1058,64 +961,8 @@ async fn auth_tool_oauth(
 
     println!("  Waiting for authorization...");
 
-    // Wait for callback with timeout
-    let timeout = std::time::Duration::from_secs(300);
-    let code = tokio::time::timeout(timeout, async {
-        loop {
-            let (mut socket, _) = listener.accept().await?;
-
-            let mut reader = BufReader::new(&mut socket);
-            let mut request_line = String::new();
-            reader.read_line(&mut request_line).await?;
-
-            // Parse GET /callback?code=xxx HTTP/1.1
-            if let Some(path) = request_line.split_whitespace().nth(1) {
-                if path.starts_with("/callback") {
-                    if let Some(query) = path.split('?').nth(1) {
-                        for param in query.split('&') {
-                            let parts: Vec<&str> = param.splitn(2, '=').collect();
-                            if parts.len() == 2 && parts[0] == "code" {
-                                let code = urlencoding::decode(parts[1])
-                                    .unwrap_or_else(|_| parts[1].into())
-                                    .into_owned();
-
-                                // Send success response
-                                let response = format!(
-                                    "HTTP/1.1 200 OK\r\n\
-                                     Content-Type: text/html; charset=utf-8\r\n\
-                                     \r\n\
-                                     {}",
-                                    oauth_landing_html(display_name, true)
-                                );
-                                let _ = socket.write_all(response.as_bytes()).await;
-                                let _ = socket.shutdown().await;
-
-                                return Ok::<_, anyhow::Error>(code);
-                            }
-                        }
-
-                        // Check for error
-                        if query.contains("error=") {
-                            let response = format!(
-                                "HTTP/1.1 400 Bad Request\r\n\
-                                 Content-Type: text/html; charset=utf-8\r\n\
-                                 \r\n\
-                                 {}",
-                                oauth_landing_html(display_name, false)
-                            );
-                            let _ = socket.write_all(response.as_bytes()).await;
-                            return Err(anyhow::anyhow!("Authorization denied by user"));
-                        }
-                    }
-                }
-            }
-
-            let response = "HTTP/1.1 404 Not Found\r\n\r\n";
-            let _ = socket.write_all(response.as_bytes()).await;
-        }
-    })
-    .await
-    .map_err(|_| anyhow::anyhow!("Timed out waiting for authorization"))??;
+    let code =
+        oauth_defaults::wait_for_callback(listener, "/callback", "code", display_name).await?;
 
     println!();
     println!("  Exchanging code for token...");

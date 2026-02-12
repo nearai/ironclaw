@@ -94,7 +94,6 @@ async fn main() -> anyhow::Result<()> {
             let session = ironclaw::llm::create_session_manager(ironclaw::llm::SessionConfig {
                 auth_base_url: config.llm.nearai.auth_base_url.clone(),
                 session_path: config.llm.nearai.session_path.clone(),
-                ..Default::default()
             })
             .await;
 
@@ -272,7 +271,6 @@ async fn main() -> anyhow::Result<()> {
     let session_config = SessionConfig {
         auth_base_url: config.llm.nearai.auth_base_url.clone(),
         session_path: config.llm.nearai.session_path.clone(),
-        ..Default::default()
     };
     let session = create_session_manager(session_config).await;
 
