@@ -41,9 +41,9 @@
 pub mod agent;
 pub mod bootstrap;
 pub mod channels;
+pub mod claude_cli;
 pub mod cli;
 pub mod config;
-pub mod pairing;
 pub mod context;
 pub mod error;
 pub mod estimation;
@@ -52,6 +52,7 @@ pub mod extensions;
 pub mod history;
 pub mod llm;
 pub mod orchestrator;
+pub mod pairing;
 pub mod safety;
 pub mod sandbox;
 pub mod secrets;

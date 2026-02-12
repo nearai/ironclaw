@@ -21,11 +21,9 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use serde::{Deserialize, Serialize};
-use tokio::io::{AsyncBufReadExt, BufReader};
-use tokio::process::Command;
 use uuid::Uuid;
 
+use crate::claude_cli::{ClaudeCodeConfig, ClaudeProcess, CliEvent, ContentBlock};
 use crate::error::WorkerError;
 use crate::worker::api::{CompletionReport, JobEventPayload, PromptResponse, WorkerHttpClient};
 
@@ -36,68 +34,6 @@ pub struct ClaudeBridgeConfig {
     pub max_turns: u32,
     pub model: String,
     pub timeout: Duration,
-}
-
-/// A Claude Code streaming event (NDJSON line from `--output-format stream-json`).
-///
-/// Claude Code emits one JSON object per line. We capture the key fields
-/// we need and forward the rest as opaque data.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ClaudeStreamEvent {
-    #[serde(rename = "type")]
-    pub event_type: String,
-
-    /// For `system` events: the session ID.
-    #[serde(default)]
-    pub session_id: Option<String>,
-
-    /// For `assistant` events: the text content blocks.
-    #[serde(default)]
-    pub content: Option<Vec<ContentBlock>>,
-
-    /// For `result` events: final status info.
-    #[serde(default)]
-    pub result: Option<ResultInfo>,
-
-    /// For `tool_use`/`tool_result`: the tool name.
-    #[serde(default)]
-    pub tool_name: Option<String>,
-
-    /// For `tool_use`: the input parameters.
-    #[serde(default)]
-    pub input: Option<serde_json::Value>,
-
-    /// For `tool_result`: the output content.
-    #[serde(default)]
-    pub output: Option<String>,
-
-    /// Subtype discriminator (e.g. "text", "tool_use", "tool_result").
-    #[serde(default)]
-    pub subtype: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ContentBlock {
-    #[serde(rename = "type")]
-    pub block_type: String,
-    #[serde(default)]
-    pub text: Option<String>,
-    #[serde(default)]
-    pub name: Option<String>,
-    #[serde(default)]
-    pub input: Option<serde_json::Value>,
-    #[serde(default)]
-    pub content: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ResultInfo {
-    #[serde(default)]
-    pub is_error: Option<bool>,
-    #[serde(default)]
-    pub duration_ms: Option<u64>,
-    #[serde(default)]
-    pub num_turns: Option<u32>,
 }
 
 /// The Claude Code bridge runtime.
@@ -117,6 +53,15 @@ impl ClaudeBridgeRuntime {
         )?);
 
         Ok(Self { config, client })
+    }
+
+    /// Build a `ClaudeCodeConfig` from the bridge settings.
+    fn claude_config(&self) -> ClaudeCodeConfig {
+        ClaudeCodeConfig::new()
+            .model(&self.config.model)
+            .max_turns(self.config.max_turns)
+            .cwd("/workspace")
+            .dangerously_skip_permissions()
     }
 
     /// Run the bridge: fetch job, spawn claude, stream events, handle follow-ups.
@@ -221,148 +166,75 @@ impl ClaudeBridgeRuntime {
         prompt: &str,
         resume_session_id: Option<&str>,
     ) -> Result<Option<String>, WorkerError> {
-        let mut cmd = Command::new("claude");
-        cmd.arg("-p")
-            .arg(prompt)
-            .arg("--output-format")
-            .arg("stream-json")
-            .arg("--dangerously-skip-permissions")
-            .arg("--max-turns")
-            .arg(self.config.max_turns.to_string())
-            .arg("--model")
-            .arg(&self.config.model);
+        let config = self.claude_config();
 
-        if let Some(sid) = resume_session_id {
-            cmd.arg("--resume").arg(sid);
+        let mut process = if let Some(sid) = resume_session_id {
+            ClaudeProcess::spawn_resume(&config, sid, prompt)
+        } else {
+            ClaudeProcess::spawn_oneshot(&config, prompt)
         }
-
-        cmd.current_dir("/workspace")
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped());
-
-        let mut child = cmd.spawn().map_err(|e| WorkerError::ExecutionFailed {
+        .map_err(|e| WorkerError::ExecutionFailed {
             reason: format!("failed to spawn claude: {}", e),
         })?;
 
-        let stdout = child
-            .stdout
-            .take()
-            .ok_or_else(|| WorkerError::ExecutionFailed {
-                reason: "failed to capture claude stdout".to_string(),
-            })?;
-
-        let stderr = child
-            .stderr
-            .take()
-            .ok_or_else(|| WorkerError::ExecutionFailed {
-                reason: "failed to capture claude stderr".to_string(),
-            })?;
-
-        // Spawn stderr reader that forwards lines as log events
-        let client_for_stderr = Arc::clone(&self.client);
-        let job_id = self.config.job_id;
-        let stderr_handle = tokio::spawn(async move {
-            let reader = BufReader::new(stderr);
-            let mut lines = reader.lines();
-            while let Ok(Some(line)) = lines.next_line().await {
-                tracing::debug!(job_id = %job_id, "claude stderr: {}", line);
-                let payload = JobEventPayload {
-                    event_type: "status".to_string(),
-                    data: serde_json::json!({ "message": line }),
-                };
-                client_for_stderr.post_event(&payload).await;
-            }
-        });
-
-        // Read stdout NDJSON line by line
-        let reader = BufReader::new(stdout);
-        let mut lines = reader.lines();
         let mut session_id: Option<String> = None;
 
-        while let Ok(Some(line)) = lines.next_line().await {
-            let line = line.trim().to_string();
-            if line.is_empty() {
-                continue;
-            }
-
-            match serde_json::from_str::<ClaudeStreamEvent>(&line) {
-                Ok(event) => {
-                    // Capture session_id from system init
-                    if event.event_type == "system" {
-                        if let Some(ref sid) = event.session_id {
-                            session_id = Some(sid.clone());
-                            tracing::info!(
-                                job_id = %self.config.job_id,
-                                session_id = %sid,
-                                "Captured Claude session ID"
-                            );
-                        }
-                    }
-
-                    // Convert to our event payload and forward
-                    let payloads = stream_event_to_payloads(&event);
-                    for payload in payloads {
-                        self.report_event(&payload.event_type, &payload.data).await;
-                    }
-                }
-                Err(e) => {
-                    // Not valid JSON, forward as a status message
-                    tracing::debug!(
+        while let Some(event) = process.next_event().await {
+            // Capture session_id from system init
+            if let Some(sid) = event.session_id() {
+                if session_id.is_none() {
+                    session_id = Some(sid.to_string());
+                    tracing::info!(
                         job_id = %self.config.job_id,
-                        "Non-JSON claude output: {} (parse error: {})", line, e
+                        session_id = %sid,
+                        "Captured Claude session ID"
                     );
-                    self.report_event("status", &serde_json::json!({ "message": line }))
-                        .await;
                 }
+            }
+
+            // Convert to event payloads and forward to orchestrator
+            let payloads = event_to_payloads(&event);
+            for payload in payloads {
+                self.report_event(&payload.event_type, &payload.data).await;
             }
         }
 
-        // Wait for the process to exit
-        let status = child
-            .wait()
-            .await
-            .map_err(|e| WorkerError::ExecutionFailed {
-                reason: format!("failed waiting for claude: {}", e),
-            })?;
-
-        // Wait for stderr reader to finish
-        let _ = stderr_handle.await;
-
-        if !status.success() {
-            let code = status.code().unwrap_or(-1);
-            tracing::warn!(
-                job_id = %self.config.job_id,
-                exit_code = code,
-                "Claude process exited with non-zero status"
-            );
-
-            // Report result event
-            self.report_event(
-                "result",
-                &serde_json::json!({
-                    "status": "error",
-                    "exit_code": code,
-                    "session_id": session_id,
-                }),
-            )
-            .await;
-
-            return Err(WorkerError::ExecutionFailed {
-                reason: format!("claude exited with code {}", code),
-            });
-        }
-
-        // Report successful result
-        self.report_event(
-            "result",
-            &serde_json::json!({
-                "status": "completed",
-                "session_id": session_id,
+        // Wait for process exit and report final status
+        match process.wait().await {
+            Ok(()) => {
+                self.report_event(
+                    "result",
+                    &serde_json::json!({
+                        "status": "completed",
+                        "session_id": session_id,
+                    }),
+                )
+                .await;
+                Ok(session_id)
+            }
+            Err(crate::claude_cli::ClaudeCliError::ProcessFailed { code, .. }) => {
+                tracing::warn!(
+                    job_id = %self.config.job_id,
+                    exit_code = code,
+                    "Claude process exited with non-zero status"
+                );
+                self.report_event(
+                    "result",
+                    &serde_json::json!({
+                        "status": "error",
+                        "exit_code": code,
+                        "session_id": session_id,
+                    }),
+                )
+                .await;
+                Err(WorkerError::ExecutionFailed {
+                    reason: format!("claude exited with code {}", code),
+                })
+            }
+            Err(e) => Err(WorkerError::ExecutionFailed {
+                reason: format!("claude process error: {}", e),
             }),
-        )
-        .await;
-
-        Ok(session_id)
+        }
     }
 
     /// Post a job event to the orchestrator.
@@ -380,184 +252,121 @@ impl ClaudeBridgeRuntime {
     }
 }
 
-/// Convert a Claude stream event into one or more event payloads for the orchestrator.
-fn stream_event_to_payloads(event: &ClaudeStreamEvent) -> Vec<JobEventPayload> {
-    let mut payloads = Vec::new();
-
-    match event.event_type.as_str() {
-        "system" => {
-            payloads.push(JobEventPayload {
+/// Convert a typed `CliEvent` into one or more event payloads for the orchestrator.
+fn event_to_payloads(event: &CliEvent) -> Vec<JobEventPayload> {
+    match event {
+        CliEvent::System(sys) => {
+            vec![JobEventPayload {
                 event_type: "status".to_string(),
                 data: serde_json::json!({
                     "message": "Claude Code session started",
-                    "session_id": event.session_id,
+                    "session_id": sys.session_id,
                 }),
-            });
+            }]
         }
-        "assistant" => {
-            // Extract text content and tool_use blocks
-            if let Some(ref blocks) = event.content {
-                for block in blocks {
-                    match block.block_type.as_str() {
-                        "text" => {
-                            if let Some(ref text) = block.text {
-                                payloads.push(JobEventPayload {
-                                    event_type: "message".to_string(),
-                                    data: serde_json::json!({
-                                        "role": "assistant",
-                                        "content": text,
-                                    }),
-                                });
-                            }
-                        }
-                        "tool_use" => {
-                            payloads.push(JobEventPayload {
-                                event_type: "tool_use".to_string(),
-                                data: serde_json::json!({
-                                    "tool_name": block.name,
-                                    "input": block.input,
-                                }),
-                            });
-                        }
-                        "tool_result" => {
-                            payloads.push(JobEventPayload {
-                                event_type: "tool_result".to_string(),
-                                data: serde_json::json!({
-                                    "tool_name": block.name.as_deref().unwrap_or("unknown"),
-                                    "output": block.content.as_deref().unwrap_or(""),
-                                }),
-                            });
-                        }
-                        _ => {}
+        CliEvent::Assistant(asst) => {
+            let mut payloads = Vec::new();
+            for block in &asst.content {
+                match block {
+                    ContentBlock::Text { text } => {
+                        payloads.push(JobEventPayload {
+                            event_type: "message".to_string(),
+                            data: serde_json::json!({
+                                "role": "assistant",
+                                "content": text,
+                            }),
+                        });
+                    }
+                    ContentBlock::ToolUse { name, input, .. } => {
+                        payloads.push(JobEventPayload {
+                            event_type: "tool_use".to_string(),
+                            data: serde_json::json!({
+                                "tool_name": name,
+                                "input": input,
+                            }),
+                        });
+                    }
+                    ContentBlock::ToolResult { content, .. } => {
+                        payloads.push(JobEventPayload {
+                            event_type: "tool_result".to_string(),
+                            data: serde_json::json!({
+                                "tool_name": "unknown",
+                                "output": content.as_deref().unwrap_or(""),
+                            }),
+                        });
                     }
                 }
             }
+            payloads
         }
-        "result" => {
-            let is_error = event
-                .result
-                .as_ref()
-                .and_then(|r| r.is_error)
-                .unwrap_or(false);
-            payloads.push(JobEventPayload {
+        CliEvent::Result(res) => {
+            let is_error = res
+                .is_error
+                .unwrap_or(false)
+                || res
+                    .result
+                    .as_ref()
+                    .and_then(|r| r.is_error)
+                    .unwrap_or(false);
+            vec![JobEventPayload {
                 event_type: "result".to_string(),
                 data: serde_json::json!({
                     "status": if is_error { "error" } else { "completed" },
-                    "session_id": event.session_id,
-                    "duration_ms": event.result.as_ref().and_then(|r| r.duration_ms),
-                    "num_turns": event.result.as_ref().and_then(|r| r.num_turns),
+                    "session_id": res.session_id,
+                    "duration_ms": res.result.as_ref().and_then(|r| r.duration_ms),
+                    "num_turns": res.result.as_ref().and_then(|r| r.num_turns),
                 }),
-            });
+            }]
         }
-        _ => {
-            // Forward unknown event types as status
-            payloads.push(JobEventPayload {
+        CliEvent::User(_) => Vec::new(),
+        CliEvent::Unknown { event_type, .. } => {
+            vec![JobEventPayload {
                 event_type: "status".to_string(),
                 data: serde_json::json!({
-                    "message": format!("Claude event: {}", event.event_type),
-                    "raw_type": event.event_type,
+                    "message": format!("Claude event: {}", event_type),
+                    "raw_type": event_type,
                 }),
-            });
+            }]
         }
     }
-
-    payloads
 }
 
 fn truncate(s: &str, max_len: usize) -> &str {
-    if s.len() <= max_len { s } else { &s[..max_len] }
+    if s.len() <= max_len {
+        s
+    } else {
+        &s[..max_len]
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::claude_cli::types::*;
 
     #[test]
-    fn test_parse_system_event() {
-        let json = r#"{"type":"system","session_id":"abc-123","subtype":"init"}"#;
-        let event: ClaudeStreamEvent = serde_json::from_str(json).unwrap();
-        assert_eq!(event.event_type, "system");
-        assert_eq!(event.session_id.as_deref(), Some("abc-123"));
-    }
-
-    #[test]
-    fn test_parse_assistant_text_event() {
-        let json = r#"{"type":"assistant","content":[{"type":"text","text":"Hello world"}]}"#;
-        let event: ClaudeStreamEvent = serde_json::from_str(json).unwrap();
-        assert_eq!(event.event_type, "assistant");
-        let blocks = event.content.unwrap();
-        assert_eq!(blocks.len(), 1);
-        assert_eq!(blocks[0].block_type, "text");
-        assert_eq!(blocks[0].text.as_deref(), Some("Hello world"));
-    }
-
-    #[test]
-    fn test_parse_assistant_tool_use_event() {
-        let json = r#"{"type":"assistant","content":[{"type":"tool_use","name":"Bash","input":{"command":"ls"}}]}"#;
-        let event: ClaudeStreamEvent = serde_json::from_str(json).unwrap();
-        let blocks = event.content.unwrap();
-        assert_eq!(blocks[0].block_type, "tool_use");
-        assert_eq!(blocks[0].name.as_deref(), Some("Bash"));
-        assert!(blocks[0].input.is_some());
-    }
-
-    #[test]
-    fn test_parse_result_event() {
-        let json =
-            r#"{"type":"result","result":{"is_error":false,"duration_ms":5000,"num_turns":3}}"#;
-        let event: ClaudeStreamEvent = serde_json::from_str(json).unwrap();
-        assert_eq!(event.event_type, "result");
-        let result = event.result.unwrap();
-        assert_eq!(result.is_error, Some(false));
-        assert_eq!(result.duration_ms, Some(5000));
-        assert_eq!(result.num_turns, Some(3));
-    }
-
-    #[test]
-    fn test_parse_result_error_event() {
-        let json = r#"{"type":"result","result":{"is_error":true}}"#;
-        let event: ClaudeStreamEvent = serde_json::from_str(json).unwrap();
-        let result = event.result.unwrap();
-        assert_eq!(result.is_error, Some(true));
-    }
-
-    #[test]
-    fn test_stream_event_to_payloads_system() {
-        let event = ClaudeStreamEvent {
-            event_type: "system".to_string(),
+    fn test_event_to_payloads_system() {
+        let event = CliEvent::System(SystemEvent {
             session_id: Some("sid-123".to_string()),
-            content: None,
-            result: None,
-            tool_name: None,
-            input: None,
-            output: None,
-            subtype: None,
-        };
-        let payloads = stream_event_to_payloads(&event);
+            subtype: Some("init".to_string()),
+            model: None,
+            tools: None,
+        });
+        let payloads = event_to_payloads(&event);
         assert_eq!(payloads.len(), 1);
         assert_eq!(payloads[0].event_type, "status");
         assert_eq!(payloads[0].data["session_id"], "sid-123");
     }
 
     #[test]
-    fn test_stream_event_to_payloads_assistant_text() {
-        let event = ClaudeStreamEvent {
-            event_type: "assistant".to_string(),
+    fn test_event_to_payloads_assistant_text() {
+        let event = CliEvent::Assistant(AssistantEvent {
+            content: vec![ContentBlock::Text {
+                text: "Here's the answer".to_string(),
+            }],
             session_id: None,
-            content: Some(vec![ContentBlock {
-                block_type: "text".to_string(),
-                text: Some("Here's the answer".to_string()),
-                name: None,
-                input: None,
-                content: None,
-            }]),
-            result: None,
-            tool_name: None,
-            input: None,
-            output: None,
-            subtype: None,
-        };
-        let payloads = stream_event_to_payloads(&event);
+        });
+        let payloads = event_to_payloads(&event);
         assert_eq!(payloads.len(), 1);
         assert_eq!(payloads[0].event_type, "message");
         assert_eq!(payloads[0].data["role"], "assistant");
@@ -565,62 +374,82 @@ mod tests {
     }
 
     #[test]
-    fn test_stream_event_to_payloads_result_success() {
-        let event = ClaudeStreamEvent {
-            event_type: "result".to_string(),
+    fn test_event_to_payloads_assistant_tool_use() {
+        let event = CliEvent::Assistant(AssistantEvent {
+            content: vec![ContentBlock::ToolUse {
+                id: Some("tu_1".to_string()),
+                name: "Bash".to_string(),
+                input: serde_json::json!({"command": "ls"}),
+            }],
+            session_id: None,
+        });
+        let payloads = event_to_payloads(&event);
+        assert_eq!(payloads.len(), 1);
+        assert_eq!(payloads[0].event_type, "tool_use");
+        assert_eq!(payloads[0].data["tool_name"], "Bash");
+    }
+
+    #[test]
+    fn test_event_to_payloads_result_success() {
+        let event = CliEvent::Result(ResultEvent {
             session_id: Some("s1".to_string()),
-            content: None,
+            subtype: None,
             result: Some(ResultInfo {
                 is_error: Some(false),
                 duration_ms: Some(12000),
+                duration_api_ms: None,
                 num_turns: Some(5),
+                cost_usd: None,
+                input_tokens: None,
+                output_tokens: None,
             }),
-            tool_name: None,
-            input: None,
-            output: None,
-            subtype: None,
-        };
-        let payloads = stream_event_to_payloads(&event);
+            is_error: None,
+        });
+        let payloads = event_to_payloads(&event);
         assert_eq!(payloads.len(), 1);
         assert_eq!(payloads[0].event_type, "result");
         assert_eq!(payloads[0].data["status"], "completed");
     }
 
     #[test]
-    fn test_stream_event_to_payloads_result_error() {
-        let event = ClaudeStreamEvent {
-            event_type: "result".to_string(),
+    fn test_event_to_payloads_result_error() {
+        let event = CliEvent::Result(ResultEvent {
             session_id: None,
-            content: None,
+            subtype: None,
             result: Some(ResultInfo {
                 is_error: Some(true),
                 duration_ms: None,
+                duration_api_ms: None,
                 num_turns: None,
+                cost_usd: None,
+                input_tokens: None,
+                output_tokens: None,
             }),
-            tool_name: None,
-            input: None,
-            output: None,
-            subtype: None,
-        };
-        let payloads = stream_event_to_payloads(&event);
+            is_error: None,
+        });
+        let payloads = event_to_payloads(&event);
         assert_eq!(payloads[0].data["status"], "error");
     }
 
     #[test]
-    fn test_stream_event_to_payloads_unknown_type() {
-        let event = ClaudeStreamEvent {
+    fn test_event_to_payloads_unknown_type() {
+        let event = CliEvent::Unknown {
             event_type: "fancy_new_thing".to_string(),
-            session_id: None,
-            content: None,
-            result: None,
-            tool_name: None,
-            input: None,
-            output: None,
-            subtype: None,
+            raw: serde_json::json!({}),
         };
-        let payloads = stream_event_to_payloads(&event);
+        let payloads = event_to_payloads(&event);
         assert_eq!(payloads.len(), 1);
         assert_eq!(payloads[0].event_type, "status");
+    }
+
+    #[test]
+    fn test_event_to_payloads_user_empty() {
+        let event = CliEvent::User(UserEvent {
+            content: vec![],
+            session_id: None,
+        });
+        let payloads = event_to_payloads(&event);
+        assert!(payloads.is_empty());
     }
 
     #[test]
