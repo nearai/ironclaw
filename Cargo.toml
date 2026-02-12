@@ -4,7 +4,16 @@ version = "0.1.0"
 edition = "2024"
 rust-version = "1.85"
 description = "Secure personal AI assistant that protects your data and expands its capabilities on the fly"
+authors = ["NEAR AI <support@near.ai>"]
 license = "MIT OR Apache-2.0"
+homepage = "https://github.com/nearai/ironclaw"
+repository = "https://github.com/nearai/ironclaw"
+
+[package.metadata.wix]
+upgrade-guid = "D0156E61-BA37-451E-8AB9-1A2ECCCFA48F"
+path-guid = "F90B6EA6-87F7-499B-BB19-CF55DE1EB339"
+license = false
+eula = false
 
 [dependencies]
 # Async runtime
@@ -127,3 +136,47 @@ tempfile = "3"
 [features]
 default = []
 integration = []
+
+# The profile that 'cargo dist' will build with
+[profile.dist]
+inherits = "release"
+lto = "thin"
+
+# Config for 'dist'
+[workspace.metadata.dist]
+# The preferred dist version to use in CI (Cargo.toml SemVer syntax)
+cargo-dist-version = "0.30.3"
+allow-dirty = ["ci"]
+# CI backends to support
+ci = "github"
+# The installers to generate for each app
+installers = ["shell", "powershell", "npm", "msi"]
+# Publish jobs to run in CI
+publish-jobs = ["npm"]
+# Target platforms to build apps for (Rust target-triple syntax)
+targets = [
+    "aarch64-apple-darwin",
+    "aarch64-unknown-linux-gnu",
+    "aarch64-pc-windows-msvc",
+    "x86_64-apple-darwin",
+    "x86_64-unknown-linux-gnu",
+    "x86_64-pc-windows-msvc",
+]
+# The archive format to use for windows builds (defaults .zip)
+windows-archive = ".tar.gz"
+# The archive format to use for non-windows builds (defaults .tar.xz)
+unix-archive = ".tar.gz"
+# Which actions to run on pull requests
+pr-run-mode = "upload"
+# Path that installers should place binaries in
+install-path = "CARGO_HOME"
+# Whether to install an updater program
+install-updater = false
+
+[workspace.metadata.dist.github-custom-runners]
+aarch64-unknown-linux-gnu = "ubuntu-24.04-arm"
+x86_64-unknown-linux-gnu = "ubuntu-22.04"
+x86_64-pc-windows-msvc = "windows-2022"
+aarch64-pc-windows-msvc = "windows-2025"
+x86_64-apple-darwin = "macos-15-intel"
+aarch64-apple-darwin = "macos-14"

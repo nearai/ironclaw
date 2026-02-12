@@ -43,12 +43,12 @@ use wasmtime_wasi::{ResourceTable, WasiCtx, WasiCtxBuilder, WasiView};
 use crate::channels::wasm::capabilities::ChannelCapabilities;
 use crate::channels::wasm::error::WasmChannelError;
 use crate::channels::wasm::host::{ChannelEmitRateLimiter, ChannelHostState, EmittedMessage};
-use crate::pairing::PairingStore;
 use crate::channels::wasm::router::RegisteredEndpoint;
 use crate::channels::wasm::runtime::{PreparedChannelModule, WasmChannelRuntime};
 use crate::channels::wasm::schema::ChannelConfig;
 use crate::channels::{Channel, IncomingMessage, MessageStream, OutgoingResponse, StatusUpdate};
 use crate::error::ChannelError;
+use crate::pairing::PairingStore;
 use crate::safety::LeakDetector;
 use crate::tools::wasm::LogLevel;
 use crate::tools::wasm::WasmResourceLimiter;
@@ -1190,6 +1190,7 @@ impl WasmChannel {
     ///
     /// Static method for use by the background typing repeat task (which
     /// doesn't have access to `&self`).
+    #[allow(clippy::too_many_arguments)]
     async fn execute_status(
         channel_name: &str,
         runtime: &Arc<WasmChannelRuntime>,
@@ -2073,12 +2074,12 @@ mod tests {
     use std::sync::Arc;
 
     use crate::channels::Channel;
-    use crate::pairing::PairingStore;
     use crate::channels::wasm::capabilities::ChannelCapabilities;
     use crate::channels::wasm::runtime::{
         PreparedChannelModule, WasmChannelRuntime, WasmChannelRuntimeConfig,
     };
     use crate::channels::wasm::wrapper::{HttpResponse, WasmChannel};
+    use crate::pairing::PairingStore;
     use crate::tools::wasm::ResourceLimits;
 
     fn create_test_channel() -> WasmChannel {
@@ -2525,8 +2526,13 @@ mod tests {
         );
         creds.insert("OTHER_SECRET".to_string(), "s3cret".to_string());
 
-        let store =
-            ChannelStoreData::new(1024 * 1024, "test", ChannelCapabilities::default(), creds);
+        let store = ChannelStoreData::new(
+            1024 * 1024,
+            "test",
+            ChannelCapabilities::default(),
+            creds,
+            Arc::new(PairingStore::new()),
+        );
 
         let error = "HTTP request failed: error sending request for url \
             (https://api.telegram.org/bot8218490433:AAEZeUxwqZ5OO3mOCXv7fKvpdhDgsmBBNis/getUpdates)";
@@ -2556,6 +2562,7 @@ mod tests {
             "test",
             ChannelCapabilities::default(),
             std::collections::HashMap::new(),
+            Arc::new(PairingStore::new()),
         );
 
         let input = "some error message";
@@ -2569,8 +2576,13 @@ mod tests {
         let mut creds = std::collections::HashMap::new();
         creds.insert("EMPTY_TOKEN".to_string(), String::new());
 
-        let store =
-            ChannelStoreData::new(1024 * 1024, "test", ChannelCapabilities::default(), creds);
+        let store = ChannelStoreData::new(
+            1024 * 1024,
+            "test",
+            ChannelCapabilities::default(),
+            creds,
+            Arc::new(PairingStore::new()),
+        );
 
         let input = "should not match anything";
         assert_eq!(store.redact_credentials(input), input);

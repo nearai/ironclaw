@@ -80,25 +80,26 @@ fn main() {
         .map(|s| s.success())
         .unwrap_or(false);
 
-    if !component_ok
-    {
+    if !component_ok {
         // Fallback: copy raw module if wasm-tools unavailable
         if std::fs::copy(&raw_wasm, &wasm_out).is_err() {
-            eprintln!(
-                "cargo:warning=wasm-tools not found. Run: cargo install wasm-tools"
-            );
+            eprintln!("cargo:warning=wasm-tools not found. Run: cargo install wasm-tools");
         }
     } else {
         // Strip debug info (use temp file to avoid clobbering)
         let stripped = wasm_out.with_extension("wasm.stripped");
         let strip_ok = Command::new("wasm-tools")
-            .args(["strip", wasm_out.to_str().unwrap(), "-o", stripped.to_str().unwrap()])
+            .args([
+                "strip",
+                wasm_out.to_str().unwrap(),
+                "-o",
+                stripped.to_str().unwrap(),
+            ])
             .current_dir(&root)
             .status()
             .map(|s| s.success())
             .unwrap_or(false);
-        if strip_ok
-        {
+        if strip_ok {
             let _ = std::fs::rename(&stripped, &wasm_out);
         }
     }
