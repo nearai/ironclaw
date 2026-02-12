@@ -10,11 +10,11 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use ironclaw::channels::Channel;
-use ironclaw::pairing::PairingStore;
 use ironclaw::channels::wasm::{
     ChannelCapabilities, EmitRateLimitConfig, PreparedChannelModule, RegisteredEndpoint,
     WasmChannel, WasmChannelRouter, WasmChannelRuntime, WasmChannelRuntimeConfig,
 };
+use ironclaw::pairing::PairingStore;
 use tempfile::TempDir;
 
 /// Create a test runtime for WASM channel operations.

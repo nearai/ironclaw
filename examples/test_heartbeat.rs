@@ -28,7 +28,9 @@ async fn main() -> anyhow::Result<()> {
     println!("=== Heartbeat Integration Test ===\n");
 
     // 1. Load config
-    let config = Config::from_env().await.map_err(|e| anyhow::anyhow!("Config: {}", e))?;
+    let config = Config::from_env()
+        .await
+        .map_err(|e| anyhow::anyhow!("Config: {}", e))?;
     println!("[1/6] Config loaded");
     println!("  heartbeat.enabled = {}", config.heartbeat.enabled);
     println!(

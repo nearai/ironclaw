@@ -3,7 +3,7 @@
 //! Verifies the full pairing lifecycle: upsert → list → approve → allowFrom → is_sender_allowed.
 //! Uses temp directory for isolation.
 
-use ironclaw::cli::{run_pairing_command_with_store, PairingCommand};
+use ironclaw::cli::{PairingCommand, run_pairing_command_with_store};
 use ironclaw::pairing::PairingStore;
 use tempfile::TempDir;
 
@@ -19,10 +19,16 @@ fn test_pairing_flow_unknown_user_to_approved() {
     let channel = "telegram";
 
     // 1. Unknown user sends first message -> upsert creates request
-    let r1 = store.upsert_request(channel, "user_12345", Some(serde_json::json!({
-        "chat_id": 999,
-        "username": "alice"
-    }))).unwrap();
+    let r1 = store
+        .upsert_request(
+            channel,
+            "user_12345",
+            Some(serde_json::json!({
+                "chat_id": 999,
+                "username": "alice"
+            })),
+        )
+        .unwrap();
     assert!(r1.created);
     assert!(!r1.code.is_empty());
     assert_eq!(r1.code.len(), 8);
@@ -34,7 +40,11 @@ fn test_pairing_flow_unknown_user_to_approved() {
     assert_eq!(pending[0].code, r1.code);
 
     // 3. User is not allowed yet
-    assert!(!store.is_sender_allowed(channel, "user_12345", Some("alice")).unwrap());
+    assert!(
+        !store
+            .is_sender_allowed(channel, "user_12345", Some("alice"))
+            .unwrap()
+    );
 
     // 4. Approve via code
     let approved = store.approve(channel, &r1.code).unwrap();
@@ -42,8 +52,16 @@ fn test_pairing_flow_unknown_user_to_approved() {
     assert_eq!(approved.unwrap().id, "user_12345");
 
     // 5. User is now allowed
-    assert!(store.is_sender_allowed(channel, "user_12345", None).unwrap());
-    assert!(store.is_sender_allowed(channel, "user_12345", Some("alice")).unwrap());
+    assert!(
+        store
+            .is_sender_allowed(channel, "user_12345", None)
+            .unwrap()
+    );
+    assert!(
+        store
+            .is_sender_allowed(channel, "user_12345", Some("alice"))
+            .unwrap()
+    );
 
     // 6. Pending list is empty
     let pending_after = store.list_pending(channel).unwrap();
@@ -69,7 +87,11 @@ fn test_pairing_flow_cli_approve() {
         },
     );
     assert!(result.is_ok());
-    assert!(store.is_sender_allowed("telegram", "user_999", None).unwrap());
+    assert!(
+        store
+            .is_sender_allowed("telegram", "user_999", None)
+            .unwrap()
+    );
 }
 
 #[test]
@@ -109,4 +131,3 @@ fn test_pairing_multiple_channels_isolated() {
     store.approve("slack", &r_slack.code).unwrap();
     assert!(store.is_sender_allowed("slack", "user_b", None).unwrap());
 }
-

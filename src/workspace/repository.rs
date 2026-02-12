@@ -404,14 +404,13 @@ impl Repository {
             Vec::new()
         };
 
-        let vector_results = if config.use_vector && embedding.is_some() {
-            self.vector_search(
-                user_id,
-                agent_id,
-                embedding.unwrap(),
-                config.pre_fusion_limit,
-            )
-            .await?
+        let vector_results = if config.use_vector {
+            if let Some(embedding) = embedding {
+                self.vector_search(user_id, agent_id, embedding, config.pre_fusion_limit)
+                    .await?
+            } else {
+                Vec::new()
+            }
         } else {
             Vec::new()
         };

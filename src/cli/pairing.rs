@@ -52,7 +52,10 @@ fn run_list(store: &PairingStore, channel: &str, json: bool) -> Result<(), Strin
     let requests = store.list_pending(channel).map_err(|e| e.to_string())?;
 
     if json {
-        println!("{}", serde_json::to_string_pretty(&requests).map_err(|e| e.to_string())?);
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&requests).map_err(|e| e.to_string())?
+        );
         return Ok(());
     }
 
@@ -69,9 +72,7 @@ fn run_list(store: &PairingStore, channel: &str, json: bool) -> Result<(), Strin
             .and_then(|m| m.as_object())
             .map(|o| {
                 o.iter()
-                    .filter_map(|(k, v)| {
-                        v.as_str().map(|s| format!("{}={}", k, s))
-                    })
+                    .filter_map(|(k, v)| v.as_str().map(|s| format!("{}={}", k, s)))
                     .collect::<Vec<_>>()
                     .join(", ")
             })
@@ -88,7 +89,10 @@ fn run_approve(store: &PairingStore, channel: &str, code: &str) -> Result<(), St
             println!("Approved {} sender {}.", channel, entry.id);
             Ok(())
         }
-        Ok(None) => Err(format!("No pending pairing request found for code: {}", code)),
+        Ok(None) => Err(format!(
+            "No pending pairing request found for code: {}",
+            code
+        )),
         Err(crate::pairing::PairingStoreError::ApproveRateLimited) => Err(
             "Too many failed approve attempts. Wait a few minutes before trying again.".to_string(),
         ),

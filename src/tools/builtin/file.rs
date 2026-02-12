@@ -36,7 +36,7 @@ fn is_workspace_path(path: &str) -> bool {
         .and_then(|f| f.to_str())
         .unwrap_or(path);
 
-    WORKSPACE_FILES.iter().any(|ws| *ws == filename)
+    WORKSPACE_FILES.contains(&filename)
         || path.starts_with("daily/")
         || path.starts_with("context/")
 }

@@ -199,56 +199,56 @@ pub trait Tool: Send + Sync {
     }
 }
 
-/// A simple no-op tool for testing.
-#[derive(Debug)]
-pub struct EchoTool;
-
-#[async_trait]
-impl Tool for EchoTool {
-    fn name(&self) -> &str {
-        "echo"
-    }
-
-    fn description(&self) -> &str {
-        "Echoes back the input message. Useful for testing."
-    }
-
-    fn parameters_schema(&self) -> serde_json::Value {
-        serde_json::json!({
-            "type": "object",
-            "properties": {
-                "message": {
-                    "type": "string",
-                    "description": "The message to echo back"
-                }
-            },
-            "required": ["message"]
-        })
-    }
-
-    async fn execute(
-        &self,
-        params: serde_json::Value,
-        _ctx: &JobContext,
-    ) -> Result<ToolOutput, ToolError> {
-        let message = params
-            .get("message")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| {
-                ToolError::InvalidParameters("missing 'message' parameter".to_string())
-            })?;
-
-        Ok(ToolOutput::text(message, Duration::from_millis(1)))
-    }
-
-    fn requires_sanitization(&self) -> bool {
-        false // Echo is a trusted internal tool
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A simple no-op tool for testing.
+    #[derive(Debug)]
+    pub struct EchoTool;
+
+    #[async_trait]
+    impl Tool for EchoTool {
+        fn name(&self) -> &str {
+            "echo"
+        }
+
+        fn description(&self) -> &str {
+            "Echoes back the input message. Useful for testing."
+        }
+
+        fn parameters_schema(&self) -> serde_json::Value {
+            serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "message": {
+                        "type": "string",
+                        "description": "The message to echo back"
+                    }
+                },
+                "required": ["message"]
+            })
+        }
+
+        async fn execute(
+            &self,
+            params: serde_json::Value,
+            _ctx: &JobContext,
+        ) -> Result<ToolOutput, ToolError> {
+            let message = params
+                .get("message")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| {
+                    ToolError::InvalidParameters("missing 'message' parameter".to_string())
+                })?;
+
+            Ok(ToolOutput::text(message, Duration::from_millis(1)))
+        }
+
+        fn requires_sanitization(&self) -> bool {
+            false // Echo is a trusted internal tool
+        }
+    }
 
     #[tokio::test]
     async fn test_echo_tool() {
