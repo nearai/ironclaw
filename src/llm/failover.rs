@@ -5,6 +5,7 @@
 
 use std::future::Future;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use async_trait::async_trait;
 use rust_decimal::Decimal;
@@ -18,8 +19,14 @@ use crate::llm::provider::{
 /// Returns `true` if the error is transient and the request should be retried
 /// on the next provider in the failover chain.
 ///
-/// Non-retryable errors (auth, context length, model availability) propagate
-/// immediately because a different provider won't fix them for the same request.
+/// Retryable: `RequestFailed`, `RateLimited`, `InvalidResponse`,
+/// `SessionRenewalFailed`, `ModelNotAvailable`, `Http`, `Io`.
+///
+/// `ModelNotAvailable` is retryable because the next provider in the chain may
+/// offer a different model, so it's worth trying.
+///
+/// Non-retryable errors (`AuthFailed`, `SessionExpired`, `ContextLengthExceeded`)
+/// propagate immediately because a different provider won't fix them.
 fn is_retryable(err: &LlmError) -> bool {
     matches!(
         err,
@@ -27,6 +34,7 @@ fn is_retryable(err: &LlmError) -> bool {
             | LlmError::RateLimited { .. }
             | LlmError::InvalidResponse { .. }
             | LlmError::SessionRenewalFailed { .. }
+            // ModelNotAvailable is retryable: the next provider may offer a different model.
             | LlmError::ModelNotAvailable { .. }
             | LlmError::Http(_)
             | LlmError::Io(_)
@@ -41,6 +49,10 @@ fn is_retryable(err: &LlmError) -> bool {
 /// (e.g. `AuthFailed`, `ContextLengthExceeded`) propagate immediately.
 pub struct FailoverProvider {
     providers: Vec<Arc<dyn LlmProvider>>,
+    /// Index of the provider that last handled a request successfully.
+    /// Used by `model_name()` and `cost_per_token()` so downstream cost
+    /// tracking reflects the provider that actually served the request.
+    last_used: AtomicUsize,
 }
 
 impl FailoverProvider {
@@ -54,12 +66,10 @@ impl FailoverProvider {
                 reason: "FailoverProvider requires at least one provider".to_string(),
             });
         }
-        Ok(Self { providers })
-    }
-
-    /// Returns a reference to the primary (first) provider.
-    fn primary(&self) -> &dyn LlmProvider {
-        self.providers[0].as_ref()
+        Ok(Self {
+            providers,
+            last_used: AtomicUsize::new(0),
+        })
     }
 
     /// Try each provider in sequence until one succeeds or all fail.
@@ -73,7 +83,10 @@ impl FailoverProvider {
         for (i, provider) in self.providers.iter().enumerate() {
             let result = call(Arc::clone(provider)).await;
             match result {
-                Ok(response) => return Ok(response),
+                Ok(response) => {
+                    self.last_used.store(i, Ordering::Relaxed);
+                    return Ok(response);
+                }
                 Err(err) => {
                     if !is_retryable(&err) {
                         return Err(err);
@@ -100,11 +113,11 @@ impl FailoverProvider {
 #[async_trait]
 impl LlmProvider for FailoverProvider {
     fn model_name(&self) -> &str {
-        self.primary().model_name()
+        self.providers[self.last_used.load(Ordering::Relaxed)].model_name()
     }
 
     fn cost_per_token(&self) -> (Decimal, Decimal) {
-        self.primary().cost_per_token()
+        self.providers[self.last_used.load(Ordering::Relaxed)].cost_per_token()
     }
 
     async fn complete(&self, request: CompletionRequest) -> Result<CompletionResponse, LlmError> {
@@ -160,6 +173,8 @@ mod tests {
     /// A mock LLM provider that returns a predetermined result.
     struct MockProvider {
         name: String,
+        input_cost: Decimal,
+        output_cost: Decimal,
         complete_result: Mutex<Option<Result<CompletionResponse, LlmError>>>,
         tool_complete_result: Mutex<Option<Result<ToolCompletionResponse, LlmError>>>,
     }
@@ -168,6 +183,8 @@ mod tests {
         fn succeeding(name: &str, content: &str) -> Self {
             Self {
                 name: name.to_string(),
+                input_cost: Decimal::ZERO,
+                output_cost: Decimal::ZERO,
                 complete_result: Mutex::new(Some(Ok(CompletionResponse {
                     content: content.to_string(),
                     input_tokens: 10,
@@ -184,9 +201,24 @@ mod tests {
             }
         }
 
+        fn succeeding_with_cost(
+            name: &str,
+            content: &str,
+            input_cost: Decimal,
+            output_cost: Decimal,
+        ) -> Self {
+            Self {
+                input_cost,
+                output_cost,
+                ..Self::succeeding(name, content)
+            }
+        }
+
         fn failing_retryable(name: &str) -> Self {
             Self {
                 name: name.to_string(),
+                input_cost: Decimal::ZERO,
+                output_cost: Decimal::ZERO,
                 complete_result: Mutex::new(Some(Err(LlmError::RequestFailed {
                     provider: name.to_string(),
                     reason: "server error".to_string(),
@@ -201,6 +233,8 @@ mod tests {
         fn failing_non_retryable(name: &str) -> Self {
             Self {
                 name: name.to_string(),
+                input_cost: Decimal::ZERO,
+                output_cost: Decimal::ZERO,
                 complete_result: Mutex::new(Some(Err(LlmError::AuthFailed {
                     provider: name.to_string(),
                 }))),
@@ -213,6 +247,8 @@ mod tests {
         fn failing_rate_limited(name: &str) -> Self {
             Self {
                 name: name.to_string(),
+                input_cost: Decimal::ZERO,
+                output_cost: Decimal::ZERO,
                 complete_result: Mutex::new(Some(Err(LlmError::RateLimited {
                     provider: name.to_string(),
                     retry_after: Some(Duration::from_secs(30)),
@@ -232,7 +268,7 @@ mod tests {
         }
 
         fn cost_per_token(&self) -> (Decimal, Decimal) {
-            (Decimal::ZERO, Decimal::ZERO)
+            (self.input_cost, self.output_cost)
         }
 
         async fn complete(
@@ -356,14 +392,29 @@ mod tests {
         assert_eq!(response.content.as_deref(), Some("tools fallback"));
     }
 
-    // Test: model_name returns primary's name.
+    // Test: model_name and cost_per_token reflect the last-used provider.
     #[tokio::test]
-    async fn model_name_returns_primary() {
-        let primary = Arc::new(MockProvider::succeeding("primary-model", "ok"));
-        let fallback = Arc::new(MockProvider::succeeding("fallback-model", "ok"));
+    async fn model_name_and_cost_track_last_used_provider() {
+        let fallback_cost = Decimal::new(15, 6); // 0.000015
+
+        let primary = Arc::new(MockProvider::failing_retryable("primary-model"));
+        let fallback = Arc::new(MockProvider::succeeding_with_cost(
+            "fallback-model",
+            "ok",
+            fallback_cost,
+            fallback_cost,
+        ));
 
         let failover = FailoverProvider::new(vec![primary, fallback]).unwrap();
+
+        // Before any call, defaults to primary (index 0).
         assert_eq!(failover.model_name(), "primary-model");
+        assert_eq!(failover.cost_per_token(), (Decimal::ZERO, Decimal::ZERO));
+
+        // After failover, should reflect the fallback provider.
+        let _ = failover.complete(make_request()).await.unwrap();
+        assert_eq!(failover.model_name(), "fallback-model");
+        assert_eq!(failover.cost_per_token(), (fallback_cost, fallback_cost));
     }
 
     // Test: list_models aggregates from all providers.
