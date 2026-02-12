@@ -24,6 +24,7 @@ jobs:
       - &install-rust
         name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
       # Generating a GitHub token, so that PRs and tags created by
       # the release-plz-action can trigger actions workflows.
       - name: Generate GitHub token
@@ -56,6 +57,7 @@ jobs:
     steps:
       - *checkout
       - *install-rust
+      - uses: Swatinem/rust-cache@v2
       - name: Run release-plz
         uses: release-plz/action@v0.5
         with:
