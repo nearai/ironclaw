@@ -11,6 +11,7 @@ mod costs;
 pub mod failover;
 mod nearai;
 mod nearai_chat;
+mod openai_compatible;
 mod provider;
 mod reasoning;
 mod retry;
@@ -20,6 +21,7 @@ pub mod session;
 pub use failover::FailoverProvider;
 pub use nearai::{ModelInfo, NearAiProvider};
 pub use nearai_chat::NearAiChatProvider;
+pub use openai_compatible::OpenAiCompatibleProvider;
 pub use provider::{
     ChatMessage, CompletionRequest, CompletionResponse, FinishReason, LlmProvider, ModelMetadata,
     Role, ToolCall, ToolCompletionRequest, ToolCompletionResponse, ToolDefinition, ToolResult,
@@ -158,28 +160,10 @@ fn create_openai_compatible_provider(config: &LlmConfig) -> Result<Arc<dyn LlmPr
             provider: "openai_compatible".to_string(),
         })?;
 
-    use rig::providers::openai;
-
-    let api_key = compat
-        .api_key
-        .as_ref()
-        .map(|k| k.expose_secret().to_string())
-        .unwrap_or_else(|| "no-key".to_string());
-
-    let client: openai::Client = openai::Client::builder()
-        .base_url(&compat.base_url)
-        .api_key(api_key)
-        .build()
-        .map_err(|e| LlmError::RequestFailed {
-            provider: "openai_compatible".to_string(),
-            reason: format!("Failed to create OpenAI-compatible client: {}", e),
-        })?;
-
-    let model = client.completion_model(&compat.model);
     tracing::info!(
         "Using OpenAI-compatible endpoint (base_url: {}, model: {})",
         compat.base_url,
         compat.model
     );
-    Ok(Arc::new(RigAdapter::new(model, &compat.model)))
+    Ok(Arc::new(OpenAiCompatibleProvider::new(compat.clone())?))
 }
