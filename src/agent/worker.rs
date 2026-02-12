@@ -382,6 +382,7 @@ Report when the job is complete or if you encounter issues you cannot resolve."#
     }
 
     /// Inner tool execution logic that can be called from both single and parallel paths.
+    #[allow(clippy::too_many_arguments)]
     async fn execute_tool_inner(
         tools: Arc<ToolRegistry>,
         context_manager: Arc<ContextManager>,

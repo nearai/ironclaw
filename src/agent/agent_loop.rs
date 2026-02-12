@@ -522,6 +522,11 @@ impl Agent {
             self.maybe_hydrate_thread(message, external_thread_id).await;
         }
 
+        // Hydrate thread from DB if it's a historical thread not in memory
+        if let Some(ref external_thread_id) = message.thread_id {
+            self.maybe_hydrate_thread(message, external_thread_id).await;
+        }
+
         // Resolve session and thread
         let (session, thread_id) = self
             .session_manager
@@ -1125,7 +1130,7 @@ impl Agent {
             iteration += 1;
             if iteration > MAX_TOOL_ITERATIONS {
                 return Err(crate::error::LlmError::InvalidResponse {
-                    provider: "nearai".to_string(),
+                    provider: "agent".to_string(),
                     reason: format!("Exceeded maximum tool iterations ({})", MAX_TOOL_ITERATIONS),
                 }
                 .into());

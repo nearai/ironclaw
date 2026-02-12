@@ -59,7 +59,7 @@ This document tracks feature parity between IronClaw (Rust implementation) and O
 | REPL (simple) | ✅ | ✅ | - | For testing |
 | WASM channels | ❌ | ✅ | - | IronClaw innovation |
 | WhatsApp | ✅ | ❌ | P1 | Baileys (Web) |
-| Telegram | ✅ | ✅ | - | WASM tool (MTProto) |
+| Telegram | ✅ | ✅ | - | WASM channel(MTProto), DM pairing, caption, /start, bot_username |
 | Discord | ✅ | ❌ | P2 | discord.js |
 | Signal | ✅ | ❌ | P2 | signal-cli |
 | Slack | ✅ | ✅ | - | WASM tool |
@@ -79,13 +79,13 @@ This document tracks feature parity between IronClaw (Rust implementation) and O
 
 | Feature | OpenClaw | IronClaw | Notes |
 |---------|----------|----------|-------|
-| DM pairing codes | ✅ | ❌ | Verification for unknown senders |
-| Allowlist/blocklist | ✅ | ❌ | Per-channel access control |
+| DM pairing codes | ✅ | ✅ | `ironclaw pairing list/approve`, host APIs |
+| Allowlist/blocklist | ✅ | 🚧 | allow_from + pairing store |
 | Self-message bypass | ✅ | ❌ | Own messages skip pairing |
-| Mention-based activation | ✅ | ❌ | Configurable patterns |
+| Mention-based activation | ✅ | ✅ | bot_username + respond_to_all_group_messages |
 | Per-group tool policies | ✅ | ❌ | Allow/deny specific tools |
 | Thread isolation | ✅ | ✅ | Separate sessions per thread |
-| Per-channel media limits | ✅ | ❌ | |
+| Per-channel media limits | ✅ | 🚧 | Caption support for media; no size limits |
 | Typing indicators | ✅ | 🚧 | TUI shows status |
 
 ### Owner: _Unassigned_
@@ -109,7 +109,7 @@ This document tracks feature parity between IronClaw (Rust implementation) and O
 | `sessions` | ✅ | ❌ | P3 | Session listing |
 | `memory` | ✅ | ✅ | - | Memory search CLI |
 | `skills` | ✅ | ❌ | P3 | Agent skills |
-| `pairing` | ✅ | ❌ | P3 | Node pairing |
+| `pairing` | ✅ | ✅ | - | list/approve for channel DM pairing |
 | `nodes` | ✅ | ❌ | P3 | Device management |
 | `plugins` | ✅ | ❌ | P3 | Plugin management |
 | `hooks` | ✅ | ✅ | P2 | Lifecycle hooks |
@@ -350,8 +350,8 @@ This document tracks feature parity between IronClaw (Rust implementation) and O
 | Device pairing | ✅ | ❌ | |
 | Tailscale identity | ✅ | ❌ | |
 | OAuth flows | ✅ | 🚧 | NEAR AI OAuth |
-| DM pairing verification | ✅ | ❌ | |
-| Allowlist/blocklist | ✅ | ❌ | |
+| DM pairing verification | ✅ | ✅ | ironclaw pairing approve, host APIs |
+| Allowlist/blocklist | ✅ | 🚧 | allow_from + pairing store |
 | Per-group tool policies | ✅ | ❌ | |
 | Exec approvals | ✅ | ✅ | TUI overlay |
 | TLS 1.3 minimum | ✅ | ✅ | reqwest rustls |
@@ -397,6 +397,7 @@ This document tracks feature parity between IronClaw (Rust implementation) and O
 ### P0 - Core (Already Done)
 - ✅ TUI channel with approval overlays
 - ✅ HTTP webhook channel
+- ✅ DM pairing (ironclaw pairing list/approve, host APIs)
 - ✅ WASM tool sandbox
 - ✅ Workspace/memory with hybrid search
 - ✅ Prompt injection defense
@@ -415,6 +416,8 @@ This document tracks feature parity between IronClaw (Rust implementation) and O
 - ✅ Gateway token auth
 
 ### P1 - High Priority
+- ❌ Slack channel (real implementation)
+- ✅ Telegram channel (WASM, DM pairing, caption, /start)
 - ❌ WhatsApp channel
 - ❌ Multi-provider failover
 - ✅ Hooks system (beforeInbound, beforeToolCall, beforeOutbound, onSessionStart, onSessionEnd, transformResponse)

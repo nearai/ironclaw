@@ -4,9 +4,7 @@ use std::sync::Arc;
 
 use tokio::sync::RwLock;
 
-use crate::hooks::hook::{
-    Hook, HookContext, HookError, HookEvent, HookFailureMode, HookOutcome,
-};
+use crate::hooks::hook::{Hook, HookContext, HookError, HookEvent, HookFailureMode, HookOutcome};
 
 /// A registered hook with its priority.
 struct HookEntry {
@@ -89,63 +87,46 @@ impl HookRegistry {
 
             match result {
                 Ok(Ok(HookOutcome::Reject { reason })) => {
-                    tracing::debug!(
-                        hook = hook.name(),
-                        "Hook rejected: {}",
-                        reason
-                    );
+                    tracing::debug!(hook = hook.name(), "Hook rejected: {}", reason);
                     return Err(HookError::Rejected { reason });
                 }
-                Ok(Ok(HookOutcome::Continue { modified: Some(value) })) => {
-                    tracing::debug!(
-                        hook = hook.name(),
-                        "Hook modified content"
-                    );
+                Ok(Ok(HookOutcome::Continue {
+                    modified: Some(value),
+                })) => {
+                    tracing::debug!(hook = hook.name(), "Hook modified content");
                     current_event.apply_modification(&value);
                 }
                 Ok(Ok(HookOutcome::Continue { modified: None })) => {
                     // No-op, continue chain
                 }
-                Ok(Err(err)) => {
-                    match hook.failure_mode() {
-                        HookFailureMode::FailOpen => {
-                            tracing::warn!(
-                                hook = hook.name(),
-                                "Hook failed (fail-open): {}",
-                                err
-                            );
-                        }
-                        HookFailureMode::FailClosed => {
-                            tracing::warn!(
-                                hook = hook.name(),
-                                "Hook failed (fail-closed): {}",
-                                err
-                            );
-                            return Err(HookError::ExecutionFailed {
-                                reason: format!("Hook '{}' failed: {}", hook.name(), err),
-                            });
-                        }
+                Ok(Err(err)) => match hook.failure_mode() {
+                    HookFailureMode::FailOpen => {
+                        tracing::warn!(hook = hook.name(), "Hook failed (fail-open): {}", err);
                     }
-                }
-                Err(_elapsed) => {
-                    match hook.failure_mode() {
-                        HookFailureMode::FailOpen => {
-                            tracing::warn!(
-                                hook = hook.name(),
-                                "Hook timed out (fail-open) after {:?}",
-                                timeout
-                            );
-                        }
-                        HookFailureMode::FailClosed => {
-                            tracing::warn!(
-                                hook = hook.name(),
-                                "Hook timed out (fail-closed) after {:?}",
-                                timeout
-                            );
-                            return Err(HookError::Timeout { timeout });
-                        }
+                    HookFailureMode::FailClosed => {
+                        tracing::warn!(hook = hook.name(), "Hook failed (fail-closed): {}", err);
+                        return Err(HookError::ExecutionFailed {
+                            reason: format!("Hook '{}' failed: {}", hook.name(), err),
+                        });
                     }
-                }
+                },
+                Err(_elapsed) => match hook.failure_mode() {
+                    HookFailureMode::FailOpen => {
+                        tracing::warn!(
+                            hook = hook.name(),
+                            "Hook timed out (fail-open) after {:?}",
+                            timeout
+                        );
+                    }
+                    HookFailureMode::FailClosed => {
+                        tracing::warn!(
+                            hook = hook.name(),
+                            "Hook timed out (fail-closed) after {:?}",
+                            timeout
+                        );
+                        return Err(HookError::Timeout { timeout });
+                    }
+                },
             }
         }
 
@@ -170,14 +151,14 @@ impl Default for HookRegistry {
 /// Extract the primary content string from a hook event.
 fn extract_content(event: &HookEvent) -> String {
     match event {
-        HookEvent::Inbound { content, .. }
-        | HookEvent::Outbound { content, .. } => content.clone(),
+        HookEvent::Inbound { content, .. } | HookEvent::Outbound { content, .. } => content.clone(),
         HookEvent::ToolCall { parameters, .. } => {
             serde_json::to_string(parameters).unwrap_or_default()
         }
         HookEvent::ResponseTransform { response, .. } => response.clone(),
-        HookEvent::SessionStart { session_id, .. }
-        | HookEvent::SessionEnd { session_id, .. } => session_id.clone(),
+        HookEvent::SessionStart { session_id, .. } | HookEvent::SessionEnd { session_id, .. } => {
+            session_id.clone()
+        }
     }
 }
 

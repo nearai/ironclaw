@@ -52,7 +52,7 @@ mod platform {
     use super::*;
 
     /// Store the master key in the macOS Keychain.
-    pub fn store_master_key(key: &[u8]) -> Result<(), SecretError> {
+    pub async fn store_master_key(key: &[u8]) -> Result<(), SecretError> {
         // Convert to hex for storage (keychain prefers strings)
         let key_hex: String = key.iter().map(|b| format!("{:02x}", b)).collect();
 
@@ -61,7 +61,7 @@ mod platform {
     }
 
     /// Retrieve the master key from the macOS Keychain.
-    pub fn get_master_key() -> Result<Vec<u8>, SecretError> {
+    pub async fn get_master_key() -> Result<Vec<u8>, SecretError> {
         let password = get_generic_password(SERVICE_NAME, MASTER_KEY_ACCOUNT).map_err(|e| {
             SecretError::KeychainError(format!("Failed to get from keychain: {}", e))
         })?;
@@ -74,14 +74,14 @@ mod platform {
     }
 
     /// Delete the master key from the macOS Keychain.
-    pub fn delete_master_key() -> Result<(), SecretError> {
+    pub async fn delete_master_key() -> Result<(), SecretError> {
         delete_generic_password(SERVICE_NAME, MASTER_KEY_ACCOUNT).map_err(|e| {
             SecretError::KeychainError(format!("Failed to delete from keychain: {}", e))
         })
     }
 
     /// Check if a master key exists in the keychain.
-    pub fn has_master_key() -> bool {
+    pub async fn has_master_key() -> bool {
         get_generic_password(SERVICE_NAME, MASTER_KEY_ACCOUNT).is_ok()
     }
 }
@@ -97,163 +97,131 @@ mod platform {
     use super::*;
 
     /// Store the master key in the Linux secret service (GNOME Keyring, KWallet).
-    pub fn store_master_key(key: &[u8]) -> Result<(), SecretError> {
-        let rt = tokio::runtime::Handle::try_current()
-            .map_err(|_| SecretError::KeychainError("No tokio runtime available".to_string()))?;
-
-        rt.block_on(async {
-            let ss = SecretService::connect(EncryptionType::Dh)
-                .await
-                .map_err(|e| {
-                    SecretError::KeychainError(format!(
-                        "Failed to connect to secret service: {}",
-                        e
-                    ))
-                })?;
-
-            let collection = ss.get_default_collection().await.map_err(|e| {
-                SecretError::KeychainError(format!("Failed to get collection: {}", e))
+    pub async fn store_master_key(key: &[u8]) -> Result<(), SecretError> {
+        let ss = SecretService::connect(EncryptionType::Dh)
+            .await
+            .map_err(|e| {
+                SecretError::KeychainError(format!("Failed to connect to secret service: {}", e))
             })?;
 
-            // Unlock if needed
-            if collection.is_locked().await.unwrap_or(true) {
-                collection.unlock().await.map_err(|e| {
-                    SecretError::KeychainError(format!("Failed to unlock collection: {}", e))
-                })?;
-            }
+        let collection = ss
+            .get_default_collection()
+            .await
+            .map_err(|e| SecretError::KeychainError(format!("Failed to get collection: {}", e)))?;
 
-            // Convert to hex for storage
-            let key_hex: String = key.iter().map(|b| format!("{:02x}", b)).collect();
+        // Unlock if needed
+        if collection.is_locked().await.unwrap_or(true) {
+            collection.unlock().await.map_err(|e| {
+                SecretError::KeychainError(format!("Failed to unlock collection: {}", e))
+            })?;
+        }
 
-            collection
-                .create_item(
-                    &format!("{} master key", SERVICE_NAME),
-                    [("service", SERVICE_NAME), ("account", MASTER_KEY_ACCOUNT)]
-                        .into_iter()
-                        .collect(),
-                    key_hex.as_bytes(),
-                    true, // Replace if exists
-                    "text/plain",
-                )
-                .await
-                .map_err(|e| {
-                    SecretError::KeychainError(format!("Failed to create secret: {}", e))
-                })?;
+        // Convert to hex for storage
+        let key_hex: String = key.iter().map(|b| format!("{:02x}", b)).collect();
 
-            Ok(())
-        })
+        collection
+            .create_item(
+                &format!("{} master key", SERVICE_NAME),
+                [("service", SERVICE_NAME), ("account", MASTER_KEY_ACCOUNT)]
+                    .into_iter()
+                    .collect(),
+                key_hex.as_bytes(),
+                true, // Replace if exists
+                "text/plain",
+            )
+            .await
+            .map_err(|e| SecretError::KeychainError(format!("Failed to create secret: {}", e)))?;
+
+        Ok(())
     }
 
     /// Retrieve the master key from the Linux secret service.
-    pub fn get_master_key() -> Result<Vec<u8>, SecretError> {
-        let rt = tokio::runtime::Handle::try_current()
-            .map_err(|_| SecretError::KeychainError("No tokio runtime available".to_string()))?;
+    pub async fn get_master_key() -> Result<Vec<u8>, SecretError> {
+        let ss = SecretService::connect(EncryptionType::Dh)
+            .await
+            .map_err(|e| {
+                SecretError::KeychainError(format!("Failed to connect to secret service: {}", e))
+            })?;
 
-        rt.block_on(async {
-            let ss = SecretService::connect(EncryptionType::Dh)
+        let items = ss
+            .search_items(
+                [("service", SERVICE_NAME), ("account", MASTER_KEY_ACCOUNT)]
+                    .into_iter()
+                    .collect(),
+            )
+            .await
+            .map_err(|e| SecretError::KeychainError(format!("Failed to search: {}", e)))?;
+
+        let item = items
+            .unlocked
+            .first()
+            .or(items.locked.first())
+            .ok_or_else(|| SecretError::KeychainError("Master key not found".to_string()))?;
+
+        // Unlock if needed
+        if item.is_locked().await.unwrap_or(true) {
+            item.unlock()
                 .await
-                .map_err(|e| {
-                    SecretError::KeychainError(format!(
-                        "Failed to connect to secret service: {}",
-                        e
-                    ))
-                })?;
+                .map_err(|e| SecretError::KeychainError(format!("Failed to unlock: {}", e)))?;
+        }
 
-            let items = ss
-                .search_items(
-                    [("service", SERVICE_NAME), ("account", MASTER_KEY_ACCOUNT)]
-                        .into_iter()
-                        .collect(),
-                )
-                .await
-                .map_err(|e| SecretError::KeychainError(format!("Failed to search: {}", e)))?;
+        let secret = item
+            .get_secret()
+            .await
+            .map_err(|e| SecretError::KeychainError(format!("Failed to get secret: {}", e)))?;
 
-            let item = items
-                .unlocked
-                .first()
-                .or(items.locked.first())
-                .ok_or_else(|| SecretError::KeychainError("Master key not found".to_string()))?;
+        let hex_str = String::from_utf8(secret)
+            .map_err(|_| SecretError::KeychainError("Invalid UTF-8 in secret".to_string()))?;
 
-            // Unlock if needed
-            if item.is_locked().await.unwrap_or(true) {
-                item.unlock()
-                    .await
-                    .map_err(|e| SecretError::KeychainError(format!("Failed to unlock: {}", e)))?;
-            }
-
-            let secret = item
-                .get_secret()
-                .await
-                .map_err(|e| SecretError::KeychainError(format!("Failed to get secret: {}", e)))?;
-
-            let hex_str = String::from_utf8(secret)
-                .map_err(|_| SecretError::KeychainError("Invalid UTF-8 in secret".to_string()))?;
-
-            hex_to_bytes(&hex_str)
-        })
+        hex_to_bytes(&hex_str)
     }
 
     /// Delete the master key from the Linux secret service.
-    pub fn delete_master_key() -> Result<(), SecretError> {
-        let rt = tokio::runtime::Handle::try_current()
-            .map_err(|_| SecretError::KeychainError("No tokio runtime available".to_string()))?;
+    pub async fn delete_master_key() -> Result<(), SecretError> {
+        let ss = SecretService::connect(EncryptionType::Dh)
+            .await
+            .map_err(|e| {
+                SecretError::KeychainError(format!("Failed to connect to secret service: {}", e))
+            })?;
 
-        rt.block_on(async {
-            let ss = SecretService::connect(EncryptionType::Dh)
+        let items = ss
+            .search_items(
+                [("service", SERVICE_NAME), ("account", MASTER_KEY_ACCOUNT)]
+                    .into_iter()
+                    .collect(),
+            )
+            .await
+            .map_err(|e| SecretError::KeychainError(format!("Failed to search: {}", e)))?;
+
+        for item in items.unlocked.iter().chain(items.locked.iter()) {
+            item.delete()
                 .await
-                .map_err(|e| {
-                    SecretError::KeychainError(format!(
-                        "Failed to connect to secret service: {}",
-                        e
-                    ))
-                })?;
+                .map_err(|e| SecretError::KeychainError(format!("Failed to delete: {}", e)))?;
+        }
 
-            let items = ss
-                .search_items(
-                    [("service", SERVICE_NAME), ("account", MASTER_KEY_ACCOUNT)]
-                        .into_iter()
-                        .collect(),
-                )
-                .await
-                .map_err(|e| SecretError::KeychainError(format!("Failed to search: {}", e)))?;
-
-            for item in items.unlocked.iter().chain(items.locked.iter()) {
-                item.delete()
-                    .await
-                    .map_err(|e| SecretError::KeychainError(format!("Failed to delete: {}", e)))?;
-            }
-
-            Ok(())
-        })
+        Ok(())
     }
 
     /// Check if a master key exists in the secret service.
-    pub fn has_master_key() -> bool {
-        let rt = match tokio::runtime::Handle::try_current() {
-            Ok(rt) => rt,
+    pub async fn has_master_key() -> bool {
+        let ss = match SecretService::connect(EncryptionType::Dh).await {
+            Ok(ss) => ss,
             Err(_) => return false,
         };
 
-        rt.block_on(async {
-            let ss = match SecretService::connect(EncryptionType::Dh).await {
-                Ok(ss) => ss,
-                Err(_) => return false,
-            };
+        let items = match ss
+            .search_items(
+                [("service", SERVICE_NAME), ("account", MASTER_KEY_ACCOUNT)]
+                    .into_iter()
+                    .collect(),
+            )
+            .await
+        {
+            Ok(items) => items,
+            Err(_) => return false,
+        };
 
-            let items = match ss
-                .search_items(
-                    [("service", SERVICE_NAME), ("account", MASTER_KEY_ACCOUNT)]
-                        .into_iter()
-                        .collect(),
-                )
-                .await
-            {
-                Ok(items) => items,
-                Err(_) => return false,
-            };
-
-            !items.unlocked.is_empty() || !items.locked.is_empty()
-        })
+        !items.unlocked.is_empty() || !items.locked.is_empty()
     }
 }
 
@@ -265,25 +233,25 @@ mod platform {
 mod platform {
     use super::*;
 
-    pub fn store_master_key(_key: &[u8]) -> Result<(), SecretError> {
+    pub async fn store_master_key(_key: &[u8]) -> Result<(), SecretError> {
         Err(SecretError::KeychainError(
             "Keychain not supported on this platform. Use SECRETS_MASTER_KEY env var.".to_string(),
         ))
     }
 
-    pub fn get_master_key() -> Result<Vec<u8>, SecretError> {
+    pub async fn get_master_key() -> Result<Vec<u8>, SecretError> {
         Err(SecretError::KeychainError(
             "Keychain not supported on this platform. Use SECRETS_MASTER_KEY env var.".to_string(),
         ))
     }
 
-    pub fn delete_master_key() -> Result<(), SecretError> {
+    pub async fn delete_master_key() -> Result<(), SecretError> {
         Err(SecretError::KeychainError(
             "Keychain not supported on this platform".to_string(),
         ))
     }
 
-    pub fn has_master_key() -> bool {
+    pub async fn has_master_key() -> bool {
         false
     }
 }

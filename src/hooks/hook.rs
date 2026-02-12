@@ -47,15 +47,9 @@ pub enum HookEvent {
         thread_id: Option<String>,
     },
     /// A new session was created.
-    SessionStart {
-        user_id: String,
-        session_id: String,
-    },
+    SessionStart { user_id: String, session_id: String },
     /// A session was ended (pruned).
-    SessionEnd {
-        user_id: String,
-        session_id: String,
-    },
+    SessionEnd { user_id: String, session_id: String },
     /// The final response is being transformed before completing a turn.
     ResponseTransform {
         user_id: String,
@@ -80,8 +74,7 @@ impl HookEvent {
     /// Apply a modification string to the event's primary content field.
     pub fn apply_modification(&mut self, modified: &str) {
         match self {
-            HookEvent::Inbound { content, .. }
-            | HookEvent::Outbound { content, .. } => {
+            HookEvent::Inbound { content, .. } | HookEvent::Outbound { content, .. } => {
                 *content = modified.to_string();
             }
             HookEvent::ToolCall { parameters, .. } => {
@@ -197,9 +190,6 @@ pub trait Hook: Send + Sync {
     }
 
     /// Execute the hook.
-    async fn execute(
-        &self,
-        event: &HookEvent,
-        ctx: &HookContext,
-    ) -> Result<HookOutcome, HookError>;
+    async fn execute(&self, event: &HookEvent, ctx: &HookContext)
+    -> Result<HookOutcome, HookError>;
 }

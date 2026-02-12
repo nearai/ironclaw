@@ -365,12 +365,7 @@ pub async fn save_mcp_servers_to_db(
     store
         .set_setting(user_id, "mcp_servers", &value)
         .await
-        .map_err(|e| {
-            ConfigError::Io(std::io::Error::new(
-                std::io::ErrorKind::Other,
-                e.to_string(),
-            ))
-        })?;
+        .map_err(std::io::Error::other)?;
     Ok(())
 }
 
