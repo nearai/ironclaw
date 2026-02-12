@@ -392,9 +392,8 @@ fn flatten_tool_messages(messages: Vec<ChatCompletionMessage>) -> Vec<ChatComple
     messages
         .into_iter()
         .map(|msg| {
-            if msg.role == "assistant" && msg.tool_calls.is_some() {
+            if let (true, Some(calls)) = (msg.role == "assistant", &msg.tool_calls) {
                 // Convert assistant tool_calls into descriptive text
-                let calls = msg.tool_calls.as_ref().unwrap();
                 let mut parts: Vec<String> = Vec::new();
                 if let Some(ref text) = msg.content {
                     if !text.is_empty() {
