@@ -1,0 +1,289 @@
+ I'm going to show you exactly how I'm using Open Claw. I have spent countless hours over the
+ last few weeks exploring every nook and cranny of what is possible with Open Claw. I truly believe
+ I am one of the most advanced users of Open Claw on the planet and I'm going to show you
+ everything that I've learned. And it all starts right here. This is a fresh MacBook Air. I wiped
+ it clean and I installed Open Claw on it. This thing lives right on my desk. I have it in clamshell
+ mode. So when I close it, it does not shut off. It is running 24 hours a day connected to the
+ internet and I make it easily available anywhere. I installed Team Viewer on it so that if I'm remote
+ and something happens and I need to change something directly on the computer, I just Team Viewer
+ into it and I can do that. I also set up tail scale so I can easily SSH into it. So if I want
+ to code something with cursor on it, I can SSH in from any other computer and that one just sits
+ on my desk. Here is the high level overview of everything going on in my system. And I know it
+ looks complicated. I'm going to get into detail about all of it. All right. So here's the overview.
+ First, we have the interfaces. This is how I'm actually talking to my Open Claw. I use Telegram
+ as the primary one. And if you watch my previous video, you know, I'm using Telegram groups. I have
+ a bunch of different topics. I keep all of the topics very narrow, very niche and I actually don't
+ have it start new sessions anymore. Previously, a default setting in Open Claw is to start a new
+ session every day at like 4 a.m. That means it basically forgot everything in the chat prior,
+ which would make sense if I had a single DM that spanned forever. But instead, I have all of these
+ individual channels. So I didn't want to do that anymore. And the solution, I simply had it set
+ the expiration of a session to be one year. And so look at all these different sessions. I have my
+ knowledge base, my food journal, chron updates, video research, self improvement, business analysis,
+ meeting prep, all of these different ones. And it allows me to stay on topic. All right. So now
+ back here. Second, I have Slack, but I have it very narrowly implemented in Slack. It's only available
+ in two channels. And it's only available to me. I am the only one who's able to invoke my Open Claw.
+ If somebody else tries to invoke it, it just ignores it. Then of course, we have our command
+ line interface. I sometimes SSH in, and we also have scripts. I'm using multiple models, of course.
+ So we have anthropic opus, sonnet and haiku. I'm using Google Gemini for a bunch of stuff. We're
+ using X AI, grok, and X search. And of course, we're using open AI. And it already has, after just two
+ plus weeks of using it, a ton of different skills. I use it as a personal CRM. I use it as a knowledge
+ base, a video idea pipeline, X and Twitter research, business meta analysis. That's a crazy one. Wait
+ till I tell you about that hub spot ops. I always apply the humanizer skill. I want all the text
+ coming out of it to be human like not AI like no M dashes. I plugged it into my to do list. And I
+ kind of use it as a task management system as well. I track all of the usage across everything I do.
+ And of course, I use it for YouTube analytics. And I'm also storing a ton of data. I actually try to
+ store all the data I possibly can. And I usually do that in a traditional database, mixed with a
+ vector column. So I want to be able to do traditional SQL searches, but I also want to be able to do
+ natural language searches using the vector column. And so I created a standardized way of creating
+ this hybrid database. And I use it across a bunch of different skills. So I have my contacts in my
+ CRM. Again, I'm going to go over all of these use cases. So I have my knowledge base. I have video
+ pitches, my business meta analysis, views of my social channels, the cron log, everything is stored.
+ Then I've plugged in a bunch of different external services. We have Google workspace via GOG. I have
+ Asana, I have HubSpot, I have to do is fathom brave and GitHub. I have X, I have YouTube's API.
+ So much is happening right now. And by the way, a quick shout out to the sponsor of this video
+ Greptile. I use Greptile to review all the code that I'm putting out for open claw. And it's a lot.
+ And it catches bugs that I wouldn't have seen that even Opus or GPT 5.3 codecs wouldn't have seen.
+ And it's just a great system to really shore up all of the rough edges of my open claw instance.
+ These guys at Greptile spend all of their time thinking about code review. And it helps me and
+ my team save a bunch of time. It's used by some of the most popular repos in the world,
+ including open claw, Nvidia, PyTorch, post talk storybook, and many more. Don't waste your
+ team's time on code review, but code review is still critically important. Let Greptile do it.
+ Try Greptile for free for 14 days. I'll drop a link down below. They've been a fantastic partner.
+ So help us help yourself. Go check them out. Click through the link and get your 14 days for free.
+ All right. So the first workflow I want to talk about is my personal CRM. It is incredible because
+ it allows me to plug in all of this built up knowledge into everything else I'm doing. Let me
+ just explain. So I basically have my open claw download all of my emails and start to parse through
+ them. Understand who's the email from filter out contacts that I don't want saved like newsletters
+ and cold outreach, cold pitches. And then it finds the highest quality contacts and starts
+ saving it to my CRM. It reads all of the downloaded emails, builds out a graph, builds out an understanding
+ of all the conversations I've had with each contact and starts to save that in the database.
+ And I have it do that every single day. So it's always up to date. It always knows who I'm talking
+ to, what I'm talking about. And it's just super helpful because I can always ask questions like,
+ who is the last person I talked to at Greptile? And what did we talk about? Or who else do I know
+ it? You know, this other company. And so this is how it works. I have the daily ingestion trigger,
+ which is a cron job. It downloads Gmail and my calendar, by the way, not just Gmail, also my
+ calendar. It extracts people from the senders and participants. It deduplicates everything,
+ merges contact records. It uses AI to classify the role in context. And I use a very inexpensive,
+ very fast Gemini 2.5 flash model, I believe, to do that classification. Then we start to update
+ the timeline in last touch. It does semantic indexing. And it sends me updates via Telegram
+ when I want it. And I can also just query against it, as I said earlier. Now where this is also very
+ useful is in my meeting prep workflow. Every single day, first thing in the morning, it looks at my
+ calendar for the day. It filters out events that don't have anybody or only have my internal team.
+ And it basically gives me a meeting prep for the day. It says, Hey, you're meeting with this person.
+ Here's the last thing you talked about. Here's what they want to talk about in this meeting.
+ Here's who they are. And it's just super helpful to keep me up to date going into these meetings.
+ All right. Next is my knowledge base. I am constantly on X and searching the web and reading articles
+ all about artificial intelligence. And I wanted a single place where I can just throw everything
+ interesting that I find into a single repository. And I'm able to use natural language to search
+ against it. And again, all of the things that I'm building, I want to be able to use across
+ different workflows. That's really important. And so when I get to the video ideation workflow
+ later, you're going to see it actually references different articles that are that have been saved
+ to this knowledge base. And so the way this works is I take a file or URL, I drop it in telegram,
+ it detects the source type, extracts all the information from it, normalizes it, chunks it,
+ puts it in the vector database, and then stores it. So then when I have a question like, find me all
+ the articles about the opus 4.6 model. And so I put that user question in, it embeds it,
+ it grabs all of the candidate articles, and then it answers with sources. So now I'm building up
+ this infinite knowledge base of everything that has interested me and it just stores it. And I can
+ always reference it if I'm creating a video and I want to reference a previous article, it is now
+ so easy to find. Okay, next, and this is one of my favorite ones. This is the video idea pipeline.
+ This was something that I spent a ton of time on. The way I was doing it previously is I would
+ drop links, again, something that I'm now doing via the knowledge base into Slack to share with
+ my team, we would talk about it in the ones that interested us the most we would decide to make a
+ video about. Then I would create an asana card, I would do research, find all relevant articles,
+ find relevant expos, and put it all together in that asana card. And it would just, you know,
+ take a lot of time. But now I don't have to do any of that. So first, remember the previous
+ knowledge base? Well, part of that workflow is when I drop an article in telegram and it gets all
+ that information, it posts to the Slack channel for me. And it says, Hey, this is what Matt's looking
+ at and we can have that discussion there. Also, if somebody from my team drops a link in Slack,
+ I can actually tag my open claw and say, Hey, let's make a video idea about this. And so
+ both of these ways work, let me show you what happens after that. So we have this idea trigger
+ and either comes from Slack or telegram, we parse the video topic or intent. Then it does research
+ on X and it also does research on the web. I don't know why it doesn't say that here, but it does.
+ Then we query the knowledge base context. So it looks for potential articles that might be relevant.
+ It comes up with video pitches and make sure it hasn't pitched us something like that already.
+ Then it starts to build hooks in an outline for the video. It links all sources, creates that asana
+ task and then sends confirmation to wherever I invoked it. All of this happens in like 30 seconds
+ now super, super valuable. All right, so here's an example. In telegram, I dropped this link. So
+ Thomas Donkey, former CEO of GitHub started a new company sounds interesting. I dropped it in here.
+ It saved it into my knowledge base. Then it also pushed a quick summary and link to the Slack channel
+ where we talk about all of this stuff. Then if we wanted to create a video about it, this is about
+ a different topic, but I said, whoa, Claude short video idea. Then Claude jumps in, does a bunch of
+ research, adds the card and everything. It's just so easy now. Now you're seeing how all of these
+ different pieces work together to create this incredibly autonomous system that saves me a bunch
+ of time. And by the way, if you want to see 25 more use cases, my team put together a completely free
+ ebook all about open claw use cases, specifically how to implement them, how to get them going,
+ why they're valuable, and so much more, go download the ebook. It's completely free. I'll drop a link
+ in the description below. Okay, next I built out an entire workflow just for searching on Twitter
+ because I do so many searches on Twitter, whether it's getting the data from specific posts. And
+ there are so many different ways to do it. I actually built an entire fallback daisy chain
+ system that handles it for me, and it's cost optimized. And yeah, it's amazing. Let me show
+ you all right. So here's how it's actually working. So I actually had so I had cursor tell me exactly
+ what's happening. So first tier one, it uses FX Twitter's API, which is apparently free. I don't
+ really understand how it's free, but it is you can only grab individual tweets with it. Single
+ tweet look up only. There's no search. You can't say show me trending topics or show me topics or
+ show me post related to this other topic. You can't do that. So fine. Then it goes to the low cost tier
+ two, which is the Twitter API dot IO. And I'm still playing around with this. I'm kind of new to
+ this service, but it's a relatively inexpensive way to query against Twitter. So it's 15 cents per
+ thousand tweets. It does search profiles, user tweets, thread context, and I did grab an API for
+ that. Then I use the expensive tier three as another fallback, the official X API V2. This is
+ very expensive. So it's 0.005 cents per tweet, pay per use, but you get basically everything. Then
+ as a fallback, we use the X AI API with the X search tool. Sometimes we use grok to search against
+ Twitter. All of these things come together and just give me an optimized cheapest, best,
+ fastest result. And so here's what that workflow looks like. All right. Next, obviously, I use it
+ to track my YouTube analytics and some of my competitors are the channels that I keep a close
+ eye on. So it hits the API daily, pulls down all of my stats for all of my videos, the channel's
+ growth, everything, it persists it and takes a snapshot and records it in a database locally.
+ Then it does some computations on it. And again, stores all that locally. We scan our competitors,
+ their uploads, their cadence to see what they're doing. We get PNG charts, and then it feeds all
+ of those insights into the meta analysis workflow, which I'll get to in a moment. And so we can kind
+ of get a sense of which types of videos are you guys liking, what titles are working, what thumbnails
+ are working, which are not. And it gives me recommendations all the time. All right. This next one is
+ absolutely insane. And I actually got this idea from Brian Armstrong, the CEO of Coinbase. He said
+ they're using AI in a really novel way where they basically plug in all of their data and have AI
+ review all of it and look for gaps in their understanding of their business ways to improve.
+ And I thought, Hey, we can do that. We're already collecting all this data. Let's do it. So check
+ this out. I basically ingest all the data from my business. I put together a council of AI experts,
+ AI agents that all work together, collaborate, and then put together a daily report for me
+ on things that I'm missing from the business ways to improve the business and more. So first,
+ here are all the signals. We have YouTube metrics, CRM health, chronic reliability, social growth,
+ Slack, all the Slack messages, emails, Asana, X, Fathom meetings. That's one of the coolest ones.
+ So Fathom, which is an AI note taker joins all my meetings, records them, transcribes them. And
+ then I ingest that. So I have a record of all the meetings that I have. And then also my HubSpot
+ pipeline. Then we compact it all down into the top 200 signals by confidence. And I have first a
+ draft created. So it looks at all of these different signals and is prompted with something like,
+ what can we do to improve the business? It's obviously a much more sophisticated prompt than
+ that. But that's the gist. Then phase two, I have a growth strategist, a revenue guardian,
+ a skeptical operator, and a team dynamics architect, all review it, collaborate, go back and forth
+ with each other. They come to a consensus. I have a council moderator, again, Opus 4.6. Sorry,
+ you can't see that. They reconciled disagreements, put it all together and finally rank everything
+ and give me that report. That runs once a day in the middle of the night. So it's when I'm not
+ using a lot of usage from Opus anyways. And then it provides me with that report.
+ And it gives me great actionable insights about the business. It is super, super cool.
+ All right. Next, I plugged in HubSpot into my open claw. And I'm not actually using this all
+ that much, but I do allow open claw to reference my deal pipeline. And of course that's for sponsorships
+ for this channel. And so it does have access to it. I'm not doing a lot of natural language queries,
+ like what this is making possible. But here it is, nonetheless. So a natural language request
+ comes in, it classifies the intent, maps to the end point, looks it all up, and then returns a
+ summary. So I can say what deals are in my qualification stage. So kind of useful. But again,
+ the more useful thing is just it having access to all of the deals that I'm currently working on.
+ All right. Next, and this is something that I use across the board, both in my direct messages
+ with my open claw, as well as any content it writes, it basically uses the humanizer skill
+ against everything. And so that removes the AI smell from writing. And it's very easy. It is a
+ skill. It's on claw hub. You can download it, install it, and it's constantly being updated
+ with AI smells. So I have a draft input. It detects the AI writing patterns, marks the problematic
+ spans, rewrites it, and then publishes it when it's ready. But it also just looks at everything.
+ It's not just reactive. It's also proactive. So that's a cool one as well. All right. Next is
+ image generation and also video generation. I plugged in nano banana and Vio as API's to open
+ claw. And now it has the ability to create images and video anytime I want for any use case. So here's
+ that workflow. I send it an existing image with edit instructions or I tell it what I want. All
+ of this happens through telegram. I have a separate telegram topic for images and another one for video.
+ So then it interprets it generates the images and goes back and forth until it's finally ready.
+ Let me actually show you what that looks like. So here I just say create an icon to use in telegram
+ to represent yourself boom. And I said make another but make it bigger and easier to see.
+ And it did that but it's kind of horizontal format. I said make it square and boom. There it is.
+ Very easy now. I have basically infinite image gen capability now. So I'll just say make another.
+ And I explicitly told it rather than saving the image locally which would be on my open
+ club MacBook Air. I said just send it to me in telegram. And here we go. Here's another one.
+ A wonky looking one but nonetheless and knew what I was talking about. Then we also have video
+ generation. So I said make a video and here's that. And so now I can just generate any video I need.
+ It's so crazy. And again, these are skills that can be used in any other automation throughout
+ open cloud. That's the key. Make them modular. Make them reusable. And you just have to tell it.
+ Just tell it to do that. Alright, here's another one. I also have it managing my to do list. And this
+ one is crazy. I just set this up. Alright, so there's a few ways that this can get started. One,
+ I have a meeting. I mentioned earlier, whenever I have a video conference, I have my fathom note
+ taker join it and transcribe all the notes. Then rather than using fathoms built in takeaway
+ generator, which was wonky and didn't really work all that well, I take the transcript and send it
+ to Gemini 2.5 flashlight and say, look through everything. Tell me what are key takeaways for me
+ to do and takeaways that my attendee needs to do and record them both. Again, all of this gets
+ stored locally. I can also just simply say, okay, add a task to follow up with X person by Friday.
+ And all of it gets extracted actions, owners, deadlines, cross referenced with the CRM. Who is
+ the person? What is the company? It looks at all of the context it has about them shows me the task
+ list. If I approve it, it puts it into my to do list, which is the to do list app that I use.
+ And it just manages it is so clean. And I just think the coolest part of this is that it actually
+ will read the transcript of my meetings and automatically suggest to do's. All right, next, I started to
+ notice because I'm doing so much with it. Occasionally, I would get charged a lot of money for an API
+ caller for a model. And I wanted to keep an eye on it. I wanted to make sure that there weren't any
+ unexpected charges. And you know, I'm still paying per month. I pay a hundred bucks per month for the
+ cloud subscription. I pay for the Gemini API calls, the X API calls. It's not cheap. I'm probably paying
+ about $150 per month in total for all of this, which relative to the value I'm getting from it is
+ very cheap, in my opinion. So I have something now that tracks all of my spend and my usage.
+ So this is something that runs silently in the background. Every single AI call, every single
+ API call gets logged to a single place. And I can ask how much I spent this week, which workflows
+ are costing a lot of money, show me the 30 day trend. Again, records all of it to a usage log,
+ it queries a log gives me cost breakdowns, gives me usage breakdowns, which is just very useful for
+ figuring out what I'm doing, maybe things that are automated and running that I didn't even know
+ about, just keeping an eye on everything. This is very useful. All right, let me show you all
+ of the services I'm using now. So I use Telegram, obviously, I use Slack. So that's just another
+ surface in which I can communicate with open claw Google workspace via GOG. And that's for
+ calendar and email ingestion, drive back up. So I'm going to get to how I save all of this,
+ because if I lost my open claw, I would be very upset if I could not easily replicate it. I use
+ Asana to do his tub spot, my YouTube API's I use X and Twitter search, Fathom, GitHub, Google drive,
+ again, that should be included here. I don't know why it listed it twice. I use brave search for
+ searching the web and fire crawl as well for searching the web. All right, so next, let me just
+ show you the holistic view of all the automations I'm doing. So every hour, I sync the code repo,
+ I check for changes, and that might be changes open claw makes to itself itself evolving. That
+ might be changes that I'm making in cursor to it anything it checks for changes and just backs it
+ up to GitHub. So critical, but I don't back up databases to GitHub, because that's kind of a waste
+ to space. So instead, I have a Google drive and I save all of the databases there. I also have a
+ very detailed document about how to restore everything in the case that I lose everything.
+ We also check the CRM for changes. We scout for new signals from anywhere. Basically,
+ then every single day, we're ingesting emails, we're collecting YouTube analytics, we're performing
+ health checks against the whole platform. And I'll explain that in a moment. And then we're
+ doing the nightly business briefing. Every week, we synthesize daily notes into long term memory.
+ That's something built into open claw. It's doing some housekeeping. And all of this follows the
+ same pattern. It's using cron executes tasks, notifies me in telegram. So I have this telegram
+ channel about all the cron jobs that run, I get a notice about them, what happened if they failed,
+ if they succeeded. And all of that again, just gets pipes to telegram. All right,
+ now let me talk a little bit more about the backup, because again, I don't ever want to lose this.
+ I spent a lot of time setting it up. And so it is all tracked and get, I push all the code,
+ including the markdown files to get it is constantly keeping track of it. And so if I ever get to a
+ bad state, I can roll it back, although that hasn't happened. And then as I mentioned, all of my
+ data, the databases all get backed up to Google Drive all the time, so that I'm not losing anything.
+ So here it is, the CRM data, the analytics, the knowledge base business analysis, cron logs,
+ everything gets backed up, time stamped, boom, Google drive. And if something goes wrong, here's
+ how we bring it back. And the code gets put into GitHub, again, always up to date. And I have all
+ of this running on a schedule. So it updates about every hour. Okay, next memory. How do we
+ remember all of this stuff? Well, I'm using kind of just the default memory built in. I'm not even
+ using QMD. And I probably should, but I haven't figured out exactly how I want to use it. So it's
+ all pretty standard. Here's what happens during the day conversations with me tasks completed mistakes
+ made all get piped into daily notes. Those have a weekly synthesis, it distills the patterns and
+ preferences and gets stored into long term memory. Then we also have the learnings folder,
+ corrective patterns mistakes, not to make again. And it just gets better over time without needing
+ to manually do that. Alright, now let me show you how I'm actually building open claw. I know a
+ lot of you are probably just chatting with open claw directly and having it build stuff for you,
+ which is fine. But I have actually found that I prefer developing in cursor. And so there's a
+ couple reasons for that. One, I just find the interface much easier to use. I can see the files
+ being created. It is just built for development versus telegram, which is just a single chat window.
+ It's just much more difficult. Again, you can do it, but I prefer using cursor. And so what I do
+ is on my Mac studio, or again, wherever I am, I have a few different laptops, I have basically
+ installed cursor and I SSH into the Macbook air, which open claw is on. So I have cursor SSH,
+ I have direct SSH, and then I use team viewer, I install team viewer, if I need to really just
+ take control of the computer completely, the Macbook air is always on, never leaves home. And I have
+ multiple different gets that I'm using one for major projects like the CRM, and then one for open
+ claw as a whole, I'm making new edits, everything I'm doing is mostly happening in cursor. And then
+ I just verify it in telegram. I write tests for everything. And I am committing and pushing to
+ GitHub frequently. All right, the last thing I want to show you is how I keep all of the markdown
+ files up to date, because there can be a lot of drift. There are multiple different markdown
+ files, they all do something specific. And as you're adding skills, as you're telling open claw what
+ to do, sometimes it puts it in multiple places. Also, everything that's in the markdown files
+ is really dependent on the model you're using. Opus 4.6, for example, really listens to every
+ single word that it is prompted with, you don't need to use bold, you don't need to use all caps,
+ you don't need to say things like don't ever forget this, or make sure you do this critical.
+ You don't need to do any of that, but that's very different from how Opus 4.5 was.
+ So here's what I do. First, I created this workspace.md file, which specifies how everything works based
+ on how I've implemented it. So here, the table of contents. And yes, it is a very large file,
+ but it is a reference to be used in other places. So I have what the workspace architecture looks
+ like. I have key patterns, SQL life for all persistent storage vector telegram. I have the platform
+ configuration. I have model providers that I'm using, fallback chain plugins, et cetera, et cetera.
+ But then we have each of these files, the agent file, the heartbeat, the identity, the memory.
+ All of these files do something different. And so how I made sure that they stayed up to date and
+ accurate is I had open clock go to the open clock website, download the best practices,
+ and store them locally. And I have it always reference it. And once a day, I have it look
+ through all of the markdown files and cross reference against the best practices and say,
+ is there anything you need to change? Recommend things to me. Then finally, for Opus 4.6 best
+ practices, I had it go and download the prompting guide for Opus 4.6. And I also stored that locally.
+ And I also have it cross reference that. And I say, look for anything that goes against the
+ prompting best practices provided by anthropic. And so it does this once per day and it's constantly
+ updating itself, cleaning itself very useful. And so that's it for today. I know that was a lot.
+ Hopefully that shows you not only what's possible, but how to get the most out of open
+ cloth. If you enjoyed this video, please consider giving a like and subscribe. And I'll see you in the next one.

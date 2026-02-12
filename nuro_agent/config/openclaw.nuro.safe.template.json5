@@ -1,0 +1,158 @@
+{
+  // Hardened baseline for a private/safe nuro IronClaw/OpenClaw deployment.
+  // Replace placeholders before use.
+
+  gateway: {
+    mode: "local",
+    bind: "loopback",
+    port: 18789,
+    controlUi: { enabled: true, basePath: "/openclaw" },
+    auth: {
+      mode: "password",
+      password: "REPLACE_WITH_STRONG_PASSWORD",
+      // Require explicit credentials even when using Tailscale Serve.
+      allowTailscale: false,
+    },
+    tailscale: {
+      mode: "serve",
+      resetOnExit: true,
+    },
+    trustedProxies: ["127.0.0.1"],
+  },
+
+  logging: {
+    level: "info",
+    consoleLevel: "info",
+    consoleStyle: "compact",
+    redactSensitive: "tools",
+    redactPatterns: ["sk-.*", "xox[bap]-[A-Za-z0-9-]+"],
+  },
+
+  commands: {
+    native: "auto",
+    text: true,
+    bash: false,
+    config: false,
+    debug: false,
+    restart: false,
+    useAccessGroups: true,
+  },
+
+  session: {
+    // Secure DM mode: isolate DM context by channel + sender.
+    dmScope: "per-channel-peer",
+    reset: {
+      mode: "daily",
+      atHour: 4,
+      idleMinutes: 10080,
+    },
+    resetByType: {
+      dm: { mode: "idle", idleMinutes: 10080 },
+      group: { mode: "idle", idleMinutes: 240 },
+      thread: { mode: "idle", idleMinutes: 240 },
+    },
+    resetTriggers: ["/new", "/reset"],
+    mainKey: "main",
+  },
+
+  channels: {
+    defaults: {
+      groupPolicy: "allowlist",
+    },
+
+    telegram: {
+      dmPolicy: "pairing",
+      allowFrom: ["tg:REPLACE_OWNER_ID"],
+      groupPolicy: "allowlist",
+      groupAllowFrom: ["tg:REPLACE_OWNER_ID"],
+      groups: {
+        "*": { requireMention: true },
+      },
+      // Prevent chat-side config mutation.
+      configWrites: false,
+    },
+
+    // Slack hardening pattern (optional):
+    // slack: {
+    //   dm: { policy: "pairing", allowFrom: ["REPLACE_OWNER_USER_ID"] },
+    //   groupPolicy: "allowlist",
+    //   channels: {
+    //     "C1234567890": { allow: true, requireMention: true, allowBots: false },
+    //   },
+    // },
+  },
+
+  tools: {
+    elevated: {
+      enabled: false,
+      allowFrom: {},
+    },
+
+    // Restrict non-main sandboxed sessions to messaging/session/memory tools.
+    sandbox: {
+      tools: {
+        allow: ["group:messaging", "group:sessions", "memory_search", "memory_get"],
+        deny: ["group:runtime", "group:fs", "group:web", "group:ui", "nodes", "cron", "gateway"],
+      },
+    },
+  },
+
+  agents: {
+    defaults: {
+      workspace: "~/Documents/dev/nuroagent/ironclaw/workspace",
+      maxConcurrent: 2,
+
+      sandbox: {
+        mode: "non-main",
+        scope: "session",
+        workspaceAccess: "none",
+        docker: {
+          image: "openclaw-sandbox:bookworm-slim",
+          readOnlyRoot: true,
+          tmpfs: ["/tmp", "/var/tmp", "/run"],
+          network: "none",
+          user: "1000:1000",
+          capDrop: ["ALL"],
+          pidsLimit: 256,
+          memory: "1g",
+          cpus: 1,
+        },
+      },
+
+      contextPruning: {
+        mode: "cache-ttl",
+        ttl: "55m",
+        keepLastAssistants: 3,
+      },
+
+      compaction: {
+        reserveTokensFloor: 24000,
+        memoryFlush: {
+          enabled: true,
+          softThresholdTokens: 4000,
+          systemPrompt: "Session nearing compaction. Store durable memories now.",
+          prompt: "Write any lasting notes to memory/YYYY-MM-DD.md; reply with NO_REPLY if nothing to store.",
+        },
+      },
+    },
+
+    list: [
+      {
+        id: "nuro",
+        default: true,
+        workspace: "~/Documents/dev/nuroagent/ironclaw/workspace",
+        groupChat: {
+          mentionPatterns: ["@nuro", "nuro", "dr\\. nuro"],
+        },
+        tools: {
+          elevated: { enabled: false },
+        },
+      },
+    ],
+  },
+
+  cron: {
+    enabled: true,
+    maxConcurrentRuns: 2,
+  },
+}

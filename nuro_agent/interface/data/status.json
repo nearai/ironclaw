@@ -1,0 +1,170 @@
+{
+  "generated_at_utc": "2026-02-12T10:12:46Z",
+  "profile": {
+    "name": "nuro",
+    "mission": "free the mind",
+    "realm": "nuro realm"
+  },
+  "config_snapshot": {
+    "gateway_mode": "local",
+    "dm_scope": "per-channel-peer",
+    "sandbox_mode": "non-main",
+    "group_policy": "allowlist",
+    "elevated_enabled": "false"
+  },
+  "runtime": {
+    "openclaw_cli_present": false,
+    "status_preview": [
+      "openclaw CLI not found"
+    ],
+    "deep_status_preview": [
+      "openclaw CLI not found"
+    ],
+    "preflight_log_path": "",
+    "preflight_log_tail": [
+      "preflight log not found. run: bash ironclaw/scripts/preflight_hardening.sh"
+    ]
+  },
+  "checks": [
+    {
+      "label": "OpenClaw CLI",
+      "status": "warn",
+      "detail": "not installed in PATH"
+    },
+    {
+      "label": "DM scope isolation",
+      "status": "ok",
+      "detail": "dmScope=per-channel-peer"
+    },
+    {
+      "label": "Sandbox posture",
+      "status": "ok",
+      "detail": "sandbox.mode=non-main"
+    },
+    {
+      "label": "Group policy",
+      "status": "ok",
+      "detail": "groupPolicy=allowlist"
+    },
+    {
+      "label": "Elevated exec",
+      "status": "ok",
+      "detail": "tools.elevated.enabled=false"
+    }
+  ],
+  "handoff": {
+    "title": "OMIN Claude Opus handoff for NUE interface hardening",
+    "summary": "Created a Codex-to-Claude Opus 4.6 execution handoff in OMIN and refreshed status/task queue for the graph-centric NUE interface hardening lane.",
+    "next_actions": [
+      "Claude executes T000A-T000E from CODEX_TASK_QUEUE with commit-sized changes.",
+      "Validate NUE interface flow locally at http://localhost:8787 and record UX findings in OMIN.",
+      "Promote highest-confidence open questions into execution backlog after next recursive loop pass."
+    ]
+  },
+  "events": [
+    {
+      "ts": "2026-02-12T09:38:16Z",
+      "agent": "codex",
+      "title": "Implemented IronClaw hardening from OpenClaw best-practice research"
+    },
+    {
+      "ts": "2026-02-12T09:42:21Z",
+      "agent": "codex",
+      "title": "Sent NEAR market join prompt to Nuro agent in IronClaw"
+    },
+    {
+      "ts": "2026-02-12T09:42:40Z",
+      "agent": "codex",
+      "title": "NUE gallery protocol+witness runtime validation and responsiveness hardening"
+    },
+    {
+      "ts": "2026-02-12T09:43:58Z",
+      "agent": "codex",
+      "title": "Created private-safe Nuro agent context pack"
+    },
+    {
+      "ts": "2026-02-12T09:45:03Z",
+      "agent": "codex",
+      "title": "Expanded safe Nuro canon with realm/stack/art directives"
+    },
+    {
+      "ts": "2026-02-12T09:46:15Z",
+      "agent": "codex",
+      "title": "Normalized nuro naming to lowercase in safe agent pack"
+    },
+    {
+      "ts": "2026-02-12T09:56:57Z",
+      "agent": "codex",
+      "title": "Global sacred sync cycle"
+    },
+    {
+      "ts": "2026-02-12T09:57:06Z",
+      "agent": "codex",
+      "title": "Transcribed X OpenClaw video and implemented nuro IronClaw safe starter"
+    },
+    {
+      "ts": "2026-02-12T10:02:03Z",
+      "agent": "codex",
+      "title": "Global sync cycle after NUE interface integration"
+    },
+    {
+      "ts": "2026-02-12T10:02:32Z",
+      "agent": "codex",
+      "title": "Built NUE interface home + recursive loop bootstrap"
+    },
+    {
+      "ts": "2026-02-12T10:06:10Z",
+      "agent": "codex",
+      "title": "Built ironclaw nuro agent interface dashboard"
+    },
+    {
+      "ts": "2026-02-12T10:08:06Z",
+      "agent": "codex",
+      "title": "OMIN Claude Opus handoff for NUE interface hardening"
+    }
+  ],
+  "quick_commands": [
+    {
+      "label": "refresh interface data",
+      "command": "bash /Users/nuro/Documents/dev/ironclaw/nuro_agent/scripts/refresh_nuro_interface_data.sh"
+    },
+    {
+      "label": "run hardening preflight",
+      "command": "bash /Users/nuro/Documents/dev/ironclaw/nuro_agent/scripts/preflight_hardening.sh"
+    },
+    {
+      "label": "run hardening with auto-fix",
+      "command": "bash /Users/nuro/Documents/dev/ironclaw/nuro_agent/scripts/preflight_hardening.sh --fix"
+    },
+    {
+      "label": "openclaw status",
+      "command": "openclaw status --all"
+    },
+    {
+      "label": "security audit",
+      "command": "openclaw security audit --deep"
+    },
+    {
+      "label": "start local interface",
+      "command": "bash /Users/nuro/Documents/dev/ironclaw/nuro_agent/scripts/run_nuro_interface.sh"
+    }
+  ],
+  "artifacts": [
+    {
+      "label": "OpenClaw video transcript (SRT)",
+      "path": "/Users/nuro/Documents/dev/ironclaw/nuro_agent/research/matthewberman_openclaw_full_transcript.srt"
+    },
+    {
+      "label": "OpenClaw video transcript (TXT)",
+      "path": "/Users/nuro/Documents/dev/ironclaw/nuro_agent/research/matthewberman_openclaw_full_transcript.txt"
+    },
+    {
+      "label": "Synthesis",
+      "path": "/Users/nuro/Documents/dev/ironclaw/nuro_agent/research/synthesis_and_implementation.md"
+    },
+    {
+      "label": "Safe template config",
+      "path": "/Users/nuro/Documents/dev/ironclaw/nuro_agent/config/openclaw.nuro.safe.template.json5"
+    }
+  ]
+}

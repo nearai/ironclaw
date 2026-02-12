@@ -1,0 +1,97 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>nuro agent interface</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;700&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet" />
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <div class="bg-grid" aria-hidden="true"></div>
+    <main class="shell">
+      <header class="hero panel reveal">
+        <div>
+          <p class="eyebrow">ironclaw / nuro realm</p>
+          <h1>nuro agent interface</h1>
+          <p id="generatedAt" class="muted">loading snapshot...</p>
+        </div>
+        <div class="hero-actions">
+          <button id="refreshDataBtn" class="btn">refresh snapshot</button>
+        </div>
+      </header>
+
+      <section class="kpi-grid reveal">
+        <article class="panel kpi">
+          <p class="kpi-label">openclaw cli</p>
+          <p id="kpiOpenclaw" class="kpi-value">-</p>
+        </article>
+        <article class="panel kpi">
+          <p class="kpi-label">gateway mode</p>
+          <p id="kpiGateway" class="kpi-value">-</p>
+        </article>
+        <article class="panel kpi">
+          <p class="kpi-label">sandbox mode</p>
+          <p id="kpiSandbox" class="kpi-value">-</p>
+        </article>
+        <article class="panel kpi">
+          <p class="kpi-label">dm scope</p>
+          <p id="kpiDmScope" class="kpi-value">-</p>
+        </article>
+      </section>
+
+      <section class="layout">
+        <article class="panel reveal">
+          <h2>health and safety checks</h2>
+          <ul id="checksList" class="line-list"></ul>
+        </article>
+
+        <article class="panel reveal">
+          <h2>latest handoff</h2>
+          <p id="handoffTitle" class="strong">-</p>
+          <p id="handoffSummary" class="muted">-</p>
+          <h3>next actions</h3>
+          <ul id="handoffNext" class="line-list"></ul>
+        </article>
+      </section>
+
+      <section class="layout">
+        <article class="panel reveal">
+          <h2>quick commands</h2>
+          <ul id="commandsList" class="command-list"></ul>
+        </article>
+
+        <article class="panel reveal">
+          <h2>recent events</h2>
+          <ul id="eventsList" class="line-list"></ul>
+        </article>
+      </section>
+
+      <section class="layout-single">
+        <article class="panel reveal">
+          <h2>log tail</h2>
+          <pre id="logTail" class="log-block">-</pre>
+        </article>
+      </section>
+
+      <section class="layout reveal">
+        <article class="panel">
+          <h2>research artifacts</h2>
+          <ul id="artifactList" class="line-list"></ul>
+        </article>
+
+        <article class="panel">
+          <h2>runtime previews</h2>
+          <h3>openclaw status</h3>
+          <pre id="statusPreview" class="log-block small">-</pre>
+          <h3>openclaw status --deep</h3>
+          <pre id="deepStatusPreview" class="log-block small">-</pre>
+        </article>
+      </section>
+    </main>
+
+    <script src="./app.js" defer></script>
+  </body>
+</html>
