@@ -174,14 +174,14 @@ impl DatabaseConfig {
 
 /// Which LLM backend to use.
 ///
-/// Defaults to `OpenRouter` for broad model access with a single API key.
+/// Defaults to `NearAi` to keep IronClaw close to the NEAR ecosystem.
 /// Users can override with `LLM_BACKEND` env var to use other providers.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum LlmBackend {
-    /// OpenRouter (default) -- OpenAI-compatible API with access to many models
-    #[default]
+    /// OpenRouter -- OpenAI-compatible API with access to many models
     OpenRouter,
-    /// NEAR AI proxy -- session or API key auth
+    /// NEAR AI proxy (default) -- session or API key auth
+    #[default]
     NearAi,
     /// Direct OpenAI API
     OpenAi,
@@ -263,11 +263,11 @@ pub struct OpenAiCompatibleConfig {
 
 /// LLM provider configuration.
 ///
-/// OpenRouter is the default backend. Users can switch to other providers
-/// by setting `LLM_BACKEND` (e.g. `nearai`, `openai`, `anthropic`, `ollama`).
+/// NEAR AI is the default backend. Users can switch to other providers
+/// by setting `LLM_BACKEND` (e.g. `openrouter`, `openai`, `anthropic`, `ollama`).
 #[derive(Debug, Clone)]
 pub struct LlmConfig {
-    /// Which backend to use (default: OpenRouter)
+    /// Which backend to use (default: NearAi)
     pub backend: LlmBackend,
     /// NEAR AI config (always populated for NEAR AI embeddings, etc.)
     pub nearai: NearAiConfig,
@@ -329,7 +329,7 @@ pub struct NearAiConfig {
 
 impl LlmConfig {
     fn resolve(settings: &Settings) -> Result<Self, ConfigError> {
-        // Determine backend (default: OpenRouter)
+        // Determine backend (default: NearAi)
         let backend: LlmBackend = if let Some(b) = optional_env("LLM_BACKEND")? {
             b.parse().map_err(|e| ConfigError::InvalidValue {
                 key: "LLM_BACKEND".to_string(),

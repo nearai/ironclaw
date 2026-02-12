@@ -1,8 +1,8 @@
 //! LLM integration for the agent.
 //!
 //! Supports multiple backends:
-//! - **OpenRouter** (default): Broad model access via OpenAI-compatible API
-//! - **NEAR AI**: Session-based or API key auth via NEAR AI proxy
+//! - **NEAR AI** (default): Session-based or API key auth via NEAR AI proxy
+//! - **OpenRouter**: Broad model access via OpenAI-compatible API
 //! - **OpenAI**: Direct API access with your own key
 //! - **Anthropic**: Direct API access with your own key
 //! - **Ollama**: Local model inference
