@@ -8,14 +8,12 @@ jobs:
     runs-on: ubuntu-latest
     steps:
     - name: Checkout repository
-      uses: actions/checkout@v2
+      uses: actions/checkout@v4
     - name: Install Rust
-      uses: actions-rs/toolchain@v1
+      uses: dtolnay/rust-toolchain@stable
       with:
-        toolchain: stable
-        override: true
         profile: minimal
-        components: rustfmt
+        components: rustfmt, clippy
     - name: Check formatting
       run: |
         cargo fmt --all -- --check
