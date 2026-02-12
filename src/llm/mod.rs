@@ -61,11 +61,23 @@ fn create_openrouter_provider(config: &LlmConfig) -> Result<Arc<dyn LlmProvider>
             provider: "openrouter".to_string(),
         })?;
 
+    use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
     use rig::providers::openai;
+
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        HeaderName::from_static("http-referer"),
+        HeaderValue::from_static("https://github.com/nearai/ironclaw"),
+    );
+    headers.insert(
+        HeaderName::from_static("x-title"),
+        HeaderValue::from_static("ironclaw"),
+    );
 
     let client: openai::Client = openai::Client::builder()
         .base_url("https://openrouter.ai/api/v1")
         .api_key(or.api_key.expose_secret())
+        .http_headers(headers)
         .build()
         .map_err(|e| LlmError::RequestFailed {
             provider: "openrouter".to_string(),
