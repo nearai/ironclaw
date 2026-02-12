@@ -1082,9 +1082,16 @@ impl Agent {
                     m
                 });
 
-            let result = reasoning.respond_with_tools(&context).await?;
+            let output = reasoning.respond_with_tools(&context).await?;
 
-            match result {
+            // Track token usage for budget enforcement
+            tracing::debug!(
+                "LLM call used {} input + {} output tokens",
+                output.usage.input_tokens,
+                output.usage.output_tokens
+            );
+
+            match output.result {
                 RespondResult::Text(text) => {
                     // If no tools have been executed yet, prompt the LLM to use tools
                     // This handles the case where the model explains what it will do
@@ -1148,10 +1155,37 @@ impl Agent {
                         if let Some(tool) = self.tools().get(&tc.name).await {
                             if tool.requires_approval() {
                                 // Check if auto-approved for this session
-                                let is_auto_approved = {
+                                let mut is_auto_approved = {
                                     let sess = session.lock().await;
                                     sess.is_tool_auto_approved(&tc.name)
                                 };
+
+                                // For shell commands, override auto-approval for
+                                // destructive patterns that should always require
+                                // explicit per-invocation approval.
+                                if is_auto_approved && tc.name == "shell" {
+                                    if let Some(cmd) = tc
+                                        .arguments
+                                        .as_str()
+                                        .and_then(|s| {
+                                            serde_json::from_str::<serde_json::Value>(s).ok()
+                                        })
+                                        .and_then(|v| {
+                                            v.get("command")
+                                                .and_then(|c| c.as_str().map(String::from))
+                                        })
+                                    {
+                                        if crate::tools::builtin::shell::requires_explicit_approval(
+                                            &cmd,
+                                        ) {
+                                            tracing::info!(
+                                                "Shell command '{}' requires explicit approval despite auto-approve",
+                                                cmd.chars().take(80).collect::<String>()
+                                            );
+                                            is_auto_approved = false;
+                                        }
+                                    }
+                                }
 
                                 if !is_auto_approved {
                                     // Need approval - store pending request and return

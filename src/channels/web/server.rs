@@ -5,6 +5,7 @@
 use std::convert::Infallible;
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use axum::{
     Json, Router,
@@ -45,6 +46,69 @@ pub type PromptQueue = Arc<
     >,
 >;
 
+/// Simple sliding-window rate limiter.
+///
+/// Tracks the number of requests in the current window. Resets when the window expires.
+/// Not per-IP (since this is a single-user gateway with auth), but prevents flooding.
+pub struct RateLimiter {
+    /// Requests remaining in the current window.
+    remaining: AtomicU64,
+    /// Epoch second when the current window started.
+    window_start: AtomicU64,
+    /// Maximum requests per window.
+    max_requests: u64,
+    /// Window duration in seconds.
+    window_secs: u64,
+}
+
+impl RateLimiter {
+    pub fn new(max_requests: u64, window_secs: u64) -> Self {
+        Self {
+            remaining: AtomicU64::new(max_requests),
+            window_start: AtomicU64::new(
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs(),
+            ),
+            max_requests,
+            window_secs,
+        }
+    }
+
+    /// Try to consume one request. Returns `true` if allowed, `false` if rate limited.
+    pub fn check(&self) -> bool {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+
+        let window = self.window_start.load(Ordering::Relaxed);
+        if now.saturating_sub(window) >= self.window_secs {
+            // Window expired, reset
+            self.window_start.store(now, Ordering::Relaxed);
+            self.remaining
+                .store(self.max_requests - 1, Ordering::Relaxed);
+            return true;
+        }
+
+        // Try to decrement remaining
+        loop {
+            let current = self.remaining.load(Ordering::Relaxed);
+            if current == 0 {
+                return false;
+            }
+            if self
+                .remaining
+                .compare_exchange_weak(current, current - 1, Ordering::Relaxed, Ordering::Relaxed)
+                .is_ok()
+            {
+                return true;
+            }
+        }
+    }
+}
+
 /// Shared state for all gateway handlers.
 pub struct GatewayState {
     /// Channel to send messages to the agent loop.
@@ -73,6 +137,8 @@ pub struct GatewayState {
     pub shutdown_tx: tokio::sync::RwLock<Option<oneshot::Sender<()>>>,
     /// WebSocket connection tracker.
     pub ws_tracker: Option<Arc<crate::channels::web::ws::WsConnectionTracker>>,
+    /// Rate limiter for chat endpoints (30 messages per 60 seconds).
+    pub chat_rate_limiter: RateLimiter,
 }
 
 /// Start the gateway HTTP server.
@@ -277,6 +343,13 @@ async fn chat_send_handler(
     State(state): State<Arc<GatewayState>>,
     Json(req): Json<SendMessageRequest>,
 ) -> Result<(StatusCode, Json<SendMessageResponse>), (StatusCode, String)> {
+    if !state.chat_rate_limiter.check() {
+        return Err((
+            StatusCode::TOO_MANY_REQUESTS,
+            "Rate limit exceeded. Try again shortly.".to_string(),
+        ));
+    }
+
     let mut msg = IncomingMessage::new("gateway", &state.user_id, &req.content);
 
     if let Some(ref thread_id) = req.thread_id {
@@ -527,6 +600,21 @@ async fn chat_history_handler(
         sess.active_thread
             .ok_or((StatusCode::NOT_FOUND, "No active thread".to_string()))?
     };
+
+    // Verify the thread belongs to the authenticated user before returning any data.
+    // In-memory threads are already scoped by user via session_manager, but DB
+    // lookups could expose another user's conversation if the UUID is guessed.
+    if query.thread_id.is_some() {
+        if let Some(ref store) = state.store {
+            let owned = store
+                .conversation_belongs_to_user(thread_id, &state.user_id)
+                .await
+                .unwrap_or(false);
+            if !owned && !sess.threads.contains_key(&thread_id) {
+                return Err((StatusCode::NOT_FOUND, "Thread not found".to_string()));
+            }
+        }
+    }
 
     // For paginated requests (before cursor set), always go to DB
     if before_cursor.is_some() {

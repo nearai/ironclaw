@@ -1,7 +1,7 @@
 //! HTTP request tool.
 
 use std::collections::HashMap;
-use std::net::IpAddr;
+use std::net::{IpAddr, ToSocketAddrs};
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -10,6 +10,9 @@ use reqwest::Client;
 use crate::context::JobContext;
 use crate::safety::LeakDetector;
 use crate::tools::tool::{Tool, ToolError, ToolOutput};
+
+/// Maximum response body size (5 MB). Prevents OOM from unbounded responses.
+const MAX_RESPONSE_SIZE: usize = 5 * 1024 * 1024;
 
 /// Tool for making HTTP requests.
 pub struct HttpTool {
@@ -50,11 +53,28 @@ fn validate_url(url: &str) -> Result<reqwest::Url, ToolError> {
         ));
     }
 
+    // Check literal IP addresses
     if let Ok(ip) = host.parse::<IpAddr>() {
         if is_disallowed_ip(&ip) {
             return Err(ToolError::NotAuthorized(
                 "private or local IPs are not allowed".to_string(),
             ));
+        }
+    }
+
+    // Resolve hostname and check all resolved IPs against the blocklist.
+    // This prevents DNS rebinding where a hostname resolves to a private IP.
+    let port = parsed.port_or_known_default().unwrap_or(443);
+    let socket_addr = format!("{}:{}", host, port);
+    if let Ok(addrs) = socket_addr.to_socket_addrs() {
+        for addr in addrs {
+            if is_disallowed_ip(&addr.ip()) {
+                return Err(ToolError::NotAuthorized(format!(
+                    "hostname '{}' resolves to disallowed IP {}",
+                    host,
+                    addr.ip()
+                )));
+            }
         }
     }
 
@@ -218,10 +238,20 @@ impl Tool for HttpTool {
             .filter_map(|(k, v)| v.to_str().ok().map(|v| (k.to_string(), v.to_string())))
             .collect();
 
-        // Get response body
-        let body_text = response.text().await.map_err(|e| {
+        // Get response body with size cap to prevent OOM
+        let body_bytes = response.bytes().await.map_err(|e| {
             ToolError::ExternalService(format!("failed to read response body: {}", e))
         })?;
+
+        if body_bytes.len() > MAX_RESPONSE_SIZE {
+            return Err(ToolError::ExecutionFailed(format!(
+                "Response body too large ({} bytes, max {})",
+                body_bytes.len(),
+                MAX_RESPONSE_SIZE
+            )));
+        }
+
+        let body_text = String::from_utf8_lossy(&body_bytes).into_owned();
 
         // Try to parse as JSON, fall back to string
         let body: serde_json::Value = serde_json::from_str(&body_text)
@@ -251,7 +281,7 @@ impl Tool for HttpTool {
 
 #[cfg(test)]
 mod tests {
-    use super::validate_url;
+    use super::*;
 
     #[test]
     fn test_validate_url_rejects_http() {
@@ -269,5 +299,41 @@ mod tests {
     fn test_validate_url_accepts_https_public() {
         let url = validate_url("https://example.com").unwrap();
         assert_eq!(url.host_str(), Some("example.com"));
+    }
+
+    #[test]
+    fn test_validate_url_rejects_private_ip_literal() {
+        let err = validate_url("https://192.168.1.1/api").unwrap_err();
+        assert!(err.to_string().contains("private"));
+    }
+
+    #[test]
+    fn test_validate_url_rejects_loopback_ip() {
+        let err = validate_url("https://127.0.0.1/api").unwrap_err();
+        assert!(err.to_string().contains("private"));
+    }
+
+    #[test]
+    fn test_validate_url_rejects_link_local() {
+        let err = validate_url("https://169.254.169.254/latest/meta-data/").unwrap_err();
+        assert!(err.to_string().contains("private"));
+    }
+
+    #[test]
+    fn test_is_disallowed_ip_covers_ranges() {
+        use std::net::Ipv4Addr;
+
+        // Private ranges
+        assert!(is_disallowed_ip(&IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1))));
+        assert!(is_disallowed_ip(&IpAddr::V4(Ipv4Addr::new(172, 16, 0, 1))));
+        assert!(is_disallowed_ip(&IpAddr::V4(Ipv4Addr::new(192, 168, 0, 1))));
+        // Loopback
+        assert!(is_disallowed_ip(&IpAddr::V4(Ipv4Addr::LOCALHOST)));
+        // Cloud metadata
+        assert!(is_disallowed_ip(&IpAddr::V4(Ipv4Addr::new(
+            169, 254, 169, 254
+        ))));
+        // Public
+        assert!(!is_disallowed_ip(&IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8))));
     }
 }

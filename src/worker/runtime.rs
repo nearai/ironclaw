@@ -238,7 +238,7 @@ Work independently to complete this job. Report when done."#,
                             reason: format!("respond_with_tools failed: {}", e),
                         })?;
 
-                match respond_result {
+                match respond_result.result {
                     RespondResult::Text(response) => {
                         self.post_event(
                             "message",

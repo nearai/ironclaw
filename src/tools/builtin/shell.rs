@@ -74,6 +74,58 @@ static DANGEROUS_PATTERNS: LazyLock<Vec<&'static str>> = LazyLock::new(|| {
     ]
 });
 
+/// Patterns that should NEVER be auto-approved, even if the user chose "always approve"
+/// for the shell tool. These require explicit per-invocation approval because they are
+/// destructive or security-sensitive.
+static NEVER_AUTO_APPROVE_PATTERNS: LazyLock<Vec<&'static str>> = LazyLock::new(|| {
+    vec![
+        "rm -rf",
+        "rm -fr",
+        "chmod -r 777",
+        "chmod 777",
+        "chown -r",
+        "shutdown",
+        "reboot",
+        "poweroff",
+        "init 0",
+        "init 6",
+        "iptables",
+        "nft ",
+        "useradd",
+        "userdel",
+        "passwd",
+        "visudo",
+        "crontab",
+        "systemctl disable",
+        "launchctl unload",
+        "kill -9",
+        "killall",
+        "pkill",
+        "docker rm",
+        "docker rmi",
+        "docker system prune",
+        "git push --force",
+        "git push -f",
+        "git reset --hard",
+        "git clean -f",
+        "DROP TABLE",
+        "DROP DATABASE",
+        "TRUNCATE",
+        "DELETE FROM",
+    ]
+});
+
+/// Check whether a shell command contains patterns that must never be auto-approved.
+///
+/// Even when the user has chosen "always approve" for the shell tool, these commands
+/// require explicit per-invocation approval because they are destructive.
+pub fn requires_explicit_approval(command: &str) -> bool {
+    let lower = command.to_lowercase();
+    NEVER_AUTO_APPROVE_PATTERNS
+        .iter()
+        .any(|p| lower.contains(&p.to_lowercase()))
+}
+
 /// Shell command execution tool.
 pub struct ShellTool {
     /// Working directory for commands (if None, uses job's working dir or cwd).
@@ -464,6 +516,27 @@ mod tests {
             .await;
 
         assert!(matches!(result, Err(ToolError::Timeout(_))));
+    }
+
+    #[test]
+    fn test_requires_explicit_approval() {
+        // Destructive commands should require explicit approval
+        assert!(requires_explicit_approval("rm -rf /tmp/stuff"));
+        assert!(requires_explicit_approval("git push --force origin main"));
+        assert!(requires_explicit_approval("git reset --hard HEAD~5"));
+        assert!(requires_explicit_approval("docker rm container_name"));
+        assert!(requires_explicit_approval("kill -9 12345"));
+        assert!(requires_explicit_approval("DROP TABLE users;"));
+
+        // Safe commands should not
+        assert!(!requires_explicit_approval("cargo build"));
+        assert!(!requires_explicit_approval("git status"));
+        assert!(!requires_explicit_approval("ls -la"));
+        assert!(!requires_explicit_approval("echo hello"));
+        assert!(!requires_explicit_approval("cat file.txt"));
+        assert!(!requires_explicit_approval(
+            "git push origin feature-branch"
+        ));
     }
 
     #[test]

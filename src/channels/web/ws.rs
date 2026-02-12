@@ -481,6 +481,7 @@ mod tests {
             user_id: "test".to_string(),
             shutdown_tx: tokio::sync::RwLock::new(None),
             ws_tracker: Some(Arc::new(WsConnectionTracker::new())),
+            chat_rate_limiter: crate::channels::web::server::RateLimiter::new(30, 60),
         }
     }
 }

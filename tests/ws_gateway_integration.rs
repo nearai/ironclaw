@@ -51,6 +51,7 @@ async fn start_test_server() -> (
         user_id: "test-user".to_string(),
         shutdown_tx: tokio::sync::RwLock::new(None),
         ws_tracker: Some(Arc::new(WsConnectionTracker::new())),
+        chat_rate_limiter: ironclaw::channels::web::server::RateLimiter::new(30, 60),
     });
 
     let addr: SocketAddr = "127.0.0.1:0".parse().unwrap();

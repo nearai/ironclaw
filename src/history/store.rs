@@ -220,6 +220,8 @@ impl Store {
                     completed_at: row.get("completed_at"),
                     transitions: Vec::new(), // Not loaded from DB for now
                     metadata: serde_json::Value::Null,
+                    total_tokens_used: 0,
+                    max_tokens: 0,
                 }))
             }
             None => Ok(None),
@@ -1340,6 +1342,22 @@ impl Store {
         .await?;
 
         Ok(id)
+    }
+
+    /// Check whether a conversation belongs to the given user.
+    pub async fn conversation_belongs_to_user(
+        &self,
+        conversation_id: Uuid,
+        user_id: &str,
+    ) -> Result<bool, DatabaseError> {
+        let conn = self.conn().await?;
+        let row = conn
+            .query_opt(
+                "SELECT 1 FROM conversations WHERE id = $1 AND user_id = $2",
+                &[&conversation_id, &user_id],
+            )
+            .await?;
+        Ok(row.is_some())
     }
 
     /// Load messages for a conversation with cursor-based pagination.

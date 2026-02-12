@@ -248,9 +248,9 @@ Report when the job is complete or if you encounter issues you cannot resolve."#
 
             if selections.is_empty() {
                 // No tools from select_tools, ask LLM directly (may still return tool calls)
-                let respond_result = reasoning.respond_with_tools(reason_ctx).await?;
+                let respond_output = reasoning.respond_with_tools(reason_ctx).await?;
 
-                match respond_result {
+                match respond_output.result {
                     RespondResult::Text(response) => {
                         // Check for explicit completion phrases. Use word-boundary
                         // aware checks to avoid false positives like "incomplete",
