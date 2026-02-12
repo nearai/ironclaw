@@ -320,17 +320,9 @@ impl PairingStore {
     fn record_failed_approve(&self, channel: &str) -> Result<(), PairingStoreError> {
         let path = approve_attempts_path(&self.base_dir, channel)?;
         fs::create_dir_all(path.parent().unwrap())?;
-<<<<<<< HEAD
-
         // Read existing content BEFORE opening with truncate (which clears the file)
         let content = fs::read_to_string(&path).unwrap_or_default();
         let mut data: ApproveAttemptsFile = serde_json::from_str(&content).unwrap_or_default();
-
-=======
-        // Read existing content BEFORE opening with truncate (which clears the file)
-        let content = fs::read_to_string(&path).unwrap_or_default();
-        let mut data: ApproveAttemptsFile = serde_json::from_str(&content).unwrap_or_default();
->>>>>>> 48e5434 (Fix failing tests: rate limit tracking and bundled channel installation)
         let now = now_secs();
         data.failed_at.push(now);
         let cutoff = now.saturating_sub(PAIRING_APPROVE_RATE_WINDOW_SECS);

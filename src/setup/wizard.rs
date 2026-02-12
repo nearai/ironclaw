@@ -2089,7 +2089,6 @@ mod tests {
 
     #[tokio::test]
     async fn test_install_missing_bundled_channels_installs_telegram() {
-<<<<<<< HEAD
         // Create stub channel artifacts so telegram appears "available"
         let channels_src = tempdir().unwrap();
         let telegram_dir = channels_src.path().join("telegram");
