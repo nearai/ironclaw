@@ -14,6 +14,7 @@ use ironclaw::channels::wasm::{
     ChannelCapabilities, EmitRateLimitConfig, PreparedChannelModule, RegisteredEndpoint,
     WasmChannel, WasmChannelRouter, WasmChannelRuntime, WasmChannelRuntimeConfig,
 };
+use ironclaw::pairing::PairingStore;
 use tempfile::TempDir;
 
 /// Create a test runtime for WASM channel operations.
@@ -38,7 +39,13 @@ fn create_test_channel(
         capabilities = capabilities.with_path(path.to_string());
     }
 
-    WasmChannel::new(runtime, prepared, capabilities, "{}".to_string())
+    WasmChannel::new(
+        runtime,
+        prepared,
+        capabilities,
+        "{}".to_string(),
+        Arc::new(PairingStore::new()),
+    )
 }
 
 mod router_tests {
