@@ -84,7 +84,7 @@ async fn main() -> anyhow::Result<()> {
 
             // Memory commands need database (and optionally embeddings)
             let _ = dotenvy::dotenv();
-            let config = Config::from_env().map_err(|e| anyhow::anyhow!("{}", e))?;
+            let config = Config::from_env().await.map_err(|e| anyhow::anyhow!("{}", e))?;
             let store = ironclaw::history::Store::new(&config.database).await?;
             store.run_migrations().await?;
 
@@ -240,7 +240,7 @@ async fn main() -> anyhow::Result<()> {
 
     // Enhanced first-run detection
     if !cli.no_onboard {
-        if let Some(reason) = check_onboard_needed() {
+        if let Some(reason) = check_onboard_needed().await {
             println!("Onboarding needed: {}", reason);
             println!();
             let mut wizard = SetupWizard::new();
@@ -252,7 +252,7 @@ async fn main() -> anyhow::Result<()> {
     let bootstrap = ironclaw::bootstrap::BootstrapConfig::load();
 
     // Load initial config from env + disk (before DB is available)
-    let mut config = match Config::from_env() {
+    let mut config = match Config::from_env().await {
         Ok(c) => c,
         Err(ironclaw::error::ConfigError::MissingRequired { key, hint }) => {
             eprintln!("Configuration error: Missing required setting '{}'", key);
@@ -1043,7 +1043,7 @@ async fn main() -> anyhow::Result<()> {
 /// Check if onboarding is needed and return the reason.
 ///
 /// Returns `Some(reason)` if onboarding should be triggered, `None` otherwise.
-fn check_onboard_needed() -> Option<&'static str> {
+async fn check_onboard_needed() -> Option<&'static str> {
     let bootstrap = ironclaw::bootstrap::BootstrapConfig::load();
 
     // Database not configured (and not in env)
@@ -1054,7 +1054,7 @@ fn check_onboard_needed() -> Option<&'static str> {
     // Secrets not configured (and not in env)
     if bootstrap.secrets_master_key_source == ironclaw::settings::KeySource::None
         && std::env::var("SECRETS_MASTER_KEY").is_err()
-        && !ironclaw::secrets::keychain::has_master_key()
+        && !ironclaw::secrets::keychain::has_master_key().await
     {
         // Only require secrets setup if user hasn't explicitly disabled it
         // For now, we don't require it for first run

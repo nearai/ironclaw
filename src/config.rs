@@ -53,7 +53,7 @@ impl Config {
             }
         };
 
-        Self::build(bootstrap, &db_settings)
+        Self::build(bootstrap, &db_settings).await
     }
 
     /// Load configuration from environment variables only (no database).
@@ -61,15 +61,15 @@ impl Config {
     /// Used during early startup before the database is connected,
     /// and by CLI commands that don't have DB access.
     /// Falls back to legacy `settings.json` on disk if present.
-    pub fn from_env() -> Result<Self, ConfigError> {
+    pub async fn from_env() -> Result<Self, ConfigError> {
         let _ = dotenvy::dotenv();
         let bootstrap = crate::bootstrap::BootstrapConfig::load();
         let settings = Settings::load();
-        Self::build(&bootstrap, &settings)
+        Self::build(&bootstrap, &settings).await
     }
 
     /// Build config from bootstrap + settings (shared by from_env and from_db).
-    fn build(
+    async fn build(
         bootstrap: &crate::bootstrap::BootstrapConfig,
         settings: &Settings,
     ) -> Result<Self, ConfigError> {
@@ -82,7 +82,7 @@ impl Config {
             agent: AgentConfig::resolve(settings)?,
             safety: SafetyConfig::resolve()?,
             wasm: WasmConfig::resolve()?,
-            secrets: SecretsConfig::resolve(bootstrap)?,
+            secrets: SecretsConfig::resolve(bootstrap).await?,
             builder: BuilderModeConfig::resolve()?,
             heartbeat: HeartbeatConfig::resolve(settings)?,
             routines: RoutineConfig::resolve()?,
@@ -604,27 +604,32 @@ impl std::fmt::Debug for SecretsConfig {
 }
 
 impl SecretsConfig {
-    fn resolve(bootstrap: &crate::bootstrap::BootstrapConfig) -> Result<Self, ConfigError> {
+    async fn resolve(bootstrap: &crate::bootstrap::BootstrapConfig) -> Result<Self, ConfigError> {
         use crate::settings::KeySource;
 
         let (master_key, source) = if let Some(env_key) = optional_env("SECRETS_MASTER_KEY")? {
             (Some(SecretString::from(env_key)), KeySource::Env)
         } else {
             match bootstrap.secrets_master_key_source {
-                KeySource::Keychain => match crate::secrets::keychain::get_master_key() {
-                    Ok(key_bytes) => {
-                        let key_hex: String =
-                            key_bytes.iter().map(|b| format!("{:02x}", b)).collect();
-                        (Some(SecretString::from(key_hex)), KeySource::Keychain)
-                    }
-                    Err(_) => {
-                        tracing::warn!(
-                            "Secrets configured for keychain but key not found. \
+                KeySource::Keychain => {
+                    // Try to load from OS keychain (async on Linux)
+                    match crate::secrets::keychain::get_master_key().await {
+                        Ok(key_bytes) => {
+                            let key_hex: String =
+                                key_bytes.iter().map(|b| format!("{:02x}", b)).collect();
+                            (Some(SecretString::from(key_hex)), KeySource::Keychain)
+                        }
+                        Err(_) => {
+                            // Keychain configured but key not found
+                            // This might happen if keychain was cleared
+                            tracing::warn!(
+                                "Secrets configured for keychain but key not found. \
                                  Run 'ironclaw onboard' to reconfigure."
-                        );
-                        (None, KeySource::None)
+                            );
+                            (None, KeySource::None)
+                        }
                     }
-                },
+                }
                 KeySource::Env => {
                     tracing::warn!(
                         "Secrets configured for env var but SECRETS_MASTER_KEY not set."
