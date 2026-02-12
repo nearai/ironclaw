@@ -1,0 +1,93 @@
+{
+  "http": {
+    "allowlist": [
+      {
+        "host": "*.okta.com",
+        "path_prefix": "/api/v1/",
+        "methods": ["GET", "POST", "PUT"]
+      },
+      {
+        "host": "*.okta.com",
+        "path_prefix": "/idp/myaccount/",
+        "methods": ["GET", "PUT"]
+      },
+      {
+        "host": "*.okta.com",
+        "path_prefix": "/oauth2/v1/",
+        "methods": ["POST"]
+      },
+      {
+        "host": "*.oktapreview.com",
+        "path_prefix": "/api/v1/",
+        "methods": ["GET", "POST", "PUT"]
+      },
+      {
+        "host": "*.oktapreview.com",
+        "path_prefix": "/idp/myaccount/",
+        "methods": ["GET", "PUT"]
+      },
+      {
+        "host": "*.oktapreview.com",
+        "path_prefix": "/oauth2/v1/",
+        "methods": ["POST"]
+      },
+      {
+        "host": "*.okta-emea.com",
+        "path_prefix": "/api/v1/",
+        "methods": ["GET", "POST", "PUT"]
+      },
+      {
+        "host": "*.okta-emea.com",
+        "path_prefix": "/idp/myaccount/",
+        "methods": ["GET", "PUT"]
+      },
+      {
+        "host": "*.okta-emea.com",
+        "path_prefix": "/oauth2/v1/",
+        "methods": ["POST"]
+      }
+    ],
+    "credentials": {
+      "okta_oauth_token": {
+        "secret_name": "okta_oauth_token",
+        "location": { "type": "bearer" },
+        "host_patterns": ["*.okta.com", "*.oktapreview.com", "*.okta-emea.com"]
+      }
+    },
+    "rate_limit": {
+      "requests_per_minute": 30,
+      "requests_per_hour": 500
+    },
+    "timeout_secs": 30
+  },
+  "workspace": {
+    "allowed_prefixes": ["okta/"]
+  },
+  "secrets": {
+    "allowed_names": ["okta_oauth_token"]
+  },
+  "auth": {
+    "secret_name": "okta_oauth_token",
+    "display_name": "Okta",
+    "oauth": {
+      "authorization_url": "https://{okta_domain}/oauth2/v1/authorize",
+      "token_url": "https://{okta_domain}/oauth2/v1/token",
+      "client_id_env": "OKTA_OAUTH_CLIENT_ID",
+      "client_secret_env": "OKTA_OAUTH_CLIENT_SECRET",
+      "scopes": [
+        "openid",
+        "profile",
+        "email",
+        "offline_access",
+        "okta.users.read.self",
+        "okta.users.manage.self",
+        "okta.apps.read"
+      ],
+      "use_pkce": true
+    },
+    "instructions": "1. In your Okta Admin Console, go to Applications > Create App Integration\n2. Select 'OIDC - OpenID Connect', then 'Web Application'\n3. Set Sign-in redirect URI to http://localhost:9876/callback (through :9886)\n4. Under Okta API Scopes, grant: okta.users.read.self, okta.users.manage.self, okta.apps.read\n5. Copy the Client ID and Client Secret\n6. IMPORTANT: You must use the Org Authorization Server (not a custom one)\n7. Store your Okta domain in workspace at 'okta/domain' (e.g., 'mycompany.okta.com')\n8. For custom domains, add them to okta-tool.capabilities.json allowlist",
+    "setup_url": "https://developer.okta.com/docs/guides/implement-oauth-for-okta/main/",
+    "token_hint": "OAuth2 access token (JWT)",
+    "env_var": "OKTA_OAUTH_TOKEN"
+  }
+}

@@ -246,13 +246,46 @@ Create `my-channel.capabilities.json`:
 
 ## Building and Deploying
 
+### Supply Chain Security: No Committed Binaries
+
+**Do not commit compiled WASM binaries.** They are a supply chain risk — the binary in a PR may not match the source. IronClaw builds channels from source:
+
+- `cargo build` automatically builds `telegram.wasm` via `build.rs`
+- The built binary is in `.gitignore` and is not committed
+- CI should run `cargo build` (or `./scripts/build-all.sh`) to produce releases
+
+**Reproducible build:**
+```bash
+cargo build --release
+```
+
+Prerequisites: `rustup target add wasm32-wasip2`, `cargo install wasm-tools` (optional; fallback copies raw WASM if unavailable).
+
+### Telegram Channel (Manual Build)
+
+```bash
+# Add WASM target if needed
+rustup target add wasm32-wasip2
+
+# Build Telegram channel
+./channels-src/telegram/build.sh
+
+# Install (or use ironclaw onboard to install bundled channel)
+mkdir -p ~/.ironclaw/channels
+cp channels-src/telegram/telegram.wasm channels-src/telegram/telegram.capabilities.json ~/.ironclaw/channels/
+```
+
+**Note**: The main IronClaw binary bundles `telegram.wasm` via `include_bytes!`. When modifying the Telegram channel source, run `./channels-src/telegram/build.sh` **before** building the main crate, so the updated WASM is included.
+
+### Other Channels
+
 ```bash
 # Build the WASM component
-cd channels/my-channel
-cargo component build --release
+cd channels-src/my-channel
+cargo build --release --target wasm32-wasip2
 
 # Deploy to ~/.ironclaw/channels/
-cp target/wasm32-wasip1/release/my_channel.wasm ~/.ironclaw/channels/my-channel.wasm
+cp target/wasm32-wasip2/release/my_channel.wasm ~/.ironclaw/channels/my-channel.wasm
 cp my-channel.capabilities.json ~/.ironclaw/channels/
 ```
 

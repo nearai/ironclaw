@@ -147,6 +147,32 @@ interface channel-host {
     /// - Path validation fails (traversal attempt, absolute path)
     /// - Write operation fails
     workspace-write: func(path: string, content: string) -> result<_, string>;
+
+    // ==================== DM Pairing ====================
+
+    /// Result of upserting a pairing request.
+    record pairing-upsert-result {
+        code: string,
+        created: bool,
+    }
+
+    /// Upsert a pairing request for an unknown sender.
+    /// Returns (code, created). When created is true, the channel should send a pairing reply.
+    pairing-upsert-request: func(
+        channel: string,
+        id: string,
+        meta-json: string
+    ) -> result<pairing-upsert-result, string>;
+
+    /// Check if a sender is allowed (in allowFrom store).
+    pairing-is-allowed: func(
+        channel: string,
+        id: string,
+        username: option<string>
+    ) -> result<bool, string>;
+
+    /// Read the allowFrom list (for merging with config allowFrom).
+    pairing-read-allow-from: func(channel: string) -> result<list<string>, string>;
 }
 
 /// Channel interface that sandboxed channels must implement.

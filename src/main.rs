@@ -17,7 +17,8 @@ use ironclaw::{
         web::log_layer::{LogBroadcaster, WebLogLayer},
     },
     cli::{
-        Cli, Command, run_mcp_command, run_memory_command, run_status_command, run_tool_command,
+        Cli, Command, run_mcp_command, run_memory_command, run_pairing_command, run_status_command,
+        run_tool_command,
     },
     config::Config,
     context::ContextManager,
@@ -28,6 +29,7 @@ use ironclaw::{
         ContainerJobConfig, ContainerJobManager, OrchestratorApi, TokenStore,
         api::OrchestratorState,
     },
+    pairing::PairingStore,
     safety::SafetyLayer,
     secrets::{PostgresSecretsStore, SecretsCrypto, SecretsStore},
     setup::{SetupConfig, SetupWizard},
@@ -84,7 +86,9 @@ async fn main() -> anyhow::Result<()> {
 
             // Memory commands need database (and optionally embeddings)
             let _ = dotenvy::dotenv();
-            let config = Config::from_env().map_err(|e| anyhow::anyhow!("{}", e))?;
+            let config = Config::from_env()
+                .await
+                .map_err(|e| anyhow::anyhow!("{}", e))?;
             let store = ironclaw::history::Store::new(&config.database).await?;
             store.run_migrations().await?;
 
@@ -127,6 +131,15 @@ async fn main() -> anyhow::Result<()> {
                 };
 
             return run_memory_command(mem_cmd.clone(), store.pool(), embeddings).await;
+        }
+        Some(Command::Pairing(pairing_cmd)) => {
+            tracing_subscriber::fmt()
+                .with_env_filter(
+                    EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("warn")),
+                )
+                .init();
+
+            return run_pairing_command(pairing_cmd.clone()).map_err(|e| anyhow::anyhow!("{}", e));
         }
         Some(Command::Status) => {
             let _ = dotenvy::dotenv();
@@ -240,7 +253,7 @@ async fn main() -> anyhow::Result<()> {
 
     // Enhanced first-run detection
     if !cli.no_onboard {
-        if let Some(reason) = check_onboard_needed() {
+        if let Some(reason) = check_onboard_needed().await {
             println!("Onboarding needed: {}", reason);
             println!();
             let mut wizard = SetupWizard::new();
@@ -252,7 +265,7 @@ async fn main() -> anyhow::Result<()> {
     let bootstrap = ironclaw::bootstrap::BootstrapConfig::load();
 
     // Load initial config from env + disk (before DB is available)
-    let mut config = match Config::from_env() {
+    let mut config = match Config::from_env().await {
         Ok(c) => c,
         Err(ironclaw::error::ConfigError::MissingRequired { key, hint }) => {
             eprintln!("Configuration error: Missing required setting '{}'", key);
@@ -274,8 +287,10 @@ async fn main() -> anyhow::Result<()> {
     };
     let session = create_session_manager(session_config).await;
 
-    // Ensure we're authenticated before proceeding (may trigger login flow)
-    session.ensure_authenticated().await?;
+    // Ensure we're authenticated before proceeding (only needed for NEAR AI backend)
+    if config.llm.backend == ironclaw::config::LlmBackend::NearAi {
+        session.ensure_authenticated().await?;
+    }
 
     // Initialize tracing
     let env_filter = EnvFilter::try_from_default_env()
@@ -302,7 +317,7 @@ async fn main() -> anyhow::Result<()> {
 
     tracing::info!("Starting IronClaw...");
     tracing::info!("Loaded configuration for agent: {}", config.agent.name);
-    tracing::info!("NEAR AI session authenticated");
+    tracing::info!("LLM backend: {}", config.llm.backend);
 
     // Initialize database store (optional for testing)
     let store = if cli.no_db {
@@ -723,7 +738,8 @@ async fn main() -> anyhow::Result<()> {
         match WasmChannelRuntime::new(WasmChannelRuntimeConfig::default()) {
             Ok(runtime) => {
                 let runtime = Arc::new(runtime);
-                let loader = WasmChannelLoader::new(Arc::clone(&runtime));
+                let pairing_store = Arc::new(PairingStore::new());
+                let loader = WasmChannelLoader::new(Arc::clone(&runtime), pairing_store);
 
                 match loader
                     .load_from_dir(&config.channels.wasm_channels_dir)
@@ -1044,7 +1060,7 @@ async fn main() -> anyhow::Result<()> {
 /// Check if onboarding is needed and return the reason.
 ///
 /// Returns `Some(reason)` if onboarding should be triggered, `None` otherwise.
-fn check_onboard_needed() -> Option<&'static str> {
+async fn check_onboard_needed() -> Option<&'static str> {
     let bootstrap = ironclaw::bootstrap::BootstrapConfig::load();
 
     // Database not configured (and not in env)
@@ -1055,7 +1071,7 @@ fn check_onboard_needed() -> Option<&'static str> {
     // Secrets not configured (and not in env)
     if bootstrap.secrets_master_key_source == ironclaw::settings::KeySource::None
         && std::env::var("SECRETS_MASTER_KEY").is_err()
-        && !ironclaw::secrets::keychain::has_master_key()
+        && !ironclaw::secrets::keychain::has_master_key().await
     {
         // Only require secrets setup if user hasn't explicitly disabled it
         // For now, we don't require it for first run
