@@ -403,6 +403,8 @@ pub struct NearAiConfig {
     /// automatically fall through to the fallback.
     pub fallback_model: Option<String>,
     /// Maximum number of retries for transient errors (default: 3).
+    /// With the default of 3, the provider makes up to 4 total attempts
+    /// (1 initial + 3 retries) before giving up.
     pub max_retries: u32,
 }
 
