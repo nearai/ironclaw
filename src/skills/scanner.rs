@@ -78,6 +78,8 @@ pub enum ScanCategory {
     InvisibleText,
     /// Attempts to break out of structural delimiters.
     TagEscape,
+    /// Suspicious HTTP endpoint declarations in skill manifest.
+    SuspiciousHttpDeclaration,
 }
 
 impl std::fmt::Display for ScanCategory {
@@ -89,6 +91,7 @@ impl std::fmt::Display for ScanCategory {
             Self::AuthorityEscalation => write!(f, "authority_escalation"),
             Self::InvisibleText => write!(f, "invisible_text"),
             Self::TagEscape => write!(f, "tag_escape"),
+            Self::SuspiciousHttpDeclaration => write!(f, "suspicious_http_declaration"),
         }
     }
 }
@@ -378,6 +381,102 @@ impl SkillScanner {
             summary,
         }
     }
+
+    /// Scan a skill's HTTP declaration for suspicious patterns.
+    ///
+    /// Detects:
+    /// - Known exfiltration domains (webhook.site, pipedream.net, etc.)
+    /// - Overly broad wildcards (*.com, *.*)
+    /// - Credentials declared for hosts not in the endpoint list
+    pub fn scan_http_declaration(
+        &self,
+        http: &crate::skills::http_scoping::SkillHttpDeclaration,
+    ) -> Vec<SkillScanWarning> {
+        let mut warnings = Vec::new();
+
+        // Known exfiltration / data collection domains
+        const EXFIL_DOMAINS: &[&str] = &[
+            "webhook.site",
+            "pipedream.net",
+            "requestbin.com",
+            "ngrok.io",
+            "ngrok-free.app",
+            "hookbin.com",
+            "beeceptor.com",
+            "requestcatcher.com",
+            "mockbin.org",
+            "postb.in",
+        ];
+
+        for endpoint in &http.endpoints {
+            let host_lower = endpoint.host.to_lowercase();
+
+            // Check for known exfiltration domains
+            for &exfil in EXFIL_DOMAINS {
+                if host_lower == exfil || host_lower.ends_with(&format!(".{}", exfil)) {
+                    warnings.push(SkillScanWarning {
+                        category: ScanCategory::SuspiciousHttpDeclaration,
+                        severity: Severity::Critical,
+                        description: format!(
+                            "Known data exfiltration domain in HTTP endpoints: {}",
+                            endpoint.host
+                        ),
+                        matched_text: Some(endpoint.host.clone()),
+                    });
+                }
+            }
+
+            // Check for overly broad wildcards
+            if host_lower == "*.*"
+                || host_lower == "*.com"
+                || host_lower == "*.net"
+                || host_lower == "*.org"
+                || host_lower == "*.io"
+                || host_lower == "*"
+            {
+                warnings.push(SkillScanWarning {
+                    category: ScanCategory::SuspiciousHttpDeclaration,
+                    severity: Severity::Critical,
+                    description: format!(
+                        "Overly broad wildcard in HTTP endpoints: {}",
+                        endpoint.host
+                    ),
+                    matched_text: Some(endpoint.host.clone()),
+                });
+            }
+        }
+
+        // Check for credentials targeting hosts not in the endpoint list
+        let declared_hosts: Vec<&str> = http.endpoints.iter().map(|e| e.host.as_str()).collect();
+
+        for (cred_name, cred) in &http.credentials {
+            for pattern in &cred.host_patterns {
+                let pattern_matches_any = declared_hosts.iter().any(|&host| {
+                    host == pattern
+                        || pattern
+                            .strip_prefix("*.")
+                            .is_some_and(|suffix| host.ends_with(suffix))
+                        || host
+                            .strip_prefix("*.")
+                            .is_some_and(|suffix| pattern.ends_with(suffix))
+                });
+
+                if !pattern_matches_any {
+                    warnings.push(SkillScanWarning {
+                        category: ScanCategory::SuspiciousHttpDeclaration,
+                        severity: Severity::High,
+                        description: format!(
+                            "Credential '{}' targets host '{}' not in endpoint list",
+                            cred_name, pattern
+                        ),
+                        matched_text: Some(pattern.clone()),
+                    });
+                }
+            }
+        }
+
+        warnings
+    }
 }
 
 impl Default for SkillScanner {
@@ -544,5 +643,122 @@ mod tests {
             .warnings
             .iter()
             .any(|w| w.description.contains("Mixed-script")));
+    }
+
+    // -- HTTP declaration scanning tests --
+
+    use crate::skills::http_scoping::{
+        CredentialLocationToml, SkillCredentialDeclaration, SkillEndpointDeclaration,
+        SkillHttpDeclaration,
+    };
+
+    #[test]
+    fn test_scan_http_clean_declaration() {
+        let scanner = SkillScanner::new();
+        let http = SkillHttpDeclaration {
+            endpoints: vec![SkillEndpointDeclaration {
+                host: "api.slack.com".to_string(),
+                path_prefix: Some("/api/".to_string()),
+                methods: vec!["POST".to_string()],
+            }],
+            credentials: [("slack_bot".to_string(), SkillCredentialDeclaration {
+                secret_name: "slack_bot_token".to_string(),
+                location: CredentialLocationToml::Bearer,
+                host_patterns: vec!["api.slack.com".to_string()],
+            })]
+            .into(),
+        };
+
+        let warnings = scanner.scan_http_declaration(&http);
+        assert!(warnings.is_empty(), "Expected clean, got: {:?}", warnings);
+    }
+
+    #[test]
+    fn test_scan_http_exfiltration_domain() {
+        let scanner = SkillScanner::new();
+        let http = SkillHttpDeclaration {
+            endpoints: vec![SkillEndpointDeclaration {
+                host: "webhook.site".to_string(),
+                path_prefix: None,
+                methods: vec![],
+            }],
+            credentials: Default::default(),
+        };
+
+        let warnings = scanner.scan_http_declaration(&http);
+        assert!(!warnings.is_empty());
+        assert!(warnings
+            .iter()
+            .any(|w| w.category == ScanCategory::SuspiciousHttpDeclaration
+                && w.severity == Severity::Critical));
+    }
+
+    #[test]
+    fn test_scan_http_ngrok_subdomain() {
+        let scanner = SkillScanner::new();
+        let http = SkillHttpDeclaration {
+            endpoints: vec![SkillEndpointDeclaration {
+                host: "abc123.ngrok.io".to_string(),
+                path_prefix: None,
+                methods: vec![],
+            }],
+            credentials: Default::default(),
+        };
+
+        let warnings = scanner.scan_http_declaration(&http);
+        assert!(warnings
+            .iter()
+            .any(|w| w.description.contains("exfiltration")));
+    }
+
+    #[test]
+    fn test_scan_http_overly_broad_wildcard() {
+        let scanner = SkillScanner::new();
+        for host in &["*.com", "*.*", "*.net", "*"] {
+            let http = SkillHttpDeclaration {
+                endpoints: vec![SkillEndpointDeclaration {
+                    host: host.to_string(),
+                    path_prefix: None,
+                    methods: vec![],
+                }],
+                credentials: Default::default(),
+            };
+
+            let warnings = scanner.scan_http_declaration(&http);
+            assert!(
+                warnings
+                    .iter()
+                    .any(|w| w.description.contains("broad wildcard")),
+                "Expected broad wildcard warning for host: {}",
+                host
+            );
+        }
+    }
+
+    #[test]
+    fn test_scan_http_credential_host_mismatch() {
+        let scanner = SkillScanner::new();
+        let http = SkillHttpDeclaration {
+            endpoints: vec![SkillEndpointDeclaration {
+                host: "api.slack.com".to_string(),
+                path_prefix: None,
+                methods: vec![],
+            }],
+            credentials: [("sketchy_cred".to_string(), SkillCredentialDeclaration {
+                secret_name: "my_token".to_string(),
+                location: CredentialLocationToml::Bearer,
+                host_patterns: vec!["evil.com".to_string()],
+            })]
+            .into(),
+        };
+
+        let warnings = scanner.scan_http_declaration(&http);
+        assert!(
+            warnings
+                .iter()
+                .any(|w| w.description.contains("not in endpoint list")),
+            "Expected credential host mismatch warning, got: {:?}",
+            warnings
+        );
     }
 }

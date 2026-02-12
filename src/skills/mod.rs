@@ -16,11 +16,13 @@
 //! preventing privilege escalation through skill mixing.
 
 pub mod attenuation;
+pub mod http_scoping;
 pub mod registry;
 pub mod scanner;
 pub mod selector;
 
 pub use attenuation::{AttenuationResult, attenuate_tools};
+pub use http_scoping::{HttpScopeError, SkillHttpDeclaration, SkillHttpScopes};
 pub use registry::SkillRegistry;
 pub use scanner::{SkillScanResult, SkillScanner};
 pub use selector::prefilter_skills;
@@ -158,6 +160,9 @@ pub struct SkillManifest {
     /// Integrity information.
     #[serde(default)]
     pub integrity: IntegrityInfo,
+    /// HTTP endpoint scoping: declares which endpoints and credentials this skill needs.
+    #[serde(default)]
+    pub http: Option<http_scoping::SkillHttpDeclaration>,
 }
 
 /// Core skill metadata from `[skill]` section.

@@ -200,6 +200,7 @@ mod tests {
                 activation: ActivationCriteria::default(),
                 permissions,
                 integrity: IntegrityInfo::default(),
+                http: None,
             },
             prompt_content: "test".to_string(),
             trust,

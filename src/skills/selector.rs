@@ -177,6 +177,7 @@ mod tests {
                 },
                 permissions: Default::default(),
                 integrity: IntegrityInfo::default(),
+                http: None,
             },
             prompt_content: "Test prompt".to_string(),
             trust: SkillTrust::Local,

@@ -1070,6 +1070,15 @@ impl Agent {
                 vec![]
             };
 
+        // Build HTTP scopes for active skills (enforced in execute_chat_tool)
+        let skill_http_scopes = if !active_skills.is_empty() {
+            Some(crate::skills::SkillHttpScopes::from_active_skills(
+                &active_skills,
+            ))
+        } else {
+            None
+        };
+
         // Build skill context block and compute trust attenuation
         let (skill_context, skill_trust) = if !active_skills.is_empty() {
             let min_trust = active_skills
@@ -1309,7 +1318,12 @@ impl Agent {
                             .await;
 
                         let tool_result = self
-                            .execute_chat_tool(&tc.name, &tc.arguments, &job_ctx)
+                            .execute_chat_tool(
+                                &tc.name,
+                                &tc.arguments,
+                                &job_ctx,
+                                skill_http_scopes.as_ref(),
+                            )
                             .await;
 
                         let _ = self
@@ -1418,6 +1432,7 @@ impl Agent {
         tool_name: &str,
         params: &serde_json::Value,
         job_ctx: &JobContext,
+        http_scopes: Option<&crate::skills::SkillHttpScopes>,
     ) -> Result<String, Error> {
         let tool =
             self.tools()
@@ -1441,6 +1456,34 @@ impl Agent {
                 reason: format!("Invalid tool parameters: {}", details),
             }
             .into());
+        }
+
+        // Enforce skill HTTP scoping
+        if let Some(scopes) = http_scopes {
+            if tool_name == "http" {
+                if let (Some(url), Some(method)) = (
+                    params.get("url").and_then(|v| v.as_str()),
+                    params.get("method").and_then(|v| v.as_str()),
+                ) {
+                    scopes.validate_http_request(url, method).map_err(
+                        |e: crate::skills::HttpScopeError| {
+                            crate::error::ToolError::ExecutionFailed {
+                                name: tool_name.to_string(),
+                                reason: e.to_string(),
+                            }
+                        },
+                    )?;
+                }
+            } else if tool_name == "shell" {
+                if let Some(cmd) = params.get("command").and_then(|v| v.as_str()) {
+                    scopes.validate_shell_command(cmd).map_err(|e| {
+                        crate::error::ToolError::ExecutionFailed {
+                            name: tool_name.to_string(),
+                            reason: e.to_string(),
+                        }
+                    })?;
+                }
+            }
         }
 
         tracing::debug!(
@@ -1782,8 +1825,14 @@ impl Agent {
                 )
                 .await;
 
+            // User explicitly approved this tool call, so skip HTTP scoping
             let tool_result = self
-                .execute_chat_tool(&pending.tool_name, &pending.parameters, &job_ctx)
+                .execute_chat_tool(
+                    &pending.tool_name,
+                    &pending.parameters,
+                    &job_ctx,
+                    None,
+                )
                 .await;
 
             let _ = self
