@@ -68,6 +68,9 @@ pub struct AgentDeps {
     pub extension_manager: Option<Arc<ExtensionManager>>,
     pub skill_registry: Option<Arc<SkillRegistry>>,
     pub skills_config: SkillsConfig,
+    /// Handle to update skill permissions on the CreateJobTool (for worker enforcement).
+    pub job_skill_permissions:
+        Option<Arc<tokio::sync::RwLock<Vec<crate::skills::enforcer::SerializedToolPermission>>>>,
 }
 
 /// The main agent that coordinates all components.
@@ -1091,6 +1094,19 @@ impl Agent {
         } else {
             None
         };
+
+        // Update skill permissions on the CreateJobTool so spawned workers
+        // inherit the current session's skill context.
+        if let Some(ref handle) = self.deps.job_skill_permissions {
+            let serialized = if !active_skills.is_empty() {
+                crate::skills::enforcer::SerializedToolPermission::from_active_skills(
+                    &active_skills,
+                )
+            } else {
+                vec![]
+            };
+            *handle.write().await = serialized;
+        }
 
         // Build skill context block and compute trust attenuation
         let (skill_context, skill_trust) = if !active_skills.is_empty() {

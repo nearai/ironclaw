@@ -17,10 +17,82 @@ use std::collections::HashMap;
 use std::fmt;
 
 use regex::RegexBuilder;
+use serde::{Deserialize, Serialize};
 
 use crate::skills::{
     FilePathPattern, LoadedSkill, MemoryTargetPattern, ShellPattern, SkillTrust, ToolPattern,
 };
+
+// ---------------------------------------------------------------------------
+// Serializable permission DTOs (cross the HTTP boundary to workers)
+// ---------------------------------------------------------------------------
+
+/// A serialized tool permission that can be sent over HTTP to workers.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SerializedToolPermission {
+    pub tool_name: String,
+    pub trust: SkillTrust,
+    pub patterns: Vec<SerializedPattern>,
+}
+
+/// A serialized pattern variant with explicit tags for unambiguous JSON round-trip.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "kind")]
+pub enum SerializedPattern {
+    Shell { command: String },
+    FilePath { path: String },
+    MemoryTarget { target: String },
+}
+
+impl SerializedToolPermission {
+    /// Extract serializable permissions from active skills.
+    ///
+    /// Community skills are excluded (defense in depth).
+    /// Each skill's tool permissions are flattened into a list of per-tool entries.
+    pub fn from_active_skills(skills: &[LoadedSkill]) -> Vec<Self> {
+        let mut result = Vec::new();
+
+        for skill in skills {
+            // Defense in depth: exclude community skill patterns
+            if skill.trust == SkillTrust::Community {
+                continue;
+            }
+
+            for (tool_name, decl) in &skill.manifest.permissions {
+                // HTTP is handled by http_scoping.rs
+                if tool_name == "http" {
+                    continue;
+                }
+
+                let patterns: Vec<SerializedPattern> = decl
+                    .allowed_patterns
+                    .iter()
+                    .map(|p| match p {
+                        ToolPattern::Shell(ShellPattern { command }) => SerializedPattern::Shell {
+                            command: command.clone(),
+                        },
+                        ToolPattern::FilePath(FilePathPattern { path }) => {
+                            SerializedPattern::FilePath { path: path.clone() }
+                        }
+                        ToolPattern::MemoryTarget(MemoryTargetPattern { target }) => {
+                            SerializedPattern::MemoryTarget {
+                                target: target.clone(),
+                            }
+                        }
+                    })
+                    .collect();
+
+                result.push(SerializedToolPermission {
+                    tool_name: tool_name.clone(),
+                    trust: skill.trust,
+                    patterns,
+                });
+            }
+        }
+
+        result
+    }
+}
 
 /// Maximum compiled regex size (64 KiB) to prevent ReDoS.
 const MAX_REGEX_SIZE: usize = 1 << 16;
@@ -189,97 +261,88 @@ pub struct SkillPermissionEnforcer {
 }
 
 impl SkillPermissionEnforcer {
-    /// Build an enforcer from active skills.
+    /// Reconstruct an enforcer from serialized permission data (worker side).
     ///
-    /// Community skills' patterns are silently ignored.
-    /// Local skills without patterns for a tool leave it unrestricted.
-    pub fn from_active_skills(skills: &[LoadedSkill]) -> Self {
+    /// Recompiles glob patterns into regex. Invalid patterns are logged and skipped.
+    /// Same trust rules as `from_active_skills()`: Community ignored, Local without
+    /// patterns = unrestricted, union semantics.
+    pub fn from_serialized(permissions: &[SerializedToolPermission]) -> Self {
         let mut tools: HashMap<String, ToolRestriction> = HashMap::new();
 
-        for skill in skills {
+        for perm in permissions {
             // Defense in depth: ignore community skill patterns
-            if skill.trust == SkillTrust::Community {
+            if perm.trust == SkillTrust::Community {
                 continue;
             }
 
-            for (tool_name, decl) in &skill.manifest.permissions {
-                // Skip HTTP -- handled by http_scoping.rs
-                if tool_name == "http" {
-                    continue;
+            let tool_name = &perm.tool_name;
+
+            if perm.patterns.is_empty() {
+                if perm.trust == SkillTrust::Local {
+                    tools.insert(tool_name.clone(), ToolRestriction::Unrestricted);
                 }
+                // Verified with no patterns: no enforcement (backward compat).
+                // NOTE: Changing this to deny-all for empty patterns was considered
+                // but deferred -- it would require a migration path for existing
+                // Verified skills that declare tools without patterns.
+                continue;
+            }
 
-                if decl.allowed_patterns.is_empty() {
-                    if skill.trust == SkillTrust::Local {
-                        // Local skill with no patterns = unrestricted
-                        tools.insert(tool_name.clone(), ToolRestriction::Unrestricted);
-                    }
-                    // Verified with no patterns: no enforcement (backward compat).
-                    // TODO(Phase 3): Consider requiring Verified skills to provide
-                    // at least one pattern per declared tool, treating empty patterns
-                    // as deny-all rather than allow-all.
-                    continue;
-                }
+            // If already unrestricted due to a Local skill, skip
+            if matches!(tools.get(tool_name), Some(ToolRestriction::Unrestricted)) {
+                continue;
+            }
 
-                // If already unrestricted due to a Local skill, skip
-                if matches!(tools.get(tool_name), Some(ToolRestriction::Unrestricted)) {
-                    continue;
-                }
+            // Compile patterns
+            let mut compiled = ToolPatterns {
+                shell: Vec::new(),
+                file_path: Vec::new(),
+                memory_target: Vec::new(),
+            };
 
-                // Compile patterns
-                let mut compiled = ToolPatterns {
-                    shell: Vec::new(),
-                    file_path: Vec::new(),
-                    memory_target: Vec::new(),
-                };
-
-                for pattern in &decl.allowed_patterns {
-                    match pattern {
-                        ToolPattern::Shell(ShellPattern { command }) => {
-                            match CompiledPattern::new(command) {
-                                Ok(cp) => compiled.shell.push(cp),
-                                Err(e) => {
-                                    tracing::warn!(
-                                        skill_name = skill.name(),
-                                        "Bad shell pattern: {}",
-                                        e
-                                    );
-                                }
-                            }
+            for pattern in &perm.patterns {
+                match pattern {
+                    SerializedPattern::Shell { command } => match CompiledPattern::new(command) {
+                        Ok(cp) => compiled.shell.push(cp),
+                        Err(e) => {
+                            tracing::warn!(
+                                tool_name = tool_name.as_str(),
+                                "Bad serialized shell pattern: {}",
+                                e
+                            );
                         }
-                        ToolPattern::FilePath(FilePathPattern { path }) => {
-                            match CompiledPattern::new(path) {
-                                Ok(cp) => compiled.file_path.push(cp),
-                                Err(e) => {
-                                    tracing::warn!(
-                                        skill_name = skill.name(),
-                                        "Bad file path pattern: {}",
-                                        e
-                                    );
-                                }
-                            }
+                    },
+                    SerializedPattern::FilePath { path } => match CompiledPattern::new(path) {
+                        Ok(cp) => compiled.file_path.push(cp),
+                        Err(e) => {
+                            tracing::warn!(
+                                tool_name = tool_name.as_str(),
+                                "Bad serialized file path pattern: {}",
+                                e
+                            );
                         }
-                        ToolPattern::MemoryTarget(MemoryTargetPattern { target }) => {
-                            match CompiledPattern::new(target) {
-                                Ok(cp) => compiled.memory_target.push(cp),
-                                Err(e) => {
-                                    tracing::warn!(
-                                        skill_name = skill.name(),
-                                        "Bad memory target pattern: {}",
-                                        e
-                                    );
-                                }
+                    },
+                    SerializedPattern::MemoryTarget { target } => {
+                        match CompiledPattern::new(target) {
+                            Ok(cp) => compiled.memory_target.push(cp),
+                            Err(e) => {
+                                tracing::warn!(
+                                    tool_name = tool_name.as_str(),
+                                    "Bad serialized memory target pattern: {}",
+                                    e
+                                );
                             }
                         }
                     }
                 }
+            }
 
-                match tools.get_mut(tool_name) {
-                    Some(ToolRestriction::Patterns(existing)) => {
-                        existing.push(compiled);
-                    }
-                    _ => {
-                        tools.insert(tool_name.clone(), ToolRestriction::Patterns(vec![compiled]));
-                    }
+            match tools.get_mut(tool_name) {
+                Some(ToolRestriction::Patterns(existing)) => {
+                    existing.push(compiled);
+                }
+                _ => {
+                    tools.insert(tool_name.clone(), ToolRestriction::Patterns(vec![compiled]));
                 }
             }
         }
@@ -292,6 +355,18 @@ impl SkillPermissionEnforcer {
             tools,
             has_enforcement,
         }
+    }
+
+    /// Build an enforcer from active skills.
+    ///
+    /// Community skills' patterns are silently ignored.
+    /// Local skills without patterns for a tool leave it unrestricted.
+    ///
+    /// Internally serializes to `SerializedToolPermission` and delegates to
+    /// `from_serialized()` so both construction paths share the same logic.
+    pub fn from_active_skills(skills: &[LoadedSkill]) -> Self {
+        let serialized = SerializedToolPermission::from_active_skills(skills);
+        Self::from_serialized(&serialized)
     }
 
     /// Whether any enforcement is active.
@@ -1002,5 +1077,268 @@ mod tests {
 
         // HTTP tool should not be enforced by this module
         assert!(!enforcer.has_enforcement());
+    }
+
+    // -----------------------------------------------------------------------
+    // Phase 3: Serialization / from_serialized tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_serialize_deserialize_roundtrip() {
+        let perm = SerializedToolPermission {
+            tool_name: "shell".to_string(),
+            trust: SkillTrust::Verified,
+            patterns: vec![
+                SerializedPattern::Shell {
+                    command: "cargo *".to_string(),
+                },
+                SerializedPattern::FilePath {
+                    path: "src/**/*.rs".to_string(),
+                },
+                SerializedPattern::MemoryTarget {
+                    target: "daily/*".to_string(),
+                },
+            ],
+        };
+
+        let json = serde_json::to_string(&perm).unwrap();
+        let roundtripped: SerializedToolPermission = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(roundtripped.tool_name, "shell");
+        assert_eq!(roundtripped.patterns.len(), 3);
+        assert!(matches!(
+            &roundtripped.patterns[0],
+            SerializedPattern::Shell { command } if command == "cargo *"
+        ));
+        assert!(matches!(
+            &roundtripped.patterns[1],
+            SerializedPattern::FilePath { path } if path == "src/**/*.rs"
+        ));
+        assert!(matches!(
+            &roundtripped.patterns[2],
+            SerializedPattern::MemoryTarget { target } if target == "daily/*"
+        ));
+    }
+
+    #[test]
+    fn test_from_serialized_shell_enforcement() {
+        let perms = vec![SerializedToolPermission {
+            tool_name: "shell".to_string(),
+            trust: SkillTrust::Verified,
+            patterns: vec![SerializedPattern::Shell {
+                command: "cargo *".to_string(),
+            }],
+        }];
+        let enforcer = SkillPermissionEnforcer::from_serialized(&perms);
+        assert!(enforcer.has_enforcement());
+
+        assert!(
+            enforcer
+                .validate_tool_call("shell", &params(&[("command", "cargo build")]))
+                .is_ok()
+        );
+        assert!(
+            enforcer
+                .validate_tool_call("shell", &params(&[("command", "rm -rf /")]))
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn test_from_serialized_file_path_enforcement() {
+        let perms = vec![SerializedToolPermission {
+            tool_name: "write_file".to_string(),
+            trust: SkillTrust::Verified,
+            patterns: vec![SerializedPattern::FilePath {
+                path: "src/**/*.rs".to_string(),
+            }],
+        }];
+        let enforcer = SkillPermissionEnforcer::from_serialized(&perms);
+        assert!(enforcer.has_enforcement());
+
+        assert!(
+            enforcer
+                .validate_tool_call("write_file", &params(&[("path", "src/main.rs")]))
+                .is_ok()
+        );
+        assert!(
+            enforcer
+                .validate_tool_call("write_file", &params(&[("path", "/etc/passwd")]))
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn test_from_serialized_memory_target_enforcement() {
+        let perms = vec![SerializedToolPermission {
+            tool_name: "memory_write".to_string(),
+            trust: SkillTrust::Verified,
+            patterns: vec![SerializedPattern::MemoryTarget {
+                target: "daily/*".to_string(),
+            }],
+        }];
+        let enforcer = SkillPermissionEnforcer::from_serialized(&perms);
+        assert!(enforcer.has_enforcement());
+
+        assert!(
+            enforcer
+                .validate_tool_call(
+                    "memory_write",
+                    &params(&[("target", "daily/2024-01-15.md")])
+                )
+                .is_ok()
+        );
+        assert!(
+            enforcer
+                .validate_tool_call("memory_write", &params(&[("target", "SOUL.md")]))
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn test_from_serialized_community_ignored() {
+        let perms = vec![SerializedToolPermission {
+            tool_name: "shell".to_string(),
+            trust: SkillTrust::Community,
+            patterns: vec![SerializedPattern::Shell {
+                command: "rm *".to_string(),
+            }],
+        }];
+        let enforcer = SkillPermissionEnforcer::from_serialized(&perms);
+        // Community patterns ignored -- no enforcement active
+        assert!(!enforcer.has_enforcement());
+    }
+
+    #[test]
+    fn test_from_serialized_local_no_patterns_unrestricted() {
+        let perms = vec![SerializedToolPermission {
+            tool_name: "shell".to_string(),
+            trust: SkillTrust::Local,
+            patterns: vec![],
+        }];
+        let enforcer = SkillPermissionEnforcer::from_serialized(&perms);
+        assert!(!enforcer.has_enforcement());
+        assert!(
+            enforcer
+                .validate_tool_call("shell", &params(&[("command", "anything")]))
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn test_from_serialized_empty_no_enforcement() {
+        let enforcer = SkillPermissionEnforcer::from_serialized(&[]);
+        assert!(!enforcer.has_enforcement());
+        assert!(
+            enforcer
+                .validate_tool_call("shell", &params(&[("command", "anything")]))
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn test_from_serialized_union_semantics() {
+        let perms = vec![
+            SerializedToolPermission {
+                tool_name: "shell".to_string(),
+                trust: SkillTrust::Verified,
+                patterns: vec![SerializedPattern::Shell {
+                    command: "cargo *".to_string(),
+                }],
+            },
+            SerializedToolPermission {
+                tool_name: "shell".to_string(),
+                trust: SkillTrust::Verified,
+                patterns: vec![SerializedPattern::Shell {
+                    command: "vale *".to_string(),
+                }],
+            },
+        ];
+        let enforcer = SkillPermissionEnforcer::from_serialized(&perms);
+        assert!(enforcer.has_enforcement());
+
+        // Both patterns available via union
+        assert!(
+            enforcer
+                .validate_tool_call("shell", &params(&[("command", "cargo build")]))
+                .is_ok()
+        );
+        assert!(
+            enforcer
+                .validate_tool_call("shell", &params(&[("command", "vale readme.md")]))
+                .is_ok()
+        );
+        // Neither matches
+        assert!(
+            enforcer
+                .validate_tool_call("shell", &params(&[("command", "rm -rf /")]))
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn test_from_serialized_bad_pattern_skipped() {
+        // Pattern with invalid chars should be skipped, not fatal
+        let perms = vec![SerializedToolPermission {
+            tool_name: "shell".to_string(),
+            trust: SkillTrust::Verified,
+            patterns: vec![
+                SerializedPattern::Shell {
+                    command: "cargo; rm -rf /".to_string(), // invalid: semicolon
+                },
+                SerializedPattern::Shell {
+                    command: "cargo *".to_string(), // valid
+                },
+            ],
+        }];
+        let enforcer = SkillPermissionEnforcer::from_serialized(&perms);
+        assert!(enforcer.has_enforcement());
+
+        // Valid pattern still works
+        assert!(
+            enforcer
+                .validate_tool_call("shell", &params(&[("command", "cargo build")]))
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn test_from_serialized_matches_from_active_skills() {
+        // Build the same enforcer both ways and verify equivalent behavior
+        let skill = make_skill(
+            "builder",
+            SkillTrust::Verified,
+            [("shell".to_string(), shell_patterns(&["cargo *"]))].into(),
+        );
+
+        let from_skills = SkillPermissionEnforcer::from_active_skills(std::slice::from_ref(&skill));
+        let serialized = SerializedToolPermission::from_active_skills(std::slice::from_ref(&skill));
+        let from_serial = SkillPermissionEnforcer::from_serialized(&serialized);
+
+        // Both should have enforcement
+        assert_eq!(from_skills.has_enforcement(), from_serial.has_enforcement());
+
+        // Both should produce same results
+        let test_cases = [
+            ("shell", "command", "cargo build", true),
+            ("shell", "command", "rm -rf /", false),
+            ("shell", "command", "cargo test", true),
+        ];
+
+        for (tool, param, value, expected_ok) in &test_cases {
+            let params_val = params(&[(param, value)]);
+            let r1 = from_skills.validate_tool_call(tool, &params_val).is_ok();
+            let r2 = from_serial.validate_tool_call(tool, &params_val).is_ok();
+            assert_eq!(
+                r1, *expected_ok,
+                "from_skills mismatch for {} {}={}",
+                tool, param, value
+            );
+            assert_eq!(
+                r2, *expected_ok,
+                "from_serialized mismatch for {} {}={}",
+                tool, param, value
+            );
+        }
     }
 }

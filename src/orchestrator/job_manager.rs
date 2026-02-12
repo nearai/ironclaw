@@ -107,6 +107,8 @@ pub struct ContainerHandle {
     pub task_description: String,
     /// Completion result from the worker (set when the worker reports done).
     pub completion_result: Option<CompletionResult>,
+    /// Skill permissions frozen at job creation time for worker enforcement.
+    pub skill_permissions: Vec<crate::skills::enforcer::SerializedToolPermission>,
     // NOTE: auth_token is intentionally NOT in this struct.
     // It lives only in the TokenStore (never logged, serialized, or persisted).
 }
@@ -138,12 +140,30 @@ impl ContainerJobManager {
     ///
     /// The caller provides the `job_id` so it can be persisted to the database
     /// before the container is created. Returns the auth token for the worker.
+    ///
+    /// Note: this convenience wrapper passes empty skill permissions to the worker.
+    /// Callers that need permission enforcement (e.g. `CreateJobTool`) should use
+    /// `create_job_with_permissions()` instead. The web gateway's job-restart
+    /// handler uses this method, so restarted jobs run without skill enforcement.
     pub async fn create_job(
         &self,
         job_id: Uuid,
         task: &str,
         project_dir: Option<PathBuf>,
         mode: JobMode,
+    ) -> Result<String, OrchestratorError> {
+        self.create_job_with_permissions(job_id, task, project_dir, mode, vec![])
+            .await
+    }
+
+    /// Create and start a new container for a job with skill permissions.
+    pub async fn create_job_with_permissions(
+        &self,
+        job_id: Uuid,
+        task: &str,
+        project_dir: Option<PathBuf>,
+        mode: JobMode,
+        skill_permissions: Vec<crate::skills::enforcer::SerializedToolPermission>,
     ) -> Result<String, OrchestratorError> {
         // Generate auth token (stored in TokenStore, never logged)
         let token = self.token_store.create_token(job_id).await;
@@ -158,6 +178,7 @@ impl ContainerJobManager {
             project_dir: project_dir.clone(),
             task_description: task.to_string(),
             completion_result: None,
+            skill_permissions,
         };
         self.containers.write().await.insert(job_id, handle);
 

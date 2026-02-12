@@ -34,6 +34,10 @@ pub struct JobDescription {
     pub title: String,
     pub description: String,
     pub project_dir: Option<String>,
+    /// Skill permissions to enforce in the worker.
+    /// Missing field deserializes to empty vec (backward compat with older orchestrators).
+    #[serde(default)]
+    pub skill_permissions: Vec<crate::skills::enforcer::SerializedToolPermission>,
 }
 
 /// Completion result from the orchestrator (proxied from the real LLM).
@@ -396,5 +400,36 @@ mod tests {
         assert_eq!(parse_finish_reason("stop"), FinishReason::Stop);
         assert_eq!(parse_finish_reason("tool_use"), FinishReason::ToolUse);
         assert_eq!(parse_finish_reason("unknown"), FinishReason::Unknown);
+    }
+
+    #[test]
+    fn test_job_description_without_permissions() {
+        // Backward compat: missing skill_permissions field deserializes to empty vec
+        let json = r#"{"title":"Test","description":"desc","project_dir":null}"#;
+        let job: JobDescription = serde_json::from_str(json).unwrap();
+        assert_eq!(job.title, "Test");
+        assert!(job.skill_permissions.is_empty());
+    }
+
+    #[test]
+    fn test_job_description_with_permissions() {
+        let json = r#"{
+            "title": "Test",
+            "description": "desc",
+            "project_dir": null,
+            "skill_permissions": [
+                {
+                    "tool_name": "shell",
+                    "trust": "verified",
+                    "patterns": [
+                        {"kind": "Shell", "command": "cargo *"}
+                    ]
+                }
+            ]
+        }"#;
+        let job: JobDescription = serde_json::from_str(json).unwrap();
+        assert_eq!(job.skill_permissions.len(), 1);
+        assert_eq!(job.skill_permissions[0].tool_name, "shell");
+        assert_eq!(job.skill_permissions[0].patterns.len(), 1);
     }
 }

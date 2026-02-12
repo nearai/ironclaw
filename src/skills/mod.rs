@@ -16,6 +16,7 @@
 //! preventing privilege escalation through skill mixing.
 
 pub mod attenuation;
+pub mod behavioral_analyzer;
 pub mod enforcer;
 pub mod http_scoping;
 pub mod registry;
@@ -23,6 +24,7 @@ pub mod scanner;
 pub mod selector;
 
 pub use attenuation::{AttenuationResult, attenuate_tools};
+pub use behavioral_analyzer::BehavioralAnalyzer;
 pub use enforcer::SkillPermissionEnforcer;
 pub use http_scoping::{HttpScopeError, SkillHttpDeclaration, SkillHttpScopes};
 pub use registry::SkillRegistry;

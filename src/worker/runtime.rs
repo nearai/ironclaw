@@ -17,6 +17,7 @@ use crate::llm::{
     ChatMessage, LlmProvider, Reasoning, ReasoningContext, RespondResult, ToolSelection,
 };
 use crate::safety::SafetyLayer;
+use crate::skills::SkillPermissionEnforcer;
 use crate::tools::ToolRegistry;
 use crate::worker::api::{CompletionReport, JobEventPayload, StatusUpdate, WorkerHttpClient};
 use crate::worker::proxy_llm::ProxyLlmProvider;
@@ -51,6 +52,8 @@ pub struct WorkerRuntime {
     llm: Arc<dyn LlmProvider>,
     safety: Arc<SafetyLayer>,
     tools: Arc<ToolRegistry>,
+    /// Permission enforcer built from job's skill context (set after job fetch).
+    permission_enforcer: Option<SkillPermissionEnforcer>,
 }
 
 impl WorkerRuntime {
@@ -83,11 +86,12 @@ impl WorkerRuntime {
             llm,
             safety,
             tools,
+            permission_enforcer: None,
         })
     }
 
     /// Run the worker until the job is complete or an error occurs.
-    pub async fn run(self) -> Result<(), WorkerError> {
+    pub async fn run(mut self) -> Result<(), WorkerError> {
         tracing::info!("Worker starting for job {}", self.config.job_id);
 
         // Fetch job description from orchestrator
@@ -98,6 +102,15 @@ impl WorkerRuntime {
             job.title,
             truncate(&job.description, 100)
         );
+
+        // Build permission enforcer from job's skill context
+        if !job.skill_permissions.is_empty() {
+            let enforcer = SkillPermissionEnforcer::from_serialized(&job.skill_permissions);
+            if enforcer.has_enforcement() {
+                tracing::info!("Skill permission enforcement active for this worker");
+                self.permission_enforcer = Some(enforcer);
+            }
+        }
 
         // Report that we're starting
         self.client
@@ -371,16 +384,18 @@ Work independently to complete this job. Report when done."#,
         })
     }
 
-    // TODO(Phase 3): Add SkillPermissionEnforcer support here.
-    // The worker runs inside Docker containers and already blocks `requires_approval()`
-    // tools (shell, http, file). Permission enforcement here is lower priority but
-    // should be added for defense in depth once the orchestrator passes skill context
-    // to workers.
     async fn execute_tool(
         &self,
         tool_name: &str,
         params: &serde_json::Value,
     ) -> Result<String, String> {
+        // Enforce skill permission patterns (defense in depth)
+        if let Some(ref enforcer) = self.permission_enforcer {
+            enforcer
+                .validate_tool_call(tool_name, params)
+                .map_err(|e| format!("Permission denied: {}", e))?;
+        }
+
         let tool = match self.tools.get(tool_name).await {
             Some(t) => t,
             None => return Err(format!("tool '{}' not found", tool_name)),
@@ -491,6 +506,11 @@ fn truncate(s: &str, max: usize) -> String {
     if s.len() <= max {
         s.to_string()
     } else {
-        format!("{}...", &s[..max])
+        // Walk backwards from max to find a valid UTF-8 char boundary
+        let mut boundary = max;
+        while boundary > 0 && !s.is_char_boundary(boundary) {
+            boundary -= 1;
+        }
+        format!("{}...", &s[..boundary])
     }
 }
