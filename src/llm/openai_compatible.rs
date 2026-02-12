@@ -17,6 +17,9 @@ use crate::llm::provider::{
     Role, ToolCall, ToolCompletionRequest, ToolCompletionResponse,
 };
 
+/// Provider name constant to avoid magic strings.
+const PROVIDER_NAME: &str = "openai_compatible";
+
 /// OpenAI-compatible Chat Completions API provider.
 pub struct OpenAiCompatibleProvider {
     client: Client,
@@ -41,18 +44,26 @@ impl OpenAiCompatibleProvider {
     }
 
     /// Construct API URL for a given path.
-    /// Uses the base_url as-is and appends `/v1/chat/completions`.
+    /// Uses the base_url as-is and appends `/v1/{path}`.
     fn api_url(&self, path: &str) -> String {
-        format!("{}/v1/{}", self.config.base_url.trim_end_matches('/'), path)
+        format!(
+            "{}/v1/{}",
+            self.config.base_url.trim_end_matches('/'),
+            path.trim_start_matches('/')
+        )
     }
 
-    /// Get the API key for authentication.
-    fn api_key(&self) -> String {
-        self.config
-            .api_key
-            .as_ref()
-            .map(|k| k.expose_secret().to_string())
-            .unwrap_or_default()
+    /// Get the API key for authentication (borrowed, no allocation).
+    fn api_key(&self) -> Option<&str> {
+        self.config.api_key.as_ref().map(|k| k.expose_secret())
+    }
+
+    /// Add Authorization header if API key is present.
+    fn add_auth_header(&self, request: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
+        match self.api_key() {
+            Some(key) => request.header("Authorization", format!("Bearer {}", key)),
+            None => request,
+        }
     }
 
     /// Send a request to the chat completions API.
@@ -64,57 +75,53 @@ impl OpenAiCompatibleProvider {
 
         tracing::debug!("Sending request to OpenAI-compatible endpoint: {}", url);
 
-        // Log the request body for debugging tool call issues
-        if let Ok(json) = serde_json::to_string(body) {
-            tracing::debug!("OpenAI-compatible request body: {}", json);
-        }
-
-        let mut request = self
+        let request = self
             .client
             .post(&url)
             .header("Content-Type", "application/json")
             .json(body);
 
-        // Add Authorization header if API key is provided
-        let api_key = self.api_key();
-        if !api_key.is_empty() {
-            request = request.header("Authorization", format!("Bearer {}", api_key));
-        }
+        let request = self.add_auth_header(request);
 
         let response = request.send().await.map_err(|e| {
             tracing::error!("OpenAI-compatible request failed: {}", e);
             LlmError::RequestFailed {
-                provider: "openai_compatible".to_string(),
+                provider: PROVIDER_NAME.to_string(),
                 reason: e.to_string(),
             }
         })?;
 
         let status = response.status();
-        let response_text = response.text().await.unwrap_or_default();
+        let response_text = response.text().await.map_err(|e| {
+            tracing::error!("Failed to read response body: {}", e);
+            LlmError::RequestFailed {
+                provider: PROVIDER_NAME.to_string(),
+                reason: format!("Failed to read response: {}", e),
+            }
+        })?;
 
         tracing::debug!("OpenAI-compatible response status: {}", status);
-        tracing::debug!("OpenAI-compatible response body: {}", response_text);
 
         if !status.is_success() {
             if status.as_u16() == 401 {
                 return Err(LlmError::AuthFailed {
-                    provider: "openai_compatible".to_string(),
+                    provider: PROVIDER_NAME.to_string(),
                 });
             }
             if status.as_u16() == 429 {
                 return Err(LlmError::RateLimited {
-                    provider: "openai_compatible".to_string(),
+                    provider: PROVIDER_NAME.to_string(),
                     retry_after: None,
                 });
             }
             return Err(LlmError::RequestFailed {
-                provider: "openai_compatible".to_string(),
+                provider: PROVIDER_NAME.to_string(),
                 reason: format!("HTTP {}: {}", status, response_text),
             });
         }
 
         serde_json::from_str(&response_text).map_err(|e| LlmError::InvalidResponse {
-            provider: "openai_compatible".to_string(),
+            provider: PROVIDER_NAME.to_string(),
             reason: format!("JSON parse error: {}. Raw: {}", e, response_text),
         })
     }
@@ -123,25 +130,26 @@ impl OpenAiCompatibleProvider {
     async fn fetch_models(&self) -> Result<Vec<ApiModelEntry>, LlmError> {
         let url = self.api_url("models");
 
-        let mut request = self.client.get(&url);
-
-        // Add Authorization header if API key is provided
-        let api_key = self.api_key();
-        if !api_key.is_empty() {
-            request = request.header("Authorization", format!("Bearer {}", api_key));
-        }
+        let request = self.client.get(&url);
+        let request = self.add_auth_header(request);
 
         let response = request.send().await.map_err(|e| LlmError::RequestFailed {
-            provider: "openai_compatible".to_string(),
+            provider: PROVIDER_NAME.to_string(),
             reason: format!("Failed to fetch models: {}", e),
         })?;
 
         let status = response.status();
-        let response_text = response.text().await.unwrap_or_default();
+        let response_text = response.text().await.map_err(|e| {
+            tracing::error!("Failed to read models response: {}", e);
+            LlmError::RequestFailed {
+                provider: PROVIDER_NAME.to_string(),
+                reason: format!("Failed to read response: {}", e),
+            }
+        })?;
 
         if !status.is_success() {
             return Err(LlmError::RequestFailed {
-                provider: "openai_compatible".to_string(),
+                provider: PROVIDER_NAME.to_string(),
                 reason: format!("HTTP {}: {}", status, response_text),
             });
         }
@@ -153,7 +161,7 @@ impl OpenAiCompatibleProvider {
 
         let resp: ModelsResponse =
             serde_json::from_str(&response_text).map_err(|e| LlmError::InvalidResponse {
-                provider: "openai_compatible".to_string(),
+                provider: PROVIDER_NAME.to_string(),
                 reason: format!("JSON parse error: {}", e),
             })?;
 
