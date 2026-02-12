@@ -6,7 +6,6 @@
 use async_trait::async_trait;
 use reqwest::Client;
 use rust_decimal::Decimal;
-use rust_decimal_macros::dec;
 use secrecy::ExposeSecret;
 use serde::{Deserialize, Serialize};
 
@@ -33,7 +32,10 @@ impl OpenAiCompatibleProvider {
         let client = Client::builder()
             .timeout(std::time::Duration::from_secs(120))
             .build()
-            .unwrap_or_else(|_| Client::new());
+            .map_err(|e| LlmError::RequestFailed {
+                provider: PROVIDER_NAME.to_string(),
+                reason: format!("Failed to build reqwest client: {}", e),
+            })?;
 
         let active_model = std::sync::RwLock::new(config.model.clone());
         Ok(Self {
@@ -45,12 +47,11 @@ impl OpenAiCompatibleProvider {
 
     /// Construct API URL for a given path.
     /// Uses the base_url as-is and appends `/v1/{path}`.
+    /// Strips trailing `/v1` from base_url to avoid double `/v1` issues.
     fn api_url(&self, path: &str) -> String {
-        format!(
-            "{}/v1/{}",
-            self.config.base_url.trim_end_matches('/'),
-            path.trim_start_matches('/')
-        )
+        let base = self.config.base_url.trim_end_matches('/');
+        let base = base.strip_suffix("/v1").unwrap_or(base);
+        format!("{}/v1/{}", base, path.trim_start_matches('/'))
     }
 
     /// Get the API key for authentication (borrowed, no allocation).
@@ -96,7 +97,7 @@ impl OpenAiCompatibleProvider {
             tracing::error!("Failed to read response body: {}", e);
             LlmError::RequestFailed {
                 provider: PROVIDER_NAME.to_string(),
-                reason: format!("Failed to read response: {}", e),
+                reason: format!("Response too large or failed to read: {}", e),
             }
         })?;
 
@@ -116,13 +117,13 @@ impl OpenAiCompatibleProvider {
             }
             return Err(LlmError::RequestFailed {
                 provider: PROVIDER_NAME.to_string(),
-                reason: format!("HTTP {}: {}", status, response_text),
+                reason: format!("HTTP {}: {}", status, &response_text[..response_text.len().min(200)]),
             });
         }
 
         serde_json::from_str(&response_text).map_err(|e| LlmError::InvalidResponse {
             provider: PROVIDER_NAME.to_string(),
-            reason: format!("JSON parse error: {}. Raw: {}", e, response_text),
+            reason: format!("JSON parse error: {}. Raw: {}", e, &response_text[..response_text.len().min(200)]),
         })
     }
 
@@ -143,14 +144,14 @@ impl OpenAiCompatibleProvider {
             tracing::error!("Failed to read models response: {}", e);
             LlmError::RequestFailed {
                 provider: PROVIDER_NAME.to_string(),
-                reason: format!("Failed to read response: {}", e),
+                reason: format!("Response too large or failed to read: {}", e),
             }
         })?;
 
         if !status.is_success() {
             return Err(LlmError::RequestFailed {
                 provider: PROVIDER_NAME.to_string(),
-                reason: format!("HTTP {}: {}", status, response_text),
+                reason: format!("HTTP {}: {}", status, &response_text[..response_text.len().min(200)]),
             });
         }
 
@@ -199,7 +200,7 @@ impl LlmProvider for OpenAiCompatibleProvider {
             .into_iter()
             .next()
             .ok_or_else(|| LlmError::InvalidResponse {
-                provider: "openai_compatible".to_string(),
+                provider: PROVIDER_NAME.to_string(),
                 reason: "No choices in response".to_string(),
             })?;
 
@@ -257,7 +258,7 @@ impl LlmProvider for OpenAiCompatibleProvider {
             .into_iter()
             .next()
             .ok_or_else(|| LlmError::InvalidResponse {
-                provider: "openai_compatible".to_string(),
+                provider: PROVIDER_NAME.to_string(),
                 reason: "No choices in response".to_string(),
             })?;
 
@@ -268,8 +269,14 @@ impl LlmProvider for OpenAiCompatibleProvider {
             .unwrap_or_default()
             .into_iter()
             .map(|tc| {
-                let arguments = serde_json::from_str(&tc.function.arguments)
-                    .unwrap_or(serde_json::Value::Object(Default::default()));
+                let arguments = serde_json::from_str(&tc.function.arguments).unwrap_or_else(|e| {
+                    tracing::warn!(
+                        "Failed to parse tool call arguments from LLM: {}. Raw: '{}'. Defaulting to empty object.",
+                        e,
+                        tc.function.arguments
+                    );
+                    serde_json::Value::Object(Default::default())
+                });
                 ToolCall {
                     id: tc.id,
                     name: tc.function.name,
@@ -307,8 +314,8 @@ impl LlmProvider for OpenAiCompatibleProvider {
     }
 
     fn cost_per_token(&self) -> (Decimal, Decimal) {
-        // Default costs - could be made configurable in the future
-        (dec!(0.000003), dec!(0.000015))
+        crate::llm::costs::model_cost(&self.config.model)
+            .unwrap_or_else(crate::llm::costs::default_cost)
     }
 
     async fn list_models(&self) -> Result<Vec<String>, LlmError> {
@@ -548,5 +555,49 @@ mod tests {
         let parsed: serde_json::Value =
             serde_json::from_str(&calls[0].function.arguments).expect("valid JSON string");
         assert_eq!(parsed["key"], "value");
+    }
+
+    // Tests for api_url() URL construction
+
+    fn create_provider_with_base_url(base_url: &str) -> OpenAiCompatibleProvider {
+        use secrecy::SecretString;
+        let config = OpenAiCompatibleConfig {
+            base_url: base_url.to_string(),
+            model: "test-model".to_string(),
+            api_key: Some(SecretString::new("test-key".to_string().into())),
+        };
+        OpenAiCompatibleProvider::new(config).unwrap()
+    }
+
+    #[test]
+    fn test_api_url_trailing_slash() {
+        // trailing slash: https://api.example.com/ → https://api.example.com/v1/chat/completions
+        let provider = create_provider_with_base_url("https://api.example.com/");
+        let url = provider.api_url("chat/completions");
+        assert_eq!(url, "https://api.example.com/v1/chat/completions");
+    }
+
+    #[test]
+    fn test_api_url_no_trailing_slash() {
+        // no trailing slash: https://api.example.com → https://api.example.com/v1/chat/completions
+        let provider = create_provider_with_base_url("https://api.example.com");
+        let url = provider.api_url("chat/completions");
+        assert_eq!(url, "https://api.example.com/v1/chat/completions");
+    }
+
+    #[test]
+    fn test_api_url_already_has_v1() {
+        // already has /v1: https://openrouter.ai/api/v1 → should NOT produce /v1/v1
+        let provider = create_provider_with_base_url("https://openrouter.ai/api/v1");
+        let url = provider.api_url("chat/completions");
+        assert_eq!(url, "https://openrouter.ai/api/v1/chat/completions");
+    }
+
+    #[test]
+    fn test_api_url_strips_leading_slash_from_path() {
+        // Path with leading slash should be handled correctly
+        let provider = create_provider_with_base_url("https://api.example.com");
+        let url = provider.api_url("/chat/completions");
+        assert_eq!(url, "https://api.example.com/v1/chat/completions");
     }
 }
