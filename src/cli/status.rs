@@ -47,7 +47,7 @@ pub async fn run_status_command() -> anyhow::Result<()> {
     print!("  Secrets:     ");
     let secrets_configured = settings.secrets_master_key_source != crate::settings::KeySource::None
         || std::env::var("SECRETS_MASTER_KEY").is_ok()
-        || crate::secrets::keychain::has_master_key();
+        || crate::secrets::keychain::has_master_key().await;
     if secrets_configured {
         println!("configured ({:?})", settings.secrets_master_key_source);
     } else {

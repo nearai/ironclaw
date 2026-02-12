@@ -266,7 +266,7 @@ impl SetupWizard {
     async fn step_security(&mut self) -> Result<(), SetupError> {
         // Check current configuration
         let env_key_exists = std::env::var("SECRETS_MASTER_KEY").is_ok();
-        let keychain_key_exists = crate::secrets::keychain::has_master_key();
+        let keychain_key_exists = crate::secrets::keychain::has_master_key().await;
 
         if env_key_exists {
             print_info("Secrets master key found in SECRETS_MASTER_KEY environment variable.");
@@ -304,9 +304,11 @@ impl SetupWizard {
                 print_info("Generating master key...");
                 let key = crate::secrets::keychain::generate_master_key();
 
-                crate::secrets::keychain::store_master_key(&key).map_err(|e| {
-                    SetupError::Config(format!("Failed to store in keychain: {}", e))
-                })?;
+                crate::secrets::keychain::store_master_key(&key)
+                    .await
+                    .map_err(|e| {
+                        SetupError::Config(format!("Failed to store in keychain: {}", e))
+                    })?;
 
                 // Also create crypto instance
                 let key_hex: String = key.iter().map(|b| format!("{:02x}", b)).collect();
@@ -550,7 +552,7 @@ impl SetupWizard {
             // Try to load master key from keychain or env
             let key = if let Ok(env_key) = std::env::var("SECRETS_MASTER_KEY") {
                 env_key
-            } else if let Ok(keychain_key) = crate::secrets::keychain::get_master_key() {
+            } else if let Ok(keychain_key) = crate::secrets::keychain::get_master_key().await {
                 keychain_key.iter().map(|b| format!("{:02x}", b)).collect()
             } else {
                 return Err(SetupError::Config(

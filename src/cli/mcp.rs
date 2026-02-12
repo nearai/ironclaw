@@ -467,7 +467,7 @@ const DEFAULT_USER_ID: &str = "default";
 
 /// Try to connect to the database store for DB-backed config.
 async fn connect_store() -> Option<Store> {
-    let config = Config::from_env().ok()?;
+    let config = Config::from_env().await.ok()?;
     let store = Store::new(&config.database).await.ok()?;
     store.run_migrations().await.ok()?;
     Some(store)
@@ -496,7 +496,7 @@ async fn save_servers(
 
 /// Initialize and return the secrets store.
 async fn get_secrets_store() -> anyhow::Result<Arc<dyn SecretsStore + Send + Sync>> {
-    let config = Config::from_env()?;
+    let config = Config::from_env().await?;
 
     let master_key = config.secrets.master_key().ok_or_else(|| {
         anyhow::anyhow!(

@@ -715,7 +715,7 @@ async fn auth_tool(name: String, dir: Option<PathBuf>, user_id: String) -> anyho
     println!();
 
     // Initialize secrets store
-    let config = Config::from_env()?;
+    let config = Config::from_env().await?;
     let master_key = config.secrets.master_key().ok_or_else(|| {
         anyhow::anyhow!(
             "SECRETS_MASTER_KEY not set. Run 'ironclaw onboard' first or set it in .env"
