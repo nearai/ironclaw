@@ -117,13 +117,21 @@ impl OpenAiCompatibleProvider {
             }
             return Err(LlmError::RequestFailed {
                 provider: PROVIDER_NAME.to_string(),
-                reason: format!("HTTP {}: {}", status, &response_text[..response_text.len().min(200)]),
+                reason: format!(
+                    "HTTP {}: {}",
+                    status,
+                    &response_text[..response_text.len().min(200)]
+                ),
             });
         }
 
         serde_json::from_str(&response_text).map_err(|e| LlmError::InvalidResponse {
             provider: PROVIDER_NAME.to_string(),
-            reason: format!("JSON parse error: {}. Raw: {}", e, &response_text[..response_text.len().min(200)]),
+            reason: format!(
+                "JSON parse error: {}. Raw: {}",
+                e,
+                &response_text[..response_text.len().min(200)]
+            ),
         })
     }
 
@@ -151,7 +159,11 @@ impl OpenAiCompatibleProvider {
         if !status.is_success() {
             return Err(LlmError::RequestFailed {
                 provider: PROVIDER_NAME.to_string(),
-                reason: format!("HTTP {}: {}", status, &response_text[..response_text.len().min(200)]),
+                reason: format!(
+                    "HTTP {}: {}",
+                    status,
+                    &response_text[..response_text.len().min(200)]
+                ),
             });
         }
 
@@ -195,14 +207,15 @@ impl LlmProvider for OpenAiCompatibleProvider {
 
         let response: ChatCompletionResponse = self.send_request(&request).await?;
 
-        let choice = response
-            .choices
-            .into_iter()
-            .next()
-            .ok_or_else(|| LlmError::InvalidResponse {
-                provider: PROVIDER_NAME.to_string(),
-                reason: "No choices in response".to_string(),
-            })?;
+        let choice =
+            response
+                .choices
+                .into_iter()
+                .next()
+                .ok_or_else(|| LlmError::InvalidResponse {
+                    provider: PROVIDER_NAME.to_string(),
+                    reason: "No choices in response".to_string(),
+                })?;
 
         let content = choice.message.content.unwrap_or_default();
         let finish_reason = match choice.finish_reason.as_deref() {
@@ -253,14 +266,15 @@ impl LlmProvider for OpenAiCompatibleProvider {
 
         let response: ChatCompletionResponse = self.send_request(&request).await?;
 
-        let choice = response
-            .choices
-            .into_iter()
-            .next()
-            .ok_or_else(|| LlmError::InvalidResponse {
-                provider: PROVIDER_NAME.to_string(),
-                reason: "No choices in response".to_string(),
-            })?;
+        let choice =
+            response
+                .choices
+                .into_iter()
+                .next()
+                .ok_or_else(|| LlmError::InvalidResponse {
+                    provider: PROVIDER_NAME.to_string(),
+                    reason: "No choices in response".to_string(),
+                })?;
 
         let content = choice.message.content;
         let tool_calls: Vec<ToolCall> = choice
