@@ -20,17 +20,43 @@ use crate::llm::provider::{
 const PROVIDER_NAME: &str = "openai_compatible";
 
 /// OpenAI-compatible Chat Completions API provider.
+///
+/// Note on std::sync::RwLock: While tokio::sync::RwLock is preferred for async code,
+/// we use std::sync::RwLock here because all read/write operations are short-lived
+/// and never held across await points. This avoids the overhead of async locking
+/// for simple model name synchronization.
 pub struct OpenAiCompatibleProvider {
     client: Client,
     config: OpenAiCompatibleConfig,
     active_model: std::sync::RwLock<String>,
 }
 
+impl std::fmt::Debug for OpenAiCompatibleProvider {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("OpenAiCompatibleProvider")
+            .field("base_url", &self.config.base_url)
+            .field("model", &self.config.model)
+            .field("has_api_key", &self.config.api_key.is_some())
+            .field("timeout_secs", &self.config.timeout_secs)
+            .field("active_model", &self.active_model_name())
+            .finish()
+    }
+}
+
+/// Truncate a string safely at UTF-8 character boundaries.
+/// Returns at most `max_chars` characters from the start of the string.
+fn truncate_utf8_safe(text: &str, max_chars: usize) -> &str {
+    match text.char_indices().nth(max_chars) {
+        Some((idx, _)) => &text[..idx],
+        None => text,
+    }
+}
+
 impl OpenAiCompatibleProvider {
     /// Create a new OpenAI-compatible provider.
     pub fn new(config: OpenAiCompatibleConfig) -> Result<Self, LlmError> {
         let client = Client::builder()
-            .timeout(std::time::Duration::from_secs(120))
+            .timeout(std::time::Duration::from_secs(config.timeout_secs))
             .build()
             .map_err(|e| LlmError::RequestFailed {
                 provider: PROVIDER_NAME.to_string(),
@@ -93,6 +119,13 @@ impl OpenAiCompatibleProvider {
         })?;
 
         let status = response.status();
+        // Extract Retry-After header before consuming the body
+        let retry_after = response
+            .headers()
+            .get("retry-after")
+            .and_then(|v| v.to_str().ok())
+            .and_then(|s| s.parse::<u64>().ok())
+            .map(std::time::Duration::from_secs);
         let response_text = response.text().await.map_err(|e| {
             tracing::error!("Failed to read response body: {}", e);
             LlmError::RequestFailed {
@@ -112,7 +145,7 @@ impl OpenAiCompatibleProvider {
             if status.as_u16() == 429 {
                 return Err(LlmError::RateLimited {
                     provider: PROVIDER_NAME.to_string(),
-                    retry_after: None,
+                    retry_after,
                 });
             }
             return Err(LlmError::RequestFailed {
@@ -120,7 +153,7 @@ impl OpenAiCompatibleProvider {
                 reason: format!(
                     "HTTP {}: {}",
                     status,
-                    &response_text[..response_text.len().min(200)]
+                    truncate_utf8_safe(&response_text, 200)
                 ),
             });
         }
@@ -130,7 +163,7 @@ impl OpenAiCompatibleProvider {
             reason: format!(
                 "JSON parse error: {}. Raw: {}",
                 e,
-                &response_text[..response_text.len().min(200)]
+                truncate_utf8_safe(&response_text, 200)
             ),
         })
     }
@@ -162,7 +195,7 @@ impl OpenAiCompatibleProvider {
                 reason: format!(
                     "HTTP {}: {}",
                     status,
-                    &response_text[..response_text.len().min(200)]
+                    truncate_utf8_safe(&response_text, 200)
                 ),
             });
         }
@@ -348,17 +381,16 @@ impl LlmProvider for OpenAiCompatibleProvider {
     }
 
     fn active_model_name(&self) -> String {
+        // Recover from poisoned locks to avoid panics - the data is still valid
         self.active_model
             .read()
-            .expect("active_model lock poisoned")
+            .unwrap_or_else(|e| e.into_inner())
             .clone()
     }
 
     fn set_model(&self, model: &str) -> Result<(), crate::error::LlmError> {
-        let mut guard = self
-            .active_model
-            .write()
-            .expect("active_model lock poisoned");
+        // Recover from poisoned locks to avoid panics - the data is still valid
+        let mut guard = self.active_model.write().unwrap_or_else(|e| e.into_inner());
         *guard = model.to_string();
         Ok(())
     }
@@ -579,6 +611,7 @@ mod tests {
             base_url: base_url.to_string(),
             model: "test-model".to_string(),
             api_key: Some(SecretString::new("test-key".to_string().into())),
+            timeout_secs: 120,
         };
         OpenAiCompatibleProvider::new(config).unwrap()
     }
@@ -613,5 +646,70 @@ mod tests {
         let provider = create_provider_with_base_url("https://api.example.com");
         let url = provider.api_url("/chat/completions");
         assert_eq!(url, "https://api.example.com/v1/chat/completions");
+    }
+
+    #[test]
+    fn test_truncate_utf8_safe_basic() {
+        // Basic truncation
+        assert_eq!(truncate_utf8_safe("hello world", 5), "hello");
+        assert_eq!(truncate_utf8_safe("hello", 10), "hello");
+        assert_eq!(truncate_utf8_safe("", 5), "");
+    }
+
+    #[test]
+    fn test_truncate_utf8_safe_multibyte() {
+        // Multi-byte UTF-8 characters (Japanese)
+        let japanese = "こんにちは世界"; // "Hello World" in Japanese
+        // Each character is 3 bytes in UTF-8
+        assert_eq!(truncate_utf8_safe(japanese, 3), "こんに");
+        assert_eq!(truncate_utf8_safe(japanese, 5), "こんにちは");
+
+        // Mixed ASCII and multi-byte
+        let mixed = "Helloこんにちは";
+        assert_eq!(truncate_utf8_safe(mixed, 7), "Helloこん");
+    }
+
+    #[test]
+    fn test_debug_impl_does_not_expose_api_key() {
+        use secrecy::SecretString;
+        let config = OpenAiCompatibleConfig {
+            base_url: "https://api.example.com".to_string(),
+            model: "test-model".to_string(),
+            api_key: Some(SecretString::new("secret-key".to_string().into())),
+            timeout_secs: 60,
+        };
+        let provider = OpenAiCompatibleProvider::new(config).unwrap();
+
+        let debug_str = format!("{:?}", provider);
+        assert!(debug_str.contains("base_url"));
+        assert!(debug_str.contains("has_api_key"));
+        assert!(!debug_str.contains("secret-key")); // API key should NOT appear
+    }
+
+    #[test]
+    fn test_lock_poisoning_recovery() {
+        use std::panic::{self, AssertUnwindSafe};
+
+        let config = OpenAiCompatibleConfig {
+            base_url: "https://api.example.com".to_string(),
+            model: "original-model".to_string(),
+            api_key: None,
+            timeout_secs: 120,
+        };
+        let provider = OpenAiCompatibleProvider::new(config).unwrap();
+
+        // Poison the lock by panicking while holding the write lock
+        let _ = panic::catch_unwind(AssertUnwindSafe(|| {
+            let _guard = provider.active_model.write().unwrap();
+            panic!("Intentional panic to poison lock");
+        }));
+
+        // Should still be able to read after poisoning
+        let model = provider.active_model_name();
+        assert_eq!(model, "original-model");
+
+        // Should still be able to write after poisoning
+        provider.set_model("new-model").unwrap();
+        assert_eq!(provider.active_model_name(), "new-model");
     }
 }

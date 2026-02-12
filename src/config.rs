@@ -248,6 +248,8 @@ pub struct OpenAiCompatibleConfig {
     pub base_url: String,
     pub api_key: Option<SecretString>,
     pub model: String,
+    /// Request timeout in seconds (default: 120)
+    pub timeout_secs: u64,
 }
 
 /// LLM provider configuration.
@@ -403,10 +405,14 @@ impl LlmConfig {
                 })?;
             let api_key = optional_env("LLM_API_KEY")?.map(SecretString::from);
             let model = optional_env("LLM_MODEL")?.unwrap_or_else(|| "default".to_string());
+            let timeout_secs = optional_env("LLM_TIMEOUT_SECS")?
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(120);
             Some(OpenAiCompatibleConfig {
                 base_url,
                 api_key,
                 model,
+                timeout_secs,
             })
         } else {
             None
