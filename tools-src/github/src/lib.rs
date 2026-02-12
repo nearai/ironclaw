@@ -20,6 +20,37 @@ wit_bindgen::generate!({
 
 use serde::{Deserialize, Serialize};
 
+/// Percent-encode a string for safe use in URL path segments.
+/// Encodes everything except alphanumeric, hyphen, underscore, and dot.
+fn url_encode_path(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() * 2);
+    for b in s.bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' => {
+                out.push(b as char);
+            }
+            _ => {
+                out.push('%');
+                out.push(char::from(b"0123456789ABCDEF"[(b >> 4) as usize]));
+                out.push(char::from(b"0123456789ABCDEF"[(b & 0xf) as usize]));
+            }
+        }
+    }
+    out
+}
+
+/// Percent-encode a string for use as a URL query parameter value.
+/// Same as path encoding but also encodes space as %20.
+fn url_encode_query(s: &str) -> String {
+    url_encode_path(s)
+}
+
+/// Validate that a path segment doesn't contain dangerous characters.
+/// Returns true if the segment is safe to use.
+fn validate_path_segment(s: &str) -> bool {
+    !s.is_empty() && !s.contains('/') && !s.contains("..") && !s.contains('?') && !s.contains('#')
+}
+
 struct GitHubTool;
 
 #[derive(Debug, Deserialize)]
@@ -132,11 +163,6 @@ fn execute_inner(params: &str) -> Result<String, String> {
     let action: GitHubAction =
         serde_json::from_str(params).map_err(|e| format!("Invalid parameters: {e}"))?;
 
-    near::agent::host::log(
-        near::agent::host::LogLevel::Info,
-        &format!("Executing GitHub action: {:?}", action),
-    );
-
     let token = get_github_token()?;
 
     match action {
@@ -203,6 +229,11 @@ fn execute_inner(params: &str) -> Result<String, String> {
 }
 
 fn get_github_token() -> Result<String, String> {
+    // Check if secret exists first (for better error messages)
+    if !near::agent::host::secret_exists("github_token") {
+        return Err("GitHub token not configured. Set it with: ironclaw secret set github_token <token>".into());
+    }
+    
     if let Some(val) = near::agent::host::workspace_read("github/token") {
         let trimmed = val.trim().to_string();
         if trimmed.is_empty() {
@@ -223,22 +254,22 @@ fn github_request(
 ) -> Result<String, String> {
     let url = format!("https://api.github.com{}", path);
     
-    let mut headers = vec![
-        ("Authorization", format!("Bearer {}", token)),
-        ("Accept", "application/vnd.github+json".to_string()),
-        ("X-GitHub-Api-Version", "2022-11-28".to_string()),
-        ("User-Agent", "IronClaw-GitHub-Tool".to_string()),
-    ];
+    let headers = serde_json::json!({
+        "Authorization": format!("Bearer {}", token),
+        "Accept": "application/vnd.github+json",
+        "X-GitHub-Api-Version": "2022-11-28",
+        "User-Agent": "IronClaw-GitHub-Tool"
+    });
 
-    if body.is_some() {
-        headers.push(("Content-Type", "application/json".to_string()));
-    }
+    let body_bytes = body.map(|b| b.into_bytes());
 
-    let response = if let Some(body) = body {
-        near::agent::host::http_request(&url, method, &headers, Some(&body))
-    } else {
-        near::agent::host::http_request(&url, method, &headers, None)
-    };
+    let response = near::agent::host::http_request(
+        method,
+        &url,
+        &headers.to_string(),
+        body_bytes.as_deref(),
+        None
+    );
 
     match response {
         Ok(resp) => {
@@ -256,7 +287,12 @@ fn github_request(
 // === API Functions ===
 
 fn get_repo(token: &str, owner: &str, repo: &str) -> Result<String, String> {
-    github_request(token, "GET", &format!("/repos/{}/{}", owner, repo), None)
+    if !validate_path_segment(owner) || !validate_path_segment(repo) {
+        return Err("Invalid owner or repo name".into());
+    }
+    let encoded_owner = url_encode_path(owner);
+    let encoded_repo = url_encode_path(repo);
+    github_request(token, "GET", &format!("/repos/{}/{}", encoded_owner, encoded_repo), None)
 }
 
 fn list_issues(
@@ -266,11 +302,17 @@ fn list_issues(
     state: Option<&str>,
     limit: Option<u32>,
 ) -> Result<String, String> {
+    if !validate_path_segment(owner) || !validate_path_segment(repo) {
+        return Err("Invalid owner or repo name".into());
+    }
+    let encoded_owner = url_encode_path(owner);
+    let encoded_repo = url_encode_path(repo);
     let state = state.unwrap_or("open");
-    let limit = limit.unwrap_or(30);
+    let limit = limit.unwrap_or(30).min(100); // Cap at 100
+    let encoded_state = url_encode_query(state);
     let path = format!(
         "/repos/{}/{}/issues?state={}&per_page={}",
-        owner, repo, state, limit
+        encoded_owner, encoded_repo, encoded_state, limit
     );
     github_request(token, "GET", &path, None)
 }
@@ -283,7 +325,12 @@ fn create_issue(
     body: Option<&str>,
     labels: Option<Vec<String>>,
 ) -> Result<String, String> {
-    let path = format!("/repos/{}/{}/issues", owner, repo);
+    if !validate_path_segment(owner) || !validate_path_segment(repo) {
+        return Err("Invalid owner or repo name".into());
+    }
+    let encoded_owner = url_encode_path(owner);
+    let encoded_repo = url_encode_path(repo);
+    let path = format!("/repos/{}/{}/issues", encoded_owner, encoded_repo);
     let mut req_body = serde_json::json!({
         "title": title,
     });
@@ -307,10 +354,15 @@ fn get_issue(
     repo: &str,
     issue_number: u32,
 ) -> Result<String, String> {
+    if !validate_path_segment(owner) || !validate_path_segment(repo) {
+        return Err("Invalid owner or repo name".into());
+    }
+    let encoded_owner = url_encode_path(owner);
+    let encoded_repo = url_encode_path(repo);
     github_request(
         token,
         "GET",
-        &format!("/repos/{}/{}/issues/{}", owner, repo, issue_number),
+        &format!("/repos/{}/{}/issues/{}", encoded_owner, encoded_repo, issue_number),
         None,
     )
 }
@@ -322,11 +374,17 @@ fn list_pull_requests(
     state: Option<&str>,
     limit: Option<u32>,
 ) -> Result<String, String> {
+    if !validate_path_segment(owner) || !validate_path_segment(repo) {
+        return Err("Invalid owner or repo name".into());
+    }
+    let encoded_owner = url_encode_path(owner);
+    let encoded_repo = url_encode_path(repo);
     let state = state.unwrap_or("open");
-    let limit = limit.unwrap_or(30);
+    let limit = limit.unwrap_or(30).min(100); // Cap at 100
+    let encoded_state = url_encode_query(state);
     let path = format!(
         "/repos/{}/{}/pulls?state={}&per_page={}",
-        owner, repo, state, limit
+        encoded_owner, encoded_repo, encoded_state, limit
     );
     github_request(token, "GET", &path, None)
 }
@@ -337,10 +395,15 @@ fn get_pull_request(
     repo: &str,
     pr_number: u32,
 ) -> Result<String, String> {
+    if !validate_path_segment(owner) || !validate_path_segment(repo) {
+        return Err("Invalid owner or repo name".into());
+    }
+    let encoded_owner = url_encode_path(owner);
+    let encoded_repo = url_encode_path(repo);
     github_request(
         token,
         "GET",
-        &format!("/repos/{}/{}/pulls/{}", owner, repo, pr_number),
+        &format!("/repos/{}/{}/pulls/{}", encoded_owner, encoded_repo, pr_number),
         None,
     )
 }
@@ -351,10 +414,15 @@ fn get_pull_request_files(
     repo: &str,
     pr_number: u32,
 ) -> Result<String, String> {
+    if !validate_path_segment(owner) || !validate_path_segment(repo) {
+        return Err("Invalid owner or repo name".into());
+    }
+    let encoded_owner = url_encode_path(owner);
+    let encoded_repo = url_encode_path(repo);
     github_request(
         token,
         "GET",
-        &format!("/repos/{}/{}/pulls/{}/files", owner, repo, pr_number),
+        &format!("/repos/{}/{}/pulls/{}/files", encoded_owner, encoded_repo, pr_number),
         None,
     )
 }
@@ -367,7 +435,12 @@ fn create_pr_review(
     body: &str,
     event: &str,
 ) -> Result<String, String> {
-    let path = format!("/repos/{}/{}/pulls/{}/reviews", owner, repo, pr_number);
+    if !validate_path_segment(owner) || !validate_path_segment(repo) {
+        return Err("Invalid owner or repo name".into());
+    }
+    let encoded_owner = url_encode_path(owner);
+    let encoded_repo = url_encode_path(repo);
+    let path = format!("/repos/{}/{}/pulls/{}/reviews", encoded_owner, encoded_repo, pr_number);
     let req_body = serde_json::json!({
         "body": body,
         "event": event,
@@ -376,8 +449,12 @@ fn create_pr_review(
 }
 
 fn list_repos(token: &str, username: &str, limit: Option<u32>) -> Result<String, String> {
-    let limit = limit.unwrap_or(30);
-    let path = format!("/users/{}/repos?per_page={}", username, limit);
+    if !validate_path_segment(username) {
+        return Err("Invalid username".into());
+    }
+    let encoded_username = url_encode_path(username);
+    let limit = limit.unwrap_or(30).min(100); // Cap at 100
+    let path = format!("/users/{}/repos?per_page={}", encoded_username, limit);
     github_request(token, "GET", &path, None)
 }
 
@@ -388,10 +465,19 @@ fn get_file_content(
     path: &str,
     r#ref: Option<&str>,
 ) -> Result<String, String> {
+    if !validate_path_segment(owner) || !validate_path_segment(repo) {
+        return Err("Invalid owner or repo name".into());
+    }
+    let encoded_owner = url_encode_path(owner);
+    let encoded_repo = url_encode_path(repo);
+    // Path can contain slashes, so we encode each segment separately
+    let encoded_path = path.split('/').map(url_encode_path).collect::<Vec<_>>().join("/");
+    
     let url_path = if let Some(r#ref) = r#ref {
-        format!("/repos/{}/{}/contents/{}?ref={}", owner, repo, path, r#ref)
+        let encoded_ref = url_encode_query(r#ref);
+        format!("/repos/{}/{}/contents/{}?ref={}", encoded_owner, encoded_repo, encoded_path, encoded_ref)
     } else {
-        format!("/repos/{}/{}/contents/{}", owner, repo, path)
+        format!("/repos/{}/{}/contents/{}", encoded_owner, encoded_repo, encoded_path)
     };
     github_request(token, "GET", &url_path, None)
 }
@@ -404,9 +490,16 @@ fn trigger_workflow(
     r#ref: &str,
     inputs: Option<serde_json::Value>,
 ) -> Result<String, String> {
+    if !validate_path_segment(owner) || !validate_path_segment(repo) {
+        return Err("Invalid owner or repo name".into());
+    }
+    // workflow_id can be a filename with .yml extension
+    let encoded_owner = url_encode_path(owner);
+    let encoded_repo = url_encode_path(repo);
+    let encoded_workflow_id = url_encode_path(workflow_id);
     let path = format!(
         "/repos/{}/{}/actions/workflows/{}/dispatches",
-        owner, repo, workflow_id
+        encoded_owner, encoded_repo, encoded_workflow_id
     );
     let mut req_body = serde_json::json!({
         "ref": r#ref,
@@ -424,16 +517,22 @@ fn get_workflow_runs(
     workflow_id: Option<&str>,
     limit: Option<u32>,
 ) -> Result<String, String> {
-    let limit = limit.unwrap_or(30);
+    if !validate_path_segment(owner) || !validate_path_segment(repo) {
+        return Err("Invalid owner or repo name".into());
+    }
+    let encoded_owner = url_encode_path(owner);
+    let encoded_repo = url_encode_path(repo);
+    let limit = limit.unwrap_or(30).min(100); // Cap at 100
     let path = if let Some(workflow_id) = workflow_id {
+        let encoded_workflow_id = url_encode_path(workflow_id);
         format!(
             "/repos/{}/{}/actions/workflows/{}/runs?per_page={}",
-            owner, repo, workflow_id, limit
+            encoded_owner, encoded_repo, encoded_workflow_id, limit
         )
     } else {
         format!(
             "/repos/{}/{}/actions/runs?per_page={}",
-            owner, repo, limit
+            encoded_owner, encoded_repo, limit
         )
     };
     github_request(token, "GET", &path, None)

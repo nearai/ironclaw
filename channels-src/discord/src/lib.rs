@@ -275,7 +275,7 @@ fn handle_slash_command(interaction: DiscordInteraction) {
             .join(", ");
         format!("/{} {}", command_name, opt_str)
     } else {
-        format!("/{})", command_name)
+        format!("/{}", command_name)
     };
 
     let metadata = DiscordMessageMetadata {
@@ -298,8 +298,10 @@ fn handle_slash_command(interaction: DiscordInteraction) {
 }
 
 fn handle_message_component(interaction: DiscordInteraction, message: DiscordMessage) {
-    let user_id = interaction.user.as_ref().map(|u| u.id.clone()).unwrap_or_default();
-    let user_name = interaction.user.as_ref().map(|u| u.global_name.as_ref().unwrap_or(&u.username).clone()).unwrap_or_default();
+    // Check member first (for server contexts), then user (for DMs)
+    let user = interaction.member.as_ref().map(|m| &m.user).or(interaction.user.as_ref());
+    let user_id = user.map(|u| u.id.clone()).unwrap_or_default();
+    let user_name = user.map(|u| u.global_name.as_ref().unwrap_or(&u.username).clone()).unwrap_or_default();
 
     let channel_id = message.channel_id.clone();
 
