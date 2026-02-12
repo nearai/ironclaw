@@ -1622,6 +1622,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "fs4"
+version = "0.6.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2eeb4ed9e12f43b7fa0baae3f9cdda28352770132ef2e09a23760c29cae8bd47"
+dependencies = [
+ "rustix 0.38.44",
+ "windows-sys 0.48.0",
+]
+
+[[package]]
 name = "funty"
 version = "2.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2299,6 +2309,7 @@ dependencies = [
  "deadpool-postgres",
  "dirs 6.0.0",
  "dotenvy",
+ "fs4",
  "futures",
  "hkdf",
  "http-body-util",

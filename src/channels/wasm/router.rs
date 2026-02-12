@@ -469,7 +469,7 @@ pub fn create_wasm_channel_router(
 }
 
 #[cfg(test)]
-mod tests {
+ mod tests {
     use std::sync::Arc;
 
     use crate::channels::wasm::capabilities::ChannelCapabilities;
@@ -478,6 +478,7 @@ mod tests {
         PreparedChannelModule, WasmChannelRuntime, WasmChannelRuntimeConfig,
     };
     use crate::channels::wasm::wrapper::WasmChannel;
+    use crate::pairing::PairingStore;
     use crate::tools::wasm::ResourceLimits;
 
     fn create_test_channel(name: &str) -> Arc<WasmChannel> {
@@ -499,6 +500,7 @@ mod tests {
             prepared,
             capabilities,
             "{}".to_string(),
+            Arc::new(PairingStore::new()),
         ))
     }
 

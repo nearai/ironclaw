@@ -43,6 +43,7 @@ use wasmtime_wasi::{ResourceTable, WasiCtx, WasiCtxBuilder, WasiView};
 use crate::channels::wasm::capabilities::ChannelCapabilities;
 use crate::channels::wasm::error::WasmChannelError;
 use crate::channels::wasm::host::{ChannelEmitRateLimiter, ChannelHostState, EmittedMessage};
+use crate::pairing::PairingStore;
 use crate::channels::wasm::router::RegisteredEndpoint;
 use crate::channels::wasm::runtime::{PreparedChannelModule, WasmChannelRuntime};
 use crate::channels::wasm::schema::ChannelConfig;
@@ -73,6 +74,8 @@ struct ChannelStoreData {
     /// Injected credentials for URL substitution (e.g., bot tokens).
     /// Keys are placeholder names like "TELEGRAM_BOT_TOKEN".
     credentials: HashMap<String, String>,
+    /// Pairing store for DM pairing (guest access control).
+    pairing_store: Arc<PairingStore>,
 }
 
 impl ChannelStoreData {
@@ -81,6 +84,7 @@ impl ChannelStoreData {
         channel_name: &str,
         capabilities: ChannelCapabilities,
         credentials: HashMap<String, String>,
+        pairing_store: Arc<PairingStore>,
     ) -> Self {
         // Create a minimal WASI context (no filesystem, no env vars for security)
         let wasi = WasiCtxBuilder::new().build();
@@ -91,6 +95,7 @@ impl ChannelStoreData {
             wasi,
             table: ResourceTable::new(),
             credentials,
+            pairing_store,
         }
     }
 
@@ -403,6 +408,43 @@ impl near::agent::channel_host::Host for ChannelStoreData {
             }
         }
     }
+
+    fn pairing_upsert_request(
+        &mut self,
+        channel: String,
+        id: String,
+        meta_json: String,
+    ) -> Result<near::agent::channel_host::PairingUpsertResult, String> {
+        let meta = if meta_json.is_empty() {
+            None
+        } else {
+            serde_json::from_str(&meta_json).ok()
+        };
+        match self.pairing_store.upsert_request(&channel, &id, meta) {
+            Ok(r) => Ok(near::agent::channel_host::PairingUpsertResult {
+                code: r.code,
+                created: r.created,
+            }),
+            Err(e) => Err(e.to_string()),
+        }
+    }
+
+    fn pairing_is_allowed(
+        &mut self,
+        channel: String,
+        id: String,
+        username: Option<String>,
+    ) -> Result<bool, String> {
+        self.pairing_store
+            .is_sender_allowed(&channel, &id, username.as_deref())
+            .map_err(|e| e.to_string())
+    }
+
+    fn pairing_read_allow_from(&mut self, channel: String) -> Result<Vec<String>, String> {
+        self.pairing_store
+            .read_allow_from(&channel)
+            .map_err(|e| e.to_string())
+    }
 }
 
 /// A WASM-based channel implementing the Channel trait.
@@ -455,6 +497,9 @@ pub struct WasmChannel {
     /// Background task that repeats typing indicators every 4 seconds.
     /// Telegram's "typing..." indicator expires after ~5s, so we refresh it.
     typing_task: RwLock<Option<tokio::task::JoinHandle<()>>>,
+
+    /// Pairing store for DM pairing (guest access control).
+    pairing_store: Arc<PairingStore>,
 }
 
 impl WasmChannel {
@@ -464,6 +509,7 @@ impl WasmChannel {
         prepared: Arc<PreparedChannelModule>,
         capabilities: ChannelCapabilities,
         config_json: String,
+        pairing_store: Arc<PairingStore>,
     ) -> Self {
         let name = prepared.name.clone();
         let rate_limiter = ChannelEmitRateLimiter::new(capabilities.emit_rate_limit.clone());
@@ -483,6 +529,7 @@ impl WasmChannel {
             endpoints: RwLock::new(Vec::new()),
             credentials: Arc::new(RwLock::new(HashMap::new())),
             typing_task: RwLock::new(None),
+            pairing_store,
         }
     }
 
@@ -564,6 +611,7 @@ impl WasmChannel {
         prepared: &PreparedChannelModule,
         capabilities: &ChannelCapabilities,
         credentials: HashMap<String, String>,
+        pairing_store: Arc<PairingStore>,
     ) -> Result<Store<ChannelStoreData>, WasmChannelError> {
         let engine = runtime.engine();
         let limits = &prepared.limits;
@@ -574,6 +622,7 @@ impl WasmChannel {
             &prepared.name,
             capabilities.clone(),
             credentials,
+            pairing_store,
         );
         let mut store = Store::new(engine, store_data);
 
@@ -674,12 +723,18 @@ impl WasmChannel {
         let timeout = self.runtime.config().callback_timeout;
         let channel_name = self.name.clone();
         let credentials = self.get_credentials().await;
+        let pairing_store = self.pairing_store.clone();
 
         // Execute in blocking task with timeout
         let result = tokio::time::timeout(timeout, async move {
             tokio::task::spawn_blocking(move || {
-                let mut store =
-                    Self::create_store(&runtime, &prepared, &capabilities, credentials)?;
+                let mut store = Self::create_store(
+                    &runtime,
+                    &prepared,
+                    &capabilities,
+                    credentials,
+                    pairing_store,
+                )?;
                 let instance = Self::instantiate_component(&runtime, &prepared, &mut store)?;
 
                 // Call on_start using the generated typed interface
@@ -784,6 +839,7 @@ impl WasmChannel {
         let capabilities = self.capabilities.clone();
         let timeout = self.runtime.config().callback_timeout;
         let credentials = self.get_credentials().await;
+        let pairing_store = self.pairing_store.clone();
 
         // Prepare request data
         let method = method.to_string();
@@ -797,8 +853,13 @@ impl WasmChannel {
         // Execute in blocking task with timeout
         let result = tokio::time::timeout(timeout, async move {
             tokio::task::spawn_blocking(move || {
-                let mut store =
-                    Self::create_store(&runtime, &prepared, &capabilities, credentials)?;
+                let mut store = Self::create_store(
+                    &runtime,
+                    &prepared,
+                    &capabilities,
+                    credentials,
+                    pairing_store,
+                )?;
                 let instance = Self::instantiate_component(&runtime, &prepared, &mut store)?;
 
                 // Build the WIT request type
@@ -871,12 +932,18 @@ impl WasmChannel {
         let timeout = self.runtime.config().callback_timeout;
         let channel_name = self.name.clone();
         let credentials = self.get_credentials().await;
+        let pairing_store = self.pairing_store.clone();
 
         // Execute in blocking task with timeout
         let result = tokio::time::timeout(timeout, async move {
             tokio::task::spawn_blocking(move || {
-                let mut store =
-                    Self::create_store(&runtime, &prepared, &capabilities, credentials)?;
+                let mut store = Self::create_store(
+                    &runtime,
+                    &prepared,
+                    &capabilities,
+                    credentials,
+                    pairing_store,
+                )?;
                 let instance = Self::instantiate_component(&runtime, &prepared, &mut store)?;
 
                 // Call on_poll using the generated typed interface
@@ -960,6 +1027,7 @@ impl WasmChannel {
         let timeout = self.runtime.config().callback_timeout;
         let channel_name = self.name.clone();
         let credentials = self.get_credentials().await;
+        let pairing_store = self.pairing_store.clone();
 
         // Prepare response data
         let message_id_str = message_id.to_string();
@@ -973,8 +1041,13 @@ impl WasmChannel {
         let result = tokio::time::timeout(timeout, async move {
             tokio::task::spawn_blocking(move || {
                 tracing::info!("Creating WASM store for on_respond");
-                let mut store =
-                    Self::create_store(&runtime, &prepared, &capabilities, credentials)?;
+                let mut store = Self::create_store(
+                    &runtime,
+                    &prepared,
+                    &capabilities,
+                    credentials,
+                    pairing_store,
+                )?;
 
                 tracing::info!("Instantiating WASM component for on_respond");
                 let instance = Self::instantiate_component(&runtime, &prepared, &mut store)?;
@@ -1067,13 +1140,19 @@ impl WasmChannel {
         let timeout = self.runtime.config().callback_timeout;
         let channel_name = self.name.clone();
         let credentials = self.get_credentials().await;
+        let pairing_store = self.pairing_store.clone();
 
         let wit_update = status_to_wit(status, metadata);
 
         let result = tokio::time::timeout(timeout, async move {
             tokio::task::spawn_blocking(move || {
-                let mut store =
-                    Self::create_store(&runtime, &prepared, &capabilities, credentials)?;
+                let mut store = Self::create_store(
+                    &runtime,
+                    &prepared,
+                    &capabilities,
+                    credentials,
+                    pairing_store,
+                )?;
                 let instance = Self::instantiate_component(&runtime, &prepared, &mut store)?;
 
                 let channel_iface = instance.near_agent_channel();
@@ -1117,6 +1196,7 @@ impl WasmChannel {
         prepared: &Arc<PreparedChannelModule>,
         capabilities: &ChannelCapabilities,
         credentials: &RwLock<HashMap<String, String>>,
+        pairing_store: Arc<PairingStore>,
         timeout: Duration,
         wit_update: wit_channel::StatusUpdate,
     ) -> Result<(), WasmChannelError> {
@@ -1132,8 +1212,13 @@ impl WasmChannel {
 
         let result = tokio::time::timeout(timeout, async move {
             tokio::task::spawn_blocking(move || {
-                let mut store =
-                    Self::create_store(&runtime, &prepared, &capabilities, credentials_snapshot)?;
+                let mut store = Self::create_store(
+                    &runtime,
+                    &prepared,
+                    &capabilities,
+                    credentials_snapshot,
+                    pairing_store,
+                )?;
                 let instance = Self::instantiate_component(&runtime, &prepared, &mut store)?;
 
                 let channel_iface = instance.near_agent_channel();
@@ -1201,6 +1286,7 @@ impl WasmChannel {
                 let prepared = Arc::clone(&self.prepared);
                 let capabilities = self.capabilities.clone();
                 let credentials = self.credentials.clone();
+                let pairing_store = self.pairing_store.clone();
                 let callback_timeout = self.runtime.config().callback_timeout;
                 let wit_update = status_to_wit(&status, metadata);
 
@@ -1220,6 +1306,7 @@ impl WasmChannel {
                             &prepared,
                             &capabilities,
                             &credentials,
+                            pairing_store.clone(),
                             callback_timeout,
                             wit_update_clone,
                         )
@@ -1350,6 +1437,7 @@ impl WasmChannel {
         let message_tx = self.message_tx.clone();
         let rate_limiter = self.rate_limiter.clone();
         let credentials = self.credentials.clone();
+        let pairing_store = self.pairing_store.clone();
         let callback_timeout = self.runtime.config().callback_timeout;
 
         tokio::spawn(async move {
@@ -1371,6 +1459,7 @@ impl WasmChannel {
                             &prepared,
                             &capabilities,
                             &credentials,
+                            pairing_store.clone(),
                             callback_timeout,
                         ).await;
 
@@ -1422,6 +1511,7 @@ impl WasmChannel {
         prepared: &Arc<PreparedChannelModule>,
         capabilities: &ChannelCapabilities,
         credentials: &RwLock<HashMap<String, String>>,
+        pairing_store: Arc<PairingStore>,
         timeout: Duration,
     ) -> Result<Vec<EmittedMessage>, WasmChannelError> {
         // Skip if no WASM bytes (testing mode)
@@ -1442,8 +1532,13 @@ impl WasmChannel {
         // Execute in blocking task with timeout
         let result = tokio::time::timeout(timeout, async move {
             tokio::task::spawn_blocking(move || {
-                let mut store =
-                    Self::create_store(&runtime, &prepared, &capabilities, credentials_snapshot)?;
+                let mut store = Self::create_store(
+                    &runtime,
+                    &prepared,
+                    &capabilities,
+                    credentials_snapshot,
+                    pairing_store,
+                )?;
                 let instance = Self::instantiate_component(&runtime, &prepared, &mut store)?;
 
                 // Call on_poll using the generated typed interface
@@ -1978,6 +2073,7 @@ mod tests {
     use std::sync::Arc;
 
     use crate::channels::Channel;
+    use crate::pairing::PairingStore;
     use crate::channels::wasm::capabilities::ChannelCapabilities;
     use crate::channels::wasm::runtime::{
         PreparedChannelModule, WasmChannelRuntime, WasmChannelRuntimeConfig,
@@ -1998,7 +2094,13 @@ mod tests {
 
         let capabilities = ChannelCapabilities::for_channel("test").with_path("/webhook/test");
 
-        WasmChannel::new(runtime, prepared, capabilities, "{}".to_string())
+        WasmChannel::new(
+            runtime,
+            prepared,
+            capabilities,
+            "{}".to_string(),
+            Arc::new(PairingStore::new()),
+        )
     }
 
     #[test]
@@ -2073,6 +2175,7 @@ mod tests {
             &prepared,
             &capabilities,
             &credentials,
+            Arc::new(PairingStore::new()),
             timeout,
         )
         .await;
@@ -2166,7 +2269,13 @@ mod tests {
             .with_path("/webhook/poll")
             .with_polling(1000);
 
-        let channel = WasmChannel::new(runtime, prepared, capabilities, "{}".to_string());
+        let channel = WasmChannel::new(
+            runtime,
+            prepared,
+            capabilities,
+            "{}".to_string(),
+            Arc::new(PairingStore::new()),
+        );
 
         // Start the channel
         let _stream = channel.start().await.expect("Channel should start");
@@ -2416,8 +2525,13 @@ mod tests {
         );
         creds.insert("OTHER_SECRET".to_string(), "s3cret".to_string());
 
-        let store =
-            ChannelStoreData::new(1024 * 1024, "test", ChannelCapabilities::default(), creds);
+        let store = ChannelStoreData::new(
+            1024 * 1024,
+            "test",
+            ChannelCapabilities::default(),
+            creds,
+            std::sync::Arc::new(crate::pairing::PairingStore::new()),
+        );
 
         let error = "HTTP request failed: error sending request for url \
             (https://api.telegram.org/bot8218490433:AAEZeUxwqZ5OO3mOCXv7fKvpdhDgsmBBNis/getUpdates)";
@@ -2447,6 +2561,7 @@ mod tests {
             "test",
             ChannelCapabilities::default(),
             std::collections::HashMap::new(),
+            std::sync::Arc::new(crate::pairing::PairingStore::new()),
         );
 
         let input = "some error message";
@@ -2460,8 +2575,13 @@ mod tests {
         let mut creds = std::collections::HashMap::new();
         creds.insert("EMPTY_TOKEN".to_string(), String::new());
 
-        let store =
-            ChannelStoreData::new(1024 * 1024, "test", ChannelCapabilities::default(), creds);
+        let store = ChannelStoreData::new(
+            1024 * 1024,
+            "test",
+            ChannelCapabilities::default(),
+            creds,
+            std::sync::Arc::new(crate::pairing::PairingStore::new()),
+        );
 
         let input = "should not match anything";
         assert_eq!(store.redact_credentials(input), input);

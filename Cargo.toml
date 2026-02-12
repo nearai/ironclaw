@@ -70,6 +70,7 @@ toml = "0.8"
 
 # Filesystem paths
 dirs = "6"
+fs4 = "0.6"
 
 # Secrecy for sensitive values
 secrecy = { version = "0.10", features = ["serde"] }

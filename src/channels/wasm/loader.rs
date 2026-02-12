@@ -16,16 +16,21 @@ use crate::channels::wasm::error::WasmChannelError;
 use crate::channels::wasm::runtime::WasmChannelRuntime;
 use crate::channels::wasm::schema::ChannelCapabilitiesFile;
 use crate::channels::wasm::wrapper::WasmChannel;
+use crate::pairing::PairingStore;
 
 /// Loads WASM channels from the filesystem.
 pub struct WasmChannelLoader {
     runtime: Arc<WasmChannelRuntime>,
+    pairing_store: Arc<PairingStore>,
 }
 
 impl WasmChannelLoader {
-    /// Create a new loader with the given runtime.
-    pub fn new(runtime: Arc<WasmChannelRuntime>) -> Self {
-        Self { runtime }
+    /// Create a new loader with the given runtime and pairing store.
+    pub fn new(runtime: Arc<WasmChannelRuntime>, pairing_store: Arc<PairingStore>) -> Self {
+        Self {
+            runtime,
+            pairing_store,
+        }
     }
 
     /// Load a single WASM channel from a file pair.
@@ -114,7 +119,13 @@ impl WasmChannelLoader {
             .await?;
 
         // Create the channel
-        let channel = WasmChannel::new(self.runtime.clone(), prepared, capabilities, config_json);
+        let channel = WasmChannel::new(
+            self.runtime.clone(),
+            prepared,
+            capabilities,
+            config_json,
+            self.pairing_store.clone(),
+        );
 
         tracing::info!(
             name = name,
@@ -352,6 +363,7 @@ mod tests {
 
     use crate::channels::wasm::loader::{WasmChannelLoader, discover_channels};
     use crate::channels::wasm::runtime::{WasmChannelRuntime, WasmChannelRuntimeConfig};
+    use crate::pairing::PairingStore;
     use std::sync::Arc;
 
     #[tokio::test]
@@ -408,7 +420,7 @@ mod tests {
     async fn test_loader_invalid_name() {
         let config = WasmChannelRuntimeConfig::for_testing();
         let runtime = Arc::new(WasmChannelRuntime::new(config).unwrap());
-        let loader = WasmChannelLoader::new(runtime);
+        let loader = WasmChannelLoader::new(runtime, Arc::new(PairingStore::new()));
 
         let dir = TempDir::new().unwrap();
         let wasm_path = dir.path().join("test.wasm");

@@ -85,6 +85,8 @@ cargo build --release
 cargo test
 ```
 
+For **full release** (after modifying channel sources), run `./scripts/build-all.sh` to rebuild channels first.
+
 ### Database Setup
 
 ```bash
@@ -227,6 +229,9 @@ cargo test
 # Run specific test
 cargo test test_name
 ```
+
+- **Telegram channel**: See [docs/TELEGRAM_SETUP.md](docs/TELEGRAM_SETUP.md) for setup and DM pairing.
+- **Changing channel sources**: Run `./channels-src/telegram/build.sh` before `cargo build` so the updated WASM is bundled.
 
 ## OpenClaw Heritage
 
