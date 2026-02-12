@@ -54,6 +54,7 @@ pub mod orchestrator;
 pub mod safety;
 pub mod sandbox;
 pub mod secrets;
+pub mod skills;
 pub mod settings;
 pub mod setup;
 pub mod tools;

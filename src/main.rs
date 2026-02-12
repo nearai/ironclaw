@@ -1009,6 +1009,18 @@ async fn main() -> anyhow::Result<()> {
         channels.add(Box::new(gw));
     }
 
+    // Initialize skills system
+    let skill_registry = if config.skills.enabled {
+        let registry = ironclaw::skills::SkillRegistry::new(config.skills.local_dir.clone());
+        let loaded = registry.discover_local().await;
+        if !loaded.is_empty() {
+            tracing::info!("Loaded {} local skill(s): {}", loaded.len(), loaded.join(", "));
+        }
+        Some(Arc::new(registry))
+    } else {
+        None
+    };
+
     // Create and run the agent
     let deps = AgentDeps {
         store,
@@ -1017,6 +1029,7 @@ async fn main() -> anyhow::Result<()> {
         tools,
         workspace,
         extension_manager,
+        skill_registry,
     };
     let agent = Agent::new(
         config.agent.clone(),
