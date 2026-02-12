@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.1](https://github.com/nearai/ironclaw/compare/v0.1.0...v0.1.1) - 2026-02-12
+
+### Other
+
+- Renamed the secrets in release-plz.yml to match the configuration
+- Make sure that the binaries release CD it kicking in after release-plz
+
 ## [0.1.0](https://github.com/nearai/ironclaw/releases/tag/v0.1.0) - 2026-02-12
 
 ### Added
