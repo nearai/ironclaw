@@ -464,6 +464,7 @@ impl SetupWizard {
                 api_mode: crate::config::NearAiApiMode::Responses,
                 api_key: None,
             },
+            openrouter: None,
             openai: None,
             anthropic: None,
             ollama: None,

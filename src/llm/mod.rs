@@ -1,7 +1,8 @@
 //! LLM integration for the agent.
 //!
 //! Supports multiple backends:
-//! - **NEAR AI** (default): Session-based or API key auth via NEAR AI proxy
+//! - **OpenRouter** (default): Broad model access via OpenAI-compatible API
+//! - **NEAR AI**: Session-based or API key auth via NEAR AI proxy
 //! - **OpenAI**: Direct API access with your own key
 //! - **Anthropic**: Direct API access with your own key
 //! - **Ollama**: Local model inference
@@ -43,12 +44,37 @@ pub fn create_llm_provider(
     session: Arc<SessionManager>,
 ) -> Result<Arc<dyn LlmProvider>, LlmError> {
     match config.backend {
+        LlmBackend::OpenRouter => create_openrouter_provider(config),
         LlmBackend::NearAi => create_nearai_provider(config, session),
         LlmBackend::OpenAi => create_openai_provider(config),
         LlmBackend::Anthropic => create_anthropic_provider(config),
         LlmBackend::Ollama => create_ollama_provider(config),
         LlmBackend::OpenAiCompatible => create_openai_compatible_provider(config),
     }
+}
+
+fn create_openrouter_provider(config: &LlmConfig) -> Result<Arc<dyn LlmProvider>, LlmError> {
+    let or = config
+        .openrouter
+        .as_ref()
+        .ok_or_else(|| LlmError::AuthFailed {
+            provider: "openrouter".to_string(),
+        })?;
+
+    use rig::providers::openai;
+
+    let client: openai::Client = openai::Client::builder()
+        .base_url("https://openrouter.ai/api/v1")
+        .api_key(or.api_key.expose_secret())
+        .build()
+        .map_err(|e| LlmError::RequestFailed {
+            provider: "openrouter".to_string(),
+            reason: format!("Failed to create OpenRouter client: {}", e),
+        })?;
+
+    let model = client.completion_model(&or.model);
+    tracing::info!("Using OpenRouter API (model: {})", or.model);
+    Ok(Arc::new(RigAdapter::new(model, &or.model)))
 }
 
 fn create_nearai_provider(
