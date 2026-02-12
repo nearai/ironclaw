@@ -1,0 +1,13 @@
+[Unit]
+Description=Cloud SQL Auth Proxy
+After=network.target
+
+[Service]
+Type=simple
+User=root
+ExecStart=/usr/local/bin/cloud-sql-proxy ironclaw-prod:us-central1:ironclaw-db --port=5432
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
