@@ -236,10 +236,11 @@ impl PairingStore {
         file.lock_exclusive()?;
 
         let content = fs::read_to_string(&path).unwrap_or_default();
-        let mut store: PairingStoreFile = serde_json::from_str(&content).unwrap_or(PairingStoreFile {
-            version: 1,
-            requests: Vec::new(),
-        });
+        let mut store: PairingStoreFile =
+            serde_json::from_str(&content).unwrap_or(PairingStoreFile {
+                version: 1,
+                requests: Vec::new(),
+            });
 
         let now = now_iso();
         let now_secs = now_secs();
@@ -296,7 +297,10 @@ impl PairingStore {
         self.write_pairing_file_locked(&mut file, channel, &store.requests)?;
         fs4::FileExt::unlock(&file)?;
 
-        Ok(UpsertResult { code, created: true })
+        Ok(UpsertResult {
+            code,
+            created: true,
+        })
     }
 
     fn is_approve_rate_limited(&self, channel: &str) -> Result<bool, PairingStoreError> {
@@ -306,8 +310,7 @@ impl PairingStore {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(false),
             Err(e) => return Err(e.into()),
         };
-        let mut data: ApproveAttemptsFile =
-            serde_json::from_str(&content).unwrap_or_default();
+        let mut data: ApproveAttemptsFile = serde_json::from_str(&content).unwrap_or_default();
         let now = now_secs();
         let cutoff = now.saturating_sub(PAIRING_APPROVE_RATE_WINDOW_SECS);
         data.failed_at.retain(|&t| t >= cutoff);
@@ -324,8 +327,7 @@ impl PairingStore {
             .open(&path)?;
         file.lock_exclusive()?;
         let content = fs::read_to_string(&path).unwrap_or_default();
-        let mut data: ApproveAttemptsFile =
-            serde_json::from_str(&content).unwrap_or_default();
+        let mut data: ApproveAttemptsFile = serde_json::from_str(&content).unwrap_or_default();
         let now = now_secs();
         data.failed_at.push(now);
         let cutoff = now.saturating_sub(PAIRING_APPROVE_RATE_WINDOW_SECS);
@@ -368,10 +370,11 @@ impl PairingStore {
         file.lock_exclusive()?;
 
         let content = fs::read_to_string(&path).unwrap_or_default();
-        let mut store: PairingStoreFile = serde_json::from_str(&content).unwrap_or(PairingStoreFile {
-            version: 1,
-            requests: Vec::new(),
-        });
+        let mut store: PairingStoreFile =
+            serde_json::from_str(&content).unwrap_or(PairingStoreFile {
+                version: 1,
+                requests: Vec::new(),
+            });
 
         let now_secs = now_secs();
         store.requests.retain(|r| !is_expired(r, now_secs));
@@ -409,10 +412,11 @@ impl PairingStore {
             Err(e) => return Err(e.into()),
         };
 
-        let file: AllowFromStoreFile = serde_json::from_str(&content).unwrap_or(AllowFromStoreFile {
-            version: 1,
-            allow_from: Vec::new(),
-        });
+        let file: AllowFromStoreFile =
+            serde_json::from_str(&content).unwrap_or(AllowFromStoreFile {
+                version: 1,
+                allow_from: Vec::new(),
+            });
 
         Ok(file.allow_from)
     }
@@ -433,10 +437,9 @@ impl PairingStore {
         if let Some(u) = username {
             let u = u.trim().to_lowercase();
             let u_norm = u.strip_prefix('@').unwrap_or(&u);
-            if allow
-                .iter()
-                .any(|e| e.trim().to_lowercase() == u || e.trim().to_lowercase() == format!("@{}", u_norm))
-            {
+            if allow.iter().any(|e| {
+                e.trim().to_lowercase() == u || e.trim().to_lowercase() == format!("@{}", u_norm)
+            }) {
                 return Ok(true);
             }
         }
@@ -563,11 +566,20 @@ mod tests {
     fn test_upsert_request_creates_new() {
         let (store, _) = test_store();
         let result = store
-            .upsert_request("telegram", "user123", Some(serde_json::json!({"chat_id": 456})))
+            .upsert_request(
+                "telegram",
+                "user123",
+                Some(serde_json::json!({"chat_id": 456})),
+            )
             .unwrap();
         assert!(result.created);
         assert_eq!(result.code.len(), PAIRING_CODE_LENGTH);
-        assert!(result.code.chars().all(|c| PAIRING_ALPHABET.contains(&(c as u8))));
+        assert!(
+            result
+                .code
+                .chars()
+                .all(|c| PAIRING_ALPHABET.contains(&(c as u8)))
+        );
     }
 
     #[test]
@@ -575,7 +587,9 @@ mod tests {
         let (store, _) = test_store();
         let r1 = store.upsert_request("telegram", "user123", None).unwrap();
         assert!(r1.created);
-        let r2 = store.upsert_request("telegram", "user123", Some(serde_json::json!({"x": 1}))).unwrap();
+        let r2 = store
+            .upsert_request("telegram", "user123", Some(serde_json::json!({"x": 1})))
+            .unwrap();
         assert!(!r2.created);
         assert_eq!(r1.code, r2.code);
 
@@ -633,21 +647,35 @@ mod tests {
         let r = store.upsert_request("telegram", "user999", None).unwrap();
         store.approve("telegram", &r.code).unwrap();
 
-        assert!(store.is_sender_allowed("telegram", "user999", None).unwrap());
+        assert!(
+            store
+                .is_sender_allowed("telegram", "user999", None)
+                .unwrap()
+        );
         assert!(!store.is_sender_allowed("telegram", "other", None).unwrap());
     }
 
     #[test]
     fn test_is_sender_allowed_by_username() {
         let (store, _) = test_store();
-        store.upsert_request("telegram", "alice", Some(serde_json::json!({"username": "alice"}))).unwrap();
+        store
+            .upsert_request(
+                "telegram",
+                "alice",
+                Some(serde_json::json!({"username": "alice"})),
+            )
+            .unwrap();
         let pending = store.list_pending("telegram").unwrap();
         store.approve("telegram", &pending[0].code).unwrap();
 
         // approve adds id to allow_from. For username we need to add it manually.
         // Actually approve adds entry.id which is "alice". So is_sender_allowed("telegram", "alice", None) would work.
         assert!(store.is_sender_allowed("telegram", "alice", None).unwrap());
-        assert!(store.is_sender_allowed("telegram", "alice", Some("alice")).unwrap());
+        assert!(
+            store
+                .is_sender_allowed("telegram", "alice", Some("alice"))
+                .unwrap()
+        );
     }
 
     #[test]
