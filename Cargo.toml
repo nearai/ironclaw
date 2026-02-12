@@ -93,6 +93,9 @@ sha2 = "0.10"
 blake3 = "1"
 rand = "0.8"
 
+# Multi-provider LLM support
+rig-core = "0.30"
+
 # Docker sandbox
 bollard = "0.18"
 

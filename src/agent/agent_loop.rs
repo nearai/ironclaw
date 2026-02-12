@@ -1049,7 +1049,7 @@ impl Agent {
             iteration += 1;
             if iteration > MAX_TOOL_ITERATIONS {
                 return Err(crate::error::LlmError::InvalidResponse {
-                    provider: "nearai".to_string(),
+                    provider: "agent".to_string(),
                     reason: format!("Exceeded maximum tool iterations ({})", MAX_TOOL_ITERATIONS),
                 }
                 .into());
