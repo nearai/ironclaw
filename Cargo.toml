@@ -1,3 +1,11 @@
+[workspace]
+exclude = [
+    "channels-src/telegram",
+    "channels-src/slack",
+    "channels-src/whatsapp",
+    "tools-src/gmail",
+]
+
 [package]
 name = "ironclaw"
 version = "0.1.0"
