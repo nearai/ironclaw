@@ -200,9 +200,11 @@ pub trait Tool: Send + Sync {
 }
 
 /// A simple no-op tool for testing.
+#[cfg(test)]
 #[derive(Debug)]
 pub struct EchoTool;
 
+#[cfg(test)]
 #[async_trait]
 impl Tool for EchoTool {
     fn name(&self) -> &str {

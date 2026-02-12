@@ -290,17 +290,17 @@ impl ShellTool {
         let timeout_duration = timeout.map(Duration::from_secs).unwrap_or(self.timeout);
 
         // Try sandbox execution if available
-        if let Some(ref sandbox) = self.sandbox {
-            if sandbox.is_initialized() || sandbox.config().enabled {
-                match self
-                    .execute_sandboxed(sandbox, cmd, &cwd, timeout_duration)
-                    .await
-                {
-                    Ok((output, code)) => return Ok((output, code)),
-                    Err(e) => {
-                        // Log sandbox failure and fall through to direct execution
-                        tracing::warn!("Sandbox execution failed, falling back to direct: {}", e);
-                    }
+        if let Some(ref sandbox) = self.sandbox
+            && (sandbox.is_initialized() || sandbox.config().enabled)
+        {
+            match self
+                .execute_sandboxed(sandbox, cmd, &cwd, timeout_duration)
+                .await
+            {
+                Ok((output, code)) => return Ok((output, code)),
+                Err(e) => {
+                    // Log sandbox failure and fall through to direct execution
+                    tracing::warn!("Sandbox execution failed, falling back to direct: {}", e);
                 }
             }
         }

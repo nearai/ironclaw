@@ -71,7 +71,9 @@ pub async fn run_config_command(cmd: ConfigCommand) -> anyhow::Result<()> {
 
 /// Bootstrap a DB connection for config commands.
 async fn connect_store() -> anyhow::Result<crate::history::Store> {
-    let config = crate::config::Config::from_env().await.map_err(|e| anyhow::anyhow!("{}", e))?;
+    let config = crate::config::Config::from_env()
+        .await
+        .map_err(|e| anyhow::anyhow!("{}", e))?;
     let store = crate::history::Store::new(&config.database).await?;
     store.run_migrations().await?;
     Ok(store)
@@ -105,10 +107,10 @@ async fn list_settings(
     println!();
 
     for (key, value) in all {
-        if let Some(ref f) = filter {
-            if !key.starts_with(f) {
-                continue;
-            }
+        if let Some(ref f) = filter
+            && !key.starts_with(f)
+        {
+            continue;
         }
 
         let display_value = if value.len() > 60 {

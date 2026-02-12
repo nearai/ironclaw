@@ -469,7 +469,7 @@ pub fn create_wasm_channel_router(
 }
 
 #[cfg(test)]
- mod tests {
+mod tests {
     use std::sync::Arc;
 
     use crate::channels::wasm::capabilities::ChannelCapabilities;

@@ -192,9 +192,10 @@ impl CreateSecretParams {
 }
 
 /// Where a credential should be injected in an HTTP request.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub enum CredentialLocation {
     /// Inject as Authorization header (e.g., "Bearer {secret}")
+    #[default]
     AuthorizationBearer,
     /// Inject as Authorization header with Basic auth
     AuthorizationBasic { username: String },
@@ -207,12 +208,6 @@ pub enum CredentialLocation {
     QueryParam { name: String },
     /// Inject by replacing a placeholder in URL or body templates
     UrlPath { placeholder: String },
-}
-
-impl Default for CredentialLocation {
-    fn default() -> Self {
-        Self::AuthorizationBearer
-    }
 }
 
 /// Mapping from a secret name to where it should be injected.

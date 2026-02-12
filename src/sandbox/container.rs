@@ -498,10 +498,10 @@ impl ContainerRunner {
 /// 3. `~/.docker/run/docker.sock` (Docker Desktop on macOS)
 pub async fn connect_docker() -> Result<Docker> {
     // First try bollard defaults (checks DOCKER_HOST, then /var/run/docker.sock)
-    if let Ok(docker) = Docker::connect_with_local_defaults() {
-        if docker.ping().await.is_ok() {
-            return Ok(docker);
-        }
+    if let Ok(docker) = Docker::connect_with_local_defaults()
+        && docker.ping().await.is_ok()
+    {
+        return Ok(docker);
     }
 
     // Try Docker Desktop socket (macOS)
@@ -511,10 +511,9 @@ pub async fn connect_docker() -> Result<Docker> {
             let sock_str = desktop_sock.to_string_lossy();
             if let Ok(docker) =
                 Docker::connect_with_socket(&sock_str, 120, bollard::API_DEFAULT_VERSION)
+                && docker.ping().await.is_ok()
             {
-                if docker.ping().await.is_ok() {
-                    return Ok(docker);
-                }
+                return Ok(docker);
             }
         }
     }

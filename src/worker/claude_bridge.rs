@@ -288,15 +288,15 @@ impl ClaudeBridgeRuntime {
             match serde_json::from_str::<ClaudeStreamEvent>(&line) {
                 Ok(event) => {
                     // Capture session_id from system init
-                    if event.event_type == "system" {
-                        if let Some(ref sid) = event.session_id {
-                            session_id = Some(sid.clone());
-                            tracing::info!(
-                                job_id = %self.config.job_id,
-                                session_id = %sid,
-                                "Captured Claude session ID"
-                            );
-                        }
+                    if event.event_type == "system"
+                        && let Some(ref sid) = event.session_id
+                    {
+                        session_id = Some(sid.clone());
+                        tracing::info!(
+                            job_id = %self.config.job_id,
+                            session_id = %sid,
+                            "Captured Claude session ID"
+                        );
                     }
 
                     // Convert to our event payload and forward

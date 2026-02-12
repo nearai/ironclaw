@@ -1,0 +1,23 @@
+name: Run Tests
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+jobs:
+  tests:
+    name: Run Tests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          profile: minimal
+      - name: Run unit tests
+        run: cargo test --lib --all-features -- --nocapture
+      - name: Run integration tests (no database required)
+        run: cargo test --test pairing_integration --test wasm_channel_integration --test ws_gateway_integration --all-features -- --nocapture
+      # workspace_integration tests require PostgreSQL with pgvector; skipped in CI

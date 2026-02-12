@@ -147,10 +147,10 @@ impl LeakDetector {
         // Build prefix matcher for patterns that start with a known prefix
         let mut prefixes = Vec::new();
         for (idx, pattern) in patterns.iter().enumerate() {
-            if let Some(prefix) = extract_literal_prefix(pattern.regex.as_str()) {
-                if prefix.len() >= 3 {
-                    prefixes.push((prefix, idx));
-                }
+            if let Some(prefix) = extract_literal_prefix(pattern.regex.as_str())
+                && prefix.len() >= 3
+            {
+                prefixes.push((prefix, idx));
             }
         }
 
@@ -307,12 +307,12 @@ impl LeakDetector {
         }
 
         // Scan body if present and valid UTF-8
-        if let Some(body_bytes) = body {
-            if let Ok(body_str) = std::str::from_utf8(body_bytes) {
-                self.scan_and_clean(body_str)?;
-            }
-            // Binary bodies are not scanned (could add hex pattern detection later)
+        if let Some(body_bytes) = body
+            && let Ok(body_str) = std::str::from_utf8(body_bytes)
+        {
+            self.scan_and_clean(body_str)?;
         }
+        // Binary bodies are not scanned (could add hex pattern detection later)
 
         Ok(())
     }

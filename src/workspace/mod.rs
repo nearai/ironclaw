@@ -333,10 +333,10 @@ impl Workspace {
         ];
 
         for (path, header) in identity_files {
-            if let Ok(doc) = self.read(path).await {
-                if !doc.content.is_empty() {
-                    parts.push(format!("{}\n\n{}", header, doc.content));
-                }
+            if let Ok(doc) = self.read(path).await
+                && !doc.content.is_empty()
+            {
+                parts.push(format!("{}\n\n{}", header, doc.content));
             }
         }
 
@@ -345,15 +345,15 @@ impl Workspace {
         let yesterday = today.pred_opt().unwrap_or(today);
 
         for date in [today, yesterday] {
-            if let Ok(doc) = self.daily_log(date).await {
-                if !doc.content.is_empty() {
-                    let header = if date == today {
-                        "## Today's Notes"
-                    } else {
-                        "## Yesterday's Notes"
-                    };
-                    parts.push(format!("{}\n\n{}", header, doc.content));
-                }
+            if let Ok(doc) = self.daily_log(date).await
+                && !doc.content.is_empty()
+            {
+                let header = if date == today {
+                    "## Today's Notes"
+                } else {
+                    "## Yesterday's Notes"
+                };
+                parts.push(format!("{}\n\n{}", header, doc.content));
             }
         }
 

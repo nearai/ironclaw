@@ -49,12 +49,12 @@ fn validate_url(url: &str) -> Result<reqwest::Url, ToolError> {
         ));
     }
 
-    if let Ok(ip) = host.parse::<IpAddr>() {
-        if is_disallowed_ip(&ip) {
-            return Err(ToolError::NotAuthorized(
-                "private or local IPs are not allowed".to_string(),
-            ));
-        }
+    if let Ok(ip) = host.parse::<IpAddr>()
+        && is_disallowed_ip(&ip)
+    {
+        return Err(ToolError::NotAuthorized(
+            "private or local IPs are not allowed".to_string(),
+        ));
     }
 
     Ok(parsed)

@@ -7,7 +7,6 @@ use tracing_subscriber::{EnvFilter, layer::SubscriberExt, util::SubscriberInitEx
 
 use ironclaw::{
     agent::{Agent, AgentDeps, SessionManager},
-    pairing::PairingStore,
     channels::{
         ChannelManager, GatewayChannel, HttpChannel, ReplChannel, WebhookServer,
         WebhookServerConfig,
@@ -30,6 +29,7 @@ use ironclaw::{
         ContainerJobConfig, ContainerJobManager, OrchestratorApi, TokenStore,
         api::OrchestratorState,
     },
+    pairing::PairingStore,
     safety::SafetyLayer,
     secrets::{PostgresSecretsStore, SecretsCrypto, SecretsStore},
     setup::{SetupConfig, SetupWizard},
@@ -86,7 +86,9 @@ async fn main() -> anyhow::Result<()> {
 
             // Memory commands need database (and optionally embeddings)
             let _ = dotenvy::dotenv();
-            let config = Config::from_env().await.map_err(|e| anyhow::anyhow!("{}", e))?;
+            let config = Config::from_env()
+                .await
+                .map_err(|e| anyhow::anyhow!("{}", e))?;
             let store = ironclaw::history::Store::new(&config.database).await?;
             store.run_migrations().await?;
 
@@ -250,13 +252,13 @@ async fn main() -> anyhow::Result<()> {
     let _ = dotenvy::dotenv();
 
     // Enhanced first-run detection
-    if !cli.no_onboard {
-        if let Some(reason) = check_onboard_needed().await {
-            println!("Onboarding needed: {}", reason);
-            println!();
-            let mut wizard = SetupWizard::new();
-            wizard.run().await?;
-        }
+    if !cli.no_onboard
+        && let Some(reason) = check_onboard_needed().await
+    {
+        println!("Onboarding needed: {}", reason);
+        println!();
+        let mut wizard = SetupWizard::new();
+        wizard.run().await?;
     }
 
     // Load bootstrap config (4 fields that must live on disk)
@@ -795,13 +797,13 @@ async fn main() -> anyhow::Result<()> {
 
                                 // Inject owner_id for Telegram so the bot only responds
                                 // to the bound user account.
-                                if channel_name == "telegram" {
-                                    if let Some(owner_id) = config.channels.telegram_owner_id {
-                                        config_updates.insert(
-                                            "owner_id".to_string(),
-                                            serde_json::json!(owner_id),
-                                        );
-                                    }
+                                if channel_name == "telegram"
+                                    && let Some(owner_id) = config.channels.telegram_owner_id
+                                {
+                                    config_updates.insert(
+                                        "owner_id".to_string(),
+                                        serde_json::json!(owner_id),
+                                    );
                                 }
 
                                 if !config_updates.is_empty() {
@@ -892,23 +894,23 @@ async fn main() -> anyhow::Result<()> {
     // Extract its routes for the unified server; the channel itself just
     // provides the mpsc stream.
     let mut webhook_server_addr: Option<std::net::SocketAddr> = None;
-    if !cli.cli_only {
-        if let Some(ref http_config) = config.channels.http {
-            let http_channel = HttpChannel::new(http_config.clone());
-            webhook_routes.push(http_channel.routes());
-            let (host, port) = http_channel.addr();
-            webhook_server_addr = Some(
-                format!("{}:{}", host, port)
-                    .parse()
-                    .expect("HttpConfig host:port must be a valid SocketAddr"),
-            );
-            channels.add(Box::new(http_channel));
-            tracing::info!(
-                "HTTP channel enabled on {}:{}",
-                http_config.host,
-                http_config.port
-            );
-        }
+    if !cli.cli_only
+        && let Some(ref http_config) = config.channels.http
+    {
+        let http_channel = HttpChannel::new(http_config.clone());
+        webhook_routes.push(http_channel.routes());
+        let (host, port) = http_channel.addr();
+        webhook_server_addr = Some(
+            format!("{}:{}", host, port)
+                .parse()
+                .expect("HttpConfig host:port must be a valid SocketAddr"),
+        );
+        channels.add(Box::new(http_channel));
+        tracing::info!(
+            "HTTP channel enabled on {}:{}",
+            http_config.host,
+            http_config.port
+        );
     }
 
     // Start the unified webhook server if any routes were registered.

@@ -24,23 +24,21 @@ pub async fn auth_middleware(
     next: Next,
 ) -> Response {
     // Try Authorization header first
-    if let Some(auth_header) = headers.get("authorization") {
-        if let Ok(value) = auth_header.to_str() {
-            if let Some(token) = value.strip_prefix("Bearer ") {
-                if token == auth.token {
-                    return next.run(request).await;
-                }
-            }
-        }
+    if let Some(auth_header) = headers.get("authorization")
+        && let Ok(value) = auth_header.to_str()
+        && let Some(token) = value.strip_prefix("Bearer ")
+        && token == auth.token
+    {
+        return next.run(request).await;
     }
 
     // Fall back to query parameter (for SSE EventSource)
     if let Some(query) = request.uri().query() {
         for pair in query.split('&') {
-            if let Some(token) = pair.strip_prefix("token=") {
-                if token == auth.token {
-                    return next.run(request).await;
-                }
+            if let Some(token) = pair.strip_prefix("token=")
+                && token == auth.token
+            {
+                return next.run(request).await;
             }
         }
     }

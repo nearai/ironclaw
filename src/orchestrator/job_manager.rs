@@ -203,27 +203,27 @@ impl ContainerJobManager {
                 .unwrap_or_else(|| PathBuf::from("."))
                 .join(".ironclaw")
                 .join("projects");
-            if let Ok(canonical_base) = projects_base.canonicalize() {
-                if !canonical.starts_with(&canonical_base) {
-                    return Err(OrchestratorError::ContainerCreationFailed {
-                        job_id,
-                        reason: format!(
-                            "project directory {} is outside allowed base {}",
-                            canonical.display(),
-                            canonical_base.display()
-                        ),
-                    });
-                }
+            if let Ok(canonical_base) = projects_base.canonicalize()
+                && !canonical.starts_with(&canonical_base)
+            {
+                return Err(OrchestratorError::ContainerCreationFailed {
+                    job_id,
+                    reason: format!(
+                        "project directory {} is outside allowed base {}",
+                        canonical.display(),
+                        canonical_base.display()
+                    ),
+                });
             }
             binds.push(format!("{}:/workspace:rw", canonical.display()));
             env_vec.push("IRONCLAW_WORKSPACE=/workspace".to_string());
         }
 
         // Claude Code mode: mount host ~/.claude read-only for auth
-        if mode == JobMode::ClaudeCode {
-            if let Some(ref claude_dir) = self.config.claude_config_dir {
-                binds.push(format!("{}:/home/sandbox/.claude:ro", claude_dir.display()));
-            }
+        if mode == JobMode::ClaudeCode
+            && let Some(ref claude_dir) = self.config.claude_config_dir
+        {
+            binds.push(format!("{}:/home/sandbox/.claude:ro", claude_dir.display()));
         }
 
         // Memory limit: Claude Code gets more memory
@@ -407,26 +407,25 @@ impl ContainerJobManager {
             let containers = self.containers.read().await;
             containers.get(&job_id).map(|h| h.container_id.clone())
         };
-        if let Some(cid) = container_id {
-            if !cid.is_empty() {
-                if let Ok(docker) = connect_docker().await {
-                    let _ = docker
-                        .stop_container(
-                            &cid,
-                            Some(bollard::container::StopContainerOptions { t: 5 }),
-                        )
-                        .await;
-                    let _ = docker
-                        .remove_container(
-                            &cid,
-                            Some(bollard::container::RemoveContainerOptions {
-                                force: true,
-                                ..Default::default()
-                            }),
-                        )
-                        .await;
-                }
-            }
+        if let Some(cid) = container_id
+            && !cid.is_empty()
+            && let Ok(docker) = connect_docker().await
+        {
+            let _ = docker
+                .stop_container(
+                    &cid,
+                    Some(bollard::container::StopContainerOptions { t: 5 }),
+                )
+                .await;
+            let _ = docker
+                .remove_container(
+                    &cid,
+                    Some(bollard::container::RemoveContainerOptions {
+                        force: true,
+                        ..Default::default()
+                    }),
+                )
+                .await;
         }
         self.token_store.revoke(job_id).await;
 
