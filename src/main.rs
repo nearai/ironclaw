@@ -84,7 +84,9 @@ async fn main() -> anyhow::Result<()> {
 
             // Memory commands need database (and optionally embeddings)
             let _ = dotenvy::dotenv();
-            let config = Config::from_env().await.map_err(|e| anyhow::anyhow!("{}", e))?;
+            let config = Config::from_env()
+                .await
+                .map_err(|e| anyhow::anyhow!("{}", e))?;
             let store = ironclaw::history::Store::new(&config.database).await?;
             store.run_migrations().await?;
 
@@ -1014,7 +1016,11 @@ async fn main() -> anyhow::Result<()> {
         let registry = ironclaw::skills::SkillRegistry::new(config.skills.local_dir.clone());
         let loaded = registry.discover_local().await;
         if !loaded.is_empty() {
-            tracing::info!("Loaded {} local skill(s): {}", loaded.len(), loaded.join(", "));
+            tracing::info!(
+                "Loaded {} local skill(s): {}",
+                loaded.len(),
+                loaded.join(", ")
+            );
         }
         Some(Arc::new(registry))
     } else {
@@ -1030,6 +1036,7 @@ async fn main() -> anyhow::Result<()> {
         workspace,
         extension_manager,
         skill_registry,
+        skills_config: config.skills.clone(),
     };
     let agent = Agent::new(
         config.agent.clone(),

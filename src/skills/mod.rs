@@ -27,7 +27,26 @@ pub use selector::prefilter_skills;
 
 use std::path::PathBuf;
 
+use regex::Regex;
 use serde::{Deserialize, Serialize};
+
+/// Maximum number of keywords allowed per skill to prevent scoring manipulation.
+const MAX_KEYWORDS_PER_SKILL: usize = 20;
+
+/// Maximum number of regex patterns allowed per skill.
+const MAX_PATTERNS_PER_SKILL: usize = 5;
+
+/// Maximum file size for prompt.md (64 KiB).
+pub const MAX_PROMPT_FILE_SIZE: u64 = 64 * 1024;
+
+/// Regex for validating skill names: alphanumeric, hyphens, underscores, dots.
+static SKILL_NAME_PATTERN: std::sync::LazyLock<Regex> =
+    std::sync::LazyLock::new(|| Regex::new(r"^[a-zA-Z0-9][a-zA-Z0-9._-]{0,63}$").unwrap());
+
+/// Validate a skill name against the allowed pattern.
+pub fn validate_skill_name(name: &str) -> bool {
+    SKILL_NAME_PATTERN.is_match(name)
+}
 
 /// Trust tier for a skill, determining its authority ceiling.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
@@ -65,9 +84,11 @@ pub enum SkillSource {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ActivationCriteria {
     /// Keywords that trigger this skill (exact and substring match).
+    /// Capped at `MAX_KEYWORDS_PER_SKILL` during loading.
     #[serde(default)]
     pub keywords: Vec<String>,
     /// Regex patterns for more complex matching.
+    /// Capped at `MAX_PATTERNS_PER_SKILL` during loading.
     #[serde(default)]
     pub patterns: Vec<String>,
     /// Tags for broad category matching.
@@ -76,6 +97,14 @@ pub struct ActivationCriteria {
     /// Maximum context tokens this skill's prompt should consume.
     #[serde(default = "default_max_context_tokens")]
     pub max_context_tokens: usize,
+}
+
+impl ActivationCriteria {
+    /// Enforce limits on keywords and patterns to prevent scoring manipulation.
+    pub fn enforce_limits(&mut self) {
+        self.keywords.truncate(MAX_KEYWORDS_PER_SKILL);
+        self.patterns.truncate(MAX_PATTERNS_PER_SKILL);
+    }
 }
 
 fn default_max_context_tokens() -> usize {
@@ -150,6 +179,8 @@ pub struct LoadedSkill {
     pub content_hash: String,
     /// Scanner warnings from loading (empty = clean).
     pub scan_warnings: Vec<String>,
+    /// Pre-compiled regex patterns from activation criteria (compiled at load time).
+    pub compiled_patterns: Vec<Regex>,
 }
 
 impl LoadedSkill {
@@ -171,6 +202,48 @@ impl LoadedSkill {
             .map(|s| s.as_str())
             .collect()
     }
+
+    /// Compile regex patterns from activation criteria. Invalid patterns are logged and skipped.
+    pub fn compile_patterns(patterns: &[String]) -> Vec<Regex> {
+        patterns
+            .iter()
+            .filter_map(|p| match Regex::new(p) {
+                Ok(re) => Some(re),
+                Err(e) => {
+                    tracing::warn!("Invalid activation regex pattern '{}': {}", p, e);
+                    None
+                }
+            })
+            .collect()
+    }
+}
+
+/// Escape a string for safe inclusion in XML attributes.
+/// Prevents attribute injection attacks via skill name/version fields.
+pub fn escape_xml_attr(s: &str) -> String {
+    s.replace('&', "&amp;")
+        .replace('"', "&quot;")
+        .replace('\'', "&apos;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+}
+
+/// Escape prompt content to prevent tag breakout from `<skill>` delimiters.
+/// Replaces `</skill` sequences that could close the wrapper tag.
+pub fn escape_skill_content(content: &str) -> String {
+    // Replace closing tag variants that could break structural isolation
+    content
+        .replace("</skill>", "&lt;/skill&gt;")
+        .replace("</skill ", "&lt;/skill ")
+        .replace("</SKILL>", "&lt;/SKILL&gt;")
+        .replace("</SKILL ", "&lt;/SKILL ")
+        .replace("</Skill>", "&lt;/Skill&gt;")
+        .replace("</Skill ", "&lt;/Skill ")
+}
+
+/// Normalize line endings to LF before hashing to ensure cross-platform consistency.
+pub fn normalize_line_endings(content: &str) -> String {
+    content.replace("\r\n", "\n").replace('\r', "\n")
 }
 
 #[cfg(test)]
@@ -244,11 +317,86 @@ reason = "need http"
             source: SkillSource::Local(PathBuf::from("/tmp/test")),
             content_hash: "sha256:000".to_string(),
             scan_warnings: vec![],
+            compiled_patterns: vec![],
         };
 
         let tools = skill.declared_tools();
         assert_eq!(tools.len(), 2);
         assert!(tools.contains(&"shell"));
         assert!(tools.contains(&"http"));
+    }
+
+    #[test]
+    fn test_validate_skill_name_valid() {
+        assert!(validate_skill_name("writing-assistant"));
+        assert!(validate_skill_name("my_skill"));
+        assert!(validate_skill_name("skill.v2"));
+        assert!(validate_skill_name("a"));
+        assert!(validate_skill_name("ABC123"));
+    }
+
+    #[test]
+    fn test_validate_skill_name_invalid() {
+        assert!(!validate_skill_name(""));
+        assert!(!validate_skill_name("-starts-with-dash"));
+        assert!(!validate_skill_name(".starts-with-dot"));
+        assert!(!validate_skill_name("has spaces"));
+        assert!(!validate_skill_name("has/slashes"));
+        assert!(!validate_skill_name("has<angle>brackets"));
+        assert!(!validate_skill_name("has\"quotes"));
+        assert!(!validate_skill_name(
+            "very-long-name-that-exceeds-the-sixty-four-character-limit-for-skill-names-wow"
+        ));
+    }
+
+    #[test]
+    fn test_escape_xml_attr() {
+        assert_eq!(escape_xml_attr("normal"), "normal");
+        assert_eq!(
+            escape_xml_attr(r#"" trust="LOCAL"#),
+            "&quot; trust=&quot;LOCAL"
+        );
+        assert_eq!(escape_xml_attr("<script>"), "&lt;script&gt;");
+        assert_eq!(escape_xml_attr("a&b"), "a&amp;b");
+    }
+
+    #[test]
+    fn test_escape_skill_content() {
+        assert_eq!(escape_skill_content("normal text"), "normal text");
+        assert_eq!(
+            escape_skill_content("</skill>breakout"),
+            "&lt;/skill&gt;breakout"
+        );
+        assert_eq!(escape_skill_content("</SKILL>UPPER"), "&lt;/SKILL&gt;UPPER");
+    }
+
+    #[test]
+    fn test_normalize_line_endings() {
+        assert_eq!(normalize_line_endings("a\r\nb\r\n"), "a\nb\n");
+        assert_eq!(normalize_line_endings("a\rb\r"), "a\nb\n");
+        assert_eq!(normalize_line_endings("a\nb\n"), "a\nb\n");
+    }
+
+    #[test]
+    fn test_enforce_keyword_limits() {
+        let mut criteria = ActivationCriteria {
+            keywords: (0..30).map(|i| format!("kw{}", i)).collect(),
+            patterns: (0..10).map(|i| format!("pat{}", i)).collect(),
+            ..Default::default()
+        };
+        criteria.enforce_limits();
+        assert_eq!(criteria.keywords.len(), MAX_KEYWORDS_PER_SKILL);
+        assert_eq!(criteria.patterns.len(), MAX_PATTERNS_PER_SKILL);
+    }
+
+    #[test]
+    fn test_compile_patterns() {
+        let patterns = vec![
+            r"(?i)\bwrite\b".to_string(),
+            "[invalid".to_string(), // bad regex
+            r"(?i)\bedit\b".to_string(),
+        ];
+        let compiled = LoadedSkill::compile_patterns(&patterns);
+        assert_eq!(compiled.len(), 2); // invalid one skipped
     }
 }

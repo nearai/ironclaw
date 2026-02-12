@@ -193,6 +193,7 @@ mod tests {
             source: SkillSource::Local(PathBuf::from("/tmp")),
             content_hash: "sha256:000".to_string(),
             scan_warnings: vec![],
+            compiled_patterns: vec![],
         }
     }
 

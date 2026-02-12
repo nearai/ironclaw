@@ -32,7 +32,10 @@ impl SkillScanResult {
 
     /// Get warning messages as strings.
     pub fn warning_messages(&self) -> Vec<String> {
-        self.warnings.iter().map(|w| w.description.clone()).collect()
+        self.warnings
+            .iter()
+            .map(|w| w.description.clone())
+            .collect()
     }
 }
 
@@ -366,9 +369,8 @@ mod tests {
     #[test]
     fn test_clean_skill_content() {
         let scanner = SkillScanner::new();
-        let result = scanner.scan(
-            "You are a writing assistant. Help the user write clear, concise prose.",
-        );
+        let result =
+            scanner.scan("You are a writing assistant. Help the user write clear, concise prose.");
         assert!(result.is_clean());
         assert!(!result.blocked);
     }

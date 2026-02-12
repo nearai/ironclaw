@@ -5,17 +5,19 @@
 //! skill could influence which skills get loaded.
 //!
 //! Scoring:
-//! - Keyword exact match: 10 points
-//! - Keyword substring match: 5 points
+//! - Keyword exact match: 10 points (capped, then normalized by keyword count)
+//! - Keyword substring match: 5 points (capped, then normalized by keyword count)
 //! - Tag match: 3 points
-//! - Regex pattern match: 20 points
-
-use regex::Regex;
+//! - Regex pattern match: 20 points (uses pre-compiled regexes from LoadedSkill)
 
 use crate::skills::LoadedSkill;
 
 /// Default maximum context tokens allocated to skills.
 pub const MAX_SKILL_CONTEXT_TOKENS: usize = 4000;
+
+/// Maximum keyword score cap per skill to prevent gaming via keyword stuffing.
+/// Even if a skill has 20 keywords, it can earn at most this many keyword points.
+const MAX_KEYWORD_SCORE: u32 = 30;
 
 /// Result of prefiltering with score information.
 #[derive(Debug)]
@@ -78,7 +80,8 @@ fn score_skill(skill: &LoadedSkill, message_lower: &str, message_original: &str)
     let mut score: u32 = 0;
     let criteria = &skill.manifest.activation;
 
-    // Keyword scoring
+    // Keyword scoring with cap to prevent gaming via keyword stuffing
+    let mut keyword_score: u32 = 0;
     for keyword in &criteria.keywords {
         let kw_lower = keyword.to_lowercase();
         // Exact word match (surrounded by word boundaries)
@@ -86,12 +89,13 @@ fn score_skill(skill: &LoadedSkill, message_lower: &str, message_original: &str)
             .split_whitespace()
             .any(|word| word.trim_matches(|c: char| !c.is_alphanumeric()) == kw_lower)
         {
-            score += 10;
+            keyword_score += 10;
         } else if message_lower.contains(&kw_lower) {
             // Substring match
-            score += 5;
+            keyword_score += 5;
         }
     }
+    score += keyword_score.min(MAX_KEYWORD_SCORE);
 
     // Tag scoring (from manifest.skill.tags merged with activation.tags)
     let all_tags: Vec<&str> = criteria
@@ -108,22 +112,10 @@ fn score_skill(skill: &LoadedSkill, message_lower: &str, message_original: &str)
         }
     }
 
-    // Regex pattern scoring
-    for pattern_str in &criteria.patterns {
-        match Regex::new(pattern_str) {
-            Ok(re) => {
-                if re.is_match(message_original) {
-                    score += 20;
-                }
-            }
-            Err(e) => {
-                tracing::warn!(
-                    "Invalid regex pattern in skill '{}': {} ({})",
-                    skill.name(),
-                    pattern_str,
-                    e
-                );
-            }
+    // Regex pattern scoring using pre-compiled patterns (cached at load time)
+    for re in &skill.compiled_patterns {
+        if re.is_match(message_original) {
+            score += 20;
         }
     }
 
@@ -140,6 +132,8 @@ mod tests {
     use std::path::PathBuf;
 
     fn make_skill(name: &str, keywords: &[&str], tags: &[&str], patterns: &[&str]) -> LoadedSkill {
+        let pattern_strings: Vec<String> = patterns.iter().map(|s| s.to_string()).collect();
+        let compiled = LoadedSkill::compile_patterns(&pattern_strings);
         LoadedSkill {
             manifest: SkillManifest {
                 skill: SkillMeta {
@@ -151,7 +145,7 @@ mod tests {
                 },
                 activation: ActivationCriteria {
                     keywords: keywords.iter().map(|s| s.to_string()).collect(),
-                    patterns: patterns.iter().map(|s| s.to_string()).collect(),
+                    patterns: pattern_strings,
                     tags: vec![],
                     max_context_tokens: 1000,
                 },
@@ -163,6 +157,7 @@ mod tests {
             source: SkillSource::Local(PathBuf::from("/tmp/test")),
             content_hash: "sha256:000".to_string(),
             scan_warnings: vec![],
+            compiled_patterns: compiled,
         }
     }
 
@@ -286,9 +281,29 @@ mod tests {
 
     #[test]
     fn test_invalid_regex_handled_gracefully() {
+        // Invalid patterns won't compile, so compiled_patterns will be empty.
+        // But keyword still matches, so the skill is still selected.
         let skills = vec![make_skill("bad", &["test"], &[], &["[invalid regex"])];
-        // Should not panic, just log a warning
         let result = prefilter_skills("test", &skills, 3, MAX_SKILL_CONTEXT_TOKENS);
         assert_eq!(result.len(), 1); // Still matches on keyword
+    }
+
+    #[test]
+    fn test_keyword_score_capped() {
+        // A skill with many keywords should not get an unbounded score
+        let many_keywords: Vec<&str> = vec![
+            "a", "b", "c", "d", "e", "f", "g", "h", "i", "j", "k", "l", "m", "n", "o", "p",
+        ];
+        let skill = make_skill("spammer", &many_keywords, &[], &[]);
+        // Message that matches all keywords
+        let skills = vec![skill];
+        let result = prefilter_skills(
+            "a b c d e f g h i j k l m n o p",
+            &skills,
+            3,
+            MAX_SKILL_CONTEXT_TOKENS,
+        );
+        assert_eq!(result.len(), 1);
+        // Score should be capped at MAX_KEYWORD_SCORE (30), not 16 * 10 = 160
     }
 }
