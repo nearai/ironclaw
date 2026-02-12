@@ -31,9 +31,9 @@ jobs:
         id: generate-token
         with:
           # GitHub App ID secret name
-          app-id: ${{ secrets.GITHUB_RELEASES_MANAGER_APP_ID }}
+          app-id: ${{ secrets.GH_RELEASES_MANAGER_APP_ID }}
           # GitHub App private key secret name
-          private-key: ${{ secrets.GITHUB_RELEASES_MANAGER_APP_PRIVATE_KEY }}
+          private-key: ${{ secrets.GH_RELEASES_MANAGER_APP_PRIVATE_KEY }}
       - name: Run release-plz
         uses: release-plz/action@v0.5
         with:
