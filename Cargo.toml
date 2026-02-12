@@ -151,7 +151,7 @@ ci = "github"
 # The installers to generate for each app
 installers = ["shell", "powershell", "npm", "msi"]
 # Publish jobs to run in CI
-publish-jobs = ["npm"]
+publish-jobs = []
 # Target platforms to build apps for (Rust target-triple syntax)
 targets = [
     "aarch64-apple-darwin",
