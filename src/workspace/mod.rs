@@ -46,7 +46,7 @@ mod embeddings;
 mod repository;
 mod search;
 
-pub use chunker::{ChunkConfig, chunk_document};
+pub use chunker::{ChunkConfig, ChunkWithPosition, chunk_document, chunk_document_with_positions};
 pub use document::{MemoryChunk, MemoryDocument, WorkspaceEntry, paths};
 pub use embeddings::{EmbeddingProvider, MockEmbeddings, NearAiEmbeddings, OpenAiEmbeddings};
 pub use repository::Repository;

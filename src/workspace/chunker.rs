@@ -2,6 +2,33 @@
 //!
 //! Documents are split into overlapping chunks for better search recall.
 //! The overlap ensures context is preserved across chunk boundaries.
+//! Line positions are tracked for citation support.
+
+/// A chunk with its position in the original document.
+#[derive(Debug, Clone)]
+pub struct ChunkWithPosition {
+    /// The chunk text content.
+    pub content: String,
+    /// Starting line number (1-based).
+    pub line_start: u32,
+    /// Ending line number (1-based, inclusive).
+    pub line_end: u32,
+    /// Character offset from document start.
+    pub char_start: usize,
+    /// Character offset end (exclusive).
+    pub char_end: usize,
+}
+
+impl ChunkWithPosition {
+    /// Format as citation string (e.g., "lines 15-23").
+    pub fn citation(&self) -> String {
+        if self.line_start == self.line_end {
+            format!("line {}", self.line_start)
+        } else {
+            format!("lines {}-{}", self.line_start, self.line_end)
+        }
+    }
+}
 
 /// Configuration for document chunking.
 #[derive(Debug, Clone)]
@@ -106,6 +133,127 @@ pub fn chunk_document(content: &str, config: ChunkConfig) -> Vec<String> {
 
         // Avoid creating duplicate chunks at the end
         if start + config.min_chunk_size >= words.len() && end == words.len() {
+            break;
+        }
+    }
+
+    chunks
+}
+
+/// Split a document into chunks with position tracking.
+///
+/// Returns chunks with line number information for citations.
+pub fn chunk_document_with_positions(content: &str, config: ChunkConfig) -> Vec<ChunkWithPosition> {
+    if content.is_empty() {
+        return Vec::new();
+    }
+
+    // Build a line map: for each character position, what line is it on?
+    let line_starts: Vec<usize> = std::iter::once(0)
+        .chain(content.match_indices('\n').map(|(i, _)| i + 1))
+        .collect();
+
+    // Helper to find line number for a character position
+    let char_to_line = |pos: usize| -> u32 {
+        match line_starts.binary_search(&pos) {
+            Ok(i) => (i + 1) as u32,
+            Err(i) => i as u32,
+        }
+    };
+
+    // Split into words while tracking their positions
+    struct WordPos<'a> {
+        word: &'a str,
+        start: usize,
+        end: usize,
+    }
+
+    let mut words: Vec<WordPos> = Vec::new();
+    let mut in_word = false;
+    let mut word_start = 0;
+
+    for (i, c) in content.char_indices() {
+        if c.is_whitespace() {
+            if in_word {
+                words.push(WordPos {
+                    word: &content[word_start..i],
+                    start: word_start,
+                    end: i,
+                });
+                in_word = false;
+            }
+        } else if !in_word {
+            word_start = i;
+            in_word = true;
+        }
+    }
+    // Handle last word
+    if in_word {
+        words.push(WordPos {
+            word: &content[word_start..],
+            start: word_start,
+            end: content.len(),
+        });
+    }
+
+    if words.is_empty() {
+        return Vec::new();
+    }
+
+    // If content is smaller than chunk size, return as single chunk
+    if words.len() <= config.chunk_size {
+        return vec![ChunkWithPosition {
+            content: content.to_string(),
+            line_start: 1,
+            line_end: char_to_line(content.len().saturating_sub(1)),
+            char_start: 0,
+            char_end: content.len(),
+        }];
+    }
+
+    let step = config.step_size();
+    let mut chunks = Vec::new();
+    let mut start_idx = 0;
+
+    while start_idx < words.len() {
+        let end_idx = (start_idx + config.chunk_size).min(words.len());
+        let chunk_words = &words[start_idx..end_idx];
+
+        // Don't create tiny trailing chunks, merge with previous
+        if chunk_words.len() < config.min_chunk_size && !chunks.is_empty() {
+            let last: ChunkWithPosition = chunks.pop().unwrap();
+            let char_end = chunk_words.last().map(|w| w.end).unwrap_or(last.char_end);
+            let combined_content = format!(
+                "{} {}",
+                last.content,
+                chunk_words.iter().map(|w| w.word).collect::<Vec<_>>().join(" ")
+            );
+            chunks.push(ChunkWithPosition {
+                content: combined_content,
+                line_start: last.line_start,
+                line_end: char_to_line(char_end.saturating_sub(1)),
+                char_start: last.char_start,
+                char_end,
+            });
+            break;
+        }
+
+        let char_start = chunk_words.first().map(|w| w.start).unwrap_or(0);
+        let char_end = chunk_words.last().map(|w| w.end).unwrap_or(0);
+
+        chunks.push(ChunkWithPosition {
+            content: chunk_words.iter().map(|w| w.word).collect::<Vec<_>>().join(" "),
+            line_start: char_to_line(char_start),
+            line_end: char_to_line(char_end.saturating_sub(1)),
+            char_start,
+            char_end,
+        });
+
+        // Move to next chunk position
+        start_idx += step;
+
+        // Avoid creating duplicate chunks at the end
+        if start_idx + config.min_chunk_size >= words.len() && end_idx == words.len() {
             break;
         }
     }
@@ -311,5 +459,74 @@ mod tests {
         // Should merge the tiny trailing chunk
         assert_eq!(chunks.len(), 1);
         assert_eq!(chunks[0].split_whitespace().count(), 12);
+    }
+
+    #[test]
+    fn test_chunk_with_positions_single_line() {
+        let config = ChunkConfig::default();
+        let content = "Hello world";
+        let chunks = chunk_document_with_positions(content, config);
+
+        assert_eq!(chunks.len(), 1);
+        assert_eq!(chunks[0].line_start, 1);
+        assert_eq!(chunks[0].line_end, 1);
+        assert_eq!(chunks[0].char_start, 0);
+        assert_eq!(chunks[0].char_end, content.len());
+    }
+
+    #[test]
+    fn test_chunk_with_positions_multiline() {
+        let config = ChunkConfig::default().with_chunk_size(5);
+        let content = "line one\nline two\nline three\nline four";
+        let chunks = chunk_document_with_positions(content, config);
+
+        assert_eq!(chunks.len(), 1);
+        assert_eq!(chunks[0].line_start, 1);
+        assert_eq!(chunks[0].line_end, 4);
+    }
+
+    #[test]
+    fn test_chunk_with_positions_multiple_chunks() {
+        let config = ChunkConfig {
+            chunk_size: 3,
+            overlap_percent: 0.0,
+            min_chunk_size: 2,
+        };
+        let content = "one\ntwo\nthree\nfour\nfive\nsix\nseven\neight";
+        let chunks = chunk_document_with_positions(content, config);
+
+        assert!(chunks.len() >= 2, "Expected at least 2 chunks");
+        // First chunk should start at line 1
+        assert_eq!(chunks[0].line_start, 1);
+        // Last chunk should end at line 8
+        assert_eq!(chunks.last().unwrap().line_end, 8);
+    }
+
+    #[test]
+    fn test_chunk_citation_format() {
+        let chunk = ChunkWithPosition {
+            content: "test".to_string(),
+            line_start: 5,
+            line_end: 5,
+            char_start: 0,
+            char_end: 4,
+        };
+        assert_eq!(chunk.citation(), "line 5");
+
+        let chunk_range = ChunkWithPosition {
+            content: "test".to_string(),
+            line_start: 10,
+            line_end: 15,
+            char_start: 0,
+            char_end: 4,
+        };
+        assert_eq!(chunk_range.citation(), "lines 10-15");
+    }
+
+    #[test]
+    fn test_chunk_with_positions_empty() {
+        let config = ChunkConfig::default();
+        assert!(chunk_document_with_positions("", config.clone()).is_empty());
+        assert!(chunk_document_with_positions("   ", config).is_empty());
     }
 }
