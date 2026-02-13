@@ -9,7 +9,7 @@
 //! ┌───────────────────────────────────────────────┐
 //! │              Orchestrator                       │
 //! │                                                 │
-//! │  Internal API (:50051)                          │
+//! │  Internal API (default :50051, configurable)    │
 //! │    POST /worker/{id}/llm/complete               │
 //! │    POST /worker/{id}/llm/complete_with_tools    │
 //! │    GET  /worker/{id}/job                        │

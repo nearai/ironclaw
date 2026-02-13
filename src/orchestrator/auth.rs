@@ -16,6 +16,7 @@ use axum::middleware::Next;
 use axum::response::Response;
 use rand::Rng;
 use serde::{Deserialize, Serialize};
+use subtle::ConstantTimeEq;
 use tokio::sync::RwLock;
 use uuid::Uuid;
 
@@ -55,13 +56,13 @@ impl TokenStore {
         token
     }
 
-    /// Validate a token for a specific job.
+    /// Validate a token for a specific job (constant-time comparison).
     pub async fn validate(&self, job_id: Uuid, token: &str) -> bool {
         self.tokens
             .read()
             .await
             .get(&job_id)
-            .map(|stored| stored == token)
+            .map(|stored| stored.as_bytes().ct_eq(token.as_bytes()).into())
             .unwrap_or(false)
     }
 
@@ -99,11 +100,12 @@ impl Default for TokenStore {
 fn generate_token() -> String {
     let mut bytes = [0u8; 32];
     rand::thread_rng().fill(&mut bytes);
-    hex_encode(&bytes)
-}
-
-fn hex_encode(bytes: &[u8]) -> String {
-    bytes.iter().map(|b| format!("{:02x}", b)).collect()
+    // Hex-encode without pulling in a crate: fixed-size array, no allocation concern.
+    bytes.iter().fold(String::with_capacity(64), |mut s, b| {
+        use std::fmt::Write;
+        let _ = write!(s, "{b:02x}");
+        s
+    })
 }
 
 /// Axum middleware that validates worker bearer tokens.

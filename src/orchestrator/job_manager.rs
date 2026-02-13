@@ -105,6 +105,10 @@ pub struct ContainerHandle {
     pub created_at: DateTime<Utc>,
     pub project_dir: Option<PathBuf>,
     pub task_description: String,
+    /// Last status message reported by the worker (iteration count, progress, etc.).
+    pub last_worker_status: Option<String>,
+    /// Which iteration the worker is on (updated via status reports).
+    pub worker_iteration: u32,
     /// Completion result from the worker (set when the worker reports done).
     pub completion_result: Option<CompletionResult>,
     // NOTE: auth_token is intentionally NOT in this struct.
@@ -118,11 +122,76 @@ pub struct CompletionResult {
     pub message: Option<String>,
 }
 
+/// Validate that a project directory is under `~/.ironclaw/projects/`.
+///
+/// Returns the canonicalized path if valid. Creates the base directory if
+/// it doesn't exist (so the prefix check always runs).
+fn validate_bind_mount_path(
+    dir: &std::path::Path,
+    job_id: Uuid,
+) -> Result<PathBuf, OrchestratorError> {
+    let canonical = dir
+        .canonicalize()
+        .map_err(|e| OrchestratorError::ContainerCreationFailed {
+            job_id,
+            reason: format!(
+                "failed to canonicalize project dir {}: {}",
+                dir.display(),
+                e
+            ),
+        })?;
+
+    let home = dirs::home_dir().ok_or_else(|| OrchestratorError::ContainerCreationFailed {
+        job_id,
+        reason: "could not determine home directory for path validation".to_string(),
+    })?;
+    let projects_base = home.join(".ironclaw").join("projects");
+
+    // Ensure the base exists so canonicalize always succeeds.
+    std::fs::create_dir_all(&projects_base).map_err(|e| {
+        OrchestratorError::ContainerCreationFailed {
+            job_id,
+            reason: format!(
+                "failed to create projects base {}: {}",
+                projects_base.display(),
+                e
+            ),
+        }
+    })?;
+
+    let canonical_base =
+        projects_base
+            .canonicalize()
+            .map_err(|e| OrchestratorError::ContainerCreationFailed {
+                job_id,
+                reason: format!(
+                    "failed to canonicalize projects base {}: {}",
+                    projects_base.display(),
+                    e
+                ),
+            })?;
+
+    if !canonical.starts_with(&canonical_base) {
+        return Err(OrchestratorError::ContainerCreationFailed {
+            job_id,
+            reason: format!(
+                "project directory {} is outside allowed base {}",
+                canonical.display(),
+                canonical_base.display()
+            ),
+        });
+    }
+
+    Ok(canonical)
+}
+
 /// Manages the lifecycle of Docker containers for sandboxed job execution.
 pub struct ContainerJobManager {
     config: ContainerJobConfig,
     token_store: TokenStore,
-    containers: Arc<RwLock<HashMap<Uuid, ContainerHandle>>>,
+    pub(crate) containers: Arc<RwLock<HashMap<Uuid, ContainerHandle>>>,
+    /// Cached Docker connection (created on first use).
+    docker: Arc<RwLock<Option<bollard::Docker>>>,
 }
 
 impl ContainerJobManager {
@@ -131,7 +200,25 @@ impl ContainerJobManager {
             config,
             token_store,
             containers: Arc::new(RwLock::new(HashMap::new())),
+            docker: Arc::new(RwLock::new(None)),
         }
+    }
+
+    /// Get or create a Docker connection.
+    async fn docker(&self) -> Result<bollard::Docker, OrchestratorError> {
+        {
+            let guard = self.docker.read().await;
+            if let Some(ref d) = *guard {
+                return Ok(d.clone());
+            }
+        }
+        let docker = connect_docker()
+            .await
+            .map_err(|e| OrchestratorError::Docker {
+                reason: e.to_string(),
+            })?;
+        *self.docker.write().await = Some(docker.clone());
+        Ok(docker)
     }
 
     /// Create and start a new container for a job.
@@ -165,16 +252,14 @@ impl ContainerJobManager {
             created_at: Utc::now(),
             project_dir: project_dir.clone(),
             task_description: task.to_string(),
+            last_worker_status: None,
+            worker_iteration: 0,
             completion_result: None,
         };
         self.containers.write().await.insert(job_id, handle);
 
-        // Connect to Docker
-        let docker = connect_docker()
-            .await
-            .map_err(|e| OrchestratorError::Docker {
-                reason: e.to_string(),
-            })?;
+        // Connect to Docker (reuses cached connection)
+        let docker = self.docker().await?;
 
         // Build container configuration
         let orchestrator_host = if cfg!(target_os = "linux") {
@@ -197,32 +282,7 @@ impl ContainerJobManager {
         // Build volume mounts (validate project_dir stays within ~/.ironclaw/projects/)
         let mut binds = Vec::new();
         if let Some(ref dir) = project_dir {
-            let canonical =
-                dir.canonicalize()
-                    .map_err(|e| OrchestratorError::ContainerCreationFailed {
-                        job_id,
-                        reason: format!(
-                            "failed to canonicalize project dir {}: {}",
-                            dir.display(),
-                            e
-                        ),
-                    })?;
-            let projects_base = dirs::home_dir()
-                .unwrap_or_else(|| PathBuf::from("."))
-                .join(".ironclaw")
-                .join("projects");
-            if let Ok(canonical_base) = projects_base.canonicalize() {
-                if !canonical.starts_with(&canonical_base) {
-                    return Err(OrchestratorError::ContainerCreationFailed {
-                        job_id,
-                        reason: format!(
-                            "project directory {} is outside allowed base {}",
-                            canonical.display(),
-                            canonical_base.display()
-                        ),
-                    });
-                }
-            }
+            let canonical = validate_bind_mount_path(dir, job_id)?;
             binds.push(format!("{}:/workspace:rw", canonical.display()));
             env_vec.push("IRONCLAW_WORKSPACE=/workspace".to_string());
         }
@@ -356,22 +416,21 @@ impl ContainerJobManager {
             });
         }
 
-        let docker = connect_docker()
-            .await
-            .map_err(|e| OrchestratorError::Docker {
-                reason: e.to_string(),
-            })?;
+        let docker = self.docker().await?;
 
         // Stop the container (10 second grace period)
-        let _ = docker
+        if let Err(e) = docker
             .stop_container(
                 &container_id,
                 Some(bollard::container::StopContainerOptions { t: 10 }),
             )
-            .await;
+            .await
+        {
+            tracing::warn!(job_id = %job_id, "Failed to stop container: {}", e);
+        }
 
         // Remove the container
-        let _ = docker
+        if let Err(e) = docker
             .remove_container(
                 &container_id,
                 Some(bollard::container::RemoveContainerOptions {
@@ -379,7 +438,10 @@ impl ContainerJobManager {
                     ..Default::default()
                 }),
             )
-            .await;
+            .await
+        {
+            tracing::warn!(job_id = %job_id, "Failed to remove container: {}", e);
+        }
 
         // Update state
         if let Some(handle) = self.containers.write().await.get_mut(&job_id) {
@@ -417,22 +479,36 @@ impl ContainerJobManager {
         };
         if let Some(cid) = container_id {
             if !cid.is_empty() {
-                if let Ok(docker) = connect_docker().await {
-                    let _ = docker
-                        .stop_container(
-                            &cid,
-                            Some(bollard::container::StopContainerOptions { t: 5 }),
-                        )
-                        .await;
-                    let _ = docker
-                        .remove_container(
-                            &cid,
-                            Some(bollard::container::RemoveContainerOptions {
-                                force: true,
-                                ..Default::default()
-                            }),
-                        )
-                        .await;
+                match self.docker().await {
+                    Ok(docker) => {
+                        if let Err(e) = docker
+                            .stop_container(
+                                &cid,
+                                Some(bollard::container::StopContainerOptions { t: 5 }),
+                            )
+                            .await
+                        {
+                            tracing::warn!(job_id = %job_id, "Failed to stop completed container: {}", e);
+                        }
+                        if let Err(e) = docker
+                            .remove_container(
+                                &cid,
+                                Some(bollard::container::RemoveContainerOptions {
+                                    force: true,
+                                    ..Default::default()
+                                }),
+                            )
+                            .await
+                        {
+                            tracing::warn!(job_id = %job_id, "Failed to remove completed container: {}", e);
+                        }
+                    }
+                    Err(e) => {
+                        tracing::error!(
+                            job_id = %job_id,
+                            "Cannot connect to Docker for container cleanup: {}", e
+                        );
+                    }
                 }
             }
         }
@@ -445,6 +521,19 @@ impl ContainerJobManager {
     /// Remove a completed job handle from memory (called after result is read).
     pub async fn cleanup_job(&self, job_id: Uuid) {
         self.containers.write().await.remove(&job_id);
+    }
+
+    /// Update the worker-reported status for a job.
+    pub async fn update_worker_status(
+        &self,
+        job_id: Uuid,
+        message: Option<String>,
+        iteration: u32,
+    ) {
+        if let Some(handle) = self.containers.write().await.get_mut(&job_id) {
+            handle.last_worker_status = message;
+            handle.worker_iteration = iteration;
+        }
     }
 
     /// Get the handle for a job.
@@ -478,5 +567,83 @@ mod tests {
     fn test_container_state_display() {
         assert_eq!(ContainerState::Running.to_string(), "running");
         assert_eq!(ContainerState::Stopped.to_string(), "stopped");
+    }
+
+    #[test]
+    fn test_validate_bind_mount_valid_path() {
+        let base = dirs::home_dir().unwrap().join(".ironclaw").join("projects");
+        std::fs::create_dir_all(&base).unwrap();
+
+        let test_dir = base.join("test_validate_bind");
+        std::fs::create_dir_all(&test_dir).unwrap();
+
+        let result = validate_bind_mount_path(&test_dir, Uuid::new_v4());
+        assert!(result.is_ok());
+        let canonical = result.unwrap();
+        assert!(canonical.starts_with(base.canonicalize().unwrap()));
+
+        let _ = std::fs::remove_dir_all(&test_dir);
+    }
+
+    #[test]
+    fn test_validate_bind_mount_rejects_outside_base() {
+        let tmp = tempfile::tempdir().unwrap();
+        let outside = tmp.path().to_path_buf();
+
+        let result = validate_bind_mount_path(&outside, Uuid::new_v4());
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("outside allowed base"),
+            "expected 'outside allowed base', got: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn test_validate_bind_mount_rejects_nonexistent() {
+        let nonexistent = PathBuf::from("/no/such/path/at/all");
+        let result = validate_bind_mount_path(&nonexistent, Uuid::new_v4());
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("canonicalize"),
+            "expected canonicalize error, got: {}",
+            err
+        );
+    }
+
+    #[tokio::test]
+    async fn test_update_worker_status() {
+        let store = TokenStore::new();
+        let mgr = ContainerJobManager::new(ContainerJobConfig::default(), store);
+        let job_id = Uuid::new_v4();
+
+        // Insert a handle
+        {
+            let mut containers = mgr.containers.write().await;
+            containers.insert(
+                job_id,
+                ContainerHandle {
+                    job_id,
+                    container_id: "test".to_string(),
+                    state: ContainerState::Running,
+                    mode: JobMode::Worker,
+                    created_at: chrono::Utc::now(),
+                    project_dir: None,
+                    task_description: "test job".to_string(),
+                    last_worker_status: None,
+                    worker_iteration: 0,
+                    completion_result: None,
+                },
+            );
+        }
+
+        mgr.update_worker_status(job_id, Some("Iteration 3".to_string()), 3)
+            .await;
+
+        let handle = mgr.get_handle(job_id).await.unwrap();
+        assert_eq!(handle.worker_iteration, 3);
+        assert_eq!(handle.last_worker_status.as_deref(), Some("Iteration 3"));
     }
 }
