@@ -412,29 +412,20 @@ pub async fn remove_mcp_server_db(
     Ok(())
 }
 
-/// Check if a lowercased URL points to localhost or 127.0.0.1.
+/// Check if a URL points to a loopback address (localhost, 127.0.0.1, [::1]).
 ///
-/// Parses the host from the URL authority to avoid substring false positives
-/// like "notlocalhost.com" matching "localhost".
-fn is_localhost_url(url_lower: &str) -> bool {
-    // Extract the authority: everything between "://" and the next "/" or end.
-    let after_scheme = url_lower
-        .find("://")
-        .map(|i| &url_lower[i + 3..])
-        .unwrap_or(url_lower);
-    let authority_end = after_scheme.find('/').unwrap_or(after_scheme.len());
-    let authority = &after_scheme[..authority_end];
-    // Strip optional userinfo (user:pass@host)
-    let host_port = authority
-        .rfind('@')
-        .map(|i| &authority[i + 1..])
-        .unwrap_or(authority);
-    // Strip port (:8080)
-    let host = host_port
-        .rfind(':')
-        .map(|i| &host_port[..i])
-        .unwrap_or(host_port);
-    host == "localhost" || host == "127.0.0.1"
+/// Uses `url::Url` for proper parsing so edge cases (IPv6, userinfo, ports)
+/// are handled correctly without manual string splitting.
+fn is_localhost_url(url: &str) -> bool {
+    let Ok(parsed) = url::Url::parse(url) else {
+        return false;
+    };
+    match parsed.host() {
+        Some(url::Host::Domain(d)) => d.eq_ignore_ascii_case("localhost"),
+        Some(url::Host::Ipv4(ip)) => ip.is_loopback(),
+        Some(url::Host::Ipv6(ip)) => ip.is_loopback(),
+        None => false,
+    }
 }
 
 #[cfg(test)]
@@ -452,6 +443,10 @@ mod tests {
         assert!(!is_localhost_url("https://example-localhost.io"));
         assert!(!is_localhost_url("https://mcp.notion.com"));
         assert!(is_localhost_url("http://user:pass@localhost:3000/path"));
+        // IPv6 loopback
+        assert!(is_localhost_url("http://[::1]:8080/path"));
+        assert!(is_localhost_url("http://[::1]/path"));
+        assert!(!is_localhost_url("http://[::2]:8080/path"));
     }
 
     #[test]

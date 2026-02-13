@@ -79,7 +79,15 @@ pub enum OAuthCallbackError {
 }
 
 /// Bind the OAuth callback listener on the fixed port.
+///
+/// Tries IPv6 loopback (`[::1]`) first so that `http://localhost:…` redirects
+/// work on systems where `localhost` resolves to `::1`. Falls back to IPv4
+/// (`127.0.0.1`) if IPv6 binding fails.
 pub async fn bind_callback_listener() -> Result<TcpListener, OAuthCallbackError> {
+    let ipv6_addr = format!("[::1]:{}", OAUTH_CALLBACK_PORT);
+    if let Ok(listener) = TcpListener::bind(&ipv6_addr).await {
+        return Ok(listener);
+    }
     TcpListener::bind(format!("127.0.0.1:{}", OAUTH_CALLBACK_PORT))
         .await
         .map_err(|e| OAuthCallbackError::PortInUse(OAUTH_CALLBACK_PORT, e.to_string()))
