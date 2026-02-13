@@ -455,17 +455,17 @@ This is not optional — if you did work, log it."#.to_string()
         // Get the document
         let doc = self.repo.get_document_by_id(document_id).await?;
 
-        // Chunk the content
-        let chunks = chunk_document(&doc.content, ChunkConfig::default());
+        // Chunk the content with position tracking for citations
+        let chunks = chunk_document_with_positions(&doc.content, ChunkConfig::default());
 
         // Delete old chunks
         self.repo.delete_chunks(document_id).await?;
 
-        // Insert new chunks
-        for (index, content) in chunks.into_iter().enumerate() {
+        // Insert new chunks with line numbers
+        for (index, chunk) in chunks.into_iter().enumerate() {
             // Generate embedding if provider available
             let embedding = if let Some(ref provider) = self.embeddings {
-                match provider.embed(&content).await {
+                match provider.embed(&chunk.content).await {
                     Ok(emb) => Some(emb),
                     Err(e) => {
                         tracing::warn!("Failed to generate embedding: {}", e);
@@ -477,7 +477,14 @@ This is not optional — if you did work, log it."#.to_string()
             };
 
             self.repo
-                .insert_chunk(document_id, index as i32, &content, embedding.as_deref())
+                .insert_chunk_with_lines(
+                    document_id,
+                    index as i32,
+                    &chunk.content,
+                    embedding.as_deref(),
+                    Some(chunk.line_start),
+                    Some(chunk.line_end),
+                )
                 .await?;
         }
 
