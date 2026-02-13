@@ -354,6 +354,242 @@ impl EmbeddingProvider for NearAiEmbeddings {
     }
 }
 
+/// Google Gemini embedding provider.
+///
+/// Uses the Gemini API's embedContent endpoint.
+/// Models: gemini-embedding-001 (768 dims), text-embedding-004 (768 dims)
+pub struct GeminiEmbeddings {
+    client: reqwest::Client,
+    api_key: String,
+    model: String,
+    dimension: usize,
+}
+
+impl GeminiEmbeddings {
+    /// Create a new Gemini embedding provider with the default model.
+    ///
+    /// Uses gemini-embedding-001 which has 768 dimensions.
+    pub fn new(api_key: impl Into<String>) -> Self {
+        Self {
+            client: reqwest::Client::new(),
+            api_key: api_key.into(),
+            model: "gemini-embedding-001".to_string(),
+            dimension: 768,
+        }
+    }
+
+    /// Use text-embedding-004 model.
+    pub fn text_embedding_004(api_key: impl Into<String>) -> Self {
+        Self {
+            client: reqwest::Client::new(),
+            api_key: api_key.into(),
+            model: "text-embedding-004".to_string(),
+            dimension: 768,
+        }
+    }
+
+    /// Use a custom model with specified dimension.
+    pub fn with_model(
+        api_key: impl Into<String>,
+        model: impl Into<String>,
+        dimension: usize,
+    ) -> Self {
+        Self {
+            client: reqwest::Client::new(),
+            api_key: api_key.into(),
+            model: model.into(),
+            dimension,
+        }
+    }
+}
+
+#[derive(Debug, Serialize)]
+struct GeminiEmbedRequest<'a> {
+    model: String,
+    content: GeminiContent<'a>,
+}
+
+#[derive(Debug, Serialize)]
+struct GeminiContent<'a> {
+    parts: Vec<GeminiPart<'a>>,
+}
+
+#[derive(Debug, Serialize)]
+struct GeminiPart<'a> {
+    text: &'a str,
+}
+
+#[derive(Debug, Serialize)]
+struct GeminiBatchRequest {
+    requests: Vec<GeminiBatchItem>,
+}
+
+#[derive(Debug, Serialize)]
+struct GeminiBatchItem {
+    model: String,
+    content: GeminiBatchContent,
+}
+
+#[derive(Debug, Serialize)]
+struct GeminiBatchContent {
+    parts: Vec<GeminiBatchPart>,
+}
+
+#[derive(Debug, Serialize)]
+struct GeminiBatchPart {
+    text: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct GeminiEmbedResponse {
+    embedding: GeminiEmbeddingValues,
+}
+
+#[derive(Debug, Deserialize)]
+struct GeminiEmbeddingValues {
+    values: Vec<f32>,
+}
+
+#[derive(Debug, Deserialize)]
+struct GeminiBatchResponse {
+    embeddings: Vec<GeminiEmbeddingValues>,
+}
+
+#[async_trait]
+impl EmbeddingProvider for GeminiEmbeddings {
+    fn dimension(&self) -> usize {
+        self.dimension
+    }
+
+    fn model_name(&self) -> &str {
+        &self.model
+    }
+
+    fn max_input_length(&self) -> usize {
+        // Gemini embeddings support up to 2048 tokens (~8k chars)
+        8_000
+    }
+
+    async fn embed(&self, text: &str) -> Result<Vec<f32>, EmbeddingError> {
+        if text.len() > self.max_input_length() {
+            return Err(EmbeddingError::TextTooLong {
+                length: text.len(),
+                max: self.max_input_length(),
+            });
+        }
+
+        let url = format!(
+            "https://generativelanguage.googleapis.com/v1beta/models/{}:embedContent?key={}",
+            self.model, self.api_key
+        );
+
+        let request = GeminiEmbedRequest {
+            model: format!("models/{}", self.model),
+            content: GeminiContent {
+                parts: vec![GeminiPart { text }],
+            },
+        };
+
+        let response = self
+            .client
+            .post(&url)
+            .json(&request)
+            .send()
+            .await?;
+
+        let status = response.status();
+
+        if status == reqwest::StatusCode::UNAUTHORIZED {
+            return Err(EmbeddingError::AuthFailed);
+        }
+
+        if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
+            let retry_after = response
+                .headers()
+                .get("retry-after")
+                .and_then(|v| v.to_str().ok())
+                .and_then(|s| s.parse::<u64>().ok())
+                .map(std::time::Duration::from_secs);
+            return Err(EmbeddingError::RateLimited { retry_after });
+        }
+
+        if !status.is_success() {
+            let error_text = response.text().await.unwrap_or_default();
+            return Err(EmbeddingError::HttpError(format!(
+                "Status {}: {}",
+                status, error_text
+            )));
+        }
+
+        let result: GeminiEmbedResponse = response.json().await.map_err(|e| {
+            EmbeddingError::InvalidResponse(format!("Failed to parse response: {}", e))
+        })?;
+
+        Ok(result.embedding.values)
+    }
+
+    async fn embed_batch(&self, texts: &[String]) -> Result<Vec<Vec<f32>>, EmbeddingError> {
+        if texts.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        // Gemini batch endpoint
+        let url = format!(
+            "https://generativelanguage.googleapis.com/v1beta/models/{}:batchEmbedContents?key={}",
+            self.model, self.api_key
+        );
+
+        let requests: Vec<GeminiBatchItem> = texts
+            .iter()
+            .map(|text| GeminiBatchItem {
+                model: format!("models/{}", self.model),
+                content: GeminiBatchContent {
+                    parts: vec![GeminiBatchPart { text: text.clone() }],
+                },
+            })
+            .collect();
+
+        let request = GeminiBatchRequest { requests };
+
+        let response = self
+            .client
+            .post(&url)
+            .json(&request)
+            .send()
+            .await?;
+
+        let status = response.status();
+
+        if status == reqwest::StatusCode::UNAUTHORIZED {
+            return Err(EmbeddingError::AuthFailed);
+        }
+
+        if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
+            let retry_after = response
+                .headers()
+                .get("retry-after")
+                .and_then(|v| v.to_str().ok())
+                .and_then(|s| s.parse::<u64>().ok())
+                .map(std::time::Duration::from_secs);
+            return Err(EmbeddingError::RateLimited { retry_after });
+        }
+
+        if !status.is_success() {
+            let error_text = response.text().await.unwrap_or_default();
+            return Err(EmbeddingError::HttpError(format!(
+                "Status {}: {}",
+                status, error_text
+            )));
+        }
+
+        let result: GeminiBatchResponse = response.json().await.map_err(|e| {
+            EmbeddingError::InvalidResponse(format!("Failed to parse response: {}", e))
+        })?;
+
+        Ok(result.embeddings.into_iter().map(|e| e.values).collect())
+    }
+}
+
 /// A mock embedding provider for testing.
 ///
 /// Generates deterministic embeddings based on text hash.

@@ -50,7 +50,7 @@ mod search;
 
 pub use chunker::{ChunkConfig, ChunkWithPosition, chunk_document, chunk_document_with_positions};
 pub use document::{MemoryChunk, MemoryDocument, WorkspaceEntry, paths};
-pub use embeddings::{EmbeddingProvider, MockEmbeddings, NearAiEmbeddings, OpenAiEmbeddings};
+pub use embeddings::{EmbeddingProvider, GeminiEmbeddings, MockEmbeddings, NearAiEmbeddings, OpenAiEmbeddings};
 #[cfg(feature = "postgres")]
 pub use repository::Repository;
 pub use search::{RankedResult, SearchConfig, SearchResult, reciprocal_rank_fusion};
