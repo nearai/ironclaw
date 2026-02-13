@@ -856,6 +856,7 @@ fn send_pairing_reply(chat_id: i64, code: &str) -> Result<(), String> {
         "https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
         &headers.to_string(),
         Some(&payload_bytes),
+        None,
     );
 
     match result {
