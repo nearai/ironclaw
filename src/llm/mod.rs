@@ -51,6 +51,7 @@ pub fn create_llm_provider(
         LlmBackend::Anthropic => create_anthropic_provider(config),
         LlmBackend::Ollama => create_ollama_provider(config),
         LlmBackend::OpenAiCompatible => create_openai_compatible_provider(config),
+        LlmBackend::Tinfoil => create_tinfoil_provider(config),
     }
 }
 
@@ -138,6 +139,30 @@ fn create_ollama_provider(config: &LlmConfig) -> Result<Arc<dyn LlmProvider>, Ll
         oll.model
     );
     Ok(Arc::new(RigAdapter::new(model, &oll.model)))
+}
+
+const TINFOIL_BASE_URL: &str = "https://inference.tinfoil.sh/v1";
+
+fn create_tinfoil_provider(config: &LlmConfig) -> Result<Arc<dyn LlmProvider>, LlmError> {
+    let tf = config.tinfoil.as_ref().ok_or_else(|| LlmError::AuthFailed {
+        provider: "tinfoil".to_string(),
+    })?;
+
+    use rig::providers::openai;
+
+    let client: openai::Client = openai::Client::builder()
+        .base_url(TINFOIL_BASE_URL)
+        .api_key(tf.api_key.expose_secret())
+        .build()
+        .map_err(|e| LlmError::RequestFailed {
+            provider: "tinfoil".to_string(),
+            reason: format!("Failed to create Tinfoil client: {}", e),
+        })?;
+
+    let client = client.completions_api();
+    let model = client.completion_model(&tf.model);
+    tracing::info!("Using Tinfoil private inference (model: {})", tf.model);
+    Ok(Arc::new(RigAdapter::new(model, &tf.model)))
 }
 
 fn create_openai_compatible_provider(config: &LlmConfig) -> Result<Arc<dyn LlmProvider>, LlmError> {
