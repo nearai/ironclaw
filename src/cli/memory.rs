@@ -90,12 +90,8 @@ pub enum MemoryCommand {
     /// Show workspace status (document count, index health)
     Status,
 
-    /// Reindex embeddings for all documents
-    Index {
-        /// Reindex all documents (not just missing embeddings)
-        #[arg(long)]
-        force: bool,
-    },
+    /// Backfill missing embeddings for all documents
+    Index,
 }
 
 /// Run a memory command (PostgreSQL backend).
@@ -120,7 +116,7 @@ pub async fn run_memory_command(
         } => write(&workspace, &path, content, append).await,
         MemoryCommand::Tree { path, depth } => tree(&workspace, &path, depth).await,
         MemoryCommand::Status => status(&workspace).await,
-        MemoryCommand::Index { force } => index(&workspace, force).await,
+        MemoryCommand::Index => index(&workspace).await,
     }
 }
 
@@ -138,15 +134,8 @@ async fn search(workspace: &Workspace, query: &str, limit: usize, full: bool) ->
     for (i, result) in results.iter().enumerate() {
         let score_bar = score_indicator(result.score);
         
-        // Format citation with line numbers if available
-        let citation = match (result.line_start, result.line_end) {
-            (Some(start), Some(end)) if start == end => format!("{}#line {}", result.path, start),
-            (Some(start), Some(end)) => format!("{}#lines {}-{}", result.path, start, end),
-            _ => result.path.clone(),
-        };
-        
         println!("{}. [{}] (score: {:.3})", i + 1, score_bar, result.score);
-        println!("   Source: {}", citation);
+        println!("   Source: {}", result.citation());
 
         // Show content (full or preview)
         let content = if full {
@@ -311,19 +300,12 @@ async fn status(workspace: &Workspace) -> anyhow::Result<()> {
     Ok(())
 }
 
-async fn index(workspace: &Workspace, force: bool) -> anyhow::Result<()> {
+async fn index(workspace: &Workspace) -> anyhow::Result<()> {
     if !workspace.has_embeddings() {
         anyhow::bail!("No embedding provider configured. Set OPENAI_API_KEY or configure embeddings.");
     }
 
-    println!("Indexing workspace...");
-    
-    if force {
-        println!("  Mode: Full reindex (--force)");
-        // For force reindex, we'd need to clear and rebuild all embeddings
-        // For now, just backfill missing ones
-        println!("  Note: Full reindex not yet implemented, running backfill instead.");
-    }
+    println!("Backfilling missing embeddings...");
     
     // Backfill missing embeddings
     let count = workspace.backfill_embeddings().await?;

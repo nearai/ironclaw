@@ -91,7 +91,7 @@ impl CheckpointTracker {
 
     /// Add a topic being discussed.
     pub fn add_topic(&mut self, topic: &str) {
-        if !self.topics.contains(&topic.to_string()) {
+        if !self.topics.iter().any(|t| t == topic) {
             self.topics.push(topic.to_string());
         }
     }
@@ -115,21 +115,28 @@ impl CheckpointTracker {
     }
 
     /// Generate checkpoint content for daily notes.
+    ///
+    /// Sanitizes topics and decisions to prevent markdown/prompt injection.
     pub fn generate_checkpoint_content(&self) -> String {
         let timestamp = Utc::now().format("%H:%M UTC");
         let mut content = format!("## Conversation Checkpoint [{}]\n", timestamp);
 
         if !self.topics.is_empty() {
+            let sanitized_topics: Vec<String> = self
+                .topics
+                .iter()
+                .map(|t| sanitize_checkpoint_text(t))
+                .collect();
             content.push_str(&format!(
                 "- Currently discussing: {}\n",
-                self.topics.join(", ")
+                sanitized_topics.join(", ")
             ));
         }
 
         if !self.decisions.is_empty() {
             content.push_str("- Key decisions made:\n");
             for decision in &self.decisions {
-                content.push_str(&format!("  - {}\n", decision));
+                content.push_str(&format!("  - {}\n", sanitize_checkpoint_text(decision)));
             }
         }
 
@@ -188,6 +195,22 @@ pub fn post_compaction_recovery() -> &'static str {
 3. Run memory_search for the last topic you can identify
 4. Be honest — tell the user you lost the thread and what you recovered
 Never pretend to remember something you don't."#
+}
+
+/// Sanitize text for checkpoint content to prevent markdown/prompt injection.
+///
+/// Removes or escapes characters that could break markdown structure
+/// or inject instructions when logs are later included in system prompts.
+fn sanitize_checkpoint_text(text: &str) -> String {
+    text.chars()
+        .filter(|c| !c.is_control() || *c == ' ')
+        .collect::<String>()
+        .replace('#', "\\#")       // Escape markdown headers
+        .replace('\n', " ")        // Flatten newlines
+        .replace("---", "–––")     // Prevent horizontal rules
+        .replace("```", "'''")     // Prevent code blocks
+        .trim()
+        .to_string()
 }
 
 #[cfg(test)]

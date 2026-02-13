@@ -479,8 +479,8 @@ impl EmbeddingProvider for GeminiEmbeddings {
         }
 
         let url = format!(
-            "https://generativelanguage.googleapis.com/v1beta/models/{}:embedContent?key={}",
-            self.model, self.api_key
+            "https://generativelanguage.googleapis.com/v1beta/models/{}:embedContent",
+            self.model
         );
 
         let request = GeminiEmbedRequest {
@@ -493,6 +493,7 @@ impl EmbeddingProvider for GeminiEmbeddings {
         let response = self
             .client
             .post(&url)
+            .header("x-goog-api-key", &self.api_key)
             .json(&request)
             .send()
             .await?;
@@ -535,8 +536,8 @@ impl EmbeddingProvider for GeminiEmbeddings {
 
         // Gemini batch endpoint
         let url = format!(
-            "https://generativelanguage.googleapis.com/v1beta/models/{}:batchEmbedContents?key={}",
-            self.model, self.api_key
+            "https://generativelanguage.googleapis.com/v1beta/models/{}:batchEmbedContents",
+            self.model
         );
 
         let requests: Vec<GeminiBatchItem> = texts
@@ -554,6 +555,7 @@ impl EmbeddingProvider for GeminiEmbeddings {
         let response = self
             .client
             .post(&url)
+            .header("x-goog-api-key", &self.api_key)
             .json(&request)
             .send()
             .await?;

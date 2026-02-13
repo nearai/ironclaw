@@ -114,6 +114,21 @@ impl SearchResult {
     pub fn is_hybrid(&self) -> bool {
         self.fts_rank.is_some() && self.vector_rank.is_some()
     }
+
+    /// Generate a citation string for this result.
+    ///
+    /// Format: `path#lines X-Y` or `path#line X` or just `path` if no line info.
+    pub fn citation(&self) -> String {
+        match (self.line_start, self.line_end) {
+            (Some(start), Some(end)) if start == end => {
+                format!("{}#line {}", self.path, start)
+            }
+            (Some(start), Some(end)) => {
+                format!("{}#lines {}-{}", self.path, start, end)
+            }
+            _ => self.path.clone(),
+        }
+    }
 }
 
 /// Raw result from a single search method.
