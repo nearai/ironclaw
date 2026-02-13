@@ -203,7 +203,7 @@ impl std::str::FromStr for LlmBackend {
             "anthropic" | "claude" => Ok(Self::Anthropic),
             "ollama" => Ok(Self::Ollama),
             "openai_compatible" | "openai-compatible" | "compatible" => Ok(Self::OpenAiCompatible),
-            "tinfoil" | "tin_foil" => Ok(Self::Tinfoil),
+            "tinfoil" => Ok(Self::Tinfoil),
             _ => Err(format!(
                 "invalid LLM backend '{}', expected one of: nearai, openai, anthropic, ollama, openai_compatible, tinfoil",
                 s
