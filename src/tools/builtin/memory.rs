@@ -98,9 +98,10 @@ impl Tool for MemorySearchTool {
         let output = serde_json::json!({
             "query": query,
             "results": results.iter().map(|r| serde_json::json!({
+                "path": r.path,
                 "content": r.content,
                 "score": r.score,
-                "document_id": r.document_id.to_string(),
+                "citation": format!("{}#{}", r.path, r.line_start.map_or("chunk".to_string(), |l| l.to_string())),
                 "is_hybrid_match": r.is_hybrid(),
             })).collect::<Vec<_>>(),
             "result_count": results.len(),
