@@ -22,7 +22,10 @@ pub use provider::{
     ChatMessage, CompletionRequest, CompletionResponse, FinishReason, LlmProvider, ModelMetadata,
     Role, ToolCall, ToolCompletionRequest, ToolCompletionResponse, ToolDefinition, ToolResult,
 };
-pub use reasoning::{ActionPlan, Reasoning, ReasoningContext, RespondResult, ToolSelection};
+pub use reasoning::{
+    ActionPlan, Reasoning, ReasoningContext, RespondOutput, RespondResult, TokenUsage,
+    ToolSelection,
+};
 pub use rig_adapter::RigAdapter;
 pub use session::{SessionConfig, SessionManager, create_session_manager};
 
