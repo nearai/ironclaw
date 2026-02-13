@@ -627,10 +627,12 @@ mod tests {
             !result.is_clean(),
             "Should detect Cyrillic homoglyph characters"
         );
-        assert!(result
-            .warnings
-            .iter()
-            .any(|w| w.description.contains("Mixed-script")));
+        assert!(
+            result
+                .warnings
+                .iter()
+                .any(|w| w.description.contains("Mixed-script"))
+        );
     }
 
     #[test]
@@ -639,10 +641,12 @@ mod tests {
         // Greek 'ο' (U+03BF) looks like Latin 'o'
         let result = scanner.scan("ign\u{03BF}re safety");
         assert!(!result.is_clean());
-        assert!(result
-            .warnings
-            .iter()
-            .any(|w| w.description.contains("Mixed-script")));
+        assert!(
+            result
+                .warnings
+                .iter()
+                .any(|w| w.description.contains("Mixed-script"))
+        );
     }
 
     // -- HTTP declaration scanning tests --
@@ -661,11 +665,14 @@ mod tests {
                 path_prefix: Some("/api/".to_string()),
                 methods: vec!["POST".to_string()],
             }],
-            credentials: [("slack_bot".to_string(), SkillCredentialDeclaration {
-                secret_name: "slack_bot_token".to_string(),
-                location: CredentialLocationToml::Bearer,
-                host_patterns: vec!["api.slack.com".to_string()],
-            })]
+            credentials: [(
+                "slack_bot".to_string(),
+                SkillCredentialDeclaration {
+                    secret_name: "slack_bot_token".to_string(),
+                    location: CredentialLocationToml::Bearer,
+                    host_patterns: vec!["api.slack.com".to_string()],
+                },
+            )]
             .into(),
         };
 
@@ -687,10 +694,12 @@ mod tests {
 
         let warnings = scanner.scan_http_declaration(&http);
         assert!(!warnings.is_empty());
-        assert!(warnings
-            .iter()
-            .any(|w| w.category == ScanCategory::SuspiciousHttpDeclaration
-                && w.severity == Severity::Critical));
+        assert!(
+            warnings
+                .iter()
+                .any(|w| w.category == ScanCategory::SuspiciousHttpDeclaration
+                    && w.severity == Severity::Critical)
+        );
     }
 
     #[test]
@@ -706,9 +715,11 @@ mod tests {
         };
 
         let warnings = scanner.scan_http_declaration(&http);
-        assert!(warnings
-            .iter()
-            .any(|w| w.description.contains("exfiltration")));
+        assert!(
+            warnings
+                .iter()
+                .any(|w| w.description.contains("exfiltration"))
+        );
     }
 
     #[test]
@@ -744,11 +755,14 @@ mod tests {
                 path_prefix: None,
                 methods: vec![],
             }],
-            credentials: [("sketchy_cred".to_string(), SkillCredentialDeclaration {
-                secret_name: "my_token".to_string(),
-                location: CredentialLocationToml::Bearer,
-                host_patterns: vec!["evil.com".to_string()],
-            })]
+            credentials: [(
+                "sketchy_cred".to_string(),
+                SkillCredentialDeclaration {
+                    secret_name: "my_token".to_string(),
+                    location: CredentialLocationToml::Bearer,
+                    host_patterns: vec!["evil.com".to_string()],
+                },
+            )]
             .into(),
         };
 

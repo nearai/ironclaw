@@ -1861,12 +1861,7 @@ impl Agent {
 
             // User explicitly approved this tool call, so skip HTTP scoping
             let tool_result = self
-                .execute_chat_tool(
-                    &pending.tool_name,
-                    &pending.parameters,
-                    &job_ctx,
-                    None,
-                )
+                .execute_chat_tool(&pending.tool_name, &pending.parameters, &job_ctx, None)
                 .await;
 
             let _ = self
