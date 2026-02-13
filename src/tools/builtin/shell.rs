@@ -438,26 +438,14 @@ impl Tool for ShellTool {
     }
 }
 
-/// Find the largest valid char boundary at or before `pos`.
-fn floor_char_boundary(s: &str, pos: usize) -> usize {
-    if pos >= s.len() {
-        return s.len();
-    }
-    let mut i = pos;
-    while i > 0 && !s.is_char_boundary(i) {
-        i -= 1;
-    }
-    i
-}
-
 /// Truncate output to fit within limits (UTF-8 safe).
 fn truncate_output(s: &str) -> String {
     if s.len() <= MAX_OUTPUT_SIZE {
         s.to_string()
     } else {
         let half = MAX_OUTPUT_SIZE / 2;
-        let head_end = floor_char_boundary(s, half);
-        let tail_start = floor_char_boundary(s, s.len() - half);
+        let head_end = crate::util::floor_char_boundary(s, half);
+        let tail_start = crate::util::floor_char_boundary(s, s.len() - half);
         format!(
             "{}\n\n... [truncated {} bytes] ...\n\n{}",
             &s[..head_end],

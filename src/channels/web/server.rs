@@ -545,8 +545,7 @@ async fn chat_ws_handler(
     if let Some(origin) = headers.get("origin").and_then(|v| v.to_str().ok()) {
         let is_local = origin.starts_with("http://localhost")
             || origin.starts_with("http://127.0.0.1")
-            || origin.starts_with("http://[::1]")
-            || origin.starts_with("http://0.0.0.0");
+            || origin.starts_with("http://[::1]");
         if !is_local {
             return Err((
                 StatusCode::FORBIDDEN,

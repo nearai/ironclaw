@@ -197,7 +197,7 @@ impl Tool for MemoryWriteTool {
         // Reject writes to identity files that are loaded into the system prompt.
         // An attacker could use prompt injection to trick the agent into overwriting
         // these, poisoning future conversations.
-        if PROTECTED_IDENTITY_FILES.iter().any(|&f| f == target) {
+        if PROTECTED_IDENTITY_FILES.contains(&target) {
             return Err(ToolError::NotAuthorized(format!(
                 "writing to '{}' is not allowed (identity file protected from tool writes)",
                 target,
@@ -249,8 +249,6 @@ impl Tool for MemoryWriteTool {
                 // Protect identity files from LLM overwrites (prompt injection defense).
                 // These files are injected into the system prompt, so poisoning them
                 // would let an attacker rewrite the agent's core instructions.
-                const PROTECTED_IDENTITY_FILES: &[&str] =
-                    &["AGENTS.md", "SOUL.md", "IDENTITY.md", "USER.md"];
                 let normalized = path.trim_start_matches('/');
                 if PROTECTED_IDENTITY_FILES
                     .iter()

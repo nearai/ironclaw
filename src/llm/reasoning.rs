@@ -144,18 +144,6 @@ pub enum RespondResult {
     },
 }
 
-impl RespondResult {
-    /// Get the token usage from this result.
-    pub fn usage(&self) -> &TokenUsage {
-        // This is a placeholder; usage is returned separately via respond_with_usage()
-        static DEFAULT: TokenUsage = TokenUsage {
-            input_tokens: 0,
-            output_tokens: 0,
-        };
-        &DEFAULT
-    }
-}
-
 /// A `RespondResult` bundled with the token usage from the LLM call that produced it.
 #[derive(Debug, Clone)]
 pub struct RespondOutput {

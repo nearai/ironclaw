@@ -249,7 +249,7 @@ Work independently to complete this job. Report when done."#,
                         )
                         .await;
 
-                        if llm_signals_completion(&response) {
+                        if crate::util::llm_signals_completion(&response) {
                             if last_output.is_empty() {
                                 last_output = response.clone();
                             }
@@ -482,105 +482,18 @@ Work independently to complete this job. Report when done."#,
     }
 }
 
-/// Check if the LLM response signals that the job is complete.
-///
-/// Uses phrase-level matching to avoid false positives from bare words like
-/// "done" or "complete" appearing in non-completion contexts (e.g. "not done yet",
-/// "the download is incomplete").
-fn llm_signals_completion(response: &str) -> bool {
-    let lower = response.to_lowercase();
-
-    let positive_phrases = [
-        "job is complete",
-        "job is done",
-        "job is finished",
-        "task is complete",
-        "task is done",
-        "task is finished",
-        "work is complete",
-        "work is done",
-        "work is finished",
-        "i have completed",
-        "i've completed",
-        "successfully completed",
-        "all done",
-        "all tasks complete",
-    ];
-
-    let negative_phrases = [
-        "not complete",
-        "not done",
-        "not finished",
-        "incomplete",
-        "unfinished",
-        "isn't done",
-        "isn't complete",
-        "isn't finished",
-        "not yet done",
-        "not yet complete",
-        "not yet finished",
-    ];
-
-    let has_negative = negative_phrases.iter().any(|p| lower.contains(p));
-    if has_negative {
-        return false;
-    }
-
-    positive_phrases.iter().any(|p| lower.contains(p))
-}
-
 fn truncate(s: &str, max: usize) -> String {
     if s.len() <= max {
         s.to_string()
     } else {
-        let end = floor_char_boundary(s, max);
+        let end = crate::util::floor_char_boundary(s, max);
         format!("{}...", &s[..end])
     }
 }
 
-/// Walk back from `pos` to find a valid UTF-8 char boundary.
-fn floor_char_boundary(s: &str, pos: usize) -> usize {
-    if pos >= s.len() {
-        return s.len();
-    }
-    let mut i = pos;
-    while i > 0 && !s.is_char_boundary(i) {
-        i -= 1;
-    }
-    i
-}
-
 #[cfg(test)]
 mod tests {
-    use crate::worker::runtime::{floor_char_boundary, llm_signals_completion, truncate};
-
-    #[test]
-    fn test_llm_signals_completion_positive() {
-        assert!(llm_signals_completion("The job is complete."));
-        assert!(llm_signals_completion("I have completed the task."));
-        assert!(llm_signals_completion("All done, here are the results."));
-        assert!(llm_signals_completion("Task is finished successfully."));
-    }
-
-    #[test]
-    fn test_llm_signals_completion_negative() {
-        // Negations should NOT signal completion
-        assert!(!llm_signals_completion("The task is not complete yet."));
-        assert!(!llm_signals_completion("This is incomplete."));
-        assert!(!llm_signals_completion("The work is not done."));
-        assert!(!llm_signals_completion("Build is unfinished."));
-    }
-
-    #[test]
-    fn test_llm_signals_completion_false_positives() {
-        // Bare words should NOT signal completion
-        assert!(!llm_signals_completion("The download completed."));
-        assert!(!llm_signals_completion(
-            "Function done_callback was called."
-        ));
-        assert!(!llm_signals_completion("Set is_complete = true"));
-        assert!(!llm_signals_completion("Running step 3 of 5"));
-    }
+    use crate::worker::runtime::truncate;
 
     #[test]
     fn test_truncate_within_limit() {
@@ -604,23 +517,5 @@ mod tests {
         let result = truncate("é is fancy", 1);
         // Should truncate to 0 chars (can't fit "é" in 1 byte)
         assert_eq!(result, "...");
-    }
-
-    #[test]
-    fn test_floor_char_boundary_at_boundary() {
-        let s = "hello";
-        assert_eq!(floor_char_boundary(s, 3), 3);
-    }
-
-    #[test]
-    fn test_floor_char_boundary_mid_char() {
-        let s = "hé"; // h=1 byte, é=2 bytes, total 3
-        assert_eq!(floor_char_boundary(s, 2), 1); // byte 2 is mid-é, back up to 1
-    }
-
-    #[test]
-    fn test_floor_char_boundary_past_end() {
-        let s = "hi";
-        assert_eq!(floor_char_boundary(s, 100), 2);
     }
 }

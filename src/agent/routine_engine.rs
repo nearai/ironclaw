@@ -563,11 +563,7 @@ fn truncate(s: &str, max: usize) -> String {
     if s.len() <= max {
         s.to_string()
     } else {
-        // Find valid UTF-8 char boundary at or before max.
-        let mut end = max;
-        while end > 0 && !s.is_char_boundary(end) {
-            end -= 1;
-        }
+        let end = crate::util::floor_char_boundary(s, max);
         format!("{}...", &s[..end])
     }
 }

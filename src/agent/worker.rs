@@ -256,7 +256,7 @@ Report when the job is complete or if you encounter issues you cannot resolve."#
                         // aware checks to avoid false positives like "incomplete",
                         // "not done", or "unfinished". Only the LLM's own response
                         // (not tool output) can trigger this.
-                        if llm_signals_completion(&response) {
+                        if crate::util::llm_signals_completion(&response) {
                             self.mark_completed().await?;
                             return Ok(());
                         }
@@ -676,7 +676,7 @@ Report when the job is complete or if you encounter issues you cannot resolve."#
         let response = reasoning.respond(reason_ctx).await?;
         reason_ctx.messages.push(ChatMessage::assistant(&response));
 
-        if llm_signals_completion(&response) {
+        if crate::util::llm_signals_completion(&response) {
             self.mark_completed().await?;
         } else {
             // Job not complete, could re-plan or fall back to direct selection
@@ -759,55 +759,6 @@ Report when the job is complete or if you encounter issues you cannot resolve."#
     }
 }
 
-/// Check if an LLM response explicitly signals job completion.
-///
-/// Uses phrase-level matching to avoid false positives from words like
-/// "incomplete", "not done", "unfinished", or tool output that happens
-/// to contain completion-like substrings.
-fn llm_signals_completion(response: &str) -> bool {
-    let lower = response.to_lowercase();
-    // Positive signals: explicit affirmative completion phrases.
-    let positive_phrases = [
-        "job is complete",
-        "job is done",
-        "job is finished",
-        "task is complete",
-        "task is done",
-        "task is finished",
-        "have completed the job",
-        "have completed the task",
-        "have finished the job",
-        "have finished the task",
-        "successfully completed",
-        "all steps are complete",
-        "all steps are done",
-        "work is complete",
-        "work is done",
-        "work is finished",
-    ];
-    // Negative signals: if any of these appear, don't treat as complete.
-    let negative_phrases = [
-        "not complete",
-        "not done",
-        "not finished",
-        "incomplete",
-        "unfinished",
-        "isn't complete",
-        "isn't done",
-        "isn't finished",
-        "not yet complete",
-        "not yet done",
-        "not yet finished",
-    ];
-
-    let has_negative = negative_phrases.iter().any(|p| lower.contains(p));
-    if has_negative {
-        return false;
-    }
-
-    positive_phrases.iter().any(|p| lower.contains(p))
-}
-
 /// Convert a TaskOutput to a string result for tool execution.
 impl From<TaskOutput> for Result<String, Error> {
     fn from(output: TaskOutput) -> Self {
@@ -823,7 +774,7 @@ impl From<TaskOutput> for Result<String, Error> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use crate::util::llm_signals_completion;
 
     #[test]
     fn test_completion_positive_signals() {

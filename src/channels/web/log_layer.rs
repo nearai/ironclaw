@@ -159,19 +159,15 @@ impl Visit for MessageVisitor {
 /// Only forwards DEBUG and above. Attach to the tracing subscriber
 /// alongside the existing fmt layer.
 ///
-/// All log messages are scrubbed through `LeakDetector` before broadcast
-/// to prevent accidental secret exfiltration via the SSE log stream.
+/// Log messages are scrubbed through `LeakDetector` in `LogBroadcaster::send()`
+/// (the single funnel point for all log output, including late-joiner history).
 pub struct WebLogLayer {
     broadcaster: Arc<LogBroadcaster>,
-    leak_detector: LeakDetector,
 }
 
 impl WebLogLayer {
     pub fn new(broadcaster: Arc<LogBroadcaster>) -> Self {
-        Self {
-            broadcaster,
-            leak_detector: LeakDetector::new(),
-        }
+        Self { broadcaster }
     }
 }
 
@@ -191,21 +187,14 @@ impl<S: tracing::Subscriber> Layer<S> for WebLogLayer {
         let mut visitor = MessageVisitor::new();
         event.record(&mut visitor);
 
-        // Scrub secrets from the message before broadcasting to SSE clients.
-        // If the message would be blocked (critical secret), replace entirely.
-        let raw_message = visitor.finish();
-        let message = match self.leak_detector.scan_and_clean(&raw_message) {
-            Ok(cleaned) => cleaned,
-            Err(_) => "[log message redacted: potential secret detected]".to_string(),
-        };
-
         let entry = LogEntry {
             level: metadata.level().to_string().to_uppercase(),
             target: metadata.target().to_string(),
-            message,
+            message: visitor.finish(),
             timestamp: chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
         };
 
+        // LeakDetector scrubbing happens inside broadcaster.send()
         self.broadcaster.send(entry);
     }
 }
@@ -343,11 +332,10 @@ mod tests {
     }
 
     #[test]
-    fn test_web_log_layer_has_leak_detector() {
-        let broadcaster = Arc::new(LogBroadcaster::new());
-        let layer = WebLogLayer::new(Arc::clone(&broadcaster));
+    fn test_broadcaster_has_leak_detector() {
+        let broadcaster = LogBroadcaster::new();
         // Verify the leak detector is initialized with default patterns
-        assert!(layer.leak_detector.pattern_count() > 0);
+        assert!(broadcaster.leak_detector.pattern_count() > 0);
     }
 
     #[test]
