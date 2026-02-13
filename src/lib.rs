@@ -58,6 +58,7 @@ pub mod secrets;
 pub mod settings;
 pub mod setup;
 pub mod tools;
+pub mod tracing_fmt;
 pub mod util;
 pub mod worker;
 pub mod workspace;
