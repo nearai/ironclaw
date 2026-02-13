@@ -18,7 +18,7 @@ wit_bindgen::generate!({
     path: "../../wit/tool.wit",
 });
 
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 
 /// Percent-encode a string for safe use in URL path segments.
 /// Encodes everything except alphanumeric, hyphen, underscore, and dot.
@@ -108,7 +108,10 @@ enum GitHubAction {
         event: String,
     },
     #[serde(rename = "list_repos")]
-    ListRepos { username: String, limit: Option<u32> },
+    ListRepos {
+        username: String,
+        limit: Option<u32>,
+    },
     #[serde(rename = "get_file_content")]
     GetFileContent {
         owner: String,
@@ -155,7 +158,7 @@ impl exports::near::agent::tool::Guest for GitHubTool {
         "GitHub integration for managing repositories, issues, pull requests, \
          and workflows. Supports reading repo info, listing/creating issues, \
          reviewing PRs, and triggering GitHub Actions. \
-         Requires GitHub Personal Access Token with 'repo' and 'workflow' scopes."
+         Authentication is handled via the 'github_token' secret injected by the host."
             .to_string()
     }
 }
@@ -164,93 +167,93 @@ fn execute_inner(params: &str) -> Result<String, String> {
     let action: GitHubAction =
         serde_json::from_str(params).map_err(|e| format!("Invalid parameters: {e}"))?;
 
-    let token = get_github_token()?;
+    // Pre-flight check: ensure token exists in secret store.
+    // We don't use the returned value because the host injects it into the request.
+    let _ = get_github_token()?;
 
     match action {
-        GitHubAction::GetRepo { owner, repo } => get_repo(&token, &owner, &repo),
+        GitHubAction::GetRepo { owner, repo } => get_repo(&owner, &repo),
         GitHubAction::ListIssues {
             owner,
             repo,
             state,
             limit,
-        } => list_issues(&token, &owner, &repo, state.as_deref(), limit),
+        } => list_issues(&owner, &repo, state.as_deref(), limit),
         GitHubAction::CreateIssue {
             owner,
             repo,
             title,
             body,
             labels,
-        } => create_issue(&token, &owner, &repo, &title, body.as_deref(), labels),
+        } => create_issue(&owner, &repo, &title, body.as_deref(), labels),
         GitHubAction::GetIssue {
             owner,
             repo,
             issue_number,
-        } => get_issue(&token, &owner, &repo, issue_number),
+        } => get_issue(&owner, &repo, issue_number),
         GitHubAction::ListPullRequests {
             owner,
             repo,
             state,
             limit,
-        } => list_pull_requests(&token, &owner, &repo, state.as_deref(), limit),
+        } => list_pull_requests(&owner, &repo, state.as_deref(), limit),
         GitHubAction::GetPullRequest {
             owner,
             repo,
             pr_number,
-        } => get_pull_request(&token, &owner, &repo, pr_number),
+        } => get_pull_request(&owner, &repo, pr_number),
         GitHubAction::GetPullRequestFiles {
             owner,
             repo,
             pr_number,
-        } => get_pull_request_files(&token, &owner, &repo, pr_number),
+        } => get_pull_request_files(&owner, &repo, pr_number),
         GitHubAction::CreatePrReview {
             owner,
             repo,
             pr_number,
             body,
             event,
-        } => create_pr_review(&token, &owner, &repo, pr_number, &body, &event),
-        GitHubAction::ListRepos { username, limit } => list_repos(&token, &username, limit),
-        GitHubAction::GetFileContent { owner, repo, path, r#ref } => {
-            get_file_content(&token, &owner, &repo, &path, r#ref.as_deref())
-        }
+        } => create_pr_review(&owner, &repo, pr_number, &body, &event),
+        GitHubAction::ListRepos { username, limit } => list_repos(&username, limit),
+        GitHubAction::GetFileContent {
+            owner,
+            repo,
+            path,
+            r#ref,
+        } => get_file_content(&owner, &repo, &path, r#ref.as_deref()),
         GitHubAction::TriggerWorkflow {
             owner,
             repo,
             workflow_id,
             r#ref,
             inputs,
-        } => trigger_workflow(&token, &owner, &repo, &workflow_id, &r#ref, inputs),
+        } => trigger_workflow(&owner, &repo, &workflow_id, &r#ref, inputs),
         GitHubAction::GetWorkflowRuns {
             owner,
             repo,
             workflow_id,
             limit,
-        } => get_workflow_runs(&token, &owner, &repo, workflow_id.as_deref(), limit),
+        } => get_workflow_runs(&owner, &repo, workflow_id.as_deref(), limit),
     }
 }
 
 fn get_github_token() -> Result<String, String> {
-    if let Some(val) = near::agent::host::secret_get("github_token") {
-        let trimmed = val.trim().to_string();
-        if trimmed.is_empty() {
-            return Err("GitHub token secret is empty. Reset it with: ironclaw secret set github_token <token>".into());
-        }
-        return Ok(trimmed);
+    if near::agent::host::secret_exists("github_token") {
+        // Return dummy value since we only need to verify existence.
+        // The actual token is injected by the host.
+        return Ok("present".to_string());
     }
-    
+
     Err("GitHub token not found in secret store. Set it with: ironclaw secret set github_token <token>. \
          Token needs 'repo', 'workflow', and 'read:org' scopes.".into())
 }
 
-fn github_request(
-    _token: &str,
-    method: &str,
-    path: &str,
-    body: Option<String>,
-) -> Result<String, String> {
+fn github_request(method: &str, path: &str, body: Option<String>) -> Result<String, String> {
     let url = format!("https://api.github.com{}", path);
 
-    // Authorization header is injected automatically by the host based on capabilities
+    // Authorization header (Bearer <token>) is injected automatically by the host
+    // via the `http-wrapper` proxy based on the `github_token` secret.
+    // The WASM tool never sees the raw token value.
     let headers = serde_json::json!({
         "Accept": "application/vnd.github+json",
         "X-GitHub-Api-Version": "2022-11-28",
@@ -264,7 +267,7 @@ fn github_request(
         &url,
         &headers.to_string(),
         body_bytes.as_deref(),
-        None
+        None,
     );
 
     match response {
@@ -282,17 +285,20 @@ fn github_request(
 
 // === API Functions ===
 
-fn get_repo(_token: &str, owner: &str, repo: &str) -> Result<String, String> {
+fn get_repo(owner: &str, repo: &str) -> Result<String, String> {
     if !validate_path_segment(owner) || !validate_path_segment(repo) {
         return Err("Invalid owner or repo name".into());
     }
     let encoded_owner = url_encode_path(owner);
     let encoded_repo = url_encode_path(repo);
-    github_request(_token, "GET", &format!("/repos/{}/{}", encoded_owner, encoded_repo), None)
+    github_request(
+        "GET",
+        &format!("/repos/{}/{}", encoded_owner, encoded_repo),
+        None,
+    )
 }
 
 fn list_issues(
-    token: &str,
     owner: &str,
     repo: &str,
     state: Option<&str>,
@@ -310,11 +316,10 @@ fn list_issues(
         "/repos/{}/{}/issues?state={}&per_page={}",
         encoded_owner, encoded_repo, encoded_state, limit
     );
-    github_request(_token, "GET", &path, None)
+    github_request("GET", &path, None)
 }
 
 fn create_issue(
-    token: &str,
     owner: &str,
     repo: &str,
     title: &str,
@@ -336,35 +341,26 @@ fn create_issue(
     if let Some(labels) = labels {
         req_body["labels"] = serde_json::json!(labels);
     }
-    github_request(
-        token,
-        "POST",
-        &path,
-        Some(req_body.to_string()),
-    )
+    github_request("POST", &path, Some(req_body.to_string()))
 }
 
-fn get_issue(
-    token: &str,
-    owner: &str,
-    repo: &str,
-    issue_number: u32,
-) -> Result<String, String> {
+fn get_issue(owner: &str, repo: &str, issue_number: u32) -> Result<String, String> {
     if !validate_path_segment(owner) || !validate_path_segment(repo) {
         return Err("Invalid owner or repo name".into());
     }
     let encoded_owner = url_encode_path(owner);
     let encoded_repo = url_encode_path(repo);
     github_request(
-        token,
         "GET",
-        &format!("/repos/{}/{}/issues/{}", encoded_owner, encoded_repo, issue_number),
+        &format!(
+            "/repos/{}/{}/issues/{}",
+            encoded_owner, encoded_repo, issue_number
+        ),
         None,
     )
 }
 
 fn list_pull_requests(
-    token: &str,
     owner: &str,
     repo: &str,
     state: Option<&str>,
@@ -382,49 +378,42 @@ fn list_pull_requests(
         "/repos/{}/{}/pulls?state={}&per_page={}",
         encoded_owner, encoded_repo, encoded_state, limit
     );
-    github_request(_token, "GET", &path, None)
+    github_request("GET", &path, None)
 }
 
-fn get_pull_request(
-    token: &str,
-    owner: &str,
-    repo: &str,
-    pr_number: u32,
-) -> Result<String, String> {
+fn get_pull_request(owner: &str, repo: &str, pr_number: u32) -> Result<String, String> {
     if !validate_path_segment(owner) || !validate_path_segment(repo) {
         return Err("Invalid owner or repo name".into());
     }
     let encoded_owner = url_encode_path(owner);
     let encoded_repo = url_encode_path(repo);
     github_request(
-        token,
         "GET",
-        &format!("/repos/{}/{}/pulls/{}", encoded_owner, encoded_repo, pr_number),
+        &format!(
+            "/repos/{}/{}/pulls/{}",
+            encoded_owner, encoded_repo, pr_number
+        ),
         None,
     )
 }
 
-fn get_pull_request_files(
-    token: &str,
-    owner: &str,
-    repo: &str,
-    pr_number: u32,
-) -> Result<String, String> {
+fn get_pull_request_files(owner: &str, repo: &str, pr_number: u32) -> Result<String, String> {
     if !validate_path_segment(owner) || !validate_path_segment(repo) {
         return Err("Invalid owner or repo name".into());
     }
     let encoded_owner = url_encode_path(owner);
     let encoded_repo = url_encode_path(repo);
     github_request(
-        token,
         "GET",
-        &format!("/repos/{}/{}/pulls/{}/files", encoded_owner, encoded_repo, pr_number),
+        &format!(
+            "/repos/{}/{}/pulls/{}/files",
+            encoded_owner, encoded_repo, pr_number
+        ),
         None,
     )
 }
 
 fn create_pr_review(
-    token: &str,
     owner: &str,
     repo: &str,
     pr_number: u32,
@@ -436,26 +425,28 @@ fn create_pr_review(
     }
     let encoded_owner = url_encode_path(owner);
     let encoded_repo = url_encode_path(repo);
-    let path = format!("/repos/{}/{}/pulls/{}/reviews", encoded_owner, encoded_repo, pr_number);
+    let path = format!(
+        "/repos/{}/{}/pulls/{}/reviews",
+        encoded_owner, encoded_repo, pr_number
+    );
     let req_body = serde_json::json!({
         "body": body,
         "event": event,
     });
-    github_request(_token, "POST", &path, Some(req_body.to_string()))
+    github_request("POST", &path, Some(req_body.to_string()))
 }
 
-fn list_repos(_token: &str, username: &str, limit: Option<u32>) -> Result<String, String> {
+fn list_repos(username: &str, limit: Option<u32>) -> Result<String, String> {
     if !validate_path_segment(username) {
         return Err("Invalid username".into());
     }
     let encoded_username = url_encode_path(username);
     let limit = limit.unwrap_or(30).min(100); // Cap at 100
     let path = format!("/users/{}/repos?per_page={}", encoded_username, limit);
-    github_request(_token, "GET", &path, None)
+    github_request("GET", &path, None)
 }
 
 fn get_file_content(
-    _token: &str,
     owner: &str,
     repo: &str,
     path: &str,
@@ -466,32 +457,41 @@ fn get_file_content(
     }
     // Validate path segments - reject path traversal attempts
     for segment in path.split('/') {
-        if segment == ".." || segment.starts_with('.') {
+        if segment == ".." {
             return Err("Invalid path: path traversal not allowed".into());
         }
     }
     // Validate ref if provided
     if let Some(r#ref) = r#ref {
-        if r#ref.contains("..") || r#ref.contains('/') || r#ref.contains(':') {
+        if r#ref.contains("..") || r#ref.contains(':') {
             return Err("Invalid ref: must be a valid branch, tag, or commit SHA".into());
         }
     }
     let encoded_owner = url_encode_path(owner);
     let encoded_repo = url_encode_path(repo);
     // Path can contain slashes, so we encode each segment separately
-    let encoded_path = path.split('/').map(url_encode_path).collect::<Vec<_>>().join("/");
-    
+    let encoded_path = path
+        .split('/')
+        .map(url_encode_path)
+        .collect::<Vec<_>>()
+        .join("/");
+
     let url_path = if let Some(r#ref) = r#ref {
         let encoded_ref = url_encode_query(r#ref);
-        format!("/repos/{}/{}/contents/{}?ref={}", encoded_owner, encoded_repo, encoded_path, encoded_ref)
+        format!(
+            "/repos/{}/{}/contents/{}?ref={}",
+            encoded_owner, encoded_repo, encoded_path, encoded_ref
+        )
     } else {
-        format!("/repos/{}/{}/contents/{}", encoded_owner, encoded_repo, encoded_path)
+        format!(
+            "/repos/{}/{}/contents/{}",
+            encoded_owner, encoded_repo, encoded_path
+        )
     };
-    github_request(_token, "GET", &url_path, None)
+    github_request("GET", &url_path, None)
 }
 
 fn trigger_workflow(
-    _token: &str,
     owner: &str,
     repo: &str,
     workflow_id: &str,
@@ -506,7 +506,7 @@ fn trigger_workflow(
         return Err("Invalid workflow_id: must be a filename or numeric ID".into());
     }
     // Validate ref - must be a valid git ref
-    if r#ref.contains("..") || r#ref.contains(':') || r#ref.starts_with('/') {
+    if r#ref.contains("..") || r#ref.contains(':') {
         return Err("Invalid ref: must be a valid branch, tag, or commit SHA".into());
     }
     let encoded_owner = url_encode_path(owner);
@@ -522,11 +522,10 @@ fn trigger_workflow(
     if let Some(inputs) = inputs {
         req_body["inputs"] = inputs;
     }
-    github_request(_token, "POST", &path, Some(req_body.to_string()))
+    github_request("POST", &path, Some(req_body.to_string()))
 }
 
 fn get_workflow_runs(
-    _token: &str,
     owner: &str,
     repo: &str,
     workflow_id: Option<&str>,
@@ -556,7 +555,7 @@ fn get_workflow_runs(
             encoded_owner, encoded_repo, limit
         )
     };
-    github_request(_token, "GET", &path, None)
+    github_request("GET", &path, None)
 }
 
 const SCHEMA: &str = r#"{
@@ -683,3 +682,23 @@ const SCHEMA: &str = r#"{
 }"#;
 
 export!(GitHubTool);
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_url_encode_path() {
+        assert_eq!(url_encode_path("foo-bar_123.baz"), "foo-bar_123.baz");
+        assert_eq!(url_encode_path("foo bar"), "foo%20bar");
+        assert_eq!(url_encode_path("foo/bar"), "foo%2Fbar");
+    }
+
+    #[test]
+    fn test_validate_path_segment() {
+        assert!(validate_path_segment("foo"));
+        assert!(!validate_path_segment(""));
+        assert!(!validate_path_segment("foo/bar"));
+        assert!(!validate_path_segment(".."));
+    }
+}
