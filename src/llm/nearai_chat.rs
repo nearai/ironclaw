@@ -71,9 +71,10 @@ impl NearAiChatProvider {
 
         tracing::debug!("Sending request to NEAR AI Chat: {}", url);
 
-        // Log the request body for debugging tool call issues
-        if let Ok(json) = serde_json::to_string(body) {
-            tracing::debug!("NEAR AI Chat request body: {}", json);
+        if tracing::enabled!(tracing::Level::DEBUG) {
+            if let Ok(json) = serde_json::to_string(body) {
+                tracing::debug!("NEAR AI Chat request body: {}", json);
+            }
         }
 
         let response = self

@@ -305,7 +305,11 @@ async fn main() -> anyhow::Result<()> {
 
     tracing_subscriber::registry()
         .with(env_filter)
-        .with(tracing_subscriber::fmt::layer().with_target(false))
+        .with(
+            tracing_subscriber::fmt::layer()
+                .with_target(false)
+                .with_writer(ironclaw::tracing_fmt::TruncatingStderr::default()),
+        )
         .with(WebLogLayer::new(Arc::clone(&log_broadcaster)))
         .init();
 
