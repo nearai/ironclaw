@@ -454,6 +454,11 @@ async fn main() -> anyhow::Result<()> {
     // Wrap in failover if a fallback model is configured
     let llm: Arc<dyn LlmProvider> =
         if let Some(fallback_model) = config.llm.nearai.fallback_model.as_ref() {
+            if fallback_model == &config.llm.nearai.model {
+                tracing::warn!(
+                    "fallback_model is the same as primary model, failover may not be effective"
+                );
+            }
             let mut fallback_config = config.llm.nearai.clone();
             fallback_config.model = fallback_model.clone();
             let fallback = create_llm_provider_with_config(&fallback_config, session.clone())?;
