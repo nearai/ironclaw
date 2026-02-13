@@ -17,7 +17,6 @@ use crate::llm::{
     ChatMessage, LlmProvider, Reasoning, ReasoningContext, RespondResult, ToolSelection,
 };
 use crate::safety::SafetyLayer;
-use crate::skills::SkillPermissionEnforcer;
 use crate::tools::ToolRegistry;
 use crate::worker::api::{CompletionReport, JobEventPayload, StatusUpdate, WorkerHttpClient};
 use crate::worker::proxy_llm::ProxyLlmProvider;
@@ -52,8 +51,6 @@ pub struct WorkerRuntime {
     llm: Arc<dyn LlmProvider>,
     safety: Arc<SafetyLayer>,
     tools: Arc<ToolRegistry>,
-    /// Permission enforcer built from job's skill context (set after job fetch).
-    permission_enforcer: Option<SkillPermissionEnforcer>,
 }
 
 impl WorkerRuntime {
@@ -86,12 +83,11 @@ impl WorkerRuntime {
             llm,
             safety,
             tools,
-            permission_enforcer: None,
         })
     }
 
     /// Run the worker until the job is complete or an error occurs.
-    pub async fn run(mut self) -> Result<(), WorkerError> {
+    pub async fn run(self) -> Result<(), WorkerError> {
         tracing::info!("Worker starting for job {}", self.config.job_id);
 
         // Fetch job description from orchestrator
@@ -102,15 +98,6 @@ impl WorkerRuntime {
             job.title,
             truncate(&job.description, 100)
         );
-
-        // Build permission enforcer from job's skill context
-        if !job.skill_permissions.is_empty() {
-            let enforcer = SkillPermissionEnforcer::from_serialized(&job.skill_permissions);
-            if enforcer.has_enforcement() {
-                tracing::info!("Skill permission enforcement active for this worker");
-                self.permission_enforcer = Some(enforcer);
-            }
-        }
 
         // Report that we're starting
         self.client
@@ -251,7 +238,7 @@ Work independently to complete this job. Report when done."#,
                             reason: format!("respond_with_tools failed: {}", e),
                         })?;
 
-                match respond_result {
+                match respond_result.result {
                     RespondResult::Text(response) => {
                         self.post_event(
                             "message",
@@ -262,11 +249,7 @@ Work independently to complete this job. Report when done."#,
                         )
                         .await;
 
-                        let response_lower = response.to_lowercase();
-                        if response_lower.contains("complete")
-                            || response_lower.contains("finished")
-                            || response_lower.contains("done")
-                        {
+                        if crate::util::llm_signals_completion(&response) {
                             if last_output.is_empty() {
                                 last_output = response.clone();
                             }
@@ -389,13 +372,6 @@ Work independently to complete this job. Report when done."#,
         tool_name: &str,
         params: &serde_json::Value,
     ) -> Result<String, String> {
-        // Enforce skill permission patterns (defense in depth)
-        if let Some(ref enforcer) = self.permission_enforcer {
-            enforcer
-                .validate_tool_call(tool_name, params)
-                .map_err(|e| format!("Permission denied: {}", e))?;
-        }
-
         let tool = match self.tools.get(tool_name).await {
             Some(t) => t,
             None => return Err(format!("tool '{}' not found", tool_name)),
@@ -451,7 +427,11 @@ Work independently to complete this job. Report when done."#,
                     wrapped,
                 ));
 
-                output.contains("TASK_COMPLETE") || output.contains("JOB_DONE")
+                // Tool output should never signal job completion. Only the LLM's
+                // natural language response should decide when a job is done. A
+                // tool could return text containing "TASK_COMPLETE" in its output
+                // (e.g. from file contents) and trigger a false positive.
+                false
             }
             Err(e) => {
                 tracing::warn!("Tool {} failed: {}", selection.tool_name, e);
@@ -506,11 +486,36 @@ fn truncate(s: &str, max: usize) -> String {
     if s.len() <= max {
         s.to_string()
     } else {
-        // Walk backwards from max to find a valid UTF-8 char boundary
-        let mut boundary = max;
-        while boundary > 0 && !s.is_char_boundary(boundary) {
-            boundary -= 1;
-        }
-        format!("{}...", &s[..boundary])
+        let end = crate::util::floor_char_boundary(s, max);
+        format!("{}...", &s[..end])
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::worker::runtime::truncate;
+
+    #[test]
+    fn test_truncate_within_limit() {
+        assert_eq!(truncate("hello", 10), "hello");
+    }
+
+    #[test]
+    fn test_truncate_at_limit() {
+        assert_eq!(truncate("hello", 5), "hello");
+    }
+
+    #[test]
+    fn test_truncate_beyond_limit() {
+        let result = truncate("hello world", 5);
+        assert_eq!(result, "hello...");
+    }
+
+    #[test]
+    fn test_truncate_multibyte_safe() {
+        // "é" is 2 bytes in UTF-8; slicing at byte 1 would panic without safety
+        let result = truncate("é is fancy", 1);
+        // Should truncate to 0 chars (can't fit "é" in 1 byte)
+        assert_eq!(result, "...");
     }
 }

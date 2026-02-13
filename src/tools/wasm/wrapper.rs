@@ -23,7 +23,7 @@ use crate::tools::wasm::capabilities::Capabilities;
 use crate::tools::wasm::error::WasmError;
 use crate::tools::wasm::host::{HostState, LogLevel};
 use crate::tools::wasm::limits::{ResourceLimits, WasmResourceLimiter};
-use crate::tools::wasm::runtime::{PreparedModule, WasmToolRuntime};
+use crate::tools::wasm::runtime::{EPOCH_TICK_INTERVAL, PreparedModule, WasmToolRuntime};
 
 // Generate component model bindings from the WIT file.
 //
@@ -194,10 +194,25 @@ impl near::agent::host::Host for StoreData {
             .scan_http_request(&url, &header_vec, body.as_deref())
             .map_err(|e| format!("Potential secret leak blocked: {}", e))?;
 
+        // Get the max response size from capabilities (default 10MB).
+        let max_response_bytes = self
+            .host_state
+            .capabilities()
+            .http
+            .as_ref()
+            .map(|h| h.max_response_bytes)
+            .unwrap_or(10 * 1024 * 1024);
+
+        // Resolve hostname and reject private/internal IPs to prevent DNS rebinding.
+        reject_private_ip(&url)?;
+
         // Make HTTP request using blocking I/O.
         // We're inside a spawn_blocking context, so use block_on.
         let result = tokio::runtime::Handle::current().block_on(async {
-            let client = reqwest::Client::new();
+            let client = reqwest::Client::builder()
+                .redirect(reqwest::redirect::Policy::none())
+                .build()
+                .map_err(|e| format!("failed to create HTTP client: {e}"))?;
 
             let mut request = match method.to_uppercase().as_str() {
                 "GET" => client.get(&url),
@@ -241,11 +256,31 @@ impl near::agent::host::Host for StoreData {
                 })
                 .collect();
             let headers_json = serde_json::to_string(&response_headers).unwrap_or_default();
+
+            // Check Content-Length header for early rejection of oversized responses.
+            let max_response = max_response_bytes;
+            if let Some(cl) = response.content_length() {
+                if cl as usize > max_response {
+                    return Err(format!(
+                        "Response body too large: {} bytes exceeds limit of {} bytes",
+                        cl, max_response
+                    ));
+                }
+            }
+
+            // Read body with a size cap to prevent memory exhaustion.
             let body = response
                 .bytes()
                 .await
-                .map_err(|e| format!("Failed to read response body: {}", e))?
-                .to_vec();
+                .map_err(|e| format!("Failed to read response body: {}", e))?;
+            if body.len() > max_response {
+                return Err(format!(
+                    "Response body too large: {} bytes exceeds limit of {} bytes",
+                    body.len(),
+                    max_response
+                ));
+            }
+            let body = body.to_vec();
 
             // Leak detection on response body
             if let Ok(body_str) = std::str::from_utf8(&body) {
@@ -380,9 +415,13 @@ impl WasmToolWrapper {
                 .map_err(|e| WasmError::ConfigError(format!("Failed to set fuel: {}", e)))?;
         }
 
-        // Configure epoch deadline for timeout backup
+        // Configure epoch deadline as a hard timeout backup.
+        // The epoch ticker thread increments the engine epoch every EPOCH_TICK_INTERVAL.
+        // Setting deadline to N means "trap after N ticks", so we compute the number
+        // of ticks that fit in the tool's timeout. Minimum 1 to always have a backstop.
         store.epoch_deadline_trap();
-        store.set_epoch_deadline(1);
+        let ticks = (limits.timeout.as_millis() / EPOCH_TICK_INTERVAL.as_millis()).max(1) as u64;
+        store.set_epoch_deadline(ticks);
 
         // Set up resource limiter
         store.limiter(|data| &mut data.limiter);
@@ -531,6 +570,88 @@ impl std::fmt::Debug for WasmToolWrapper {
     }
 }
 
+/// Resolve the URL's hostname and reject connections to private/internal IP addresses.
+/// This prevents DNS rebinding attacks where an attacker's domain resolves to an
+/// internal IP after passing the allowlist check.
+fn reject_private_ip(url: &str) -> Result<(), String> {
+    let host = url
+        .split("://")
+        .nth(1)
+        .and_then(|rest| {
+            let host_and_port = rest.split('/').next().unwrap_or(rest);
+            // Strip port
+            if host_and_port.starts_with('[') {
+                // IPv6
+                host_and_port.find(']').map(|i| &host_and_port[1..i])
+            } else {
+                Some(
+                    host_and_port
+                        .rfind(':')
+                        .map_or(host_and_port, |i| &host_and_port[..i]),
+                )
+            }
+        })
+        .ok_or_else(|| "Failed to parse host from URL".to_string())?;
+
+    // If the host is already an IP, check it directly
+    if let Ok(ip) = host.parse::<std::net::IpAddr>() {
+        return if is_private_ip(ip) {
+            Err(format!(
+                "HTTP request to private/internal IP {} is not allowed",
+                ip
+            ))
+        } else {
+            Ok(())
+        };
+    }
+
+    // Resolve DNS and check all addresses
+    use std::net::ToSocketAddrs;
+    // Port 0 is a placeholder; ToSocketAddrs needs host:port but the port
+    // doesn't affect which IPs the hostname resolves to.
+    let addrs: Vec<_> = format!("{}:0", host)
+        .to_socket_addrs()
+        .map_err(|e| format!("DNS resolution failed for {}: {}", host, e))?
+        .collect();
+
+    if addrs.is_empty() {
+        return Err(format!("DNS resolution returned no addresses for {}", host));
+    }
+
+    for addr in &addrs {
+        if is_private_ip(addr.ip()) {
+            return Err(format!(
+                "DNS rebinding detected: {} resolved to private IP {}",
+                host,
+                addr.ip()
+            ));
+        }
+    }
+
+    Ok(())
+}
+
+/// Check if an IP address belongs to a private/internal range.
+fn is_private_ip(ip: std::net::IpAddr) -> bool {
+    match ip {
+        std::net::IpAddr::V4(v4) => {
+            v4.is_loopback()           // 127.0.0.0/8
+            || v4.is_private()         // 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16
+            || v4.is_link_local()      // 169.254.0.0/16
+            || v4.is_unspecified()     // 0.0.0.0
+            || v4.octets()[0] == 100 && (v4.octets()[1] & 0xC0) == 64 // 100.64.0.0/10 (CGNAT)
+        }
+        std::net::IpAddr::V6(v6) => {
+            v6.is_loopback()           // ::1
+            || v6.is_unspecified()     // ::
+            // fc00::/7 (unique local)
+            || (v6.segments()[0] & 0xFE00) == 0xFC00
+            // fe80::/10 (link-local)
+            || (v6.segments()[0] & 0xFFC0) == 0xFE80
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
@@ -556,5 +677,68 @@ mod tests {
         assert!(caps.http.is_none());
         assert!(caps.tool_invoke.is_none());
         assert!(caps.secrets.is_none());
+    }
+
+    #[test]
+    fn test_is_private_ip_v4() {
+        use std::net::IpAddr;
+        // Private ranges
+        assert!(super::is_private_ip("127.0.0.1".parse::<IpAddr>().unwrap()));
+        assert!(super::is_private_ip("10.0.0.1".parse::<IpAddr>().unwrap()));
+        assert!(super::is_private_ip(
+            "172.16.0.1".parse::<IpAddr>().unwrap()
+        ));
+        assert!(super::is_private_ip(
+            "192.168.1.1".parse::<IpAddr>().unwrap()
+        ));
+        assert!(super::is_private_ip(
+            "169.254.1.1".parse::<IpAddr>().unwrap()
+        ));
+        assert!(super::is_private_ip("0.0.0.0".parse::<IpAddr>().unwrap()));
+        // CGNAT
+        assert!(super::is_private_ip(
+            "100.64.0.1".parse::<IpAddr>().unwrap()
+        ));
+
+        // Public IPs
+        assert!(!super::is_private_ip("8.8.8.8".parse::<IpAddr>().unwrap()));
+        assert!(!super::is_private_ip("1.1.1.1".parse::<IpAddr>().unwrap()));
+        assert!(!super::is_private_ip(
+            "93.184.216.34".parse::<IpAddr>().unwrap()
+        ));
+    }
+
+    #[test]
+    fn test_is_private_ip_v6() {
+        use std::net::IpAddr;
+        assert!(super::is_private_ip("::1".parse::<IpAddr>().unwrap()));
+        assert!(super::is_private_ip("::".parse::<IpAddr>().unwrap()));
+        assert!(super::is_private_ip("fc00::1".parse::<IpAddr>().unwrap()));
+        assert!(super::is_private_ip("fe80::1".parse::<IpAddr>().unwrap()));
+
+        // Public
+        assert!(!super::is_private_ip(
+            "2606:4700::1111".parse::<IpAddr>().unwrap()
+        ));
+    }
+
+    #[test]
+    fn test_reject_private_ip_loopback() {
+        let result = super::reject_private_ip("https://127.0.0.1:8080/api");
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("private/internal IP"));
+    }
+
+    #[test]
+    fn test_reject_private_ip_internal() {
+        let result = super::reject_private_ip("https://192.168.1.1/admin");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_reject_private_ip_public_ok() {
+        // 8.8.8.8 (Google DNS) is public
+        let result = super::reject_private_ip("https://8.8.8.8/dns-query");
+        assert!(result.is_ok());
     }
 }

@@ -115,6 +115,19 @@ pub struct ToolSelection {
     pub alternatives: Vec<String>,
 }
 
+/// Token usage from a single LLM call.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct TokenUsage {
+    pub input_tokens: u32,
+    pub output_tokens: u32,
+}
+
+impl TokenUsage {
+    pub fn total(&self) -> u32 {
+        self.input_tokens + self.output_tokens
+    }
+}
+
 /// Result of a response with potential tool calls.
 ///
 /// Used by the agent loop to handle tool execution before returning a final response.
@@ -129,6 +142,13 @@ pub enum RespondResult {
         tool_calls: Vec<ToolCall>,
         content: Option<String>,
     },
+}
+
+/// A `RespondResult` bundled with the token usage from the LLM call that produced it.
+#[derive(Debug, Clone)]
+pub struct RespondOutput {
+    pub result: RespondResult,
+    pub usage: TokenUsage,
 }
 
 /// Reasoning engine for the agent.
@@ -307,7 +327,8 @@ Respond in JSON format:
     /// tool calls as text for simple cases. Use `respond_with_tools()` when you
     /// need to actually execute tool calls in an agentic loop.
     pub async fn respond(&self, context: &ReasoningContext) -> Result<String, LlmError> {
-        match self.respond_with_tools(context).await? {
+        let output = self.respond_with_tools(context).await?;
+        match output.result {
             RespondResult::Text(text) => Ok(text),
             RespondResult::ToolCalls {
                 tool_calls: calls, ..
@@ -322,15 +343,14 @@ Respond in JSON format:
         }
     }
 
-    /// Generate a response that may include tool calls.
+    /// Generate a response that may include tool calls, with token usage tracking.
     ///
-    /// Returns `RespondResult::ToolCalls` if the model wants to call tools,
-    /// allowing the caller to execute them and continue the conversation.
-    /// Returns `RespondResult::Text` when the model has a final text response.
+    /// Returns `RespondOutput` containing the result and token usage from the LLM call.
+    /// The caller should use `usage` to track cost/budget against the job.
     pub async fn respond_with_tools(
         &self,
         context: &ReasoningContext,
-    ) -> Result<RespondResult, LlmError> {
+    ) -> Result<RespondOutput, LlmError> {
         let system_prompt = self.build_conversation_prompt(context);
 
         let mut messages = vec![ChatMessage::system(system_prompt)];
@@ -359,12 +379,19 @@ Respond in JSON format:
             request.metadata = context.metadata.clone();
 
             let response = self.llm.complete_with_tools(request).await?;
+            let usage = TokenUsage {
+                input_tokens: response.input_tokens,
+                output_tokens: response.output_tokens,
+            };
 
             // If there were tool calls, return them for execution
             if !response.tool_calls.is_empty() {
-                return Ok(RespondResult::ToolCalls {
-                    tool_calls: response.tool_calls,
-                    content: response.content,
+                return Ok(RespondOutput {
+                    result: RespondResult::ToolCalls {
+                        tool_calls: response.tool_calls,
+                        content: response.content,
+                    },
+                    usage,
                 });
             }
 
@@ -378,17 +405,23 @@ Respond in JSON format:
             let recovered = recover_tool_calls_from_content(&content, &context.available_tools);
             if !recovered.is_empty() {
                 let cleaned = clean_response(&content);
-                return Ok(RespondResult::ToolCalls {
-                    tool_calls: recovered,
-                    content: if cleaned.is_empty() {
-                        None
-                    } else {
-                        Some(cleaned)
+                return Ok(RespondOutput {
+                    result: RespondResult::ToolCalls {
+                        tool_calls: recovered,
+                        content: if cleaned.is_empty() {
+                            None
+                        } else {
+                            Some(cleaned)
+                        },
                     },
+                    usage,
                 });
             }
 
-            Ok(RespondResult::Text(clean_response(&content)))
+            Ok(RespondOutput {
+                result: RespondResult::Text(clean_response(&content)),
+                usage,
+            })
         } else {
             // No tools, use simple completion
             let mut request = CompletionRequest::new(messages)
@@ -397,7 +430,13 @@ Respond in JSON format:
             request.metadata = context.metadata.clone();
 
             let response = self.llm.complete(request).await?;
-            Ok(RespondResult::Text(clean_response(&response.content)))
+            Ok(RespondOutput {
+                result: RespondResult::Text(clean_response(&response.content)),
+                usage: TokenUsage {
+                    input_tokens: response.input_tokens,
+                    output_tokens: response.output_tokens,
+                },
+            })
         }
     }
 
