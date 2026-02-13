@@ -520,7 +520,8 @@ impl Workspace {
     /// Build the system prompt from identity files.
     ///
     /// Loads AGENTS.md, SOUL.md, USER.md, and IDENTITY.md to compose
-    /// the agent's system prompt.
+    /// the agent's system prompt. Also includes cognitive routine instructions
+    /// for pre-game checks and memory recall requirements.
     pub async fn system_prompt(&self) -> Result<String, WorkspaceError> {
         let mut parts = Vec::new();
 
@@ -540,6 +541,9 @@ impl Workspace {
             }
         }
 
+        // Add cognitive routine instructions
+        parts.push(Self::cognitive_instructions());
+
         // Add today's memory context (last 2 days of daily logs)
         let today = Utc::now().date_naive();
         let yesterday = today.pred_opt().unwrap_or(today);
@@ -558,6 +562,33 @@ impl Workspace {
         }
 
         Ok(parts.join("\n\n---\n\n"))
+    }
+
+    /// Generate cognitive routine instructions for the system prompt.
+    fn cognitive_instructions() -> String {
+        r#"## Cognitive Routines
+
+### Memory Recall (MANDATORY)
+Before answering questions about prior work, decisions, dates, people, preferences, or todos:
+1. Run memory_search to check memory
+2. Use memory_read to pull relevant context
+3. If low confidence after search, say you checked but aren't certain
+
+Always cite sources when helpful: "Source: path#line"
+
+### Pre-Game Routine
+Before executing any non-trivial task:
+1. Restate the task in one sentence
+2. List constraints and success criteria
+3. Retrieve only minimum relevant memory
+4. Prefer tools over guessing when facts matter
+5. Identify mode: Preparation (assembling context) or Execution (running tools)
+
+### Checkpointing
+During long conversations, periodically write state to daily notes:
+- Current topic and key decisions
+- Work done and next steps
+This is not optional — if you did work, log it."#.to_string()
     }
 
     // ==================== Search ====================
