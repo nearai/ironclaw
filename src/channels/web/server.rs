@@ -266,8 +266,6 @@ pub async fn start_server(
             format!("http://localhost:{}", addr.port())
                 .parse()
                 .expect("valid origin"),
-            "http://localhost:3001".parse().expect("valid origin"),
-            "http://127.0.0.1:3001".parse().expect("valid origin"),
         ])
         .allow_methods([
             axum::http::Method::GET,
@@ -542,16 +540,26 @@ async fn chat_ws_handler(
     State(state): State<Arc<GatewayState>>,
 ) -> Result<impl IntoResponse, (StatusCode, String)> {
     // Validate Origin header to prevent cross-site WebSocket hijacking.
-    if let Some(origin) = headers.get("origin").and_then(|v| v.to_str().ok()) {
-        let is_local = origin.starts_with("http://localhost")
-            || origin.starts_with("http://127.0.0.1")
-            || origin.starts_with("http://[::1]");
-        if !is_local {
-            return Err((
+    // Require the header outright; browsers always send it for WS upgrades,
+    // so a missing Origin means a non-browser client trying to bypass the check.
+    let origin = headers
+        .get("origin")
+        .and_then(|v| v.to_str().ok())
+        .ok_or_else(|| {
+            (
                 StatusCode::FORBIDDEN,
-                "WebSocket origin not allowed".to_string(),
-            ));
-        }
+                "WebSocket Origin header required".to_string(),
+            )
+        })?;
+
+    let is_local = origin.starts_with("http://localhost")
+        || origin.starts_with("http://127.0.0.1")
+        || origin.starts_with("http://[::1]");
+    if !is_local {
+        return Err((
+            StatusCode::FORBIDDEN,
+            "WebSocket origin not allowed".to_string(),
+        ));
     }
     Ok(ws.on_upgrade(move |socket| crate::channels::web::ws::handle_ws_connection(socket, state)))
 }

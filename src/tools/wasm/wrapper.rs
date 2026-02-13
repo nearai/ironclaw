@@ -607,7 +607,9 @@ fn reject_private_ip(url: &str) -> Result<(), String> {
 
     // Resolve DNS and check all addresses
     use std::net::ToSocketAddrs;
-    let addrs: Vec<_> = format!("{}:443", host)
+    // Port 0 is a placeholder; ToSocketAddrs needs host:port but the port
+    // doesn't affect which IPs the hostname resolves to.
+    let addrs: Vec<_> = format!("{}:0", host)
         .to_socket_addrs()
         .map_err(|e| format!("DNS resolution failed for {}: {}", host, e))?
         .collect();
