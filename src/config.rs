@@ -178,11 +178,11 @@ impl DatabaseConfig {
 /// Users can override with `LLM_BACKEND` env var to use other providers.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum LlmBackend {
-    /// OpenRouter -- OpenAI-compatible API with access to many models
-    OpenRouter,
     /// NEAR AI proxy (default) -- session or API key auth
     #[default]
     NearAi,
+    /// OpenRouter -- OpenAI-compatible API with access to many models
+    OpenRouter,
     /// Direct OpenAI API
     OpenAi,
     /// Direct Anthropic API
@@ -380,7 +380,7 @@ impl LlmConfig {
                     hint: "Set OPENROUTER_API_KEY when LLM_BACKEND=openrouter".to_string(),
                 })?;
             let model = optional_env("OPENROUTER_MODEL")?
-                .unwrap_or_else(|| "anthropic/claude-sonnet-4".to_string());
+                .unwrap_or_else(|| crate::llm::OPENROUTER_DEFAULT_MODEL.to_string());
             Some(OpenRouterConfig { api_key, model })
         } else {
             None
@@ -1270,4 +1270,32 @@ where
         })
         .transpose()
         .map(|opt| opt.unwrap_or(default))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_openrouter_backend() {
+        assert_eq!(
+            "openrouter".parse::<LlmBackend>().unwrap(),
+            LlmBackend::OpenRouter
+        );
+        assert_eq!(
+            "open_router".parse::<LlmBackend>().unwrap(),
+            LlmBackend::OpenRouter
+        );
+    }
+
+    #[test]
+    fn openrouter_roundtrip() {
+        let backend = LlmBackend::OpenRouter;
+        assert_eq!(backend.to_string().parse::<LlmBackend>().unwrap(), backend);
+    }
+
+    #[test]
+    fn default_backend_is_nearai() {
+        assert_eq!(LlmBackend::default(), LlmBackend::NearAi);
+    }
 }

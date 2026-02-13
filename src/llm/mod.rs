@@ -34,6 +34,12 @@ use secrecy::ExposeSecret;
 use crate::config::{LlmBackend, LlmConfig, NearAiApiMode};
 use crate::error::LlmError;
 
+// OpenRouter defaults
+const OPENROUTER_BASE_URL: &str = "https://openrouter.ai/api/v1";
+pub const OPENROUTER_DEFAULT_MODEL: &str = "anthropic/claude-sonnet-4";
+const OPENROUTER_REFERER: &str = "https://github.com/nearai/ironclaw";
+const OPENROUTER_TITLE: &str = "ironclaw";
+
 /// Create an LLM provider based on configuration.
 ///
 /// - `NearAi` backend: Uses session manager for authentication (Responses API)
@@ -67,15 +73,15 @@ fn create_openrouter_provider(config: &LlmConfig) -> Result<Arc<dyn LlmProvider>
     let mut headers = HeaderMap::new();
     headers.insert(
         HeaderName::from_static("http-referer"),
-        HeaderValue::from_static("https://github.com/nearai/ironclaw"),
+        HeaderValue::from_static(OPENROUTER_REFERER),
     );
     headers.insert(
         HeaderName::from_static("x-title"),
-        HeaderValue::from_static("ironclaw"),
+        HeaderValue::from_static(OPENROUTER_TITLE),
     );
 
     let client: openai::Client = openai::Client::builder()
-        .base_url("https://openrouter.ai/api/v1")
+        .base_url(OPENROUTER_BASE_URL)
         .api_key(or.api_key.expose_secret())
         .http_headers(headers)
         .build()
