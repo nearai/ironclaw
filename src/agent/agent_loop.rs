@@ -37,8 +37,14 @@ pub(crate) fn truncate_for_preview(output: &str, max_chars: usize) -> String {
         .split_whitespace()
         .collect::<Vec<_>>()
         .join(" ");
-    if collapsed.len() > max_chars {
-        format!("{}...", &collapsed[..max_chars])
+    // char_indices gives us byte offsets at char boundaries, so the slice is always valid UTF-8.
+    if collapsed.chars().count() > max_chars {
+        let byte_offset = collapsed
+            .char_indices()
+            .nth(max_chars)
+            .map(|(i, _)| i)
+            .unwrap_or(collapsed.len());
+        format!("{}...", &collapsed[..byte_offset])
     } else {
         collapsed
     }
@@ -2626,5 +2632,71 @@ mod tests {
         .to_string());
 
         assert!(detect_auth_awaiting("tool_activate", &result).is_none());
+    }
+
+    // --- truncate_for_preview tests ---
+
+    use super::truncate_for_preview;
+
+    #[test]
+    fn test_truncate_short_input() {
+        assert_eq!(truncate_for_preview("hello", 10), "hello");
+    }
+
+    #[test]
+    fn test_truncate_empty_input() {
+        assert_eq!(truncate_for_preview("", 10), "");
+    }
+
+    #[test]
+    fn test_truncate_exact_length() {
+        assert_eq!(truncate_for_preview("hello", 5), "hello");
+    }
+
+    #[test]
+    fn test_truncate_over_limit() {
+        let result = truncate_for_preview("hello world, this is long", 10);
+        assert!(result.ends_with("..."));
+        // "hello worl" = 10 chars + "..."
+        assert_eq!(result, "hello worl...");
+    }
+
+    #[test]
+    fn test_truncate_collapses_newlines() {
+        let result = truncate_for_preview("line1\nline2\nline3", 100);
+        assert!(!result.contains('\n'));
+        assert_eq!(result, "line1 line2 line3");
+    }
+
+    #[test]
+    fn test_truncate_collapses_whitespace() {
+        let result = truncate_for_preview("hello   world", 100);
+        assert_eq!(result, "hello world");
+    }
+
+    #[test]
+    fn test_truncate_multibyte_utf8() {
+        // Each emoji is 4 bytes. Truncating at char boundary must not panic.
+        let input = "😀😁😂🤣😃😄😅😆😉😊";
+        let result = truncate_for_preview(input, 5);
+        assert!(result.ends_with("..."));
+        // First 5 chars = 5 emoji
+        assert_eq!(result, "😀😁😂🤣😃...");
+    }
+
+    #[test]
+    fn test_truncate_cjk_characters() {
+        // CJK chars are 3 bytes each in UTF-8.
+        let input = "你好世界测试数据很长的字符串";
+        let result = truncate_for_preview(input, 4);
+        assert_eq!(result, "你好世界...");
+    }
+
+    #[test]
+    fn test_truncate_mixed_multibyte_and_ascii() {
+        let input = "hello 世界 foo";
+        let result = truncate_for_preview(input, 8);
+        // 'h','e','l','l','o',' ','世','界' = 8 chars
+        assert_eq!(result, "hello 世界...");
     }
 }

@@ -37,8 +37,6 @@ use crate::agent::truncate_for_preview;
 use crate::channels::{Channel, IncomingMessage, MessageStream, OutgoingResponse, StatusUpdate};
 use crate::error::ChannelError;
 
-/// Max characters for tool result previews in the terminal.
-const CLI_TOOL_RESULT_MAX: usize = 200;
 /// Max characters for thinking/status messages in the terminal.
 const CLI_STATUS_MAX: usize = 200;
 
@@ -420,8 +418,7 @@ impl Channel for ReplChannel {
                 }
             }
             StatusUpdate::ToolResult { name: _, preview } => {
-                let display = truncate_for_preview(&preview, CLI_TOOL_RESULT_MAX);
-                eprintln!("    \x1b[90m{display}\x1b[0m");
+                eprintln!("    \x1b[90m{preview}\x1b[0m");
             }
             StatusUpdate::StreamChunk(chunk) => {
                 // Print separator on the false-to-true transition
