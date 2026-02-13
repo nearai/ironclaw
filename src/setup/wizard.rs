@@ -1087,9 +1087,10 @@ mod tests {
 
     #[tokio::test]
     async fn test_install_missing_bundled_channels_installs_telegram() {
-        // Skip if telegram WASM artifact hasn't been built (e.g. CI without wasm target)
+        // WASM artifacts only exist in dev builds (not CI). Skip gracefully
+        // rather than fail when the telegram channel hasn't been compiled.
         if !available_channel_names().contains(&"telegram") {
-            eprintln!("Skipping: telegram channel artifact not available");
+            eprintln!("skipping: telegram WASM artifacts not built");
             return;
         }
 

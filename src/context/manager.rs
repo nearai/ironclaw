@@ -45,20 +45,21 @@ impl ContextManager {
         title: impl Into<String>,
         description: impl Into<String>,
     ) -> Result<Uuid, JobError> {
-        let contexts = self.contexts.read().await;
+        // Hold write lock for the entire check-insert to prevent TOCTOU races
+        // where two concurrent calls both pass the active_count check.
+        let mut contexts = self.contexts.write().await;
         let active_count = contexts.values().filter(|c| c.state.is_active()).count();
 
         if active_count >= self.max_jobs {
             return Err(JobError::MaxJobsExceeded { max: self.max_jobs });
         }
-        drop(contexts);
 
         let context = JobContext::with_user(user_id, title, description);
         let job_id = context.job_id;
+        contexts.insert(job_id, context);
+        drop(contexts);
 
         let memory = Memory::new(job_id);
-
-        self.contexts.write().await.insert(job_id, context);
         self.memories.write().await.insert(job_id, memory);
 
         Ok(job_id)
