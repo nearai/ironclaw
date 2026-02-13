@@ -20,6 +20,12 @@ use crate::context::JobContext;
 use crate::tools::tool::{Tool, ToolError, ToolOutput};
 use crate::workspace::{Workspace, paths};
 
+/// Identity files that the LLM must not overwrite via tool calls.
+/// These are loaded into the system prompt and could be used for prompt
+/// injection if an attacker tricks the agent into overwriting them.
+const PROTECTED_IDENTITY_FILES: &[&str] =
+    &[paths::IDENTITY, paths::SOUL, paths::AGENTS, paths::USER];
+
 /// Tool for searching workspace memory.
 ///
 /// Performs hybrid search (FTS + semantic) across all memory documents.
@@ -188,6 +194,16 @@ impl Tool for MemoryWriteTool {
             .and_then(|v| v.as_str())
             .unwrap_or("daily_log");
 
+        // Reject writes to identity files that are loaded into the system prompt.
+        // An attacker could use prompt injection to trick the agent into overwriting
+        // these, poisoning future conversations.
+        if PROTECTED_IDENTITY_FILES.contains(&target) {
+            return Err(ToolError::NotAuthorized(format!(
+                "writing to '{}' is not allowed (identity file protected from tool writes)",
+                target,
+            )));
+        }
+
         let append = params
             .get("append")
             .and_then(|v| v.as_bool())
@@ -230,6 +246,20 @@ impl Tool for MemoryWriteTool {
                 paths::HEARTBEAT.to_string()
             }
             path => {
+                // Protect identity files from LLM overwrites (prompt injection defense).
+                // These files are injected into the system prompt, so poisoning them
+                // would let an attacker rewrite the agent's core instructions.
+                let normalized = path.trim_start_matches('/');
+                if PROTECTED_IDENTITY_FILES
+                    .iter()
+                    .any(|p| normalized.eq_ignore_ascii_case(p))
+                {
+                    return Err(ToolError::NotAuthorized(format!(
+                        "writing to '{}' is not allowed (identity file protected from tool access)",
+                        path
+                    )));
+                }
+
                 if append {
                     self.workspace
                         .append(path, content)

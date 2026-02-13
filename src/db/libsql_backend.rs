@@ -576,6 +576,26 @@ impl Database for LibSqlBackend {
         Ok(messages)
     }
 
+    async fn conversation_belongs_to_user(
+        &self,
+        conversation_id: Uuid,
+        user_id: &str,
+    ) -> Result<bool, DatabaseError> {
+        let conn = self.connect()?;
+        let mut rows = conn
+            .query(
+                "SELECT 1 FROM conversations WHERE id = ?1 AND user_id = ?2",
+                libsql::params![conversation_id.to_string(), user_id],
+            )
+            .await
+            .map_err(|e| DatabaseError::Query(e.to_string()))?;
+        let found = rows
+            .next()
+            .await
+            .map_err(|e| DatabaseError::Query(e.to_string()))?;
+        Ok(found.is_some())
+    }
+
     // ==================== Jobs ====================
 
     async fn save_job(&self, ctx: &JobContext) -> Result<(), DatabaseError> {
@@ -1069,6 +1089,92 @@ impl Database for LibSqlBackend {
             }
         }
         Ok(summary)
+    }
+
+    async fn list_sandbox_jobs_for_user(
+        &self,
+        user_id: &str,
+    ) -> Result<Vec<SandboxJobRecord>, DatabaseError> {
+        let conn = self.connect()?;
+        let mut rows = conn
+            .query(
+                r#"
+                SELECT id, title, status, user_id, project_dir,
+                       success, failure_reason, created_at, started_at, completed_at
+                FROM agent_jobs WHERE source = 'sandbox' AND user_id = ?1
+                ORDER BY created_at DESC
+                "#,
+                libsql::params![user_id],
+            )
+            .await
+            .map_err(|e| DatabaseError::Query(e.to_string()))?;
+
+        let mut jobs = Vec::new();
+        while let Some(row) = rows.next().await.map_err(|e| DatabaseError::Query(e.to_string()))? {
+            jobs.push(SandboxJobRecord {
+                id: get_text(&row, 0).parse().unwrap_or_default(),
+                task: get_text(&row, 1),
+                status: get_text(&row, 2),
+                user_id: get_text(&row, 3),
+                project_dir: get_text(&row, 4),
+                success: get_opt_bool(&row, 5),
+                failure_reason: get_opt_text(&row, 6),
+                created_at: get_ts(&row, 7),
+                started_at: get_opt_ts(&row, 8),
+                completed_at: get_opt_ts(&row, 9),
+            });
+        }
+        Ok(jobs)
+    }
+
+    async fn sandbox_job_summary_for_user(
+        &self,
+        user_id: &str,
+    ) -> Result<SandboxJobSummary, DatabaseError> {
+        let conn = self.connect()?;
+        let mut rows = conn
+            .query(
+                "SELECT status, COUNT(*) as cnt FROM agent_jobs WHERE source = 'sandbox' AND user_id = ?1 GROUP BY status",
+                libsql::params![user_id],
+            )
+            .await
+            .map_err(|e| DatabaseError::Query(e.to_string()))?;
+
+        let mut summary = SandboxJobSummary::default();
+        while let Some(row) = rows.next().await.map_err(|e| DatabaseError::Query(e.to_string()))? {
+            let status = get_text(&row, 0);
+            let count = get_i64(&row, 1) as usize;
+            summary.total += count;
+            match status.as_str() {
+                "creating" => summary.creating += count,
+                "running" => summary.running += count,
+                "completed" => summary.completed += count,
+                "failed" => summary.failed += count,
+                "interrupted" => summary.interrupted += count,
+                _ => {}
+            }
+        }
+        Ok(summary)
+    }
+
+    async fn sandbox_job_belongs_to_user(
+        &self,
+        job_id: Uuid,
+        user_id: &str,
+    ) -> Result<bool, DatabaseError> {
+        let conn = self.connect()?;
+        let mut rows = conn
+            .query(
+                "SELECT 1 FROM agent_jobs WHERE id = ?1 AND user_id = ?2 AND source = 'sandbox'",
+                libsql::params![job_id.to_string(), user_id],
+            )
+            .await
+            .map_err(|e| DatabaseError::Query(e.to_string()))?;
+        let found = rows
+            .next()
+            .await
+            .map_err(|e| DatabaseError::Query(e.to_string()))?;
+        Ok(found.is_some())
     }
 
     async fn update_sandbox_job_mode(

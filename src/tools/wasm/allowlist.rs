@@ -182,6 +182,17 @@ fn parse_url(url: &str) -> Result<ParsedUrl, String> {
         return Err(format!("Unsupported scheme: {}", scheme));
     }
 
+    // Reject URLs with userinfo (user:pass@host) to prevent allowlist bypass.
+    // A URL like https://api.openai.com@evil.com/ would match the allowlist
+    // for api.openai.com but actually send traffic to evil.com.
+    let authority = match rest.find('/') {
+        Some(idx) => &rest[..idx],
+        None => rest,
+    };
+    if authority.contains('@') {
+        return Err("URL contains userinfo (@) which is not allowed".to_string());
+    }
+
     // Split host from path
     let (host_and_port, path) = match rest.find('/') {
         Some(idx) => (&rest[..idx], &rest[idx..]),
@@ -206,6 +217,14 @@ fn parse_url(url: &str) -> Result<ParsedUrl, String> {
         }
         None => host_and_port,
     };
+
+    // Reject URLs with userinfo (user:pass@host).
+    // A URL like https://api.openai.com@evil.com/ confuses the parser into
+    // seeing "api.openai.com" as the host, but reqwest actually sends to
+    // "evil.com". Block any '@' in the authority section to prevent this.
+    if host.contains('@') || host_and_port.contains('@') {
+        return Err("URL contains userinfo (@) which is not allowed".to_string());
+    }
 
     // Validate host
     if host.is_empty() {
@@ -333,6 +352,21 @@ mod tests {
     }
 
     #[test]
+    fn test_userinfo_rejected() {
+        let validator = validator_with_patterns();
+
+        // Userinfo in URL should be rejected to prevent allowlist bypass
+        let result = validator.validate("https://api.openai.com@evil.com/v1/chat", "GET");
+        assert!(!result.is_allowed());
+
+        if let super::AllowlistResult::Denied(reason) = result {
+            assert!(matches!(reason, DenyReason::InvalidUrl(_)));
+        } else {
+            panic!("Expected denied for userinfo URL");
+        }
+    }
+
+    #[test]
     fn test_invalid_url() {
         let validator = validator_with_patterns();
 
@@ -353,5 +387,29 @@ mod tests {
 
         let result = validator.validate("http://localhost:8080/api", "GET");
         assert!(result.is_allowed());
+    }
+
+    #[test]
+    fn test_reject_url_with_userinfo() {
+        let validator = validator_with_patterns();
+
+        // Attacker uses userinfo to trick the parser: the allowlist sees
+        // "api.openai.com" but reqwest would actually connect to "evil.com".
+        let result = validator.validate("https://api.openai.com@evil.com/v1/steal", "GET");
+        assert!(!result.is_allowed());
+
+        if let super::AllowlistResult::Denied(reason) = result {
+            assert!(matches!(reason, DenyReason::InvalidUrl(_)));
+        } else {
+            panic!("Expected denied due to userinfo");
+        }
+    }
+
+    #[test]
+    fn test_reject_url_with_user_pass() {
+        let validator = validator_with_patterns();
+
+        let result = validator.validate("https://user:password@api.openai.com/v1/chat", "GET");
+        assert!(!result.is_allowed());
     }
 }

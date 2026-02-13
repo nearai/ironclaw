@@ -232,6 +232,8 @@ impl Store {
                     completed_at: row.get("completed_at"),
                     transitions: Vec::new(), // Not loaded from DB for now
                     metadata: serde_json::Value::Null,
+                    total_tokens_used: 0,
+                    max_tokens: 0,
                 }))
             }
             None => Ok(None),
@@ -576,6 +578,90 @@ impl Store {
                 completed_at: r.get("completed_at"),
             })
             .collect())
+    }
+
+    /// List sandbox jobs for a specific user, most recent first.
+    pub async fn list_sandbox_jobs_for_user(
+        &self,
+        user_id: &str,
+    ) -> Result<Vec<SandboxJobRecord>, DatabaseError> {
+        let conn = self.conn().await?;
+        let rows = conn
+            .query(
+                r#"
+                SELECT id, title, status, user_id, project_dir,
+                       success, failure_reason, created_at, started_at, completed_at
+                FROM agent_jobs WHERE source = 'sandbox' AND user_id = $1
+                ORDER BY created_at DESC
+                "#,
+                &[&user_id],
+            )
+            .await?;
+
+        Ok(rows
+            .iter()
+            .map(|r| SandboxJobRecord {
+                id: r.get("id"),
+                task: r.get("title"),
+                status: r.get("status"),
+                user_id: r.get("user_id"),
+                project_dir: r
+                    .get::<_, Option<String>>("project_dir")
+                    .unwrap_or_default(),
+                success: r.get("success"),
+                failure_reason: r.get("failure_reason"),
+                created_at: r.get("created_at"),
+                started_at: r.get("started_at"),
+                completed_at: r.get("completed_at"),
+            })
+            .collect())
+    }
+
+    /// Get a summary of sandbox job counts by status for a specific user.
+    pub async fn sandbox_job_summary_for_user(
+        &self,
+        user_id: &str,
+    ) -> Result<SandboxJobSummary, DatabaseError> {
+        let conn = self.conn().await?;
+        let rows = conn
+            .query(
+                "SELECT status, COUNT(*) as cnt FROM agent_jobs WHERE source = 'sandbox' AND user_id = $1 GROUP BY status",
+                &[&user_id],
+            )
+            .await?;
+
+        let mut summary = SandboxJobSummary::default();
+        for row in &rows {
+            let status: String = row.get("status");
+            let count: i64 = row.get("cnt");
+            let c = count as usize;
+            summary.total += c;
+            match status.as_str() {
+                "creating" => summary.creating += c,
+                "running" => summary.running += c,
+                "completed" => summary.completed += c,
+                "failed" => summary.failed += c,
+                "interrupted" => summary.interrupted += c,
+                _ => {}
+            }
+        }
+        Ok(summary)
+    }
+
+    /// Check if a sandbox job belongs to a specific user.
+    pub async fn sandbox_job_belongs_to_user(
+        &self,
+        job_id: Uuid,
+        user_id: &str,
+    ) -> Result<bool, DatabaseError> {
+        let conn = self.conn().await?;
+        let row = conn
+            .query_opt(
+                "SELECT 1 FROM agent_jobs WHERE id = $1 AND user_id = $2 AND source = 'sandbox'",
+                &[&job_id, &user_id],
+            )
+            .await?;
+        Ok(row.is_some())
     }
 
     /// Update sandbox job status and optional timestamps/result.
@@ -1275,6 +1361,22 @@ impl Store {
         .await?;
 
         Ok(id)
+    }
+
+    /// Check whether a conversation belongs to the given user.
+    pub async fn conversation_belongs_to_user(
+        &self,
+        conversation_id: Uuid,
+        user_id: &str,
+    ) -> Result<bool, DatabaseError> {
+        let conn = self.conn().await?;
+        let row = conn
+            .query_opt(
+                "SELECT 1 FROM conversations WHERE id = $1 AND user_id = $2",
+                &[&conversation_id, &user_id],
+            )
+            .await?;
+        Ok(row.is_some())
     }
 
     /// Load messages for a conversation with cursor-based pagination.

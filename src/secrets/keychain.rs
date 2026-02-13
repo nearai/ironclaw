@@ -101,15 +101,13 @@ mod platform {
         let ss = SecretService::connect(EncryptionType::Dh)
             .await
             .map_err(|e| {
-                SecretError::KeychainError(format!(
-                    "Failed to connect to secret service: {}",
-                    e
-                ))
+                SecretError::KeychainError(format!("Failed to connect to secret service: {}", e))
             })?;
 
-        let collection = ss.get_default_collection().await.map_err(|e| {
-            SecretError::KeychainError(format!("Failed to get collection: {}", e))
-        })?;
+        let collection = ss
+            .get_default_collection()
+            .await
+            .map_err(|e| SecretError::KeychainError(format!("Failed to get collection: {}", e)))?;
 
         // Unlock if needed
         if collection.is_locked().await.unwrap_or(true) {
@@ -132,9 +130,7 @@ mod platform {
                 "text/plain",
             )
             .await
-            .map_err(|e| {
-                SecretError::KeychainError(format!("Failed to create secret: {}", e))
-            })?;
+            .map_err(|e| SecretError::KeychainError(format!("Failed to create secret: {}", e)))?;
 
         Ok(())
     }
@@ -144,10 +140,7 @@ mod platform {
         let ss = SecretService::connect(EncryptionType::Dh)
             .await
             .map_err(|e| {
-                SecretError::KeychainError(format!(
-                    "Failed to connect to secret service: {}",
-                    e
-                ))
+                SecretError::KeychainError(format!("Failed to connect to secret service: {}", e))
             })?;
 
         let items = ss
@@ -188,10 +181,7 @@ mod platform {
         let ss = SecretService::connect(EncryptionType::Dh)
             .await
             .map_err(|e| {
-                SecretError::KeychainError(format!(
-                    "Failed to connect to secret service: {}",
-                    e
-                ))
+                SecretError::KeychainError(format!("Failed to connect to secret service: {}", e))
             })?;
 
         let items = ss

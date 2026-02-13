@@ -165,6 +165,16 @@ impl Database for PgBackend {
             .await
     }
 
+    async fn conversation_belongs_to_user(
+        &self,
+        conversation_id: Uuid,
+        user_id: &str,
+    ) -> Result<bool, DatabaseError> {
+        self.store
+            .conversation_belongs_to_user(conversation_id, user_id)
+            .await
+    }
+
     // ==================== Jobs ====================
 
     async fn save_job(&self, ctx: &JobContext) -> Result<(), DatabaseError> {
@@ -287,6 +297,28 @@ impl Database for PgBackend {
 
     async fn sandbox_job_summary(&self) -> Result<SandboxJobSummary, DatabaseError> {
         self.store.sandbox_job_summary().await
+    }
+
+    async fn list_sandbox_jobs_for_user(
+        &self,
+        user_id: &str,
+    ) -> Result<Vec<SandboxJobRecord>, DatabaseError> {
+        self.store.list_sandbox_jobs_for_user(user_id).await
+    }
+
+    async fn sandbox_job_summary_for_user(
+        &self,
+        user_id: &str,
+    ) -> Result<SandboxJobSummary, DatabaseError> {
+        self.store.sandbox_job_summary_for_user(user_id).await
+    }
+
+    async fn sandbox_job_belongs_to_user(
+        &self,
+        job_id: Uuid,
+        user_id: &str,
+    ) -> Result<bool, DatabaseError> {
+        self.store.sandbox_job_belongs_to_user(job_id, user_id).await
     }
 
     async fn update_sandbox_job_mode(

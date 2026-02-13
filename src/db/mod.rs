@@ -182,6 +182,13 @@ pub trait Database: Send + Sync {
         conversation_id: Uuid,
     ) -> Result<Vec<ConversationMessage>, DatabaseError>;
 
+    /// Check if a conversation belongs to a specific user.
+    async fn conversation_belongs_to_user(
+        &self,
+        conversation_id: Uuid,
+        user_id: &str,
+    ) -> Result<bool, DatabaseError>;
+
     // ==================== Jobs ====================
 
     /// Save a job context.
@@ -276,6 +283,25 @@ pub trait Database: Send + Sync {
 
     /// Get sandbox job summary.
     async fn sandbox_job_summary(&self) -> Result<SandboxJobSummary, DatabaseError>;
+
+    /// List sandbox jobs for a specific user, most recent first.
+    async fn list_sandbox_jobs_for_user(
+        &self,
+        user_id: &str,
+    ) -> Result<Vec<SandboxJobRecord>, DatabaseError>;
+
+    /// Get sandbox job summary for a specific user.
+    async fn sandbox_job_summary_for_user(
+        &self,
+        user_id: &str,
+    ) -> Result<SandboxJobSummary, DatabaseError>;
+
+    /// Check if a sandbox job belongs to a specific user.
+    async fn sandbox_job_belongs_to_user(
+        &self,
+        job_id: Uuid,
+        user_id: &str,
+    ) -> Result<bool, DatabaseError>;
 
     /// Update sandbox job mode.
     async fn update_sandbox_job_mode(

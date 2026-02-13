@@ -14,6 +14,7 @@ use axum::http::StatusCode;
 use axum::middleware::Next;
 use axum::response::Response;
 use rand::Rng;
+use subtle::ConstantTimeEq;
 use tokio::sync::RwLock;
 use uuid::Uuid;
 
@@ -38,13 +39,13 @@ impl TokenStore {
         token
     }
 
-    /// Validate a token for a specific job.
+    /// Validate a token for a specific job (constant-time comparison).
     pub async fn validate(&self, job_id: Uuid, token: &str) -> bool {
         self.tokens
             .read()
             .await
             .get(&job_id)
-            .map(|stored| stored == token)
+            .map(|stored| stored.as_bytes().ct_eq(token.as_bytes()).into())
             .unwrap_or(false)
     }
 

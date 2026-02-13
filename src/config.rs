@@ -1259,6 +1259,36 @@ pub struct ClaudeCodeConfig {
     pub max_turns: u32,
     /// Memory limit in MB for Claude Code containers (heavier than workers).
     pub memory_limit_mb: u64,
+    /// Allowed tool patterns for Claude Code permission settings.
+    ///
+    /// Written to `/workspace/.claude/settings.json` before spawning the CLI.
+    /// Provides defense-in-depth: only explicitly listed tools are auto-approved.
+    /// Any new/unknown tools would require interactive approval (which times out
+    /// in the non-interactive container, failing safely).
+    ///
+    /// Patterns follow Claude Code syntax: `"Bash(*)"`, `"Read"`, `"Edit(*)"`, etc.
+    pub allowed_tools: Vec<String>,
+}
+
+/// Default allowed tools for Claude Code inside containers.
+///
+/// These cover all standard Claude Code tools needed for autonomous operation.
+/// The Docker container provides the primary security boundary; this allowlist
+/// provides defense-in-depth by preventing any future unknown tools from being
+/// silently auto-approved.
+fn default_claude_code_allowed_tools() -> Vec<String> {
+    [
+        "Bash(*)",
+        "Read",
+        "Edit(*)",
+        "Glob",
+        "Grep",
+        "WebFetch(*)",
+        "Task(*)",
+    ]
+    .into_iter()
+    .map(String::from)
+    .collect()
 }
 
 impl Default for ClaudeCodeConfig {
@@ -1271,11 +1301,24 @@ impl Default for ClaudeCodeConfig {
             model: "sonnet".to_string(),
             max_turns: 50,
             memory_limit_mb: 4096,
+            allowed_tools: default_claude_code_allowed_tools(),
         }
     }
 }
 
 impl ClaudeCodeConfig {
+    /// Load from environment variables only (used inside containers where
+    /// there is no database or full config).
+    pub fn from_env() -> Self {
+        match Self::resolve() {
+            Ok(c) => c,
+            Err(e) => {
+                tracing::warn!("Failed to resolve ClaudeCodeConfig: {e}, using defaults");
+                Self::default()
+            }
+        }
+    }
+
     fn resolve() -> Result<Self, ConfigError> {
         let defaults = Self::default();
         Ok(Self {
@@ -1296,6 +1339,14 @@ impl ClaudeCodeConfig {
                 "CLAUDE_CODE_MEMORY_LIMIT_MB",
                 defaults.memory_limit_mb,
             )?,
+            allowed_tools: optional_env("CLAUDE_CODE_ALLOWED_TOOLS")?
+                .map(|s| {
+                    s.split(',')
+                        .map(|t| t.trim().to_string())
+                        .filter(|t| !t.is_empty())
+                        .collect()
+                })
+                .unwrap_or(defaults.allowed_tools),
         })
     }
 }

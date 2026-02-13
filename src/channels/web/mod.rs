@@ -16,6 +16,7 @@
 
 pub mod auth;
 pub mod log_layer;
+pub mod openai_compat;
 pub mod server;
 pub mod sse;
 pub mod types;
@@ -81,6 +82,8 @@ impl GatewayChannel {
             user_id: config.user_id.clone(),
             shutdown_tx: tokio::sync::RwLock::new(None),
             ws_tracker: Some(Arc::new(ws::WsConnectionTracker::new())),
+            llm_provider: None,
+            chat_rate_limiter: server::RateLimiter::new(30, 60),
         });
 
         Self {
@@ -106,6 +109,8 @@ impl GatewayChannel {
             user_id: self.state.user_id.clone(),
             shutdown_tx: tokio::sync::RwLock::new(None),
             ws_tracker: self.state.ws_tracker.clone(),
+            llm_provider: self.state.llm_provider.clone(),
+            chat_rate_limiter: server::RateLimiter::new(30, 60),
         };
         mutate(&mut new_state);
         self.state = Arc::new(new_state);
@@ -166,6 +171,12 @@ impl GatewayChannel {
         >,
     ) -> Self {
         self.rebuild_state(|s| s.prompt_queue = Some(pq));
+        self
+    }
+
+    /// Inject the LLM provider for OpenAI-compatible API proxy.
+    pub fn with_llm_provider(mut self, llm: Arc<dyn crate::llm::LlmProvider>) -> Self {
+        self.rebuild_state(|s| s.llm_provider = Some(llm));
         self
     }
 
