@@ -124,6 +124,8 @@ pub struct RankedResult {
     pub path: String,
     pub content: String,
     pub rank: u32, // 1-based rank
+    pub line_start: Option<u32>,
+    pub line_end: Option<u32>,
 }
 
 /// Reciprocal Rank Fusion algorithm.
@@ -155,6 +157,8 @@ pub fn reciprocal_rank_fusion(
         score: f32,
         fts_rank: Option<u32>,
         vector_rank: Option<u32>,
+        line_start: Option<u32>,
+        line_end: Option<u32>,
     }
 
     let mut chunk_scores: HashMap<Uuid, ChunkInfo> = HashMap::new();
@@ -175,6 +179,8 @@ pub fn reciprocal_rank_fusion(
                 score: rrf_score,
                 fts_rank: Some(result.rank),
                 vector_rank: None,
+                line_start: result.line_start,
+                line_end: result.line_end,
             });
     }
 
@@ -194,6 +200,8 @@ pub fn reciprocal_rank_fusion(
                 score: rrf_score,
                 fts_rank: None,
                 vector_rank: Some(result.rank),
+                line_start: result.line_start,
+                line_end: result.line_end,
             });
     }
 
@@ -208,8 +216,8 @@ pub fn reciprocal_rank_fusion(
             score: info.score,
             fts_rank: info.fts_rank,
             vector_rank: info.vector_rank,
-            line_start: None, // TODO: Phase 2 - track line numbers in chunker
-            line_end: None,
+            line_start: info.line_start,
+            line_end: info.line_end,
         })
         .collect();
 
@@ -251,6 +259,8 @@ mod tests {
             path: "test/document.md".to_string(),
             content: format!("content for chunk {}", chunk_id),
             rank,
+            line_start: Some(1),
+            line_end: Some(10),
         }
     }
 

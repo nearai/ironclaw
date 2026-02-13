@@ -97,13 +97,22 @@ impl Tool for MemorySearchTool {
 
         let output = serde_json::json!({
             "query": query,
-            "results": results.iter().map(|r| serde_json::json!({
-                "path": r.path,
-                "content": r.content,
-                "score": r.score,
-                "citation": format!("{}#{}", r.path, r.line_start.map_or("chunk".to_string(), |l| l.to_string())),
-                "is_hybrid_match": r.is_hybrid(),
-            })).collect::<Vec<_>>(),
+            "results": results.iter().map(|r| {
+                let citation = match (r.line_start, r.line_end) {
+                    (Some(start), Some(end)) if start == end => format!("{}#line {}", r.path, start),
+                    (Some(start), Some(end)) => format!("{}#lines {}-{}", r.path, start, end),
+                    _ => r.path.clone(),
+                };
+                serde_json::json!({
+                    "path": r.path,
+                    "content": r.content,
+                    "score": r.score,
+                    "citation": citation,
+                    "line_start": r.line_start,
+                    "line_end": r.line_end,
+                    "is_hybrid_match": r.is_hybrid(),
+                })
+            }).collect::<Vec<_>>(),
             "result_count": results.len(),
         });
 
