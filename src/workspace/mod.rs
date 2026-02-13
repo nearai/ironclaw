@@ -115,6 +115,11 @@ impl Workspace {
         self
     }
 
+    /// Check if an embedding provider is configured.
+    pub fn has_embeddings(&self) -> bool {
+        self.embeddings.is_some()
+    }
+
     /// Get the user ID.
     pub fn user_id(&self) -> &str {
         &self.user_id
