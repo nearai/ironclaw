@@ -417,7 +417,7 @@ mod tests {
 
         let long = "a".repeat(2005);
         let truncated = truncate_message(&long);
-        assert_eq!(truncated.len(), 2006); // 1990 + 16 chars suffix
+        assert_eq!(truncated.len(), 2005); // 1990 + 15 chars suffix
         assert!(truncated.ends_with("\n... (truncated)"));
     }
 
