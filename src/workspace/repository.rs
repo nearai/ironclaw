@@ -381,6 +381,8 @@ impl Repository {
                 chunk_index: row.get("chunk_index"),
                 content: row.get("content"),
                 embedding: None,
+                line_start: row.try_get("line_start").ok(),
+                line_end: row.try_get("line_end").ok(),
                 created_at: row.get("created_at"),
             })
             .collect())
