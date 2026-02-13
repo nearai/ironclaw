@@ -343,12 +343,12 @@ impl ShellTool {
 
         // Use sandbox if configured; fail-closed (never silently fall through
         // to unsandboxed execution when sandbox was intended).
-        if let Some(ref sandbox) = self.sandbox {
-            if sandbox.is_initialized() || sandbox.config().enabled {
-                return self
-                    .execute_sandboxed(sandbox, cmd, &cwd, timeout_duration)
-                    .await;
-            }
+        if let Some(ref sandbox) = self.sandbox
+            && (sandbox.is_initialized() || sandbox.config().enabled)
+        {
+            return self
+                .execute_sandboxed(sandbox, cmd, &cwd, timeout_duration)
+                .await;
         }
 
         // Only execute directly when no sandbox was configured at all.

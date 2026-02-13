@@ -103,10 +103,9 @@ impl RoutineEngine {
             if let Trigger::Event {
                 channel: Some(ch), ..
             } = &routine.trigger
+                && ch != &message.channel
             {
-                if ch != &message.channel {
-                    continue;
-                }
+                continue;
             }
 
             // Regex match

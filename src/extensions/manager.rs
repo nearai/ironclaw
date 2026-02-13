@@ -490,13 +490,13 @@ impl ExtensionManager {
         }
 
         // Check Content-Length header before downloading the full body
-        if let Some(len) = response.content_length() {
-            if len as usize > MAX_WASM_SIZE {
-                return Err(ExtensionError::InstallFailed(format!(
-                    "WASM binary too large ({} bytes, max {} bytes)",
-                    len, MAX_WASM_SIZE
-                )));
-            }
+        if let Some(len) = response.content_length()
+            && len as usize > MAX_WASM_SIZE
+        {
+            return Err(ExtensionError::InstallFailed(format!(
+                "WASM binary too large ({} bytes, max {} bytes)",
+                len, MAX_WASM_SIZE
+            )));
         }
 
         let bytes = response
@@ -766,27 +766,27 @@ impl ExtensionManager {
         };
 
         // Check env var first
-        if let Some(ref env_var) = auth.env_var {
-            if let Ok(value) = std::env::var(env_var) {
-                // Store the env var value as a secret
-                let params = CreateSecretParams::new(&auth.secret_name, &value)
-                    .with_provider(name.to_string());
-                self.secrets
-                    .create(&self.user_id, params)
-                    .await
-                    .map_err(|e| ExtensionError::AuthFailed(e.to_string()))?;
+        if let Some(ref env_var) = auth.env_var
+            && let Ok(value) = std::env::var(env_var)
+        {
+            // Store the env var value as a secret
+            let params =
+                CreateSecretParams::new(&auth.secret_name, &value).with_provider(name.to_string());
+            self.secrets
+                .create(&self.user_id, params)
+                .await
+                .map_err(|e| ExtensionError::AuthFailed(e.to_string()))?;
 
-                return Ok(AuthResult {
-                    name: name.to_string(),
-                    kind: ExtensionKind::WasmTool,
-                    auth_url: None,
-                    callback_type: None,
-                    instructions: None,
-                    setup_url: None,
-                    awaiting_token: false,
-                    status: "authenticated".to_string(),
-                });
-            }
+            return Ok(AuthResult {
+                name: name.to_string(),
+                kind: ExtensionKind::WasmTool,
+                auth_url: None,
+                callback_type: None,
+                instructions: None,
+                setup_url: None,
+                awaiting_token: false,
+                status: "authenticated".to_string(),
+            });
         }
 
         // Check if already authenticated
