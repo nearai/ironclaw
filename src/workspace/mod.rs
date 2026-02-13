@@ -333,6 +333,7 @@ impl Workspace {
     /// Read a file by path.
     ///
     /// Returns the document if it exists, or an error if not found.
+    /// Rejects paths with traversal attempts (../).
     ///
     /// # Example
     /// ```ignore
@@ -340,7 +341,7 @@ impl Workspace {
     /// println!("{}", doc.content);
     /// ```
     pub async fn read(&self, path: &str) -> Result<MemoryDocument, WorkspaceError> {
-        let path = normalize_path(path);
+        let path = validate_path(path)?;
         self.storage
             .get_document_by_path(&self.user_id, self.agent_id, &path)
             .await
@@ -350,13 +351,14 @@ impl Workspace {
     ///
     /// Creates parent directories implicitly (they're virtual in the DB).
     /// Re-indexes the document for search after writing.
+    /// Rejects paths with traversal attempts (../).
     ///
     /// # Example
     /// ```ignore
     /// workspace.write("projects/alpha/README.md", "# Project Alpha\n\nDescription here.").await?;
     /// ```
     pub async fn write(&self, path: &str, content: &str) -> Result<MemoryDocument, WorkspaceError> {
-        let path = normalize_path(path);
+        let path = validate_path(path)?;
         let doc = self
             .storage
             .get_or_create_document_by_path(&self.user_id, self.agent_id, &path)
@@ -372,8 +374,9 @@ impl Workspace {
     ///
     /// Creates the file if it doesn't exist.
     /// Adds a newline separator between existing and new content.
+    /// Rejects paths with traversal attempts (../).
     pub async fn append(&self, path: &str, content: &str) -> Result<(), WorkspaceError> {
-        let path = normalize_path(path);
+        let path = validate_path(path)?;
         let doc = self
             .storage
             .get_or_create_document_by_path(&self.user_id, self.agent_id, &path)
@@ -391,8 +394,9 @@ impl Workspace {
     }
 
     /// Check if a file exists.
+    /// Rejects paths with traversal attempts (../).
     pub async fn exists(&self, path: &str) -> Result<bool, WorkspaceError> {
-        let path = normalize_path(path);
+        let path = validate_path(path)?;
         match self
             .storage
             .get_document_by_path(&self.user_id, self.agent_id, &path)
@@ -407,8 +411,9 @@ impl Workspace {
     /// Delete a file.
     ///
     /// Also deletes associated chunks.
+    /// Rejects paths with traversal attempts (../).
     pub async fn delete(&self, path: &str) -> Result<(), WorkspaceError> {
-        let path = normalize_path(path);
+        let path = validate_path(path)?;
         self.storage
             .delete_document_by_path(&self.user_id, self.agent_id, &path)
             .await
@@ -418,6 +423,7 @@ impl Workspace {
     ///
     /// Returns immediate children (not recursive).
     /// Use empty string or "/" for root directory.
+    /// Rejects paths with traversal attempts (../).
     ///
     /// # Example
     /// ```ignore
@@ -431,7 +437,7 @@ impl Workspace {
     /// }
     /// ```
     pub async fn list(&self, directory: &str) -> Result<Vec<WorkspaceEntry>, WorkspaceError> {
-        let directory = normalize_directory(directory);
+        let directory = validate_path(directory)?;
         self.storage
             .list_directory(&self.user_id, self.agent_id, &directory)
             .await
@@ -801,9 +807,22 @@ This is not optional — if you did work, log it."#.to_string()
     }
 }
 
-/// Normalize a file path (remove leading/trailing slashes, collapse //).
-fn normalize_path(path: &str) -> String {
+/// Normalize a file path (remove leading/trailing slashes, collapse //, prevent traversal).
+///
+/// Returns None if the path attempts directory traversal (../).
+fn normalize_path(path: &str) -> Option<String> {
     let path = path.trim().trim_matches('/');
+    
+    // Check for path traversal attempts
+    if path.contains("..") {
+        return None;
+    }
+    
+    // Reject null bytes (path injection)
+    if path.contains('\0') {
+        return None;
+    }
+    
     // Collapse multiple slashes
     let mut result = String::new();
     let mut last_was_slash = false;
@@ -818,13 +837,15 @@ fn normalize_path(path: &str) -> String {
             last_was_slash = false;
         }
     }
-    result
+    Some(result)
 }
 
-/// Normalize a directory path (ensure no trailing slash for consistency).
-fn normalize_directory(path: &str) -> String {
-    let path = normalize_path(path);
-    path.trim_end_matches('/').to_string()
+/// Validate and normalize a path, returning an error on invalid paths.
+fn validate_path(path: &str) -> Result<String, WorkspaceError> {
+    normalize_path(path).ok_or_else(|| WorkspaceError::InvalidPath {
+        path: path.to_string(),
+        reason: "path traversal or invalid characters detected".to_string(),
+    })
 }
 
 #[cfg(test)]
@@ -833,18 +854,38 @@ mod tests {
 
     #[test]
     fn test_normalize_path() {
-        assert_eq!(normalize_path("foo/bar"), "foo/bar");
-        assert_eq!(normalize_path("/foo/bar/"), "foo/bar");
-        assert_eq!(normalize_path("foo//bar"), "foo/bar");
-        assert_eq!(normalize_path("  /foo/  "), "foo");
-        assert_eq!(normalize_path("README.md"), "README.md");
+        assert_eq!(normalize_path("foo/bar"), Some("foo/bar".to_string()));
+        assert_eq!(normalize_path("/foo/bar/"), Some("foo/bar".to_string()));
+        assert_eq!(normalize_path("foo//bar"), Some("foo/bar".to_string()));
+        assert_eq!(normalize_path("  /foo/  "), Some("foo".to_string()));
+        assert_eq!(normalize_path("README.md"), Some("README.md".to_string()));
     }
 
     #[test]
-    fn test_normalize_directory() {
-        assert_eq!(normalize_directory("foo/bar/"), "foo/bar");
-        assert_eq!(normalize_directory("foo/bar"), "foo/bar");
-        assert_eq!(normalize_directory("/"), "");
-        assert_eq!(normalize_directory(""), "");
+    fn test_normalize_path_rejects_traversal() {
+        // Path traversal attempts should be rejected
+        assert_eq!(normalize_path("../etc/passwd"), None);
+        assert_eq!(normalize_path("foo/../bar"), None);
+        assert_eq!(normalize_path("foo/bar/.."), None);
+        assert_eq!(normalize_path(".."), None);
+        assert_eq!(normalize_path("foo/.."), None);
+    }
+
+    #[test]
+    fn test_normalize_path_rejects_null_bytes() {
+        assert_eq!(normalize_path("foo\0bar"), None);
+        assert_eq!(normalize_path("README.md\0.txt"), None);
+    }
+
+    #[test]
+    fn test_validate_path_error() {
+        let result = validate_path("../etc/passwd");
+        assert!(result.is_err());
+        if let Err(WorkspaceError::InvalidPath { path, reason }) = result {
+            assert_eq!(path, "../etc/passwd");
+            assert!(reason.contains("traversal"));
+        } else {
+            panic!("Expected InvalidPath error");
+        }
     }
 }
