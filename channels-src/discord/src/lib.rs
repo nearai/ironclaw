@@ -393,7 +393,14 @@ fn truncate_message(content: &str) -> String {
     if content.len() <= 2000 {
         content.to_string()
     } else {
-        let mut truncated = content[..1990].to_string();
+        let max_bytes = 1990;
+        let cutoff = content
+            .char_indices()
+            .take_while(|(i, _)| *i < max_bytes)
+            .map(|(i, _)| i)
+            .last()
+            .unwrap_or(0);
+        let mut truncated = content[..cutoff].to_string();
         truncated.push_str("\n... (truncated)");
         truncated
     }

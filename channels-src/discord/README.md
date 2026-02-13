@@ -11,12 +11,13 @@ WASM channel for Discord integration - handle slash commands and button interact
 
 ## Setup
 
-1. Create a Discord Application at https://discord.com/developers/applications
+1. Create a Discord Application at <https://discord.com/developers/applications>
 2. Create a Bot and get the token
 3. Set up Interactions URL to point to your IronClaw instance
 4. Copy the Application ID and Public Key
 5. Store in IronClaw secrets:
-   ```
+
+   ```bash
    ironclaw secret set discord_bot_token YOUR_BOT_TOKEN
    ```
 
@@ -50,6 +51,7 @@ curl -X POST \
 ### Set Interactions Endpoint
 
 In your Discord app settings, set:
+
 - Interactions Endpoint URL: `https://your-ironclaw.com/webhook/discord`
 
 ## Usage Examples
@@ -59,7 +61,8 @@ In your Discord app settings, set:
 User types: `/ask question: What is the weather?`
 
 The agent receives:
-```
+
+```text
 User: @username
 Content: /ask question: What is the weather?
 ```
@@ -67,8 +70,9 @@ Content: /ask question: What is the weather?
 ### Button Click
 
 When a user clicks a button in a message, the agent receives:
-```
-User: @username  
+
+```text
+User: @username
 Content: [Button clicked] Original message content
 ```
 
