@@ -129,21 +129,32 @@ fn test_cognitive_config_serialization() {
 }
 
 #[test]
-fn test_checkpoint_content_escaping() {
+fn test_checkpoint_content_sanitization() {
     let mut tracker = CheckpointTracker::default();
     
     // Add topics/decisions with potentially problematic content
-    tracker.add_topic("User asked about <script>alert('xss')</script>");
-    tracker.add_decision("Decided to use 'single quotes' and \"double quotes\"");
-    tracker.add_decision("Path: ../../../etc/passwd");
+    tracker.add_topic("## Injected Header");
+    tracker.add_topic("Multi\nline\ntopic");
+    tracker.add_decision("Use --- horizontal rule");
+    tracker.add_decision("```code block``` injection");
     
     let content = tracker.generate_checkpoint_content();
     
     // Content should be generated (no panic)
     assert!(content.contains("Conversation Checkpoint"));
-    // The content is included as-is (sanitization is the caller's responsibility for log storage)
-    assert!(content.contains("script"));
-    assert!(content.contains("quotes"));
+    
+    // Verify sanitization is applied:
+    // - # should be escaped to \#
+    assert!(content.contains("\\#\\# Injected Header"));
+    // - Newlines should be flattened to spaces
+    assert!(content.contains("Multi line topic"));
+    assert!(!content.contains("Multi\nline"));
+    // - --- should be replaced with ––– (en-dashes)
+    assert!(content.contains("–––"));
+    assert!(!content.contains("---"));
+    // - ``` should be replaced with '''
+    assert!(content.contains("'''"));
+    assert!(!content.contains("```"));
 }
 
 #[test]
