@@ -432,12 +432,8 @@ impl LlmConfig {
                     key: "TINFOIL_API_KEY".to_string(),
                     hint: "Set TINFOIL_API_KEY when LLM_BACKEND=tinfoil".to_string(),
                 })?;
-            let model = optional_env("TINFOIL_MODEL")?
-                .unwrap_or_else(|| "kimi-k2-5".to_string());
-            Some(TinfoilConfig {
-                api_key,
-                model,
-            })
+            let model = optional_env("TINFOIL_MODEL")?.unwrap_or_else(|| "kimi-k2-5".to_string());
+            Some(TinfoilConfig { api_key, model })
         } else {
             None
         };

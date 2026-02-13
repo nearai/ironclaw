@@ -144,9 +144,12 @@ fn create_ollama_provider(config: &LlmConfig) -> Result<Arc<dyn LlmProvider>, Ll
 const TINFOIL_BASE_URL: &str = "https://inference.tinfoil.sh/v1";
 
 fn create_tinfoil_provider(config: &LlmConfig) -> Result<Arc<dyn LlmProvider>, LlmError> {
-    let tf = config.tinfoil.as_ref().ok_or_else(|| LlmError::AuthFailed {
-        provider: "tinfoil".to_string(),
-    })?;
+    let tf = config
+        .tinfoil
+        .as_ref()
+        .ok_or_else(|| LlmError::AuthFailed {
+            provider: "tinfoil".to_string(),
+        })?;
 
     use rig::providers::openai;
 
