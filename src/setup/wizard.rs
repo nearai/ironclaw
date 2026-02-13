@@ -344,17 +344,17 @@ impl SetupWizard {
     /// Step 3: NEAR AI authentication.
     async fn step_authentication(&mut self) -> Result<(), SetupError> {
         // Check if we already have a session
-        if let Some(ref session) = self.session_manager {
-            if session.has_token().await {
-                print_info("Existing session found. Validating...");
-                match session.ensure_authenticated().await {
-                    Ok(()) => {
-                        print_success("Session valid");
-                        return Ok(());
-                    }
-                    Err(e) => {
-                        print_info(&format!("Session invalid: {}. Re-authenticating...", e));
-                    }
+        if let Some(ref session) = self.session_manager
+            && session.has_token().await
+        {
+            print_info("Existing session found. Validating...");
+            match session.ensure_authenticated().await {
+                Ok(()) => {
+                    print_success("Session valid");
+                    return Ok(());
+                }
+                Err(e) => {
+                    print_info(&format!("Session invalid: {}. Re-authenticating...", e));
                 }
             }
         }
@@ -642,11 +642,10 @@ impl SetupWizard {
             &installed_names,
         )
         .await?
+            && !installed.is_empty()
         {
-            if !installed.is_empty() {
-                print_success(&format!("Installed channels: {}", installed.join(", ")));
-                discovered_channels = discover_wasm_channels(&channels_dir).await;
-            }
+            print_success(&format!("Installed channels: {}", installed.join(", ")));
+            discovered_channels = discover_wasm_channels(&channels_dir).await;
         }
 
         // Determine if we need secrets context

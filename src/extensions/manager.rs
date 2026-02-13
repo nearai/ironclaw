@@ -490,13 +490,13 @@ impl ExtensionManager {
         }
 
         // Check Content-Length header before downloading the full body
-        if let Some(len) = response.content_length() {
-            if len as usize > MAX_WASM_SIZE {
-                return Err(ExtensionError::InstallFailed(format!(
-                    "WASM binary too large ({} bytes, max {} bytes)",
-                    len, MAX_WASM_SIZE
-                )));
-            }
+        if let Some(len) = response.content_length()
+            && len as usize > MAX_WASM_SIZE
+        {
+            return Err(ExtensionError::InstallFailed(format!(
+                "WASM binary too large ({} bytes, max {} bytes)",
+                len, MAX_WASM_SIZE
+            )));
         }
 
         let bytes = response

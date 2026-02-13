@@ -96,10 +96,10 @@ impl ToolRegistry {
         if let Ok(mut tools) = self.tools.try_write() {
             tools.insert(name.clone(), tool);
             // Mark as built-in so it can't be shadowed later
-            if PROTECTED_TOOL_NAMES.contains(&name.as_str()) {
-                if let Ok(mut builtins) = self.builtin_names.try_write() {
-                    builtins.insert(name.clone());
-                }
+            if PROTECTED_TOOL_NAMES.contains(&name.as_str())
+                && let Ok(mut builtins) = self.builtin_names.try_write()
+            {
+                builtins.insert(name.clone());
             }
             tracing::debug!("Registered tool: {}", name);
         }

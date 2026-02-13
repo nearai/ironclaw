@@ -430,10 +430,10 @@ pub mod testing {
                 if pattern == secret_name {
                     return Ok(true);
                 }
-                if let Some(prefix) = pattern.strip_suffix('*') {
-                    if secret_name.starts_with(prefix) {
-                        return Ok(true);
-                    }
+                if let Some(prefix) = pattern.strip_suffix('*')
+                    && secret_name.starts_with(prefix)
+                {
+                    return Ok(true);
                 }
             }
             Ok(false)

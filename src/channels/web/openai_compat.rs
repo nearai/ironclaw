@@ -473,10 +473,10 @@ pub async fn chat_completions_handler(
         if let Some(mt) = req.max_tokens {
             tool_req = tool_req.with_max_tokens(mt);
         }
-        if let Some(ref tc) = req.tool_choice {
-            if let Some(choice) = normalize_tool_choice(tc) {
-                tool_req = tool_req.with_tool_choice(choice);
-            }
+        if let Some(ref tc) = req.tool_choice
+            && let Some(choice) = normalize_tool_choice(tc)
+        {
+            tool_req = tool_req.with_tool_choice(choice);
         }
 
         let resp = llm
@@ -591,10 +591,10 @@ async fn handle_streaming(
         if let Some(mt) = req.max_tokens {
             tool_req = tool_req.with_max_tokens(mt);
         }
-        if let Some(ref tc) = req.tool_choice {
-            if let Some(choice) = normalize_tool_choice(tc) {
-                tool_req = tool_req.with_tool_choice(choice);
-            }
+        if let Some(ref tc) = req.tool_choice
+            && let Some(choice) = normalize_tool_choice(tc)
+        {
+            tool_req = tool_req.with_tool_choice(choice);
         }
         LlmResult::WithTools(
             llm.complete_with_tools(tool_req)
