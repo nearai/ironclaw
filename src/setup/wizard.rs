@@ -802,10 +802,7 @@ impl SetupWizard {
         // Write DATABASE_URL to ~/.ironclaw/.env
         if let Some(ref url) = self.settings.database_url {
             crate::bootstrap::save_database_url(url).map_err(|e| {
-                SetupError::Io(std::io::Error::other(format!(
-                    "Failed to save .env: {}",
-                    e
-                )))
+                SetupError::Io(std::io::Error::other(format!("Failed to save .env: {}", e)))
             })?;
         }
 
