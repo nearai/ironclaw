@@ -334,9 +334,9 @@ impl NearAiProvider {
 
                 // Check for session expiration (401 with specific message patterns)
                 if status_code == 401 {
-                    let is_session_expired = response_text.to_lowercase().contains("session")
-                        && (response_text.to_lowercase().contains("expired")
-                            || response_text.to_lowercase().contains("invalid"));
+                    let lower = response_text.to_lowercase();
+                    let is_session_expired = lower.contains("session")
+                        && (lower.contains("expired") || lower.contains("invalid"));
 
                     if is_session_expired {
                         return Err(LlmError::SessionExpired {

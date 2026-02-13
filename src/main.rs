@@ -22,7 +22,6 @@ use ironclaw::{
     config::Config,
     context::ContextManager,
     extensions::ExtensionManager,
-    history::Store,
     llm::{
         FailoverProvider, LlmProvider, SessionConfig, create_llm_provider,
         create_llm_provider_with_config, create_session_manager,

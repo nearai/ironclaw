@@ -19,7 +19,7 @@ pub(crate) fn is_retryable_status(status: u16) -> bool {
 /// - attempt 1: ~2s (1.5s - 2.5s)
 /// - attempt 2: ~4s (3.0s - 5.0s)
 pub(crate) fn retry_backoff_delay(attempt: u32) -> Duration {
-    let base_ms: u64 = 1000 * 2u64.saturating_pow(attempt);
+    let base_ms: u64 = 1000u64.saturating_mul(2u64.saturating_pow(attempt));
     let jitter_range = base_ms / 4; // 25%
     let jitter = if jitter_range > 0 {
         let offset = rand::thread_rng().gen_range(0..=jitter_range * 2);
