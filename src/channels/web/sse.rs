@@ -54,13 +54,19 @@ impl SseManager {
     ///
     /// Returns `None` if the maximum connection limit has been reached.
     pub fn subscribe_raw(&self) -> Option<impl Stream<Item = SseEvent> + Send + 'static + use<>> {
-        let current = self.connection_count.load(Ordering::Relaxed);
-        if current >= self.max_connections {
-            return None;
-        }
-
+        // Atomically increment only if below the limit. This prevents
+        // concurrent callers from overshooting max_connections.
         let counter = Arc::clone(&self.connection_count);
-        counter.fetch_add(1, Ordering::Relaxed);
+        let max = self.max_connections;
+        counter
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
+                if current < max {
+                    Some(current + 1)
+                } else {
+                    None
+                }
+            })
+            .ok()?;
         let rx = self.tx.subscribe();
 
         let stream = BroadcastStream::new(rx).filter_map(|result| result.ok());
@@ -77,13 +83,18 @@ impl SseManager {
     pub fn subscribe(
         &self,
     ) -> Option<Sse<impl Stream<Item = Result<Event, Infallible>> + Send + 'static + use<>>> {
-        let current = self.connection_count.load(Ordering::Relaxed);
-        if current >= self.max_connections {
-            return None;
-        }
-
+        // Atomically increment only if below the limit.
         let counter = Arc::clone(&self.connection_count);
-        counter.fetch_add(1, Ordering::Relaxed);
+        let max = self.max_connections;
+        counter
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
+                if current < max {
+                    Some(current + 1)
+                } else {
+                    None
+                }
+            })
+            .ok()?;
         let rx = self.tx.subscribe();
 
         let stream = BroadcastStream::new(rx)

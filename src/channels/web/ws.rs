@@ -75,6 +75,10 @@ pub async fn handle_ws_connection(socket: WebSocket, state: Arc<GatewayState>) {
     // Reject if we've hit the connection limit.
     let Some(raw_stream) = state.sse.subscribe_raw() else {
         tracing::warn!("WebSocket rejected: too many connections");
+        // Decrement the WS tracker we already incremented above.
+        if let Some(ref tracker) = tracker_for_drop {
+            tracker.decrement();
+        }
         return;
     };
     let mut event_stream = Box::pin(raw_stream);

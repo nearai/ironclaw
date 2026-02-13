@@ -552,9 +552,16 @@ async fn chat_ws_handler(
             )
         })?;
 
-    let is_local = origin.starts_with("http://localhost")
-        || origin.starts_with("http://127.0.0.1")
-        || origin.starts_with("http://[::1]");
+    // Extract the host from the origin and compare exactly, so that
+    // crafted origins like "http://localhost.evil.com" are rejected.
+    // Origin format is "scheme://host[:port]".
+    let host = origin
+        .strip_prefix("http://")
+        .or_else(|| origin.strip_prefix("https://"))
+        .and_then(|rest| rest.split(':').next()?.split('/').next())
+        .unwrap_or("");
+
+    let is_local = matches!(host, "localhost" | "127.0.0.1" | "[::1]");
     if !is_local {
         return Err((
             StatusCode::FORBIDDEN,

@@ -321,10 +321,16 @@ impl PairingStore {
         let path = approve_attempts_path(&self.base_dir, channel)?;
         fs::create_dir_all(path.parent().unwrap())?;
 
-        // Read existing attempts BEFORE opening for write, otherwise we'd
-        // lose them. The old code used .truncate(true) which wiped the file
-        // before the read, so failed attempts never accumulated and the rate
-        // limit never fired.
+        // Open (or create) and lock before reading so concurrent callers
+        // don't clobber each other's writes.
+        let file = fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(&path)?;
+        file.lock_exclusive()?;
+
         let mut data: ApproveAttemptsFile = fs::read_to_string(&path)
             .ok()
             .and_then(|c| serde_json::from_str(&c).ok())
@@ -337,6 +343,7 @@ impl PairingStore {
 
         let json = serde_json::to_string_pretty(&data)?;
         fs::write(&path, json)?;
+        fs4::FileExt::unlock(&file)?;
         Ok(())
     }
 
