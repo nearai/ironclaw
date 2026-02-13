@@ -405,10 +405,9 @@ async fn get_credentials_handler(
             }
         }
 
-        tracing::info!(
+        tracing::debug!(
             job_id = %job_id,
             env_var = %grant.env_var,
-            secret = %grant.secret_name,
             "Serving credential to container"
         );
 

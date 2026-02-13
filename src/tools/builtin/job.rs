@@ -120,6 +120,8 @@ impl CreateJobTool {
                 ))
             })?;
 
+            validate_env_var_name(env_var)?;
+
             // Validate the secret actually exists
             let exists = secrets.exists(user_id, secret_name).await.map_err(|e| {
                 ToolError::ExecutionFailed(format!(
@@ -425,6 +427,54 @@ impl CreateJobTool {
 }
 
 /// The base directory where all project directories must live.
+/// Env var names that could be abused to hijack process behavior.
+const DANGEROUS_ENV_VARS: &[&str] = &[
+    "LD_PRELOAD",
+    "LD_LIBRARY_PATH",
+    "DYLD_INSERT_LIBRARIES",
+    "DYLD_LIBRARY_PATH",
+    "BASH_ENV",
+    "ENV",
+    "CDPATH",
+    "IFS",
+    "PATH",
+    "HOME",
+    "USER",
+    "SHELL",
+    "RUST_LOG",
+];
+
+/// Validate that an env var name is safe for container injection.
+fn validate_env_var_name(name: &str) -> Result<(), ToolError> {
+    if name.is_empty() {
+        return Err(ToolError::InvalidParameters(
+            "env var name cannot be empty".into(),
+        ));
+    }
+
+    // Must match ^[A-Z_][A-Z0-9_]*$
+    let valid = name
+        .bytes()
+        .enumerate()
+        .all(|(i, b)| matches!(b, b'A'..=b'Z' | b'_') || (i > 0 && b.is_ascii_digit()));
+
+    if !valid {
+        return Err(ToolError::InvalidParameters(format!(
+            "env var '{}' must match [A-Z_][A-Z0-9_]* (uppercase, underscores, digits)",
+            name
+        )));
+    }
+
+    if DANGEROUS_ENV_VARS.contains(&name) {
+        return Err(ToolError::InvalidParameters(format!(
+            "env var '{}' is on the denylist (could hijack process behavior)",
+            name
+        )));
+    }
+
+    Ok(())
+}
+
 fn projects_base() -> PathBuf {
     dirs::home_dir()
         .unwrap_or_else(|| PathBuf::from("."))
@@ -455,34 +505,46 @@ fn resolve_project_dir(
         ToolError::ExecutionFailed(format!("failed to canonicalize projects base: {}", e))
     })?;
 
-    let dir = match explicit {
-        Some(d) => d,
-        None => canonical_base.join(project_id.to_string()),
+    let (canonical_dir, was_explicit) = match explicit {
+        Some(d) => {
+            // Explicit paths: validate BEFORE creating anything.
+            // The path must already exist (it comes from a previous job run).
+            let canonical = d.canonicalize().map_err(|e| {
+                ToolError::InvalidParameters(format!(
+                    "explicit project dir {} does not exist or is inaccessible: {}",
+                    d.display(),
+                    e
+                ))
+            })?;
+            if !canonical.starts_with(&canonical_base) {
+                return Err(ToolError::InvalidParameters(format!(
+                    "project directory must be under {}",
+                    canonical_base.display()
+                )));
+            }
+            (canonical, true)
+        }
+        None => {
+            let dir = canonical_base.join(project_id.to_string());
+            std::fs::create_dir_all(&dir).map_err(|e| {
+                ToolError::ExecutionFailed(format!(
+                    "failed to create project dir {}: {}",
+                    dir.display(),
+                    e
+                ))
+            })?;
+            let canonical = dir.canonicalize().map_err(|e| {
+                ToolError::ExecutionFailed(format!(
+                    "failed to canonicalize project dir {}: {}",
+                    dir.display(),
+                    e
+                ))
+            })?;
+            (canonical, false)
+        }
     };
 
-    std::fs::create_dir_all(&dir).map_err(|e| {
-        ToolError::ExecutionFailed(format!(
-            "failed to create project dir {}: {}",
-            dir.display(),
-            e
-        ))
-    })?;
-
-    // Canonicalize resolves symlinks, `..`, etc. so we can do a reliable prefix check.
-    let canonical_dir = dir.canonicalize().map_err(|e| {
-        ToolError::ExecutionFailed(format!(
-            "failed to canonicalize project dir {}: {}",
-            dir.display(),
-            e
-        ))
-    })?;
-
-    if !canonical_dir.starts_with(&canonical_base) {
-        return Err(ToolError::InvalidParameters(format!(
-            "project directory must be under {}",
-            canonical_base.display()
-        )));
-    }
+    let _ = was_explicit;
 
     let browse_id = canonical_dir
         .file_name()
@@ -959,14 +1021,24 @@ impl Tool for JobEventsTool {
             ToolError::InvalidParameters(format!("invalid job ID format: {}", job_id_str))
         })?;
 
-        // Verify the caller owns this job.
-        if let Ok(job_ctx) = self.context_manager.get_context(job_id).await {
-            if job_ctx.user_id != ctx.user_id {
-                return Err(ToolError::ExecutionFailed(format!(
-                    "job {} does not belong to current user",
+        // Verify the caller owns this job. A missing context is treated as
+        // unauthorized to prevent leaking events after process restarts.
+        let job_ctx = self
+            .context_manager
+            .get_context(job_id)
+            .await
+            .map_err(|_| {
+                ToolError::ExecutionFailed(format!(
+                    "job {} not found or context unavailable",
                     &job_id_str[..8]
-                )));
-            }
+                ))
+            })?;
+
+        if job_ctx.user_id != ctx.user_id {
+            return Err(ToolError::ExecutionFailed(format!(
+                "job {} does not belong to current user",
+                &job_id_str[..8]
+            )));
         }
 
         let limit = params.get("limit").and_then(|v| v.as_u64()).unwrap_or(50) as usize;
@@ -1082,14 +1154,24 @@ impl Tool for JobPromptTool {
             ToolError::InvalidParameters(format!("invalid job ID format: {}", job_id_str))
         })?;
 
-        // Verify the caller owns this job.
-        if let Ok(job_ctx) = self.context_manager.get_context(job_id).await {
-            if job_ctx.user_id != ctx.user_id {
-                return Err(ToolError::ExecutionFailed(format!(
-                    "job {} does not belong to current user",
+        // Verify the caller owns this job. A missing context is treated as
+        // unauthorized to prevent sending prompts to jobs after process restarts.
+        let job_ctx = self
+            .context_manager
+            .get_context(job_id)
+            .await
+            .map_err(|_| {
+                ToolError::ExecutionFailed(format!(
+                    "job {} not found or context unavailable",
                     &job_id_str[..8]
-                )));
-            }
+                ))
+            })?;
+
+        if job_ctx.user_id != ctx.user_id {
+            return Err(ToolError::ExecutionFailed(format!(
+                "job {} does not belong to current user",
+                &job_id_str[..8]
+            )));
         }
 
         let content = params
@@ -1239,6 +1321,8 @@ mod tests {
         let base = projects_base();
         std::fs::create_dir_all(&base).unwrap();
         let explicit = base.join("test_explicit_project");
+        // Explicit paths must already exist (no auto-create).
+        std::fs::create_dir_all(&explicit).unwrap();
         let project_id = Uuid::new_v4();
 
         let (dir, browse_id) = resolve_project_dir(Some(explicit.clone()), project_id).unwrap();
@@ -1255,8 +1339,26 @@ mod tests {
     fn test_resolve_project_dir_rejects_outside_base() {
         let tmp = tempfile::tempdir().unwrap();
         let escape_attempt = tmp.path().join("evil_project");
+        // Don't create it: explicit paths that don't exist are rejected
+        // before the prefix check even runs.
 
         let result = resolve_project_dir(Some(escape_attempt), Uuid::new_v4());
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("does not exist"),
+            "expected 'does not exist' error, got: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn test_resolve_project_dir_rejects_outside_base_existing() {
+        // A directory that exists but is outside the projects base.
+        let tmp = tempfile::tempdir().unwrap();
+        let outside = tmp.path().to_path_buf();
+
+        let result = resolve_project_dir(Some(outside), Uuid::new_v4());
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
         assert!(
@@ -1268,18 +1370,22 @@ mod tests {
 
     #[test]
     fn test_resolve_project_dir_rejects_traversal() {
-        // Attempt to escape via `..` components
+        // Non-existent traversal path is rejected because canonicalize fails.
         let base = projects_base();
         let traversal = base.join("legit").join("..").join("..").join(".ssh");
 
         let result = resolve_project_dir(Some(traversal), Uuid::new_v4());
-        assert!(result.is_err());
-        let err = result.unwrap_err().to_string();
-        assert!(
-            err.contains("must be under"),
-            "expected 'must be under' error, got: {}",
-            err
-        );
+        assert!(result.is_err(), "traversal path should be rejected");
+
+        // Traversal path that actually resolves gets the prefix check.
+        // `base/../` resolves to the parent of projects base, which is outside.
+        let base_parent = projects_base().join("..").join("definitely_not_projects");
+        std::fs::create_dir_all(&base_parent).ok();
+        if base_parent.exists() {
+            let result = resolve_project_dir(Some(base_parent.clone()), Uuid::new_v4());
+            assert!(result.is_err(), "path outside base should be rejected");
+            let _ = std::fs::remove_dir_all(&base_parent);
+        }
     }
 
     #[test]
@@ -1408,11 +1514,16 @@ mod tests {
 
     #[tokio::test]
     async fn test_job_prompt_tool_queues_prompt() {
+        let cm = Arc::new(ContextManager::new(5));
+        let job_id = cm
+            .create_job_for_user("default", "Test Job", "desc")
+            .await
+            .unwrap();
+
         let queue: PromptQueue =
             Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new()));
-        let tool = test_prompt_tool(Arc::clone(&queue));
+        let tool = JobPromptTool::new(Arc::clone(&queue), cm);
 
-        let job_id = Uuid::new_v4();
         let params = serde_json::json!({
             "job_id": job_id.to_string(),
             "content": "What's the status?",

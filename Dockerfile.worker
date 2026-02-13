@@ -21,14 +21,15 @@ RUN cargo build --release --bin ironclaw
 
 FROM debian:bookworm-slim
 
-# Add GitHub CLI apt repository, then install all dev tools in a single layer.
-RUN curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
+# Install curl first (needed to fetch the GitHub CLI GPG key), then add the
+# gh CLI apt repository, then install all remaining dev tools in one layer.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ca-certificates curl \
+    && curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
         | dd of=/usr/share/keyrings/githubcli-archive-keyring.gpg \
     && echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" \
         > /etc/apt/sources.list.d/github-cli.list \
     && apt-get update && apt-get install -y --no-install-recommends \
-    ca-certificates \
-    curl \
     git \
     build-essential \
     pkg-config \
