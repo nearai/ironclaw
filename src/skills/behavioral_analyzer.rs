@@ -147,11 +147,13 @@ impl BehavioralAnalyzer {
         // Run analysis
         let result = self.run_analysis(content, content_hash, skill_name).await;
 
-        // Cache the result (with bounded size)
+        // Cache the result (with bounded size).
+        // Note: eviction is arbitrary (HashMap order) rather than LRU. At the
+        // current MAX_CACHE_ENTRIES=256 this is acceptable -- a full LRU would
+        // add a dependency for negligible benefit.
         {
             let mut cache = self.cache.write().await;
             if cache.len() >= MAX_CACHE_ENTRIES {
-                // Evict an arbitrary entry to stay within bounds.
                 if let Some(key) = cache.keys().next().cloned() {
                     cache.remove(&key);
                 }

@@ -1044,31 +1044,27 @@ impl Agent {
         let active_skills: Vec<crate::skills::LoadedSkill> =
             if let Some(registry) = self.skill_registry() {
                 let available = registry.available().await;
-                if !available.is_empty() {
-                    let skills_cfg = &self.deps.skills_config;
-                    let selected = crate::skills::prefilter_skills(
-                        &message.content,
-                        &available,
-                        skills_cfg.max_active_skills,
-                        skills_cfg.max_context_tokens,
+                let skills_cfg = &self.deps.skills_config;
+                let selected = crate::skills::prefilter_skills(
+                    &message.content,
+                    &available,
+                    skills_cfg.max_active_skills,
+                    skills_cfg.max_context_tokens,
+                );
+
+                if !selected.is_empty() {
+                    tracing::debug!(
+                        "Selected {} skill(s) for message: {}",
+                        selected.len(),
+                        selected
+                            .iter()
+                            .map(|s| s.name())
+                            .collect::<Vec<_>>()
+                            .join(", ")
                     );
-
-                    if !selected.is_empty() {
-                        tracing::debug!(
-                            "Selected {} skill(s) for message: {}",
-                            selected.len(),
-                            selected
-                                .iter()
-                                .map(|s| s.name())
-                                .collect::<Vec<_>>()
-                                .join(", ")
-                        );
-                    }
-
-                    selected.into_iter().cloned().collect()
-                } else {
-                    vec![]
                 }
+
+                selected.into_iter().cloned().collect()
             } else {
                 vec![]
             };

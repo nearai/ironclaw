@@ -190,8 +190,17 @@ impl fmt::Display for HttpScopeError {
 impl std::error::Error for HttpScopeError {}
 
 /// Truncate a command string for display in error messages.
+/// Uses char-boundary-aware slicing to avoid panicking on multi-byte UTF-8.
 fn truncate_cmd(s: &str, max: usize) -> &str {
-    if s.len() <= max { s } else { &s[..max] }
+    if s.len() <= max {
+        s
+    } else {
+        let mut end = max;
+        while end > 0 && !s.is_char_boundary(end) {
+            end -= 1;
+        }
+        &s[..end]
+    }
 }
 
 // ---------------------------------------------------------------------------

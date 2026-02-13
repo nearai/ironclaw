@@ -339,20 +339,16 @@ Respond in JSON format:
         // Apply trust-based tool attenuation if skills are active.
         // Tools above the trust ceiling are removed entirely -- the LLM
         // cannot call tools it doesn't know exist.
-        let effective_tools = if self.active_skill_trust.is_some() {
-            // We already did attenuation in the agent loop and stored the
-            // result in the context. The attenuation is performed there so
-            // we can log the result. The context.available_tools already
-            // contains the filtered set. This branch just logs for clarity.
+        // Attenuation is performed in agent_loop.rs; context.available_tools
+        // already contains the filtered set by the time we get here.
+        if self.active_skill_trust.is_some() {
             tracing::debug!(
                 "Skills active (min trust: {:?}), {} tools available after attenuation",
                 self.active_skill_trust,
                 context.available_tools.len()
             );
-            context.available_tools.clone()
-        } else {
-            context.available_tools.clone()
-        };
+        }
+        let effective_tools = context.available_tools.clone();
 
         // If we have tools, use tool completion mode
         if !effective_tools.is_empty() {

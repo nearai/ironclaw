@@ -62,6 +62,11 @@ pub fn validate_skill_name(name: &str) -> bool {
 }
 
 /// Trust tier for a skill, determining its authority ceiling.
+///
+/// SAFETY: Variant ordering matters. `Ord` is derived from discriminant values
+/// and the security model relies on `Community < Verified < Local`. Do NOT
+/// reorder variants or change discriminant values without auditing all
+/// `min()` / comparison call-sites in attenuation and enforcement code.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SkillTrust {
