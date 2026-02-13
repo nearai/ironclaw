@@ -6,6 +6,7 @@ use axum::{
     middleware::Next,
     response::{IntoResponse, Response},
 };
+use subtle::ConstantTimeEq;
 
 /// Shared auth state injected via axum middleware state.
 #[derive(Clone)]
@@ -23,22 +24,22 @@ pub async fn auth_middleware(
     request: Request,
     next: Next,
 ) -> Response {
-    // Try Authorization header first
+    // Try Authorization header first (constant-time comparison)
     if let Some(auth_header) = headers.get("authorization") {
         if let Ok(value) = auth_header.to_str() {
             if let Some(token) = value.strip_prefix("Bearer ") {
-                if token == auth.token {
+                if bool::from(token.as_bytes().ct_eq(auth.token.as_bytes())) {
                     return next.run(request).await;
                 }
             }
         }
     }
 
-    // Fall back to query parameter (for SSE EventSource)
+    // Fall back to query parameter for SSE EventSource (constant-time comparison)
     if let Some(query) = request.uri().query() {
         for pair in query.split('&') {
             if let Some(token) = pair.strip_prefix("token=") {
-                if token == auth.token {
+                if bool::from(token.as_bytes().ct_eq(auth.token.as_bytes())) {
                     return next.run(request).await;
                 }
             }

@@ -595,7 +595,7 @@ Create alongside the .wasm file to grant capabilities:
                     AgentToolError::BuilderFailed(format!("LLM response failed: {}", e))
                 })?;
 
-            match result {
+            match result.result {
                 RespondResult::Text(response) => {
                     reason_ctx.messages.push(ChatMessage::assistant(&response));
 

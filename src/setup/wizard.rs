@@ -1089,8 +1089,10 @@ mod tests {
     async fn test_install_missing_bundled_channels_installs_telegram() {
         use crate::channels::wasm::available_channel_names;
 
-        // Skip test if build artifacts aren't available (e.g. CI without wasm32-wasip2)
+        // WASM artifacts only exist in dev builds (not CI). Skip gracefully
+        // rather than fail when the telegram channel hasn't been compiled.
         if !available_channel_names().contains(&"telegram") {
+            eprintln!("skipping: telegram WASM artifacts not built");
             return;
         }
 
