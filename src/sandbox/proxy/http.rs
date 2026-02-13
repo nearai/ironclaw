@@ -325,10 +325,10 @@ async fn forward_request(
 
     // Copy headers (except hop-by-hop headers)
     for (name, value) in req.headers() {
-        if !is_hop_by_hop_header(name.as_str()) {
-            if let Ok(v) = value.to_str() {
-                builder = builder.header(name.as_str(), v);
-            }
+        if !is_hop_by_hop_header(name.as_str())
+            && let Ok(v) = value.to_str()
+        {
+            builder = builder.header(name.as_str(), v);
         }
     }
 

@@ -58,6 +58,8 @@ pub struct ContainerJobConfig {
     pub claude_code_max_turns: u32,
     /// Memory limit in MB for Claude Code containers (heavier than workers).
     pub claude_code_memory_limit_mb: u64,
+    /// Allowed tool patterns for Claude Code (passed as CLAUDE_CODE_ALLOWED_TOOLS env var).
+    pub claude_code_allowed_tools: Vec<String>,
 }
 
 impl Default for ContainerJobConfig {
@@ -71,6 +73,7 @@ impl Default for ContainerJobConfig {
             claude_code_model: "sonnet".to_string(),
             claude_code_max_turns: 50,
             claude_code_memory_limit_mb: 4096,
+            claude_code_allowed_tools: crate::config::ClaudeCodeConfig::default().allowed_tools,
         }
     }
 }
@@ -258,6 +261,29 @@ impl ContainerJobManager {
         };
         self.containers.write().await.insert(job_id, handle);
 
+        // Run the actual container creation. On any failure, revoke the token
+        // and remove the handle so we don't leak resources.
+        match self
+            .create_job_inner(job_id, &token, project_dir, mode)
+            .await
+        {
+            Ok(()) => Ok(token),
+            Err(e) => {
+                self.token_store.revoke(job_id).await;
+                self.containers.write().await.remove(&job_id);
+                Err(e)
+            }
+        }
+    }
+
+    /// Inner implementation of container creation (separated for cleanup).
+    async fn create_job_inner(
+        &self,
+        job_id: Uuid,
+        token: &str,
+        project_dir: Option<PathBuf>,
+        mode: JobMode,
+    ) -> Result<(), OrchestratorError> {
         // Connect to Docker (reuses cached connection)
         let docker = self.docker().await?;
 
@@ -287,10 +313,17 @@ impl ContainerJobManager {
             env_vec.push("IRONCLAW_WORKSPACE=/workspace".to_string());
         }
 
-        // Claude Code mode: mount host ~/.claude read-only for auth
+        // Claude Code mode: mount host ~/.claude read-only for auth,
+        // and pass the tool allowlist so the bridge can write settings.json.
         if mode == JobMode::ClaudeCode {
             if let Some(ref claude_dir) = self.config.claude_config_dir {
                 binds.push(format!("{}:/home/sandbox/.claude:ro", claude_dir.display()));
+            }
+            if !self.config.claude_code_allowed_tools.is_empty() {
+                env_vec.push(format!(
+                    "CLAUDE_CODE_ALLOWED_TOOLS={}",
+                    self.config.claude_code_allowed_tools.join(",")
+                ));
             }
         }
 
@@ -311,11 +344,7 @@ impl ContainerJobManager {
             network_mode: Some("bridge".to_string()),
             extra_hosts: Some(vec!["host.docker.internal:host-gateway".to_string()]),
             cap_drop: Some(vec!["ALL".to_string()]),
-            cap_add: Some(vec![
-                "CHOWN".to_string(),
-                "SETUID".to_string(),
-                "SETGID".to_string(),
-            ]),
+            cap_add: Some(vec!["CHOWN".to_string()]),
             security_opt: Some(vec!["no-new-privileges:true".to_string()]),
             tmpfs: Some(
                 [("/tmp".to_string(), "size=512M".to_string())]
@@ -396,7 +425,7 @@ impl ContainerJobManager {
             "Created and started worker container"
         );
 
-        Ok(token)
+        Ok(())
     }
 
     /// Stop a running container job.
@@ -426,7 +455,7 @@ impl ContainerJobManager {
             )
             .await
         {
-            tracing::warn!(job_id = %job_id, "Failed to stop container: {}", e);
+            tracing::warn!(job_id = %job_id, error = %e, "Failed to stop container (may already be stopped)");
         }
 
         // Remove the container
@@ -440,7 +469,7 @@ impl ContainerJobManager {
             )
             .await
         {
-            tracing::warn!(job_id = %job_id, "Failed to remove container: {}", e);
+            tracing::warn!(job_id = %job_id, error = %e, "Failed to remove container (may require manual cleanup)");
         }
 
         // Update state
@@ -477,38 +506,35 @@ impl ContainerJobManager {
             let containers = self.containers.read().await;
             containers.get(&job_id).map(|h| h.container_id.clone())
         };
-        if let Some(cid) = container_id {
-            if !cid.is_empty() {
-                match self.docker().await {
-                    Ok(docker) => {
-                        if let Err(e) = docker
-                            .stop_container(
-                                &cid,
-                                Some(bollard::container::StopContainerOptions { t: 5 }),
-                            )
-                            .await
-                        {
-                            tracing::warn!(job_id = %job_id, "Failed to stop completed container: {}", e);
-                        }
-                        if let Err(e) = docker
-                            .remove_container(
-                                &cid,
-                                Some(bollard::container::RemoveContainerOptions {
-                                    force: true,
-                                    ..Default::default()
-                                }),
-                            )
-                            .await
-                        {
-                            tracing::warn!(job_id = %job_id, "Failed to remove completed container: {}", e);
-                        }
+        if let Some(cid) = container_id
+            && !cid.is_empty()
+        {
+            match self.docker().await {
+                Ok(docker) => {
+                    if let Err(e) = docker
+                        .stop_container(
+                            &cid,
+                            Some(bollard::container::StopContainerOptions { t: 5 }),
+                        )
+                        .await
+                    {
+                        tracing::warn!(job_id = %job_id, error = %e, "Failed to stop completed container");
                     }
-                    Err(e) => {
-                        tracing::error!(
-                            job_id = %job_id,
-                            "Cannot connect to Docker for container cleanup: {}", e
-                        );
+                    if let Err(e) = docker
+                        .remove_container(
+                            &cid,
+                            Some(bollard::container::RemoveContainerOptions {
+                                force: true,
+                                ..Default::default()
+                            }),
+                        )
+                        .await
+                    {
+                        tracing::warn!(job_id = %job_id, error = %e, "Failed to remove completed container");
                     }
+                }
+                Err(e) => {
+                    tracing::warn!(job_id = %job_id, error = %e, "Failed to connect to Docker for container cleanup");
                 }
             }
         }

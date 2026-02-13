@@ -111,12 +111,11 @@ impl NetworkPolicyDecider for DefaultPolicyDecider {
     async fn decide(&self, request: &NetworkRequest) -> NetworkDecision {
         // First check if the domain is allowed
         let validation = self.allowlist.is_allowed(&request.host);
-        if !validation.is_allowed() {
-            if let crate::sandbox::proxy::allowlist::DomainValidationResult::Denied(reason) =
+        if !validation.is_allowed()
+            && let crate::sandbox::proxy::allowlist::DomainValidationResult::Denied(reason) =
                 validation
-            {
-                return NetworkDecision::Deny { reason };
-            }
+        {
+            return NetworkDecision::Deny { reason };
         }
 
         // Check if we need to inject credentials
@@ -138,12 +137,13 @@ fn host_matches_pattern(host: &str, pattern: &str) -> bool {
     }
 
     // Support wildcard: *.example.com matches sub.example.com
-    if let Some(suffix) = pattern.strip_prefix("*.") {
-        if host.ends_with(suffix) && host.len() > suffix.len() {
-            let prefix = &host[..host.len() - suffix.len()];
-            if prefix.ends_with('.') || prefix.is_empty() {
-                return true;
-            }
+    if let Some(suffix) = pattern.strip_prefix("*.")
+        && host.ends_with(suffix)
+        && host.len() > suffix.len()
+    {
+        let prefix = &host[..host.len() - suffix.len()];
+        if prefix.ends_with('.') || prefix.is_empty() {
+            return true;
         }
     }
 

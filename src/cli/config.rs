@@ -107,10 +107,10 @@ async fn list_settings(
     println!();
 
     for (key, value) in all {
-        if let Some(ref f) = filter {
-            if !key.starts_with(f) {
-                continue;
-            }
+        if let Some(ref f) = filter
+            && !key.starts_with(f)
+        {
+            continue;
         }
 
         let display_value = if value.len() > 60 {

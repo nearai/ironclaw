@@ -353,16 +353,16 @@ async fn get_prompt_handler(
     Path(job_id): Path<Uuid>,
 ) -> Result<(StatusCode, Json<serde_json::Value>), StatusCode> {
     let mut queue = state.prompt_queue.lock().await;
-    if let Some(prompts) = queue.get_mut(&job_id) {
-        if let Some(prompt) = prompts.pop_front() {
-            return Ok((
-                StatusCode::OK,
-                Json(serde_json::json!({
-                    "content": prompt.content,
-                    "done": prompt.done,
-                })),
-            ));
-        }
+    if let Some(prompts) = queue.get_mut(&job_id)
+        && let Some(prompt) = prompts.pop_front()
+    {
+        return Ok((
+            StatusCode::OK,
+            Json(serde_json::json!({
+                "content": prompt.content,
+                "done": prompt.done,
+            })),
+        ));
     }
 
     // Return 204 with an empty body. The Json wrapper requires some value
@@ -404,13 +404,13 @@ async fn get_credentials_handler(
             })?;
 
         // Record usage for audit trail
-        if let Ok(secret) = secrets.get(&state.user_id, &grant.secret_name).await {
-            if let Err(e) = secrets.record_usage(secret.id).await {
-                tracing::warn!(
-                    secret = %grant.secret_name,
-                    "Failed to record credential usage: {}", e
-                );
-            }
+        if let Ok(secret) = secrets.get(&state.user_id, &grant.secret_name).await
+            && let Err(e) = secrets.record_usage(secret.id).await
+        {
+            tracing::warn!(
+                secret = %grant.secret_name,
+                "Failed to record credential usage: {}", e
+            );
         }
 
         tracing::debug!(
