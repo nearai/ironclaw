@@ -312,6 +312,9 @@ pub enum WorkspaceError {
 
     #[error("Heartbeat error: {reason}")]
     HeartbeatError { reason: String },
+
+    #[error("Invalid path '{path}': {reason}")]
+    InvalidPath { path: String, reason: String },
 }
 
 /// Orchestrator errors (internal API, container management).
