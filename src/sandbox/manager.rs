@@ -35,6 +35,8 @@ use std::time::Duration;
 
 use tokio::sync::RwLock;
 
+use bollard::Docker;
+
 use crate::sandbox::config::{ResourceLimits, SandboxConfig, SandboxPolicy};
 use crate::sandbox::container::{ContainerOutput, ContainerRunner, connect_docker};
 use crate::sandbox::error::{Result, SandboxError};
@@ -82,7 +84,7 @@ impl From<ContainerOutput> for ExecOutput {
 pub struct SandboxManager {
     config: SandboxConfig,
     proxy: Arc<RwLock<Option<HttpProxy>>>,
-    runner: Arc<RwLock<Option<ContainerRunner>>>,
+    docker: Arc<RwLock<Option<Docker>>>,
     initialized: std::sync::atomic::AtomicBool,
 }
 
@@ -92,7 +94,7 @@ impl SandboxManager {
         Self {
             config,
             proxy: Arc::new(RwLock::new(None)),
-            runner: Arc::new(RwLock::new(None)),
+            docker: Arc::new(RwLock::new(None)),
             initialized: std::sync::atomic::AtomicBool::new(false),
         }
     }
@@ -137,14 +139,15 @@ impl SandboxManager {
                 reason: e.to_string(),
             })?;
 
-        // Create container runner
-        let runner =
-            ContainerRunner::new(docker, self.config.image.clone(), self.config.proxy_port);
-
-        // Check for / pull image
-        if !runner.image_exists().await {
+        // Check for / pull image using a temporary runner
+        let checker = ContainerRunner::new(
+            docker.clone(),
+            self.config.image.clone(),
+            self.config.proxy_port,
+        );
+        if !checker.image_exists().await {
             if self.config.auto_pull_image {
-                runner.pull_image().await?;
+                checker.pull_image().await?;
             } else {
                 return Err(SandboxError::ContainerCreationFailed {
                     reason: format!(
@@ -155,7 +158,7 @@ impl SandboxManager {
             }
         }
 
-        *self.runner.write().await = Some(runner);
+        *self.docker.write().await = Some(docker);
 
         // Start the network proxy if we're using a sandboxed policy
         if self.config.policy.is_sandboxed() {
@@ -221,8 +224,15 @@ impl SandboxManager {
             0
         };
 
-        // Create a runner with the current proxy port
-        let docker = connect_docker().await?;
+        // Reuse the stored Docker connection, create a runner with the current proxy port
+        let docker =
+            self.docker
+                .read()
+                .await
+                .clone()
+                .ok_or_else(|| SandboxError::DockerNotAvailable {
+                    reason: "Docker connection not initialized".to_string(),
+                })?;
         let runner = ContainerRunner::new(docker, self.config.image.clone(), proxy_port);
 
         let limits = ResourceLimits {
@@ -268,8 +278,22 @@ impl SandboxManager {
                 reason: e.to_string(),
             })?;
 
-        let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-        let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+        let max_output: usize = 64 * 1024; // 64 KB, matching container path
+        let half_max = max_output / 2;
+
+        let mut stdout = String::from_utf8_lossy(&output.stdout).to_string();
+        let mut stderr = String::from_utf8_lossy(&output.stderr).to_string();
+        let mut truncated = false;
+
+        if stdout.len() > half_max {
+            stdout.truncate(half_max);
+            truncated = true;
+        }
+        if stderr.len() > half_max {
+            stderr.truncate(half_max);
+            truncated = true;
+        }
+
         let combined = if stderr.is_empty() {
             stdout.clone()
         } else if stdout.is_empty() {
@@ -284,7 +308,7 @@ impl SandboxManager {
             stderr,
             output: combined,
             duration: start.elapsed(),
-            truncated: false,
+            truncated,
         })
     }
 
@@ -470,5 +494,29 @@ mod tests {
         assert!(result.is_ok());
         let output = result.unwrap();
         assert!(output.stdout.contains("hello"));
+    }
+
+    #[tokio::test]
+    async fn test_direct_execution_truncates_large_output() {
+        let manager = SandboxManager::new(SandboxConfig {
+            enabled: true,
+            policy: SandboxPolicy::FullAccess,
+            ..Default::default()
+        });
+
+        // Generate output larger than 32KB (half of 64KB limit)
+        // printf repeats a 100-char line 400 times = 40KB
+        let result = manager
+            .execute(
+                "printf 'A%.0s' $(seq 1 40000)",
+                Path::new("."),
+                HashMap::new(),
+            )
+            .await;
+
+        assert!(result.is_ok());
+        let output = result.unwrap();
+        assert!(output.truncated);
+        assert!(output.stdout.len() <= 32 * 1024);
     }
 }
