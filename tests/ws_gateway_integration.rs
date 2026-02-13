@@ -51,6 +51,7 @@ async fn start_test_server() -> (
         user_id: "test-user".to_string(),
         shutdown_tx: tokio::sync::RwLock::new(None),
         ws_tracker: Some(Arc::new(WsConnectionTracker::new())),
+        llm_provider: None,
         chat_rate_limiter: ironclaw::channels::web::server::RateLimiter::new(30, 60),
     });
 
