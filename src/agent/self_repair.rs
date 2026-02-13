@@ -119,25 +119,25 @@ impl SelfRepair for DefaultSelfRepair {
         let mut stuck_jobs = Vec::new();
 
         for job_id in stuck_ids {
-            if let Ok(ctx) = self.context_manager.get_context(job_id).await {
-                if ctx.state == JobState::Stuck {
-                    let stuck_duration = ctx
-                        .started_at
-                        .map(|start| {
-                            let now = Utc::now();
-                            let duration = now.signed_duration_since(start);
-                            Duration::from_secs(duration.num_seconds().max(0) as u64)
-                        })
-                        .unwrap_or_default();
+            if let Ok(ctx) = self.context_manager.get_context(job_id).await
+                && ctx.state == JobState::Stuck
+            {
+                let stuck_duration = ctx
+                    .started_at
+                    .map(|start| {
+                        let now = Utc::now();
+                        let duration = now.signed_duration_since(start);
+                        Duration::from_secs(duration.num_seconds().max(0) as u64)
+                    })
+                    .unwrap_or_default();
 
-                    stuck_jobs.push(StuckJob {
-                        job_id,
-                        last_activity: ctx.started_at.unwrap_or(ctx.created_at),
-                        stuck_duration,
-                        last_error: None,
-                        repair_attempts: ctx.repair_attempts,
-                    });
-                }
+                stuck_jobs.push(StuckJob {
+                    job_id,
+                    last_activity: ctx.started_at.unwrap_or(ctx.created_at),
+                    stuck_duration,
+                    last_error: None,
+                    repair_attempts: ctx.repair_attempts,
+                });
             }
         }
 

@@ -8,12 +8,13 @@ jobs:
     runs-on: ubuntu-latest
     steps:
     - name: Checkout repository
-      uses: actions/checkout@v4
+      uses: actions/checkout@v6
     - name: Install Rust
       uses: dtolnay/rust-toolchain@stable
       with:
         profile: minimal
         components: rustfmt, clippy
+    - uses: Swatinem/rust-cache@v2
     - name: Check formatting
       run: |
         cargo fmt --all -- --check

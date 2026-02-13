@@ -1,0 +1,20 @@
+# Local development only — do NOT use these credentials in production.
+services:
+  postgres:
+    image: pgvector/pgvector:pg16
+    ports:
+      - "5432:5432"
+    environment:
+      POSTGRES_DB: ironclaw
+      POSTGRES_USER: ironclaw
+      POSTGRES_PASSWORD: ironclaw  # dev-only, change for any non-local deployment
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ironclaw"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+volumes:
+  pgdata:

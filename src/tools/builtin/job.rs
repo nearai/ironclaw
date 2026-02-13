@@ -157,18 +157,18 @@ impl CreateJobTool {
         });
 
         // Persist the job mode to DB
-        if mode == JobMode::ClaudeCode {
-            if let Some(store) = self.store.clone() {
-                let job_id_copy = job_id;
-                tokio::spawn(async move {
-                    if let Err(e) = store
-                        .update_sandbox_job_mode(job_id_copy, "claude_code")
-                        .await
-                    {
-                        tracing::warn!(job_id = %job_id_copy, "Failed to set job mode: {}", e);
-                    }
-                });
-            }
+        if mode == JobMode::ClaudeCode
+            && let Some(store) = self.store.clone()
+        {
+            let job_id_copy = job_id;
+            tokio::spawn(async move {
+                if let Err(e) = store
+                    .update_sandbox_job_mode(job_id_copy, "claude_code")
+                    .await
+                {
+                    tracing::warn!(job_id = %job_id_copy, "Failed to set job mode: {}", e);
+                }
+            });
         }
 
         // Create the container job with the pre-determined job_id.

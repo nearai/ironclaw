@@ -93,27 +93,26 @@ impl SubmissionParser {
         // /thread <uuid> - switch thread
         if let Some(rest) = lower.strip_prefix("/thread ") {
             let rest = rest.trim();
-            if rest != "new" {
-                if let Ok(id) = Uuid::parse_str(rest) {
-                    return Submission::SwitchThread { thread_id: id };
-                }
+            if rest != "new"
+                && let Ok(id) = Uuid::parse_str(rest)
+            {
+                return Submission::SwitchThread { thread_id: id };
             }
         }
 
         // /resume <uuid> - resume from checkpoint
-        if let Some(rest) = lower.strip_prefix("/resume ") {
-            if let Ok(id) = Uuid::parse_str(rest.trim()) {
-                return Submission::Resume { checkpoint_id: id };
-            }
+        if let Some(rest) = lower.strip_prefix("/resume ")
+            && let Ok(id) = Uuid::parse_str(rest.trim())
+        {
+            return Submission::Resume { checkpoint_id: id };
         }
 
         // Try structured JSON approval (from web gateway's /api/chat/approval endpoint)
-        if trimmed.starts_with('{') {
-            if let Ok(submission) = serde_json::from_str::<Submission>(trimmed) {
-                if matches!(submission, Submission::ExecApproval { .. }) {
-                    return submission;
-                }
-            }
+        if trimmed.starts_with('{')
+            && let Ok(submission) = serde_json::from_str::<Submission>(trimmed)
+            && matches!(submission, Submission::ExecApproval { .. })
+        {
+            return submission;
         }
 
         // Approval responses (simple yes/no/always for pending approvals)
