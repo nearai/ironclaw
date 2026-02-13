@@ -306,17 +306,33 @@ impl Repository {
         content: &str,
         embedding: Option<&[f32]>,
     ) -> Result<Uuid, WorkspaceError> {
+        self.insert_chunk_with_lines(document_id, chunk_index, content, embedding, None, None)
+            .await
+    }
+
+    /// Insert a chunk with line number information for citations.
+    pub async fn insert_chunk_with_lines(
+        &self,
+        document_id: Uuid,
+        chunk_index: i32,
+        content: &str,
+        embedding: Option<&[f32]>,
+        line_start: Option<u32>,
+        line_end: Option<u32>,
+    ) -> Result<Uuid, WorkspaceError> {
         let conn = self.conn().await?;
         let id = Uuid::new_v4();
 
         let embedding_vec = embedding.map(|e| Vector::from(e.to_vec()));
+        let line_start_i32 = line_start.map(|l| l as i32);
+        let line_end_i32 = line_end.map(|l| l as i32);
 
         conn.execute(
             r#"
-            INSERT INTO memory_chunks (id, document_id, chunk_index, content, embedding)
-            VALUES ($1, $2, $3, $4, $5)
+            INSERT INTO memory_chunks (id, document_id, chunk_index, content, embedding, line_start, line_end)
+            VALUES ($1, $2, $3, $4, $5, $6, $7)
             "#,
-            &[&id, &document_id, &chunk_index, &content, &embedding_vec],
+            &[&id, &document_id, &chunk_index, &content, &embedding_vec, &line_start_i32, &line_end_i32],
         )
         .await
         .map_err(|e| WorkspaceError::ChunkingFailed {
@@ -434,6 +450,7 @@ impl Repository {
             .query(
                 r#"
                 SELECT c.id as chunk_id, c.document_id, d.path, c.content,
+                       c.line_start, c.line_end,
                        ts_rank_cd(c.content_tsv, plainto_tsquery('english', $3)) as rank
                 FROM memory_chunks c
                 JOIN memory_documents d ON d.id = c.document_id
@@ -458,6 +475,8 @@ impl Repository {
                 path: row.get("path"),
                 content: row.get("content"),
                 rank: (i + 1) as u32,
+                line_start: row.get::<_, Option<i32>>("line_start").map(|l| l as u32),
+                line_end: row.get::<_, Option<i32>>("line_end").map(|l| l as u32),
             })
             .collect())
     }
@@ -477,6 +496,7 @@ impl Repository {
             .query(
                 r#"
                 SELECT c.id as chunk_id, c.document_id, d.path, c.content,
+                       c.line_start, c.line_end,
                        1 - (c.embedding <=> $3) as similarity
                 FROM memory_chunks c
                 JOIN memory_documents d ON d.id = c.document_id
@@ -501,6 +521,8 @@ impl Repository {
                 path: row.get("path"),
                 content: row.get("content"),
                 rank: (i + 1) as u32,
+                line_start: row.get::<_, Option<i32>>("line_start").map(|l| l as u32),
+                line_end: row.get::<_, Option<i32>>("line_end").map(|l| l as u32),
             })
             .collect())
     }
