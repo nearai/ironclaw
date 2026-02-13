@@ -59,6 +59,7 @@ pub mod settings;
 pub mod setup;
 pub mod skills;
 pub mod tools;
+pub mod util;
 pub mod worker;
 pub mod workspace;
 

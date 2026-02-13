@@ -782,12 +782,9 @@ impl SetupWizard {
     fn save_and_summarize(&mut self) -> Result<(), SetupError> {
         self.settings.onboard_completed = true;
 
-        self.settings.save().map_err(|e| {
-            SetupError::Io(std::io::Error::new(
-                std::io::ErrorKind::Other,
-                format!("Failed to save settings: {}", e),
-            ))
-        })?;
+        self.settings
+            .save()
+            .map_err(|e| std::io::Error::other(format!("Failed to save settings: {}", e)))?;
 
         println!();
         print_success("Configuration saved to ~/.ironclaw/");
@@ -1090,6 +1087,15 @@ mod tests {
 
     #[tokio::test]
     async fn test_install_missing_bundled_channels_installs_telegram() {
+        use crate::channels::wasm::available_channel_names;
+
+        // WASM artifacts only exist in dev builds (not CI). Skip gracefully
+        // rather than fail when the telegram channel hasn't been compiled.
+        if !available_channel_names().contains(&"telegram") {
+            eprintln!("skipping: telegram WASM artifacts not built");
+            return;
+        }
+
         let dir = tempdir().unwrap();
         let installed = HashSet::<String>::new();
 

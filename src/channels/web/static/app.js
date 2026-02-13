@@ -281,11 +281,35 @@ function sendApprovalAction(requestId, action) {
 function renderMarkdown(text) {
   if (typeof marked !== 'undefined') {
     let html = marked.parse(text);
+    // Sanitize HTML output to prevent XSS from tool output or LLM responses.
+    html = sanitizeRenderedHtml(html);
     // Inject copy buttons into <pre> blocks
     html = html.replace(/<pre>/g, '<pre class="code-block-wrapper"><button class="copy-btn" onclick="copyCodeBlock(this)">Copy</button>');
     return html;
   }
   return escapeHtml(text);
+}
+
+// Strip dangerous HTML elements and attributes from rendered markdown.
+// This prevents XSS from tool output or prompt injection in LLM responses.
+function sanitizeRenderedHtml(html) {
+  html = html.replace(/<script\b[^<]*(?:(?!<\/script>)<[^<]*)*<\/script>/gi, '');
+  html = html.replace(/<iframe\b[^>]*>[\s\S]*?<\/iframe>/gi, '');
+  html = html.replace(/<object\b[^>]*>[\s\S]*?<\/object>/gi, '');
+  html = html.replace(/<embed\b[^>]*\/?>/gi, '');
+  html = html.replace(/<form\b[^>]*>[\s\S]*?<\/form>/gi, '');
+  html = html.replace(/<style\b[^>]*>[\s\S]*?<\/style>/gi, '');
+  html = html.replace(/<link\b[^>]*\/?>/gi, '');
+  html = html.replace(/<base\b[^>]*\/?>/gi, '');
+  html = html.replace(/<meta\b[^>]*\/?>/gi, '');
+  // Remove event handler attributes (onclick, onerror, onload, etc.)
+  html = html.replace(/\s+on\w+\s*=\s*"[^"]*"/gi, '');
+  html = html.replace(/\s+on\w+\s*=\s*'[^']*'/gi, '');
+  html = html.replace(/\s+on\w+\s*=\s*[^\s>]+/gi, '');
+  // Remove javascript: and data: URLs in href/src attributes
+  html = html.replace(/(href|src|action)\s*=\s*["']?\s*javascript\s*:/gi, '$1="');
+  html = html.replace(/(href|src|action)\s*=\s*["']?\s*data\s*:/gi, '$1="');
+  return html;
 }
 
 function copyCodeBlock(btn) {
