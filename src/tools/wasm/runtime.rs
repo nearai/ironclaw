@@ -14,6 +14,10 @@ use wasmtime::{Config, Engine, OptLevel};
 use crate::tools::wasm::error::WasmError;
 use crate::tools::wasm::limits::{FuelConfig, ResourceLimits};
 
+/// Default epoch tick interval. Each tick increments the engine's epoch counter,
+/// which causes any store with an expired epoch deadline to trap.
+pub const EPOCH_TICK_INTERVAL: Duration = Duration::from_millis(500);
+
 /// Configuration for the WASM runtime.
 #[derive(Debug, Clone)]
 pub struct WasmRuntimeConfig {
@@ -122,6 +126,25 @@ impl WasmToolRuntime {
         let engine = Engine::new(&wasmtime_config).map_err(|e| {
             WasmError::EngineCreationFailed(format!("Failed to create Wasmtime engine: {}", e))
         })?;
+
+        // Spawn a background thread that periodically increments the engine's
+        // epoch counter. Without this, epoch_deadline_trap() never fires and
+        // WASM modules can spin indefinitely even with a deadline set.
+        let ticker_engine = engine.clone();
+        std::thread::Builder::new()
+            .name("wasm-epoch-ticker".into())
+            .spawn(move || {
+                loop {
+                    std::thread::sleep(EPOCH_TICK_INTERVAL);
+                    ticker_engine.increment_epoch();
+                }
+            })
+            .map_err(|e| {
+                WasmError::EngineCreationFailed(format!(
+                    "Failed to spawn epoch ticker thread: {}",
+                    e
+                ))
+            })?;
 
         Ok(Self {
             engine,

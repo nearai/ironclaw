@@ -1087,6 +1087,15 @@ mod tests {
 
     #[tokio::test]
     async fn test_install_missing_bundled_channels_installs_telegram() {
+        use crate::channels::wasm::available_channel_names;
+
+        // WASM artifacts only exist in dev builds (not CI). Skip gracefully
+        // rather than fail when the telegram channel hasn't been compiled.
+        if !available_channel_names().contains(&"telegram") {
+            eprintln!("skipping: telegram WASM artifacts not built");
+            return;
+        }
+
         let dir = tempdir().unwrap();
         let installed = HashSet::<String>::new();
 

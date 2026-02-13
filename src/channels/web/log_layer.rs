@@ -24,6 +24,8 @@ use tokio::sync::broadcast;
 use tracing::field::{Field, Visit};
 use tracing_subscriber::Layer;
 
+use crate::safety::LeakDetector;
+
 /// Maximum number of recent log entries kept for late-joining SSE subscribers.
 const HISTORY_CAP: usize = 500;
 
@@ -46,6 +48,8 @@ pub struct LogEntry {
 pub struct LogBroadcaster {
     tx: broadcast::Sender<LogEntry>,
     recent: Mutex<VecDeque<LogEntry>>,
+    /// Scrubs secrets from log messages before broadcasting to SSE clients.
+    leak_detector: LeakDetector,
 }
 
 impl LogBroadcaster {
@@ -54,10 +58,19 @@ impl LogBroadcaster {
         Self {
             tx,
             recent: Mutex::new(VecDeque::with_capacity(HISTORY_CAP)),
+            leak_detector: LeakDetector::new(),
         }
     }
 
-    pub fn send(&self, entry: LogEntry) {
+    pub fn send(&self, mut entry: LogEntry) {
+        // Scrub secrets from the message before it reaches any subscriber.
+        // This is defense-in-depth: even if code elsewhere accidentally logs
+        // a secret, it won't be broadcast to SSE clients.
+        entry.message = self
+            .leak_detector
+            .scan_and_clean(&entry.message)
+            .unwrap_or_else(|_| "[log message redacted: contained blocked secret]".to_string());
+
         // Stash in ring buffer (for late joiners)
         if let Ok(mut buf) = self.recent.lock() {
             if buf.len() >= HISTORY_CAP {
@@ -145,6 +158,9 @@ impl Visit for MessageVisitor {
 ///
 /// Only forwards DEBUG and above. Attach to the tracing subscriber
 /// alongside the existing fmt layer.
+///
+/// Log messages are scrubbed through `LeakDetector` in `LogBroadcaster::send()`
+/// (the single funnel point for all log output, including late-joiner history).
 pub struct WebLogLayer {
     broadcaster: Arc<LogBroadcaster>,
 }
@@ -178,6 +194,7 @@ impl<S: tracing::Subscriber> Layer<S> for WebLogLayer {
             timestamp: chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
         };
 
+        // LeakDetector scrubbing happens inside broadcaster.send()
         self.broadcaster.send(entry);
     }
 }
@@ -312,5 +329,30 @@ mod tests {
     fn test_message_visitor_finish_empty() {
         let v = MessageVisitor::new();
         assert_eq!(v.finish(), "");
+    }
+
+    #[test]
+    fn test_broadcaster_has_leak_detector() {
+        let broadcaster = LogBroadcaster::new();
+        // Verify the leak detector is initialized with default patterns
+        assert!(broadcaster.leak_detector.pattern_count() > 0);
+    }
+
+    #[test]
+    fn test_leak_detector_scrubs_api_key_in_log() {
+        let detector = crate::safety::LeakDetector::new();
+        let msg = "Connecting with token sk-proj-test1234567890abcdefghij";
+        let result = detector.scan_and_clean(msg);
+        // Should be blocked (OpenAI key pattern)
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_leak_detector_passes_clean_log() {
+        let detector = crate::safety::LeakDetector::new();
+        let msg = "Request completed status=200 url=https://api.example.com/data";
+        let result = detector.scan_and_clean(msg);
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), msg);
     }
 }

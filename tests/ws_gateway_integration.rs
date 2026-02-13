@@ -52,6 +52,7 @@ async fn start_test_server() -> (
         shutdown_tx: tokio::sync::RwLock::new(None),
         ws_tracker: Some(Arc::new(WsConnectionTracker::new())),
         llm_provider: None,
+        chat_rate_limiter: ironclaw::channels::web::server::RateLimiter::new(30, 60),
     });
 
     let addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
@@ -67,7 +68,12 @@ async fn connect_ws(
     addr: SocketAddr,
 ) -> tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>> {
     let url = format!("ws://{}/api/chat/ws?token={}", addr, AUTH_TOKEN);
-    let request = url.into_client_request().unwrap();
+    let mut request = url.into_client_request().unwrap();
+    // Server requires an Origin header from localhost to prevent cross-site WS hijacking.
+    request.headers_mut().insert(
+        "Origin",
+        format!("http://127.0.0.1:{}", addr.port()).parse().unwrap(),
+    );
     let (stream, _response) = tokio_tungstenite::connect_async(request)
         .await
         .expect("Failed to connect WebSocket");

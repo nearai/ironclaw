@@ -113,6 +113,7 @@ async fn start_test_server() -> (SocketAddr, Arc<GatewayState>) {
         shutdown_tx: tokio::sync::RwLock::new(None),
         ws_tracker: Some(Arc::new(WsConnectionTracker::new())),
         llm_provider: Some(Arc::new(MockLlmProvider)),
+        chat_rate_limiter: ironclaw::channels::web::server::RateLimiter::new(30, 60),
     });
 
     let addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
@@ -159,9 +160,7 @@ async fn test_chat_completions_basic() {
     assert_eq!(body["model"], "mock-model-v1");
     assert_eq!(body["choices"][0]["finish_reason"], "stop");
 
-    let content = body["choices"][0]["message"]["content"]
-        .as_str()
-        .unwrap();
+    let content = body["choices"][0]["message"]["content"].as_str().unwrap();
     assert!(
         content.contains("Hello world"),
         "Expected echo, got: {}",
@@ -197,9 +196,7 @@ async fn test_chat_completions_with_system_message() {
 
     assert_eq!(resp.status(), 200);
     let body: serde_json::Value = resp.json().await.unwrap();
-    let content = body["choices"][0]["message"]["content"]
-        .as_str()
-        .unwrap();
+    let content = body["choices"][0]["message"]["content"].as_str().unwrap();
     assert!(content.contains("2+2"));
 }
 
@@ -269,7 +266,9 @@ async fn test_chat_completions_streaming() {
 
     // Check simulated streaming header
     assert_eq!(
-        resp.headers().get("x-ironclaw-streaming").and_then(|v| v.to_str().ok()),
+        resp.headers()
+            .get("x-ironclaw-streaming")
+            .and_then(|v| v.to_str().ok()),
         Some("simulated"),
         "Expected x-ironclaw-streaming: simulated header"
     );
@@ -277,11 +276,23 @@ async fn test_chat_completions_streaming() {
     let text = resp.text().await.unwrap();
 
     // Should contain SSE data lines
-    assert!(text.contains("data:"), "Expected SSE data lines, got: {}", text);
+    assert!(
+        text.contains("data:"),
+        "Expected SSE data lines, got: {}",
+        text
+    );
     // Should end with [DONE]
-    assert!(text.contains("[DONE]"), "Expected [DONE] sentinel, got: {}", text);
+    assert!(
+        text.contains("[DONE]"),
+        "Expected [DONE] sentinel, got: {}",
+        text
+    );
     // Should contain the role chunk
-    assert!(text.contains("\"role\":\"assistant\""), "Expected role chunk, got: {}", text);
+    assert!(
+        text.contains("\"role\":\"assistant\""),
+        "Expected role chunk, got: {}",
+        text
+    );
 
     // Collect all content from the chunks
     let mut full_content = String::new();
@@ -323,10 +334,7 @@ async fn test_chat_completions_empty_messages() {
 
     assert_eq!(resp.status(), 400);
     let body: serde_json::Value = resp.json().await.unwrap();
-    assert!(body["error"]["message"]
-        .as_str()
-        .unwrap()
-        .contains("empty"));
+    assert!(body["error"]["message"].as_str().unwrap().contains("empty"));
 }
 
 #[tokio::test]
@@ -348,10 +356,12 @@ async fn test_chat_completions_model_mismatch() {
     assert_eq!(resp.status(), 404);
     let body: serde_json::Value = resp.json().await.unwrap();
     assert_eq!(body["error"]["code"], "model_not_found");
-    assert!(body["error"]["message"]
-        .as_str()
-        .unwrap()
-        .contains("mock-model-v1"));
+    assert!(
+        body["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("mock-model-v1")
+    );
 }
 
 #[tokio::test]
@@ -423,6 +433,7 @@ async fn test_no_llm_provider_returns_503() {
         shutdown_tx: tokio::sync::RwLock::new(None),
         ws_tracker: Some(Arc::new(WsConnectionTracker::new())),
         llm_provider: None, // No LLM!
+        chat_rate_limiter: ironclaw::channels::web::server::RateLimiter::new(30, 60),
     });
 
     let addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
@@ -450,8 +461,8 @@ async fn test_chat_completions_body_too_large() {
     let (addr, _state) = start_test_server().await;
     let url = format!("http://{}/v1/chat/completions", addr);
 
-    // Build a payload over 2 MB (axum's default body limit)
-    let big_content = "x".repeat(3 * 1024 * 1024);
+    // Build a payload over 1 MB (the gateway's DefaultBodyLimit)
+    let big_content = "x".repeat(2 * 1024 * 1024);
     let resp = client()
         .post(&url)
         .bearer_auth(AUTH_TOKEN)
