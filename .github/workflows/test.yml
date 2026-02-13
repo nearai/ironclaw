@@ -11,13 +11,11 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
         with:
           profile: minimal
-      - name: Run unit tests
-        run: cargo test --lib --all-features -- --nocapture
-      - name: Run integration tests (no database required)
-        run: cargo test --test pairing_integration --test wasm_channel_integration --test ws_gateway_integration --all-features -- --nocapture
-      # workspace_integration tests require PostgreSQL with pgvector; skipped in CI
+      - uses: Swatinem/rust-cache@v2
+      - name: Run Tests
+        run: cargo test --all-features -- --nocapture

@@ -344,17 +344,17 @@ impl SetupWizard {
     /// Step 3: NEAR AI authentication.
     async fn step_authentication(&mut self) -> Result<(), SetupError> {
         // Check if we already have a session
-        if let Some(ref session) = self.session_manager
-            && session.has_token().await
-        {
-            print_info("Existing session found. Validating...");
-            match session.ensure_authenticated().await {
-                Ok(()) => {
-                    print_success("Session valid");
-                    return Ok(());
-                }
-                Err(e) => {
-                    print_info(&format!("Session invalid: {}. Re-authenticating...", e));
+        if let Some(ref session) = self.session_manager {
+            if session.has_token().await {
+                print_info("Existing session found. Validating...");
+                match session.ensure_authenticated().await {
+                    Ok(()) => {
+                        print_success("Session valid");
+                        return Ok(());
+                    }
+                    Err(e) => {
+                        print_info(&format!("Session invalid: {}. Re-authenticating...", e));
+                    }
                 }
             }
         }
@@ -642,10 +642,11 @@ impl SetupWizard {
             &installed_names,
         )
         .await?
-            && !installed.is_empty()
         {
-            print_success(&format!("Installed channels: {}", installed.join(", ")));
-            discovered_channels = discover_wasm_channels(&channels_dir).await;
+            if !installed.is_empty() {
+                print_success(&format!("Installed channels: {}", installed.join(", ")));
+                discovered_channels = discover_wasm_channels(&channels_dir).await;
+            }
         }
 
         // Determine if we need secrets context
@@ -781,12 +782,9 @@ impl SetupWizard {
     fn save_and_summarize(&mut self) -> Result<(), SetupError> {
         self.settings.onboard_completed = true;
 
-        self.settings.save().map_err(|e| {
-            SetupError::Io(std::io::Error::other(format!(
-                "Failed to save settings: {}",
-                e
-            )))
-        })?;
+        self.settings
+            .save()
+            .map_err(|e| std::io::Error::other(format!("Failed to save settings: {}", e)))?;
 
         println!();
         print_success("Configuration saved to ~/.ironclaw/");
@@ -1091,8 +1089,10 @@ mod tests {
     async fn test_install_missing_bundled_channels_installs_telegram() {
         use crate::channels::wasm::available_channel_names;
 
-        // Skip test if build artifacts aren't available (e.g. CI without wasm32-wasip2)
+        // WASM artifacts only exist in dev builds (not CI). Skip gracefully
+        // rather than fail when the telegram channel hasn't been compiled.
         if !available_channel_names().contains(&"telegram") {
+            eprintln!("skipping: telegram WASM artifacts not built");
             return;
         }
 

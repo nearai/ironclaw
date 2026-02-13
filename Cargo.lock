@@ -2291,7 +2291,7 @@ dependencies = [
 
 [[package]]
 name = "ironclaw"
-version = "0.1.0"
+version = "0.1.3"
 dependencies = [
  "aes-gcm",
  "aho-corasick",
@@ -2334,6 +2334,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
+ "subtle",
  "tempfile",
  "termimad",
  "testcontainers-modules",

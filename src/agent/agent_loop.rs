@@ -654,17 +654,19 @@ impl Agent {
         }
 
         // Restore response chain from conversation metadata
-        if let Some(store) = self.store()
-            && let Ok(Some(metadata)) = store.get_conversation_metadata(thread_uuid).await
-            && let Some(rid) = metadata
-                .get("last_response_id")
-                .and_then(|v| v.as_str())
-                .map(String::from)
-        {
-            thread.last_response_id = Some(rid.clone());
-            self.llm()
-                .seed_response_chain(&thread_uuid.to_string(), rid);
-            tracing::debug!("Restored response chain for thread {}", thread_uuid);
+        if let Some(store) = self.store() {
+            if let Ok(Some(metadata)) = store.get_conversation_metadata(thread_uuid).await {
+                if let Some(rid) = metadata
+                    .get("last_response_id")
+                    .and_then(|v| v.as_str())
+                    .map(String::from)
+                {
+                    thread.last_response_id = Some(rid.clone());
+                    self.llm()
+                        .seed_response_chain(&thread_uuid.to_string(), rid);
+                    tracing::debug!("Restored response chain for thread {}", thread_uuid);
+                }
+            }
         }
 
         // Insert into session and register with session manager
@@ -952,12 +954,13 @@ impl Agent {
                 return;
             }
 
-            if let Some(ref resp) = response
-                && let Err(e) = store
+            if let Some(ref resp) = response {
+                if let Err(e) = store
                     .add_conversation_message(thread_id, "assistant", resp)
                     .await
-            {
-                tracing::warn!("Failed to persist assistant message: {}", e);
+                {
+                    tracing::warn!("Failed to persist assistant message: {}", e);
+                }
             }
         });
     }
@@ -1055,14 +1058,14 @@ impl Agent {
             // Check if interrupted
             {
                 let sess = session.lock().await;
-                if let Some(thread) = sess.threads.get(&thread_id)
-                    && thread.state == ThreadState::Interrupted
-                {
-                    return Err(crate::error::JobError::ContextError {
-                        id: thread_id,
-                        reason: "Interrupted".to_string(),
+                if let Some(thread) = sess.threads.get(&thread_id) {
+                    if thread.state == ThreadState::Interrupted {
+                        return Err(crate::error::JobError::ContextError {
+                            id: thread_id,
+                            reason: "Interrupted".to_string(),
+                        }
+                        .into());
                     }
-                    .into());
                 }
             }
 
@@ -1079,9 +1082,16 @@ impl Agent {
                     m
                 });
 
-            let result = reasoning.respond_with_tools(&context).await?;
+            let output = reasoning.respond_with_tools(&context).await?;
 
-            match result {
+            // Track token usage for budget enforcement
+            tracing::debug!(
+                "LLM call used {} input + {} output tokens",
+                output.usage.input_tokens,
+                output.usage.output_tokens
+            );
+
+            match output.result {
                 RespondResult::Text(text) => {
                     // If no tools have been executed yet, prompt the LLM to use tools
                     // This handles the case where the model explains what it will do
@@ -1130,11 +1140,11 @@ impl Agent {
                     // Record tool calls in the thread
                     {
                         let mut sess = session.lock().await;
-                        if let Some(thread) = sess.threads.get_mut(&thread_id)
-                            && let Some(turn) = thread.last_turn_mut()
-                        {
-                            for tc in &tool_calls {
-                                turn.record_tool_call(&tc.name, tc.arguments.clone());
+                        if let Some(thread) = sess.threads.get_mut(&thread_id) {
+                            if let Some(turn) = thread.last_turn_mut() {
+                                for tc in &tool_calls {
+                                    turn.record_tool_call(&tc.name, tc.arguments.clone());
+                                }
                             }
                         }
                     }
@@ -1142,27 +1152,54 @@ impl Agent {
                     // Execute each tool (with approval checking)
                     for tc in tool_calls {
                         // Check if tool requires approval
-                        if let Some(tool) = self.tools().get(&tc.name).await
-                            && tool.requires_approval()
-                        {
-                            // Check if auto-approved for this session
-                            let is_auto_approved = {
-                                let sess = session.lock().await;
-                                sess.is_tool_auto_approved(&tc.name)
-                            };
-
-                            if !is_auto_approved {
-                                // Need approval - store pending request and return
-                                let pending = PendingApproval {
-                                    request_id: Uuid::new_v4(),
-                                    tool_name: tc.name.clone(),
-                                    parameters: tc.arguments.clone(),
-                                    description: tool.description().to_string(),
-                                    tool_call_id: tc.id.clone(),
-                                    context_messages: context_messages.clone(),
+                        if let Some(tool) = self.tools().get(&tc.name).await {
+                            if tool.requires_approval() {
+                                // Check if auto-approved for this session
+                                let mut is_auto_approved = {
+                                    let sess = session.lock().await;
+                                    sess.is_tool_auto_approved(&tc.name)
                                 };
 
-                                return Ok(AgenticLoopResult::NeedApproval { pending });
+                                // For shell commands, override auto-approval for
+                                // destructive patterns that should always require
+                                // explicit per-invocation approval.
+                                if is_auto_approved && tc.name == "shell" {
+                                    if let Some(cmd) = tc
+                                        .arguments
+                                        .as_str()
+                                        .and_then(|s| {
+                                            serde_json::from_str::<serde_json::Value>(s).ok()
+                                        })
+                                        .and_then(|v| {
+                                            v.get("command")
+                                                .and_then(|c| c.as_str().map(String::from))
+                                        })
+                                    {
+                                        if crate::tools::builtin::shell::requires_explicit_approval(
+                                            &cmd,
+                                        ) {
+                                            tracing::info!(
+                                                "Shell command '{}' requires explicit approval despite auto-approve",
+                                                cmd.chars().take(80).collect::<String>()
+                                            );
+                                            is_auto_approved = false;
+                                        }
+                                    }
+                                }
+
+                                if !is_auto_approved {
+                                    // Need approval - store pending request and return
+                                    let pending = PendingApproval {
+                                        request_id: Uuid::new_v4(),
+                                        tool_name: tc.name.clone(),
+                                        parameters: tc.arguments.clone(),
+                                        description: tool.description().to_string(),
+                                        tool_call_id: tc.id.clone(),
+                                        context_messages: context_messages.clone(),
+                                    };
+
+                                    return Ok(AgenticLoopResult::NeedApproval { pending });
+                                }
                             }
                         }
 
@@ -1193,34 +1230,34 @@ impl Agent {
                             )
                             .await;
 
-                        if let Ok(ref output) = tool_result
-                            && !output.is_empty()
-                        {
-                            let _ = self
-                                .channels
-                                .send_status(
-                                    &message.channel,
-                                    StatusUpdate::ToolResult {
-                                        name: tc.name.clone(),
-                                        preview: truncate_for_preview(output, 200),
-                                    },
-                                    &message.metadata,
-                                )
-                                .await;
+                        if let Ok(ref output) = tool_result {
+                            if !output.is_empty() {
+                                let _ = self
+                                    .channels
+                                    .send_status(
+                                        &message.channel,
+                                        StatusUpdate::ToolResult {
+                                            name: tc.name.clone(),
+                                            preview: truncate_for_preview(output, 200),
+                                        },
+                                        &message.metadata,
+                                    )
+                                    .await;
+                            }
                         }
 
                         // Record result in thread
                         {
                             let mut sess = session.lock().await;
-                            if let Some(thread) = sess.threads.get_mut(&thread_id)
-                                && let Some(turn) = thread.last_turn_mut()
-                            {
-                                match &tool_result {
-                                    Ok(output) => {
-                                        turn.record_tool_result(serde_json::json!(output));
-                                    }
-                                    Err(e) => {
-                                        turn.record_tool_error(e.to_string());
+                            if let Some(thread) = sess.threads.get_mut(&thread_id) {
+                                if let Some(turn) = thread.last_turn_mut() {
+                                    match &tool_result {
+                                        Ok(output) => {
+                                            turn.record_tool_result(serde_json::json!(output));
+                                        }
+                                        Err(e) => {
+                                            turn.record_tool_error(e.to_string());
+                                        }
                                     }
                                 }
                             }
@@ -1603,17 +1640,17 @@ impl Agent {
         };
 
         // Verify request ID if provided
-        if let Some(req_id) = request_id
-            && req_id != pending.request_id
-        {
-            // Put it back and return error
-            let mut sess = session.lock().await;
-            if let Some(thread) = sess.threads.get_mut(&thread_id) {
-                thread.await_approval(pending);
+        if let Some(req_id) = request_id {
+            if req_id != pending.request_id {
+                // Put it back and return error
+                let mut sess = session.lock().await;
+                if let Some(thread) = sess.threads.get_mut(&thread_id) {
+                    thread.await_approval(pending);
+                }
+                return Ok(SubmissionResult::error(
+                    "Request ID mismatch. Use the correct request ID.",
+                ));
             }
-            return Ok(SubmissionResult::error(
-                "Request ID mismatch. Use the correct request ID.",
-            ));
         }
 
         if approved {
@@ -1667,20 +1704,20 @@ impl Agent {
                 )
                 .await;
 
-            if let Ok(ref output) = tool_result
-                && !output.is_empty()
-            {
-                let _ = self
-                    .channels
-                    .send_status(
-                        &message.channel,
-                        StatusUpdate::ToolResult {
-                            name: pending.tool_name.clone(),
-                            preview: truncate_for_preview(output, 200),
-                        },
-                        &message.metadata,
-                    )
-                    .await;
+            if let Ok(ref output) = tool_result {
+                if !output.is_empty() {
+                    let _ = self
+                        .channels
+                        .send_status(
+                            &message.channel,
+                            StatusUpdate::ToolResult {
+                                name: pending.tool_name.clone(),
+                                preview: truncate_for_preview(output, 200),
+                            },
+                            &message.metadata,
+                        )
+                        .await;
+                }
             }
 
             // Build context including the tool result
@@ -1689,15 +1726,15 @@ impl Agent {
             // Record result in thread
             {
                 let mut sess = session.lock().await;
-                if let Some(thread) = sess.threads.get_mut(&thread_id)
-                    && let Some(turn) = thread.last_turn_mut()
-                {
-                    match &tool_result {
-                        Ok(output) => {
-                            turn.record_tool_result(serde_json::json!(output));
-                        }
-                        Err(e) => {
-                            turn.record_tool_error(e.to_string());
+                if let Some(thread) = sess.threads.get_mut(&thread_id) {
+                    if let Some(turn) = thread.last_turn_mut() {
+                        match &tool_result {
+                            Ok(output) => {
+                                turn.record_tool_result(serde_json::json!(output));
+                            }
+                            Err(e) => {
+                                turn.record_tool_error(e.to_string());
+                            }
                         }
                     }
                 }
@@ -2057,15 +2094,15 @@ impl Agent {
         }
 
         // Persist new job to database (fire-and-forget)
-        if let Some(store) = self.store()
-            && let Ok(ctx) = self.context_manager.get_context(job_id).await
-        {
-            let store = store.clone();
-            tokio::spawn(async move {
-                if let Err(e) = store.save_job(&ctx).await {
-                    tracing::warn!("Failed to persist new job {}: {}", job_id, e);
-                }
-            });
+        if let Some(store) = self.store() {
+            if let Ok(ctx) = self.context_manager.get_context(job_id).await {
+                let store = store.clone();
+                tokio::spawn(async move {
+                    if let Err(e) = store.save_job(&ctx).await {
+                        tracing::warn!("Failed to persist new job {}: {}", job_id, e);
+                    }
+                });
+            }
         }
 
         // Schedule for execution
@@ -2145,10 +2182,10 @@ impl Agent {
 
         let mut output = String::from("Jobs:\n");
         for job_id in jobs {
-            if let Ok(ctx) = self.context_manager.get_context(job_id).await
-                && ctx.user_id == user_id
-            {
-                output.push_str(&format!("  {} - {} ({:?})\n", job_id, ctx.title, ctx.state));
+            if let Ok(ctx) = self.context_manager.get_context(job_id).await {
+                if ctx.user_id == user_id {
+                    output.push_str(&format!("  {} - {} ({:?})\n", job_id, ctx.title, ctx.state));
+                }
             }
         }
 

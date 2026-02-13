@@ -192,7 +192,7 @@ impl CreateSecretParams {
 }
 
 /// Where a credential should be injected in an HTTP request.
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub enum CredentialLocation {
     /// Inject as Authorization header (e.g., "Bearer {secret}")
     #[default]

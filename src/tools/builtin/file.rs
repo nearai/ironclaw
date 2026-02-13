@@ -50,65 +50,90 @@ const MAX_WRITE_SIZE: usize = 5 * 1024 * 1024;
 /// Maximum directory listing entries.
 const MAX_DIR_ENTRIES: usize = 500;
 
-/// Validate that a path is safe (no traversal attacks).
-fn validate_path(path_str: &str, base_dir: Option<&Path>) -> Result<PathBuf, ToolError> {
-    let path = PathBuf::from(path_str);
-
-    // Reject paths with suspicious components (validation only, no action needed)
+/// Normalize a path by resolving `.` and `..` components lexically (no filesystem access).
+///
+/// This is critical for security: `std::fs::canonicalize` only works on paths that exist,
+/// so for new files we must normalize without touching the filesystem.
+fn normalize_lexical(path: &Path) -> PathBuf {
+    let mut components = Vec::new();
     for component in path.components() {
         match component {
             std::path::Component::ParentDir => {
-                // Allow .. but validate final path is within sandbox
-            }
-            std::path::Component::Normal(s) => {
-                let s = s.to_string_lossy();
-                if s.starts_with('.') && s != "." && s != ".." && !s.starts_with(".git") {
-                    // Hidden files are OK for .git, .gitignore, etc.
+                // Only pop if there's a normal component to pop (don't escape root/prefix)
+                if components
+                    .last()
+                    .is_some_and(|c| matches!(c, std::path::Component::Normal(_)))
+                {
+                    components.pop();
                 }
             }
-            _ => {}
+            std::path::Component::CurDir => {}
+            other => components.push(other),
         }
     }
+    components.iter().collect()
+}
+
+/// Validate that a path is safe (no traversal attacks).
+///
+/// For sandboxed paths (base_dir is set), we normalize the joined path lexically
+/// and then verify it lives under the canonical base. This prevents escapes through
+/// non-existent parent directories where `canonicalize()` would fall back to the
+/// raw (un-normalized) path.
+fn validate_path(path_str: &str, base_dir: Option<&Path>) -> Result<PathBuf, ToolError> {
+    let path = PathBuf::from(path_str);
 
     // Resolve to absolute path
     let resolved = if path.is_absolute() {
-        path.canonicalize().unwrap_or_else(|_| path.clone())
+        path.canonicalize()
+            .unwrap_or_else(|_| normalize_lexical(&path))
     } else if let Some(base) = base_dir {
-        base.join(&path)
+        let joined = base.join(&path);
+        joined
             .canonicalize()
-            .unwrap_or_else(|_| base.join(&path))
+            .unwrap_or_else(|_| normalize_lexical(&joined))
     } else {
-        std::env::current_dir()
+        let joined = std::env::current_dir()
             .unwrap_or_else(|_| PathBuf::from("."))
-            .join(&path)
+            .join(&path);
+        normalize_lexical(&joined)
     };
 
-    // If base_dir is set, ensure path is within it
+    // If base_dir is set, ensure the resolved path is within it
     if let Some(base) = base_dir {
-        // Canonicalize the base to handle symlinks (e.g., /var -> /private/var on macOS)
-        let base_canonical = base.canonicalize().unwrap_or_else(|_| base.to_path_buf());
+        let base_canonical = base
+            .canonicalize()
+            .unwrap_or_else(|_| normalize_lexical(base));
 
-        // For files that don't exist yet, we need to check the parent directory
-        // and ensure the resolved path would be within the base
+        // For existing paths, canonicalize to resolve symlinks.
+        // For non-existent paths, the lexical normalization above already removed
+        // all `..` components, so starts_with is reliable.
         let check_path = if resolved.exists() {
             resolved.canonicalize().unwrap_or_else(|_| resolved.clone())
         } else {
-            // For non-existent files, canonicalize the parent and append the filename
-            if let Some(parent) = resolved.parent() {
-                if parent.exists() {
-                    let canonical_parent = parent
+            // Walk up to the nearest existing ancestor directory, canonicalize it,
+            // then re-append the remaining tail. This handles the case where a
+            // symlink sits above the new file.
+            let mut ancestor = resolved.as_path();
+            let mut tail_parts: Vec<&std::ffi::OsStr> = Vec::new();
+            loop {
+                if ancestor.exists() {
+                    let canonical_ancestor = ancestor
                         .canonicalize()
-                        .unwrap_or_else(|_| parent.to_path_buf());
-                    if let Some(filename) = resolved.file_name() {
-                        canonical_parent.join(filename)
-                    } else {
-                        resolved.clone()
+                        .unwrap_or_else(|_| ancestor.to_path_buf());
+                    let mut result = canonical_ancestor;
+                    for part in tail_parts.into_iter().rev() {
+                        result = result.join(part);
                     }
-                } else {
-                    resolved.clone()
+                    break result;
                 }
-            } else {
-                resolved.clone()
+                if let Some(name) = ancestor.file_name() {
+                    tail_parts.push(name);
+                }
+                match ancestor.parent() {
+                    Some(parent) if parent != ancestor => ancestor = parent,
+                    _ => break resolved.clone(),
+                }
             }
         };
 
@@ -870,5 +895,82 @@ mod tests {
 
         let entries = result.result.get("entries").unwrap().as_array().unwrap();
         assert!(entries.len() >= 2);
+    }
+
+    #[test]
+    fn test_normalize_lexical() {
+        // Basic .. resolution
+        assert_eq!(
+            normalize_lexical(Path::new("/a/b/../c")),
+            PathBuf::from("/a/c")
+        );
+        // Multiple .. components
+        assert_eq!(
+            normalize_lexical(Path::new("/a/b/c/../../d")),
+            PathBuf::from("/a/d")
+        );
+        // . components stripped
+        assert_eq!(
+            normalize_lexical(Path::new("/a/./b/./c")),
+            PathBuf::from("/a/b/c")
+        );
+        // Cannot escape root
+        assert_eq!(
+            normalize_lexical(Path::new("/a/../../..")),
+            PathBuf::from("/")
+        );
+    }
+
+    #[test]
+    fn test_validate_path_rejects_traversal_nonexistent_parent() {
+        // The critical test: writing to ../../outside/newdir/file with base_dir
+        // set should be rejected even when the parent directory does not exist
+        // (i.e. canonicalize() cannot resolve it).
+        let dir = TempDir::new().unwrap();
+        let evil_path = format!(
+            "{}/../../outside/newdir/file.txt",
+            dir.path().to_str().unwrap()
+        );
+        let result = validate_path(&evil_path, Some(dir.path()));
+        assert!(
+            result.is_err(),
+            "Should reject traversal via non-existent parent, got: {:?}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_validate_path_rejects_relative_traversal() {
+        let dir = TempDir::new().unwrap();
+        let result = validate_path("../../etc/passwd", Some(dir.path()));
+        assert!(
+            result.is_err(),
+            "Should reject relative traversal, got: {:?}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_validate_path_allows_valid_nested_write() {
+        let dir = TempDir::new().unwrap();
+        let result = validate_path("subdir/newfile.txt", Some(dir.path()));
+        assert!(
+            result.is_ok(),
+            "Should allow nested writes within sandbox: {:?}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_validate_path_allows_dot_dot_within_sandbox() {
+        // a/b/../c resolves to a/c which is still inside the sandbox
+        let dir = TempDir::new().unwrap();
+        std::fs::create_dir_all(dir.path().join("a/b")).unwrap();
+        let result = validate_path("a/b/../c.txt", Some(dir.path()));
+        assert!(
+            result.is_ok(),
+            "Should allow .. that stays within sandbox: {:?}",
+            result
+        );
     }
 }

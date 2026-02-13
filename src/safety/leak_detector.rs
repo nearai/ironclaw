@@ -147,10 +147,10 @@ impl LeakDetector {
         // Build prefix matcher for patterns that start with a known prefix
         let mut prefixes = Vec::new();
         for (idx, pattern) in patterns.iter().enumerate() {
-            if let Some(prefix) = extract_literal_prefix(pattern.regex.as_str())
-                && prefix.len() >= 3
-            {
-                prefixes.push((prefix, idx));
+            if let Some(prefix) = extract_literal_prefix(pattern.regex.as_str()) {
+                if prefix.len() >= 3 {
+                    prefixes.push((prefix, idx));
+                }
             }
         }
 
@@ -306,13 +306,12 @@ impl LeakDetector {
                 })?;
         }
 
-        // Scan body if present and valid UTF-8
-        if let Some(body_bytes) = body
-            && let Ok(body_str) = std::str::from_utf8(body_bytes)
-        {
-            self.scan_and_clean(body_str)?;
+        // Scan body if present. Use lossy UTF-8 conversion so a leading
+        // non-UTF8 byte can't be used to skip scanning entirely.
+        if let Some(body_bytes) = body {
+            let body_str = String::from_utf8_lossy(body_bytes);
+            self.scan_and_clean(&body_str)?;
         }
-        // Binary bodies are not scanned (could add hex pattern detection later)
 
         Ok(())
     }
@@ -704,5 +703,18 @@ mod tests {
         let body = b"{\"stolen\": \"sk-proj-test1234567890abcdefghij\"}";
         let result = detector.scan_http_request("https://api.example.com/webhook", &[], Some(body));
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_scan_http_request_blocks_secret_in_binary_body() {
+        let detector = LeakDetector::new();
+
+        // Attacker prepends a non-UTF8 byte to bypass strict from_utf8 check.
+        // The lossy conversion should still detect the secret.
+        let mut body = vec![0xFF]; // invalid UTF-8 leading byte
+        body.extend_from_slice(b"sk-proj-test1234567890abcdefghij");
+
+        let result = detector.scan_http_request("https://api.example.com/exfil", &[], Some(&body));
+        assert!(result.is_err(), "binary body should still be scanned");
     }
 }
