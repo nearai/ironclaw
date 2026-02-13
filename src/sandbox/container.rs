@@ -279,11 +279,7 @@ impl ContainerRunner {
             network_mode: Some("bridge".to_string()),
             // Security: drop all capabilities and add back only what's needed
             cap_drop: Some(vec!["ALL".to_string()]),
-            cap_add: Some(vec![
-                "CHOWN".to_string(),
-                "SETUID".to_string(),
-                "SETGID".to_string(),
-            ]),
+            cap_add: Some(vec!["CHOWN".to_string()]),
             // Prevent privilege escalation
             security_opt: Some(vec!["no-new-privileges:true".to_string()]),
             // Read-only root filesystem (workspace is still writable if policy allows)

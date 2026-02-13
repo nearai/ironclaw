@@ -11,7 +11,7 @@ mod marketplace;
 mod memory;
 mod restaurant;
 pub mod routine;
-mod shell;
+pub(crate) mod shell;
 mod taskrabbit;
 mod time;
 

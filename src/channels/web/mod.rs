@@ -81,6 +81,7 @@ impl GatewayChannel {
             user_id: config.user_id.clone(),
             shutdown_tx: tokio::sync::RwLock::new(None),
             ws_tracker: Some(Arc::new(ws::WsConnectionTracker::new())),
+            chat_rate_limiter: server::RateLimiter::new(30, 60),
         });
 
         Self {
@@ -106,6 +107,7 @@ impl GatewayChannel {
             user_id: self.state.user_id.clone(),
             shutdown_tx: tokio::sync::RwLock::new(None),
             ws_tracker: self.state.ws_tracker.clone(),
+            chat_rate_limiter: server::RateLimiter::new(30, 60),
         };
         mutate(&mut new_state);
         self.state = Arc::new(new_state);

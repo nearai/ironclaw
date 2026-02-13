@@ -103,6 +103,7 @@ hkdf = "0.12"
 sha2 = "0.10"
 blake3 = "1"
 rand = "0.8"
+subtle = "2"  # Constant-time comparisons for token validation
 
 # Multi-provider LLM support
 rig-core = "0.30"

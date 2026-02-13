@@ -461,7 +461,16 @@ impl ExtensionManager {
         name: &str,
         url: &str,
     ) -> Result<InstallResult, ExtensionError> {
-        // Download the WASM binary
+        // Require HTTPS to prevent downgrade attacks
+        if !url.starts_with("https://") {
+            return Err(ExtensionError::InstallFailed(
+                "Only HTTPS URLs are allowed for extension downloads".to_string(),
+            ));
+        }
+
+        // 50 MB cap to prevent disk-fill DoS
+        const MAX_WASM_SIZE: usize = 50 * 1024 * 1024;
+
         let client = reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(60))
             .build()
@@ -480,10 +489,35 @@ impl ExtensionManager {
             )));
         }
 
+        // Check Content-Length header before downloading the full body
+        if let Some(len) = response.content_length() {
+            if len as usize > MAX_WASM_SIZE {
+                return Err(ExtensionError::InstallFailed(format!(
+                    "WASM binary too large ({} bytes, max {} bytes)",
+                    len, MAX_WASM_SIZE
+                )));
+            }
+        }
+
         let bytes = response
             .bytes()
             .await
             .map_err(|e| ExtensionError::DownloadFailed(e.to_string()))?;
+
+        if bytes.len() > MAX_WASM_SIZE {
+            return Err(ExtensionError::InstallFailed(format!(
+                "WASM binary too large ({} bytes, max {} bytes)",
+                bytes.len(),
+                MAX_WASM_SIZE
+            )));
+        }
+
+        // Basic WASM magic number check (\0asm)
+        if bytes.len() < 4 || &bytes[..4] != b"\0asm" {
+            return Err(ExtensionError::InstallFailed(
+                "Downloaded file is not a valid WASM binary (bad magic number)".to_string(),
+            ));
+        }
 
         // Ensure tools directory exists
         tokio::fs::create_dir_all(&self.wasm_tools_dir)
@@ -497,9 +531,10 @@ impl ExtensionManager {
             .map_err(|e| ExtensionError::InstallFailed(e.to_string()))?;
 
         tracing::info!(
-            "Installed WASM tool '{}' ({} bytes) to {}",
+            "Installed WASM tool '{}' ({} bytes) from {} to {}",
             name,
             bytes.len(),
+            url,
             wasm_path.display()
         );
 

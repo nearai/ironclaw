@@ -378,6 +378,25 @@ impl SessionManager {
                 ))
             })?;
 
+        // Restrictive permissions: session file contains a secret token
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let perms = std::fs::Permissions::from_mode(0o600);
+            tokio::fs::set_permissions(&self.config.session_path, perms)
+                .await
+                .map_err(|e| {
+                    LlmError::Io(std::io::Error::new(
+                        e.kind(),
+                        format!(
+                            "Failed to set permissions on {}: {}",
+                            self.config.session_path.display(),
+                            e
+                        ),
+                    ))
+                })?;
+        }
+
         tracing::debug!("Session saved to {}", self.config.session_path.display());
 
         // Also save to DB if a store is attached

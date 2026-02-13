@@ -273,6 +273,16 @@ impl near::agent::channel_host::Host for ChannelStoreData {
             .scan_http_request(&url, &header_vec, body.as_deref())
             .map_err(|e| format!("Potential secret leak blocked: {}", e))?;
 
+        // Get the max response size from capabilities (default 10MB).
+        let max_response_bytes = self
+            .host_state
+            .capabilities()
+            .tool_capabilities
+            .http
+            .as_ref()
+            .map(|h| h.max_response_bytes)
+            .unwrap_or(10 * 1024 * 1024);
+
         // Make the HTTP request using a dedicated single-threaded runtime.
         // We're inside spawn_blocking, so we can't rely on the main runtime's
         // I/O driver (it may be busy with WASM compilation or other startup work).
@@ -334,11 +344,29 @@ impl near::agent::channel_host::Host for ChannelStoreData {
                 })
                 .collect();
             let headers_json = serde_json::to_string(&response_headers).unwrap_or_default();
+
+            // Enforce max response body size to prevent memory exhaustion.
+            let max_response = max_response_bytes;
+            if let Some(cl) = response.content_length() {
+                if cl as usize > max_response {
+                    return Err(format!(
+                        "Response body too large: {} bytes exceeds limit of {} bytes",
+                        cl, max_response
+                    ));
+                }
+            }
             let body = response
                 .bytes()
                 .await
-                .map_err(|e| format!("Failed to read response body: {}", e))?
-                .to_vec();
+                .map_err(|e| format!("Failed to read response body: {}", e))?;
+            if body.len() > max_response {
+                return Err(format!(
+                    "Response body too large: {} bytes exceeds limit of {} bytes",
+                    body.len(),
+                    max_response
+                ));
+            }
+            let body = body.to_vec();
 
             tracing::info!(
                 status = status,
