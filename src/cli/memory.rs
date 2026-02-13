@@ -133,27 +133,12 @@ async fn read(workspace: &Workspace, path: &str, from: Option<u32>, lines: Optio
             let content_lines: Vec<&str> = doc.content.lines().collect();
             
             // Apply line range if specified
-            let (start_idx, end_idx) = match (from, lines) {
-                (Some(f), Some(l)) => {
-                    let start = (f.saturating_sub(1)) as usize;
-                    let end = (start + l as usize).min(content_lines.len());
-                    (start, end)
-                }
-                (Some(f), None) => {
-                    let start = (f.saturating_sub(1)) as usize;
-                    (start, content_lines.len())
-                }
-                (None, Some(l)) => {
-                    (0, (l as usize).min(content_lines.len()))
-                }
-                (None, None) => {
-                    (0, content_lines.len())
-                }
-            };
+            let start_idx = from.map_or(0, |f| f.saturating_sub(1) as usize);
+            let lines_to_take = lines.map_or(content_lines.len(), |l| l as usize);
             
             // Print with line numbers if range was specified
             if from.is_some() || lines.is_some() {
-                for (i, line) in content_lines[start_idx..end_idx].iter().enumerate() {
+                for (i, line) in content_lines.iter().skip(start_idx).take(lines_to_take).enumerate() {
                     println!("{:4} | {}", start_idx + i + 1, line);
                 }
             } else {
