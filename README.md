@@ -71,7 +71,38 @@ IronClaw is the AI assistant you can actually trust with your personal and profe
 - PostgreSQL 15+ with [pgvector](https://github.com/pgvector/pgvector) extension
 - NEAR AI account (authentication handled via setup wizard)
 
-### Build
+## Download or Build
+
+Visit [Releases page](https://github.com/nearai/ironclaw/releases/) to see the latest updates.
+
+<details>
+  <summary>Install via Windows Installer (Windows)</summary>
+
+Download the [Windows Installer](https://github.com/nearai/ironclaw/releases/latest/download/ironclaw-x86_64-pc-windows-msvc.msi) and run it.
+
+</details>
+
+<details>
+  <summary>Install via powershell script (Windows)</summary>
+
+```sh
+irm https://github.com/nearai/ironclaw/releases/latest/download/ironclaw-installer.ps1 | iex
+```
+
+</details>
+
+<details>
+  <summary>Install via shell script (macOS, Linux, Windows/WSL)</summary>
+
+```sh
+curl --proto '=https' --tlsv1.2 -LsSf https://github.com/nearai/ironclaw/releases/latest/download/ironclaw-installer.sh | sh
+```
+</details>
+
+<details>
+  <summary>Compile the source code (Cargo on Windows, Linux, macOS)</summary>
+
+Install it with `cargo`, just make sure you have [Rust](https://rustup.rs) installed on your computer.
 
 ```bash
 # Clone the repository
@@ -84,6 +115,10 @@ cargo build --release
 # Run tests
 cargo test
 ```
+
+For **full release** (after modifying channel sources), run `./scripts/build-all.sh` to rebuild channels first.
+
+</details>
 
 ### Database Setup
 
@@ -227,6 +262,9 @@ cargo test
 # Run specific test
 cargo test test_name
 ```
+
+- **Telegram channel**: See [docs/TELEGRAM_SETUP.md](docs/TELEGRAM_SETUP.md) for setup and DM pairing.
+- **Changing channel sources**: Run `./channels-src/telegram/build.sh` before `cargo build` so the updated WASM is bundled.
 
 ## OpenClaw Heritage
 

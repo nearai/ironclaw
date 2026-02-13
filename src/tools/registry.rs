@@ -481,7 +481,7 @@ impl std::fmt::Debug for ToolRegistry {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::tools::tool::EchoTool;
+    use crate::tools::registry::EchoTool;
 
     #[tokio::test]
     async fn test_register_and_get() {

@@ -51,6 +51,7 @@ pub mod extensions;
 pub mod history;
 pub mod llm;
 pub mod orchestrator;
+pub mod pairing;
 pub mod safety;
 pub mod sandbox;
 pub mod secrets;
