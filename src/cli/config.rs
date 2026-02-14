@@ -192,16 +192,12 @@ async fn reset_setting(store: Option<&dyn crate::db::Database>, path: &str) -> a
 fn show_path(has_db: bool) -> anyhow::Result<()> {
     if has_db {
         println!("Settings stored in: database (settings table)");
-        println!(
-            "Bootstrap config:   {}",
-            crate::bootstrap::BootstrapConfig::default_path().display()
-        );
     } else {
         println!("Settings stored in: PostgreSQL (not connected, using defaults)");
     }
     println!(
         "Env config:         {}",
-        crate::bootstrap::BootstrapConfig::default_path().display()
+        crate::bootstrap::ironclaw_env_path().display()
     );
 
     Ok(())

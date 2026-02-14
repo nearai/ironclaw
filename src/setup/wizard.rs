@@ -1021,34 +1021,70 @@ impl SetupWizard {
     async fn save_and_summarize(&mut self) -> Result<(), SetupError> {
         self.settings.onboard_completed = true;
 
-        // Write all settings to the database
-        if let Some(ref pool) = self.db_pool {
-            let store = crate::history::Store::from_pool(pool.clone());
+        // Write all settings to the database (whichever backend is active).
+        {
             let db_map = self.settings.to_db_map();
-            store
-                .set_all_settings("default", &db_map)
-                .await
-                .map_err(|e| {
-                    SetupError::Database(format!("Failed to save settings to database: {}", e))
-                })?;
-        } else {
-            return Err(SetupError::Database(
-                "No database connection, cannot save settings".to_string(),
-            ));
+            let saved = false;
+
+            #[cfg(feature = "postgres")]
+            let saved = if !saved {
+                if let Some(ref pool) = self.db_pool {
+                    let store = crate::history::Store::from_pool(pool.clone());
+                    store
+                        .set_all_settings("default", &db_map)
+                        .await
+                        .map_err(|e| {
+                            SetupError::Database(format!(
+                                "Failed to save settings to database: {}",
+                                e
+                            ))
+                        })?;
+                    true
+                } else {
+                    false
+                }
+            } else {
+                saved
+            };
+
+            #[cfg(feature = "libsql")]
+            let saved = if !saved {
+                if let Some(ref backend) = self.db_backend {
+                    use crate::db::Database as _;
+                    backend
+                        .set_all_settings("default", &db_map)
+                        .await
+                        .map_err(|e| {
+                            SetupError::Database(format!(
+                                "Failed to save settings to database: {}",
+                                e
+                            ))
+                        })?;
+                    true
+                } else {
+                    false
+                }
+            } else {
+                saved
+            };
+
+            if !saved {
+                return Err(SetupError::Database(
+                    "No database connection, cannot save settings".to_string(),
+                ));
+            }
         }
 
-        // Save bootstrap config (fields needed before DB is available)
-        let mut bootstrap = crate::bootstrap::BootstrapConfig::load();
-        bootstrap.database_url = self.settings.database_url.clone();
-        bootstrap.database_pool_size = self.settings.database_pool_size;
-        bootstrap.secrets_master_key_source = self.settings.secrets_master_key_source;
-        bootstrap.onboard_completed = true;
-        bootstrap.save().map_err(|e| {
-            SetupError::Io(std::io::Error::other(format!(
-                "Failed to save bootstrap config: {}",
-                e
-            )))
-        })?;
+        // Save DATABASE_URL to ~/.ironclaw/.env (the only field that needs
+        // disk persistence before the DB is available).
+        if let Some(ref url) = self.settings.database_url {
+            crate::bootstrap::save_database_url(url).map_err(|e| {
+                SetupError::Io(std::io::Error::other(format!(
+                    "Failed to save DATABASE_URL to .env: {}",
+                    e
+                )))
+            })?;
+        }
 
         println!();
         print_success("Configuration saved to database");

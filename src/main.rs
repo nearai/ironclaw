@@ -240,7 +240,8 @@ async fn main() -> anyhow::Result<()> {
             skip_auth,
             channels_only,
         }) => {
-            // Load .env before running onboarding wizard
+            // Load .env files before running onboarding wizard
+            ironclaw::bootstrap::load_ironclaw_env();
             let _ = dotenvy::dotenv();
 
             #[cfg(any(feature = "postgres", feature = "libsql"))]
@@ -264,19 +265,20 @@ async fn main() -> anyhow::Result<()> {
         }
     }
 
+    // Load ~/.ironclaw/.env early so DATABASE_URL (and any other vars) are
+    // available to all subsequent env-based config resolution.
+    ironclaw::bootstrap::load_ironclaw_env();
+
     // Enhanced first-run detection
     #[cfg(any(feature = "postgres", feature = "libsql"))]
     if !cli.no_onboard
-        && let Some(reason) = check_onboard_needed().await
+        && let Some(reason) = check_onboard_needed()
     {
         println!("Onboarding needed: {}", reason);
         println!();
         let mut wizard = SetupWizard::new();
         wizard.run().await?;
     }
-
-    // Load bootstrap config (4 fields that must live on disk)
-    let bootstrap = ironclaw::bootstrap::BootstrapConfig::load();
 
     // Load initial config from env + disk (before DB is available)
     let mut config = match Config::from_env().await {
@@ -415,7 +417,7 @@ async fn main() -> anyhow::Result<()> {
         }
 
         // Reload config from DB now that we have a connection.
-        match Config::from_db(db.as_ref(), "default", &bootstrap).await {
+        match Config::from_db(db.as_ref(), "default").await {
             Ok(db_config) => {
                 config = db_config;
                 tracing::info!("Configuration reloaded from database");
@@ -1166,13 +1168,11 @@ async fn main() -> anyhow::Result<()> {
 /// Check if onboarding is needed and return the reason.
 ///
 /// Returns `Some(reason)` if onboarding should be triggered, `None` otherwise.
+/// Called after `load_ironclaw_env()`, so DATABASE_URL from `~/.ironclaw/.env`
+/// is already in the environment.
 #[cfg(any(feature = "postgres", feature = "libsql"))]
-async fn check_onboard_needed() -> Option<&'static str> {
-    let bootstrap = ironclaw::bootstrap::BootstrapConfig::load();
-
-    // Database not configured (and not in env)
-    let has_db = bootstrap.database_url.is_some()
-        || std::env::var("DATABASE_URL").is_ok()
+fn check_onboard_needed() -> Option<&'static str> {
+    let has_db = std::env::var("DATABASE_URL").is_ok()
         || std::env::var("LIBSQL_PATH").is_ok()
         || ironclaw::config::default_libsql_path().exists();
 
