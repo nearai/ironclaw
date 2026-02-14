@@ -299,6 +299,7 @@ Report when the job is complete or if you encounter issues you cannot resolve."#
                                 parameters: tc.arguments.clone(),
                                 reasoning: String::new(),
                                 alternatives: vec![],
+                                tool_call_id: tc.id.clone(),
                             };
 
                             self.process_tool_result(reason_ctx, &selection, result)
@@ -565,7 +566,7 @@ Report when the job is complete or if you encounter issues you cannot resolve."#
                 );
 
                 reason_ctx.messages.push(ChatMessage::tool_result(
-                    "tool_call_id",
+                    &selection.tool_call_id,
                     &selection.tool_name,
                     wrapped,
                 ));
@@ -597,7 +598,7 @@ Report when the job is complete or if you encounter issues you cannot resolve."#
                 }
 
                 reason_ctx.messages.push(ChatMessage::tool_result(
-                    "tool_call_id",
+                    &selection.tool_call_id,
                     &selection.tool_name,
                     format!("Error: {}", e),
                 ));
@@ -647,12 +648,15 @@ Report when the job is complete or if you encounter issues you cannot resolve."#
                 .execute_tool(&action.tool_name, &action.parameters)
                 .await;
 
-            // Create a synthetic ToolSelection for process_tool_result
+            // Create a synthetic ToolSelection for process_tool_result.
+            // Plan actions don't originate from an LLM tool_call response so
+            // there is no real tool_call_id; generate a unique one.
             let selection = ToolSelection {
                 tool_name: action.tool_name.clone(),
                 parameters: action.parameters.clone(),
                 reasoning: action.reasoning.clone(),
                 alternatives: vec![],
+                tool_call_id: format!("plan_{}_{}", self.job_id, i),
             };
 
             // Process the result
@@ -774,7 +778,25 @@ impl From<TaskOutput> for Result<String, Error> {
 
 #[cfg(test)]
 mod tests {
+    use crate::llm::ToolSelection;
     use crate::util::llm_signals_completion;
+
+    #[test]
+    fn test_tool_selection_preserves_call_id() {
+        let selection = ToolSelection {
+            tool_name: "memory_search".to_string(),
+            parameters: serde_json::json!({"query": "test"}),
+            reasoning: "Need to search memory".to_string(),
+            alternatives: vec![],
+            tool_call_id: "call_abc123".to_string(),
+        };
+
+        assert_eq!(selection.tool_call_id, "call_abc123");
+        assert_ne!(
+            selection.tool_call_id, "tool_call_id",
+            "tool_call_id must not be the hardcoded placeholder string"
+        );
+    }
 
     #[test]
     fn test_completion_positive_signals() {
