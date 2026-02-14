@@ -326,20 +326,20 @@ impl TestHarness {
                 }
 
                 // Verify expected output
-                if let Some(ref expected) = test.expected_output {
-                    if &actual != expected {
-                        return TestResult {
-                            name: test.name.clone(),
-                            passed: false,
-                            duration,
-                            error: Some(format!(
-                                "Output mismatch:\nExpected: {}\nActual: {}",
-                                serde_json::to_string_pretty(expected).unwrap_or_default(),
-                                serde_json::to_string_pretty(&actual).unwrap_or_default()
-                            )),
-                            actual_output: Some(actual),
-                        };
-                    }
+                if let Some(ref expected) = test.expected_output
+                    && &actual != expected
+                {
+                    return TestResult {
+                        name: test.name.clone(),
+                        passed: false,
+                        duration,
+                        error: Some(format!(
+                            "Output mismatch:\nExpected: {}\nActual: {}",
+                            serde_json::to_string_pretty(expected).unwrap_or_default(),
+                            serde_json::to_string_pretty(&actual).unwrap_or_default()
+                        )),
+                        actual_output: Some(actual),
+                    };
                 }
 
                 // Verify expected fields
@@ -357,19 +357,19 @@ impl TestHarness {
                             };
                         }
 
-                        if let Some(ref expected_value) = field.value {
-                            if field_value != Some(expected_value) {
-                                return TestResult {
-                                    name: test.name.clone(),
-                                    passed: false,
-                                    duration,
-                                    error: Some(format!(
-                                        "Field '{}' mismatch: expected {:?}, got {:?}",
-                                        field.path, expected_value, field_value
-                                    )),
-                                    actual_output: Some(actual),
-                                };
-                            }
+                        if let Some(ref expected_value) = field.value
+                            && field_value != Some(expected_value)
+                        {
+                            return TestResult {
+                                name: test.name.clone(),
+                                passed: false,
+                                duration,
+                                error: Some(format!(
+                                    "Field '{}' mismatch: expected {:?}, got {:?}",
+                                    field.path, expected_value, field_value
+                                )),
+                                actual_output: Some(actual),
+                            };
                         }
                     }
                 }

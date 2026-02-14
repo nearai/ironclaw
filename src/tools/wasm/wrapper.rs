@@ -259,13 +259,13 @@ impl near::agent::host::Host for StoreData {
 
             // Check Content-Length header for early rejection of oversized responses.
             let max_response = max_response_bytes;
-            if let Some(cl) = response.content_length() {
-                if cl as usize > max_response {
-                    return Err(format!(
-                        "Response body too large: {} bytes exceeds limit of {} bytes",
-                        cl, max_response
-                    ));
-                }
+            if let Some(cl) = response.content_length()
+                && cl as usize > max_response
+            {
+                return Err(format!(
+                    "Response body too large: {} bytes exceeds limit of {} bytes",
+                    cl, max_response
+                ));
             }
 
             // Read body with a size cap to prevent memory exhaustion.

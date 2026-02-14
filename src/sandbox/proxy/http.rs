@@ -259,11 +259,11 @@ async fn handle_connect(
 
     let decision = state.decider.decide(&network_req).await;
 
-    if !decision.is_allowed() {
-        if let NetworkDecision::Deny { reason } = decision {
-            tracing::info!("Proxy: blocked CONNECT {} - {}", host, reason);
-            return error_response(StatusCode::FORBIDDEN, reason);
-        }
+    if !decision.is_allowed()
+        && let NetworkDecision::Deny { reason } = decision
+    {
+        tracing::info!("Proxy: blocked CONNECT {} - {}", host, reason);
+        return error_response(StatusCode::FORBIDDEN, reason);
     }
 
     tracing::debug!("Proxy: allowing CONNECT to {}", host);
@@ -294,10 +294,10 @@ async fn forward_request(
 
     // Copy headers (except hop-by-hop headers)
     for (name, value) in req.headers() {
-        if !is_hop_by_hop_header(name.as_str()) {
-            if let Ok(v) = value.to_str() {
-                builder = builder.header(name.as_str(), v);
-            }
+        if !is_hop_by_hop_header(name.as_str())
+            && let Ok(v) = value.to_str()
+        {
+            builder = builder.header(name.as_str(), v);
         }
     }
 

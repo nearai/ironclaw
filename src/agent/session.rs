@@ -346,11 +346,11 @@ impl Thread {
                 let mut turn = Turn::new(turn_number, &msg.content);
 
                 // Check if next is assistant response
-                if let Some(next) = iter.peek() {
-                    if next.role == crate::llm::Role::Assistant {
-                        let response = iter.next().expect("peeked");
-                        turn.complete(&response.content);
-                    }
+                if let Some(next) = iter.peek()
+                    && next.role == crate::llm::Role::Assistant
+                {
+                    let response = iter.next().expect("peeked");
+                    turn.complete(&response.content);
                 }
 
                 self.turns.push(turn);

@@ -26,6 +26,7 @@ pub mod task;
 pub mod undo;
 pub mod worker;
 
+pub(crate) use agent_loop::truncate_for_preview;
 pub use agent_loop::{Agent, AgentDeps};
 pub use compaction::{CompactionResult, ContextCompactor};
 pub use context_monitor::{CompactionStrategy, ContextBreakdown, ContextMonitor};

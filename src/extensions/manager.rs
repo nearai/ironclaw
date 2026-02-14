@@ -57,7 +57,7 @@ pub struct ExtensionManager {
     _tunnel_url: Option<String>,
     user_id: String,
     /// Optional database store for DB-backed MCP config.
-    store: Option<Arc<crate::history::Store>>,
+    store: Option<Arc<dyn crate::db::Database>>,
 }
 
 impl ExtensionManager {
@@ -71,7 +71,7 @@ impl ExtensionManager {
         wasm_channels_dir: PathBuf,
         tunnel_url: Option<String>,
         user_id: String,
-        store: Option<Arc<crate::history::Store>>,
+        store: Option<Arc<dyn crate::db::Database>>,
     ) -> Self {
         Self {
             registry: ExtensionRegistry::new(),
@@ -351,7 +351,7 @@ impl ExtensionManager {
     ) -> Result<crate::tools::mcp::config::McpServersFile, crate::tools::mcp::config::ConfigError>
     {
         if let Some(ref store) = self.store {
-            crate::tools::mcp::config::load_mcp_servers_from_db(store, &self.user_id).await
+            crate::tools::mcp::config::load_mcp_servers_from_db(store.as_ref(), &self.user_id).await
         } else {
             crate::tools::mcp::config::load_mcp_servers().await
         }
@@ -375,7 +375,8 @@ impl ExtensionManager {
     ) -> Result<(), crate::tools::mcp::config::ConfigError> {
         config.validate()?;
         if let Some(ref store) = self.store {
-            crate::tools::mcp::config::add_mcp_server_db(store, &self.user_id, config).await
+            crate::tools::mcp::config::add_mcp_server_db(store.as_ref(), &self.user_id, config)
+                .await
         } else {
             crate::tools::mcp::config::add_mcp_server(config).await
         }
@@ -386,7 +387,8 @@ impl ExtensionManager {
         name: &str,
     ) -> Result<(), crate::tools::mcp::config::ConfigError> {
         if let Some(ref store) = self.store {
-            crate::tools::mcp::config::remove_mcp_server_db(store, &self.user_id, name).await
+            crate::tools::mcp::config::remove_mcp_server_db(store.as_ref(), &self.user_id, name)
+                .await
         } else {
             crate::tools::mcp::config::remove_mcp_server(name).await
         }
@@ -490,13 +492,13 @@ impl ExtensionManager {
         }
 
         // Check Content-Length header before downloading the full body
-        if let Some(len) = response.content_length() {
-            if len as usize > MAX_WASM_SIZE {
-                return Err(ExtensionError::InstallFailed(format!(
-                    "WASM binary too large ({} bytes, max {} bytes)",
-                    len, MAX_WASM_SIZE
-                )));
-            }
+        if let Some(len) = response.content_length()
+            && len as usize > MAX_WASM_SIZE
+        {
+            return Err(ExtensionError::InstallFailed(format!(
+                "WASM binary too large ({} bytes, max {} bytes)",
+                len, MAX_WASM_SIZE
+            )));
         }
 
         let bytes = response
@@ -766,27 +768,27 @@ impl ExtensionManager {
         };
 
         // Check env var first
-        if let Some(ref env_var) = auth.env_var {
-            if let Ok(value) = std::env::var(env_var) {
-                // Store the env var value as a secret
-                let params = CreateSecretParams::new(&auth.secret_name, &value)
-                    .with_provider(name.to_string());
-                self.secrets
-                    .create(&self.user_id, params)
-                    .await
-                    .map_err(|e| ExtensionError::AuthFailed(e.to_string()))?;
+        if let Some(ref env_var) = auth.env_var
+            && let Ok(value) = std::env::var(env_var)
+        {
+            // Store the env var value as a secret
+            let params =
+                CreateSecretParams::new(&auth.secret_name, &value).with_provider(name.to_string());
+            self.secrets
+                .create(&self.user_id, params)
+                .await
+                .map_err(|e| ExtensionError::AuthFailed(e.to_string()))?;
 
-                return Ok(AuthResult {
-                    name: name.to_string(),
-                    kind: ExtensionKind::WasmTool,
-                    auth_url: None,
-                    callback_type: None,
-                    instructions: None,
-                    setup_url: None,
-                    awaiting_token: false,
-                    status: "authenticated".to_string(),
-                });
-            }
+            return Ok(AuthResult {
+                name: name.to_string(),
+                kind: ExtensionKind::WasmTool,
+                auth_url: None,
+                callback_type: None,
+                instructions: None,
+                setup_url: None,
+                awaiting_token: false,
+                status: "authenticated".to_string(),
+            });
         }
 
         // Check if already authenticated
