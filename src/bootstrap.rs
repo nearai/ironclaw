@@ -124,7 +124,7 @@ impl BootstrapConfig {
 /// If both conditions hold, migrates settings, MCP servers, and session data
 /// to the database, writes `bootstrap.json`, and renames old files to `.migrated`.
 pub async fn migrate_disk_to_db(
-    store: &crate::history::Store,
+    store: &dyn crate::db::Database,
     user_id: &str,
 ) -> Result<(), MigrationError> {
     let legacy_settings_path = BootstrapConfig::legacy_settings_path();

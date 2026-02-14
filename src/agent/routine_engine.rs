@@ -24,14 +24,14 @@ use crate::agent::routine::{
 };
 use crate::channels::{IncomingMessage, OutgoingResponse};
 use crate::config::RoutineConfig;
-use crate::history::Store;
+use crate::db::Database;
 use crate::llm::{ChatMessage, CompletionRequest, FinishReason, LlmProvider};
 use crate::workspace::Workspace;
 
 /// The routine execution engine.
 pub struct RoutineEngine {
     config: RoutineConfig,
-    store: Arc<Store>,
+    store: Arc<dyn Database>,
     llm: Arc<dyn LlmProvider>,
     workspace: Arc<Workspace>,
     /// Sender for notifications (routed to channel manager).
@@ -45,7 +45,7 @@ pub struct RoutineEngine {
 impl RoutineEngine {
     pub fn new(
         config: RoutineConfig,
-        store: Arc<Store>,
+        store: Arc<dyn Database>,
         llm: Arc<dyn LlmProvider>,
         workspace: Arc<Workspace>,
         notify_tx: mpsc::Sender<OutgoingResponse>,
@@ -103,10 +103,9 @@ impl RoutineEngine {
             if let Trigger::Event {
                 channel: Some(ch), ..
             } = &routine.trigger
+                && ch != &message.channel
             {
-                if ch != &message.channel {
-                    continue;
-                }
+                continue;
             }
 
             // Regex match
@@ -294,7 +293,7 @@ impl RoutineEngine {
 
 /// Shared context passed to the execution function.
 struct EngineContext {
-    store: Arc<Store>,
+    store: Arc<dyn Database>,
     llm: Arc<dyn LlmProvider>,
     workspace: Arc<Workspace>,
     notify_tx: mpsc::Sender<OutgoingResponse>,

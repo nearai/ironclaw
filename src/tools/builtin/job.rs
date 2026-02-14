@@ -15,7 +15,8 @@ use chrono::Utc;
 use uuid::Uuid;
 
 use crate::context::{ContextManager, JobContext, JobState};
-use crate::history::{SandboxJobRecord, Store};
+use crate::db::Database;
+use crate::history::SandboxJobRecord;
 use crate::orchestrator::job_manager::{ContainerJobManager, JobMode};
 use crate::tools::tool::{Tool, ToolError, ToolOutput};
 
@@ -27,7 +28,7 @@ use crate::tools::tool::{Tool, ToolError, ToolOutput};
 pub struct CreateJobTool {
     context_manager: Arc<ContextManager>,
     job_manager: Option<Arc<ContainerJobManager>>,
-    store: Option<Arc<Store>>,
+    store: Option<Arc<dyn Database>>,
 }
 
 impl CreateJobTool {
@@ -43,7 +44,7 @@ impl CreateJobTool {
     pub fn with_sandbox(
         mut self,
         job_manager: Arc<ContainerJobManager>,
-        store: Option<Arc<Store>>,
+        store: Option<Arc<dyn Database>>,
     ) -> Self {
         self.job_manager = Some(job_manager);
         self.store = store;
@@ -157,18 +158,18 @@ impl CreateJobTool {
         });
 
         // Persist the job mode to DB
-        if mode == JobMode::ClaudeCode {
-            if let Some(store) = self.store.clone() {
-                let job_id_copy = job_id;
-                tokio::spawn(async move {
-                    if let Err(e) = store
-                        .update_sandbox_job_mode(job_id_copy, "claude_code")
-                        .await
-                    {
-                        tracing::warn!(job_id = %job_id_copy, "Failed to set job mode: {}", e);
-                    }
-                });
-            }
+        if mode == JobMode::ClaudeCode
+            && let Some(store) = self.store.clone()
+        {
+            let job_id_copy = job_id;
+            tokio::spawn(async move {
+                if let Err(e) = store
+                    .update_sandbox_job_mode(job_id_copy, "claude_code")
+                    .await
+                {
+                    tracing::warn!(job_id = %job_id_copy, "Failed to set job mode: {}", e);
+                }
+            });
         }
 
         // Create the container job with the pre-determined job_id.
