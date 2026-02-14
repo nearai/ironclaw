@@ -357,8 +357,7 @@ Report when the job is complete or if you encounter issues you cannot resolve."#
                 let job_id = self.job_id;
 
                 async move {
-                    let result =
-                        Self::execute_tool_inner(&deps, job_id, &tool_name, &params).await;
+                    let result = Self::execute_tool_inner(&deps, job_id, &tool_name, &params).await;
                     ToolExecResult { result }
                 }
             })
@@ -374,13 +373,13 @@ Report when the job is complete or if you encounter issues you cannot resolve."#
         tool_name: &str,
         params: &serde_json::Value,
     ) -> Result<String, Error> {
-        let tool = deps
-            .tools
-            .get(tool_name)
-            .await
-            .ok_or_else(|| crate::error::ToolError::NotFound {
-                name: tool_name.to_string(),
-            })?;
+        let tool =
+            deps.tools
+                .get(tool_name)
+                .await
+                .ok_or_else(|| crate::error::ToolError::NotFound {
+                    name: tool_name.to_string(),
+                })?;
 
         // Tools requiring approval are blocked in autonomous jobs
         if tool.requires_approval() {
@@ -518,7 +517,8 @@ Report when the job is complete or if you encounter issues you cannot resolve."#
                     .await
                     .ok()
             }
-            Ok(Err(e)) => deps.context_manager
+            Ok(Err(e)) => deps
+                .context_manager
                 .update_memory(job_id, |mem| {
                     let rec = mem
                         .create_action(tool_name, params.clone())
@@ -528,7 +528,8 @@ Report when the job is complete or if you encounter issues you cannot resolve."#
                 })
                 .await
                 .ok(),
-            Err(_) => deps.context_manager
+            Err(_) => deps
+                .context_manager
                 .update_memory(job_id, |mem| {
                     let rec = mem
                         .create_action(tool_name, params.clone())

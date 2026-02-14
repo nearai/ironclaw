@@ -1303,18 +1303,16 @@ impl Agent {
                                 }
                                 Ok(crate::hooks::HookOutcome::Continue {
                                     modified: Some(new_params),
-                                }) => {
-                                    match serde_json::from_str(&new_params) {
-                                        Ok(parsed) => tc.arguments = parsed,
-                                        Err(e) => {
-                                            tracing::warn!(
-                                                tool = %tc.name,
-                                                "Hook returned non-JSON modification for ToolCall, ignoring: {}",
-                                                e
-                                            );
-                                        }
+                                }) => match serde_json::from_str(&new_params) {
+                                    Ok(parsed) => tc.arguments = parsed,
+                                    Err(e) => {
+                                        tracing::warn!(
+                                            tool = %tc.name,
+                                            "Hook returned non-JSON modification for ToolCall, ignoring: {}",
+                                            e
+                                        );
                                     }
-                                }
+                                },
                                 _ => {} // Continue, fail-open errors already logged
                             }
                         }

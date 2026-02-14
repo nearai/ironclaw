@@ -77,17 +77,15 @@ impl HookEvent {
             HookEvent::Inbound { content, .. } | HookEvent::Outbound { content, .. } => {
                 *content = modified.to_string();
             }
-            HookEvent::ToolCall { parameters, .. } => {
-                match serde_json::from_str(modified) {
-                    Ok(parsed) => *parameters = parsed,
-                    Err(e) => {
-                        tracing::warn!(
-                            "Hook returned non-JSON modification for ToolCall, ignoring: {}",
-                            e
-                        );
-                    }
+            HookEvent::ToolCall { parameters, .. } => match serde_json::from_str(modified) {
+                Ok(parsed) => *parameters = parsed,
+                Err(e) => {
+                    tracing::warn!(
+                        "Hook returned non-JSON modification for ToolCall, ignoring: {}",
+                        e
+                    );
                 }
-            }
+            },
             HookEvent::ResponseTransform { response, .. } => {
                 *response = modified.to_string();
             }
