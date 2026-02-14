@@ -67,11 +67,17 @@ impl HookRegistry {
         let point = event.hook_point();
         let ctx = HookContext::default();
 
-        let hooks = self.hooks.read().await;
-        let matching: Vec<_> = hooks
-            .iter()
-            .filter(|e| e.hook.hook_points().contains(&point))
-            .collect();
+        // Clone matching hooks and drop the read guard before executing.
+        // Each hook can run up to its timeout, so holding the guard would
+        // block concurrent register/unregister/run calls.
+        let matching: Vec<Arc<dyn Hook>> = {
+            let hooks = self.hooks.read().await;
+            hooks
+                .iter()
+                .filter(|e| e.hook.hook_points().contains(&point))
+                .map(|e| e.hook.clone())
+                .collect()
+        };
 
         if matching.is_empty() {
             return Ok(HookOutcome::ok());
@@ -79,8 +85,7 @@ impl HookRegistry {
 
         let mut current_event = event.clone();
 
-        for entry in matching {
-            let hook = &entry.hook;
+        for hook in &matching {
             let timeout = hook.timeout();
 
             let result = tokio::time::timeout(timeout, hook.execute(&current_event, &ctx)).await;

@@ -78,8 +78,14 @@ impl HookEvent {
                 *content = modified.to_string();
             }
             HookEvent::ToolCall { parameters, .. } => {
-                if let Ok(parsed) = serde_json::from_str(modified) {
-                    *parameters = parsed;
+                match serde_json::from_str(modified) {
+                    Ok(parsed) => *parameters = parsed,
+                    Err(e) => {
+                        tracing::warn!(
+                            "Hook returned non-JSON modification for ToolCall, ignoring: {}",
+                            e
+                        );
+                    }
                 }
             }
             HookEvent::ResponseTransform { response, .. } => {

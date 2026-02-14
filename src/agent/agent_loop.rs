@@ -522,11 +522,6 @@ impl Agent {
             self.maybe_hydrate_thread(message, external_thread_id).await;
         }
 
-        // Hydrate thread from DB if it's a historical thread not in memory
-        if let Some(ref external_thread_id) = message.thread_id {
-            self.maybe_hydrate_thread(message, external_thread_id).await;
-        }
-
         // Resolve session and thread
         let (session, thread_id) = self
             .session_manager
@@ -1312,8 +1307,15 @@ impl Agent {
                                 Ok(crate::hooks::HookOutcome::Continue {
                                     modified: Some(new_params),
                                 }) => {
-                                    if let Ok(parsed) = serde_json::from_str(&new_params) {
-                                        tc.arguments = parsed;
+                                    match serde_json::from_str(&new_params) {
+                                        Ok(parsed) => tc.arguments = parsed,
+                                        Err(e) => {
+                                            tracing::warn!(
+                                                tool = %tc.name,
+                                                "Hook returned non-JSON modification for ToolCall, ignoring: {}",
+                                                e
+                                            );
+                                        }
                                     }
                                 }
                                 _ => {} // Continue, fail-open errors already logged
