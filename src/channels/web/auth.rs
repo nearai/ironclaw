@@ -25,23 +25,21 @@ pub async fn auth_middleware(
     next: Next,
 ) -> Response {
     // Try Authorization header first (constant-time comparison)
-    if let Some(auth_header) = headers.get("authorization") {
-        if let Ok(value) = auth_header.to_str() {
-            if let Some(token) = value.strip_prefix("Bearer ") {
-                if bool::from(token.as_bytes().ct_eq(auth.token.as_bytes())) {
-                    return next.run(request).await;
-                }
-            }
-        }
+    if let Some(auth_header) = headers.get("authorization")
+        && let Ok(value) = auth_header.to_str()
+        && let Some(token) = value.strip_prefix("Bearer ")
+        && bool::from(token.as_bytes().ct_eq(auth.token.as_bytes()))
+    {
+        return next.run(request).await;
     }
 
     // Fall back to query parameter for SSE EventSource (constant-time comparison)
     if let Some(query) = request.uri().query() {
         for pair in query.split('&') {
-            if let Some(token) = pair.strip_prefix("token=") {
-                if bool::from(token.as_bytes().ct_eq(auth.token.as_bytes())) {
-                    return next.run(request).await;
-                }
+            if let Some(token) = pair.strip_prefix("token=")
+                && bool::from(token.as_bytes().ct_eq(auth.token.as_bytes()))
+            {
+                return next.run(request).await;
             }
         }
     }

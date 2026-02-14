@@ -59,7 +59,7 @@ pub struct SessionManager {
     /// Prevents thundering herd during concurrent 401s.
     renewal_lock: Mutex<()>,
     /// Optional database store for persisting session to the settings table.
-    store: RwLock<Option<Arc<crate::history::Store>>>,
+    store: RwLock<Option<Arc<dyn crate::db::Database>>>,
     /// User ID for DB settings (default: "default").
     user_id: RwLock<String>,
 }
@@ -80,16 +80,16 @@ impl SessionManager {
         };
 
         // Try to load existing session synchronously during construction
-        if let Ok(data) = std::fs::read_to_string(&manager.config.session_path) {
-            if let Ok(session) = serde_json::from_str::<SessionData>(&data) {
-                // We can't await here, so we use try_write
-                if let Ok(mut guard) = manager.token.try_write() {
-                    *guard = Some(SecretString::from(session.session_token));
-                    tracing::info!(
-                        "Loaded session token from {}",
-                        manager.config.session_path.display()
-                    );
-                }
+        if let Ok(data) = std::fs::read_to_string(&manager.config.session_path)
+            && let Ok(session) = serde_json::from_str::<SessionData>(&data)
+        {
+            // We can't await here, so we use try_write
+            if let Ok(mut guard) = manager.token.try_write() {
+                *guard = Some(SecretString::from(session.session_token));
+                tracing::info!(
+                    "Loaded session token from {}",
+                    manager.config.session_path.display()
+                );
             }
         }
 
@@ -122,7 +122,7 @@ impl SessionManager {
     /// When a store is attached, session tokens are saved to the `settings`
     /// table (key: `nearai.session_token`) in addition to the disk file.
     /// On load, DB is preferred over disk.
-    pub async fn attach_store(&self, store: Arc<crate::history::Store>, user_id: &str) {
+    pub async fn attach_store(&self, store: Arc<dyn crate::db::Database>, user_id: &str) {
         *self.store.write().await = Some(store);
         *self.user_id.write().await = user_id.to_string();
 
@@ -500,15 +500,14 @@ pub async fn create_session_manager(config: SessionConfig) -> Arc<SessionManager
     let manager = SessionManager::new_async(config).await;
 
     // Check for legacy env var and migrate if present and no file token
-    if !manager.has_token().await {
-        if let Ok(token) = std::env::var("NEARAI_SESSION_TOKEN") {
-            if !token.is_empty() {
-                tracing::info!("Migrating session token from NEARAI_SESSION_TOKEN env var to file");
-                manager.set_token(SecretString::from(token.clone())).await;
-                if let Err(e) = manager.save_session(&token, None).await {
-                    tracing::warn!("Failed to save migrated session: {}", e);
-                }
-            }
+    if !manager.has_token().await
+        && let Ok(token) = std::env::var("NEARAI_SESSION_TOKEN")
+        && !token.is_empty()
+    {
+        tracing::info!("Migrating session token from NEARAI_SESSION_TOKEN env var to file");
+        manager.set_token(SecretString::from(token.clone())).await;
+        if let Err(e) = manager.save_session(&token, None).await {
+            tracing::warn!("Failed to save migrated session: {}", e);
         }
     }
 

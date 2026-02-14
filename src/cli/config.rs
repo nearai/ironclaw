@@ -1,7 +1,9 @@
 //! Configuration management CLI commands.
 //!
 //! Commands for viewing and modifying settings.
-//! Settings are stored in PostgreSQL (env > DB > default).
+//! Settings are stored in the database (env > DB > default).
+
+use std::sync::Arc;
 
 use clap::Subcommand;
 
@@ -47,8 +49,8 @@ pub enum ConfigCommand {
 /// if the database is not available.
 pub async fn run_config_command(cmd: ConfigCommand) -> anyhow::Result<()> {
     // Try to connect to the DB for settings access
-    let store = match connect_store().await {
-        Ok(s) => Some(s),
+    let db: Option<Arc<dyn crate::db::Database>> = match connect_db().await {
+        Ok(d) => Some(d),
         Err(e) => {
             eprintln!(
                 "Warning: Could not connect to database ({}), using disk fallback",
@@ -58,29 +60,30 @@ pub async fn run_config_command(cmd: ConfigCommand) -> anyhow::Result<()> {
         }
     };
 
+    let db_ref = db.as_deref();
     match cmd {
-        ConfigCommand::List { filter } => list_settings(store.as_ref(), filter).await,
-        ConfigCommand::Get { path } => get_setting(store.as_ref(), &path).await,
-        ConfigCommand::Set { path, value } => set_setting(store.as_ref(), &path, &value).await,
-        ConfigCommand::Reset { path } => reset_setting(store.as_ref(), &path).await,
-        ConfigCommand::Path => show_path(store.is_some()),
+        ConfigCommand::List { filter } => list_settings(db_ref, filter).await,
+        ConfigCommand::Get { path } => get_setting(db_ref, &path).await,
+        ConfigCommand::Set { path, value } => set_setting(db_ref, &path, &value).await,
+        ConfigCommand::Reset { path } => reset_setting(db_ref, &path).await,
+        ConfigCommand::Path => show_path(db_ref.is_some()),
     }
 }
 
-/// Bootstrap a DB connection for config commands.
-async fn connect_store() -> anyhow::Result<crate::history::Store> {
+/// Bootstrap a DB connection for config commands (backend-agnostic).
+async fn connect_db() -> anyhow::Result<Arc<dyn crate::db::Database>> {
     let config = crate::config::Config::from_env()
         .await
         .map_err(|e| anyhow::anyhow!("{}", e))?;
-    let store = crate::history::Store::new(&config.database).await?;
-    store.run_migrations().await?;
-    Ok(store)
+    crate::db::connect_from_config(&config.database)
+        .await
+        .map_err(|e| anyhow::anyhow!("{}", e))
 }
 
 const DEFAULT_USER_ID: &str = "default";
 
-/// Load settings from DB, falling back to defaults.
-async fn load_settings(store: Option<&crate::history::Store>) -> Settings {
+/// Load settings: DB if available, else disk.
+async fn load_settings(store: Option<&dyn crate::db::Database>) -> Settings {
     if let Some(store) = store {
         match store.get_all_settings(DEFAULT_USER_ID).await {
             Ok(map) if !map.is_empty() => return Settings::from_db_map(&map),
@@ -92,7 +95,7 @@ async fn load_settings(store: Option<&crate::history::Store>) -> Settings {
 
 /// List all settings.
 async fn list_settings(
-    store: Option<&crate::history::Store>,
+    store: Option<&dyn crate::db::Database>,
     filter: Option<String>,
 ) -> anyhow::Result<()> {
     let settings = load_settings(store).await;
@@ -105,10 +108,10 @@ async fn list_settings(
     println!();
 
     for (key, value) in all {
-        if let Some(ref f) = filter {
-            if !key.starts_with(f) {
-                continue;
-            }
+        if let Some(ref f) = filter
+            && !key.starts_with(f)
+        {
+            continue;
         }
 
         let display_value = if value.len() > 60 {
@@ -124,7 +127,7 @@ async fn list_settings(
 }
 
 /// Get a specific setting.
-async fn get_setting(store: Option<&crate::history::Store>, path: &str) -> anyhow::Result<()> {
+async fn get_setting(store: Option<&dyn crate::db::Database>, path: &str) -> anyhow::Result<()> {
     let settings = load_settings(store).await;
 
     match settings.get(path) {
@@ -140,7 +143,7 @@ async fn get_setting(store: Option<&crate::history::Store>, path: &str) -> anyho
 
 /// Set a setting value.
 async fn set_setting(
-    store: Option<&crate::history::Store>,
+    store: Option<&dyn crate::db::Database>,
     path: &str,
     value: &str,
 ) -> anyhow::Result<()> {
@@ -167,7 +170,7 @@ async fn set_setting(
 }
 
 /// Reset a setting to default.
-async fn reset_setting(store: Option<&crate::history::Store>, path: &str) -> anyhow::Result<()> {
+async fn reset_setting(store: Option<&dyn crate::db::Database>, path: &str) -> anyhow::Result<()> {
     let default = Settings::default();
     let default_value = default
         .get(path)
@@ -188,13 +191,17 @@ async fn reset_setting(store: Option<&crate::history::Store>, path: &str) -> any
 /// Show the settings storage info.
 fn show_path(has_db: bool) -> anyhow::Result<()> {
     if has_db {
-        println!("Settings stored in: PostgreSQL (settings table)");
+        println!("Settings stored in: database (settings table)");
+        println!(
+            "Bootstrap config:   {}",
+            crate::bootstrap::BootstrapConfig::default_path().display()
+        );
     } else {
         println!("Settings stored in: PostgreSQL (not connected, using defaults)");
     }
     println!(
         "Env config:         {}",
-        crate::bootstrap::ironclaw_env_path().display()
+        crate::bootstrap::BootstrapConfig::default_path().display()
     );
 
     Ok(())

@@ -39,6 +39,7 @@ use crate::error::ChannelError;
 
 /// Max characters for tool result previews in the terminal.
 const CLI_TOOL_RESULT_MAX: usize = 200;
+
 /// Max characters for thinking/status messages in the terminal.
 const CLI_STATUS_MAX: usize = 200;
 

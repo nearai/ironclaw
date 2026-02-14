@@ -209,20 +209,20 @@ impl NearAiProvider {
             data: Option<Vec<ModelEntry>>,
         }
 
-        if let Ok(resp) = serde_json::from_str::<ModelsResponse>(&response_text) {
-            if let Some(entries) = resp.models.or(resp.data) {
-                let models: Vec<ModelInfo> = entries
-                    .into_iter()
-                    .filter_map(|e| {
-                        e.get_name().map(|name| ModelInfo {
-                            name,
-                            provider: None,
-                        })
+        if let Ok(resp) = serde_json::from_str::<ModelsResponse>(&response_text)
+            && let Some(entries) = resp.models.or(resp.data)
+        {
+            let models: Vec<ModelInfo> = entries
+                .into_iter()
+                .filter_map(|e| {
+                    e.get_name().map(|name| ModelInfo {
+                        name,
+                        provider: None,
                     })
-                    .collect();
-                if !models.is_empty() {
-                    return Ok(models);
-                }
+                })
+                .collect();
+            if !models.is_empty() {
+                return Ok(models);
             }
         }
 
@@ -686,21 +686,21 @@ impl LlmProvider for NearAiProvider {
                         }
                     }
                 }
-            } else if item.item_type == "function_call" {
-                if let (Some(name), Some(call_id)) = (&item.name, &item.call_id) {
-                    // Parse arguments JSON string into Value
-                    let arguments = item
-                        .arguments
-                        .as_ref()
-                        .and_then(|s| serde_json::from_str(s).ok())
-                        .unwrap_or(serde_json::Value::Object(Default::default()));
+            } else if item.item_type == "function_call"
+                && let (Some(name), Some(call_id)) = (&item.name, &item.call_id)
+            {
+                // Parse arguments JSON string into Value
+                let arguments = item
+                    .arguments
+                    .as_ref()
+                    .and_then(|s| serde_json::from_str(s).ok())
+                    .unwrap_or(serde_json::Value::Object(Default::default()));
 
-                    tool_calls.push(ToolCall {
-                        id: call_id.clone(),
-                        name: name.clone(),
-                        arguments,
-                    });
-                }
+                tool_calls.push(ToolCall {
+                    id: call_id.clone(),
+                    name: name.clone(),
+                    arguments,
+                });
             }
         }
 

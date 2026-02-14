@@ -132,12 +132,13 @@ pub async fn run_status_command() -> anyhow::Result<()> {
     // Config path
     println!(
         "\n  Config:      {}",
-        crate::bootstrap::ironclaw_env_path().display()
+        crate::bootstrap::BootstrapConfig::default_path().display()
     );
 
     Ok(())
 }
 
+#[cfg(feature = "postgres")]
 async fn check_database() -> anyhow::Result<()> {
     let url = std::env::var("DATABASE_URL").map_err(|_| anyhow::anyhow!("DATABASE_URL not set"))?;
 
@@ -162,6 +163,12 @@ async fn check_database() -> anyhow::Result<()> {
         .await
         .map_err(|e| anyhow::anyhow!("{}", e))?;
 
+    Ok(())
+}
+
+#[cfg(not(feature = "postgres"))]
+async fn check_database() -> anyhow::Result<()> {
+    // For non-postgres backends, just report configured
     Ok(())
 }
 

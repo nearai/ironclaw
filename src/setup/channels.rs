@@ -12,7 +12,9 @@ use reqwest::Client;
 use secrecy::{ExposeSecret, SecretString};
 use serde::Deserialize;
 
-use crate::secrets::{CreateSecretParams, PostgresSecretsStore, SecretsCrypto, SecretsStore};
+#[cfg(feature = "postgres")]
+use crate::secrets::SecretsCrypto;
+use crate::secrets::{CreateSecretParams, SecretsStore};
 use crate::settings::{Settings, TunnelSettings};
 use crate::setup::prompts::{
     confirm, input, optional_input, print_error, print_info, print_success, secret_input,
@@ -20,15 +22,24 @@ use crate::setup::prompts::{
 
 /// Context for saving secrets during setup.
 pub struct SecretsContext {
-    store: PostgresSecretsStore,
+    store: Arc<dyn SecretsStore>,
     user_id: String,
 }
 
 impl SecretsContext {
-    /// Create a new secrets context.
+    /// Create a new secrets context from a trait-object store.
+    pub fn from_store(store: Arc<dyn SecretsStore>, user_id: &str) -> Self {
+        Self {
+            store,
+            user_id: user_id.to_string(),
+        }
+    }
+
+    /// Create a new secrets context from a PostgreSQL pool and crypto.
+    #[cfg(feature = "postgres")]
     pub fn new(pool: deadpool_postgres::Pool, crypto: Arc<SecretsCrypto>, user_id: &str) -> Self {
         Self {
-            store: PostgresSecretsStore::new(pool, crypto),
+            store: Arc::new(crate::secrets::PostgresSecretsStore::new(pool, crypto)),
             user_id: user_id.to_string(),
         }
     }
@@ -255,32 +266,32 @@ async fn bind_telegram_owner(token: &SecretString) -> Result<Option<i64>, String
 
         // Find the first message with a sender
         for update in &body.result {
-            if let Some(ref msg) = update.message {
-                if let Some(ref from) = msg.from {
-                    let display_name = from
-                        .username
-                        .as_ref()
-                        .map(|u| format!("@{}", u))
-                        .unwrap_or_else(|| from.first_name.clone());
+            if let Some(ref msg) = update.message
+                && let Some(ref from) = msg.from
+            {
+                let display_name = from
+                    .username
+                    .as_ref()
+                    .map(|u| format!("@{}", u))
+                    .unwrap_or_else(|| from.first_name.clone());
 
-                    print_success(&format!(
-                        "Received message from {} (ID: {})",
-                        display_name, from.id
-                    ));
+                print_success(&format!(
+                    "Received message from {} (ID: {})",
+                    display_name, from.id
+                ));
 
-                    // Acknowledge the update so it doesn't pile up
-                    let ack_url = format!(
-                        "https://api.telegram.org/bot{}/getUpdates",
-                        token.expose_secret()
-                    );
-                    let _ = client
-                        .get(&ack_url)
-                        .query(&[("offset", &(update.update_id + 1).to_string())])
-                        .send()
-                        .await;
+                // Acknowledge the update so it doesn't pile up
+                let ack_url = format!(
+                    "https://api.telegram.org/bot{}/getUpdates",
+                    token.expose_secret()
+                );
+                let _ = client
+                    .get(&ack_url)
+                    .query(&[("offset", &(update.update_id + 1).to_string())])
+                    .send()
+                    .await;
 
-                    return Ok(Some(from.id));
-                }
+                return Ok(Some(from.id));
             }
         }
     }

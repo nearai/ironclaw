@@ -38,9 +38,12 @@ impl Config {
     /// Priority: env var > DB settings > default.
     /// This is the primary way to load config after DB is connected.
     pub async fn from_db(
-        store: &crate::history::Store,
+        store: &dyn crate::db::Database,
         user_id: &str,
+        bootstrap: &crate::bootstrap::BootstrapConfig,
     ) -> Result<Self, ConfigError> {
+        let _ = dotenvy::dotenv();
+
         // Load all settings from DB into a Settings struct
         let db_settings = match store.get_all_settings(user_id).await {
             Ok(map) => Settings::from_db_map(&map),
@@ -50,23 +53,28 @@ impl Config {
             }
         };
 
-        Self::build(&db_settings).await
+        Self::build(bootstrap, &db_settings).await
     }
 
     /// Load configuration from environment variables only (no database).
     ///
     /// Used during early startup before the database is connected,
     /// and by CLI commands that don't have DB access.
-    /// Uses defaults for all settings; the DB overwrites them via `from_db()`.
+    /// Falls back to legacy `settings.json` on disk if present.
     pub async fn from_env() -> Result<Self, ConfigError> {
-        let settings = Settings::default();
-        Self::build(&settings).await
+        let _ = dotenvy::dotenv();
+        let bootstrap = crate::bootstrap::BootstrapConfig::load();
+        let settings = Settings::load();
+        Self::build(&bootstrap, &settings).await
     }
 
-    /// Build config from settings (env vars always take priority via `optional_env`).
-    async fn build(settings: &Settings) -> Result<Self, ConfigError> {
+    /// Build config from bootstrap + settings (shared by from_env and from_db).
+    async fn build(
+        bootstrap: &crate::bootstrap::BootstrapConfig,
+        settings: &Settings,
+    ) -> Result<Self, ConfigError> {
         Ok(Self {
-            database: DatabaseConfig::resolve()?,
+            database: DatabaseConfig::resolve(bootstrap)?,
             llm: LlmConfig::resolve(settings)?,
             embeddings: EmbeddingsConfig::resolve(settings)?,
             tunnel: TunnelConfig::resolve(settings)?,
@@ -74,7 +82,7 @@ impl Config {
             agent: AgentConfig::resolve(settings)?,
             safety: SafetyConfig::resolve()?,
             wasm: WasmConfig::resolve()?,
-            secrets: SecretsConfig::resolve().await?,
+            secrets: SecretsConfig::resolve(bootstrap).await?,
             builder: BuilderModeConfig::resolve()?,
             heartbeat: HeartbeatConfig::resolve(settings)?,
             routines: RoutineConfig::resolve()?,
@@ -99,13 +107,13 @@ impl TunnelConfig {
         let public_url = optional_env("TUNNEL_URL")?
             .or_else(|| settings.tunnel.public_url.clone().filter(|s| !s.is_empty()));
 
-        if let Some(ref url) = public_url {
-            if !url.starts_with("https://") {
-                return Err(ConfigError::InvalidValue {
-                    key: "TUNNEL_URL".to_string(),
-                    message: "must start with https:// (webhooks require HTTPS)".to_string(),
-                });
-            }
+        if let Some(ref url) = public_url
+            && !url.starts_with("https://")
+        {
+            return Err(ConfigError::InvalidValue {
+                key: "TUNNEL_URL".to_string(),
+                message: "must start with https:// (webhooks require HTTPS)".to_string(),
+            });
         }
 
         Ok(Self { public_url })
@@ -126,26 +134,112 @@ impl TunnelConfig {
     }
 }
 
+/// Which database backend to use.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum DatabaseBackend {
+    /// PostgreSQL via deadpool-postgres (default).
+    #[default]
+    Postgres,
+    /// libSQL/Turso embedded database.
+    LibSql,
+}
+
+impl std::str::FromStr for DatabaseBackend {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.to_lowercase().as_str() {
+            "postgres" | "postgresql" | "pg" => Ok(Self::Postgres),
+            "libsql" | "turso" | "sqlite" => Ok(Self::LibSql),
+            _ => Err(format!(
+                "invalid database backend '{}', expected 'postgres' or 'libsql'",
+                s
+            )),
+        }
+    }
+}
+
 /// Database configuration.
 #[derive(Debug, Clone)]
 pub struct DatabaseConfig {
+    /// Which backend to use (default: Postgres).
+    pub backend: DatabaseBackend,
+
+    // -- PostgreSQL fields --
     pub url: SecretString,
     pub pool_size: usize,
+
+    // -- libSQL fields --
+    /// Path to local libSQL database file (default: ~/.ironclaw/ironclaw.db).
+    pub libsql_path: Option<PathBuf>,
+    /// Turso cloud URL for remote sync (optional).
+    pub libsql_url: Option<String>,
+    /// Turso auth token (required when libsql_url is set).
+    pub libsql_auth_token: Option<SecretString>,
 }
 
 impl DatabaseConfig {
-    fn resolve() -> Result<Self, ConfigError> {
-        // DATABASE_URL comes from env (loaded from ~/.ironclaw/.env via dotenvy)
-        let url = optional_env("DATABASE_URL")?.ok_or_else(|| ConfigError::MissingRequired {
-            key: "DATABASE_URL".to_string(),
-            hint: "Run 'ironclaw onboard' or set DATABASE_URL environment variable".to_string(),
-        })?;
+    fn resolve(bootstrap: &crate::bootstrap::BootstrapConfig) -> Result<Self, ConfigError> {
+        let backend: DatabaseBackend = if let Some(b) = optional_env("DATABASE_BACKEND")? {
+            b.parse().map_err(|e| ConfigError::InvalidValue {
+                key: "DATABASE_BACKEND".to_string(),
+                message: e,
+            })?
+        } else {
+            DatabaseBackend::default()
+        };
 
-        let pool_size = parse_optional_env("DATABASE_POOL_SIZE", 10)?;
+        // PostgreSQL URL is required only when using the postgres backend.
+        // For libsql backend, default to an empty placeholder.
+        let url = optional_env("DATABASE_URL")?
+            .or_else(|| bootstrap.database_url.clone())
+            .or_else(|| {
+                if backend == DatabaseBackend::LibSql {
+                    Some("unused://libsql".to_string())
+                } else {
+                    None
+                }
+            })
+            .ok_or_else(|| ConfigError::MissingRequired {
+                key: "database_url".to_string(),
+                hint: "Run 'ironclaw onboard' or set DATABASE_URL environment variable".to_string(),
+            })?;
+
+        let pool_size = optional_env("DATABASE_POOL_SIZE")?
+            .map(|s| s.parse())
+            .transpose()
+            .map_err(|e| ConfigError::InvalidValue {
+                key: "DATABASE_POOL_SIZE".to_string(),
+                message: format!("must be a positive integer: {e}"),
+            })?
+            .or(bootstrap.database_pool_size)
+            .unwrap_or(10);
+
+        let libsql_path = optional_env("LIBSQL_PATH")?.map(PathBuf::from).or_else(|| {
+            if backend == DatabaseBackend::LibSql {
+                Some(default_libsql_path())
+            } else {
+                None
+            }
+        });
+
+        let libsql_url = optional_env("LIBSQL_URL")?;
+        let libsql_auth_token = optional_env("LIBSQL_AUTH_TOKEN")?.map(SecretString::from);
+
+        if libsql_url.is_some() && libsql_auth_token.is_none() {
+            return Err(ConfigError::MissingRequired {
+                key: "LIBSQL_AUTH_TOKEN".to_string(),
+                hint: "LIBSQL_AUTH_TOKEN is required when LIBSQL_URL is set".to_string(),
+            });
+        }
 
         Ok(Self {
+            backend,
             url: SecretString::from(url),
             pool_size,
+            libsql_path,
+            libsql_url,
+            libsql_auth_token,
         })
     }
 
@@ -153,6 +247,14 @@ impl DatabaseConfig {
     pub fn url(&self) -> &str {
         self.url.expose_secret()
     }
+}
+
+/// Default libSQL database path (~/.ironclaw/ironclaw.db).
+pub fn default_libsql_path() -> PathBuf {
+    dirs::home_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join(".ironclaw")
+        .join("ironclaw.db")
 }
 
 /// Which LLM backend to use.
@@ -752,58 +854,55 @@ impl std::fmt::Debug for SecretsConfig {
 
 impl SecretsConfig {
     /// Auto-detect secrets master key from env var, then OS keychain.
-    async fn resolve() -> Result<Self, ConfigError> {
+    async fn resolve(bootstrap: &crate::bootstrap::BootstrapConfig) -> Result<Self, ConfigError> {
         use crate::settings::KeySource;
 
-        // 1. Check env var first
-        if let Some(env_key) = optional_env("SECRETS_MASTER_KEY")? {
-            let key = SecretString::from(env_key);
-            if key.expose_secret().len() < 32 {
-                return Err(ConfigError::InvalidValue {
-                    key: "SECRETS_MASTER_KEY".to_string(),
-                    message: "must be at least 32 bytes for AES-256-GCM".to_string(),
-                });
+        let (master_key, source) = if let Some(env_key) = optional_env("SECRETS_MASTER_KEY")? {
+            (Some(SecretString::from(env_key)), KeySource::Env)
+        } else {
+            match bootstrap.secrets_master_key_source {
+                KeySource::Keychain => {
+                    // Try to load from OS keychain (async on Linux)
+                    match crate::secrets::keychain::get_master_key().await {
+                        Ok(key_bytes) => {
+                            let key_hex: String =
+                                key_bytes.iter().map(|b| format!("{:02x}", b)).collect();
+                            (Some(SecretString::from(key_hex)), KeySource::Keychain)
+                        }
+                        Err(_) => {
+                            tracing::warn!(
+                                "Secrets configured for keychain but key not found. \
+                                 Run 'ironclaw onboard' to reconfigure."
+                            );
+                            (None, KeySource::None)
+                        }
+                    }
+                }
+                KeySource::Env => {
+                    tracing::warn!(
+                        "Secrets configured for env var but SECRETS_MASTER_KEY not set."
+                    );
+                    (None, KeySource::None)
+                }
+                KeySource::None => (None, KeySource::None),
             }
-            return Ok(Self {
-                master_key: Some(key),
-                enabled: true,
-                source: KeySource::Env,
+        };
+
+        let enabled = master_key.is_some();
+
+        if let Some(ref key) = master_key
+            && key.expose_secret().len() < 32
+        {
+            return Err(ConfigError::InvalidValue {
+                key: "SECRETS_MASTER_KEY".to_string(),
+                message: "must be at least 32 bytes for AES-256-GCM".to_string(),
             });
         }
 
-        // 2. Probe OS keychain
-        if crate::secrets::keychain::has_master_key().await {
-            match crate::secrets::keychain::get_master_key().await {
-                Ok(key_bytes) => {
-                    let key_hex: String = key_bytes.iter().map(|b| format!("{:02x}", b)).collect();
-                    let key = SecretString::from(key_hex);
-                    if key.expose_secret().len() < 32 {
-                        return Err(ConfigError::InvalidValue {
-                            key: "SECRETS_MASTER_KEY".to_string(),
-                            message: "must be at least 32 bytes for AES-256-GCM".to_string(),
-                        });
-                    }
-                    return Ok(Self {
-                        master_key: Some(key),
-                        enabled: true,
-                        source: KeySource::Keychain,
-                    });
-                }
-                Err(e) => {
-                    tracing::warn!(
-                        "Keychain reports master key exists but retrieval failed: {}. \
-                         Secrets disabled.",
-                        e
-                    );
-                }
-            }
-        }
-
-        // 3. No key found, secrets disabled
         Ok(Self {
-            master_key: None,
-            enabled: false,
-            source: KeySource::None,
+            master_key,
+            enabled,
+            source,
         })
     }
 

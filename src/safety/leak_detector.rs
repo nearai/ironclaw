@@ -147,10 +147,10 @@ impl LeakDetector {
         // Build prefix matcher for patterns that start with a known prefix
         let mut prefixes = Vec::new();
         for (idx, pattern) in patterns.iter().enumerate() {
-            if let Some(prefix) = extract_literal_prefix(pattern.regex.as_str()) {
-                if prefix.len() >= 3 {
-                    prefixes.push((prefix, idx));
-                }
+            if let Some(prefix) = extract_literal_prefix(pattern.regex.as_str())
+                && prefix.len() >= 3
+            {
+                prefixes.push((prefix, idx));
             }
         }
 

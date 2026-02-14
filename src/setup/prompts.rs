@@ -54,10 +54,11 @@ pub fn select_one(prompt: &str, options: &[&str]) -> io::Result<usize> {
         }
 
         // Parse number
-        if let Ok(num) = input.parse::<usize>() {
-            if num >= 1 && num <= options.len() {
-                return Ok(num - 1);
-            }
+        if let Ok(num) = input.parse::<usize>()
+            && num >= 1
+            && num <= options.len()
+        {
+            return Ok(num - 1);
         }
 
         writeln!(

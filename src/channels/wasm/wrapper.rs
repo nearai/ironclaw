@@ -138,13 +138,13 @@ impl ChannelStoreData {
         if result.contains('{') && result.contains('}') {
             // Only warn if it looks like an unresolved placeholder (not JSON braces)
             let brace_pattern = regex::Regex::new(r"\{[A-Z_]+\}").ok();
-            if let Some(re) = brace_pattern {
-                if re.is_match(&result) {
-                    tracing::warn!(
-                        context = %context,
-                        "String may contain unresolved credential placeholders"
-                    );
-                }
+            if let Some(re) = brace_pattern
+                && re.is_match(&result)
+            {
+                tracing::warn!(
+                    context = %context,
+                    "String may contain unresolved credential placeholders"
+                );
             }
         }
 
@@ -357,13 +357,13 @@ impl near::agent::channel_host::Host for ChannelStoreData {
 
             // Enforce max response body size to prevent memory exhaustion.
             let max_response = max_response_bytes;
-            if let Some(cl) = response.content_length() {
-                if cl as usize > max_response {
-                    return Err(format!(
-                        "Response body too large: {} bytes exceeds limit of {} bytes",
-                        cl, max_response
-                    ));
-                }
+            if let Some(cl) = response.content_length()
+                && cl as usize > max_response
+            {
+                return Err(format!(
+                    "Response body too large: {} bytes exceeds limit of {} bytes",
+                    cl, max_response
+                ));
             }
             let body = response
                 .bytes()
@@ -1528,8 +1528,8 @@ impl WasmChannel {
                         match result {
                             Ok(emitted_messages) => {
                                 // Process any emitted messages
-                                if !emitted_messages.is_empty() {
-                                    if let Err(e) = Self::dispatch_emitted_messages(
+                                if !emitted_messages.is_empty()
+                                    && let Err(e) = Self::dispatch_emitted_messages(
                                         &channel_name,
                                         emitted_messages,
                                         &message_tx,
@@ -1541,7 +1541,6 @@ impl WasmChannel {
                                             "Failed to dispatch emitted messages from poll"
                                         );
                                     }
-                                }
                             }
                             Err(e) => {
                                 tracing::warn!(
@@ -1771,22 +1770,22 @@ impl Channel for WasmChannel {
         *self.endpoints.write().await = endpoints;
 
         // Start polling if configured
-        if let Some(poll_config) = &config.poll {
-            if poll_config.enabled {
-                let interval = self
-                    .capabilities
-                    .validate_poll_interval(poll_config.interval_ms)
-                    .map_err(|e| ChannelError::StartupFailed {
-                        name: self.name.clone(),
-                        reason: e,
-                    })?;
+        if let Some(poll_config) = &config.poll
+            && poll_config.enabled
+        {
+            let interval = self
+                .capabilities
+                .validate_poll_interval(poll_config.interval_ms)
+                .map_err(|e| ChannelError::StartupFailed {
+                    name: self.name.clone(),
+                    reason: e,
+                })?;
 
-                // Create shutdown channel for polling and store the sender to keep it alive
-                let (poll_shutdown_tx, poll_shutdown_rx) = oneshot::channel();
-                *self.poll_shutdown_tx.write().await = Some(poll_shutdown_tx);
+            // Create shutdown channel for polling and store the sender to keep it alive
+            let (poll_shutdown_tx, poll_shutdown_rx) = oneshot::channel();
+            *self.poll_shutdown_tx.write().await = Some(poll_shutdown_tx);
 
-                self.start_polling(Duration::from_millis(interval as u64), poll_shutdown_rx);
-            }
+            self.start_polling(Duration::from_millis(interval as u64), poll_shutdown_rx);
         }
 
         tracing::info!(

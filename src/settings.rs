@@ -15,6 +15,10 @@ pub struct Settings {
     pub onboard_completed: bool,
 
     // === Step 1: Database ===
+    /// Database backend: "postgres" or "libsql".
+    #[serde(default)]
+    pub database_backend: Option<String>,
+
     /// Database connection URL (postgres://...).
     #[serde(default)]
     pub database_url: Option<String>,
@@ -22,6 +26,14 @@ pub struct Settings {
     /// Database pool size.
     #[serde(default)]
     pub database_pool_size: Option<usize>,
+
+    /// Path to local libSQL database file.
+    #[serde(default)]
+    pub libsql_path: Option<String>,
+
+    /// Turso cloud URL for remote replica sync.
+    #[serde(default)]
+    pub libsql_url: Option<String>,
 
     // === Step 2: Security ===
     /// Source for the secrets master key.
@@ -530,6 +542,19 @@ impl Settings {
         let mut map = std::collections::HashMap::new();
         collect_settings_json(&json, String::new(), &mut map);
         map
+    }
+
+    /// Get the default settings file path (~/.ironclaw/settings.json).
+    pub fn default_path() -> std::path::PathBuf {
+        dirs::home_dir()
+            .unwrap_or_else(|| std::path::PathBuf::from("."))
+            .join(".ironclaw")
+            .join("settings.json")
+    }
+
+    /// Load settings from disk, returning default if not found.
+    pub fn load() -> Self {
+        Self::load_from(&Self::default_path())
     }
 
     /// Load settings from a specific path (used by bootstrap legacy migration).
