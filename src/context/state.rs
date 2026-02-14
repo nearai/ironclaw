@@ -119,6 +119,10 @@ pub struct JobContext {
     pub estimated_duration: Option<Duration>,
     /// Actual cost so far.
     pub actual_cost: Decimal,
+    /// Total tokens consumed by LLM calls in this job.
+    pub total_tokens_used: u64,
+    /// Maximum tokens allowed per job (0 = unlimited).
+    pub max_tokens: u64,
     /// When the job was created.
     pub created_at: DateTime<Utc>,
     /// When the job was started.
@@ -159,6 +163,8 @@ impl JobContext {
             estimated_cost: None,
             estimated_duration: None,
             actual_cost: Decimal::ZERO,
+            total_tokens_used: 0,
+            max_tokens: 0,
             created_at: Utc::now(),
             started_at: None,
             completed_at: None,
@@ -189,6 +195,14 @@ impl JobContext {
         };
 
         self.transitions.push(transition);
+
+        // Cap transition history to prevent unbounded memory growth
+        const MAX_TRANSITIONS: usize = 200;
+        if self.transitions.len() > MAX_TRANSITIONS {
+            let drain_count = self.transitions.len() - MAX_TRANSITIONS;
+            self.transitions.drain(..drain_count);
+        }
+
         self.state = new_state;
 
         // Update timestamps
@@ -208,6 +222,29 @@ impl JobContext {
     /// Add to the actual cost.
     pub fn add_cost(&mut self, cost: Decimal) {
         self.actual_cost += cost;
+    }
+
+    /// Record token usage from an LLM call. Returns an error string if the
+    /// token budget has been exceeded after this addition.
+    pub fn add_tokens(&mut self, tokens: u64) -> Result<(), String> {
+        self.total_tokens_used += tokens;
+        if self.max_tokens > 0 && self.total_tokens_used > self.max_tokens {
+            Err(format!(
+                "Token budget exceeded: used {} of {} allowed tokens",
+                self.total_tokens_used, self.max_tokens
+            ))
+        } else {
+            Ok(())
+        }
+    }
+
+    /// Check whether the monetary budget has been exceeded.
+    pub fn budget_exceeded(&self) -> bool {
+        if let Some(ref budget) = self.budget {
+            self.actual_cost > *budget
+        } else {
+            false
+        }
     }
 
     /// Get the duration since the job started.
@@ -272,6 +309,57 @@ mod tests {
         ctx.transition_to(JobState::Completed, Some("Done".to_string()))
             .unwrap();
         assert_eq!(ctx.state, JobState::Completed);
+    }
+
+    #[test]
+    fn test_transition_history_capped() {
+        let mut ctx = JobContext::new("Test", "Transition cap test");
+        // Cycle through Pending -> InProgress -> Stuck -> InProgress -> Stuck ...
+        ctx.transition_to(JobState::InProgress, None).unwrap();
+        for i in 0..250 {
+            ctx.mark_stuck(format!("stuck {}", i)).unwrap();
+            ctx.attempt_recovery().unwrap();
+        }
+        // 1 initial + 250*2 = 501 transitions, should be capped at 200
+        assert!(
+            ctx.transitions.len() <= 200,
+            "transitions should be capped at 200, got {}",
+            ctx.transitions.len()
+        );
+    }
+
+    #[test]
+    fn test_add_tokens_enforces_budget() {
+        let mut ctx = JobContext::new("Test", "Budget test");
+        ctx.max_tokens = 1000;
+        assert!(ctx.add_tokens(500).is_ok());
+        assert_eq!(ctx.total_tokens_used, 500);
+        assert!(ctx.add_tokens(600).is_err());
+        assert_eq!(ctx.total_tokens_used, 1100); // tokens still recorded
+    }
+
+    #[test]
+    fn test_add_tokens_unlimited() {
+        let mut ctx = JobContext::new("Test", "No budget");
+        // max_tokens = 0 means unlimited
+        assert!(ctx.add_tokens(1_000_000).is_ok());
+    }
+
+    #[test]
+    fn test_budget_exceeded() {
+        let mut ctx = JobContext::new("Test", "Money test");
+        ctx.budget = Some(Decimal::new(100, 0)); // $100
+        assert!(!ctx.budget_exceeded());
+        ctx.add_cost(Decimal::new(50, 0));
+        assert!(!ctx.budget_exceeded());
+        ctx.add_cost(Decimal::new(60, 0));
+        assert!(ctx.budget_exceeded());
+    }
+
+    #[test]
+    fn test_budget_exceeded_none() {
+        let ctx = JobContext::new("Test", "No budget");
+        assert!(!ctx.budget_exceeded()); // No budget = never exceeded
     }
 
     #[test]

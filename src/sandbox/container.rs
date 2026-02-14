@@ -279,11 +279,7 @@ impl ContainerRunner {
             network_mode: Some("bridge".to_string()),
             // Security: drop all capabilities and add back only what's needed
             cap_drop: Some(vec!["ALL".to_string()]),
-            cap_add: Some(vec![
-                "CHOWN".to_string(),
-                "SETUID".to_string(),
-                "SETGID".to_string(),
-            ]),
+            cap_add: Some(vec!["CHOWN".to_string()]),
             // Prevent privilege escalation
             security_opt: Some(vec!["no-new-privileges:true".to_string()]),
             // Read-only root filesystem (workspace is still writable if policy allows)
@@ -498,10 +494,10 @@ impl ContainerRunner {
 /// 3. `~/.docker/run/docker.sock` (Docker Desktop on macOS)
 pub async fn connect_docker() -> Result<Docker> {
     // First try bollard defaults (checks DOCKER_HOST, then /var/run/docker.sock)
-    if let Ok(docker) = Docker::connect_with_local_defaults() {
-        if docker.ping().await.is_ok() {
-            return Ok(docker);
-        }
+    if let Ok(docker) = Docker::connect_with_local_defaults()
+        && docker.ping().await.is_ok()
+    {
+        return Ok(docker);
     }
 
     // Try Docker Desktop socket (macOS)
@@ -511,10 +507,9 @@ pub async fn connect_docker() -> Result<Docker> {
             let sock_str = desktop_sock.to_string_lossy();
             if let Ok(docker) =
                 Docker::connect_with_socket(&sock_str, 120, bollard::API_DEFAULT_VERSION)
+                && docker.ping().await.is_ok()
             {
-                if docker.ping().await.is_ok() {
-                    return Ok(docker);
-                }
+                return Ok(docker);
             }
         }
     }

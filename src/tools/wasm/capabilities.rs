@@ -209,10 +209,10 @@ impl EndpointPattern {
         }
 
         // Check path prefix
-        if let Some(ref prefix) = self.path_prefix {
-            if !url_path.starts_with(prefix) {
-                return false;
-            }
+        if let Some(ref prefix) = self.path_prefix
+            && !url_path.starts_with(prefix)
+        {
+            return false;
         }
 
         // Check method
@@ -237,13 +237,14 @@ impl EndpointPattern {
         }
 
         // Support wildcard: *.example.com matches sub.example.com
-        if let Some(suffix) = self.host.strip_prefix("*.") {
-            if url_host.ends_with(suffix) && url_host.len() > suffix.len() {
-                // Ensure there's a dot before the suffix (or it's the whole thing)
-                let prefix = &url_host[..url_host.len() - suffix.len()];
-                if prefix.ends_with('.') || prefix.is_empty() {
-                    return true;
-                }
+        if let Some(suffix) = self.host.strip_prefix("*.")
+            && url_host.ends_with(suffix)
+            && url_host.len() > suffix.len()
+        {
+            // Ensure there's a dot before the suffix (or it's the whole thing)
+            let prefix = &url_host[..url_host.len() - suffix.len()];
+            if prefix.ends_with('.') || prefix.is_empty() {
+                return true;
             }
         }
 
@@ -291,10 +292,10 @@ impl SecretsCapability {
             if pattern == name {
                 return true;
             }
-            if let Some(prefix) = pattern.strip_suffix('*') {
-                if name.starts_with(prefix) {
-                    return true;
-                }
+            if let Some(prefix) = pattern.strip_suffix('*')
+                && name.starts_with(prefix)
+            {
+                return true;
             }
         }
         false

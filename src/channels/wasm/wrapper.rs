@@ -43,12 +43,12 @@ use wasmtime_wasi::{ResourceTable, WasiCtx, WasiCtxBuilder, WasiView};
 use crate::channels::wasm::capabilities::ChannelCapabilities;
 use crate::channels::wasm::error::WasmChannelError;
 use crate::channels::wasm::host::{ChannelEmitRateLimiter, ChannelHostState, EmittedMessage};
-use crate::pairing::PairingStore;
 use crate::channels::wasm::router::RegisteredEndpoint;
 use crate::channels::wasm::runtime::{PreparedChannelModule, WasmChannelRuntime};
 use crate::channels::wasm::schema::ChannelConfig;
 use crate::channels::{Channel, IncomingMessage, MessageStream, OutgoingResponse, StatusUpdate};
 use crate::error::ChannelError;
+use crate::pairing::PairingStore;
 use crate::safety::LeakDetector;
 use crate::tools::wasm::LogLevel;
 use crate::tools::wasm::WasmResourceLimiter;
@@ -134,13 +134,13 @@ impl ChannelStoreData {
         if result.contains('{') && result.contains('}') {
             // Only warn if it looks like an unresolved placeholder (not JSON braces)
             let brace_pattern = regex::Regex::new(r"\{[A-Z_]+\}").ok();
-            if let Some(re) = brace_pattern {
-                if re.is_match(&result) {
-                    tracing::warn!(
-                        context = %context,
-                        "String may contain unresolved credential placeholders"
-                    );
-                }
+            if let Some(re) = brace_pattern
+                && re.is_match(&result)
+            {
+                tracing::warn!(
+                    context = %context,
+                    "String may contain unresolved credential placeholders"
+                );
             }
         }
 
@@ -273,6 +273,16 @@ impl near::agent::channel_host::Host for ChannelStoreData {
             .scan_http_request(&url, &header_vec, body.as_deref())
             .map_err(|e| format!("Potential secret leak blocked: {}", e))?;
 
+        // Get the max response size from capabilities (default 10MB).
+        let max_response_bytes = self
+            .host_state
+            .capabilities()
+            .tool_capabilities
+            .http
+            .as_ref()
+            .map(|h| h.max_response_bytes)
+            .unwrap_or(10 * 1024 * 1024);
+
         // Make the HTTP request using blocking I/O
         // We're already in a spawn_blocking context, so we can use block_on
         let result = tokio::runtime::Handle::current().block_on(async {
@@ -325,11 +335,29 @@ impl near::agent::channel_host::Host for ChannelStoreData {
                 })
                 .collect();
             let headers_json = serde_json::to_string(&response_headers).unwrap_or_default();
+
+            // Enforce max response body size to prevent memory exhaustion.
+            let max_response = max_response_bytes;
+            if let Some(cl) = response.content_length()
+                && cl as usize > max_response
+            {
+                return Err(format!(
+                    "Response body too large: {} bytes exceeds limit of {} bytes",
+                    cl, max_response
+                ));
+            }
             let body = response
                 .bytes()
                 .await
-                .map_err(|e| format!("Failed to read response body: {}", e))?
-                .to_vec();
+                .map_err(|e| format!("Failed to read response body: {}", e))?;
+            if body.len() > max_response {
+                return Err(format!(
+                    "Response body too large: {} bytes exceeds limit of {} bytes",
+                    body.len(),
+                    max_response
+                ));
+            }
+            let body = body.to_vec();
 
             tracing::info!(
                 status = status,
@@ -1190,6 +1218,7 @@ impl WasmChannel {
     ///
     /// Static method for use by the background typing repeat task (which
     /// doesn't have access to `&self`).
+    #[allow(clippy::too_many_arguments)]
     async fn execute_status(
         channel_name: &str,
         runtime: &Arc<WasmChannelRuntime>,
@@ -1466,8 +1495,8 @@ impl WasmChannel {
                         match result {
                             Ok(emitted_messages) => {
                                 // Process any emitted messages
-                                if !emitted_messages.is_empty() {
-                                    if let Err(e) = Self::dispatch_emitted_messages(
+                                if !emitted_messages.is_empty()
+                                    && let Err(e) = Self::dispatch_emitted_messages(
                                         &channel_name,
                                         emitted_messages,
                                         &message_tx,
@@ -1479,7 +1508,6 @@ impl WasmChannel {
                                             "Failed to dispatch emitted messages from poll"
                                         );
                                     }
-                                }
                             }
                             Err(e) => {
                                 tracing::warn!(
@@ -1709,22 +1737,22 @@ impl Channel for WasmChannel {
         *self.endpoints.write().await = endpoints;
 
         // Start polling if configured
-        if let Some(poll_config) = &config.poll {
-            if poll_config.enabled {
-                let interval = self
-                    .capabilities
-                    .validate_poll_interval(poll_config.interval_ms)
-                    .map_err(|e| ChannelError::StartupFailed {
-                        name: self.name.clone(),
-                        reason: e,
-                    })?;
+        if let Some(poll_config) = &config.poll
+            && poll_config.enabled
+        {
+            let interval = self
+                .capabilities
+                .validate_poll_interval(poll_config.interval_ms)
+                .map_err(|e| ChannelError::StartupFailed {
+                    name: self.name.clone(),
+                    reason: e,
+                })?;
 
-                // Create shutdown channel for polling and store the sender to keep it alive
-                let (poll_shutdown_tx, poll_shutdown_rx) = oneshot::channel();
-                *self.poll_shutdown_tx.write().await = Some(poll_shutdown_tx);
+            // Create shutdown channel for polling and store the sender to keep it alive
+            let (poll_shutdown_tx, poll_shutdown_rx) = oneshot::channel();
+            *self.poll_shutdown_tx.write().await = Some(poll_shutdown_tx);
 
-                self.start_polling(Duration::from_millis(interval as u64), poll_shutdown_rx);
-            }
+            self.start_polling(Duration::from_millis(interval as u64), poll_shutdown_rx);
         }
 
         tracing::info!(
@@ -2073,12 +2101,12 @@ mod tests {
     use std::sync::Arc;
 
     use crate::channels::Channel;
-    use crate::pairing::PairingStore;
     use crate::channels::wasm::capabilities::ChannelCapabilities;
     use crate::channels::wasm::runtime::{
         PreparedChannelModule, WasmChannelRuntime, WasmChannelRuntimeConfig,
     };
     use crate::channels::wasm::wrapper::{HttpResponse, WasmChannel};
+    use crate::pairing::PairingStore;
     use crate::tools::wasm::ResourceLimits;
 
     fn create_test_channel() -> WasmChannel {
@@ -2525,8 +2553,13 @@ mod tests {
         );
         creds.insert("OTHER_SECRET".to_string(), "s3cret".to_string());
 
-        let store =
-            ChannelStoreData::new(1024 * 1024, "test", ChannelCapabilities::default(), creds);
+        let store = ChannelStoreData::new(
+            1024 * 1024,
+            "test",
+            ChannelCapabilities::default(),
+            creds,
+            Arc::new(PairingStore::new()),
+        );
 
         let error = "HTTP request failed: error sending request for url \
             (https://api.telegram.org/bot8218490433:AAEZeUxwqZ5OO3mOCXv7fKvpdhDgsmBBNis/getUpdates)";
@@ -2556,6 +2589,7 @@ mod tests {
             "test",
             ChannelCapabilities::default(),
             std::collections::HashMap::new(),
+            Arc::new(PairingStore::new()),
         );
 
         let input = "some error message";
@@ -2569,8 +2603,13 @@ mod tests {
         let mut creds = std::collections::HashMap::new();
         creds.insert("EMPTY_TOKEN".to_string(), String::new());
 
-        let store =
-            ChannelStoreData::new(1024 * 1024, "test", ChannelCapabilities::default(), creds);
+        let store = ChannelStoreData::new(
+            1024 * 1024,
+            "test",
+            ChannelCapabilities::default(),
+            creds,
+            Arc::new(PairingStore::new()),
+        );
 
         let input = "should not match anything";
         assert_eq!(store.redact_credentials(input), input);

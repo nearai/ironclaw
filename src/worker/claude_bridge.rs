@@ -4,18 +4,26 @@
 //! output back to the orchestrator via HTTP. Supports follow-up prompts via
 //! `--resume`.
 //!
+//! Security model: the Docker container is the primary security boundary
+//! (cap-drop ALL, non-root user, memory limits, network isolation).
+//! As defense-in-depth, a project-level `.claude/settings.json` is written
+//! before spawning with an explicit tool allowlist. Only listed tools are
+//! auto-approved; unknown/future tools would require interactive approval,
+//! which times out harmlessly in the non-interactive container.
+//!
 //! ```text
-//! ┌─────────────────────────────────────────────┐
-//! │ Docker Container                             │
-//! │                                              │
-//! │  ironclaw claude-bridge --job-id <uuid>      │
+//! ┌──────────────────────────────────────────────┐
+//! │ Docker Container                              │
+//! │                                               │
+//! │  ironclaw claude-bridge --job-id <uuid>       │
+//! │    └─ writes /workspace/.claude/settings.json │
 //! │    └─ claude -p "task" --output-format        │
-//! │       stream-json --dangerously-skip-perms   │
-//! │    └─ reads stdout line-by-line              │
-//! │    └─ POSTs events to orchestrator           │
-//! │    └─ polls for follow-up prompts            │
-//! │    └─ on follow-up: claude --resume          │
-//! └─────────────────────────────────────────────┘
+//! │       stream-json                             │
+//! │    └─ reads stdout line-by-line               │
+//! │    └─ POSTs events to orchestrator            │
+//! │    └─ polls for follow-up prompts             │
+//! │    └─ on follow-up: claude --resume           │
+//! └──────────────────────────────────────────────┘
 //! ```
 
 use std::sync::Arc;
@@ -36,6 +44,8 @@ pub struct ClaudeBridgeConfig {
     pub max_turns: u32,
     pub model: String,
     pub timeout: Duration,
+    /// Tool patterns to auto-approve via project-level settings.json.
+    pub allowed_tools: Vec<String>,
 }
 
 /// A Claude Code streaming event (NDJSON line from `--output-format stream-json`).
@@ -119,8 +129,37 @@ impl ClaudeBridgeRuntime {
         Ok(Self { config, client })
     }
 
+    /// Write project-level `.claude/settings.json` with the tool allowlist.
+    ///
+    /// This replaces `--dangerously-skip-permissions` with an explicit set of
+    /// auto-approved tools. The Docker container is still the primary security
+    /// boundary; this is defense-in-depth.
+    fn write_permission_settings(&self) -> Result<(), WorkerError> {
+        let settings_json = build_permission_settings(&self.config.allowed_tools);
+        let settings_dir = std::path::Path::new("/workspace/.claude");
+        std::fs::create_dir_all(settings_dir).map_err(|e| WorkerError::ExecutionFailed {
+            reason: format!("failed to create /workspace/.claude/: {e}"),
+        })?;
+        std::fs::write(settings_dir.join("settings.json"), &settings_json).map_err(|e| {
+            WorkerError::ExecutionFailed {
+                reason: format!("failed to write settings.json: {e}"),
+            }
+        })?;
+        tracing::info!(
+            job_id = %self.config.job_id,
+            tools = ?self.config.allowed_tools,
+            "Wrote Claude Code permission settings"
+        );
+        Ok(())
+    }
+
     /// Run the bridge: fetch job, spawn claude, stream events, handle follow-ups.
     pub async fn run(&self) -> Result<(), WorkerError> {
+        // Write project-level settings with explicit tool allowlist.
+        // This replaces --dangerously-skip-permissions with defense-in-depth:
+        // only the listed tools are auto-approved, unknown tools fail safely.
+        self.write_permission_settings()?;
+
         // Fetch the job description from the orchestrator
         let job = self.client.get_job().await?;
 
@@ -226,7 +265,6 @@ impl ClaudeBridgeRuntime {
             .arg(prompt)
             .arg("--output-format")
             .arg("stream-json")
-            .arg("--dangerously-skip-permissions")
             .arg("--max-turns")
             .arg(self.config.max_turns.to_string())
             .arg("--model")
@@ -288,15 +326,15 @@ impl ClaudeBridgeRuntime {
             match serde_json::from_str::<ClaudeStreamEvent>(&line) {
                 Ok(event) => {
                     // Capture session_id from system init
-                    if event.event_type == "system" {
-                        if let Some(ref sid) = event.session_id {
-                            session_id = Some(sid.clone());
-                            tracing::info!(
-                                job_id = %self.config.job_id,
-                                session_id = %sid,
-                                "Captured Claude session ID"
-                            );
-                        }
+                    if event.event_type == "system"
+                        && let Some(ref sid) = event.session_id
+                    {
+                        session_id = Some(sid.clone());
+                        tracing::info!(
+                            job_id = %self.config.job_id,
+                            session_id = %sid,
+                            "Captured Claude session ID"
+                        );
                     }
 
                     // Convert to our event payload and forward
@@ -378,6 +416,19 @@ impl ClaudeBridgeRuntime {
     async fn poll_for_prompt(&self) -> Result<Option<PromptResponse>, WorkerError> {
         self.client.poll_prompt().await
     }
+}
+
+/// Build the JSON content for `.claude/settings.json` with the given tool allowlist.
+///
+/// Produces a Claude Code project settings file that auto-approves the listed
+/// tools while leaving any unknown/future tools unapproved (defense-in-depth).
+fn build_permission_settings(allowed_tools: &[String]) -> String {
+    let settings = serde_json::json!({
+        "permissions": {
+            "allow": allowed_tools,
+        }
+    });
+    serde_json::to_string_pretty(&settings).expect("static JSON structure is always valid")
 }
 
 /// Convert a Claude stream event into one or more event payloads for the orchestrator.
@@ -465,7 +516,16 @@ fn stream_event_to_payloads(event: &ClaudeStreamEvent) -> Vec<JobEventPayload> {
 }
 
 fn truncate(s: &str, max_len: usize) -> &str {
-    if s.len() <= max_len { s } else { &s[..max_len] }
+    if s.len() <= max_len {
+        s
+    } else {
+        // Walk back from max_len to find a valid UTF-8 char boundary.
+        let mut end = max_len;
+        while end > 0 && !s.is_char_boundary(end) {
+            end -= 1;
+        }
+        &s[..end]
+    }
 }
 
 #[cfg(test)]
@@ -640,5 +700,39 @@ mod tests {
         assert_eq!(truncate("hello", 10), "hello");
         assert_eq!(truncate("hello world", 5), "hello");
         assert_eq!(truncate("", 5), "");
+    }
+
+    #[test]
+    fn test_build_permission_settings_default_tools() {
+        let tools: Vec<String> = ["Bash(*)", "Read", "Edit(*)", "Glob", "Grep"]
+            .into_iter()
+            .map(String::from)
+            .collect();
+        let json_str = build_permission_settings(&tools);
+        let parsed: serde_json::Value = serde_json::from_str(&json_str).unwrap();
+        let allow = parsed["permissions"]["allow"].as_array().unwrap();
+        assert_eq!(allow.len(), 5);
+        assert_eq!(allow[0], "Bash(*)");
+        assert_eq!(allow[1], "Read");
+        assert_eq!(allow[2], "Edit(*)");
+    }
+
+    #[test]
+    fn test_build_permission_settings_empty_tools() {
+        let json_str = build_permission_settings(&[]);
+        let parsed: serde_json::Value = serde_json::from_str(&json_str).unwrap();
+        let allow = parsed["permissions"]["allow"].as_array().unwrap();
+        assert!(allow.is_empty());
+    }
+
+    #[test]
+    fn test_build_permission_settings_is_valid_json() {
+        let tools = vec!["Bash(npm run *)".to_string(), "Read".to_string()];
+        let json_str = build_permission_settings(&tools);
+        // Must be valid JSON
+        let parsed: serde_json::Value = serde_json::from_str(&json_str).unwrap();
+        // Must have the expected structure
+        assert!(parsed["permissions"].is_object());
+        assert!(parsed["permissions"]["allow"].is_array());
     }
 }

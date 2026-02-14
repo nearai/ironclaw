@@ -7,7 +7,6 @@ use tracing_subscriber::{EnvFilter, layer::SubscriberExt, util::SubscriberInitEx
 
 use ironclaw::{
     agent::{Agent, AgentDeps, SessionManager},
-    pairing::PairingStore,
     channels::{
         ChannelManager, GatewayChannel, HttpChannel, ReplChannel, WebhookServer,
         WebhookServerConfig,
@@ -30,6 +29,7 @@ use ironclaw::{
         ContainerJobConfig, ContainerJobManager, OrchestratorApi, TokenStore,
         api::OrchestratorState,
     },
+    pairing::PairingStore,
     safety::SafetyLayer,
     secrets::{PostgresSecretsStore, SecretsCrypto, SecretsStore},
     setup::{SetupConfig, SetupWizard},
@@ -86,7 +86,9 @@ async fn main() -> anyhow::Result<()> {
 
             // Memory commands need database (and optionally embeddings)
             let _ = dotenvy::dotenv();
-            let config = Config::from_env().await.map_err(|e| anyhow::anyhow!("{}", e))?;
+            let config = Config::from_env()
+                .await
+                .map_err(|e| anyhow::anyhow!("{}", e))?;
             let store = ironclaw::history::Store::new(&config.database).await?;
             store.run_migrations().await?;
 
@@ -208,12 +210,15 @@ async fn main() -> anyhow::Result<()> {
                 model
             );
 
+            // Load allowed tools from config (env var or defaults).
+            let claude_config = ironclaw::config::ClaudeCodeConfig::from_env();
             let config = ironclaw::worker::claude_bridge::ClaudeBridgeConfig {
                 job_id: *job_id,
                 orchestrator_url: orchestrator_url.clone(),
                 max_turns: *max_turns,
                 model: model.clone(),
                 timeout: std::time::Duration::from_secs(1800),
+                allowed_tools: claude_config.allowed_tools,
             };
 
             let runtime = ironclaw::worker::ClaudeBridgeRuntime::new(config)
@@ -250,13 +255,13 @@ async fn main() -> anyhow::Result<()> {
     let _ = dotenvy::dotenv();
 
     // Enhanced first-run detection
-    if !cli.no_onboard {
-        if let Some(reason) = check_onboard_needed().await {
-            println!("Onboarding needed: {}", reason);
-            println!();
-            let mut wizard = SetupWizard::new();
-            wizard.run().await?;
-        }
+    if !cli.no_onboard
+        && let Some(reason) = check_onboard_needed().await
+    {
+        println!("Onboarding needed: {}", reason);
+        println!();
+        let mut wizard = SetupWizard::new();
+        wizard.run().await?;
     }
 
     // Load bootstrap config (4 fields that must live on disk)
@@ -300,7 +305,11 @@ async fn main() -> anyhow::Result<()> {
 
     tracing_subscriber::registry()
         .with(env_filter)
-        .with(tracing_subscriber::fmt::layer().with_target(false))
+        .with(
+            tracing_subscriber::fmt::layer()
+                .with_target(false)
+                .with_writer(ironclaw::tracing_fmt::TruncatingStderr::default()),
+        )
         .with(WebLogLayer::new(Arc::clone(&log_broadcaster)))
         .init();
 
@@ -679,6 +688,7 @@ async fn main() -> anyhow::Result<()> {
             claude_code_model: config.claude_code.model.clone(),
             claude_code_max_turns: config.claude_code.max_turns,
             claude_code_memory_limit_mb: config.claude_code.memory_limit_mb,
+            claude_code_allowed_tools: config.claude_code.allowed_tools.clone(),
         };
         let jm = Arc::new(ContainerJobManager::new(job_config, token_store.clone()));
 
@@ -795,13 +805,13 @@ async fn main() -> anyhow::Result<()> {
 
                                 // Inject owner_id for Telegram so the bot only responds
                                 // to the bound user account.
-                                if channel_name == "telegram" {
-                                    if let Some(owner_id) = config.channels.telegram_owner_id {
-                                        config_updates.insert(
-                                            "owner_id".to_string(),
-                                            serde_json::json!(owner_id),
-                                        );
-                                    }
+                                if channel_name == "telegram"
+                                    && let Some(owner_id) = config.channels.telegram_owner_id
+                                {
+                                    config_updates.insert(
+                                        "owner_id".to_string(),
+                                        serde_json::json!(owner_id),
+                                    );
                                 }
 
                                 if !config_updates.is_empty() {
@@ -892,23 +902,23 @@ async fn main() -> anyhow::Result<()> {
     // Extract its routes for the unified server; the channel itself just
     // provides the mpsc stream.
     let mut webhook_server_addr: Option<std::net::SocketAddr> = None;
-    if !cli.cli_only {
-        if let Some(ref http_config) = config.channels.http {
-            let http_channel = HttpChannel::new(http_config.clone());
-            webhook_routes.push(http_channel.routes());
-            let (host, port) = http_channel.addr();
-            webhook_server_addr = Some(
-                format!("{}:{}", host, port)
-                    .parse()
-                    .expect("HttpConfig host:port must be a valid SocketAddr"),
-            );
-            channels.add(Box::new(http_channel));
-            tracing::info!(
-                "HTTP channel enabled on {}:{}",
-                http_config.host,
-                http_config.port
-            );
-        }
+    if !cli.cli_only
+        && let Some(ref http_config) = config.channels.http
+    {
+        let http_channel = HttpChannel::new(http_config.clone());
+        webhook_routes.push(http_channel.routes());
+        let (host, port) = http_channel.addr();
+        webhook_server_addr = Some(
+            format!("{}:{}", host, port)
+                .parse()
+                .expect("HttpConfig host:port must be a valid SocketAddr"),
+        );
+        channels.add(Box::new(http_channel));
+        tracing::info!(
+            "HTTP channel enabled on {}:{}",
+            http_config.host,
+            http_config.port
+        );
     }
 
     // Start the unified webhook server if any routes were registered.
@@ -991,6 +1001,7 @@ async fn main() -> anyhow::Result<()> {
         if let Some(ref jm) = container_job_manager {
             gw = gw.with_job_manager(Arc::clone(jm));
         }
+        gw = gw.with_llm_provider(Arc::clone(&llm));
         if config.sandbox.enabled {
             gw = gw.with_prompt_queue(Arc::clone(&prompt_queue));
 

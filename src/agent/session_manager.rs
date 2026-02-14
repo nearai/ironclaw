@@ -199,10 +199,10 @@ impl SessionManager {
         {
             let sessions = self.sessions.read().await;
             for user_id in &stale_users {
-                if let Some(session) = sessions.get(user_id) {
-                    if let Ok(sess) = session.try_lock() {
-                        stale_thread_ids.extend(sess.threads.keys());
-                    }
+                if let Some(session) = sessions.get(user_id)
+                    && let Ok(sess) = session.try_lock()
+                {
+                    stale_thread_ids.extend(sess.threads.keys());
                 }
             }
         }
