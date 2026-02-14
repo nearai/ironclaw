@@ -396,8 +396,8 @@ fn truncate_message(content: &str) -> String {
         let max_bytes = 1990;
         let cutoff = content
             .char_indices()
-            .take_while(|(i, _)| *i < max_bytes)
-            .map(|(i, _)| i)
+            .map(|(i, c)| i + c.len_utf8())
+            .take_while(|&end| end <= max_bytes)
             .last()
             .unwrap_or(0);
         let mut truncated = content[..cutoff].to_string();
@@ -417,7 +417,7 @@ mod tests {
 
         let long = "a".repeat(2005);
         let truncated = truncate_message(&long);
-        assert_eq!(truncated.len(), 2005); // 1990 + 15 chars suffix
+        assert_eq!(truncated.len(), 2006); // 1990 + 16 chars suffix
         assert!(truncated.ends_with("\n... (truncated)"));
     }
 

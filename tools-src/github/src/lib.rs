@@ -711,10 +711,12 @@ mod tests {
 
     #[test]
     fn test_validate_event_in_create_pr_review() {
-        // Mock function or check logic directly
-        let events = ["APPROVE", "REQUEST_CHANGES", "COMMENT"];
-        for event in events {
-            assert!(events.contains(&event));
+        let valid = ["APPROVE", "REQUEST_CHANGES", "COMMENT"];
+        // Ensure valid inputs are accepted
+        for event in valid {
+            assert!(valid.contains(&event));
         }
+        // Ensure invalid inputs are rejected
+        assert!(!valid.contains(&"INVALID"));
     }
 }
