@@ -160,8 +160,6 @@ pub struct Reasoning {
     workspace_system_prompt: Option<String>,
     /// Optional skill context block to inject into system prompt.
     skill_context: Option<String>,
-    /// Minimum trust level of active skills (for tool attenuation).
-    active_skill_trust: Option<crate::skills::SkillTrust>,
 }
 
 impl Reasoning {
@@ -172,7 +170,6 @@ impl Reasoning {
             safety,
             workspace_system_prompt: None,
             skill_context: None,
-            active_skill_trust: None,
         }
     }
 
@@ -195,12 +192,6 @@ impl Reasoning {
         if !context.is_empty() {
             self.skill_context = Some(context);
         }
-        self
-    }
-
-    /// Set the minimum trust level of active skills for tool attenuation.
-    pub fn with_skill_trust(mut self, trust: crate::skills::SkillTrust) -> Self {
-        self.active_skill_trust = Some(trust);
         self
     }
 
@@ -357,22 +348,7 @@ Respond in JSON format:
         messages.extend(context.messages.clone());
 
         // Apply trust-based tool attenuation if skills are active.
-        // Tools above the trust ceiling are removed entirely -- the LLM
-        // cannot call tools it doesn't know exist.
-        let effective_tools = if self.active_skill_trust.is_some() {
-            // We already did attenuation in the agent loop and stored the
-            // result in the context. The attenuation is performed there so
-            // we can log the result. The context.available_tools already
-            // contains the filtered set. This branch just logs for clarity.
-            tracing::debug!(
-                "Skills active (min trust: {:?}), {} tools available after attenuation",
-                self.active_skill_trust,
-                context.available_tools.len()
-            );
-            context.available_tools.clone()
-        } else {
-            context.available_tools.clone()
-        };
+        let effective_tools = context.available_tools.clone();
 
         // If we have tools, use tool completion mode
         if !effective_tools.is_empty() {

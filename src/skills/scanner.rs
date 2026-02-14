@@ -269,14 +269,16 @@ impl SkillScanner {
         let regex_patterns = vec![
             // Invisible text: zero-width characters
             RegexEntry {
-                regex: Regex::new(r"[\u{200B}\u{200C}\u{200D}\u{FEFF}\u{00AD}]").unwrap(),
+                regex: Regex::new(r"[\u{200B}\u{200C}\u{200D}\u{FEFF}\u{00AD}]")
+                    .expect("BUG: hardcoded zero-width regex must compile"),
                 category: ScanCategory::InvisibleText,
                 severity: Severity::Critical,
                 description: "Zero-width or invisible characters detected".to_string(),
             },
             // RTL override characters
             RegexEntry {
-                regex: Regex::new(r"[\u{202A}-\u{202E}\u{2066}-\u{2069}]").unwrap(),
+                regex: Regex::new(r"[\u{202A}-\u{202E}\u{2066}-\u{2069}]")
+                    .expect("BUG: hardcoded RTL override regex must compile"),
                 category: ScanCategory::InvisibleText,
                 severity: Severity::Critical,
                 description: "Bidirectional text override characters detected".to_string(),
@@ -284,7 +286,7 @@ impl SkillScanner {
             // Tool invocation with specific tool names
             RegexEntry {
                 regex: Regex::new(r"(?i)\b(always|must|shall)\s+(use|call|invoke|run)\s+\w+\s+tool")
-                    .unwrap(),
+                    .expect("BUG: hardcoded tool invocation regex must compile"),
                 category: ScanCategory::ToolInvocation,
                 severity: Severity::High,
                 description: "Imperative tool invocation directive".to_string(),
@@ -294,7 +296,7 @@ impl SkillScanner {
                 regex: Regex::new(
                     r"(?i)(send|post|upload|forward)\s+(all|any|the|this)?\s*(data|output|result|response|content|secret|key|token)\s+(to|at|via)\s+https?://",
                 )
-                .unwrap(),
+                .expect("BUG: hardcoded exfiltration regex must compile"),
                 category: ScanCategory::DataExfiltration,
                 severity: Severity::Critical,
                 description: "Data exfiltration to URL pattern".to_string(),
@@ -302,7 +304,7 @@ impl SkillScanner {
             // Authority escalation with system prompt manipulation
             RegexEntry {
                 regex: Regex::new(r"(?i)(you\s+are\s+now|from\s+now\s+on|new\s+system\s+prompt)")
-                    .unwrap(),
+                    .expect("BUG: hardcoded authority escalation regex must compile"),
                 category: ScanCategory::AuthorityEscalation,
                 severity: Severity::Critical,
                 description: "System prompt override attempt".to_string(),
@@ -314,7 +316,7 @@ impl SkillScanner {
                 regex: Regex::new(
                     r"[\u{0400}-\u{04FF}\u{0370}-\u{03FF}\u{0530}-\u{058F}\u{2100}-\u{214F}]",
                 )
-                .unwrap(),
+                .expect("BUG: hardcoded mixed-script regex must compile"),
                 category: ScanCategory::InvisibleText,
                 severity: Severity::High,
                 description: "Mixed-script characters detected (potential homoglyph attack)"

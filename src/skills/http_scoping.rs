@@ -13,6 +13,8 @@
 //! - If **any** skill declares `[http]`, a request must match at least one skill's allowlist.
 //! - Union semantics: a URL is allowed if any active skill's scope permits it.
 //! - Community skills' `[http]` declarations are ignored (defense in depth).
+//! - Shell HTTP scoping is best-effort: it only inspects explicit `curl`/`wget` URL tokens.
+//!   It does not comprehensively sandbox all shell-based networking paths.
 
 use std::fmt;
 
@@ -191,7 +193,14 @@ impl std::error::Error for HttpScopeError {}
 
 /// Truncate a command string for display in error messages.
 fn truncate_cmd(s: &str, max: usize) -> &str {
-    if s.len() <= max { s } else { &s[..max] }
+    if s.len() <= max {
+        return s;
+    }
+    let mut end = max;
+    while end > 0 && !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    &s[..end]
 }
 
 // ---------------------------------------------------------------------------
@@ -230,6 +239,8 @@ pub struct SkillHttpScopes {
     validators: Vec<SkillScope>,
     /// Whether any scoping is active (if false, all requests pass through).
     has_scopes: bool,
+    /// Whether a community skill is active. Used for defense in depth deny-by-default.
+    community_active: bool,
 }
 
 struct SkillScope {
@@ -253,10 +264,12 @@ impl SkillHttpScopes {
     /// Community skills' `[http]` declarations are silently ignored.
     pub fn from_active_skills(skills: &[LoadedSkill]) -> Self {
         let mut validators = Vec::new();
+        let mut community_active = false;
 
         for skill in skills {
             // Defense in depth: ignore community skill HTTP declarations
             if skill.trust == SkillTrust::Community {
+                community_active = true;
                 if skill.manifest.http.is_some() {
                     tracing::warn!(
                         skill_name = skill.name(),
@@ -295,6 +308,7 @@ impl SkillHttpScopes {
         Self {
             validators,
             has_scopes,
+            community_active,
         }
     }
 
@@ -309,6 +323,15 @@ impl SkillHttpScopes {
         url: &str,
         method: &str,
     ) -> Result<Vec<&CredentialMapping>, HttpScopeError> {
+        if self.community_active && !self.has_scopes {
+            return Err(HttpScopeError::EndpointDenied {
+                url: url.to_string(),
+                method: method.to_string(),
+                reason: "community-tier skill active with no enforceable non-community HTTP scopes"
+                    .to_string(),
+            });
+        }
+
         if !self.has_scopes {
             return Ok(vec![]);
         }
@@ -347,6 +370,9 @@ impl SkillHttpScopes {
     ///
     /// If the command uses `curl` or `wget` with a URL, validates the URL
     /// against active skill scopes. Non-HTTP shell commands always pass.
+    ///
+    /// This is best-effort only: shell-based network access via interpreters,
+    /// indirection, subshells, or non-curl/wget binaries is not fully detected.
     pub fn validate_shell_command(&self, command: &str) -> Result<(), HttpScopeError> {
         if !self.has_scopes {
             return Ok(());
@@ -515,10 +541,11 @@ mod tests {
         );
         let scopes = SkillHttpScopes::from_active_skills(&[community]);
 
-        // Community skill's scope is ignored -- no scopes active means passthrough
+        // Defense in depth: community-only active skills deny HTTP when no
+        // non-community scopes are available.
         assert!(!scopes.has_scopes);
         let result = scopes.validate_http_request("https://evil.com/steal", "GET");
-        assert!(result.is_ok());
+        assert!(result.is_err());
     }
 
     #[test]
@@ -548,6 +575,14 @@ mod tests {
         // slack.com allowed via local skill
         let result = scopes.validate_http_request("https://slack.com/api/test", "POST");
         assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_truncate_cmd_utf8_safe_boundary() {
+        let input = "curl https://example.com/naive/ßeta";
+        let truncated = truncate_cmd(input, 31);
+        assert!(input.starts_with(truncated));
+        assert!(truncated.is_char_boundary(truncated.len()));
     }
 
     #[test]

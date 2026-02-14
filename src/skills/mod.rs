@@ -49,8 +49,10 @@ const MIN_KEYWORD_TAG_LENGTH: usize = 3;
 pub const MAX_PROMPT_FILE_SIZE: u64 = 64 * 1024;
 
 /// Regex for validating skill names: alphanumeric, hyphens, underscores, dots.
-static SKILL_NAME_PATTERN: std::sync::LazyLock<Regex> =
-    std::sync::LazyLock::new(|| Regex::new(r"^[a-zA-Z0-9][a-zA-Z0-9._-]{0,63}$").unwrap());
+static SKILL_NAME_PATTERN: std::sync::LazyLock<Regex> = std::sync::LazyLock::new(|| {
+    Regex::new(r"^[a-zA-Z0-9][a-zA-Z0-9._-]{0,63}$")
+        .expect("BUG: hardcoded skill name regex must compile")
+});
 
 /// Validate a skill name against the allowed pattern.
 pub fn validate_skill_name(name: &str) -> bool {
@@ -58,6 +60,9 @@ pub fn validate_skill_name(name: &str) -> bool {
 }
 
 /// Trust tier for a skill, determining its authority ceiling.
+///
+/// SECURITY NOTE: variant order is security-relevant because `Ord` is derived
+/// and the attenuation layer uses `min()` trust across active skills.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SkillTrust {
@@ -272,13 +277,16 @@ pub fn escape_skill_content(content: &str) -> String {
         // Match `<` followed by optional `/`, optional whitespace/control chars,
         // then `skill` (case-insensitive). Catches both opening and closing tags:
         // `<skill`, `</skill`, `< skill`, `</\0skill`, `<SKILL`, etc.
-        Regex::new(r"(?i)</?[\s\x00]*skill").unwrap()
+        Regex::new(r"(?i)</?[\s\x00]*skill").expect("BUG: hardcoded skill tag regex must compile")
     });
 
     SKILL_TAG_RE
         .replace_all(content, |caps: &regex::Captures| {
             // Replace leading `<` with `&lt;` to neutralize the tag
-            let matched = caps.get(0).unwrap().as_str();
+            let matched = caps
+                .get(0)
+                .expect("BUG: regex replacement capture 0 must exist")
+                .as_str();
             format!("&lt;{}", &matched[1..])
         })
         .into_owned()
