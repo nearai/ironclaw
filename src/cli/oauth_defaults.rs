@@ -101,7 +101,13 @@ pub async fn bind_callback_listener() -> Result<TcpListener, OAuthCallbackError>
     }
     TcpListener::bind(format!("127.0.0.1:{}", OAUTH_CALLBACK_PORT))
         .await
-        .map_err(|e| OAuthCallbackError::PortInUse(OAUTH_CALLBACK_PORT, e.to_string()))
+        .map_err(|e| {
+            if e.kind() == std::io::ErrorKind::AddrInUse {
+                OAuthCallbackError::PortInUse(OAUTH_CALLBACK_PORT, e.to_string())
+            } else {
+                OAuthCallbackError::Io(e.to_string())
+            }
+        })
 }
 
 /// Wait for an OAuth callback and extract a query parameter value.

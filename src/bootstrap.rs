@@ -69,7 +69,7 @@ fn migrate_bootstrap_json_to_env(env_path: &std::path::Path) {
             eprintln!("Warning: failed to create {}: {}", parent.display(), e);
             return;
         }
-        if let Err(e) = std::fs::write(env_path, format!("DATABASE_URL={}\n", url)) {
+        if let Err(e) = std::fs::write(env_path, format!("DATABASE_URL=\"{}\"\n", url)) {
             eprintln!("Warning: failed to migrate bootstrap.json to .env: {}", e);
             return;
         }
@@ -84,12 +84,14 @@ fn migrate_bootstrap_json_to_env(env_path: &std::path::Path) {
 /// Write `DATABASE_URL` to `~/.ironclaw/.env`.
 ///
 /// Creates the parent directory if it doesn't exist.
+/// The value is double-quoted so that `#` (common in URL-encoded passwords)
+/// and other shell-special characters are preserved by dotenvy.
 pub fn save_database_url(url: &str) -> std::io::Result<()> {
     let path = ironclaw_env_path();
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    std::fs::write(&path, format!("DATABASE_URL={}\n", url))
+    std::fs::write(&path, format!("DATABASE_URL=\"{}\"\n", url))
 }
 
 /// One-time migration of legacy `~/.ironclaw/settings.json` into the database.
@@ -246,18 +248,37 @@ mod tests {
         let dir = tempdir().unwrap();
         let env_path = dir.path().join(".env");
 
-        // Write using the helper (we need to test the format, not the global path)
+        // Write in the quoted format that save_database_url uses
         let url = "postgres://localhost:5432/ironclaw_test";
-        std::fs::write(&env_path, format!("DATABASE_URL={}\n", url)).unwrap();
+        std::fs::write(&env_path, format!("DATABASE_URL=\"{}\"\n", url)).unwrap();
 
-        // Verify the content is a valid dotenv line
+        // Verify the content is a valid dotenv line (quoted)
         let content = std::fs::read_to_string(&env_path).unwrap();
         assert_eq!(
             content,
-            "DATABASE_URL=postgres://localhost:5432/ironclaw_test\n"
+            "DATABASE_URL=\"postgres://localhost:5432/ironclaw_test\"\n"
         );
 
-        // Verify dotenvy can parse it
+        // Verify dotenvy can parse it (strips quotes automatically)
+        let parsed: Vec<(String, String)> = dotenvy::from_path_iter(&env_path)
+            .unwrap()
+            .filter_map(|r| r.ok())
+            .collect();
+        assert_eq!(parsed.len(), 1);
+        assert_eq!(parsed[0].0, "DATABASE_URL");
+        assert_eq!(parsed[0].1, url);
+    }
+
+    #[test]
+    fn test_save_database_url_with_hash_in_password() {
+        let dir = tempdir().unwrap();
+        let env_path = dir.path().join(".env");
+
+        // URLs with # in the password are common (URL-encoded special chars).
+        // Without quoting, dotenvy treats # as a comment delimiter.
+        let url = "postgres://user:p%23ss@localhost:5432/ironclaw";
+        std::fs::write(&env_path, format!("DATABASE_URL=\"{}\"\n", url)).unwrap();
+
         let parsed: Vec<(String, String)> = dotenvy::from_path_iter(&env_path)
             .unwrap()
             .filter_map(|r| r.ok())
@@ -321,7 +342,7 @@ mod tests {
         let content = std::fs::read_to_string(&env_path).unwrap();
         assert_eq!(
             content,
-            "DATABASE_URL=postgres://localhost/ironclaw_upgrade\n"
+            "DATABASE_URL=\"postgres://localhost/ironclaw_upgrade\"\n"
         );
 
         // bootstrap.json should be renamed to .migrated

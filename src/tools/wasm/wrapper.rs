@@ -746,12 +746,34 @@ impl std::fmt::Debug for WasmToolWrapper {
 /// then stores the new access token (with expiry) and rotated refresh token
 /// (if the provider returns one).
 ///
+/// SSRF defense: `token_url` originates from a tool's capabilities JSON, so
+/// a malicious tool could point it at an internal service to exfiltrate the
+/// refresh token. We require HTTPS, reject private/loopback IPs (including
+/// DNS-resolved), and disable redirects.
+///
 /// Returns `true` if the refresh succeeded, `false` otherwise.
 async fn refresh_oauth_token(
     store: &(dyn SecretsStore + Send + Sync),
     user_id: &str,
     config: &OAuthRefreshConfig,
 ) -> bool {
+    // SSRF defense: token_url comes from the tool's capabilities file.
+    if !config.token_url.starts_with("https://") {
+        tracing::warn!(
+            token_url = %config.token_url,
+            "OAuth token_url must use HTTPS, refusing token refresh"
+        );
+        return false;
+    }
+    if let Err(reason) = reject_private_ip(&config.token_url) {
+        tracing::warn!(
+            token_url = %config.token_url,
+            reason = %reason,
+            "OAuth token_url points to a private/internal IP, refusing token refresh"
+        );
+        return false;
+    }
+
     let refresh_name = format!("{}_refresh_token", config.secret_name);
     let refresh_secret = match store.get_decrypted(user_id, &refresh_name).await {
         Ok(s) => s,
@@ -767,6 +789,7 @@ async fn refresh_oauth_token(
 
     let client = match reqwest::Client::builder()
         .timeout(Duration::from_secs(15))
+        .redirect(reqwest::redirect::Policy::none())
         .build()
     {
         Ok(c) => c,
