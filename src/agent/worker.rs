@@ -227,11 +227,11 @@ Report when the job is complete or if you encounter issues you cannot resolve."#
             }
 
             // Check for cancellation
-            if let Ok(ctx) = self.context_manager().get_context(self.job_id).await {
-                if ctx.state == JobState::Cancelled {
-                    tracing::info!("Worker for job {} detected cancellation", self.job_id);
-                    return Ok(());
-                }
+            if let Ok(ctx) = self.context_manager().get_context(self.job_id).await
+                && ctx.state == JobState::Cancelled
+            {
+                tracing::info!("Worker for job {} detected cancellation", self.job_id);
+                return Ok(());
             }
 
             iteration += 1;

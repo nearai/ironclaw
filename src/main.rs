@@ -322,7 +322,11 @@ async fn main() -> anyhow::Result<()> {
 
     tracing_subscriber::registry()
         .with(env_filter)
-        .with(tracing_subscriber::fmt::layer().with_target(false))
+        .with(
+            tracing_subscriber::fmt::layer()
+                .with_target(false)
+                .with_writer(ironclaw::tracing_fmt::TruncatingStderr::default()),
+        )
         .with(WebLogLayer::new(Arc::clone(&log_broadcaster)))
         .init();
 
@@ -902,13 +906,13 @@ async fn main() -> anyhow::Result<()> {
 
                                 // Inject owner_id for Telegram so the bot only responds
                                 // to the bound user account.
-                                if channel_name == "telegram" {
-                                    if let Some(owner_id) = config.channels.telegram_owner_id {
-                                        config_updates.insert(
-                                            "owner_id".to_string(),
-                                            serde_json::json!(owner_id),
-                                        );
-                                    }
+                                if channel_name == "telegram"
+                                    && let Some(owner_id) = config.channels.telegram_owner_id
+                                {
+                                    config_updates.insert(
+                                        "owner_id".to_string(),
+                                        serde_json::json!(owner_id),
+                                    );
                                 }
 
                                 if !config_updates.is_empty() {
@@ -999,23 +1003,23 @@ async fn main() -> anyhow::Result<()> {
     // Extract its routes for the unified server; the channel itself just
     // provides the mpsc stream.
     let mut webhook_server_addr: Option<std::net::SocketAddr> = None;
-    if !cli.cli_only {
-        if let Some(ref http_config) = config.channels.http {
-            let http_channel = HttpChannel::new(http_config.clone());
-            webhook_routes.push(http_channel.routes());
-            let (host, port) = http_channel.addr();
-            webhook_server_addr = Some(
-                format!("{}:{}", host, port)
-                    .parse()
-                    .expect("HttpConfig host:port must be a valid SocketAddr"),
-            );
-            channels.add(Box::new(http_channel));
-            tracing::info!(
-                "HTTP channel enabled on {}:{}",
-                http_config.host,
-                http_config.port
-            );
-        }
+    if !cli.cli_only
+        && let Some(ref http_config) = config.channels.http
+    {
+        let http_channel = HttpChannel::new(http_config.clone());
+        webhook_routes.push(http_channel.routes());
+        let (host, port) = http_channel.addr();
+        webhook_server_addr = Some(
+            format!("{}:{}", host, port)
+                .parse()
+                .expect("HttpConfig host:port must be a valid SocketAddr"),
+        );
+        channels.add(Box::new(http_channel));
+        tracing::info!(
+            "HTTP channel enabled on {}:{}",
+            http_config.host,
+            http_config.port
+        );
     }
 
     // Start the unified webhook server if any routes were registered.

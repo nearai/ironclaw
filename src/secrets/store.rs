@@ -153,10 +153,10 @@ impl SecretsStore for PostgresSecretsStore {
                 let secret = row_to_secret(&r);
 
                 // Check expiration
-                if let Some(expires_at) = secret.expires_at {
-                    if expires_at < Utc::now() {
-                        return Err(SecretError::Expired);
-                    }
+                if let Some(expires_at) = secret.expires_at
+                    && expires_at < Utc::now()
+                {
+                    return Err(SecretError::Expired);
                 }
 
                 Ok(secret)
@@ -276,10 +276,10 @@ impl SecretsStore for PostgresSecretsStore {
             }
 
             // Simple glob: * matches any suffix
-            if let Some(prefix) = pattern.strip_suffix('*') {
-                if secret_name.starts_with(prefix) {
-                    return Ok(true);
-                }
+            if let Some(prefix) = pattern.strip_suffix('*')
+                && secret_name.starts_with(prefix)
+            {
+                return Ok(true);
             }
         }
 
@@ -761,10 +761,10 @@ pub mod testing {
                 if pattern == secret_name {
                     return Ok(true);
                 }
-                if let Some(prefix) = pattern.strip_suffix('*') {
-                    if secret_name.starts_with(prefix) {
-                        return Ok(true);
-                    }
+                if let Some(prefix) = pattern.strip_suffix('*')
+                    && secret_name.starts_with(prefix)
+                {
+                    return Ok(true);
                 }
             }
             Ok(false)

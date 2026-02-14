@@ -581,21 +581,20 @@ fn recover_tool_calls_from_content(
             }
 
             // Try JSON first: {"name":"x","arguments":{}}
-            if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(inner) {
-                if let Some(name) = parsed.get("name").and_then(|v| v.as_str()) {
-                    if tool_names.contains(name) {
-                        let arguments = parsed
-                            .get("arguments")
-                            .cloned()
-                            .unwrap_or(serde_json::Value::Object(Default::default()));
-                        calls.push(ToolCall {
-                            id: format!("recovered_{}", calls.len()),
-                            name: name.to_string(),
-                            arguments,
-                        });
-                        continue;
-                    }
-                }
+            if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(inner)
+                && let Some(name) = parsed.get("name").and_then(|v| v.as_str())
+                && tool_names.contains(name)
+            {
+                let arguments = parsed
+                    .get("arguments")
+                    .cloned()
+                    .unwrap_or(serde_json::Value::Object(Default::default()));
+                calls.push(ToolCall {
+                    id: format!("recovered_{}", calls.len()),
+                    name: name.to_string(),
+                    arguments,
+                });
+                continue;
             }
 
             // Bare tool name (e.g. "<tool_call>tool_list</tool_call>")

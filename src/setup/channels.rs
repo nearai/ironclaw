@@ -263,32 +263,32 @@ async fn bind_telegram_owner(token: &SecretString) -> Result<Option<i64>, String
 
         // Find the first message with a sender
         for update in &body.result {
-            if let Some(ref msg) = update.message {
-                if let Some(ref from) = msg.from {
-                    let display_name = from
-                        .username
-                        .as_ref()
-                        .map(|u| format!("@{}", u))
-                        .unwrap_or_else(|| from.first_name.clone());
+            if let Some(ref msg) = update.message
+                && let Some(ref from) = msg.from
+            {
+                let display_name = from
+                    .username
+                    .as_ref()
+                    .map(|u| format!("@{}", u))
+                    .unwrap_or_else(|| from.first_name.clone());
 
-                    print_success(&format!(
-                        "Received message from {} (ID: {})",
-                        display_name, from.id
-                    ));
+                print_success(&format!(
+                    "Received message from {} (ID: {})",
+                    display_name, from.id
+                ));
 
-                    // Acknowledge the update so it doesn't pile up
-                    let ack_url = format!(
-                        "https://api.telegram.org/bot{}/getUpdates",
-                        token.expose_secret()
-                    );
-                    let _ = client
-                        .get(&ack_url)
-                        .query(&[("offset", &(update.update_id + 1).to_string())])
-                        .send()
-                        .await;
+                // Acknowledge the update so it doesn't pile up
+                let ack_url = format!(
+                    "https://api.telegram.org/bot{}/getUpdates",
+                    token.expose_secret()
+                );
+                let _ = client
+                    .get(&ack_url)
+                    .query(&[("offset", &(update.update_id + 1).to_string())])
+                    .send()
+                    .await;
 
-                    return Ok(Some(from.id));
-                }
+                return Ok(Some(from.id));
             }
         }
     }

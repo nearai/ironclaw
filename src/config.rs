@@ -107,13 +107,13 @@ impl TunnelConfig {
         let public_url = optional_env("TUNNEL_URL")?
             .or_else(|| settings.tunnel.public_url.clone().filter(|s| !s.is_empty()));
 
-        if let Some(ref url) = public_url {
-            if !url.starts_with("https://") {
-                return Err(ConfigError::InvalidValue {
-                    key: "TUNNEL_URL".to_string(),
-                    message: "must start with https:// (webhooks require HTTPS)".to_string(),
-                });
-            }
+        if let Some(ref url) = public_url
+            && !url.starts_with("https://")
+        {
+            return Err(ConfigError::InvalidValue {
+                key: "TUNNEL_URL".to_string(),
+                message: "must start with https:// (webhooks require HTTPS)".to_string(),
+            });
         }
 
         Ok(Self { public_url })
@@ -891,13 +891,13 @@ impl SecretsConfig {
 
         let enabled = master_key.is_some();
 
-        if let Some(ref key) = master_key {
-            if key.expose_secret().len() < 32 {
-                return Err(ConfigError::InvalidValue {
-                    key: "SECRETS_MASTER_KEY".to_string(),
-                    message: "must be at least 32 bytes for AES-256-GCM".to_string(),
-                });
-            }
+        if let Some(ref key) = master_key
+            && key.expose_secret().len() < 32
+        {
+            return Err(ConfigError::InvalidValue {
+                key: "SECRETS_MASTER_KEY".to_string(),
+                message: "must be at least 32 bytes for AES-256-GCM".to_string(),
+            });
         }
 
         Ok(Self {

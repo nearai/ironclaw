@@ -71,8 +71,9 @@ impl NearAiChatProvider {
 
         tracing::debug!("Sending request to NEAR AI Chat: {}", url);
 
-        // Log the request body for debugging tool call issues
-        if let Ok(json) = serde_json::to_string(body) {
+        if tracing::enabled!(tracing::Level::DEBUG)
+            && let Ok(json) = serde_json::to_string(body)
+        {
             tracing::debug!("NEAR AI Chat request body: {}", json);
         }
 
@@ -395,10 +396,10 @@ fn flatten_tool_messages(messages: Vec<ChatCompletionMessage>) -> Vec<ChatComple
             if let (true, Some(calls)) = (msg.role == "assistant", &msg.tool_calls) {
                 // Convert assistant tool_calls into descriptive text
                 let mut parts: Vec<String> = Vec::new();
-                if let Some(ref text) = msg.content {
-                    if !text.is_empty() {
-                        parts.push(text.clone());
-                    }
+                if let Some(ref text) = msg.content
+                    && !text.is_empty()
+                {
+                    parts.push(text.clone());
                 }
                 for tc in calls {
                     parts.push(format!(

@@ -423,11 +423,11 @@ async fn extract_crate_name(cargo_toml: &Path) -> anyhow::Result<String> {
     // Simple TOML parsing for [package] name
     for line in content.lines() {
         let line = line.trim();
-        if line.starts_with("name") {
-            if let Some((_, value)) = line.split_once('=') {
-                let name = value.trim().trim_matches('"').trim_matches('\'');
-                return Ok(name.to_string());
-            }
+        if line.starts_with("name")
+            && let Some((_, value)) = line.split_once('=')
+        {
+            let name = value.trim().trim_matches('"').trim_matches('\'');
+            return Ok(name.to_string());
         }
     }
 
@@ -491,10 +491,10 @@ async fn list_tools(dir: Option<PathBuf>, verbose: bool) -> anyhow::Result<()> {
 
             if has_caps {
                 let caps_path = path.with_extension("capabilities.json");
-                if let Ok(content) = fs::read_to_string(&caps_path).await {
-                    if let Ok(caps) = CapabilitiesFile::from_json(&content) {
-                        print_capabilities_summary(&caps);
-                    }
+                if let Ok(content) = fs::read_to_string(&caps_path).await
+                    && let Ok(caps) = CapabilitiesFile::from_json(&content)
+                {
+                    print_capabilities_summary(&caps);
                 }
             }
             println!();
@@ -607,16 +607,16 @@ fn print_capabilities_summary(caps: &CapabilitiesFile) {
         }
     }
 
-    if let Some(ref secrets) = caps.secrets {
-        if !secrets.allowed_names.is_empty() {
-            parts.push(format!("secrets: {}", secrets.allowed_names.len()));
-        }
+    if let Some(ref secrets) = caps.secrets
+        && !secrets.allowed_names.is_empty()
+    {
+        parts.push(format!("secrets: {}", secrets.allowed_names.len()));
     }
 
-    if let Some(ref ws) = caps.workspace {
-        if !ws.allowed_prefixes.is_empty() {
-            parts.push("workspace: read".to_string());
-        }
+    if let Some(ref ws) = caps.workspace
+        && !ws.allowed_prefixes.is_empty()
+    {
+        parts.push("workspace: read".to_string());
     }
 
     if !parts.is_empty() {
@@ -653,30 +653,30 @@ fn print_capabilities_detail(caps: &CapabilitiesFile) {
         }
     }
 
-    if let Some(ref secrets) = caps.secrets {
-        if !secrets.allowed_names.is_empty() {
-            println!("  Secrets (existence check only):");
-            for name in &secrets.allowed_names {
-                println!("    {}", name);
-            }
+    if let Some(ref secrets) = caps.secrets
+        && !secrets.allowed_names.is_empty()
+    {
+        println!("  Secrets (existence check only):");
+        for name in &secrets.allowed_names {
+            println!("    {}", name);
         }
     }
 
-    if let Some(ref tool_invoke) = caps.tool_invoke {
-        if !tool_invoke.aliases.is_empty() {
-            println!("  Tool aliases:");
-            for (alias, real_name) in &tool_invoke.aliases {
-                println!("    {} -> {}", alias, real_name);
-            }
+    if let Some(ref tool_invoke) = caps.tool_invoke
+        && !tool_invoke.aliases.is_empty()
+    {
+        println!("  Tool aliases:");
+        for (alias, real_name) in &tool_invoke.aliases {
+            println!("    {} -> {}", alias, real_name);
         }
     }
 
-    if let Some(ref ws) = caps.workspace {
-        if !ws.allowed_prefixes.is_empty() {
-            println!("  Workspace read prefixes:");
-            for prefix in &ws.allowed_prefixes {
-                println!("    {}", prefix);
-            }
+    if let Some(ref ws) = caps.workspace
+        && !ws.allowed_prefixes.is_empty()
+    {
+        println!("  Workspace read prefixes:");
+        for prefix in &ws.allowed_prefixes {
+            println!("    {}", prefix);
         }
     }
 }
@@ -802,37 +802,36 @@ async fn auth_tool(name: String, dir: Option<PathBuf>, user_id: String) -> anyho
     }
 
     // Check for environment variable
-    if let Some(ref env_var) = auth.env_var {
-        if let Ok(token) = std::env::var(env_var) {
-            if !token.is_empty() {
-                println!("  Found {} in environment.", env_var);
-                println!();
+    if let Some(ref env_var) = auth.env_var
+        && let Ok(token) = std::env::var(env_var)
+        && !token.is_empty()
+    {
+        println!("  Found {} in environment.", env_var);
+        println!();
 
-                // Validate if endpoint is provided
-                if let Some(ref validation) = auth.validation_endpoint {
-                    print!("  Validating token...");
-                    std::io::stdout().flush()?;
+        // Validate if endpoint is provided
+        if let Some(ref validation) = auth.validation_endpoint {
+            print!("  Validating token...");
+            std::io::stdout().flush()?;
 
-                    match validate_token(&token, validation, &auth.secret_name).await {
-                        Ok(()) => {
-                            println!(" ✓");
-                        }
-                        Err(e) => {
-                            println!(" ✗");
-                            println!("  Validation failed: {}", e);
-                            println!();
-                            println!("  Falling back to manual entry...");
-                            return auth_tool_manual(secrets_store.as_ref(), &user_id, &auth).await;
-                        }
-                    }
+            match validate_token(&token, validation, &auth.secret_name).await {
+                Ok(()) => {
+                    println!(" ✓");
                 }
-
-                // Save the token
-                save_token(secrets_store.as_ref(), &user_id, &auth, &token).await?;
-                print_success(display_name);
-                return Ok(());
+                Err(e) => {
+                    println!(" ✗");
+                    println!("  Validation failed: {}", e);
+                    println!();
+                    println!("  Falling back to manual entry...");
+                    return auth_tool_manual(secrets_store.as_ref(), &user_id, &auth).await;
+                }
             }
         }
+
+        // Save the token
+        save_token(secrets_store.as_ref(), &user_id, &auth, &token).await?;
+        print_success(display_name);
+        return Ok(());
     }
 
     // Check for OAuth configuration
@@ -973,9 +972,9 @@ async fn auth_tool_oauth(
             reader.read_line(&mut request_line).await?;
 
             // Parse GET /callback?code=xxx HTTP/1.1
-            if let Some(path) = request_line.split_whitespace().nth(1) {
-                if path.starts_with("/callback") {
-                    if let Some(query) = path.split('?').nth(1) {
+            if let Some(path) = request_line.split_whitespace().nth(1)
+                && path.starts_with("/callback")
+                    && let Some(query) = path.split('?').nth(1) {
                         for param in query.split('&') {
                             let parts: Vec<&str> = param.splitn(2, '=').collect();
                             if parts.len() == 2 && parts[0] == "code" {
@@ -1012,8 +1011,6 @@ async fn auth_tool_oauth(
                             return Err(anyhow::anyhow!("Authorization denied by user"));
                         }
                     }
-                }
-            }
 
             let response = "HTTP/1.1 404 Not Found\r\n\r\n";
             let _ = socket.write_all(response.as_bytes()).await;
