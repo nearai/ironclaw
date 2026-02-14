@@ -192,8 +192,9 @@ When designing new features or systems, always prefer generic/extensible archite
 
 ### Error Handling
 - Use `thiserror` for error types in `error.rs`
-- Never use `.unwrap()` in production code (tests are fine)
+- Never use `.unwrap()` or `.expect()` in production code (tests are fine)
 - Map errors with context: `.map_err(|e| SomeError::Variant { reason: e.to_string() })?`
+- Before committing, grep for `.unwrap()` and `.expect(` in changed files to catch violations mechanically
 
 ### Async
 - All I/O is async with tokio
@@ -550,6 +551,37 @@ RUST_LOG=ironclaw=debug,tower_http=debug cargo run
 - Prefer strong types over strings (enums, newtypes)
 - Keep functions focused, extract helpers when logic is reused
 - Comments for non-obvious logic only
+
+## Review & Fix Discipline
+
+Hard-won lessons from code review -- follow these when fixing bugs or addressing review feedback.
+
+### Fix the pattern, not just the instance
+When a reviewer flags a bug (e.g., TOCTOU race in INSERT + SELECT-back), search the entire codebase for all instances of that same pattern. A fix in `SecretsStore::create()` that doesn't also fix `WasmToolStore::store()` is half a fix.
+
+### Propagate architectural fixes to satellite types
+If a core type changes its concurrency model (e.g., `LibSqlBackend` switches to connection-per-operation), every type that was handed a resource from the old model (e.g., `LibSqlSecretsStore`, `LibSqlWasmToolStore` holding a single `Connection`) must also be updated. Grep for the old type across the codebase.
+
+### Schema translation is more than DDL
+When translating a database schema between backends (PostgreSQL to libSQL, etc.), check for:
+- **Indexes** -- diff `CREATE INDEX` statements between the two schemas
+- **Seed data** -- check for `INSERT INTO` in migrations (e.g., `leak_detection_patterns`)
+- **Semantic differences** -- document where SQL functions behave differently (e.g., `json_patch` vs `jsonb_set`)
+
+### Feature flag testing
+When adding feature-gated code, test compilation with each feature in isolation:
+```bash
+cargo check                                          # default features
+cargo check --no-default-features --features libsql  # libsql only
+cargo check --all-features                           # all features
+```
+Dead code behind the wrong `#[cfg]` gate will only show up when building with a single feature.
+
+### Mechanical verification before committing
+Run these checks on changed files before committing:
+- `grep -rn '\.unwrap()' <files>` and `grep -rn '\.expect(' <files>` -- no panics in production
+- `grep -rn 'super::' <files>` -- use `crate::` imports
+- If you fixed a pattern bug, `grep` for other instances of that pattern across `src/`
 
 ## Workspace & Memory System
 
