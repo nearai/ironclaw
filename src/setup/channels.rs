@@ -12,7 +12,9 @@ use reqwest::Client;
 use secrecy::{ExposeSecret, SecretString};
 use serde::Deserialize;
 
-use crate::secrets::{CreateSecretParams, PostgresSecretsStore, SecretsCrypto, SecretsStore};
+#[cfg(feature = "postgres")]
+use crate::secrets::SecretsCrypto;
+use crate::secrets::{CreateSecretParams, SecretsStore};
 use crate::settings::Settings;
 use crate::setup::prompts::{
     confirm, input, optional_input, print_error, print_info, print_success, secret_input,
@@ -20,15 +22,24 @@ use crate::setup::prompts::{
 
 /// Context for saving secrets during setup.
 pub struct SecretsContext {
-    store: PostgresSecretsStore,
+    store: Arc<dyn SecretsStore>,
     user_id: String,
 }
 
 impl SecretsContext {
-    /// Create a new secrets context.
+    /// Create a new secrets context from a trait-object store.
+    pub fn from_store(store: Arc<dyn SecretsStore>, user_id: &str) -> Self {
+        Self {
+            store,
+            user_id: user_id.to_string(),
+        }
+    }
+
+    /// Create a new secrets context from a PostgreSQL pool and crypto.
+    #[cfg(feature = "postgres")]
     pub fn new(pool: deadpool_postgres::Pool, crypto: Arc<SecretsCrypto>, user_id: &str) -> Self {
         Self {
-            store: PostgresSecretsStore::new(pool, crypto),
+            store: Arc::new(crate::secrets::PostgresSecretsStore::new(pool, crypto)),
             user_id: user_id.to_string(),
         }
     }

@@ -19,9 +19,9 @@ use crate::channels::{ChannelManager, IncomingMessage, OutgoingResponse, StatusU
 use crate::config::{AgentConfig, HeartbeatConfig, RoutineConfig};
 use crate::context::ContextManager;
 use crate::context::JobContext;
+use crate::db::Database;
 use crate::error::Error;
 use crate::extensions::ExtensionManager;
-use crate::history::Store;
 use crate::llm::{ChatMessage, LlmProvider, Reasoning, ReasoningContext, RespondResult};
 use crate::safety::SafetyLayer;
 use crate::tools::ToolRegistry;
@@ -65,7 +65,7 @@ enum AgenticLoopResult {
 ///
 /// Bundles the shared components to reduce argument count.
 pub struct AgentDeps {
-    pub store: Option<Arc<Store>>,
+    pub store: Option<Arc<dyn Database>>,
     pub llm: Arc<dyn LlmProvider>,
     pub safety: Arc<SafetyLayer>,
     pub tools: Arc<ToolRegistry>,
@@ -130,7 +130,7 @@ impl Agent {
     }
 
     // Convenience accessors
-    fn store(&self) -> Option<&Arc<Store>> {
+    fn store(&self) -> Option<&Arc<dyn Database>> {
         self.deps.store.as_ref()
     }
 

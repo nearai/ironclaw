@@ -333,7 +333,7 @@ pub async fn get_mcp_server(name: &str) -> Result<McpServerConfig, ConfigError> 
 ///
 /// Falls back to the disk file if DB has no entry.
 pub async fn load_mcp_servers_from_db(
-    store: &crate::history::Store,
+    store: &dyn crate::db::Database,
     user_id: &str,
 ) -> Result<McpServersFile, ConfigError> {
     match store.get_setting(user_id, "mcp_servers").await {
@@ -357,7 +357,7 @@ pub async fn load_mcp_servers_from_db(
 
 /// Save MCP server configurations to the database settings table.
 pub async fn save_mcp_servers_to_db(
-    store: &crate::history::Store,
+    store: &dyn crate::db::Database,
     user_id: &str,
     config: &McpServersFile,
 ) -> Result<(), ConfigError> {
@@ -371,7 +371,7 @@ pub async fn save_mcp_servers_to_db(
 
 /// Add a new MCP server configuration (DB-backed).
 pub async fn add_mcp_server_db(
-    store: &crate::history::Store,
+    store: &dyn crate::db::Database,
     user_id: &str,
     config: McpServerConfig,
 ) -> Result<(), ConfigError> {
@@ -386,7 +386,7 @@ pub async fn add_mcp_server_db(
 
 /// Remove an MCP server by name (DB-backed).
 pub async fn remove_mcp_server_db(
-    store: &crate::history::Store,
+    store: &dyn crate::db::Database,
     user_id: &str,
     name: &str,
 ) -> Result<(), ConfigError> {

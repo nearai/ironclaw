@@ -482,7 +482,7 @@ impl Tool for MemoryTreeTool {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "postgres"))]
 mod tests {
     use super::*;
 

@@ -16,6 +16,7 @@ use std::collections::HashMap;
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
+#[cfg(feature = "postgres")]
 use deadpool_postgres::Pool;
 use uuid::Uuid;
 
@@ -263,16 +264,19 @@ pub fn verify_binary_integrity(binary: &[u8], expected_hash: &[u8]) -> bool {
 }
 
 /// PostgreSQL implementation of WasmToolStore.
+#[cfg(feature = "postgres")]
 pub struct PostgresWasmToolStore {
     pool: Pool,
 }
 
+#[cfg(feature = "postgres")]
 impl PostgresWasmToolStore {
     pub fn new(pool: Pool) -> Self {
         Self { pool }
     }
 }
 
+#[cfg(feature = "postgres")]
 #[async_trait]
 impl WasmToolStore for PostgresWasmToolStore {
     async fn store(&self, params: StoreToolParams) -> Result<StoredWasmTool, WasmStorageError> {
@@ -538,6 +542,7 @@ impl WasmToolStore for PostgresWasmToolStore {
     }
 }
 
+#[cfg(feature = "postgres")]
 fn row_to_tool(row: &tokio_postgres::Row) -> Result<StoredWasmTool, WasmStorageError> {
     let trust_level_str: String = row.get("trust_level");
     let status_str: String = row.get("status");
@@ -556,6 +561,459 @@ fn row_to_tool(row: &tokio_postgres::Row) -> Result<StoredWasmTool, WasmStorageE
         status: status_str.parse().map_err(WasmStorageError::InvalidData)?,
         created_at: row.get("created_at"),
         updated_at: row.get("updated_at"),
+    })
+}
+
+// ==================== libSQL implementation ====================
+
+/// libSQL/Turso implementation of WasmToolStore.
+///
+/// Holds an `Arc<Database>` handle and creates a fresh connection per operation,
+/// matching the connection-per-request pattern used by the main `LibSqlBackend`.
+#[cfg(feature = "libsql")]
+pub struct LibSqlWasmToolStore {
+    db: std::sync::Arc<libsql::Database>,
+}
+
+#[cfg(feature = "libsql")]
+impl LibSqlWasmToolStore {
+    pub fn new(db: std::sync::Arc<libsql::Database>) -> Self {
+        Self { db }
+    }
+
+    fn connect(&self) -> Result<libsql::Connection, WasmStorageError> {
+        self.db
+            .connect()
+            .map_err(|e| WasmStorageError::Database(format!("Connection failed: {}", e)))
+    }
+}
+
+#[cfg(feature = "libsql")]
+#[async_trait]
+impl WasmToolStore for LibSqlWasmToolStore {
+    async fn store(&self, params: StoreToolParams) -> Result<StoredWasmTool, WasmStorageError> {
+        let binary_hash = compute_binary_hash(&params.wasm_binary);
+        let id = Uuid::new_v4();
+        let now = Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+        let schema_str = serde_json::to_string(&params.parameters_schema)
+            .map_err(|e| WasmStorageError::InvalidData(e.to_string()))?;
+
+        // Wrap INSERT + read-back in a transaction to prevent TOCTOU races
+        let conn = self.connect()?;
+        let tx = conn
+            .transaction()
+            .await
+            .map_err(|e| WasmStorageError::Database(e.to_string()))?;
+
+        tx.execute(
+            r#"
+                INSERT INTO wasm_tools (
+                    id, user_id, name, version, description, wasm_binary, binary_hash,
+                    parameters_schema, source_url, trust_level, status, created_at, updated_at
+                )
+                VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, 'active', ?11, ?11)
+                ON CONFLICT (user_id, name, version) DO UPDATE SET
+                    description = excluded.description,
+                    wasm_binary = excluded.wasm_binary,
+                    binary_hash = excluded.binary_hash,
+                    parameters_schema = excluded.parameters_schema,
+                    source_url = excluded.source_url,
+                    updated_at = ?11
+                "#,
+            libsql::params![
+                id.to_string(),
+                params.user_id.as_str(),
+                params.name.as_str(),
+                params.version.as_str(),
+                params.description.as_str(),
+                libsql::Value::Blob(params.wasm_binary),
+                libsql::Value::Blob(binary_hash),
+                schema_str.as_str(),
+                libsql_wasm_opt_text(params.source_url.as_deref()),
+                params.trust_level.to_string(),
+                now.as_str(),
+            ],
+        )
+        .await
+        .map_err(|e| WasmStorageError::Database(e.to_string()))?;
+
+        // Read back the row within the same transaction
+        let mut rows = tx
+            .query(
+                r#"
+                SELECT id, user_id, name, version, description, parameters_schema,
+                       source_url, trust_level, status, created_at, updated_at
+                FROM wasm_tools
+                WHERE user_id = ?1 AND name = ?2
+                ORDER BY version DESC
+                LIMIT 1
+                "#,
+                libsql::params![params.user_id.as_str(), params.name.as_str()],
+            )
+            .await
+            .map_err(|e| WasmStorageError::Database(e.to_string()))?;
+
+        let row = rows
+            .next()
+            .await
+            .map_err(|e| WasmStorageError::Database(e.to_string()))?
+            .ok_or_else(|| {
+                WasmStorageError::Database("Insert succeeded but row not found".into())
+            })?;
+
+        let tool = libsql_row_to_tool(&row)?;
+
+        tx.commit()
+            .await
+            .map_err(|e| WasmStorageError::Database(e.to_string()))?;
+
+        Ok(tool)
+    }
+
+    async fn get(&self, user_id: &str, name: &str) -> Result<StoredWasmTool, WasmStorageError> {
+        let conn = self.connect()?;
+        let mut rows = conn
+            .query(
+                r#"
+                SELECT id, user_id, name, version, description, parameters_schema,
+                       source_url, trust_level, status, created_at, updated_at
+                FROM wasm_tools
+                WHERE user_id = ?1 AND name = ?2 AND status = 'active'
+                ORDER BY version DESC
+                LIMIT 1
+                "#,
+                libsql::params![user_id, name],
+            )
+            .await
+            .map_err(|e| WasmStorageError::Database(e.to_string()))?;
+
+        match rows
+            .next()
+            .await
+            .map_err(|e| WasmStorageError::Database(e.to_string()))?
+        {
+            Some(row) => {
+                let tool = libsql_row_to_tool(&row)?;
+                match tool.status {
+                    ToolStatus::Active => Ok(tool),
+                    ToolStatus::Disabled => Err(WasmStorageError::Disabled),
+                    ToolStatus::Quarantined => Err(WasmStorageError::Quarantined),
+                }
+            }
+            None => Err(WasmStorageError::NotFound(name.to_string())),
+        }
+    }
+
+    async fn get_with_binary(
+        &self,
+        user_id: &str,
+        name: &str,
+    ) -> Result<StoredWasmToolWithBinary, WasmStorageError> {
+        let conn = self.connect()?;
+        let mut rows = conn
+            .query(
+                r#"
+                SELECT id, user_id, name, version, description, wasm_binary, binary_hash,
+                       parameters_schema, source_url, trust_level, status, created_at, updated_at
+                FROM wasm_tools
+                WHERE user_id = ?1 AND name = ?2 AND status = 'active'
+                ORDER BY version DESC
+                LIMIT 1
+                "#,
+                libsql::params![user_id, name],
+            )
+            .await
+            .map_err(|e| WasmStorageError::Database(e.to_string()))?;
+
+        match rows
+            .next()
+            .await
+            .map_err(|e| WasmStorageError::Database(e.to_string()))?
+        {
+            Some(row) => {
+                let wasm_binary: Vec<u8> = row
+                    .get(5)
+                    .map_err(|e| WasmStorageError::Database(e.to_string()))?;
+                let binary_hash: Vec<u8> = row
+                    .get(6)
+                    .map_err(|e| WasmStorageError::Database(e.to_string()))?;
+
+                if !verify_binary_integrity(&wasm_binary, &binary_hash) {
+                    tracing::error!(
+                        user_id = user_id,
+                        name = name,
+                        "WASM binary integrity check failed"
+                    );
+                    return Err(WasmStorageError::IntegrityCheckFailed);
+                }
+
+                // Parse metadata from the row (different column offsets due to binary/hash)
+                let tool = libsql_row_to_tool_with_offset(&row)?;
+
+                match tool.status {
+                    ToolStatus::Active => Ok(StoredWasmToolWithBinary {
+                        tool,
+                        wasm_binary,
+                        binary_hash,
+                    }),
+                    ToolStatus::Disabled => Err(WasmStorageError::Disabled),
+                    ToolStatus::Quarantined => Err(WasmStorageError::Quarantined),
+                }
+            }
+            None => Err(WasmStorageError::NotFound(name.to_string())),
+        }
+    }
+
+    async fn get_capabilities(
+        &self,
+        tool_id: Uuid,
+    ) -> Result<Option<StoredCapabilities>, WasmStorageError> {
+        let conn = self.connect()?;
+        let mut rows = conn
+            .query(
+                r#"
+                SELECT id, wasm_tool_id, http_allowlist, allowed_secrets, tool_aliases,
+                       requests_per_minute, requests_per_hour, max_request_body_bytes,
+                       max_response_body_bytes, workspace_read_prefixes, http_timeout_secs
+                FROM tool_capabilities
+                WHERE wasm_tool_id = ?1
+                "#,
+                libsql::params![tool_id.to_string()],
+            )
+            .await
+            .map_err(|e| WasmStorageError::Database(e.to_string()))?;
+
+        match rows
+            .next()
+            .await
+            .map_err(|e| WasmStorageError::Database(e.to_string()))?
+        {
+            Some(row) => {
+                let id_str: String = row
+                    .get(0)
+                    .map_err(|e| WasmStorageError::Database(e.to_string()))?;
+                let tool_id_str: String = row
+                    .get(1)
+                    .map_err(|e| WasmStorageError::Database(e.to_string()))?;
+                let http_allowlist_str: String = row.get::<String>(2).unwrap_or_default();
+                let allowed_secrets_str: String = row.get::<String>(3).unwrap_or_default();
+                let tool_aliases_str: String = row.get::<String>(4).unwrap_or_default();
+                let rpm: i64 = row.get::<i64>(5).unwrap_or(60);
+                let rph: i64 = row.get::<i64>(6).unwrap_or(1000);
+                let max_req: i64 = row.get::<i64>(7).unwrap_or(1048576);
+                let max_resp: i64 = row.get::<i64>(8).unwrap_or(10485760);
+                let ws_prefixes_str: String = row.get::<String>(9).unwrap_or_default();
+                let timeout: i64 = row.get::<i64>(10).unwrap_or(30);
+
+                let http_allowlist: Vec<EndpointPattern> =
+                    serde_json::from_str(&http_allowlist_str).unwrap_or_default();
+                let allowed_secrets: Vec<String> =
+                    serde_json::from_str(&allowed_secrets_str).unwrap_or_default();
+                let tool_aliases: HashMap<String, String> =
+                    serde_json::from_str(&tool_aliases_str).unwrap_or_default();
+                let workspace_read_prefixes: Vec<String> =
+                    serde_json::from_str(&ws_prefixes_str).unwrap_or_default();
+
+                Ok(Some(StoredCapabilities {
+                    id: id_str
+                        .parse()
+                        .map_err(|e: uuid::Error| WasmStorageError::InvalidData(e.to_string()))?,
+                    wasm_tool_id: tool_id_str
+                        .parse()
+                        .map_err(|e: uuid::Error| WasmStorageError::InvalidData(e.to_string()))?,
+                    http_allowlist,
+                    allowed_secrets,
+                    tool_aliases,
+                    requests_per_minute: rpm as u32,
+                    requests_per_hour: rph as u32,
+                    max_request_body_bytes: max_req,
+                    max_response_body_bytes: max_resp,
+                    workspace_read_prefixes,
+                    http_timeout_secs: timeout as i32,
+                }))
+            }
+            None => Ok(None),
+        }
+    }
+
+    async fn list(&self, user_id: &str) -> Result<Vec<StoredWasmTool>, WasmStorageError> {
+        // SQLite doesn't have DISTINCT ON, so we use a subquery to get latest version per name
+        let conn = self.connect()?;
+        let mut rows = conn
+            .query(
+                r#"
+                SELECT id, user_id, name, version, description, parameters_schema,
+                       source_url, trust_level, status, created_at, updated_at
+                FROM wasm_tools
+                WHERE user_id = ?1
+                  AND rowid IN (
+                      SELECT MAX(rowid)
+                      FROM wasm_tools
+                      WHERE user_id = ?1
+                      GROUP BY name
+                  )
+                ORDER BY name
+                "#,
+                libsql::params![user_id],
+            )
+            .await
+            .map_err(|e| WasmStorageError::Database(e.to_string()))?;
+
+        let mut tools = Vec::new();
+        while let Some(row) = rows
+            .next()
+            .await
+            .map_err(|e| WasmStorageError::Database(e.to_string()))?
+        {
+            tools.push(libsql_row_to_tool(&row)?);
+        }
+        Ok(tools)
+    }
+
+    async fn update_status(
+        &self,
+        user_id: &str,
+        name: &str,
+        status: ToolStatus,
+    ) -> Result<(), WasmStorageError> {
+        let now = Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+        let conn = self.connect()?;
+
+        let result = conn
+            .execute(
+                "UPDATE wasm_tools SET status = ?1, updated_at = ?2 WHERE user_id = ?3 AND name = ?4",
+                libsql::params![status.to_string(), now.as_str(), user_id, name],
+            )
+            .await
+            .map_err(|e| WasmStorageError::Database(e.to_string()))?;
+
+        if result == 0 {
+            return Err(WasmStorageError::NotFound(name.to_string()));
+        }
+
+        Ok(())
+    }
+
+    async fn delete(&self, user_id: &str, name: &str) -> Result<bool, WasmStorageError> {
+        let conn = self.connect()?;
+        let result = conn
+            .execute(
+                "DELETE FROM wasm_tools WHERE user_id = ?1 AND name = ?2",
+                libsql::params![user_id, name],
+            )
+            .await
+            .map_err(|e| WasmStorageError::Database(e.to_string()))?;
+
+        Ok(result > 0)
+    }
+}
+
+#[cfg(feature = "libsql")]
+fn libsql_wasm_opt_text(s: Option<&str>) -> libsql::Value {
+    match s {
+        Some(s) => libsql::Value::Text(s.to_string()),
+        None => libsql::Value::Null,
+    }
+}
+
+#[cfg(feature = "libsql")]
+fn libsql_wasm_parse_ts(s: &str) -> Result<DateTime<Utc>, WasmStorageError> {
+    if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(s) {
+        return Ok(dt.with_timezone(&Utc));
+    }
+    if let Ok(ndt) = chrono::NaiveDateTime::parse_from_str(s, "%Y-%m-%d %H:%M:%S%.f") {
+        return Ok(ndt.and_utc());
+    }
+    if let Ok(ndt) = chrono::NaiveDateTime::parse_from_str(s, "%Y-%m-%d %H:%M:%S") {
+        return Ok(ndt.and_utc());
+    }
+    Err(WasmStorageError::InvalidData(format!(
+        "unparseable timestamp: {:?}",
+        s
+    )))
+}
+
+/// Parse a tool row with standard column order (no binary columns).
+/// Columns: id(0), user_id(1), name(2), version(3), description(4),
+///          parameters_schema(5), source_url(6), trust_level(7), status(8),
+///          created_at(9), updated_at(10)
+#[cfg(feature = "libsql")]
+fn libsql_row_to_tool(row: &libsql::Row) -> Result<StoredWasmTool, WasmStorageError> {
+    libsql_row_to_tool_at(row, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10)
+}
+
+/// Parse a tool row when binary columns are present (get_with_binary query).
+/// Columns: id(0), user_id(1), name(2), version(3), description(4),
+///          wasm_binary(5), binary_hash(6),
+///          parameters_schema(7), source_url(8), trust_level(9), status(10),
+///          created_at(11), updated_at(12)
+#[cfg(feature = "libsql")]
+fn libsql_row_to_tool_with_offset(row: &libsql::Row) -> Result<StoredWasmTool, WasmStorageError> {
+    libsql_row_to_tool_at(row, 0, 1, 2, 3, 4, 7, 8, 9, 10, 11, 12)
+}
+
+#[cfg(feature = "libsql")]
+#[allow(clippy::too_many_arguments)]
+fn libsql_row_to_tool_at(
+    row: &libsql::Row,
+    id_idx: i32,
+    user_id_idx: i32,
+    name_idx: i32,
+    version_idx: i32,
+    description_idx: i32,
+    schema_idx: i32,
+    source_url_idx: i32,
+    trust_level_idx: i32,
+    status_idx: i32,
+    created_at_idx: i32,
+    updated_at_idx: i32,
+) -> Result<StoredWasmTool, WasmStorageError> {
+    let id_str: String = row
+        .get(id_idx)
+        .map_err(|e| WasmStorageError::Database(e.to_string()))?;
+    let trust_level_str: String = row
+        .get(trust_level_idx)
+        .map_err(|e| WasmStorageError::Database(e.to_string()))?;
+    let status_str: String = row
+        .get(status_idx)
+        .map_err(|e| WasmStorageError::Database(e.to_string()))?;
+    let schema_str: String = row
+        .get(schema_idx)
+        .map_err(|e| WasmStorageError::Database(e.to_string()))?;
+    let created_at_str: String = row
+        .get(created_at_idx)
+        .map_err(|e| WasmStorageError::Database(e.to_string()))?;
+    let updated_at_str: String = row
+        .get(updated_at_idx)
+        .map_err(|e| WasmStorageError::Database(e.to_string()))?;
+
+    Ok(StoredWasmTool {
+        id: id_str
+            .parse()
+            .map_err(|e: uuid::Error| WasmStorageError::InvalidData(e.to_string()))?,
+        user_id: row
+            .get(user_id_idx)
+            .map_err(|e| WasmStorageError::Database(e.to_string()))?,
+        name: row
+            .get(name_idx)
+            .map_err(|e| WasmStorageError::Database(e.to_string()))?,
+        version: row
+            .get(version_idx)
+            .map_err(|e| WasmStorageError::Database(e.to_string()))?,
+        description: row
+            .get(description_idx)
+            .map_err(|e| WasmStorageError::Database(e.to_string()))?,
+        parameters_schema: serde_json::from_str(&schema_str).unwrap_or_default(),
+        source_url: row
+            .get::<String>(source_url_idx)
+            .ok()
+            .filter(|s| !s.is_empty()),
+        trust_level: trust_level_str
+            .parse()
+            .map_err(WasmStorageError::InvalidData)?,
+        status: status_str.parse().map_err(WasmStorageError::InvalidData)?,
+        created_at: libsql_wasm_parse_ts(&created_at_str)?,
+        updated_at: libsql_wasm_parse_ts(&updated_at_str)?,
     })
 }
 

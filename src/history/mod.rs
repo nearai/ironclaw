@@ -5,11 +5,15 @@
 //! - Learning from past executions
 //! - Analytics and metrics
 
+#[cfg(feature = "postgres")]
 mod analytics;
 mod store;
 
+#[cfg(feature = "postgres")]
 pub use analytics::{JobStats, ToolStats};
+#[cfg(feature = "postgres")]
+pub use store::Store;
 pub use store::{
     ConversationMessage, ConversationSummary, JobEventRecord, LlmCallRecord, SandboxJobRecord,
-    SandboxJobSummary, Store,
+    SandboxJobSummary, SettingRow,
 };

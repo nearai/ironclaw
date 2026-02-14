@@ -15,7 +15,7 @@ use tokio::sync::{Mutex, broadcast};
 use uuid::Uuid;
 
 use crate::channels::web::types::SseEvent;
-use crate::history::Store;
+use crate::db::Database;
 use crate::llm::{CompletionRequest, LlmProvider, ToolCompletionRequest};
 use crate::orchestrator::auth::{TokenStore, worker_auth_middleware};
 use crate::orchestrator::job_manager::ContainerJobManager;
@@ -43,7 +43,7 @@ pub struct OrchestratorState {
     /// Buffered follow-up prompts for sandbox jobs, keyed by job_id.
     pub prompt_queue: Arc<Mutex<HashMap<Uuid, VecDeque<PendingPrompt>>>>,
     /// Database handle for persisting job events.
-    pub store: Option<Arc<Store>>,
+    pub store: Option<Arc<dyn Database>>,
 }
 
 /// The orchestrator's internal API server.

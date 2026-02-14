@@ -30,8 +30,8 @@ use crate::channels::web::auth::{AuthState, auth_middleware};
 use crate::channels::web::log_layer::LogBroadcaster;
 use crate::channels::web::sse::SseManager;
 use crate::channels::web::types::*;
+use crate::db::Database;
 use crate::extensions::ExtensionManager;
-use crate::history::Store;
 use crate::orchestrator::job_manager::ContainerJobManager;
 use crate::tools::ToolRegistry;
 use crate::workspace::Workspace;
@@ -126,7 +126,7 @@ pub struct GatewayState {
     /// Tool registry for listing registered tools.
     pub tool_registry: Option<Arc<ToolRegistry>>,
     /// Database store for sandbox job persistence.
-    pub store: Option<Arc<Store>>,
+    pub store: Option<Arc<dyn Database>>,
     /// Container job manager for sandbox operations.
     pub job_manager: Option<Arc<ContainerJobManager>>,
     /// Prompt queue for Claude Code follow-up prompts.

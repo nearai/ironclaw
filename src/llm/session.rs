@@ -62,7 +62,7 @@ pub struct SessionManager {
     /// Prevents thundering herd during concurrent 401s.
     renewal_lock: Mutex<()>,
     /// Optional database store for persisting session to the settings table.
-    store: RwLock<Option<Arc<crate::history::Store>>>,
+    store: RwLock<Option<Arc<dyn crate::db::Database>>>,
     /// User ID for DB settings (default: "default").
     user_id: RwLock<String>,
 }
@@ -125,7 +125,7 @@ impl SessionManager {
     /// When a store is attached, session tokens are saved to the `settings`
     /// table (key: `nearai.session_token`) in addition to the disk file.
     /// On load, DB is preferred over disk.
-    pub async fn attach_store(&self, store: Arc<crate::history::Store>, user_id: &str) {
+    pub async fn attach_store(&self, store: Arc<dyn crate::db::Database>, user_id: &str) {
         *self.store.write().await = Some(store);
         *self.user_id.write().await = user_id.to_string();
 
