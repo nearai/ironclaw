@@ -113,6 +113,12 @@ pub struct ToolSelection {
     pub reasoning: String,
     /// Alternative tools considered.
     pub alternatives: Vec<String>,
+    /// The tool call ID from the LLM response.
+    ///
+    /// OpenAI-compatible providers assign each tool call a unique ID that must
+    /// be echoed back in the corresponding tool result message. Without this,
+    /// the provider cannot match results to their originating calls.
+    pub tool_call_id: String,
 }
 
 /// Token usage from a single LLM call.
@@ -244,6 +250,7 @@ impl Reasoning {
                 parameters: tool_call.arguments,
                 reasoning: reasoning.clone(),
                 alternatives: vec![],
+                tool_call_id: tool_call.id,
             })
             .collect();
 
