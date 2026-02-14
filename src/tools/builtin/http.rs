@@ -5,6 +5,7 @@ use std::net::{IpAddr, ToSocketAddrs};
 use std::time::Duration;
 
 use async_trait::async_trait;
+use futures::StreamExt;
 use reqwest::Client;
 
 use crate::context::JobContext;
@@ -238,18 +239,35 @@ impl Tool for HttpTool {
             .filter_map(|(k, v)| v.to_str().ok().map(|v| (k.to_string(), v.to_string())))
             .collect();
 
-        // Get response body with size cap to prevent OOM
-        let body_bytes = response.bytes().await.map_err(|e| {
-            ToolError::ExternalService(format!("failed to read response body: {}", e))
-        })?;
-
-        if body_bytes.len() > MAX_RESPONSE_SIZE {
+        // Pre-check Content-Length header to reject obviously oversized responses
+        // before downloading anything, preventing OOM from malicious servers.
+        if let Some(content_length) = response.headers().get(reqwest::header::CONTENT_LENGTH)
+            && let Ok(len) = content_length.to_str().unwrap_or("0").parse::<usize>()
+            && len > MAX_RESPONSE_SIZE
+        {
             return Err(ToolError::ExecutionFailed(format!(
-                "Response body too large ({} bytes, max {})",
-                body_bytes.len(),
-                MAX_RESPONSE_SIZE
+                "Response Content-Length ({} bytes) exceeds maximum allowed size ({} bytes)",
+                len, MAX_RESPONSE_SIZE
             )));
         }
+
+        // Stream the response body with a hard size cap. Even if Content-Length was
+        // absent or lied about the size, we stop reading once we exceed the limit.
+        let mut body = Vec::new();
+        let mut stream = response.bytes_stream();
+        while let Some(chunk) = StreamExt::next(&mut stream).await {
+            let chunk = chunk.map_err(|e| {
+                ToolError::ExternalService(format!("failed to read response body: {}", e))
+            })?;
+            body.extend_from_slice(&chunk);
+            if body.len() > MAX_RESPONSE_SIZE {
+                return Err(ToolError::ExecutionFailed(format!(
+                    "Response body exceeds maximum allowed size ({} bytes)",
+                    MAX_RESPONSE_SIZE
+                )));
+            }
+        }
+        let body_bytes = bytes::Bytes::from(body);
 
         let body_text = String::from_utf8_lossy(&body_bytes).into_owned();
 
@@ -335,5 +353,11 @@ mod tests {
         ))));
         // Public
         assert!(!is_disallowed_ip(&IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8))));
+    }
+
+    #[test]
+    fn test_max_response_size_is_reasonable() {
+        // MAX_RESPONSE_SIZE should be 5 MB to prevent OOM while allowing typical API responses.
+        assert_eq!(MAX_RESPONSE_SIZE, 5 * 1024 * 1024);
     }
 }
