@@ -74,7 +74,7 @@ impl Config {
         settings: &Settings,
     ) -> Result<Self, ConfigError> {
         Ok(Self {
-            database: DatabaseConfig::resolve(bootstrap)?,
+            database: DatabaseConfig::resolve(bootstrap, settings)?,
             llm: LlmConfig::resolve(settings)?,
             embeddings: EmbeddingsConfig::resolve(settings)?,
             tunnel: TunnelConfig::resolve(settings)?,
@@ -179,12 +179,18 @@ pub struct DatabaseConfig {
 }
 
 impl DatabaseConfig {
-    fn resolve(bootstrap: &crate::bootstrap::BootstrapConfig) -> Result<Self, ConfigError> {
+    fn resolve(
+        bootstrap: &crate::bootstrap::BootstrapConfig,
+        settings: &Settings,
+    ) -> Result<Self, ConfigError> {
+        // Priority: env var > settings > default
         let backend: DatabaseBackend = if let Some(b) = optional_env("DATABASE_BACKEND")? {
             b.parse().map_err(|e| ConfigError::InvalidValue {
                 key: "DATABASE_BACKEND".to_string(),
                 message: e,
             })?
+        } else if let Some(ref b) = settings.database_backend {
+            b.parse().unwrap_or(DatabaseBackend::default())
         } else {
             DatabaseBackend::default()
         };
@@ -215,15 +221,19 @@ impl DatabaseConfig {
             .or(bootstrap.database_pool_size)
             .unwrap_or(10);
 
-        let libsql_path = optional_env("LIBSQL_PATH")?.map(PathBuf::from).or_else(|| {
-            if backend == DatabaseBackend::LibSql {
-                Some(default_libsql_path())
-            } else {
-                None
-            }
-        });
+        // Priority: env var > settings > default (if libsql backend)
+        let libsql_path = optional_env("LIBSQL_PATH")?
+            .map(PathBuf::from)
+            .or_else(|| settings.libsql_path.as_ref().map(PathBuf::from))
+            .or_else(|| {
+                if backend == DatabaseBackend::LibSql {
+                    Some(default_libsql_path())
+                } else {
+                    None
+                }
+            });
 
-        let libsql_url = optional_env("LIBSQL_URL")?;
+        let libsql_url = optional_env("LIBSQL_URL")?.or_else(|| settings.libsql_url.clone());
         let libsql_auth_token = optional_env("LIBSQL_AUTH_TOKEN")?.map(SecretString::from);
 
         if libsql_url.is_some() && libsql_auth_token.is_none() {
@@ -401,12 +411,14 @@ pub struct NearAiConfig {
 
 impl LlmConfig {
     fn resolve(settings: &Settings) -> Result<Self, ConfigError> {
-        // Determine backend (default: NearAi)
+        // Determine backend: env var > settings > default (NearAi)
         let backend: LlmBackend = if let Some(b) = optional_env("LLM_BACKEND")? {
             b.parse().map_err(|e| ConfigError::InvalidValue {
                 key: "LLM_BACKEND".to_string(),
                 message: e,
             })?
+        } else if let Some(ref b) = settings.llm_backend {
+            b.parse().unwrap_or(LlmBackend::NearAi)
         } else {
             LlmBackend::NearAi
         };
@@ -473,6 +485,7 @@ impl LlmConfig {
 
         let ollama = if backend == LlmBackend::Ollama {
             let base_url = optional_env("OLLAMA_BASE_URL")?
+                .or_else(|| settings.ollama_base_url.clone())
                 .unwrap_or_else(|| "http://localhost:11434".to_string());
             let model = optional_env("OLLAMA_MODEL")?.unwrap_or_else(|| "llama3".to_string());
             Some(OllamaConfig { base_url, model })
@@ -481,8 +494,9 @@ impl LlmConfig {
         };
 
         let openai_compatible = if backend == LlmBackend::OpenAiCompatible {
-            let base_url =
-                optional_env("LLM_BASE_URL")?.ok_or_else(|| ConfigError::MissingRequired {
+            let base_url = optional_env("LLM_BASE_URL")?
+                .or_else(|| settings.openai_compatible_base_url.clone())
+                .ok_or_else(|| ConfigError::MissingRequired {
                     key: "LLM_BASE_URL".to_string(),
                     hint: "Set LLM_BASE_URL when LLM_BACKEND=openai_compatible".to_string(),
                 })?;
@@ -1348,6 +1362,44 @@ impl ClaudeCodeConfig {
                 })
                 .unwrap_or(defaults.allowed_tools),
         })
+    }
+}
+
+/// Load API keys from the encrypted secrets store into process env vars.
+///
+/// This bridges the gap between secrets stored during onboarding and the
+/// env-var-first resolution in `LlmConfig::resolve()`. Only sets env vars
+/// that aren't already present, so explicit env vars always win.
+pub async fn inject_llm_keys_from_secrets(
+    secrets: &dyn crate::secrets::SecretsStore,
+    user_id: &str,
+) {
+    let mappings = [
+        ("llm_openai_api_key", "OPENAI_API_KEY"),
+        ("llm_anthropic_api_key", "ANTHROPIC_API_KEY"),
+        ("llm_compatible_api_key", "LLM_API_KEY"),
+    ];
+
+    for (secret_name, env_var) in mappings {
+        if std::env::var(env_var).is_ok() {
+            continue;
+        }
+        match secrets.get_decrypted(user_id, secret_name).await {
+            Ok(decrypted) => {
+                // SAFETY: single-threaded at this point in startup
+                unsafe {
+                    std::env::set_var(env_var, decrypted.expose());
+                }
+                tracing::debug!(
+                    "Injected secret '{}' into env var '{}'",
+                    secret_name,
+                    env_var
+                );
+            }
+            Err(_) => {
+                // Secret doesn't exist, that's fine
+            }
+        }
     }
 }
 

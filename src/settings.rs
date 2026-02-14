@@ -40,8 +40,18 @@ pub struct Settings {
     #[serde(default)]
     pub secrets_master_key_source: KeySource,
 
-    // === Step 3: NEAR AI Auth ===
-    // Session stored separately in session.json
+    // === Step 3: Inference Provider ===
+    /// LLM backend: "nearai", "anthropic", "openai", "ollama", "openai_compatible".
+    #[serde(default)]
+    pub llm_backend: Option<String>,
+
+    /// Ollama base URL (when llm_backend = "ollama").
+    #[serde(default)]
+    pub ollama_base_url: Option<String>,
+
+    /// OpenAI-compatible endpoint base URL (when llm_backend = "openai_compatible").
+    #[serde(default)]
+    pub openai_compatible_base_url: Option<String>,
 
     // === Step 4: Model Selection ===
     /// Currently selected model.
@@ -512,16 +522,25 @@ impl Settings {
     /// Each key is a dotted path (e.g., "agent.name"), value is a JSONB value.
     /// Missing keys get their default value.
     pub fn from_db_map(map: &std::collections::HashMap<String, serde_json::Value>) -> Self {
-        // Start with defaults, then overlay each DB setting
+        // Start with defaults, then overlay each DB setting.
+        //
+        // The settings table stores both Settings struct fields and app-specific
+        // data (e.g. nearai.session_token). Skip keys that don't correspond to
+        // a known Settings path.
         let mut settings = Self::default();
 
         for (key, value) in map {
+            // Check if this key maps to a known Settings field
+            if settings.get(key).is_none() {
+                continue;
+            }
+
             // Convert the JSONB value to a string for the existing set() method
             let value_str = match value {
                 serde_json::Value::String(s) => s.clone(),
                 serde_json::Value::Bool(b) => b.to_string(),
                 serde_json::Value::Number(n) => n.to_string(),
-                serde_json::Value::Null => "null".to_string(),
+                serde_json::Value::Null => continue, // null means default, skip
                 other => other.to_string(),
             };
 
@@ -911,5 +930,30 @@ mod tests {
             .set("channels.telegram_owner_id", "987654321")
             .unwrap();
         assert_eq!(settings.channels.telegram_owner_id, Some(987654321));
+    }
+
+    #[test]
+    fn test_llm_backend_round_trip() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+
+        let settings = Settings {
+            llm_backend: Some("anthropic".to_string()),
+            ollama_base_url: Some("http://localhost:11434".to_string()),
+            openai_compatible_base_url: Some("http://my-vllm:8000/v1".to_string()),
+            ..Default::default()
+        };
+        settings.save_to(&path).unwrap();
+
+        let loaded = Settings::load_from(&path);
+        assert_eq!(loaded.llm_backend, Some("anthropic".to_string()));
+        assert_eq!(
+            loaded.ollama_base_url,
+            Some("http://localhost:11434".to_string())
+        );
+        assert_eq!(
+            loaded.openai_compatible_base_url,
+            Some("http://my-vllm:8000/v1".to_string())
+        );
     }
 }

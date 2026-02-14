@@ -107,7 +107,6 @@ struct TelegramGetUpdatesResponse {
 
 #[derive(Debug, Deserialize)]
 struct TelegramUpdate {
-    #[allow(dead_code)]
     update_id: i64,
     message: Option<TelegramUpdateMessage>,
 }
@@ -231,7 +230,9 @@ async fn bind_telegram_owner(token: &SecretString) -> Result<Option<i64>, String
         "https://api.telegram.org/bot{}/deleteWebhook",
         token.expose_secret()
     );
-    let _ = client.post(&delete_url).send().await;
+    if let Err(e) = client.post(&delete_url).send().await {
+        tracing::warn!("Failed to delete webhook (getUpdates may not work): {e}");
+    }
 
     let updates_url = format!(
         "https://api.telegram.org/bot{}/getUpdates",
@@ -282,11 +283,14 @@ async fn bind_telegram_owner(token: &SecretString) -> Result<Option<i64>, String
                     "https://api.telegram.org/bot{}/getUpdates",
                     token.expose_secret()
                 );
-                let _ = client
+                if let Err(e) = client
                     .get(&ack_url)
                     .query(&[("offset", &(update.update_id + 1).to_string())])
                     .send()
-                    .await;
+                    .await
+                {
+                    tracing::warn!("Failed to acknowledge Telegram update: {e}");
+                }
 
                 return Ok(Some(from.id));
             }
@@ -593,14 +597,11 @@ pub async fn setup_wasm_channel(
         print_success(&format!("{} saved to database", secret_config.name));
     }
 
-    // Optionally validate the configuration
+    // TODO(#XX): Substitute secrets into the validation URL and make a
+    // GET request to verify the configured credentials actually work.
     if let Some(ref validation_endpoint) = setup.validation_endpoint {
-        print_info("Validating configuration...");
-        // The validation endpoint may contain placeholders like {telegram_bot_token}
-        // For now, we skip validation since we'd need to substitute secrets
-        // A full implementation would fetch secrets and substitute them
         print_info(&format!(
-            "Validation endpoint configured: {} (validation skipped)",
+            "Validation endpoint configured: {} (validation not yet implemented)",
             validation_endpoint
         ));
     }
@@ -630,5 +631,15 @@ mod tests {
     fn test_generate_webhook_secret() {
         let secret = generate_webhook_secret();
         assert_eq!(secret.len(), 64); // 32 bytes = 64 hex chars
+    }
+
+    #[test]
+    fn test_generate_secret_with_length() {
+        let s = generate_secret_with_length(16);
+        assert_eq!(s.len(), 32); // 16 bytes = 32 hex chars
+        assert!(s.chars().all(|c| c.is_ascii_hexdigit()));
+
+        let s2 = generate_secret_with_length(1);
+        assert_eq!(s2.len(), 2);
     }
 }

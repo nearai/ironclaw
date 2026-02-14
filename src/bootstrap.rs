@@ -211,7 +211,7 @@ pub async fn migrate_disk_to_db(
             Ok(content) => match serde_json::from_str::<serde_json::Value>(&content) {
                 Ok(value) => {
                     store
-                        .set_setting(user_id, "nearai.session", &value)
+                        .set_setting(user_id, "nearai.session_token", &value)
                         .await
                         .map_err(|e| {
                             MigrationError::Database(format!(
