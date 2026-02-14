@@ -14,6 +14,7 @@ mod agent_loop;
 pub mod compaction;
 pub mod context_monitor;
 mod heartbeat;
+pub mod job_monitor;
 mod router;
 pub mod routine;
 pub mod routine_engine;

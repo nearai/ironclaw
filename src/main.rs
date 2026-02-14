@@ -700,6 +700,8 @@ async fn main() -> anyhow::Result<()> {
             job_event_tx: job_event_tx.clone(),
             prompt_queue: Arc::clone(&prompt_queue),
             store: store.clone(),
+            secrets_store: secrets_store.clone(),
+            user_id: "default".to_string(),
         };
 
         tokio::spawn(async move {
@@ -981,6 +983,14 @@ async fn main() -> anyhow::Result<()> {
         Arc::clone(&context_manager),
         container_job_manager.clone(),
         store.clone(),
+        job_event_tx.clone(),
+        Some(channels.inject_sender()),
+        if config.sandbox.enabled {
+            Some(Arc::clone(&prompt_queue))
+        } else {
+            None
+        },
+        secrets_store.clone(),
     );
 
     // Add web gateway channel if configured

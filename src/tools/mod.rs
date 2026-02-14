@@ -13,7 +13,6 @@ pub mod mcp;
 pub mod wasm;
 
 mod registry;
-mod sandbox;
 mod tool;
 
 pub use builder::{
@@ -22,5 +21,4 @@ pub use builder::{
     TestCase, TestHarness, TestResult, TestSuite, ValidationError, ValidationResult, WasmValidator,
 };
 pub use registry::ToolRegistry;
-pub use sandbox::ToolSandbox;
 pub use tool::{Tool, ToolDomain, ToolError, ToolOutput};

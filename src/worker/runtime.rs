@@ -99,6 +99,21 @@ impl WorkerRuntime {
             truncate(&job.description, 100)
         );
 
+        // Fetch and set credentials before execution begins.
+        // Worker is a single-threaded entry point so set_var is safe here;
+        // the spawned tool commands inherit the process environment.
+        let credentials = self.client.fetch_credentials().await?;
+        for cred in &credentials {
+            // SAFETY: worker is single-threaded at this point (no tools running yet)
+            unsafe { std::env::set_var(&cred.env_var, &cred.value) };
+        }
+        if !credentials.is_empty() {
+            tracing::info!(
+                "Injected {} credential(s) into environment",
+                credentials.len()
+            );
+        }
+
         // Report that we're starting
         self.client
             .report_status(&StatusUpdate {

@@ -1295,7 +1295,7 @@ async fn jobs_restart_handler(
 
     let project_dir = std::path::PathBuf::from(&old_job.project_dir);
     let _token = jm
-        .create_job(new_job_id, &old_job.task, Some(project_dir), mode)
+        .create_job(new_job_id, &old_job.task, Some(project_dir), mode, vec![])
         .await
         .map_err(|e| {
             (

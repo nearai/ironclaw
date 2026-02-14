@@ -169,6 +169,21 @@ impl ClaudeBridgeRuntime {
             truncate(&job.description, 100)
         );
 
+        // Fetch and set credentials before spawning Claude.
+        // The spawned `claude` Command inherits env vars from this process.
+        let credentials = self.client.fetch_credentials().await?;
+        for cred in &credentials {
+            // SAFETY: bridge is single-threaded at this point (no child processes yet)
+            unsafe { std::env::set_var(&cred.env_var, &cred.value) };
+        }
+        if !credentials.is_empty() {
+            tracing::info!(
+                job_id = %self.config.job_id,
+                "Injected {} credential(s) into environment",
+                credentials.len()
+            );
+        }
+
         // Report that we're running
         self.client
             .report_status(&crate::worker::api::StatusUpdate {
