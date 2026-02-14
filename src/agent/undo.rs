@@ -92,12 +92,14 @@ impl UndoManager {
 
     /// Undo: pop the last checkpoint and return it.
     ///
-    /// The current state should be saved to redo stack before calling this.
+    /// Saves the current state to the redo stack and pops the most recent
+    /// checkpoint from the undo stack so that repeated undos walk backwards
+    /// through history.
     pub fn undo(
         &mut self,
         current_turn: usize,
         current_messages: Vec<ChatMessage>,
-    ) -> Option<&Checkpoint> {
+    ) -> Option<Checkpoint> {
         if self.undo_stack.is_empty() {
             return None;
         }
@@ -110,9 +112,8 @@ impl UndoManager {
         );
         self.redo_stack.push(current);
 
-        // Return the most recent checkpoint without removing it
-        // (we keep it so multiple undos can work)
-        self.undo_stack.back()
+        // Pop and return the most recent checkpoint
+        self.undo_stack.pop_back()
     }
 
     /// Pop the last checkpoint from the undo stack.
@@ -121,7 +122,31 @@ impl UndoManager {
     }
 
     /// Redo: restore a previously undone state.
-    pub fn redo(&mut self) -> Option<Checkpoint> {
+    ///
+    /// Saves the current state to the undo stack and pops the most recent
+    /// checkpoint from the redo stack.
+    pub fn redo(
+        &mut self,
+        current_turn: usize,
+        current_messages: Vec<ChatMessage>,
+    ) -> Option<Checkpoint> {
+        if self.redo_stack.is_empty() {
+            return None;
+        }
+
+        // Save current state to undo stack
+        let current = Checkpoint::new(
+            current_turn,
+            current_messages,
+            format!("Turn {}", current_turn),
+        );
+        self.undo_stack.push_back(current);
+
+        // Trim if over limit
+        while self.undo_stack.len() > self.max_checkpoints {
+            self.undo_stack.pop_front();
+        }
+
         self.redo_stack.pop()
     }
 
@@ -214,14 +239,16 @@ mod tests {
         assert!(manager.can_undo());
         assert!(!manager.can_redo());
 
-        // Undo
+        // Undo - returns owned Checkpoint now
         let current = vec![ChatMessage::user("Hello"), ChatMessage::assistant("Hi")];
         let checkpoint = manager.undo(2, current);
         assert!(checkpoint.is_some());
+        let checkpoint = checkpoint.unwrap();
+        assert_eq!(checkpoint.turn_number, 1);
         assert!(manager.can_redo());
 
-        // Redo
-        let restored = manager.redo();
+        // Redo - now requires current state parameters
+        let restored = manager.redo(checkpoint.turn_number, checkpoint.messages);
         assert!(restored.is_some());
     }
 
@@ -248,5 +275,91 @@ mod tests {
         let restored = manager.restore(checkpoint_id);
         assert!(restored.is_some());
         assert_eq!(manager.undo_count(), 0);
+    }
+
+    #[test]
+    fn test_repeated_undo_advances_through_stack() {
+        let mut manager = UndoManager::new();
+
+        // Create 3 checkpoints at turns 0, 1, 2
+        manager.checkpoint(0, vec![], "Turn 0");
+        manager.checkpoint(1, vec![ChatMessage::user("msg1")], "Turn 1");
+        manager.checkpoint(2, vec![ChatMessage::user("msg2")], "Turn 2");
+        assert_eq!(manager.undo_count(), 3);
+
+        // First undo: should return turn 2 checkpoint, stack shrinks to 2
+        let cp1 = manager
+            .undo(3, vec![ChatMessage::user("msg3")])
+            .expect("first undo should succeed");
+        assert_eq!(cp1.turn_number, 2);
+        assert_eq!(manager.undo_count(), 2);
+
+        // Second undo: should return turn 1 checkpoint (different!), stack shrinks to 1
+        let cp2 = manager
+            .undo(cp1.turn_number, cp1.messages)
+            .expect("second undo should succeed");
+        assert_eq!(cp2.turn_number, 1);
+        assert_eq!(manager.undo_count(), 1);
+
+        // Verify we walked backwards through distinct checkpoints
+        assert_ne!(cp1.turn_number, cp2.turn_number);
+    }
+
+    #[test]
+    fn test_undo_redo_cycle_preserves_state() {
+        let mut manager = UndoManager::new();
+
+        let msgs_t0: Vec<ChatMessage> = vec![];
+        let msgs_t1 = vec![ChatMessage::user("hello")];
+        let msgs_t2 = vec![ChatMessage::user("hello"), ChatMessage::assistant("hi")];
+
+        manager.checkpoint(0, msgs_t0, "Turn 0");
+        manager.checkpoint(1, msgs_t1, "Turn 1");
+
+        // Undo from turn 2 -> get turn 1 checkpoint
+        let cp_undo1 = manager
+            .undo(2, msgs_t2.clone())
+            .expect("undo should succeed");
+        assert_eq!(cp_undo1.turn_number, 1);
+
+        // Redo from turn 1 -> get turn 2 state back
+        let cp_redo = manager
+            .redo(cp_undo1.turn_number, cp_undo1.messages)
+            .expect("redo should succeed");
+        assert_eq!(cp_redo.turn_number, 2);
+        assert_eq!(cp_redo.messages.len(), 2);
+
+        // Undo again from turn 2 -> should go back to turn 1 again
+        let cp_undo2 = manager
+            .undo(cp_redo.turn_number, cp_redo.messages)
+            .expect("second undo should succeed");
+        assert_eq!(cp_undo2.turn_number, 1);
+    }
+
+    #[test]
+    fn test_undo_redo_stack_sizes_consistent() {
+        let mut manager = UndoManager::new();
+
+        manager.checkpoint(0, vec![], "Turn 0");
+        manager.checkpoint(1, vec![ChatMessage::user("a")], "Turn 1");
+        manager.checkpoint(2, vec![ChatMessage::user("b")], "Turn 2");
+
+        // Start: undo=3, redo=0, total=3
+        let total = manager.undo_count() + manager.redo_count();
+        assert_eq!(total, 3);
+
+        // After undo: total should still be 3 (one moved from undo to redo,
+        // plus the current state pushed to redo)
+        // Actually: undo pops one (3->2), pushes current to redo (0->1), total=3
+        let cp = manager.undo(3, vec![]).unwrap();
+        assert_eq!(manager.undo_count() + manager.redo_count(), 3);
+
+        // After redo: redo pops one (1->0), pushes current to undo (2->3), total=3
+        let cp2 = manager.redo(cp.turn_number, cp.messages).unwrap();
+        assert_eq!(manager.undo_count() + manager.redo_count(), 3);
+
+        // After another undo: same invariant
+        let _cp3 = manager.undo(cp2.turn_number, cp2.messages).unwrap();
+        assert_eq!(manager.undo_count() + manager.redo_count(), 3);
     }
 }
