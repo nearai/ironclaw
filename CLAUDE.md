@@ -151,6 +151,12 @@ src/
 │       ├── rate_limiter.rs # Per-tool rate limiting
 │       └── storage.rs  # Linear memory persistence
 │
+├── db/                 # Database abstraction layer
+│   ├── mod.rs          # Database trait (~60 async methods)
+│   ├── postgres.rs     # PostgreSQL backend (delegates to Store + Repository)
+│   ├── libsql_backend.rs # libSQL/Turso backend (embedded SQLite)
+│   └── libsql_migrations.rs # SQLite-dialect schema (idempotent)
+│
 ├── workspace/          # Persistent memory system (OpenClaw-inspired)
 │   ├── mod.rs          # Workspace struct, memory operations
 │   ├── document.rs     # MemoryDocument, MemoryChunk, WorkspaceEntry
@@ -201,6 +207,7 @@ When designing new features or systems, always prefer generic/extensible archite
 - Use `RwLock` for concurrent read/write access
 
 ### Traits for Extensibility
+- `Database` - Add new database backends (must implement all ~60 methods)
 - `Channel` - Add new input sources
 - `Tool` - Add new capabilities
 - `LlmProvider` - Add new LLM backends
@@ -248,7 +255,12 @@ Pending -> InProgress -> Completed -> Submitted -> Accepted
 
 Environment variables (see `.env.example`):
 ```bash
+# Database backend (default: postgres)
+DATABASE_BACKEND=postgres               # or "libsql" / "turso"
 DATABASE_URL=postgres://user:pass@localhost/ironclaw
+LIBSQL_PATH=~/.ironclaw/ironclaw.db    # libSQL local path (default)
+# LIBSQL_URL=libsql://xxx.turso.io    # Turso cloud (optional)
+# LIBSQL_AUTH_TOKEN=xxx                # Required with LIBSQL_URL
 
 # NEAR AI (required)
 NEARAI_SESSION_TOKEN=sess_...
@@ -308,7 +320,51 @@ Session tokens have the format `sess_xxx` (37 characters). They are authenticate
 
 ## Database
 
-Single migration in `migrations/V1__initial.sql`. Tables:
+IronClaw supports two database backends, selected at compile time via Cargo feature flags and at runtime via the `DATABASE_BACKEND` environment variable.
+
+**IMPORTANT: All new features that touch persistence MUST support both backends.** Implement the operation as a method on the `Database` trait in `src/db/mod.rs`, then add the implementation in both `src/db/postgres.rs` (delegate to Store/Repository) and `src/db/libsql_backend.rs` (native SQL).
+
+### Backends
+
+| Backend | Feature Flag | Default | Use Case |
+|---------|-------------|---------|----------|
+| PostgreSQL | `postgres` (default) | Yes | Production, existing deployments |
+| libSQL/Turso | `libsql` | No | Zero-dependency local mode, edge, Turso cloud |
+
+```bash
+# Build with PostgreSQL only (default)
+cargo build
+
+# Build with libSQL only
+cargo build --no-default-features --features libsql
+
+# Build with both backends available
+cargo build --features "postgres,libsql"
+```
+
+### Database Trait
+
+The `Database` trait (`src/db/mod.rs`) defines ~60 async methods covering all persistence:
+- Conversations, messages, metadata
+- Jobs, actions, LLM calls, estimation snapshots
+- Sandbox jobs, job events
+- Routines, routine runs
+- Tool failures, settings
+- Workspace: documents, chunks, hybrid search
+
+Both backends implement this trait. PostgreSQL delegates to the existing `Store` + `Repository`. libSQL implements native SQLite-dialect SQL.
+
+### Schema
+
+**PostgreSQL:** `migrations/V1__initial.sql` (351 lines). Uses pgvector for embeddings, tsvector for FTS, PL/pgSQL functions. Managed by `refinery`.
+
+**libSQL:** `src/db/libsql_migrations.rs` (consolidated schema, ~480 lines). Translates PG types:
+- `UUID` -> `TEXT`, `TIMESTAMPTZ` -> `TEXT` (ISO-8601), `JSONB` -> `TEXT`
+- `VECTOR(1536)` -> `F32_BLOB(1536)` with `libsql_vector_idx`
+- `tsvector`/`ts_rank_cd` -> FTS5 virtual table with sync triggers
+- PL/pgSQL functions -> SQLite triggers
+
+**Tables (both backends):**
 
 **Core:**
 - `conversations` - Multi-channel conversation tracking
@@ -320,12 +376,41 @@ Single migration in `migrations/V1__initial.sql`. Tables:
 
 **Workspace/Memory:**
 - `memory_documents` - Flexible path-based files (e.g., "context/vision.md", "daily/2024-01-15.md")
-- `memory_chunks` - Chunked content with FTS (tsvector) and vector (pgvector) indexes
+- `memory_chunks` - Chunked content with FTS and vector indexes
 - `heartbeat_state` - Periodic execution tracking
 
-Requires pgvector extension: `CREATE EXTENSION IF NOT EXISTS vector;`
+**Other:**
+- `routines`, `routine_runs` - Scheduled/reactive execution
+- `settings` - Per-user key-value settings
+- `tool_failures` - Self-repair tracking
+- `secrets`, `wasm_tools`, `tool_capabilities` - Extension infrastructure
 
-Run migrations: `refinery migrate -c refinery.toml`
+### Configuration
+
+```bash
+# Backend selection (default: postgres)
+DATABASE_BACKEND=libsql
+
+# PostgreSQL
+DATABASE_URL=postgres://user:pass@localhost/ironclaw
+
+# libSQL (embedded)
+LIBSQL_PATH=~/.ironclaw/ironclaw.db    # Default path
+
+# libSQL (Turso cloud sync)
+LIBSQL_URL=libsql://your-db.turso.io
+LIBSQL_AUTH_TOKEN=your-token            # Required when LIBSQL_URL is set
+```
+
+### Current Limitations (libSQL backend)
+
+- **Workspace/memory system** not yet wired through Database trait (requires Store migration)
+- **Secrets store** not yet available (still requires PostgresSecretsStore)
+- **Hybrid search** uses FTS5 only (vector search via libsql_vector_idx not yet implemented)
+- **Settings reload from DB** skipped (Config::from_db requires Store)
+- No incremental migration versioning (schema is CREATE IF NOT EXISTS, no ALTER TABLE support yet)
+- **No encryption at rest** -- The local SQLite database file stores conversation content, job data, workspace memory, and other application data in plaintext. Only secrets (API tokens, credentials) are encrypted via AES-256-GCM before storage. Users handling sensitive data should use full-disk encryption (FileVault, LUKS, BitLocker) or consider the PostgreSQL backend with TDE/encrypted storage.
+- **JSON merge patch vs path-targeted update** -- The libSQL backend uses RFC 7396 JSON Merge Patch (`json_patch`) for metadata updates, while PostgreSQL uses path-targeted `jsonb_set`. Merge patch replaces top-level keys entirely, which may drop nested keys not present in the patch. Callers should avoid relying on partial nested object updates in metadata fields.
 
 ## Safety Layer
 
@@ -387,6 +472,7 @@ Key test patterns:
 - ✅ **Claude Code mode** - Delegate jobs to Claude CLI inside containers
 - ✅ **Routines system** - Cron, event, webhook, and manual triggers with guardrails
 - ✅ **Extension management** - Install, auth, activate MCP/WASM extensions via CLI and web UI
+- ✅ **libSQL/Turso backend** - Database trait abstraction (`src/db/`), feature-gated dual backend support (postgres/libsql), embedded SQLite for zero-dependency local mode
 
 ## Adding a New Tool
 
@@ -625,13 +711,17 @@ Four tools for LLM use:
 
 ### Hybrid Search (RRF)
 
-Combines full-text search (PostgreSQL `ts_rank_cd`) and vector similarity (pgvector cosine) using Reciprocal Rank Fusion:
+Combines full-text search and vector similarity using Reciprocal Rank Fusion:
 
 ```
 score(d) = Σ 1/(k + rank(d)) for each method where d appears
 ```
 
 Default k=60. Results from both methods are combined, with documents appearing in both getting boosted scores.
+
+**Backend differences:**
+- **PostgreSQL:** `ts_rank_cd` for FTS, pgvector cosine distance for vectors, full RRF
+- **libSQL:** FTS5 for keyword search only (vector search via `libsql_vector_idx` not yet wired)
 
 ### Heartbeat System
 

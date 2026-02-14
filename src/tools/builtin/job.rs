@@ -15,7 +15,8 @@ use chrono::Utc;
 use uuid::Uuid;
 
 use crate::context::{ContextManager, JobContext, JobState};
-use crate::history::{SandboxJobRecord, Store};
+use crate::db::Database;
+use crate::history::SandboxJobRecord;
 use crate::orchestrator::job_manager::{ContainerJobManager, JobMode};
 use crate::tools::tool::{Tool, ToolError, ToolOutput};
 
@@ -27,7 +28,7 @@ use crate::tools::tool::{Tool, ToolError, ToolOutput};
 pub struct CreateJobTool {
     context_manager: Arc<ContextManager>,
     job_manager: Option<Arc<ContainerJobManager>>,
-    store: Option<Arc<Store>>,
+    store: Option<Arc<dyn Database>>,
 }
 
 impl CreateJobTool {
@@ -43,7 +44,7 @@ impl CreateJobTool {
     pub fn with_sandbox(
         mut self,
         job_manager: Arc<ContainerJobManager>,
-        store: Option<Arc<Store>>,
+        store: Option<Arc<dyn Database>>,
     ) -> Self {
         self.job_manager = Some(job_manager);
         self.store = store;

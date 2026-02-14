@@ -9,6 +9,30 @@ use clap::Subcommand;
 
 use crate::workspace::{EmbeddingProvider, SearchConfig, Workspace};
 
+/// Run a memory command using the Database trait (works with any backend).
+pub async fn run_memory_command_with_db(
+    cmd: MemoryCommand,
+    db: std::sync::Arc<dyn crate::db::Database>,
+    embeddings: Option<Arc<dyn EmbeddingProvider>>,
+) -> anyhow::Result<()> {
+    let mut workspace = Workspace::new_with_db("default", db);
+    if let Some(emb) = embeddings {
+        workspace = workspace.with_embeddings(emb);
+    }
+
+    match cmd {
+        MemoryCommand::Search { query, limit } => search(&workspace, &query, limit).await,
+        MemoryCommand::Read { path } => read(&workspace, &path).await,
+        MemoryCommand::Write {
+            path,
+            content,
+            append,
+        } => write(&workspace, &path, content, append).await,
+        MemoryCommand::Tree { path, depth } => tree(&workspace, &path, depth).await,
+        MemoryCommand::Status => status(&workspace).await,
+    }
+}
+
 #[derive(Subcommand, Debug, Clone)]
 pub enum MemoryCommand {
     /// Search workspace memory (hybrid full-text + semantic)
@@ -55,7 +79,8 @@ pub enum MemoryCommand {
     Status,
 }
 
-/// Run a memory command.
+/// Run a memory command (PostgreSQL backend).
+#[cfg(feature = "postgres")]
 pub async fn run_memory_command(
     cmd: MemoryCommand,
     pool: deadpool_postgres::Pool,

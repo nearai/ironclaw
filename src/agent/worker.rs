@@ -10,8 +10,8 @@ use uuid::Uuid;
 use crate::agent::scheduler::WorkerMessage;
 use crate::agent::task::TaskOutput;
 use crate::context::{ContextManager, JobState};
+use crate::db::Database;
 use crate::error::Error;
-use crate::history::Store;
 use crate::llm::{
     ActionPlan, ChatMessage, LlmProvider, Reasoning, ReasoningContext, RespondResult, ToolSelection,
 };
@@ -28,7 +28,7 @@ pub struct WorkerDeps {
     pub llm: Arc<dyn LlmProvider>,
     pub safety: Arc<SafetyLayer>,
     pub tools: Arc<ToolRegistry>,
-    pub store: Option<Arc<Store>>,
+    pub store: Option<Arc<dyn Database>>,
     pub timeout: Duration,
     pub use_planning: bool,
 }
@@ -67,7 +67,7 @@ impl Worker {
         &self.deps.tools
     }
 
-    fn store(&self) -> Option<&Arc<Store>> {
+    fn store(&self) -> Option<&Arc<dyn Database>> {
         self.deps.store.as_ref()
     }
 
@@ -382,7 +382,7 @@ Report when the job is complete or if you encounter issues you cannot resolve."#
         tools: Arc<ToolRegistry>,
         context_manager: Arc<ContextManager>,
         safety: Arc<SafetyLayer>,
-        store: Option<Arc<Store>>,
+        store: Option<Arc<dyn Database>>,
         job_id: Uuid,
         tool_name: &str,
         params: &serde_json::Value,
