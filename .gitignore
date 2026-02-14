@@ -7,3 +7,5 @@ target/
 # WASM build artifacts (loaded from disk, not bundled)
 *.wasm
 
+# decapod data
+.decapod/data 
