@@ -52,7 +52,14 @@ impl std::fmt::Debug for OpenAiCompatibleProvider {
             .field("has_api_key", &self.config.api_key.is_some())
             .field("timeout_secs", &self.config.timeout_secs)
             .field("active_model", &self.active_model_name())
-            .field("has_cached_models", &self.models_cache.read().unwrap_or_else(|e| e.into_inner()).is_some())
+            .field(
+                "has_cached_models",
+                &self
+                    .models_cache
+                    .read()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .is_some(),
+            )
             .finish()
     }
 }
@@ -169,7 +176,9 @@ impl OpenAiCompatibleProvider {
                     } else {
                         -(jitter as i64)
                     };
-                    delay_ms = (delay_ms * 2).saturating_add(jitter_adjustment as u64);
+                    // Use i64 for safe arithmetic, then convert back to u64
+                    let new_delay = (delay_ms as i64 * 2).saturating_add(jitter_adjustment);
+                    delay_ms = new_delay.max(1) as u64;
                 }
             }
         }
@@ -226,10 +235,7 @@ impl OpenAiCompatibleProvider {
         if response_text.len() > MAX_RESPONSE_SIZE_BYTES {
             return Err(LlmError::InvalidResponse {
                 provider: PROVIDER_NAME.to_string(),
-                reason: format!(
-                    "Response size {} exceeds 10MB limit",
-                    response_text.len()
-                ),
+                reason: format!("Response size {} exceeds 10MB limit", response_text.len()),
             });
         }
 
@@ -272,10 +278,7 @@ impl OpenAiCompatibleProvider {
     async fn fetch_models(&self) -> Result<Vec<ApiModelEntry>, LlmError> {
         // Check cache first
         {
-            let cache_guard = self
-                .models_cache
-                .read()
-                .unwrap_or_else(|e| e.into_inner());
+            let cache_guard = self.models_cache.read().unwrap_or_else(|e| e.into_inner());
             if let Some(ref cached) = *cache_guard {
                 let elapsed = cached.fetched_at.elapsed();
                 if elapsed < std::time::Duration::from_secs(MODEL_CACHE_TTL_SECONDS) {
@@ -293,10 +296,7 @@ impl OpenAiCompatibleProvider {
 
         let response = request.send().await.map_err(|e| {
             // Clear cache on failure to prevent stale data
-            let mut cache_guard = self
-                .models_cache
-                .write()
-                .unwrap_or_else(|e| e.into_inner());
+            let mut cache_guard = self.models_cache.write().unwrap_or_else(|e| e.into_inner());
             *cache_guard = None;
             LlmError::RequestFailed {
                 provider: PROVIDER_NAME.to_string(),
@@ -308,10 +308,7 @@ impl OpenAiCompatibleProvider {
         let response_text = response.text().await.map_err(|e| {
             tracing::error!("Failed to read models response: {}", e);
             // Clear cache on failure to prevent stale data
-            let mut cache_guard = self
-                .models_cache
-                .write()
-                .unwrap_or_else(|e| e.into_inner());
+            let mut cache_guard = self.models_cache.write().unwrap_or_else(|e| e.into_inner());
             *cache_guard = None;
             LlmError::RequestFailed {
                 provider: PROVIDER_NAME.to_string(),
@@ -321,10 +318,7 @@ impl OpenAiCompatibleProvider {
 
         if !status.is_success() {
             // Clear cache on failure to prevent stale data
-            let mut cache_guard = self
-                .models_cache
-                .write()
-                .unwrap_or_else(|e| e.into_inner());
+            let mut cache_guard = self.models_cache.write().unwrap_or_else(|e| e.into_inner());
             *cache_guard = None;
             return Err(LlmError::RequestFailed {
                 provider: PROVIDER_NAME.to_string(),
@@ -348,10 +342,7 @@ impl OpenAiCompatibleProvider {
             })?;
 
         // Update cache
-        let mut cache_guard = self
-            .models_cache
-            .write()
-            .unwrap_or_else(|e| e.into_inner());
+        let mut cache_guard = self.models_cache.write().unwrap_or_else(|e| e.into_inner());
         *cache_guard = Some(CachedModels {
             models: resp.data.clone(),
             fetched_at: std::time::Instant::now(),
@@ -539,10 +530,7 @@ impl LlmProvider for OpenAiCompatibleProvider {
         let mut guard = self.active_model.write().unwrap_or_else(|e| e.into_inner());
         *guard = model.to_string();
         // Invalidate model cache when model changes
-        let mut cache_guard = self
-            .models_cache
-            .write()
-            .unwrap_or_else(|e| e.into_inner());
+        let mut cache_guard = self.models_cache.write().unwrap_or_else(|e| e.into_inner());
         *cache_guard = None;
         Ok(())
     }
@@ -907,7 +895,9 @@ mod tests {
     async fn mock_handler(
         axum::extract::State(state): axum::extract::State<MockServerState>,
     ) -> impl IntoResponse {
-        let n = state.request_count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let n = state
+            .request_count
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         if n < state.fail_count {
             // Return error status
             if state.status_code == axum::http::StatusCode::TOO_MANY_REQUESTS {
@@ -984,7 +974,11 @@ mod tests {
         let result: Result<ChatCompletionResponse, LlmError> =
             provider.send_request_with_retry(&request).await;
 
-        assert!(result.is_ok(), "Should succeed after retries: {:?}", result.err());
+        assert!(
+            result.is_ok(),
+            "Should succeed after retries: {:?}",
+            result.err()
+        );
         assert_eq!(state.count(), 3, "Should have made 3 requests");
 
         server.abort();
@@ -993,7 +987,7 @@ mod tests {
     #[tokio::test]
     async fn test_retry_on_5xx_server_error() {
         let state = MockServerState::new(2, axum::http::StatusCode::SERVICE_UNAVAILABLE);
-        
+
         // Build router with state
         let app = axum::Router::new()
             .route("/v1/chat/completions", axum::routing::post(mock_handler))
@@ -1002,12 +996,14 @@ mod tests {
         // Bind to random port
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();
-        
+
         // Spawn server with graceful shutdown
         let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
         let server = tokio::spawn(async move {
             axum::serve(listener, app)
-                .with_graceful_shutdown(async move { let _ = shutdown_rx.await; })
+                .with_graceful_shutdown(async move {
+                    let _ = shutdown_rx.await;
+                })
                 .await
                 .unwrap();
         });
@@ -1041,10 +1037,12 @@ mod tests {
         };
 
         // Use timeout to prevent hanging
-        let result: Result<Result<ChatCompletionResponse, LlmError>, tokio::time::error::Elapsed> = tokio::time::timeout(
-            std::time::Duration::from_secs(30),
-            provider.send_request_with_retry(&request)
-        ).await;
+        let result: Result<Result<ChatCompletionResponse, LlmError>, tokio::time::error::Elapsed> =
+            tokio::time::timeout(
+                std::time::Duration::from_secs(30),
+                provider.send_request_with_retry(&request),
+            )
+            .await;
 
         // Shutdown server
         let _ = shutdown_tx.send(());
@@ -1073,11 +1071,13 @@ mod tests {
 
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();
-        
+
         let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
         let server = tokio::spawn(async move {
             axum::serve(listener, app)
-                .with_graceful_shutdown(async move { let _ = shutdown_rx.await; })
+                .with_graceful_shutdown(async move {
+                    let _ = shutdown_rx.await;
+                })
                 .await
                 .unwrap();
         });
@@ -1109,20 +1109,29 @@ mod tests {
             tool_choice: None,
         };
 
-        let result: Result<Result<ChatCompletionResponse, LlmError>, tokio::time::error::Elapsed> = tokio::time::timeout(
-            std::time::Duration::from_secs(30),
-            provider.send_request_with_retry(&request)
-        ).await;
+        let result: Result<Result<ChatCompletionResponse, LlmError>, tokio::time::error::Elapsed> =
+            tokio::time::timeout(
+                std::time::Duration::from_secs(30),
+                provider.send_request_with_retry(&request),
+            )
+            .await;
 
         let _ = shutdown_tx.send(());
         let _ = tokio::time::timeout(std::time::Duration::from_millis(500), server).await;
 
         match result {
             Ok(Err(_)) => {
-                assert_eq!(state.count(), 3, "Should have made 3 requests (initial + 2 retries)");
+                assert_eq!(
+                    state.count(),
+                    3,
+                    "Should have made 3 requests (initial + 2 retries)"
+                );
             }
             Ok(Ok(_)) => {
-                panic!("Expected request to fail but it succeeded. Request count: {}", state.count());
+                panic!(
+                    "Expected request to fail but it succeeded. Request count: {}",
+                    state.count()
+                );
             }
             Err(_) => {
                 panic!("Test timed out. Request count: {}", state.count());
@@ -1141,8 +1150,10 @@ mod tests {
     #[tokio::test]
     async fn test_non_retryable_error_fails_immediately() {
         let _state = MockServerState::new(0, axum::http::StatusCode::OK);
-        let app = axum::Router::new()
-            .route("/v1/chat/completions", axum::routing::post(auth_error_handler));
+        let app = axum::Router::new().route(
+            "/v1/chat/completions",
+            axum::routing::post(auth_error_handler),
+        );
 
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();
@@ -1200,8 +1211,10 @@ mod tests {
 
     #[tokio::test]
     async fn test_400_error_fails_immediately() {
-        let app = axum::Router::new()
-            .route("/v1/chat/completions", axum::routing::post(bad_request_handler));
+        let app = axum::Router::new().route(
+            "/v1/chat/completions",
+            axum::routing::post(bad_request_handler),
+        );
 
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();
