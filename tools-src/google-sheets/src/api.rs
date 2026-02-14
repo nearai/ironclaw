@@ -335,7 +335,7 @@ pub fn add_sheet(spreadsheet_id: &str, title: &str) -> Result<AddSheetResult, St
         .and_then(|arr| arr.first())
         .map(|r| &r["addSheet"]["properties"]);
 
-    let reply = reply.ok_or("No reply from batch update")?;
+    let reply = reply.ok_or_else(|| "No reply from batch update".to_string())?;
 
     Ok(AddSheetResult {
         sheet: SheetInfo {

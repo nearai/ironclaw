@@ -176,6 +176,12 @@ impl SetupWizard {
                 if backend == "libsql" || backend == "turso" || backend == "sqlite" {
                     return self.step_database_libsql().await;
                 }
+                if backend != "postgres" && backend != "postgresql" {
+                    print_info(&format!(
+                        "Unknown DATABASE_BACKEND '{}', defaulting to PostgreSQL",
+                        backend
+                    ));
+                }
                 return self.step_database_postgres().await;
             }
 
@@ -579,7 +585,12 @@ impl SetupWizard {
             print_info(&format!("Current provider: {}", display));
             println!();
 
-            if confirm("Keep current provider?", true).map_err(SetupError::Io)? {
+            let is_known = matches!(
+                current.as_str(),
+                "nearai" | "anthropic" | "openai" | "ollama" | "openai_compatible"
+            );
+
+            if is_known && confirm("Keep current provider?", true).map_err(SetupError::Io)? {
                 // Still run the auth sub-flow in case they need to update keys
                 match current.as_str() {
                     "nearai" => return self.setup_nearai().await,
@@ -587,9 +598,15 @@ impl SetupWizard {
                     "openai" => return self.setup_openai().await,
                     "ollama" => return self.setup_ollama(),
                     "openai_compatible" => return self.setup_openai_compatible().await,
-                    _ => {}
+                    _ => unreachable!(),
                 }
-                return Ok(());
+            }
+
+            if !is_known {
+                print_info(&format!(
+                    "Unknown provider '{}', please select a supported provider.",
+                    current
+                ));
             }
         }
 
@@ -928,7 +945,15 @@ impl SetupWizard {
         let choice = select_one("Select a model:", &options).map_err(SetupError::Io)?;
 
         let selected = if choice == options.len() - 1 {
-            input("Enter model ID").map_err(SetupError::Io)?
+            loop {
+                let raw = input("Enter model ID").map_err(SetupError::Io)?;
+                let trimmed = raw.trim().to_string();
+                if trimmed.is_empty() {
+                    println!("Model ID cannot be empty.");
+                    continue;
+                }
+                break trimmed;
+            }
         } else {
             models[choice].0.clone()
         };
