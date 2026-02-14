@@ -18,9 +18,11 @@ pub fn ironclaw_env_path() -> PathBuf {
 
 /// Load env vars from `~/.ironclaw/.env` (in addition to the standard `.env`).
 ///
-/// Call this early in main, before any env-based config resolution.
-/// dotenvy does NOT overwrite existing env vars, so a standard `.env`
-/// in the working directory and explicit env vars still take priority.
+/// Call this **after** `dotenvy::dotenv()` so that the standard `./.env`
+/// takes priority over `~/.ironclaw/.env`. dotenvy never overwrites
+/// existing env vars, so the effective priority is:
+///
+///   explicit env vars > `./.env` > `~/.ironclaw/.env`
 ///
 /// If `~/.ironclaw/.env` doesn't exist but the legacy `bootstrap.json` does,
 /// extracts `DATABASE_URL` from it and writes the `.env` file (one-time
@@ -217,7 +219,7 @@ pub async fn migrate_disk_to_db(
 }
 
 /// Rename a file to `<name>.migrated` as a safety net.
-fn rename_to_migrated(path: &PathBuf) {
+fn rename_to_migrated(path: &std::path::Path) {
     let mut migrated = path.as_os_str().to_owned();
     migrated.push(".migrated");
     if let Err(e) = std::fs::rename(path, &migrated) {

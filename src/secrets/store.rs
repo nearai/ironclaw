@@ -703,10 +703,10 @@ pub mod testing {
                 .cloned()
                 .ok_or_else(|| SecretError::NotFound(name.to_string()))?;
 
-            if let Some(expires_at) = secret.expires_at {
-                if expires_at < Utc::now() {
-                    return Err(SecretError::Expired);
-                }
+            if let Some(expires_at) = secret.expires_at
+                && expires_at < Utc::now()
+            {
+                return Err(SecretError::Expired);
             }
 
             Ok(secret)

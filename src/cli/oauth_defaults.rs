@@ -135,47 +135,46 @@ pub async fn wait_for_callback(
                 .await
                 .map_err(|e| OAuthCallbackError::Io(e.to_string()))?;
 
-            if let Some(path) = request_line.split_whitespace().nth(1) {
-                if path.starts_with(&path_prefix) {
-                    if let Some(query) = path.split('?').nth(1) {
-                        // Check for error first
-                        if query.contains("error=") {
-                            let html = landing_html(&display_name, false);
-                            let response = format!(
-                                "HTTP/1.1 400 Bad Request\r\n\
-                                 Content-Type: text/html; charset=utf-8\r\n\
-                                 Connection: close\r\n\
-                                 \r\n\
-                                 {}",
-                                html
-                            );
-                            let _ = socket.write_all(response.as_bytes()).await;
-                            return Err(OAuthCallbackError::Denied);
-                        }
+            if let Some(path) = request_line.split_whitespace().nth(1)
+                && path.starts_with(&path_prefix)
+                && let Some(query) = path.split('?').nth(1)
+            {
+                // Check for error first
+                if query.contains("error=") {
+                    let html = landing_html(&display_name, false);
+                    let response = format!(
+                        "HTTP/1.1 400 Bad Request\r\n\
+                         Content-Type: text/html; charset=utf-8\r\n\
+                         Connection: close\r\n\
+                         \r\n\
+                         {}",
+                        html
+                    );
+                    let _ = socket.write_all(response.as_bytes()).await;
+                    return Err(OAuthCallbackError::Denied);
+                }
 
-                        // Look for the target parameter
-                        for param in query.split('&') {
-                            let parts: Vec<&str> = param.splitn(2, '=').collect();
-                            if parts.len() == 2 && parts[0] == param_name {
-                                let value = urlencoding::decode(parts[1])
-                                    .unwrap_or_else(|_| parts[1].into())
-                                    .into_owned();
+                // Look for the target parameter
+                for param in query.split('&') {
+                    let parts: Vec<&str> = param.splitn(2, '=').collect();
+                    if parts.len() == 2 && parts[0] == param_name {
+                        let value = urlencoding::decode(parts[1])
+                            .unwrap_or_else(|_| parts[1].into())
+                            .into_owned();
 
-                                let html = landing_html(&display_name, true);
-                                let response = format!(
-                                    "HTTP/1.1 200 OK\r\n\
-                                     Content-Type: text/html; charset=utf-8\r\n\
-                                     Connection: close\r\n\
-                                     \r\n\
-                                     {}",
-                                    html
-                                );
-                                let _ = socket.write_all(response.as_bytes()).await;
-                                let _ = socket.shutdown().await;
+                        let html = landing_html(&display_name, true);
+                        let response = format!(
+                            "HTTP/1.1 200 OK\r\n\
+                             Content-Type: text/html; charset=utf-8\r\n\
+                             Connection: close\r\n\
+                             \r\n\
+                             {}",
+                            html
+                        );
+                        let _ = socket.write_all(response.as_bytes()).await;
+                        let _ = socket.shutdown().await;
 
-                                return Ok(value);
-                            }
-                        }
+                        return Ok(value);
                     }
                 }
             }

@@ -879,16 +879,13 @@ async fn combine_provider_scopes(
                 continue;
             }
 
-            if let Ok(content) = tokio::fs::read_to_string(&path).await {
-                if let Ok(caps) = CapabilitiesFile::from_json(&content) {
-                    if let Some(auth) = &caps.auth {
-                        if auth.secret_name == secret_name {
-                            if let Some(oauth) = &auth.oauth {
-                                all_scopes.extend(oauth.scopes.iter().cloned());
-                            }
-                        }
-                    }
-                }
+            if let Ok(content) = tokio::fs::read_to_string(&path).await
+                && let Ok(caps) = CapabilitiesFile::from_json(&content)
+                && let Some(auth) = &caps.auth
+                && auth.secret_name == secret_name
+                && let Some(oauth) = &auth.oauth
+            {
+                all_scopes.extend(oauth.scopes.iter().cloned());
             }
         }
     }

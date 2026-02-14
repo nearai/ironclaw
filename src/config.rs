@@ -42,6 +42,7 @@ impl Config {
         user_id: &str,
     ) -> Result<Self, ConfigError> {
         let _ = dotenvy::dotenv();
+        crate::bootstrap::load_ironclaw_env();
 
         // Load all settings from DB into a Settings struct
         let db_settings = match store.get_all_settings(user_id).await {
@@ -60,8 +61,12 @@ impl Config {
     /// Used during early startup before the database is connected,
     /// and by CLI commands that don't have DB access.
     /// Falls back to legacy `settings.json` on disk if present.
+    ///
+    /// Loads both `./.env` (standard, higher priority) and `~/.ironclaw/.env`
+    /// (lower priority) via dotenvy, which never overwrites existing vars.
     pub async fn from_env() -> Result<Self, ConfigError> {
         let _ = dotenvy::dotenv();
+        crate::bootstrap::load_ironclaw_env();
         let settings = Settings::load();
         Self::build(&settings).await
     }

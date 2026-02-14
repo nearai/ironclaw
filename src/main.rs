@@ -240,9 +240,10 @@ async fn main() -> anyhow::Result<()> {
             skip_auth,
             channels_only,
         }) => {
-            // Load .env files before running onboarding wizard
-            ironclaw::bootstrap::load_ironclaw_env();
+            // Load .env files before running onboarding wizard.
+            // Standard ./.env first (higher priority), then ~/.ironclaw/.env.
             let _ = dotenvy::dotenv();
+            ironclaw::bootstrap::load_ironclaw_env();
 
             #[cfg(any(feature = "postgres", feature = "libsql"))]
             {
@@ -265,8 +266,10 @@ async fn main() -> anyhow::Result<()> {
         }
     }
 
-    // Load ~/.ironclaw/.env early so DATABASE_URL (and any other vars) are
+    // Load .env files early so DATABASE_URL (and any other vars) are
     // available to all subsequent env-based config resolution.
+    // Standard ./.env first (higher priority), then ~/.ironclaw/.env.
+    let _ = dotenvy::dotenv();
     ironclaw::bootstrap::load_ironclaw_env();
 
     // Enhanced first-run detection
