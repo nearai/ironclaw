@@ -953,6 +953,7 @@ fn libsql_row_to_tool_with_offset(row: &libsql::Row) -> Result<StoredWasmTool, W
 }
 
 #[cfg(feature = "libsql")]
+#[allow(clippy::too_many_arguments)]
 fn libsql_row_to_tool_at(
     row: &libsql::Row,
     id_idx: i32,

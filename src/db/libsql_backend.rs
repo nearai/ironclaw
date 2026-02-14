@@ -772,10 +772,10 @@ impl Database for LibSqlBackend {
             .await
             .map_err(|e| DatabaseError::Query(e.to_string()))?
         {
-            if let Ok(id_str) = row.get::<String>(0) {
-                if let Ok(id) = id_str.parse() {
-                    ids.push(id);
-                }
+            if let Ok(id_str) = row.get::<String>(0)
+                && let Ok(id) = id_str.parse()
+            {
+                ids.push(id);
             }
         }
         Ok(ids)
@@ -2199,10 +2199,10 @@ impl Database for LibSqlBackend {
                         e.content_preview = None;
                     }
                     // Update to latest timestamp
-                    if let (Some(existing), Some(new)) = (&e.updated_at, &updated_at) {
-                        if new > existing {
-                            e.updated_at = Some(*new);
-                        }
+                    if let (Some(existing), Some(new)) = (&e.updated_at, &updated_at)
+                        && new > existing
+                    {
+                        e.updated_at = Some(*new);
                     }
                 })
                 .or_insert(WorkspaceEntry {

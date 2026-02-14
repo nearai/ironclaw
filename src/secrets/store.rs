@@ -432,10 +432,10 @@ impl SecretsStore for LibSqlSecretsStore {
             Some(row) => {
                 let secret = libsql_row_to_secret(&row)?;
 
-                if let Some(expires_at) = secret.expires_at {
-                    if expires_at < Utc::now() {
-                        return Err(SecretError::Expired);
-                    }
+                if let Some(expires_at) = secret.expires_at
+                    && expires_at < Utc::now()
+                {
+                    return Err(SecretError::Expired);
                 }
 
                 Ok(secret)
@@ -541,10 +541,10 @@ impl SecretsStore for LibSqlSecretsStore {
                 return Ok(true);
             }
 
-            if let Some(prefix) = pattern.strip_suffix('*') {
-                if secret_name.starts_with(prefix) {
-                    return Ok(true);
-                }
+            if let Some(prefix) = pattern.strip_suffix('*')
+                && secret_name.starts_with(prefix)
+            {
+                return Ok(true);
             }
         }
 

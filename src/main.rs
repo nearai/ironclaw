@@ -272,13 +272,13 @@ async fn main() -> anyhow::Result<()> {
 
     // Enhanced first-run detection
     #[cfg(any(feature = "postgres", feature = "libsql"))]
-    if !cli.no_onboard {
-        if let Some(reason) = check_onboard_needed().await {
-            println!("Onboarding needed: {}", reason);
-            println!();
-            let mut wizard = SetupWizard::new();
-            wizard.run().await?;
-        }
+    if !cli.no_onboard
+        && let Some(reason) = check_onboard_needed().await
+    {
+        println!("Onboarding needed: {}", reason);
+        println!();
+        let mut wizard = SetupWizard::new();
+        wizard.run().await?;
     }
 
     // Load bootstrap config (4 fields that must live on disk)
