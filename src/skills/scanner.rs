@@ -309,17 +309,21 @@ impl SkillScanner {
                 severity: Severity::Critical,
                 description: "System prompt override attempt".to_string(),
             },
-            // Mixed-script homoglyph detection: Cyrillic/Greek/Armenian chars that look
-            // like Latin letters, commonly used to bypass keyword matching.
-            // Covers the most dangerous confusables: Cyrillic а-у, Greek α-ω, Armenian, etc.
+            // Mixed-script homoglyph detection: flags words that mix Latin letters
+            // with Cyrillic/Greek/Armenian/Letterlike lookalikes. This catches
+            // homoglyph attacks (e.g., "ignоre" with Cyrillic 'о') while allowing
+            // legitimately multilingual content where non-Latin text stands alone.
+            //
+            // The pattern matches a Latin letter immediately followed by a non-Latin
+            // confusable, or vice versa, within the same word boundary.
             RegexEntry {
                 regex: Regex::new(
-                    r"[\u{0400}-\u{04FF}\u{0370}-\u{03FF}\u{0530}-\u{058F}\u{2100}-\u{214F}]",
+                    r"[a-zA-Z][\u{0400}-\u{04FF}\u{0370}-\u{03FF}\u{0530}-\u{058F}\u{2100}-\u{214F}]|[\u{0400}-\u{04FF}\u{0370}-\u{03FF}\u{0530}-\u{058F}\u{2100}-\u{214F}][a-zA-Z]",
                 )
                 .expect("BUG: hardcoded mixed-script regex must compile"),
                 category: ScanCategory::InvisibleText,
                 severity: Severity::High,
-                description: "Mixed-script characters detected (potential homoglyph attack)"
+                description: "Mixed-script characters in same word (potential homoglyph attack)"
                     .to_string(),
             },
         ];
@@ -648,6 +652,22 @@ mod tests {
                 .warnings
                 .iter()
                 .any(|w| w.description.contains("Mixed-script"))
+        );
+    }
+
+    #[test]
+    fn test_pure_non_latin_text_not_flagged_as_homoglyph() {
+        let scanner = SkillScanner::new();
+        // Pure Cyrillic text separated from Latin by spaces should NOT trigger
+        // the mixed-script detector (legitimate multilingual content).
+        let result = scanner.scan("This skill helps with \u{041F}\u{0440}\u{0438}\u{0432}\u{0435}\u{0442} greetings");
+        let has_mixed_script = result
+            .warnings
+            .iter()
+            .any(|w| w.description.contains("Mixed-script"));
+        assert!(
+            !has_mixed_script,
+            "Pure non-Latin words separated by spaces should not trigger mixed-script warning"
         );
     }
 

@@ -75,17 +75,17 @@ pub fn prefilter_skills<'a>(
         let declared_tokens = entry.skill.manifest.activation.max_context_tokens;
         // Rough token estimate: ~0.75 tokens per byte for English prose
         let approx_tokens = (entry.skill.prompt_content.len() as f64 * 0.75) as usize;
-        let raw_cost = if approx_tokens > declared_tokens * 2 {
+        // Use the larger of declared vs actual so a skill can't undercount its cost.
+        // Log a warning when the actual estimate significantly exceeds the declaration.
+        if approx_tokens > declared_tokens * 2 {
             tracing::warn!(
-                "Skill '{}' declares max_context_tokens={} but prompt is ~{} tokens; using actual estimate",
+                "Skill '{}' declares max_context_tokens={} but prompt is ~{} tokens",
                 entry.skill.name(),
                 declared_tokens,
                 approx_tokens,
             );
-            approx_tokens
-        } else {
-            declared_tokens
-        };
+        }
+        let raw_cost = declared_tokens.max(approx_tokens);
         // Enforce a minimum token cost so max_context_tokens=0 can't bypass budgeting
         let token_cost = raw_cost.max(1);
         if token_cost <= budget_remaining {
