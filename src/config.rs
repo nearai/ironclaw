@@ -39,7 +39,7 @@ impl Config {
     /// Priority: env var > DB settings > default.
     /// This is the primary way to load config after DB is connected.
     pub async fn from_db(
-        store: &crate::history::Store,
+        store: &dyn crate::db::Database,
         user_id: &str,
         bootstrap: &crate::bootstrap::BootstrapConfig,
     ) -> Result<Self, ConfigError> {
@@ -109,13 +109,13 @@ impl TunnelConfig {
         let public_url = optional_env("TUNNEL_URL")?
             .or_else(|| settings.tunnel.public_url.clone().filter(|s| !s.is_empty()));
 
-        if let Some(ref url) = public_url {
-            if !url.starts_with("https://") {
-                return Err(ConfigError::InvalidValue {
-                    key: "TUNNEL_URL".to_string(),
-                    message: "must start with https:// (webhooks require HTTPS)".to_string(),
-                });
-            }
+        if let Some(ref url) = public_url
+            && !url.starts_with("https://")
+        {
+            return Err(ConfigError::InvalidValue {
+                key: "TUNNEL_URL".to_string(),
+                message: "must start with https:// (webhooks require HTTPS)".to_string(),
+            });
         }
 
         Ok(Self { public_url })
@@ -136,17 +136,72 @@ impl TunnelConfig {
     }
 }
 
+/// Which database backend to use.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum DatabaseBackend {
+    /// PostgreSQL via deadpool-postgres (default).
+    #[default]
+    Postgres,
+    /// libSQL/Turso embedded database.
+    LibSql,
+}
+
+impl std::str::FromStr for DatabaseBackend {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.to_lowercase().as_str() {
+            "postgres" | "postgresql" | "pg" => Ok(Self::Postgres),
+            "libsql" | "turso" | "sqlite" => Ok(Self::LibSql),
+            _ => Err(format!(
+                "invalid database backend '{}', expected 'postgres' or 'libsql'",
+                s
+            )),
+        }
+    }
+}
+
 /// Database configuration.
 #[derive(Debug, Clone)]
 pub struct DatabaseConfig {
+    /// Which backend to use (default: Postgres).
+    pub backend: DatabaseBackend,
+
+    // -- PostgreSQL fields --
     pub url: SecretString,
     pub pool_size: usize,
+
+    // -- libSQL fields --
+    /// Path to local libSQL database file (default: ~/.ironclaw/ironclaw.db).
+    pub libsql_path: Option<PathBuf>,
+    /// Turso cloud URL for remote sync (optional).
+    pub libsql_url: Option<String>,
+    /// Turso auth token (required when libsql_url is set).
+    pub libsql_auth_token: Option<SecretString>,
 }
 
 impl DatabaseConfig {
     fn resolve(bootstrap: &crate::bootstrap::BootstrapConfig) -> Result<Self, ConfigError> {
+        let backend: DatabaseBackend = if let Some(b) = optional_env("DATABASE_BACKEND")? {
+            b.parse().map_err(|e| ConfigError::InvalidValue {
+                key: "DATABASE_BACKEND".to_string(),
+                message: e,
+            })?
+        } else {
+            DatabaseBackend::default()
+        };
+
+        // PostgreSQL URL is required only when using the postgres backend.
+        // For libsql backend, default to an empty placeholder.
         let url = optional_env("DATABASE_URL")?
             .or_else(|| bootstrap.database_url.clone())
+            .or_else(|| {
+                if backend == DatabaseBackend::LibSql {
+                    Some("unused://libsql".to_string())
+                } else {
+                    None
+                }
+            })
             .ok_or_else(|| ConfigError::MissingRequired {
                 key: "database_url".to_string(),
                 hint: "Run 'ironclaw onboard' or set DATABASE_URL environment variable".to_string(),
@@ -162,9 +217,31 @@ impl DatabaseConfig {
             .or(bootstrap.database_pool_size)
             .unwrap_or(10);
 
+        let libsql_path = optional_env("LIBSQL_PATH")?.map(PathBuf::from).or_else(|| {
+            if backend == DatabaseBackend::LibSql {
+                Some(default_libsql_path())
+            } else {
+                None
+            }
+        });
+
+        let libsql_url = optional_env("LIBSQL_URL")?;
+        let libsql_auth_token = optional_env("LIBSQL_AUTH_TOKEN")?.map(SecretString::from);
+
+        if libsql_url.is_some() && libsql_auth_token.is_none() {
+            return Err(ConfigError::MissingRequired {
+                key: "LIBSQL_AUTH_TOKEN".to_string(),
+                hint: "LIBSQL_AUTH_TOKEN is required when LIBSQL_URL is set".to_string(),
+            });
+        }
+
         Ok(Self {
+            backend,
             url: SecretString::from(url),
             pool_size,
+            libsql_path,
+            libsql_url,
+            libsql_auth_token,
         })
     }
 
@@ -172,6 +249,14 @@ impl DatabaseConfig {
     pub fn url(&self) -> &str {
         self.url.expose_secret()
     }
+}
+
+/// Default libSQL database path (~/.ironclaw/ironclaw.db).
+pub fn default_libsql_path() -> PathBuf {
+    dirs::home_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join(".ironclaw")
+        .join("ironclaw.db")
 }
 
 /// Which LLM backend to use.
@@ -314,6 +399,15 @@ pub struct NearAiConfig {
     pub api_mode: NearAiApiMode,
     /// API key for cloud-api (required for chat_completions mode)
     pub api_key: Option<SecretString>,
+    /// Optional fallback model for failover (default: None).
+    /// When set, a secondary provider is created with this model and wrapped
+    /// in a `FailoverProvider` so transient errors on the primary model
+    /// automatically fall through to the fallback.
+    pub fallback_model: Option<String>,
+    /// Maximum number of retries for transient errors (default: 3).
+    /// With the default of 3, the provider makes up to 4 total attempts
+    /// (1 initial + 3 retries) before giving up.
+    pub max_retries: u32,
 }
 
 impl LlmConfig {
@@ -358,6 +452,8 @@ impl LlmConfig {
                 .unwrap_or_else(default_session_path),
             api_mode,
             api_key: nearai_api_key,
+            fallback_model: optional_env("NEARAI_FALLBACK_MODEL")?,
+            max_retries: parse_optional_env("NEARAI_MAX_RETRIES", 3)?,
         };
 
         // Resolve provider-specific configs based on backend
@@ -808,13 +904,13 @@ impl SecretsConfig {
 
         let enabled = master_key.is_some();
 
-        if let Some(ref key) = master_key {
-            if key.expose_secret().len() < 32 {
-                return Err(ConfigError::InvalidValue {
-                    key: "SECRETS_MASTER_KEY".to_string(),
-                    message: "must be at least 32 bytes for AES-256-GCM".to_string(),
-                });
-            }
+        if let Some(ref key) = master_key
+            && key.expose_secret().len() < 32
+        {
+            return Err(ConfigError::InvalidValue {
+                key: "SECRETS_MASTER_KEY".to_string(),
+                message: "must be at least 32 bytes for AES-256-GCM".to_string(),
+            });
         }
 
         Ok(Self {

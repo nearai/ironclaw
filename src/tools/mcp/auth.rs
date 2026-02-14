@@ -539,9 +539,9 @@ pub async fn wait_for_authorization_callback(
                 .map_err(|e| AuthError::Http(e.to_string()))?;
 
             // Parse GET /callback?code=xxx HTTP/1.1
-            if let Some(path) = request_line.split_whitespace().nth(1) {
-                if path.starts_with("/callback") {
-                    if let Some(query) = path.split('?').nth(1) {
+            if let Some(path) = request_line.split_whitespace().nth(1)
+                && path.starts_with("/callback")
+                    && let Some(query) = path.split('?').nth(1) {
                         // Check for error first
                         if query.contains("error=") {
                             let response = "HTTP/1.1 400 Bad Request\r\n\r\nAuthorization denied";
@@ -578,8 +578,6 @@ pub async fn wait_for_authorization_callback(
                             }
                         }
                     }
-                }
-            }
 
             let response = "HTTP/1.1 404 Not Found\r\n\r\n";
             let _ = socket.write_all(response.as_bytes()).await;

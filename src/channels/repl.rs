@@ -33,8 +33,12 @@ use termimad::MadSkin;
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 
+use crate::agent::truncate_for_preview;
 use crate::channels::{Channel, IncomingMessage, MessageStream, OutgoingResponse, StatusUpdate};
 use crate::error::ChannelError;
+
+/// Max characters for thinking/status messages in the terminal.
+const CLI_STATUS_MAX: usize = 200;
 
 /// Slash commands available in the REPL.
 const SLASH_COMMANDS: &[&str] = &[
@@ -400,7 +404,8 @@ impl Channel for ReplChannel {
 
         match status {
             StatusUpdate::Thinking(msg) => {
-                eprintln!("  \x1b[90m\u{25CB} {msg}\x1b[0m");
+                let display = truncate_for_preview(&msg, CLI_STATUS_MAX);
+                eprintln!("  \x1b[90m\u{25CB} {display}\x1b[0m");
             }
             StatusUpdate::ToolStarted { name } => {
                 eprintln!("  \x1b[33m\u{25CB} {name}\x1b[0m");
@@ -438,7 +443,8 @@ impl Channel for ReplChannel {
             }
             StatusUpdate::Status(msg) => {
                 if debug || msg.contains("approval") || msg.contains("Approval") {
-                    eprintln!("  \x1b[90m{msg}\x1b[0m");
+                    let display = truncate_for_preview(&msg, CLI_STATUS_MAX);
+                    eprintln!("  \x1b[90m{display}\x1b[0m");
                 }
             }
             StatusUpdate::ApprovalNeeded {

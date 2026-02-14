@@ -144,12 +144,11 @@ impl SuccessEvaluator for RuleBasedEvaluator {
 
         // Check for critical errors
         for action in actions.iter().filter(|a| !a.success) {
-            if let Some(ref error) = action.error {
-                if error.to_lowercase().contains("critical")
-                    || error.to_lowercase().contains("fatal")
-                {
-                    issues.push(format!("Critical error in {}: {}", action.tool_name, error));
-                }
+            if let Some(ref error) = action.error
+                && (error.to_lowercase().contains("critical")
+                    || error.to_lowercase().contains("fatal"))
+            {
+                issues.push(format!("Critical error in {}: {}", action.tool_name, error));
             }
         }
 

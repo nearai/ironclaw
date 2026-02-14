@@ -11,8 +11,11 @@ use clap::Subcommand;
 use tokio::fs;
 
 use crate::config::Config;
-use crate::history::Store;
-use crate::secrets::{CreateSecretParams, PostgresSecretsStore, SecretsCrypto, SecretsStore};
+#[allow(unused_imports)]
+use crate::db::Database;
+#[cfg(feature = "postgres")]
+use crate::secrets::PostgresSecretsStore;
+use crate::secrets::{CreateSecretParams, SecretsCrypto, SecretsStore};
 use crate::tools::wasm::{CapabilitiesFile, compute_binary_hash};
 
 /// Default tools directory.
@@ -420,11 +423,11 @@ async fn extract_crate_name(cargo_toml: &Path) -> anyhow::Result<String> {
     // Simple TOML parsing for [package] name
     for line in content.lines() {
         let line = line.trim();
-        if line.starts_with("name") {
-            if let Some((_, value)) = line.split_once('=') {
-                let name = value.trim().trim_matches('"').trim_matches('\'');
-                return Ok(name.to_string());
-            }
+        if line.starts_with("name")
+            && let Some((_, value)) = line.split_once('=')
+        {
+            let name = value.trim().trim_matches('"').trim_matches('\'');
+            return Ok(name.to_string());
         }
     }
 
@@ -488,10 +491,10 @@ async fn list_tools(dir: Option<PathBuf>, verbose: bool) -> anyhow::Result<()> {
 
             if has_caps {
                 let caps_path = path.with_extension("capabilities.json");
-                if let Ok(content) = fs::read_to_string(&caps_path).await {
-                    if let Ok(caps) = CapabilitiesFile::from_json(&content) {
-                        print_capabilities_summary(&caps);
-                    }
+                if let Ok(content) = fs::read_to_string(&caps_path).await
+                    && let Ok(caps) = CapabilitiesFile::from_json(&content)
+                {
+                    print_capabilities_summary(&caps);
                 }
             }
             println!();
@@ -604,16 +607,16 @@ fn print_capabilities_summary(caps: &CapabilitiesFile) {
         }
     }
 
-    if let Some(ref secrets) = caps.secrets {
-        if !secrets.allowed_names.is_empty() {
-            parts.push(format!("secrets: {}", secrets.allowed_names.len()));
-        }
+    if let Some(ref secrets) = caps.secrets
+        && !secrets.allowed_names.is_empty()
+    {
+        parts.push(format!("secrets: {}", secrets.allowed_names.len()));
     }
 
-    if let Some(ref ws) = caps.workspace {
-        if !ws.allowed_prefixes.is_empty() {
-            parts.push("workspace: read".to_string());
-        }
+    if let Some(ref ws) = caps.workspace
+        && !ws.allowed_prefixes.is_empty()
+    {
+        parts.push("workspace: read".to_string());
     }
 
     if !parts.is_empty() {
@@ -650,30 +653,30 @@ fn print_capabilities_detail(caps: &CapabilitiesFile) {
         }
     }
 
-    if let Some(ref secrets) = caps.secrets {
-        if !secrets.allowed_names.is_empty() {
-            println!("  Secrets (existence check only):");
-            for name in &secrets.allowed_names {
-                println!("    {}", name);
-            }
+    if let Some(ref secrets) = caps.secrets
+        && !secrets.allowed_names.is_empty()
+    {
+        println!("  Secrets (existence check only):");
+        for name in &secrets.allowed_names {
+            println!("    {}", name);
         }
     }
 
-    if let Some(ref tool_invoke) = caps.tool_invoke {
-        if !tool_invoke.aliases.is_empty() {
-            println!("  Tool aliases:");
-            for (alias, real_name) in &tool_invoke.aliases {
-                println!("    {} -> {}", alias, real_name);
-            }
+    if let Some(ref tool_invoke) = caps.tool_invoke
+        && !tool_invoke.aliases.is_empty()
+    {
+        println!("  Tool aliases:");
+        for (alias, real_name) in &tool_invoke.aliases {
+            println!("    {} -> {}", alias, real_name);
         }
     }
 
-    if let Some(ref ws) = caps.workspace {
-        if !ws.allowed_prefixes.is_empty() {
-            println!("  Workspace read prefixes:");
-            for prefix in &ws.allowed_prefixes {
-                println!("    {}", prefix);
-            }
+    if let Some(ref ws) = caps.workspace
+        && !ws.allowed_prefixes.is_empty()
+    {
+        println!("  Workspace read prefixes:");
+        for prefix in &ws.allowed_prefixes {
+            println!("    {}", prefix);
         }
     }
 }
@@ -722,11 +725,58 @@ async fn auth_tool(name: String, dir: Option<PathBuf>, user_id: String) -> anyho
         )
     })?;
 
-    let store = Store::new(&config.database).await?;
-    store.run_migrations().await?;
-
     let crypto = SecretsCrypto::new(master_key.clone())?;
-    let secrets_store = Arc::new(PostgresSecretsStore::new(store.pool(), Arc::new(crypto)));
+
+    let secrets_store: Arc<dyn SecretsStore + Send + Sync> = {
+        #[cfg(feature = "postgres")]
+        {
+            let store = crate::history::Store::new(&config.database).await?;
+            store.run_migrations().await?;
+            Arc::new(PostgresSecretsStore::new(store.pool(), Arc::new(crypto)))
+        }
+        #[cfg(all(feature = "libsql", not(feature = "postgres")))]
+        {
+            use crate::db::Database as _;
+            use crate::db::libsql_backend::LibSqlBackend;
+            use secrecy::ExposeSecret as _;
+
+            let default_path = crate::config::default_libsql_path();
+            let db_path = config
+                .database
+                .libsql_path
+                .as_deref()
+                .unwrap_or(&default_path);
+
+            let backend = if let Some(ref url) = config.database.libsql_url {
+                let token = config.database.libsql_auth_token.as_ref().ok_or_else(|| {
+                    anyhow::anyhow!("LIBSQL_AUTH_TOKEN is required when LIBSQL_URL is set")
+                })?;
+                LibSqlBackend::new_remote_replica(db_path, url, token.expose_secret())
+                    .await
+                    .map_err(|e| anyhow::anyhow!("{}", e))?
+            } else {
+                LibSqlBackend::new_local(db_path)
+                    .await
+                    .map_err(|e| anyhow::anyhow!("{}", e))?
+            };
+            backend
+                .run_migrations()
+                .await
+                .map_err(|e| anyhow::anyhow!("{}", e))?;
+
+            Arc::new(crate::secrets::LibSqlSecretsStore::new(
+                backend.shared_db(),
+                Arc::new(crypto),
+            ))
+        }
+        #[cfg(not(any(feature = "postgres", feature = "libsql")))]
+        {
+            let _ = crypto;
+            anyhow::bail!(
+                "No database backend available for secrets. Enable 'postgres' or 'libsql' feature."
+            );
+        }
+    };
 
     // Check if already configured
     let already_configured = secrets_store
@@ -752,51 +802,50 @@ async fn auth_tool(name: String, dir: Option<PathBuf>, user_id: String) -> anyho
     }
 
     // Check for environment variable
-    if let Some(ref env_var) = auth.env_var {
-        if let Ok(token) = std::env::var(env_var) {
-            if !token.is_empty() {
-                println!("  Found {} in environment.", env_var);
-                println!();
+    if let Some(ref env_var) = auth.env_var
+        && let Ok(token) = std::env::var(env_var)
+        && !token.is_empty()
+    {
+        println!("  Found {} in environment.", env_var);
+        println!();
 
-                // Validate if endpoint is provided
-                if let Some(ref validation) = auth.validation_endpoint {
-                    print!("  Validating token...");
-                    std::io::stdout().flush()?;
+        // Validate if endpoint is provided
+        if let Some(ref validation) = auth.validation_endpoint {
+            print!("  Validating token...");
+            std::io::stdout().flush()?;
 
-                    match validate_token(&token, validation, &auth.secret_name).await {
-                        Ok(()) => {
-                            println!(" ✓");
-                        }
-                        Err(e) => {
-                            println!(" ✗");
-                            println!("  Validation failed: {}", e);
-                            println!();
-                            println!("  Falling back to manual entry...");
-                            return auth_tool_manual(&secrets_store, &user_id, &auth).await;
-                        }
-                    }
+            match validate_token(&token, validation, &auth.secret_name).await {
+                Ok(()) => {
+                    println!(" ✓");
                 }
-
-                // Save the token
-                save_token(&secrets_store, &user_id, &auth, &token).await?;
-                print_success(display_name);
-                return Ok(());
+                Err(e) => {
+                    println!(" ✗");
+                    println!("  Validation failed: {}", e);
+                    println!();
+                    println!("  Falling back to manual entry...");
+                    return auth_tool_manual(secrets_store.as_ref(), &user_id, &auth).await;
+                }
             }
         }
+
+        // Save the token
+        save_token(secrets_store.as_ref(), &user_id, &auth, &token).await?;
+        print_success(display_name);
+        return Ok(());
     }
 
     // Check for OAuth configuration
     if let Some(ref oauth) = auth.oauth {
-        return auth_tool_oauth(&secrets_store, &user_id, &auth, oauth).await;
+        return auth_tool_oauth(secrets_store.as_ref(), &user_id, &auth, oauth).await;
     }
 
     // Fall back to manual entry
-    auth_tool_manual(&secrets_store, &user_id, &auth).await
+    auth_tool_manual(secrets_store.as_ref(), &user_id, &auth).await
 }
 
 /// OAuth browser-based login flow.
 async fn auth_tool_oauth(
-    store: &PostgresSecretsStore,
+    store: &(dyn SecretsStore + Send + Sync),
     user_id: &str,
     auth: &crate::tools::wasm::AuthCapabilitySchema,
     oauth: &crate::tools::wasm::OAuthConfigSchema,
@@ -923,9 +972,9 @@ async fn auth_tool_oauth(
             reader.read_line(&mut request_line).await?;
 
             // Parse GET /callback?code=xxx HTTP/1.1
-            if let Some(path) = request_line.split_whitespace().nth(1) {
-                if path.starts_with("/callback") {
-                    if let Some(query) = path.split('?').nth(1) {
+            if let Some(path) = request_line.split_whitespace().nth(1)
+                && path.starts_with("/callback")
+                    && let Some(query) = path.split('?').nth(1) {
                         for param in query.split('&') {
                             let parts: Vec<&str> = param.splitn(2, '=').collect();
                             if parts.len() == 2 && parts[0] == "code" {
@@ -962,8 +1011,6 @@ async fn auth_tool_oauth(
                             return Err(anyhow::anyhow!("Authorization denied by user"));
                         }
                     }
-                }
-            }
 
             let response = "HTTP/1.1 404 Not Found\r\n\r\n";
             let _ = socket.write_all(response.as_bytes()).await;
@@ -1044,7 +1091,7 @@ async fn auth_tool_oauth(
 
 /// Manual token entry flow.
 async fn auth_tool_manual(
-    store: &PostgresSecretsStore,
+    store: &(dyn SecretsStore + Send + Sync),
     user_id: &str,
     auth: &crate::tools::wasm::AuthCapabilitySchema,
 ) -> anyhow::Result<()> {
@@ -1217,7 +1264,7 @@ async fn validate_token(
 
 /// Save token to secrets store.
 async fn save_token(
-    store: &PostgresSecretsStore,
+    store: &(dyn SecretsStore + Send + Sync),
     user_id: &str,
     auth: &crate::tools::wasm::AuthCapabilitySchema,
     token: &str,
