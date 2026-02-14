@@ -1037,9 +1037,11 @@ impl SetupWizard {
             ));
         }
 
-        // Save bootstrap config (database_url, secrets key source)
+        // Save bootstrap config (fields needed before DB is available)
         let mut bootstrap = crate::bootstrap::BootstrapConfig::load();
         bootstrap.database_url = self.settings.database_url.clone();
+        bootstrap.database_pool_size = self.settings.database_pool_size;
+        bootstrap.secrets_master_key_source = self.settings.secrets_master_key_source;
         bootstrap.onboard_completed = true;
         bootstrap.save().map_err(|e| {
             SetupError::Io(std::io::Error::other(format!(

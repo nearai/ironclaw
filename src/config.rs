@@ -1,9 +1,10 @@
 //! Configuration for IronClaw.
 //!
-//! Settings are loaded with priority: env var > database > default.
-//! `DATABASE_URL` lives in `~/.ironclaw/.env` (loaded via dotenvy early
-//! in startup). Everything else comes from env vars, the DB settings
-//! table, or auto-detection.
+//! Settings are loaded with priority: env var > bootstrap.json > database > default.
+//! The 4 bootstrap fields (database_url, pool_size, secrets key source,
+//! onboard_completed) live in `~/.ironclaw/bootstrap.json` because they're
+//! needed before the database connection is established. Everything else
+//! comes from env vars, the DB settings table, or auto-detection.
 
 use std::path::PathBuf;
 use std::time::Duration;
