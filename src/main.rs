@@ -22,6 +22,7 @@ use ironclaw::{
     config::Config,
     context::ContextManager,
     extensions::ExtensionManager,
+    hooks::HookRegistry,
     llm::{SessionConfig, create_llm_provider, create_session_manager},
     orchestrator::{
         ContainerJobConfig, ContainerJobManager, OrchestratorApi, TokenStore,
@@ -1076,8 +1077,11 @@ async fn main() -> anyhow::Result<()> {
     // Create context manager (shared between job tools and agent)
     let context_manager = Arc::new(ContextManager::new(config.agent.max_parallel_jobs));
 
+    // Create hook registry
+    let hooks = Arc::new(HookRegistry::new());
+
     // Create session manager (shared between agent and web gateway)
-    let session_manager = Arc::new(SessionManager::new());
+    let session_manager = Arc::new(SessionManager::new().with_hooks(hooks.clone()));
 
     // Register job tools (sandbox deps auto-injected when container_job_manager is available)
     tools.register_job_tools(
@@ -1142,6 +1146,7 @@ async fn main() -> anyhow::Result<()> {
         tools,
         workspace,
         extension_manager,
+        hooks,
     };
     let agent = Agent::new(
         config.agent.clone(),

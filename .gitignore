@@ -2,6 +2,9 @@
 .env
 .env.local
 
+# Claude Code worktrees
+.claude/worktrees/
+
 target/
 
 # WASM build artifacts (loaded from disk, not bundled)

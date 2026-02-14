@@ -869,8 +869,6 @@ impl SecretsConfig {
                             (Some(SecretString::from(key_hex)), KeySource::Keychain)
                         }
                         Err(_) => {
-                            // Keychain configured but key not found
-                            // This might happen if keychain was cleared
                             tracing::warn!(
                                 "Secrets configured for keychain but key not found. \
                                  Run 'ironclaw onboard' to reconfigure."
