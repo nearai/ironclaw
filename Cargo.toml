@@ -10,7 +10,7 @@ exclude = [
 name = "ironclaw"
 version = "0.1.3"
 edition = "2024"
-rust-version = "1.85"
+rust-version = "1.92"
 description = "Secure personal AI assistant that protects your data and expands its capabilities on the fly"
 authors = ["NEAR AI <support@near.ai>"]
 license = "MIT OR Apache-2.0"
@@ -36,11 +36,14 @@ reqwest = { version = "0.12", default-features = false, features = ["json", "rus
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 
-# Database
-deadpool-postgres = "0.14"
-tokio-postgres = { version = "0.7", features = ["with-uuid-1", "with-chrono-0_4", "with-serde_json-1"] }
-postgres-types = { version = "0.2", features = ["with-serde_json-1"] }
-refinery = { version = "0.8", features = ["tokio-postgres"] }
+# Database - PostgreSQL (default, feature-gated)
+deadpool-postgres = { version = "0.14", optional = true }
+tokio-postgres = { version = "0.7", features = ["with-uuid-1", "with-chrono-0_4", "with-serde_json-1"], optional = true }
+postgres-types = { version = "0.2", features = ["with-serde_json-1"], optional = true }
+refinery = { version = "0.8", features = ["tokio-postgres"], optional = true }
+
+# Database - libSQL/Turso (optional embedded database)
+libsql = { version = "0.6", optional = true, default-features = false, features = ["core", "replication"] }
 
 # Error handling
 thiserror = "2"
@@ -56,7 +59,7 @@ dotenvy = "0.15"
 # Core types
 uuid = { version = "1", features = ["v4", "serde"] }
 chrono = { version = "0.4", features = ["serde"] }
-rust_decimal = { version = "1", features = ["serde", "serde-with-str", "db-tokio-postgres", "maths"] }
+rust_decimal = { version = "1", features = ["serde", "serde-with-str", "maths"] }
 rust_decimal_macros = "1"
 
 # Async traits
@@ -97,7 +100,7 @@ open = "5"
 
 # Vector embeddings for semantic search
 # The postgres feature provides ToSql/FromSql for postgres-types (shared by tokio-postgres)
-pgvector = { version = "0.4", features = ["postgres"] }
+pgvector = { version = "0.4", features = ["postgres"], optional = true }
 
 # WASM sandbox for untrusted tool execution
 wasmtime = { version = "28", features = ["component-model"] }
@@ -143,8 +146,21 @@ pretty_assertions = "1"
 tempfile = "3"
 
 [features]
-default = []
+default = ["postgres"]
+postgres = [
+    "dep:deadpool-postgres",
+    "dep:tokio-postgres",
+    "dep:postgres-types",
+    "dep:refinery",
+    "dep:pgvector",
+    "rust_decimal/db-tokio-postgres",
+]
+libsql = ["dep:libsql"]
 integration = []
+
+[[example]]
+name = "test_heartbeat"
+required-features = ["postgres"]
 
 # The profile that 'cargo dist' will build with
 [profile.dist]

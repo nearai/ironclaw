@@ -90,14 +90,21 @@ pub enum DatabaseError {
     #[error("Serialization error: {0}")]
     Serialization(String),
 
+    #[cfg(feature = "postgres")]
     #[error("PostgreSQL error: {0}")]
     Postgres(#[from] tokio_postgres::Error),
 
+    #[cfg(feature = "postgres")]
     #[error("Pool build error: {0}")]
     PoolBuild(#[from] deadpool_postgres::BuildError),
 
+    #[cfg(feature = "postgres")]
     #[error("Pool runtime error: {0}")]
     PoolRuntime(#[from] deadpool_postgres::PoolError),
+
+    #[cfg(feature = "libsql")]
+    #[error("LibSQL error: {0}")]
+    LibSql(#[from] libsql::Error),
 }
 
 /// Channel-related errors.
