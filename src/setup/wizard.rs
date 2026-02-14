@@ -693,6 +693,7 @@ impl SetupWizard {
         let options = [
             "NEAR AI (uses same auth, no extra cost)",
             "OpenAI (requires API key)",
+            "Venice (uses same auth as Venice LLM backend)",
         ];
 
         let choice = select_one("Select embeddings provider:", &options).map_err(SetupError::Io)?;
@@ -714,6 +715,16 @@ impl SetupWizard {
                 self.settings.embeddings.provider = "openai".to_string();
                 self.settings.embeddings.model = "text-embedding-3-small".to_string();
                 print_success("Embeddings configured for OpenAI");
+            }
+            2 => {
+                if std::env::var("VENICE_API_KEY").is_err() {
+                    print_info("VENICE_API_KEY not set in environment.");
+                    print_info("Add it to your .env file or set LLM_BACKEND=venice.");
+                }
+                self.settings.embeddings.enabled = true;
+                self.settings.embeddings.provider = "venice".to_string();
+                self.settings.embeddings.model = "text-embedding-3-small".to_string();
+                print_success("Embeddings configured for Venice AI");
             }
             _ => unreachable!(),
         }
