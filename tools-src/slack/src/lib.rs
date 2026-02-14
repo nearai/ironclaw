@@ -76,7 +76,7 @@ impl exports::near::agent::tool::Guest for SlackTool {
                 },
                 "limit": {
                     "type": "integer",
-                    "description": "Maximum number of results to return. Used by: list_channels (default: 100), get_channel_history (default: 20)"
+                    "description": "Maximum number of results to return. Used by: list_channels, get_channel_history"
                 },
                 "timestamp": {
                     "type": "string",

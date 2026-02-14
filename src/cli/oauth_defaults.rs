@@ -189,14 +189,31 @@ pub async fn wait_for_callback(
     .map_err(|_| OAuthCallbackError::Timeout)?
 }
 
+/// Escape a string for safe interpolation into HTML content.
+fn html_escape(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        match c {
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            '"' => out.push_str("&quot;"),
+            '\'' => out.push_str("&#x27;"),
+            _ => out.push(c),
+        }
+    }
+    out
+}
+
 /// HTML landing page shown in the browser after an OAuth redirect.
 pub fn landing_html(provider_name: &str, success: bool) -> String {
+    let safe_name = html_escape(provider_name);
     let (icon, heading, subtitle, accent) = if success {
         (
             r##"<div style="width:64px;height:64px;border-radius:50%;background:#22c55e;display:flex;align-items:center;justify-content:center;margin:0 auto 24px">
                 <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>
               </div>"##,
-            format!("{} Connected", provider_name),
+            format!("{} Connected", safe_name),
             "You can close this window and return to your terminal.",
             "#22c55e",
         )
@@ -300,6 +317,13 @@ mod tests {
         assert!(html.contains("IronClaw"));
         assert!(html.contains("#22c55e")); // green accent
         assert!(!html.contains("Failed"));
+    }
+
+    #[test]
+    fn test_landing_html_escapes_provider_name() {
+        let html = landing_html("<script>alert(1)</script>", true);
+        assert!(!html.contains("<script>"));
+        assert!(html.contains("&lt;script&gt;"));
     }
 
     #[test]
