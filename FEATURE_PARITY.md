@@ -133,7 +133,7 @@ This document tracks feature parity between IronClaw (Rust implementation) and O
 |---------|----------|----------|-------|
 | Pi agent runtime | ✅ | ➖ | IronClaw uses custom runtime |
 | RPC-based execution | ✅ | ✅ | Orchestrator/worker pattern |
-| Multi-provider failover | ✅ | ❌ | Provider fallback chains |
+| Multi-provider failover | ✅ | ✅ | `FailoverProvider` tries providers sequentially on retryable errors |
 | Per-sender sessions | ✅ | ✅ | |
 | Global sessions | ✅ | ❌ | Optional shared context |
 | Session pruning | ✅ | ❌ | Auto cleanup old sessions |
@@ -173,7 +173,7 @@ This document tracks feature parity between IronClaw (Rust implementation) and O
 | Feature | OpenClaw | IronClaw | Notes |
 |---------|----------|----------|-------|
 | Auto-discovery | ✅ | ❌ | |
-| Failover chains | ✅ | ❌ | Provider fallback |
+| Failover chains | ✅ | ✅ | `FailoverProvider` with configurable `fallback_model` |
 | Cooldown management | ✅ | ❌ | Skip failed providers |
 | Per-session model override | ✅ | ✅ | Model selector in TUI |
 | Model selection UI | ✅ | ✅ | TUI keyboard shortcut |
@@ -419,7 +419,7 @@ This document tracks feature parity between IronClaw (Rust implementation) and O
 - ❌ Slack channel (real implementation)
 - ✅ Telegram channel (WASM, DM pairing, caption, /start)
 - ❌ WhatsApp channel
-- ❌ Multi-provider failover
+- ✅ Multi-provider failover (`FailoverProvider` with retryable error classification)
 - ❌ Hooks system (beforeInbound, beforeToolCall, etc.)
 
 ### P2 - Medium Priority
