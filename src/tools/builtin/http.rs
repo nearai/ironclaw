@@ -242,7 +242,8 @@ impl Tool for HttpTool {
         // Pre-check Content-Length header to reject obviously oversized responses
         // before downloading anything, preventing OOM from malicious servers.
         if let Some(content_length) = response.headers().get(reqwest::header::CONTENT_LENGTH)
-            && let Ok(len) = content_length.to_str().unwrap_or("0").parse::<usize>()
+            && let Ok(s) = content_length.to_str()
+            && let Ok(len) = s.parse::<usize>()
             && len > MAX_RESPONSE_SIZE
         {
             return Err(ToolError::ExecutionFailed(format!(
@@ -259,13 +260,13 @@ impl Tool for HttpTool {
             let chunk = chunk.map_err(|e| {
                 ToolError::ExternalService(format!("failed to read response body: {}", e))
             })?;
-            body.extend_from_slice(&chunk);
-            if body.len() > MAX_RESPONSE_SIZE {
+            if body.len() + chunk.len() > MAX_RESPONSE_SIZE {
                 return Err(ToolError::ExecutionFailed(format!(
                     "Response body exceeds maximum allowed size ({} bytes)",
                     MAX_RESPONSE_SIZE
                 )));
             }
+            body.extend_from_slice(&chunk);
         }
         let body_bytes = bytes::Bytes::from(body);
 
