@@ -579,7 +579,7 @@ Dead code behind the wrong `#[cfg]` gate will only show up when building with a 
 
 ### Mechanical verification before committing
 Run these checks on changed files before committing:
-- `grep -rn '\.unwrap()' <files>` and `grep -rn '\.expect(' <files>` -- no panics in production
+- `grep -rnE '\.unwrap\(|\.expect\(' <files>` -- no panics in production
 - `grep -rn 'super::' <files>` -- use `crate::` imports
 - If you fixed a pattern bug, `grep` for other instances of that pattern across `src/`
 
