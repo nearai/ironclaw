@@ -57,7 +57,7 @@ pub struct ExtensionManager {
     _tunnel_url: Option<String>,
     user_id: String,
     /// Optional database store for DB-backed MCP config.
-    store: Option<Arc<crate::history::Store>>,
+    store: Option<Arc<dyn crate::db::Database>>,
 }
 
 impl ExtensionManager {
@@ -71,7 +71,7 @@ impl ExtensionManager {
         wasm_channels_dir: PathBuf,
         tunnel_url: Option<String>,
         user_id: String,
-        store: Option<Arc<crate::history::Store>>,
+        store: Option<Arc<dyn crate::db::Database>>,
     ) -> Self {
         Self {
             registry: ExtensionRegistry::new(),
@@ -351,7 +351,7 @@ impl ExtensionManager {
     ) -> Result<crate::tools::mcp::config::McpServersFile, crate::tools::mcp::config::ConfigError>
     {
         if let Some(ref store) = self.store {
-            crate::tools::mcp::config::load_mcp_servers_from_db(store, &self.user_id).await
+            crate::tools::mcp::config::load_mcp_servers_from_db(store.as_ref(), &self.user_id).await
         } else {
             crate::tools::mcp::config::load_mcp_servers().await
         }
@@ -375,7 +375,8 @@ impl ExtensionManager {
     ) -> Result<(), crate::tools::mcp::config::ConfigError> {
         config.validate()?;
         if let Some(ref store) = self.store {
-            crate::tools::mcp::config::add_mcp_server_db(store, &self.user_id, config).await
+            crate::tools::mcp::config::add_mcp_server_db(store.as_ref(), &self.user_id, config)
+                .await
         } else {
             crate::tools::mcp::config::add_mcp_server(config).await
         }
@@ -386,7 +387,8 @@ impl ExtensionManager {
         name: &str,
     ) -> Result<(), crate::tools::mcp::config::ConfigError> {
         if let Some(ref store) = self.store {
-            crate::tools::mcp::config::remove_mcp_server_db(store, &self.user_id, name).await
+            crate::tools::mcp::config::remove_mcp_server_db(store.as_ref(), &self.user_id, name)
+                .await
         } else {
             crate::tools::mcp::config::remove_mcp_server(name).await
         }

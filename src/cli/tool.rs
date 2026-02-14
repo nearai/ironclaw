@@ -11,8 +11,11 @@ use clap::Subcommand;
 use tokio::fs;
 
 use crate::config::Config;
-use crate::history::Store;
-use crate::secrets::{CreateSecretParams, PostgresSecretsStore, SecretsCrypto, SecretsStore};
+#[allow(unused_imports)]
+use crate::db::Database;
+#[cfg(feature = "postgres")]
+use crate::secrets::PostgresSecretsStore;
+use crate::secrets::{CreateSecretParams, SecretsCrypto, SecretsStore};
 use crate::tools::wasm::{CapabilitiesFile, compute_binary_hash};
 
 /// Default tools directory.
@@ -722,11 +725,58 @@ async fn auth_tool(name: String, dir: Option<PathBuf>, user_id: String) -> anyho
         )
     })?;
 
-    let store = Store::new(&config.database).await?;
-    store.run_migrations().await?;
-
     let crypto = SecretsCrypto::new(master_key.clone())?;
-    let secrets_store = Arc::new(PostgresSecretsStore::new(store.pool(), Arc::new(crypto)));
+
+    let secrets_store: Arc<dyn SecretsStore + Send + Sync> = {
+        #[cfg(feature = "postgres")]
+        {
+            let store = crate::history::Store::new(&config.database).await?;
+            store.run_migrations().await?;
+            Arc::new(PostgresSecretsStore::new(store.pool(), Arc::new(crypto)))
+        }
+        #[cfg(all(feature = "libsql", not(feature = "postgres")))]
+        {
+            use crate::db::Database as _;
+            use crate::db::libsql_backend::LibSqlBackend;
+            use secrecy::ExposeSecret as _;
+
+            let default_path = crate::config::default_libsql_path();
+            let db_path = config
+                .database
+                .libsql_path
+                .as_deref()
+                .unwrap_or(&default_path);
+
+            let backend = if let Some(ref url) = config.database.libsql_url {
+                let token = config.database.libsql_auth_token.as_ref().ok_or_else(|| {
+                    anyhow::anyhow!("LIBSQL_AUTH_TOKEN is required when LIBSQL_URL is set")
+                })?;
+                LibSqlBackend::new_remote_replica(db_path, url, token.expose_secret())
+                    .await
+                    .map_err(|e| anyhow::anyhow!("{}", e))?
+            } else {
+                LibSqlBackend::new_local(db_path)
+                    .await
+                    .map_err(|e| anyhow::anyhow!("{}", e))?
+            };
+            backend
+                .run_migrations()
+                .await
+                .map_err(|e| anyhow::anyhow!("{}", e))?;
+
+            Arc::new(crate::secrets::LibSqlSecretsStore::new(
+                backend.shared_db(),
+                Arc::new(crypto),
+            ))
+        }
+        #[cfg(not(any(feature = "postgres", feature = "libsql")))]
+        {
+            let _ = crypto;
+            anyhow::bail!(
+                "No database backend available for secrets. Enable 'postgres' or 'libsql' feature."
+            );
+        }
+    };
 
     // Check if already configured
     let already_configured = secrets_store
@@ -773,29 +823,29 @@ async fn auth_tool(name: String, dir: Option<PathBuf>, user_id: String) -> anyho
                     println!("  Validation failed: {}", e);
                     println!();
                     println!("  Falling back to manual entry...");
-                    return auth_tool_manual(&secrets_store, &user_id, &auth).await;
+                    return auth_tool_manual(secrets_store.as_ref(), &user_id, &auth).await;
                 }
             }
         }
 
         // Save the token
-        save_token(&secrets_store, &user_id, &auth, &token).await?;
+        save_token(secrets_store.as_ref(), &user_id, &auth, &token).await?;
         print_success(display_name);
         return Ok(());
     }
 
     // Check for OAuth configuration
     if let Some(ref oauth) = auth.oauth {
-        return auth_tool_oauth(&secrets_store, &user_id, &auth, oauth).await;
+        return auth_tool_oauth(secrets_store.as_ref(), &user_id, &auth, oauth).await;
     }
 
     // Fall back to manual entry
-    auth_tool_manual(&secrets_store, &user_id, &auth).await
+    auth_tool_manual(secrets_store.as_ref(), &user_id, &auth).await
 }
 
 /// OAuth browser-based login flow.
 async fn auth_tool_oauth(
-    store: &PostgresSecretsStore,
+    store: &(dyn SecretsStore + Send + Sync),
     user_id: &str,
     auth: &crate::tools::wasm::AuthCapabilitySchema,
     oauth: &crate::tools::wasm::OAuthConfigSchema,
@@ -1041,7 +1091,7 @@ async fn auth_tool_oauth(
 
 /// Manual token entry flow.
 async fn auth_tool_manual(
-    store: &PostgresSecretsStore,
+    store: &(dyn SecretsStore + Send + Sync),
     user_id: &str,
     auth: &crate::tools::wasm::AuthCapabilitySchema,
 ) -> anyhow::Result<()> {
@@ -1214,7 +1264,7 @@ async fn validate_token(
 
 /// Save token to secrets store.
 async fn save_token(
-    store: &PostgresSecretsStore,
+    store: &(dyn SecretsStore + Send + Sync),
     user_id: &str,
     auth: &crate::tools::wasm::AuthCapabilitySchema,
     token: &str,

@@ -64,7 +64,11 @@ mod store;
 mod types;
 
 pub use crypto::SecretsCrypto;
-pub use store::{PostgresSecretsStore, SecretsStore};
+#[cfg(feature = "libsql")]
+pub use store::LibSqlSecretsStore;
+#[cfg(feature = "postgres")]
+pub use store::PostgresSecretsStore;
+pub use store::SecretsStore;
 pub use types::{
     CreateSecretParams, CredentialLocation, CredentialMapping, DecryptedSecret, Secret,
     SecretError, SecretRef,
