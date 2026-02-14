@@ -1171,10 +1171,18 @@ impl Agent {
                                 && tc.name == "shell"
                                 && let Some(cmd) = tc
                                     .arguments
-                                    .as_str()
-                                    .and_then(|s| serde_json::from_str::<serde_json::Value>(s).ok())
-                                    .and_then(|v| {
-                                        v.get("command").and_then(|c| c.as_str().map(String::from))
+                                    .get("command")
+                                    .and_then(|c| c.as_str().map(String::from))
+                                    .or_else(|| {
+                                        tc.arguments
+                                            .as_str()
+                                            .and_then(|s| {
+                                                serde_json::from_str::<serde_json::Value>(s).ok()
+                                            })
+                                            .and_then(|v| {
+                                                v.get("command")
+                                                    .and_then(|c| c.as_str().map(String::from))
+                                            })
                                     })
                                 && crate::tools::builtin::shell::requires_explicit_approval(&cmd)
                             {

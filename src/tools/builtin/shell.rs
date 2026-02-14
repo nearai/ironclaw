@@ -527,6 +527,48 @@ mod tests {
         ));
     }
 
+    /// Replicate the extraction logic from agent_loop.rs to prove it works
+    /// when `arguments` is a `serde_json::Value::Object` (the common case
+    /// that was previously broken because `Value::Object.as_str()` returns None).
+    #[test]
+    fn test_destructive_command_extraction_from_object_args() {
+        let arguments = serde_json::json!({"command": "rm -rf /tmp/stuff"});
+
+        let cmd = arguments
+            .get("command")
+            .and_then(|c| c.as_str().map(String::from))
+            .or_else(|| {
+                arguments
+                    .as_str()
+                    .and_then(|s| serde_json::from_str::<serde_json::Value>(s).ok())
+                    .and_then(|v| v.get("command").and_then(|c| c.as_str().map(String::from)))
+            });
+
+        assert_eq!(cmd.as_deref(), Some("rm -rf /tmp/stuff"));
+        assert!(requires_explicit_approval(cmd.as_deref().unwrap()));
+    }
+
+    /// Verify extraction still works when `arguments` is a JSON string
+    /// (rare, but possible if the LLM provider returns string-encoded JSON).
+    #[test]
+    fn test_destructive_command_extraction_from_string_args() {
+        let arguments =
+            serde_json::Value::String(r#"{"command": "git push --force origin main"}"#.to_string());
+
+        let cmd = arguments
+            .get("command")
+            .and_then(|c| c.as_str().map(String::from))
+            .or_else(|| {
+                arguments
+                    .as_str()
+                    .and_then(|s| serde_json::from_str::<serde_json::Value>(s).ok())
+                    .and_then(|v| v.get("command").and_then(|c| c.as_str().map(String::from)))
+            });
+
+        assert_eq!(cmd.as_deref(), Some("git push --force origin main"));
+        assert!(requires_explicit_approval(cmd.as_deref().unwrap()));
+    }
+
     #[test]
     fn test_sandbox_policy_builder() {
         let tool = ShellTool::new()
