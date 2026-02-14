@@ -19,6 +19,18 @@ use crate::llm::provider::{
 /// Provider name constant to avoid magic strings.
 const PROVIDER_NAME: &str = "openai_compatible";
 
+/// Maximum response size in bytes (10MB) to prevent DoS from oversized responses.
+const MAX_RESPONSE_SIZE_BYTES: usize = 10 * 1024 * 1024; // 10MB
+
+/// Cache TTL for model list (5 minutes).
+const MODEL_CACHE_TTL_SECONDS: u64 = 300; // 5 minutes
+
+/// Cached model list with timestamp for TTL validation.
+struct CachedModels {
+    models: Vec<ApiModelEntry>,
+    fetched_at: std::time::Instant,
+}
+
 /// OpenAI-compatible Chat Completions API provider.
 ///
 /// Note on std::sync::RwLock: While tokio::sync::RwLock is preferred for async code,
@@ -29,6 +41,7 @@ pub struct OpenAiCompatibleProvider {
     client: Client,
     config: OpenAiCompatibleConfig,
     active_model: std::sync::RwLock<String>,
+    models_cache: std::sync::RwLock<Option<CachedModels>>,
 }
 
 impl std::fmt::Debug for OpenAiCompatibleProvider {
@@ -39,6 +52,7 @@ impl std::fmt::Debug for OpenAiCompatibleProvider {
             .field("has_api_key", &self.config.api_key.is_some())
             .field("timeout_secs", &self.config.timeout_secs)
             .field("active_model", &self.active_model_name())
+            .field("has_cached_models", &self.models_cache.read().unwrap_or_else(|e| e.into_inner()).is_some())
             .finish()
     }
 }
@@ -64,10 +78,12 @@ impl OpenAiCompatibleProvider {
             })?;
 
         let active_model = std::sync::RwLock::new(config.model.clone());
+        let models_cache = std::sync::RwLock::new(None);
         Ok(Self {
             client,
             config,
             active_model,
+            models_cache,
         })
     }
 
@@ -93,8 +109,80 @@ impl OpenAiCompatibleProvider {
         }
     }
 
-    /// Send a request to the chat completions API.
-    async fn send_request<T: Serialize, R: for<'de> Deserialize<'de>>(
+    /// Send a request to the chat completions API with retry logic.
+    ///
+    /// Implements exponential backoff with jitter for retryable errors (429, 5xx).
+    /// Respects Retry-After header when present on 429 responses.
+    async fn send_request_with_retry<T: Serialize, R: for<'de> Deserialize<'de>>(
+        &self,
+        body: &T,
+    ) -> Result<R, LlmError> {
+        let mut delay_ms = self.config.retry_initial_delay_ms;
+        let max_retries = self.config.max_retries;
+
+        for attempt in 0..=max_retries {
+            match self.send_request_internal(body).await {
+                Ok(response) => return Ok(response),
+                Err(e) => {
+                    // Check if this is the last attempt
+                    if attempt == max_retries {
+                        return Err(e);
+                    }
+
+                    // Check if error is retryable (429 or 5xx)
+                    let should_retry = match &e {
+                        LlmError::RateLimited { retry_after, .. } => {
+                            // Use Retry-After header if present
+                            if let Some(duration) = retry_after {
+                                delay_ms = duration.as_millis() as u64;
+                            }
+                            true
+                        }
+                        LlmError::RequestFailed { reason, .. } => {
+                            // Check for 5xx in error message (e.g., "HTTP 503: ...")
+                            reason.contains("HTTP 5")
+                        }
+                        // Auth errors and other 4xx should not be retried
+                        LlmError::AuthFailed { .. } => false,
+                        _ => false,
+                    };
+
+                    if !should_retry {
+                        return Err(e);
+                    }
+
+                    tracing::warn!(
+                        "Request failed (attempt {}/{}), retrying after {}ms: {}",
+                        attempt + 1,
+                        max_retries,
+                        delay_ms,
+                        e
+                    );
+
+                    tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
+
+                    // Exponential backoff: delay = delay * 2
+                    // With ±25% jitter to prevent thundering herd
+                    let jitter = (delay_ms as f64 * 0.25) as u64;
+                    let jitter_adjustment = if rand::random::<bool>() {
+                        jitter as i64
+                    } else {
+                        -(jitter as i64)
+                    };
+                    delay_ms = (delay_ms * 2).saturating_add(jitter_adjustment as u64);
+                }
+            }
+        }
+
+        // This should never be reached, but satisfies the compiler
+        Err(LlmError::RequestFailed {
+            provider: PROVIDER_NAME.to_string(),
+            reason: "Max retries exceeded".to_string(),
+        })
+    }
+
+    /// Send a request to the chat completions API (internal, no retries).
+    async fn send_request_internal<T: Serialize, R: for<'de> Deserialize<'de>>(
         &self,
         body: &T,
     ) -> Result<R, LlmError> {
@@ -134,6 +222,17 @@ impl OpenAiCompatibleProvider {
             }
         })?;
 
+        // Check response size to prevent DoS from oversized responses
+        if response_text.len() > MAX_RESPONSE_SIZE_BYTES {
+            return Err(LlmError::InvalidResponse {
+                provider: PROVIDER_NAME.to_string(),
+                reason: format!(
+                    "Response size {} exceeds 10MB limit",
+                    response_text.len()
+                ),
+            });
+        }
+
         tracing::debug!("OpenAI-compatible response status: {}", status);
 
         if !status.is_success() {
@@ -169,20 +268,51 @@ impl OpenAiCompatibleProvider {
     }
 
     /// Fetch available models with full metadata from the `/v1/models` endpoint.
+    /// Uses caching with 5-minute TTL to reduce API calls.
     async fn fetch_models(&self) -> Result<Vec<ApiModelEntry>, LlmError> {
+        // Check cache first
+        {
+            let cache_guard = self
+                .models_cache
+                .read()
+                .unwrap_or_else(|e| e.into_inner());
+            if let Some(ref cached) = *cache_guard {
+                let elapsed = cached.fetched_at.elapsed();
+                if elapsed < std::time::Duration::from_secs(MODEL_CACHE_TTL_SECONDS) {
+                    tracing::debug!("Using cached model list ({}s old)", elapsed.as_secs());
+                    return Ok(cached.models.clone());
+                }
+            }
+        } // Drop read lock before acquiring write lock
+
+        // Fetch from API
         let url = self.api_url("models");
 
         let request = self.client.get(&url);
         let request = self.add_auth_header(request);
 
-        let response = request.send().await.map_err(|e| LlmError::RequestFailed {
-            provider: PROVIDER_NAME.to_string(),
-            reason: format!("Failed to fetch models: {}", e),
+        let response = request.send().await.map_err(|e| {
+            // Clear cache on failure to prevent stale data
+            let mut cache_guard = self
+                .models_cache
+                .write()
+                .unwrap_or_else(|e| e.into_inner());
+            *cache_guard = None;
+            LlmError::RequestFailed {
+                provider: PROVIDER_NAME.to_string(),
+                reason: format!("Failed to fetch models: {}", e),
+            }
         })?;
 
         let status = response.status();
         let response_text = response.text().await.map_err(|e| {
             tracing::error!("Failed to read models response: {}", e);
+            // Clear cache on failure to prevent stale data
+            let mut cache_guard = self
+                .models_cache
+                .write()
+                .unwrap_or_else(|e| e.into_inner());
+            *cache_guard = None;
             LlmError::RequestFailed {
                 provider: PROVIDER_NAME.to_string(),
                 reason: format!("Response too large or failed to read: {}", e),
@@ -190,6 +320,12 @@ impl OpenAiCompatibleProvider {
         })?;
 
         if !status.is_success() {
+            // Clear cache on failure to prevent stale data
+            let mut cache_guard = self
+                .models_cache
+                .write()
+                .unwrap_or_else(|e| e.into_inner());
+            *cache_guard = None;
             return Err(LlmError::RequestFailed {
                 provider: PROVIDER_NAME.to_string(),
                 reason: format!(
@@ -211,12 +347,22 @@ impl OpenAiCompatibleProvider {
                 reason: format!("JSON parse error: {}", e),
             })?;
 
+        // Update cache
+        let mut cache_guard = self
+            .models_cache
+            .write()
+            .unwrap_or_else(|e| e.into_inner());
+        *cache_guard = Some(CachedModels {
+            models: resp.data.clone(),
+            fetched_at: std::time::Instant::now(),
+        });
+
         Ok(resp.data)
     }
 }
 
 /// Model entry as returned by the `/v1/models` API.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 struct ApiModelEntry {
     id: String,
     #[serde(default)]
@@ -238,7 +384,7 @@ impl LlmProvider for OpenAiCompatibleProvider {
             tool_choice: None,
         };
 
-        let response: ChatCompletionResponse = self.send_request(&request).await?;
+        let response: ChatCompletionResponse = self.send_request_with_retry(&request).await?;
 
         let choice =
             response
@@ -297,7 +443,7 @@ impl LlmProvider for OpenAiCompatibleProvider {
             tool_choice: req.tool_choice,
         };
 
-        let response: ChatCompletionResponse = self.send_request(&request).await?;
+        let response: ChatCompletionResponse = self.send_request_with_retry(&request).await?;
 
         let choice =
             response
@@ -392,6 +538,12 @@ impl LlmProvider for OpenAiCompatibleProvider {
         // Recover from poisoned locks to avoid panics - the data is still valid
         let mut guard = self.active_model.write().unwrap_or_else(|e| e.into_inner());
         *guard = model.to_string();
+        // Invalidate model cache when model changes
+        let mut cache_guard = self
+            .models_cache
+            .write()
+            .unwrap_or_else(|e| e.into_inner());
+        *cache_guard = None;
         Ok(())
     }
 }
@@ -528,6 +680,8 @@ struct ChatCompletionUsage {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use axum::response::IntoResponse;
+    use std::sync::Arc;
 
     #[test]
     fn test_message_conversion() {
@@ -612,6 +766,8 @@ mod tests {
             model: "test-model".to_string(),
             api_key: Some(SecretString::new("test-key".to_string().into())),
             timeout_secs: 120,
+            max_retries: 3,
+            retry_initial_delay_ms: 1000,
         };
         OpenAiCompatibleProvider::new(config).unwrap()
     }
@@ -677,6 +833,8 @@ mod tests {
             model: "test-model".to_string(),
             api_key: Some(SecretString::new("secret-key".to_string().into())),
             timeout_secs: 60,
+            max_retries: 3,
+            retry_initial_delay_ms: 1000,
         };
         let provider = OpenAiCompatibleProvider::new(config).unwrap();
 
@@ -695,6 +853,8 @@ mod tests {
             model: "original-model".to_string(),
             api_key: None,
             timeout_secs: 120,
+            max_retries: 3,
+            retry_initial_delay_ms: 1000,
         };
         let provider = OpenAiCompatibleProvider::new(config).unwrap();
 
@@ -711,5 +871,376 @@ mod tests {
         // Should still be able to write after poisoning
         provider.set_model("new-model").unwrap();
         assert_eq!(provider.active_model_name(), "new-model");
+    }
+
+    #[test]
+    fn test_max_response_size_constant() {
+        // Verify the constant is correctly set to 10MB
+        assert_eq!(MAX_RESPONSE_SIZE_BYTES, 10 * 1024 * 1024);
+        assert_eq!(MAX_RESPONSE_SIZE_BYTES, 10_485_760);
+    }
+
+    // Tests for retry logic - using wiremock-style testing with proper async handlers
+
+    /// Helper struct for mock server state
+    #[derive(Clone)]
+    struct MockServerState {
+        request_count: Arc<std::sync::atomic::AtomicUsize>,
+        fail_count: usize,
+        status_code: axum::http::StatusCode,
+    }
+
+    impl MockServerState {
+        fn new(fail_count: usize, status_code: axum::http::StatusCode) -> Self {
+            Self {
+                request_count: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+                fail_count,
+                status_code,
+            }
+        }
+
+        fn count(&self) -> usize {
+            self.request_count.load(std::sync::atomic::Ordering::SeqCst)
+        }
+    }
+
+    async fn mock_handler(
+        axum::extract::State(state): axum::extract::State<MockServerState>,
+    ) -> impl IntoResponse {
+        let n = state.request_count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        if n < state.fail_count {
+            // Return error status
+            if state.status_code == axum::http::StatusCode::TOO_MANY_REQUESTS {
+                (
+                    state.status_code,
+                    [(axum::http::header::RETRY_AFTER, "1")],
+                    axum::Json(serde_json::json!({ "error": { "message": "Error" } })),
+                )
+                    .into_response()
+            } else {
+                (
+                    state.status_code,
+                    axum::Json(serde_json::json!({ "error": { "message": "Error" } })),
+                )
+                    .into_response()
+            }
+        } else {
+            // Return success
+            (
+                axum::http::StatusCode::OK,
+                axum::Json(serde_json::json!({
+                    "id": "test-123",
+                    "choices": [{
+                        "message": { "role": "assistant", "content": "Hello" },
+                        "finish_reason": "stop"
+                    }],
+                    "usage": { "prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15 }
+                })),
+            )
+                .into_response()
+        }
+    }
+
+    #[tokio::test]
+    async fn test_retry_on_429_rate_limit() {
+        let state = MockServerState::new(2, axum::http::StatusCode::TOO_MANY_REQUESTS);
+        let app = axum::Router::new()
+            .route("/v1/chat/completions", axum::routing::post(mock_handler))
+            .with_state(state.clone());
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        let config = OpenAiCompatibleConfig {
+            base_url: format!("http://127.0.0.1:{}", port),
+            model: "test-model".to_string(),
+            api_key: None,
+            timeout_secs: 30,
+            max_retries: 3,
+            retry_initial_delay_ms: 10,
+        };
+        let provider = OpenAiCompatibleProvider::new(config).unwrap();
+
+        let request = ChatCompletionRequest {
+            model: "test-model".to_string(),
+            messages: vec![ChatCompletionMessage {
+                role: "user".to_string(),
+                content: Some("Hello".to_string()),
+                tool_call_id: None,
+                name: None,
+                tool_calls: None,
+            }],
+            temperature: None,
+            max_tokens: None,
+            tools: None,
+            tool_choice: None,
+        };
+
+        let result: Result<ChatCompletionResponse, LlmError> =
+            provider.send_request_with_retry(&request).await;
+
+        assert!(result.is_ok(), "Should succeed after retries: {:?}", result.err());
+        assert_eq!(state.count(), 3, "Should have made 3 requests");
+
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn test_retry_on_5xx_server_error() {
+        let state = MockServerState::new(2, axum::http::StatusCode::SERVICE_UNAVAILABLE);
+        
+        // Build router with state
+        let app = axum::Router::new()
+            .route("/v1/chat/completions", axum::routing::post(mock_handler))
+            .with_state(state.clone());
+
+        // Bind to random port
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        
+        // Spawn server with graceful shutdown
+        let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app)
+                .with_graceful_shutdown(async move { let _ = shutdown_rx.await; })
+                .await
+                .unwrap();
+        });
+
+        // Wait for server to be ready
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+        let config = OpenAiCompatibleConfig {
+            base_url: format!("http://127.0.0.1:{}", port),
+            model: "test-model".to_string(),
+            api_key: None,
+            timeout_secs: 5, // Short timeout for tests
+            max_retries: 3,
+            retry_initial_delay_ms: 10,
+        };
+        let provider = OpenAiCompatibleProvider::new(config).unwrap();
+
+        let request = ChatCompletionRequest {
+            model: "test-model".to_string(),
+            messages: vec![ChatCompletionMessage {
+                role: "user".to_string(),
+                content: Some("Hello".to_string()),
+                tool_call_id: None,
+                name: None,
+                tool_calls: None,
+            }],
+            temperature: None,
+            max_tokens: None,
+            tools: None,
+            tool_choice: None,
+        };
+
+        // Use timeout to prevent hanging
+        let result: Result<Result<ChatCompletionResponse, LlmError>, tokio::time::error::Elapsed> = tokio::time::timeout(
+            std::time::Duration::from_secs(30),
+            provider.send_request_with_retry(&request)
+        ).await;
+
+        // Shutdown server
+        let _ = shutdown_tx.send(());
+        let _ = tokio::time::timeout(std::time::Duration::from_millis(500), server).await;
+
+        match result {
+            Ok(Ok(_)) => {
+                assert_eq!(state.count(), 3, "Should have made 3 requests");
+            }
+            Ok(Err(e)) => {
+                panic!("Request failed: {:?}. Request count: {}", e, state.count());
+            }
+            Err(_) => {
+                panic!("Test timed out. Request count: {}", state.count());
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn test_max_retries_respected() {
+        // Server that always fails
+        let state = MockServerState::new(usize::MAX, axum::http::StatusCode::SERVICE_UNAVAILABLE);
+        let app = axum::Router::new()
+            .route("/v1/chat/completions", axum::routing::post(mock_handler))
+            .with_state(state.clone());
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        
+        let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app)
+                .with_graceful_shutdown(async move { let _ = shutdown_rx.await; })
+                .await
+                .unwrap();
+        });
+
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+        let config = OpenAiCompatibleConfig {
+            base_url: format!("http://127.0.0.1:{}", port),
+            model: "test-model".to_string(),
+            api_key: None,
+            timeout_secs: 5,
+            max_retries: 2, // Will try 3 times total (initial + 2 retries)
+            retry_initial_delay_ms: 10,
+        };
+        let provider = OpenAiCompatibleProvider::new(config).unwrap();
+
+        let request = ChatCompletionRequest {
+            model: "test-model".to_string(),
+            messages: vec![ChatCompletionMessage {
+                role: "user".to_string(),
+                content: Some("Hello".to_string()),
+                tool_call_id: None,
+                name: None,
+                tool_calls: None,
+            }],
+            temperature: None,
+            max_tokens: None,
+            tools: None,
+            tool_choice: None,
+        };
+
+        let result: Result<Result<ChatCompletionResponse, LlmError>, tokio::time::error::Elapsed> = tokio::time::timeout(
+            std::time::Duration::from_secs(30),
+            provider.send_request_with_retry(&request)
+        ).await;
+
+        let _ = shutdown_tx.send(());
+        let _ = tokio::time::timeout(std::time::Duration::from_millis(500), server).await;
+
+        match result {
+            Ok(Err(_)) => {
+                assert_eq!(state.count(), 3, "Should have made 3 requests (initial + 2 retries)");
+            }
+            Ok(Ok(_)) => {
+                panic!("Expected request to fail but it succeeded. Request count: {}", state.count());
+            }
+            Err(_) => {
+                panic!("Test timed out. Request count: {}", state.count());
+            }
+        }
+    }
+
+    async fn auth_error_handler() -> impl IntoResponse {
+        (
+            axum::http::StatusCode::UNAUTHORIZED,
+            axum::Json(serde_json::json!({ "error": { "message": "Invalid API key" } })),
+        )
+            .into_response()
+    }
+
+    #[tokio::test]
+    async fn test_non_retryable_error_fails_immediately() {
+        let _state = MockServerState::new(0, axum::http::StatusCode::OK);
+        let app = axum::Router::new()
+            .route("/v1/chat/completions", axum::routing::post(auth_error_handler));
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        let config = OpenAiCompatibleConfig {
+            base_url: format!("http://127.0.0.1:{}", port),
+            model: "test-model".to_string(),
+            api_key: None,
+            timeout_secs: 30,
+            max_retries: 3,
+            retry_initial_delay_ms: 10,
+        };
+        let provider = OpenAiCompatibleProvider::new(config).unwrap();
+
+        let request = ChatCompletionRequest {
+            model: "test-model".to_string(),
+            messages: vec![ChatCompletionMessage {
+                role: "user".to_string(),
+                content: Some("Hello".to_string()),
+                tool_call_id: None,
+                name: None,
+                tool_calls: None,
+            }],
+            temperature: None,
+            max_tokens: None,
+            tools: None,
+            tool_choice: None,
+        };
+
+        let result: Result<ChatCompletionResponse, LlmError> =
+            provider.send_request_with_retry(&request).await;
+
+        assert!(result.is_err(), "Should fail immediately");
+        match result {
+            Err(LlmError::AuthFailed { .. }) => (),
+            Err(other) => panic!("Expected AuthFailed, got: {:?}", other),
+            Ok(_) => panic!("Should have failed"),
+        }
+
+        server.abort();
+    }
+
+    async fn bad_request_handler() -> impl IntoResponse {
+        (
+            axum::http::StatusCode::BAD_REQUEST,
+            axum::Json(serde_json::json!({ "error": { "message": "Invalid request" } })),
+        )
+            .into_response()
+    }
+
+    #[tokio::test]
+    async fn test_400_error_fails_immediately() {
+        let app = axum::Router::new()
+            .route("/v1/chat/completions", axum::routing::post(bad_request_handler));
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        let config = OpenAiCompatibleConfig {
+            base_url: format!("http://127.0.0.1:{}", port),
+            model: "test-model".to_string(),
+            api_key: None,
+            timeout_secs: 30,
+            max_retries: 3,
+            retry_initial_delay_ms: 10,
+        };
+        let provider = OpenAiCompatibleProvider::new(config).unwrap();
+
+        let request = ChatCompletionRequest {
+            model: "test-model".to_string(),
+            messages: vec![ChatCompletionMessage {
+                role: "user".to_string(),
+                content: Some("Hello".to_string()),
+                tool_call_id: None,
+                name: None,
+                tool_calls: None,
+            }],
+            temperature: None,
+            max_tokens: None,
+            tools: None,
+            tool_choice: None,
+        };
+
+        let result: Result<ChatCompletionResponse, LlmError> =
+            provider.send_request_with_retry(&request).await;
+
+        assert!(result.is_err(), "Should fail immediately");
+
+        server.abort();
     }
 }
