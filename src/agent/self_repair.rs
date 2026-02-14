@@ -8,8 +8,8 @@ use chrono::{DateTime, Utc};
 use uuid::Uuid;
 
 use crate::context::{ContextManager, JobState};
+use crate::db::Database;
 use crate::error::RepairError;
-use crate::history::Store;
 use crate::tools::{BuildRequirement, Language, SoftwareBuilder, SoftwareType, ToolRegistry};
 
 /// A job that has been detected as stuck.
@@ -69,7 +69,7 @@ pub struct DefaultSelfRepair {
     #[allow(dead_code)] // Will be used for time-based stuck detection
     stuck_threshold: Duration,
     max_repair_attempts: u32,
-    store: Option<Arc<Store>>,
+    store: Option<Arc<dyn Database>>,
     builder: Option<Arc<dyn SoftwareBuilder>>,
     #[allow(dead_code)] // Will be used for tool hot-reload after repair
     tools: Option<Arc<ToolRegistry>>,
@@ -94,7 +94,7 @@ impl DefaultSelfRepair {
 
     /// Add a Store for tool failure tracking.
     #[allow(dead_code)] // Public API for configuring repair with persistence
-    pub fn with_store(mut self, store: Arc<Store>) -> Self {
+    pub fn with_store(mut self, store: Arc<dyn Database>) -> Self {
         self.store = Some(store);
         self
     }

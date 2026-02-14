@@ -135,6 +135,7 @@ pub async fn run_status_command() -> anyhow::Result<()> {
     Ok(())
 }
 
+#[cfg(feature = "postgres")]
 async fn check_database() -> anyhow::Result<()> {
     let _ = dotenvy::dotenv();
     let settings = Settings::load();
@@ -164,6 +165,12 @@ async fn check_database() -> anyhow::Result<()> {
         .await
         .map_err(|e| anyhow::anyhow!("{}", e))?;
 
+    Ok(())
+}
+
+#[cfg(not(feature = "postgres"))]
+async fn check_database() -> anyhow::Result<()> {
+    // For non-postgres backends, just report configured
     Ok(())
 }
 

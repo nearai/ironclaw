@@ -8,8 +8,10 @@ use std::sync::Arc;
 use clap::Subcommand;
 
 use crate::config::Config;
-use crate::history::Store;
-use crate::secrets::{PostgresSecretsStore, SecretsCrypto, SecretsStore};
+use crate::db::Database;
+#[cfg(feature = "postgres")]
+use crate::secrets::PostgresSecretsStore;
+use crate::secrets::{SecretsCrypto, SecretsStore};
 use crate::tools::mcp::{
     McpClient, McpServerConfig, McpSessionManager, OAuthConfig,
     auth::{authorize_mcp_server, is_authenticated},
@@ -172,10 +174,10 @@ async fn add_server(
     config.validate()?;
 
     // Save (DB if available, else disk)
-    let store = connect_store().await;
-    let mut servers = load_servers(store.as_ref()).await?;
+    let db = connect_db().await;
+    let mut servers = load_servers(db.as_deref()).await?;
     servers.upsert(config);
-    save_servers(store.as_ref(), &servers).await?;
+    save_servers(db.as_deref(), &servers).await?;
 
     println!();
     println!("  ✓ Added MCP server '{}'", name);
@@ -193,12 +195,12 @@ async fn add_server(
 
 /// Remove an MCP server.
 async fn remove_server(name: String) -> anyhow::Result<()> {
-    let store = connect_store().await;
-    let mut servers = load_servers(store.as_ref()).await?;
+    let db = connect_db().await;
+    let mut servers = load_servers(db.as_deref()).await?;
     if !servers.remove(&name) {
         anyhow::bail!("Server '{}' not found", name);
     }
-    save_servers(store.as_ref(), &servers).await?;
+    save_servers(db.as_deref(), &servers).await?;
 
     println!();
     println!("  ✓ Removed MCP server '{}'", name);
@@ -209,8 +211,8 @@ async fn remove_server(name: String) -> anyhow::Result<()> {
 
 /// List configured MCP servers.
 async fn list_servers(verbose: bool) -> anyhow::Result<()> {
-    let store = connect_store().await;
-    let servers = load_servers(store.as_ref()).await?;
+    let db = connect_db().await;
+    let servers = load_servers(db.as_deref()).await?;
 
     if servers.servers.is_empty() {
         println!();
@@ -268,8 +270,8 @@ async fn list_servers(verbose: bool) -> anyhow::Result<()> {
 /// Authenticate with an MCP server.
 async fn auth_server(name: String, user_id: String) -> anyhow::Result<()> {
     // Get server config
-    let store = connect_store().await;
-    let servers = load_servers(store.as_ref()).await?;
+    let db = connect_db().await;
+    let servers = load_servers(db.as_deref()).await?;
     let server = servers
         .get(&name)
         .cloned()
@@ -341,8 +343,8 @@ async fn auth_server(name: String, user_id: String) -> anyhow::Result<()> {
 /// Test connection to an MCP server.
 async fn test_server(name: String, user_id: String) -> anyhow::Result<()> {
     // Get server config
-    let store = connect_store().await;
-    let servers = load_servers(store.as_ref()).await?;
+    let db = connect_db().await;
+    let servers = load_servers(db.as_deref()).await?;
     let server = servers
         .get(&name)
         .cloned()
@@ -437,8 +439,8 @@ async fn test_server(name: String, user_id: String) -> anyhow::Result<()> {
 
 /// Toggle server enabled/disabled state.
 async fn toggle_server(name: String, enable: bool, disable: bool) -> anyhow::Result<()> {
-    let store = connect_store().await;
-    let mut servers = load_servers(store.as_ref()).await?;
+    let db = connect_db().await;
+    let mut servers = load_servers(db.as_deref()).await?;
 
     let server = servers
         .get_mut(&name)
@@ -453,7 +455,7 @@ async fn toggle_server(name: String, enable: bool, disable: bool) -> anyhow::Res
     };
 
     server.enabled = new_state;
-    save_servers(store.as_ref(), &servers).await?;
+    save_servers(db.as_deref(), &servers).await?;
 
     let status = if new_state { "enabled" } else { "disabled" };
     println!();
@@ -465,18 +467,16 @@ async fn toggle_server(name: String, enable: bool, disable: bool) -> anyhow::Res
 
 const DEFAULT_USER_ID: &str = "default";
 
-/// Try to connect to the database store for DB-backed config.
-async fn connect_store() -> Option<Store> {
+/// Try to connect to the database (backend-agnostic).
+async fn connect_db() -> Option<Arc<dyn Database>> {
     let config = Config::from_env().await.ok()?;
-    let store = Store::new(&config.database).await.ok()?;
-    store.run_migrations().await.ok()?;
-    Some(store)
+    crate::db::connect_from_config(&config.database).await.ok()
 }
 
 /// Load MCP servers (DB if available, else disk).
-async fn load_servers(store: Option<&Store>) -> Result<McpServersFile, config::ConfigError> {
-    if let Some(store) = store {
-        config::load_mcp_servers_from_db(store, DEFAULT_USER_ID).await
+async fn load_servers(db: Option<&dyn Database>) -> Result<McpServersFile, config::ConfigError> {
+    if let Some(db) = db {
+        config::load_mcp_servers_from_db(db, DEFAULT_USER_ID).await
     } else {
         config::load_mcp_servers().await
     }
@@ -484,11 +484,11 @@ async fn load_servers(store: Option<&Store>) -> Result<McpServersFile, config::C
 
 /// Save MCP servers (DB if available, else disk).
 async fn save_servers(
-    store: Option<&Store>,
+    db: Option<&dyn Database>,
     servers: &McpServersFile,
 ) -> Result<(), config::ConfigError> {
-    if let Some(store) = store {
-        config::save_mcp_servers_to_db(store, DEFAULT_USER_ID, servers).await
+    if let Some(db) = db {
+        config::save_mcp_servers_to_db(db, DEFAULT_USER_ID, servers).await
     } else {
         config::save_mcp_servers(servers).await
     }
@@ -504,14 +504,61 @@ async fn get_secrets_store() -> anyhow::Result<Arc<dyn SecretsStore + Send + Syn
         )
     })?;
 
-    let store = Store::new(&config.database).await?;
-    store.run_migrations().await?;
-
     let crypto = SecretsCrypto::new(master_key.clone())?;
-    Ok(Arc::new(PostgresSecretsStore::new(
-        store.pool(),
-        Arc::new(crypto),
-    )))
+
+    #[cfg(feature = "postgres")]
+    {
+        let store = crate::history::Store::new(&config.database).await?;
+        store.run_migrations().await?;
+        Ok(Arc::new(PostgresSecretsStore::new(
+            store.pool(),
+            Arc::new(crypto),
+        )))
+    }
+
+    #[cfg(all(feature = "libsql", not(feature = "postgres")))]
+    {
+        use crate::db::Database as _;
+        use crate::db::libsql_backend::LibSqlBackend;
+        use secrecy::ExposeSecret as _;
+
+        let default_path = crate::config::default_libsql_path();
+        let db_path = config
+            .database
+            .libsql_path
+            .as_deref()
+            .unwrap_or(&default_path);
+
+        let backend = if let Some(ref url) = config.database.libsql_url {
+            let token = config.database.libsql_auth_token.as_ref().ok_or_else(|| {
+                anyhow::anyhow!("LIBSQL_AUTH_TOKEN is required when LIBSQL_URL is set")
+            })?;
+            LibSqlBackend::new_remote_replica(db_path, url, token.expose_secret())
+                .await
+                .map_err(|e| anyhow::anyhow!("{}", e))?
+        } else {
+            LibSqlBackend::new_local(db_path)
+                .await
+                .map_err(|e| anyhow::anyhow!("{}", e))?
+        };
+        backend
+            .run_migrations()
+            .await
+            .map_err(|e| anyhow::anyhow!("{}", e))?;
+
+        return Ok(Arc::new(crate::secrets::LibSqlSecretsStore::new(
+            backend.shared_db(),
+            Arc::new(crypto),
+        )));
+    }
+
+    #[cfg(not(any(feature = "postgres", feature = "libsql")))]
+    {
+        let _ = crypto;
+        anyhow::bail!(
+            "No database backend available for secrets. Enable 'postgres' or 'libsql' feature."
+        );
+    }
 }
 
 #[cfg(test)]

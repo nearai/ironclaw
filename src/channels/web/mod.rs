@@ -32,9 +32,9 @@ use tokio_stream::wrappers::ReceiverStream;
 use crate::agent::SessionManager;
 use crate::channels::{Channel, IncomingMessage, MessageStream, OutgoingResponse, StatusUpdate};
 use crate::config::GatewayConfig;
+use crate::db::Database;
 use crate::error::ChannelError;
 use crate::extensions::ExtensionManager;
-use crate::history::Store;
 use crate::orchestrator::job_manager::ContainerJobManager;
 use crate::tools::ToolRegistry;
 use crate::workspace::Workspace;
@@ -147,7 +147,7 @@ impl GatewayChannel {
     }
 
     /// Inject the database store for sandbox job persistence.
-    pub fn with_store(mut self, store: Arc<Store>) -> Self {
+    pub fn with_store(mut self, store: Arc<dyn Database>) -> Self {
         self.rebuild_state(|s| s.store = Some(store));
         self
     }
