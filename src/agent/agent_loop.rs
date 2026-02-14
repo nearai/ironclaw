@@ -1465,6 +1465,9 @@ impl Agent {
         session: Arc<Mutex<Session>>,
         thread_id: Uuid,
     ) -> Result<SubmissionResult, Error> {
+        // Lock session first, then undo manager -- consistent with process_user_input
+        // to avoid potential deadlocks.
+        let mut sess = session.lock().await;
         let undo_mgr = self.session_manager.get_undo_manager(thread_id).await;
         let mut mgr = undo_mgr.lock().await;
 
@@ -1472,7 +1475,6 @@ impl Agent {
             return Ok(SubmissionResult::ok_with_message("Nothing to undo."));
         }
 
-        let mut sess = session.lock().await;
         let thread = sess
             .threads
             .get_mut(&thread_id)
@@ -1501,6 +1503,9 @@ impl Agent {
         session: Arc<Mutex<Session>>,
         thread_id: Uuid,
     ) -> Result<SubmissionResult, Error> {
+        // Lock session first, then undo manager -- consistent with process_user_input
+        // to avoid potential deadlocks.
+        let mut sess = session.lock().await;
         let undo_mgr = self.session_manager.get_undo_manager(thread_id).await;
         let mut mgr = undo_mgr.lock().await;
 
@@ -1508,7 +1513,6 @@ impl Agent {
             return Ok(SubmissionResult::ok_with_message("Nothing to redo."));
         }
 
-        let mut sess = session.lock().await;
         let thread = sess
             .threads
             .get_mut(&thread_id)

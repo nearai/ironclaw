@@ -68,6 +68,14 @@ impl UndoManager {
         self
     }
 
+    /// Push a checkpoint onto the undo stack, trimming oldest entries if over limit.
+    fn push_undo(&mut self, checkpoint: Checkpoint) {
+        self.undo_stack.push_back(checkpoint);
+        while self.undo_stack.len() > self.max_checkpoints {
+            self.undo_stack.pop_front();
+        }
+    }
+
     /// Create a checkpoint at the current state.
     ///
     /// This clears the redo stack since we're creating a new history branch.
@@ -80,14 +88,8 @@ impl UndoManager {
         // Clear redo stack (new branch of history)
         self.redo_stack.clear();
 
-        // Create and push checkpoint
         let checkpoint = Checkpoint::new(turn_number, messages, description);
-        self.undo_stack.push_back(checkpoint);
-
-        // Trim if over limit
-        while self.undo_stack.len() > self.max_checkpoints {
-            self.undo_stack.pop_front();
-        }
+        self.push_undo(checkpoint);
     }
 
     /// Undo: pop the last checkpoint and return it.
@@ -140,12 +142,7 @@ impl UndoManager {
             current_messages,
             format!("Turn {}", current_turn),
         );
-        self.undo_stack.push_back(current);
-
-        // Trim if over limit
-        while self.undo_stack.len() > self.max_checkpoints {
-            self.undo_stack.pop_front();
-        }
+        self.push_undo(current);
 
         self.redo_stack.pop()
     }
