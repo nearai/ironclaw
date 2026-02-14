@@ -508,7 +508,7 @@ impl LlmProvider for NearAiProvider {
             Err(e) => return Err(e),
         };
 
-        tracing::debug!("NEAR AI response: {:?}", response);
+        tracing::debug!("NEAR AI response: output_items={}", response.output.len());
 
         // Extract text from response output
         // Try multiple formats since API response shape may vary
@@ -516,11 +516,6 @@ impl LlmProvider for NearAiProvider {
             .output
             .iter()
             .filter_map(|item| {
-                tracing::debug!(
-                    "Processing output item: type={}, text={:?}",
-                    item.item_type,
-                    item.text
-                );
                 if item.item_type == "message" {
                     // First check for direct text field on item
                     if let Some(ref text) = item.text {
@@ -531,11 +526,6 @@ impl LlmProvider for NearAiProvider {
                         contents
                             .iter()
                             .filter_map(|c| {
-                                tracing::debug!(
-                                    "Content item: type={}, text={:?}",
-                                    c.content_type,
-                                    c.text
-                                );
                                 // Accept various content types that might contain text
                                 match c.content_type.as_str() {
                                     "output_text" | "text" => c.text.clone(),

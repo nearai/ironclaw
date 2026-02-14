@@ -37,6 +37,9 @@ use crate::agent::truncate_for_preview;
 use crate::channels::{Channel, IncomingMessage, MessageStream, OutgoingResponse, StatusUpdate};
 use crate::error::ChannelError;
 
+/// Max characters for tool result previews in the terminal.
+const CLI_TOOL_RESULT_MAX: usize = 200;
+
 /// Max characters for thinking/status messages in the terminal.
 const CLI_STATUS_MAX: usize = 200;
 
@@ -265,7 +268,7 @@ impl Channel for ReplChannel {
         std::thread::spawn(move || {
             // Single message mode: send it and return
             if let Some(msg) = single_message {
-                let incoming = IncomingMessage::new("repl", "user", &msg);
+                let incoming = IncomingMessage::new("repl", "default", &msg);
                 let _ = tx.blocking_send(incoming);
                 return;
             }
@@ -333,21 +336,21 @@ impl Channel for ReplChannel {
                             _ => {}
                         }
 
-                        let msg = IncomingMessage::new("repl", "user", line);
+                        let msg = IncomingMessage::new("repl", "default", line);
                         if tx.blocking_send(msg).is_err() {
                             break;
                         }
                     }
                     Err(ReadlineError::Interrupted) => {
                         // Ctrl+C: send /interrupt
-                        let msg = IncomingMessage::new("repl", "user", "/interrupt");
+                        let msg = IncomingMessage::new("repl", "default", "/interrupt");
                         if tx.blocking_send(msg).is_err() {
                             break;
                         }
                     }
                     Err(ReadlineError::Eof) => {
                         // Ctrl+D: send /quit so the agent loop runs graceful shutdown
-                        let msg = IncomingMessage::new("repl", "user", "/quit");
+                        let msg = IncomingMessage::new("repl", "default", "/quit");
                         let _ = tx.blocking_send(msg);
                         break;
                     }
@@ -418,7 +421,8 @@ impl Channel for ReplChannel {
                 }
             }
             StatusUpdate::ToolResult { name: _, preview } => {
-                eprintln!("    \x1b[90m{preview}\x1b[0m");
+                let display = truncate_for_preview(&preview, CLI_TOOL_RESULT_MAX);
+                eprintln!("    \x1b[90m{display}\x1b[0m");
             }
             StatusUpdate::StreamChunk(chunk) => {
                 // Print separator on the false-to-true transition

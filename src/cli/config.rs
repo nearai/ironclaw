@@ -48,8 +48,6 @@ pub enum ConfigCommand {
 /// Connects to the database to read/write settings. Falls back to disk
 /// if the database is not available.
 pub async fn run_config_command(cmd: ConfigCommand) -> anyhow::Result<()> {
-    let _ = dotenvy::dotenv();
-
     // Try to connect to the DB for settings access
     let db: Option<Arc<dyn crate::db::Database>> = match connect_db().await {
         Ok(d) => Some(d),
@@ -92,7 +90,7 @@ async fn load_settings(store: Option<&dyn crate::db::Database>) -> Settings {
             _ => {}
         }
     }
-    Settings::load()
+    Settings::default()
 }
 
 /// List all settings.
@@ -155,19 +153,17 @@ async fn set_setting(
         .set(path, value)
         .map_err(|e| anyhow::anyhow!("{}", e))?;
 
-    // Save to DB if available, otherwise disk
-    if let Some(store) = store {
-        let json_value = match serde_json::from_str::<serde_json::Value>(value) {
-            Ok(v) => v,
-            Err(_) => serde_json::Value::String(value.to_string()),
-        };
-        store
-            .set_setting(DEFAULT_USER_ID, path, &json_value)
-            .await
-            .map_err(|e| anyhow::anyhow!("Failed to save to database: {}", e))?;
-    } else {
-        settings.save()?;
-    }
+    let store = store.ok_or_else(|| {
+        anyhow::anyhow!("Database connection required to save settings. Check DATABASE_URL.")
+    })?;
+    let json_value = match serde_json::from_str::<serde_json::Value>(value) {
+        Ok(v) => v,
+        Err(_) => serde_json::Value::String(value.to_string()),
+    };
+    store
+        .set_setting(DEFAULT_USER_ID, path, &json_value)
+        .await
+        .map_err(|e| anyhow::anyhow!("Failed to save to database: {}", e))?;
 
     println!("Set {} = {}", path, value);
     Ok(())
@@ -180,17 +176,13 @@ async fn reset_setting(store: Option<&dyn crate::db::Database>, path: &str) -> a
         .get(path)
         .ok_or_else(|| anyhow::anyhow!("Unknown setting: {}", path))?;
 
-    // Delete from DB (falling back to default) or reset on disk
-    if let Some(store) = store {
-        store
-            .delete_setting(DEFAULT_USER_ID, path)
-            .await
-            .map_err(|e| anyhow::anyhow!("Failed to delete setting from database: {}", e))?;
-    } else {
-        let mut settings = Settings::load();
-        settings.reset(path).map_err(|e| anyhow::anyhow!("{}", e))?;
-        settings.save()?;
-    }
+    let store = store.ok_or_else(|| {
+        anyhow::anyhow!("Database connection required to reset settings. Check DATABASE_URL.")
+    })?;
+    store
+        .delete_setting(DEFAULT_USER_ID, path)
+        .await
+        .map_err(|e| anyhow::anyhow!("Failed to delete setting from database: {}", e))?;
 
     println!("Reset {} to default: {}", path, default_value);
     Ok(())
@@ -200,37 +192,13 @@ async fn reset_setting(store: Option<&dyn crate::db::Database>, path: &str) -> a
 fn show_path(has_db: bool) -> anyhow::Result<()> {
     if has_db {
         println!("Settings stored in: database (settings table)");
-        println!(
-            "Bootstrap config:   {}",
-            crate::bootstrap::BootstrapConfig::default_path().display()
-        );
     } else {
-        let path = Settings::default_path();
-        println!("Settings stored in: {} (disk fallback)", path.display());
-
-        if path.exists() {
-            let metadata = std::fs::metadata(&path)?;
-            println!("  Size: {} bytes", metadata.len());
-            if let Ok(modified) = metadata.modified() {
-                use std::time::SystemTime;
-                let duration = SystemTime::now()
-                    .duration_since(modified)
-                    .unwrap_or_default();
-                let secs = duration.as_secs();
-                if secs < 60 {
-                    println!("  Modified: {} seconds ago", secs);
-                } else if secs < 3600 {
-                    println!("  Modified: {} minutes ago", secs / 60);
-                } else if secs < 86400 {
-                    println!("  Modified: {} hours ago", secs / 3600);
-                } else {
-                    println!("  Modified: {} days ago", secs / 86400);
-                }
-            }
-        } else {
-            println!("  (does not exist, using defaults)");
-        }
+        println!("Settings stored in: PostgreSQL (not connected, using defaults)");
     }
+    println!(
+        "Env config:         {}",
+        crate::bootstrap::ironclaw_env_path().display()
+    );
 
     Ok(())
 }

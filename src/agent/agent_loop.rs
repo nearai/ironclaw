@@ -1244,7 +1244,7 @@ impl Agent {
                                     &message.channel,
                                     StatusUpdate::ToolResult {
                                         name: tc.name.clone(),
-                                        preview: truncate_for_preview(output, 200),
+                                        preview: output.clone(),
                                     },
                                     &message.metadata,
                                 )
@@ -1718,7 +1718,7 @@ impl Agent {
                         &message.channel,
                         StatusUpdate::ToolResult {
                             name: pending.tool_name.clone(),
-                            preview: truncate_for_preview(output, 200),
+                            preview: output.clone(),
                         },
                         &message.metadata,
                     )
