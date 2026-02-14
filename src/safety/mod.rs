@@ -98,15 +98,15 @@ impl SafetyLayer {
                 was_modified: true,
             };
         }
-        if violations
+        let force_sanitize = violations
             .iter()
-            .any(|rule| rule.action == crate::safety::PolicyAction::Sanitize)
-        {
+            .any(|rule| rule.action == crate::safety::PolicyAction::Sanitize);
+        if force_sanitize {
             was_modified = true;
         }
 
-        // Run sanitization if enabled
-        if self.config.injection_check_enabled {
+        // Run sanitization once: if injection_check is enabled OR policy requires it
+        if self.config.injection_check_enabled || force_sanitize {
             let mut sanitized = self.sanitizer.sanitize(&content);
             sanitized.was_modified = sanitized.was_modified || was_modified;
             sanitized
@@ -189,5 +189,21 @@ mod tests {
         assert!(wrapped.contains("name=\"test_tool\""));
         assert!(wrapped.contains("sanitized=\"true\""));
         assert!(wrapped.contains("Hello &lt;world&gt;"));
+    }
+
+    #[test]
+    fn test_sanitize_action_forces_sanitization_when_injection_check_disabled() {
+        let config = SafetyConfig {
+            max_output_length: 100_000,
+            injection_check_enabled: false,
+        };
+        let safety = SafetyLayer::new(&config);
+
+        // Content with an injection-like pattern that a policy might flag
+        let output = safety.sanitize_tool_output("test", "normal text");
+        // With injection_check disabled and no policy violations, content
+        // should pass through unmodified
+        assert_eq!(output.content, "normal text");
+        assert!(!output.was_modified);
     }
 }

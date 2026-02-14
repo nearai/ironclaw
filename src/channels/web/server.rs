@@ -5,10 +5,11 @@
 use std::convert::Infallible;
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use axum::{
     Json, Router,
-    extract::{Path, Query, State, WebSocketUpgrade},
+    extract::{DefaultBodyLimit, Path, Query, State, WebSocketUpgrade},
     http::{StatusCode, header},
     middleware,
     response::{
@@ -20,6 +21,7 @@ use axum::{
 use serde::Deserialize;
 use tokio::sync::{mpsc, oneshot};
 use tokio_stream::StreamExt;
+use tower_http::cors::{AllowHeaders, CorsLayer};
 use uuid::Uuid;
 
 use crate::agent::SessionManager;
@@ -28,8 +30,8 @@ use crate::channels::web::auth::{AuthState, auth_middleware};
 use crate::channels::web::log_layer::LogBroadcaster;
 use crate::channels::web::sse::SseManager;
 use crate::channels::web::types::*;
+use crate::db::Database;
 use crate::extensions::ExtensionManager;
-use crate::history::Store;
 use crate::orchestrator::job_manager::ContainerJobManager;
 use crate::tools::ToolRegistry;
 use crate::workspace::Workspace;
@@ -43,6 +45,69 @@ pub type PromptQueue = Arc<
         >,
     >,
 >;
+
+/// Simple sliding-window rate limiter.
+///
+/// Tracks the number of requests in the current window. Resets when the window expires.
+/// Not per-IP (since this is a single-user gateway with auth), but prevents flooding.
+pub struct RateLimiter {
+    /// Requests remaining in the current window.
+    remaining: AtomicU64,
+    /// Epoch second when the current window started.
+    window_start: AtomicU64,
+    /// Maximum requests per window.
+    max_requests: u64,
+    /// Window duration in seconds.
+    window_secs: u64,
+}
+
+impl RateLimiter {
+    pub fn new(max_requests: u64, window_secs: u64) -> Self {
+        Self {
+            remaining: AtomicU64::new(max_requests),
+            window_start: AtomicU64::new(
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs(),
+            ),
+            max_requests,
+            window_secs,
+        }
+    }
+
+    /// Try to consume one request. Returns `true` if allowed, `false` if rate limited.
+    pub fn check(&self) -> bool {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+
+        let window = self.window_start.load(Ordering::Relaxed);
+        if now.saturating_sub(window) >= self.window_secs {
+            // Window expired, reset
+            self.window_start.store(now, Ordering::Relaxed);
+            self.remaining
+                .store(self.max_requests - 1, Ordering::Relaxed);
+            return true;
+        }
+
+        // Try to decrement remaining
+        loop {
+            let current = self.remaining.load(Ordering::Relaxed);
+            if current == 0 {
+                return false;
+            }
+            if self
+                .remaining
+                .compare_exchange_weak(current, current - 1, Ordering::Relaxed, Ordering::Relaxed)
+                .is_ok()
+            {
+                return true;
+            }
+        }
+    }
+}
 
 /// Shared state for all gateway handlers.
 pub struct GatewayState {
@@ -61,7 +126,7 @@ pub struct GatewayState {
     /// Tool registry for listing registered tools.
     pub tool_registry: Option<Arc<ToolRegistry>>,
     /// Database store for sandbox job persistence.
-    pub store: Option<Arc<Store>>,
+    pub store: Option<Arc<dyn Database>>,
     /// Container job manager for sandbox operations.
     pub job_manager: Option<Arc<ContainerJobManager>>,
     /// Prompt queue for Claude Code follow-up prompts.
@@ -72,6 +137,10 @@ pub struct GatewayState {
     pub shutdown_tx: tokio::sync::RwLock<Option<oneshot::Sender<()>>>,
     /// WebSocket connection tracker.
     pub ws_tracker: Option<Arc<crate::channels::web::ws::WsConnectionTracker>>,
+    /// LLM provider for OpenAI-compatible API proxy.
+    pub llm_provider: Option<Arc<dyn crate::llm::LlmProvider>>,
+    /// Rate limiter for chat endpoints (30 messages per 60 seconds).
+    pub chat_rate_limiter: RateLimiter,
 }
 
 /// Start the gateway HTTP server.
@@ -168,7 +237,16 @@ pub async fn start_server(
         )
         // Gateway control plane
         .route("/api/gateway/status", get(gateway_status_handler))
-        .route_layer(middleware::from_fn_with_state(auth_state, auth_middleware));
+        // OpenAI-compatible API
+        .route(
+            "/v1/chat/completions",
+            post(super::openai_compat::chat_completions_handler),
+        )
+        .route("/v1/models", get(super::openai_compat::models_handler))
+        .route_layer(middleware::from_fn_with_state(
+            auth_state.clone(),
+            auth_middleware,
+        ));
 
     // Static file routes (no auth, served from embedded strings)
     let statics = Router::new()
@@ -176,19 +254,46 @@ pub async fn start_server(
         .route("/style.css", get(css_handler))
         .route("/app.js", get(js_handler));
 
-    // Project file serving (no auth, local browsing of sandbox outputs).
-    // The trailing-slash route serves index.html; the bare route redirects so
-    // relative paths in the HTML (e.g. href="style.css") resolve correctly.
+    // Project file serving (behind auth to prevent unauthorized file access).
     let projects = Router::new()
         .route("/projects/{project_id}", get(project_redirect_handler))
         .route("/projects/{project_id}/", get(project_index_handler))
-        .route("/projects/{project_id}/{*path}", get(project_file_handler));
+        .route("/projects/{project_id}/{*path}", get(project_file_handler))
+        .route_layer(middleware::from_fn_with_state(
+            auth_state.clone(),
+            auth_middleware,
+        ));
+
+    // CORS: restrict to same-origin by default. Only localhost/127.0.0.1
+    // origins are allowed, since the gateway is a local-first service.
+    let cors = CorsLayer::new()
+        .allow_origin([
+            format!("http://{}:{}", addr.ip(), addr.port())
+                .parse()
+                .expect("valid origin"),
+            format!("http://localhost:{}", addr.port())
+                .parse()
+                .expect("valid origin"),
+        ])
+        .allow_methods([
+            axum::http::Method::GET,
+            axum::http::Method::POST,
+            axum::http::Method::PUT,
+            axum::http::Method::DELETE,
+        ])
+        .allow_headers(AllowHeaders::list([
+            header::CONTENT_TYPE,
+            header::AUTHORIZATION,
+        ]))
+        .allow_credentials(true);
 
     let app = Router::new()
         .merge(public)
         .merge(statics)
         .merge(projects)
         .merge(protected)
+        .layer(cors)
+        .layer(DefaultBodyLimit::max(1024 * 1024)) // 1 MB max request body
         .with_state(state.clone());
 
     let (shutdown_tx, shutdown_rx) = oneshot::channel();
@@ -244,6 +349,13 @@ async fn chat_send_handler(
     State(state): State<Arc<GatewayState>>,
     Json(req): Json<SendMessageRequest>,
 ) -> Result<(StatusCode, Json<SendMessageResponse>), (StatusCode, String)> {
+    if !state.chat_rate_limiter.check() {
+        return Err((
+            StatusCode::TOO_MANY_REQUESTS,
+            "Rate limit exceeded. Try again shortly.".to_string(),
+        ));
+    }
+
     let mut msg = IncomingMessage::new("gateway", &state.user_id, &req.content);
 
     if let Some(ref thread_id) = req.thread_id {
@@ -413,24 +525,58 @@ pub async fn clear_auth_mode(state: &GatewayState) {
     if let Some(ref sm) = state.session_manager {
         let session = sm.get_or_create_session(&state.user_id).await;
         let mut sess = session.lock().await;
-        if let Some(thread_id) = sess.active_thread {
-            if let Some(thread) = sess.threads.get_mut(&thread_id) {
-                thread.pending_auth = None;
-            }
+        if let Some(thread_id) = sess.active_thread
+            && let Some(thread) = sess.threads.get_mut(&thread_id)
+        {
+            thread.pending_auth = None;
         }
     }
 }
 
-async fn chat_events_handler(State(state): State<Arc<GatewayState>>) -> impl IntoResponse {
-    // subscribe() returns Sse<impl Stream + 'static + use<>> so no lifetime issues
-    state.sse.subscribe()
+async fn chat_events_handler(
+    State(state): State<Arc<GatewayState>>,
+) -> Result<impl IntoResponse, (StatusCode, String)> {
+    state.sse.subscribe().ok_or((
+        StatusCode::SERVICE_UNAVAILABLE,
+        "Too many connections".to_string(),
+    ))
 }
 
 async fn chat_ws_handler(
+    headers: axum::http::HeaderMap,
     ws: WebSocketUpgrade,
     State(state): State<Arc<GatewayState>>,
-) -> impl IntoResponse {
-    ws.on_upgrade(move |socket| crate::channels::web::ws::handle_ws_connection(socket, state))
+) -> Result<impl IntoResponse, (StatusCode, String)> {
+    // Validate Origin header to prevent cross-site WebSocket hijacking.
+    // Require the header outright; browsers always send it for WS upgrades,
+    // so a missing Origin means a non-browser client trying to bypass the check.
+    let origin = headers
+        .get("origin")
+        .and_then(|v| v.to_str().ok())
+        .ok_or_else(|| {
+            (
+                StatusCode::FORBIDDEN,
+                "WebSocket Origin header required".to_string(),
+            )
+        })?;
+
+    // Extract the host from the origin and compare exactly, so that
+    // crafted origins like "http://localhost.evil.com" are rejected.
+    // Origin format is "scheme://host[:port]".
+    let host = origin
+        .strip_prefix("http://")
+        .or_else(|| origin.strip_prefix("https://"))
+        .and_then(|rest| rest.split(':').next()?.split('/').next())
+        .unwrap_or("");
+
+    let is_local = matches!(host, "localhost" | "127.0.0.1" | "[::1]");
+    if !is_local {
+        return Err((
+            StatusCode::FORBIDDEN,
+            "WebSocket origin not allowed".to_string(),
+        ));
+    }
+    Ok(ws.on_upgrade(move |socket| crate::channels::web::ws::handle_ws_connection(socket, state)))
 }
 
 #[derive(Deserialize)]
@@ -477,57 +623,72 @@ async fn chat_history_handler(
             .ok_or((StatusCode::NOT_FOUND, "No active thread".to_string()))?
     };
 
-    // For paginated requests (before cursor set), always go to DB
-    if before_cursor.is_some() {
-        if let Some(ref store) = state.store {
-            let (messages, has_more) = store
-                .list_conversation_messages_paginated(thread_id, before_cursor, limit as i64)
-                .await
-                .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-
-            let oldest_timestamp = messages.first().map(|m| m.created_at.to_rfc3339());
-            let turns = build_turns_from_db_messages(&messages);
-            return Ok(Json(HistoryResponse {
-                thread_id,
-                turns,
-                has_more,
-                oldest_timestamp,
-            }));
+    // Verify the thread belongs to the authenticated user before returning any data.
+    // In-memory threads are already scoped by user via session_manager, but DB
+    // lookups could expose another user's conversation if the UUID is guessed.
+    if query.thread_id.is_some()
+        && let Some(ref store) = state.store
+    {
+        let owned = store
+            .conversation_belongs_to_user(thread_id, &state.user_id)
+            .await
+            .unwrap_or(false);
+        if !owned && !sess.threads.contains_key(&thread_id) {
+            return Err((StatusCode::NOT_FOUND, "Thread not found".to_string()));
         }
     }
 
-    // Try in-memory first (freshest data for active threads)
-    if let Some(thread) = sess.threads.get(&thread_id) {
-        if !thread.turns.is_empty() {
-            let turns: Vec<TurnInfo> = thread
-                .turns
-                .iter()
-                .map(|t| TurnInfo {
-                    turn_number: t.turn_number,
-                    user_input: t.user_input.clone(),
-                    response: t.response.clone(),
-                    state: format!("{:?}", t.state),
-                    started_at: t.started_at.to_rfc3339(),
-                    completed_at: t.completed_at.map(|dt| dt.to_rfc3339()),
-                    tool_calls: t
-                        .tool_calls
-                        .iter()
-                        .map(|tc| ToolCallInfo {
-                            name: tc.name.clone(),
-                            has_result: tc.result.is_some(),
-                            has_error: tc.error.is_some(),
-                        })
-                        .collect(),
-                })
-                .collect();
+    // For paginated requests (before cursor set), always go to DB
+    if before_cursor.is_some()
+        && let Some(ref store) = state.store
+    {
+        let (messages, has_more) = store
+            .list_conversation_messages_paginated(thread_id, before_cursor, limit as i64)
+            .await
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
-            return Ok(Json(HistoryResponse {
-                thread_id,
-                turns,
-                has_more: false,
-                oldest_timestamp: None,
-            }));
-        }
+        let oldest_timestamp = messages.first().map(|m| m.created_at.to_rfc3339());
+        let turns = build_turns_from_db_messages(&messages);
+        return Ok(Json(HistoryResponse {
+            thread_id,
+            turns,
+            has_more,
+            oldest_timestamp,
+        }));
+    }
+
+    // Try in-memory first (freshest data for active threads)
+    if let Some(thread) = sess.threads.get(&thread_id)
+        && !thread.turns.is_empty()
+    {
+        let turns: Vec<TurnInfo> = thread
+            .turns
+            .iter()
+            .map(|t| TurnInfo {
+                turn_number: t.turn_number,
+                user_input: t.user_input.clone(),
+                response: t.response.clone(),
+                state: format!("{:?}", t.state),
+                started_at: t.started_at.to_rfc3339(),
+                completed_at: t.completed_at.map(|dt| dt.to_rfc3339()),
+                tool_calls: t
+                    .tool_calls
+                    .iter()
+                    .map(|tc| ToolCallInfo {
+                        name: tc.name.clone(),
+                        has_result: tc.result.is_some(),
+                        has_error: tc.error.is_some(),
+                    })
+                    .collect(),
+            })
+            .collect();
+
+        return Ok(Json(HistoryResponse {
+            thread_id,
+            turns,
+            has_more: false,
+            oldest_timestamp: None,
+        }));
     }
 
     // Fall back to DB for historical threads not in memory (paginated)
@@ -577,12 +738,12 @@ fn build_turns_from_db_messages(messages: &[crate::history::ConversationMessage]
             };
 
             // Check if next message is an assistant response
-            if let Some(next) = iter.peek() {
-                if next.role == "assistant" {
-                    let assistant_msg = iter.next().expect("peeked");
-                    turn.response = Some(assistant_msg.content.clone());
-                    turn.completed_at = Some(assistant_msg.created_at.to_rfc3339());
-                }
+            if let Some(next) = iter.peek()
+                && next.role == "assistant"
+            {
+                let assistant_msg = iter.next().expect("peeked");
+                turn.response = Some(assistant_msg.content.clone());
+                turn.completed_at = Some(assistant_msg.created_at.to_rfc3339());
             }
 
             // Incomplete turn (user message without response)
@@ -901,14 +1062,16 @@ async fn jobs_list_handler(
         "Database not available".to_string(),
     ))?;
 
-    // Fetch sandbox jobs from the DB.
+    // Fetch sandbox jobs scoped to the authenticated user.
     let sandbox_jobs = store
-        .list_sandbox_jobs()
+        .list_sandbox_jobs_for_user(&state.user_id)
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
+    // Scope jobs to the authenticated user.
     let mut jobs: Vec<JobInfo> = sandbox_jobs
         .iter()
+        .filter(|j| j.user_id == state.user_id)
         .map(|j| {
             let ui_state = match j.status.as_str() {
                 "creating" => "pending",
@@ -941,7 +1104,7 @@ async fn jobs_summary_handler(
     ))?;
 
     let s = store
-        .sandbox_job_summary()
+        .sandbox_job_summary_for_user(&state.user_id)
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
@@ -962,63 +1125,66 @@ async fn jobs_detail_handler(
     let job_id = Uuid::parse_str(&id)
         .map_err(|_| (StatusCode::BAD_REQUEST, "Invalid job ID".to_string()))?;
 
-    // Try sandbox job from DB first.
-    if let Some(ref store) = state.store {
-        if let Ok(Some(job)) = store.get_sandbox_job(job_id).await {
-            let browse_id = std::path::Path::new(&job.project_dir)
-                .file_name()
-                .map(|n| n.to_string_lossy().to_string())
-                .unwrap_or_else(|| job.id.to_string());
-
-            let ui_state = match job.status.as_str() {
-                "creating" => "pending",
-                "running" => "in_progress",
-                s => s,
-            };
-
-            let elapsed_secs = job.started_at.map(|start| {
-                let end = job.completed_at.unwrap_or_else(chrono::Utc::now);
-                (end - start).num_seconds().max(0) as u64
-            });
-
-            // Synthesize transitions from timestamps.
-            let mut transitions = Vec::new();
-            if let Some(started) = job.started_at {
-                transitions.push(TransitionInfo {
-                    from: "creating".to_string(),
-                    to: "running".to_string(),
-                    timestamp: started.to_rfc3339(),
-                    reason: None,
-                });
-            }
-            if let Some(completed) = job.completed_at {
-                transitions.push(TransitionInfo {
-                    from: "running".to_string(),
-                    to: job.status.clone(),
-                    timestamp: completed.to_rfc3339(),
-                    reason: job.failure_reason.clone(),
-                });
-            }
-
-            return Ok(Json(JobDetailResponse {
-                id: job.id,
-                title: job.task.clone(),
-                description: String::new(),
-                state: ui_state.to_string(),
-                user_id: job.user_id.clone(),
-                created_at: job.created_at.to_rfc3339(),
-                started_at: job.started_at.map(|dt| dt.to_rfc3339()),
-                completed_at: job.completed_at.map(|dt| dt.to_rfc3339()),
-                elapsed_secs,
-                project_dir: Some(job.project_dir.clone()),
-                browse_url: Some(format!("/projects/{}/", browse_id)),
-                job_mode: {
-                    let mode = store.get_sandbox_job_mode(job.id).await.ok().flatten();
-                    mode.filter(|m| m != "worker")
-                },
-                transitions,
-            }));
+    // Try sandbox job from DB first, scoped to the authenticated user.
+    if let Some(ref store) = state.store
+        && let Ok(Some(job)) = store.get_sandbox_job(job_id).await
+    {
+        if job.user_id != state.user_id {
+            return Err((StatusCode::NOT_FOUND, "Job not found".to_string()));
         }
+        let browse_id = std::path::Path::new(&job.project_dir)
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_else(|| job.id.to_string());
+
+        let ui_state = match job.status.as_str() {
+            "creating" => "pending",
+            "running" => "in_progress",
+            s => s,
+        };
+
+        let elapsed_secs = job.started_at.map(|start| {
+            let end = job.completed_at.unwrap_or_else(chrono::Utc::now);
+            (end - start).num_seconds().max(0) as u64
+        });
+
+        // Synthesize transitions from timestamps.
+        let mut transitions = Vec::new();
+        if let Some(started) = job.started_at {
+            transitions.push(TransitionInfo {
+                from: "creating".to_string(),
+                to: "running".to_string(),
+                timestamp: started.to_rfc3339(),
+                reason: None,
+            });
+        }
+        if let Some(completed) = job.completed_at {
+            transitions.push(TransitionInfo {
+                from: "running".to_string(),
+                to: job.status.clone(),
+                timestamp: completed.to_rfc3339(),
+                reason: job.failure_reason.clone(),
+            });
+        }
+
+        return Ok(Json(JobDetailResponse {
+            id: job.id,
+            title: job.task.clone(),
+            description: String::new(),
+            state: ui_state.to_string(),
+            user_id: job.user_id.clone(),
+            created_at: job.created_at.to_rfc3339(),
+            started_at: job.started_at.map(|dt| dt.to_rfc3339()),
+            completed_at: job.completed_at.map(|dt| dt.to_rfc3339()),
+            elapsed_secs,
+            project_dir: Some(job.project_dir.clone()),
+            browse_url: Some(format!("/projects/{}/", browse_id)),
+            job_mode: {
+                let mode = store.get_sandbox_job_mode(job.id).await.ok().flatten();
+                mode.filter(|m| m != "worker")
+            },
+            transitions,
+        }));
     }
 
     Err((StatusCode::NOT_FOUND, "Job not found".to_string()))
@@ -1031,31 +1197,36 @@ async fn jobs_cancel_handler(
     let job_id = Uuid::parse_str(&id)
         .map_err(|_| (StatusCode::BAD_REQUEST, "Invalid job ID".to_string()))?;
 
-    // Try sandbox job cancellation.
-    if let Some(ref store) = state.store {
-        if let Ok(Some(job)) = store.get_sandbox_job(job_id).await {
-            if job.status == "running" || job.status == "creating" {
-                // Stop the container if we have a job manager.
-                if let Some(ref jm) = state.job_manager {
-                    let _ = jm.stop_job(job_id).await;
-                }
-                store
-                    .update_sandbox_job_status(
-                        job_id,
-                        "failed",
-                        Some(false),
-                        Some("Cancelled by user"),
-                        None,
-                        Some(chrono::Utc::now()),
-                    )
-                    .await
-                    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-            }
-            return Ok(Json(serde_json::json!({
-                "status": "cancelled",
-                "job_id": job_id,
-            })));
+    // Try sandbox job cancellation, scoped to the authenticated user.
+    if let Some(ref store) = state.store
+        && let Ok(Some(job)) = store.get_sandbox_job(job_id).await
+    {
+        if job.user_id != state.user_id {
+            return Err((StatusCode::NOT_FOUND, "Job not found".to_string()));
         }
+        if job.status == "running" || job.status == "creating" {
+            // Stop the container if we have a job manager.
+            if let Some(ref jm) = state.job_manager
+                && let Err(e) = jm.stop_job(job_id).await
+            {
+                tracing::warn!(job_id = %job_id, error = %e, "Failed to stop container during cancellation");
+            }
+            store
+                .update_sandbox_job_status(
+                    job_id,
+                    "failed",
+                    Some(false),
+                    Some("Cancelled by user"),
+                    None,
+                    Some(chrono::Utc::now()),
+                )
+                .await
+                .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+        }
+        return Ok(Json(serde_json::json!({
+            "status": "cancelled",
+            "job_id": job_id,
+        })));
     }
 
     Err((StatusCode::NOT_FOUND, "Job not found".to_string()))
@@ -1082,6 +1253,11 @@ async fn jobs_restart_handler(
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
         .ok_or((StatusCode::NOT_FOUND, "Job not found".to_string()))?;
+
+    // Scope to the authenticated user.
+    if old_job.user_id != state.user_id {
+        return Err((StatusCode::NOT_FOUND, "Job not found".to_string()));
+    }
 
     if old_job.status != "interrupted" && old_job.status != "failed" {
         return Err((
@@ -1157,6 +1333,16 @@ async fn jobs_prompt_handler(
         .parse()
         .map_err(|_| (StatusCode::BAD_REQUEST, "Invalid job ID".to_string()))?;
 
+    // Verify user owns this job.
+    if let Some(ref store) = state.store
+        && !store
+            .sandbox_job_belongs_to_user(job_id, &state.user_id)
+            .await
+            .unwrap_or(false)
+    {
+        return Err((StatusCode::NOT_FOUND, "Job not found".to_string()));
+    }
+
     let content = body
         .get("content")
         .and_then(|v| v.as_str())
@@ -1194,6 +1380,15 @@ async fn jobs_events_handler(
     let job_id: uuid::Uuid = id
         .parse()
         .map_err(|_| (StatusCode::BAD_REQUEST, "Invalid job ID".to_string()))?;
+
+    // Verify user owns this job.
+    if !store
+        .sandbox_job_belongs_to_user(job_id, &state.user_id)
+        .await
+        .unwrap_or(false)
+    {
+        return Err((StatusCode::NOT_FOUND, "Job not found".to_string()));
+    }
 
     let events = store
         .list_job_events(job_id)
@@ -1243,6 +1438,11 @@ async fn job_files_list_handler(
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
         .ok_or((StatusCode::NOT_FOUND, "Job not found".to_string()))?;
+
+    // Verify user owns this job.
+    if job.user_id != state.user_id {
+        return Err((StatusCode::NOT_FOUND, "Job not found".to_string()));
+    }
 
     let base = std::path::PathBuf::from(&job.project_dir);
     let rel_path = query.path.as_deref().unwrap_or("");
@@ -1306,6 +1506,11 @@ async fn job_files_read_handler(
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
         .ok_or((StatusCode::NOT_FOUND, "Job not found".to_string()))?;
+
+    // Verify user owns this job.
+    if job.user_id != state.user_id {
+        return Err((StatusCode::NOT_FOUND, "Job not found".to_string()));
+    }
 
     let path = query.path.as_deref().ok_or((
         StatusCode::BAD_REQUEST,
@@ -1525,6 +1730,15 @@ async fn project_file_handler(
 /// Shared logic: resolve the file inside `~/.ironclaw/projects/{project_id}/`,
 /// guard against path traversal, and stream the content with the right MIME type.
 async fn serve_project_file(project_id: &str, path: &str) -> axum::response::Response {
+    // Reject project_id values that could escape the projects directory.
+    if project_id.contains('/')
+        || project_id.contains('\\')
+        || project_id.contains("..")
+        || project_id.is_empty()
+    {
+        return (StatusCode::BAD_REQUEST, "Invalid project ID").into_response();
+    }
+
     let base = dirs::home_dir()
         .unwrap_or_else(|| std::path::PathBuf::from("."))
         .join(".ironclaw")

@@ -19,18 +19,18 @@ use crate::agent::routine::{
 };
 use crate::agent::routine_engine::RoutineEngine;
 use crate::context::JobContext;
-use crate::history::Store;
+use crate::db::Database;
 use crate::tools::tool::{Tool, ToolError, ToolOutput};
 
 // ==================== routine_create ====================
 
 pub struct RoutineCreateTool {
-    store: Arc<Store>,
+    store: Arc<dyn Database>,
     engine: Arc<RoutineEngine>,
 }
 
 impl RoutineCreateTool {
-    pub fn new(store: Arc<Store>, engine: Arc<RoutineEngine>) -> Self {
+    pub fn new(store: Arc<dyn Database>, engine: Arc<RoutineEngine>) -> Self {
         Self { store, engine }
     }
 }
@@ -277,11 +277,11 @@ impl Tool for RoutineCreateTool {
 // ==================== routine_list ====================
 
 pub struct RoutineListTool {
-    store: Arc<Store>,
+    store: Arc<dyn Database>,
 }
 
 impl RoutineListTool {
-    pub fn new(store: Arc<Store>) -> Self {
+    pub fn new(store: Arc<dyn Database>) -> Self {
         Self { store }
     }
 }
@@ -351,12 +351,12 @@ impl Tool for RoutineListTool {
 // ==================== routine_update ====================
 
 pub struct RoutineUpdateTool {
-    store: Arc<Store>,
+    store: Arc<dyn Database>,
     engine: Arc<RoutineEngine>,
 }
 
 impl RoutineUpdateTool {
-    pub fn new(store: Arc<Store>, engine: Arc<RoutineEngine>) -> Self {
+    pub fn new(store: Arc<dyn Database>, engine: Arc<RoutineEngine>) -> Self {
         Self { store, engine }
     }
 }
@@ -474,12 +474,12 @@ impl Tool for RoutineUpdateTool {
 // ==================== routine_delete ====================
 
 pub struct RoutineDeleteTool {
-    store: Arc<Store>,
+    store: Arc<dyn Database>,
     engine: Arc<RoutineEngine>,
 }
 
 impl RoutineDeleteTool {
-    pub fn new(store: Arc<Store>, engine: Arc<RoutineEngine>) -> Self {
+    pub fn new(store: Arc<dyn Database>, engine: Arc<RoutineEngine>) -> Self {
         Self { store, engine }
     }
 }
@@ -551,11 +551,11 @@ impl Tool for RoutineDeleteTool {
 // ==================== routine_history ====================
 
 pub struct RoutineHistoryTool {
-    store: Arc<Store>,
+    store: Arc<dyn Database>,
 }
 
 impl RoutineHistoryTool {
-    pub fn new(store: Arc<Store>) -> Self {
+    pub fn new(store: Arc<dyn Database>) -> Self {
         Self { store }
     }
 }

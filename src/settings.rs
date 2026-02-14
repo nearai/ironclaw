@@ -15,6 +15,10 @@ pub struct Settings {
     pub onboard_completed: bool,
 
     // === Step 1: Database ===
+    /// Database backend: "postgres" or "libsql".
+    #[serde(default)]
+    pub database_backend: Option<String>,
+
     /// Database connection URL (postgres://...).
     #[serde(default)]
     pub database_url: Option<String>,
@@ -22,6 +26,14 @@ pub struct Settings {
     /// Database pool size.
     #[serde(default)]
     pub database_pool_size: Option<usize>,
+
+    /// Path to local libSQL database file.
+    #[serde(default)]
+    pub libsql_path: Option<String>,
+
+    /// Turso cloud URL for remote replica sync.
+    #[serde(default)]
+    pub libsql_url: Option<String>,
 
     // === Step 2: Security ===
     /// Source for the secrets master key.

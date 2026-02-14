@@ -238,7 +238,7 @@ Work independently to complete this job. Report when done."#,
                             reason: format!("respond_with_tools failed: {}", e),
                         })?;
 
-                match respond_result {
+                match respond_result.result {
                     RespondResult::Text(response) => {
                         self.post_event(
                             "message",
@@ -249,11 +249,7 @@ Work independently to complete this job. Report when done."#,
                         )
                         .await;
 
-                        let response_lower = response.to_lowercase();
-                        if response_lower.contains("complete")
-                            || response_lower.contains("finished")
-                            || response_lower.contains("done")
-                        {
+                        if crate::util::llm_signals_completion(&response) {
                             if last_output.is_empty() {
                                 last_output = response.clone();
                             }
@@ -431,7 +427,11 @@ Work independently to complete this job. Report when done."#,
                     wrapped,
                 ));
 
-                output.contains("TASK_COMPLETE") || output.contains("JOB_DONE")
+                // Tool output should never signal job completion. Only the LLM's
+                // natural language response should decide when a job is done. A
+                // tool could return text containing "TASK_COMPLETE" in its output
+                // (e.g. from file contents) and trigger a false positive.
+                false
             }
             Err(e) => {
                 tracing::warn!("Tool {} failed: {}", selection.tool_name, e);
@@ -486,6 +486,36 @@ fn truncate(s: &str, max: usize) -> String {
     if s.len() <= max {
         s.to_string()
     } else {
-        format!("{}...", &s[..max])
+        let end = crate::util::floor_char_boundary(s, max);
+        format!("{}...", &s[..end])
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::worker::runtime::truncate;
+
+    #[test]
+    fn test_truncate_within_limit() {
+        assert_eq!(truncate("hello", 10), "hello");
+    }
+
+    #[test]
+    fn test_truncate_at_limit() {
+        assert_eq!(truncate("hello", 5), "hello");
+    }
+
+    #[test]
+    fn test_truncate_beyond_limit() {
+        let result = truncate("hello world", 5);
+        assert_eq!(result, "hello...");
+    }
+
+    #[test]
+    fn test_truncate_multibyte_safe() {
+        // "é" is 2 bytes in UTF-8; slicing at byte 1 would panic without safety
+        let result = truncate("é is fancy", 1);
+        // Should truncate to 0 chars (can't fit "é" in 1 byte)
+        assert_eq!(result, "...");
     }
 }

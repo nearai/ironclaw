@@ -11,6 +11,7 @@
 //! Full-job routines are delegated to the existing `Scheduler`.
 
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use chrono::Utc;
@@ -23,20 +24,20 @@ use crate::agent::routine::{
 };
 use crate::channels::{IncomingMessage, OutgoingResponse};
 use crate::config::RoutineConfig;
-use crate::history::Store;
+use crate::db::Database;
 use crate::llm::{ChatMessage, CompletionRequest, FinishReason, LlmProvider};
 use crate::workspace::Workspace;
 
 /// The routine execution engine.
 pub struct RoutineEngine {
     config: RoutineConfig,
-    store: Arc<Store>,
+    store: Arc<dyn Database>,
     llm: Arc<dyn LlmProvider>,
     workspace: Arc<Workspace>,
     /// Sender for notifications (routed to channel manager).
     notify_tx: mpsc::Sender<OutgoingResponse>,
     /// Currently running routine count (across all routines).
-    running_count: Arc<RwLock<usize>>,
+    running_count: Arc<AtomicUsize>,
     /// Compiled event regex cache: routine_id -> compiled regex.
     event_cache: Arc<RwLock<Vec<(Uuid, Routine, Regex)>>>,
 }
@@ -44,7 +45,7 @@ pub struct RoutineEngine {
 impl RoutineEngine {
     pub fn new(
         config: RoutineConfig,
-        store: Arc<Store>,
+        store: Arc<dyn Database>,
         llm: Arc<dyn LlmProvider>,
         workspace: Arc<Workspace>,
         notify_tx: mpsc::Sender<OutgoingResponse>,
@@ -55,7 +56,7 @@ impl RoutineEngine {
             llm,
             workspace,
             notify_tx,
-            running_count: Arc::new(RwLock::new(0)),
+            running_count: Arc::new(AtomicUsize::new(0)),
             event_cache: Arc::new(RwLock::new(Vec::new())),
         }
     }
@@ -102,10 +103,9 @@ impl RoutineEngine {
             if let Trigger::Event {
                 channel: Some(ch), ..
             } = &routine.trigger
+                && ch != &message.channel
             {
-                if ch != &message.channel {
-                    continue;
-                }
+                continue;
             }
 
             // Regex match
@@ -126,7 +126,7 @@ impl RoutineEngine {
             }
 
             // Global capacity check
-            if *self.running_count.read().await >= self.config.max_concurrent_routines {
+            if self.running_count.load(Ordering::Relaxed) >= self.config.max_concurrent_routines {
                 tracing::warn!(routine = %routine.name, "Skipped: global max concurrent reached");
                 continue;
             }
@@ -150,7 +150,7 @@ impl RoutineEngine {
         };
 
         for routine in routines {
-            if *self.running_count.read().await >= self.config.max_concurrent_routines {
+            if self.running_count.load(Ordering::Relaxed) >= self.config.max_concurrent_routines {
                 tracing::warn!("Global max concurrent routines reached, skipping remaining");
                 break;
             }
@@ -293,21 +293,18 @@ impl RoutineEngine {
 
 /// Shared context passed to the execution function.
 struct EngineContext {
-    store: Arc<Store>,
+    store: Arc<dyn Database>,
     llm: Arc<dyn LlmProvider>,
     workspace: Arc<Workspace>,
     notify_tx: mpsc::Sender<OutgoingResponse>,
-    running_count: Arc<RwLock<usize>>,
+    running_count: Arc<AtomicUsize>,
     max_lightweight_tokens: u32,
 }
 
 /// Execute a routine run. Handles both lightweight and full_job modes.
 async fn execute_routine(ctx: EngineContext, routine: Routine, run: RoutineRun) {
-    // Increment running count
-    {
-        let mut count = ctx.running_count.write().await;
-        *count += 1;
-    }
+    // Increment running count (atomic: survives panics in the execution below)
+    ctx.running_count.fetch_add(1, Ordering::Relaxed);
 
     let result = match &routine.action {
         RoutineAction::Lightweight {
@@ -327,10 +324,7 @@ async fn execute_routine(ctx: EngineContext, routine: Routine, run: RoutineRun) 
     };
 
     // Decrement running count
-    {
-        let mut count = ctx.running_count.write().await;
-        *count = count.saturating_sub(1);
-    }
+    ctx.running_count.fetch_sub(1, Ordering::Relaxed);
 
     // Process result
     let (status, summary, tokens) = match result {
@@ -568,7 +562,8 @@ fn truncate(s: &str, max: usize) -> String {
     if s.len() <= max {
         s.to_string()
     } else {
-        format!("{}...", &s[..max])
+        let end = crate::util::floor_char_boundary(s, max);
+        format!("{}...", &s[..end])
     }
 }
 

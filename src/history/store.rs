@@ -1,13 +1,18 @@
 //! PostgreSQL store for persisting agent data.
 
 use chrono::{DateTime, Utc};
+#[cfg(feature = "postgres")]
 use deadpool_postgres::{Config, Pool, Runtime};
 use rust_decimal::Decimal;
+#[cfg(feature = "postgres")]
 use tokio_postgres::NoTls;
 use uuid::Uuid;
 
+#[cfg(feature = "postgres")]
 use crate::config::DatabaseConfig;
+#[cfg(feature = "postgres")]
 use crate::context::{ActionRecord, JobContext, JobState};
+#[cfg(feature = "postgres")]
 use crate::error::DatabaseError;
 
 /// Record for an LLM call to be persisted.
@@ -24,10 +29,12 @@ pub struct LlmCallRecord<'a> {
 }
 
 /// Database store for the agent.
+#[cfg(feature = "postgres")]
 pub struct Store {
     pool: Pool,
 }
 
+#[cfg(feature = "postgres")]
 impl Store {
     /// Create a new store and connect to the database.
     pub async fn new(config: &DatabaseConfig) -> Result<Self, DatabaseError> {
@@ -144,7 +151,12 @@ impl Store {
                 actual_cost, repair_attempts, created_at, started_at, completed_at
             ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)
             ON CONFLICT (id) DO UPDATE SET
+                title = EXCLUDED.title,
+                description = EXCLUDED.description,
+                category = EXCLUDED.category,
                 status = EXCLUDED.status,
+                estimated_cost = EXCLUDED.estimated_cost,
+                estimated_time_secs = EXCLUDED.estimated_time_secs,
                 actual_cost = EXCLUDED.actual_cost,
                 repair_attempts = EXCLUDED.repair_attempts,
                 started_at = EXCLUDED.started_at,
@@ -220,6 +232,8 @@ impl Store {
                     completed_at: row.get("completed_at"),
                     transitions: Vec::new(), // Not loaded from DB for now
                     metadata: serde_json::Value::Null,
+                    total_tokens_used: 0,
+                    max_tokens: 0,
                 }))
             }
             None => Ok(None),
@@ -464,6 +478,7 @@ pub struct SandboxJobSummary {
     pub interrupted: usize,
 }
 
+#[cfg(feature = "postgres")]
 impl Store {
     /// Insert a new sandbox job into `agent_jobs`.
     pub async fn save_sandbox_job(&self, job: &SandboxJobRecord) -> Result<(), DatabaseError> {
@@ -565,6 +580,90 @@ impl Store {
             .collect())
     }
 
+    /// List sandbox jobs for a specific user, most recent first.
+    pub async fn list_sandbox_jobs_for_user(
+        &self,
+        user_id: &str,
+    ) -> Result<Vec<SandboxJobRecord>, DatabaseError> {
+        let conn = self.conn().await?;
+        let rows = conn
+            .query(
+                r#"
+                SELECT id, title, status, user_id, project_dir,
+                       success, failure_reason, created_at, started_at, completed_at
+                FROM agent_jobs WHERE source = 'sandbox' AND user_id = $1
+                ORDER BY created_at DESC
+                "#,
+                &[&user_id],
+            )
+            .await?;
+
+        Ok(rows
+            .iter()
+            .map(|r| SandboxJobRecord {
+                id: r.get("id"),
+                task: r.get("title"),
+                status: r.get("status"),
+                user_id: r.get("user_id"),
+                project_dir: r
+                    .get::<_, Option<String>>("project_dir")
+                    .unwrap_or_default(),
+                success: r.get("success"),
+                failure_reason: r.get("failure_reason"),
+                created_at: r.get("created_at"),
+                started_at: r.get("started_at"),
+                completed_at: r.get("completed_at"),
+            })
+            .collect())
+    }
+
+    /// Get a summary of sandbox job counts by status for a specific user.
+    pub async fn sandbox_job_summary_for_user(
+        &self,
+        user_id: &str,
+    ) -> Result<SandboxJobSummary, DatabaseError> {
+        let conn = self.conn().await?;
+        let rows = conn
+            .query(
+                "SELECT status, COUNT(*) as cnt FROM agent_jobs WHERE source = 'sandbox' AND user_id = $1 GROUP BY status",
+                &[&user_id],
+            )
+            .await?;
+
+        let mut summary = SandboxJobSummary::default();
+        for row in &rows {
+            let status: String = row.get("status");
+            let count: i64 = row.get("cnt");
+            let c = count as usize;
+            summary.total += c;
+            match status.as_str() {
+                "creating" => summary.creating += c,
+                "running" => summary.running += c,
+                "completed" => summary.completed += c,
+                "failed" => summary.failed += c,
+                "interrupted" => summary.interrupted += c,
+                _ => {}
+            }
+        }
+        Ok(summary)
+    }
+
+    /// Check if a sandbox job belongs to a specific user.
+    pub async fn sandbox_job_belongs_to_user(
+        &self,
+        job_id: Uuid,
+        user_id: &str,
+    ) -> Result<bool, DatabaseError> {
+        let conn = self.conn().await?;
+        let row = conn
+            .query_opt(
+                "SELECT 1 FROM agent_jobs WHERE id = $1 AND user_id = $2 AND source = 'sandbox'",
+                &[&job_id, &user_id],
+            )
+            .await?;
+        Ok(row.is_some())
+    }
+
     /// Update sandbox job status and optional timestamps/result.
     pub async fn update_sandbox_job_status(
         &self,
@@ -656,6 +755,7 @@ pub struct JobEventRecord {
     pub created_at: DateTime<Utc>,
 }
 
+#[cfg(feature = "postgres")]
 impl Store {
     /// Persist a job event (fire-and-forget from orchestrator handler).
     pub async fn save_job_event(
@@ -728,10 +828,12 @@ impl Store {
 
 // ==================== Routines ====================
 
+#[cfg(feature = "postgres")]
 use crate::agent::routine::{
     NotifyConfig, Routine, RoutineAction, RoutineGuardrails, RoutineRun, RunStatus, Trigger,
 };
 
+#[cfg(feature = "postgres")]
 impl Store {
     /// Create a new routine.
     pub async fn create_routine(&self, routine: &Routine) -> Result<(), DatabaseError> {
@@ -1032,6 +1134,7 @@ impl Store {
     }
 }
 
+#[cfg(feature = "postgres")]
 fn row_to_routine(row: &tokio_postgres::Row) -> Result<Routine, DatabaseError> {
     let trigger_type: String = row.get("trigger_type");
     let trigger_config: serde_json::Value = row.get("trigger_config");
@@ -1076,6 +1179,7 @@ fn row_to_routine(row: &tokio_postgres::Row) -> Result<Routine, DatabaseError> {
     })
 }
 
+#[cfg(feature = "postgres")]
 fn row_to_routine_run(row: &tokio_postgres::Row) -> Result<RoutineRun, DatabaseError> {
     let status_str: String = row.get("status");
     let status: RunStatus = status_str
@@ -1121,6 +1225,7 @@ pub struct ConversationMessage {
     pub created_at: DateTime<Utc>,
 }
 
+#[cfg(feature = "postgres")]
 impl Store {
     /// Ensure a conversation row exists for a given UUID.
     ///
@@ -1258,6 +1363,22 @@ impl Store {
         Ok(id)
     }
 
+    /// Check whether a conversation belongs to the given user.
+    pub async fn conversation_belongs_to_user(
+        &self,
+        conversation_id: Uuid,
+        user_id: &str,
+    ) -> Result<bool, DatabaseError> {
+        let conn = self.conn().await?;
+        let row = conn
+            .query_opt(
+                "SELECT 1 FROM conversations WHERE id = $1 AND user_id = $2",
+                &[&conversation_id, &user_id],
+            )
+            .await?;
+        Ok(row.is_some())
+    }
+
     /// Load messages for a conversation with cursor-based pagination.
     ///
     /// Returns `(messages_oldest_first, has_more)`.
@@ -1375,6 +1496,7 @@ impl Store {
     }
 }
 
+#[cfg(feature = "postgres")]
 fn parse_job_state(s: &str) -> JobState {
     match s {
         "pending" => JobState::Pending,
@@ -1391,8 +1513,10 @@ fn parse_job_state(s: &str) -> JobState {
 
 // ==================== Tool Failures ====================
 
+#[cfg(feature = "postgres")]
 use crate::agent::BrokenTool;
 
+#[cfg(feature = "postgres")]
 impl Store {
     /// Record a tool failure (upsert: increment count if exists).
     pub async fn record_tool_failure(
@@ -1486,6 +1610,7 @@ pub struct SettingRow {
     pub updated_at: DateTime<Utc>,
 }
 
+#[cfg(feature = "postgres")]
 impl Store {
     /// Get a single setting by key.
     pub async fn get_setting(

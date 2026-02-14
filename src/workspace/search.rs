@@ -237,11 +237,11 @@ pub fn reciprocal_rank_fusion(
         .collect();
 
     // Normalize scores to 0-1 range
-    if let Some(max_score) = results.iter().map(|r| r.score).reduce(f32::max) {
-        if max_score > 0.0 {
-            for result in &mut results {
-                result.score /= max_score;
-            }
+    if let Some(max_score) = results.iter().map(|r| r.score).reduce(f32::max)
+        && max_score > 0.0
+    {
+        for result in &mut results {
+            result.score /= max_score;
         }
     }
 

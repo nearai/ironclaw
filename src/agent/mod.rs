@@ -27,6 +27,7 @@ pub mod task;
 pub mod undo;
 pub mod worker;
 
+pub(crate) use agent_loop::truncate_for_preview;
 pub use agent_loop::{Agent, AgentDeps};
 pub use cognitive::{
     CheckpointTracker, CognitiveConfig, after_action_template, post_compaction_recovery,
