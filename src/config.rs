@@ -410,6 +410,15 @@ pub struct NearAiConfig {
     pub api_mode: NearAiApiMode,
     /// API key for cloud-api (required for chat_completions mode)
     pub api_key: Option<SecretString>,
+    /// Optional fallback model for failover (default: None).
+    /// When set, a secondary provider is created with this model and wrapped
+    /// in a `FailoverProvider` so transient errors on the primary model
+    /// automatically fall through to the fallback.
+    pub fallback_model: Option<String>,
+    /// Maximum number of retries for transient errors (default: 3).
+    /// With the default of 3, the provider makes up to 4 total attempts
+    /// (1 initial + 3 retries) before giving up.
+    pub max_retries: u32,
 }
 
 impl LlmConfig {
@@ -454,6 +463,8 @@ impl LlmConfig {
                 .unwrap_or_else(default_session_path),
             api_mode,
             api_key: nearai_api_key,
+            fallback_model: optional_env("NEARAI_FALLBACK_MODEL")?,
+            max_retries: parse_optional_env("NEARAI_MAX_RETRIES", 3)?,
         };
 
         // Resolve provider-specific configs based on backend
