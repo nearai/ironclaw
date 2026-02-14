@@ -274,6 +274,8 @@ pub enum LlmBackend {
     Ollama,
     /// Any OpenAI-compatible endpoint (e.g. vLLM, LiteLLM, Together)
     OpenAiCompatible,
+    /// Venice AI inference API
+    Venice,
 }
 
 impl std::str::FromStr for LlmBackend {
@@ -286,8 +288,9 @@ impl std::str::FromStr for LlmBackend {
             "anthropic" | "claude" => Ok(Self::Anthropic),
             "ollama" => Ok(Self::Ollama),
             "openai_compatible" | "openai-compatible" | "compatible" => Ok(Self::OpenAiCompatible),
+            "venice" | "venice_ai" | "venice-ai" => Ok(Self::Venice),
             _ => Err(format!(
-                "invalid LLM backend '{}', expected one of: nearai, openai, anthropic, ollama, openai_compatible",
+                "invalid LLM backend '{}', expected one of: nearai, openai, anthropic, ollama, openai_compatible, venice",
                 s
             )),
         }
@@ -302,6 +305,7 @@ impl std::fmt::Display for LlmBackend {
             Self::Anthropic => write!(f, "anthropic"),
             Self::Ollama => write!(f, "ollama"),
             Self::OpenAiCompatible => write!(f, "openai_compatible"),
+            Self::Venice => write!(f, "venice"),
         }
     }
 }
@@ -335,6 +339,20 @@ pub struct OpenAiCompatibleConfig {
     pub model: String,
 }
 
+/// Configuration for Venice AI inference API.
+#[derive(Debug, Clone)]
+pub struct VeniceConfig {
+    pub api_key: SecretString,
+    pub base_url: String,
+    pub model: String,
+    /// Web search mode: "off", "on", or "auto".
+    pub web_search: Option<String>,
+    /// Whether to enable web scraping.
+    pub web_scraping: Option<bool>,
+    /// Whether to include the Venice system prompt.
+    pub include_venice_system_prompt: Option<bool>,
+}
+
 /// LLM provider configuration.
 ///
 /// NEAR AI remains the default backend. Users can switch to other providers
@@ -353,6 +371,8 @@ pub struct LlmConfig {
     pub ollama: Option<OllamaConfig>,
     /// OpenAI-compatible config (populated when backend=openai_compatible)
     pub openai_compatible: Option<OpenAiCompatibleConfig>,
+    /// Venice AI config (populated when backend=venice)
+    pub venice: Option<VeniceConfig>,
 }
 
 /// API mode for NEAR AI.
@@ -497,6 +517,58 @@ impl LlmConfig {
             None
         };
 
+        let venice = if backend == LlmBackend::Venice {
+            let api_key = optional_env("VENICE_API_KEY")?
+                .map(SecretString::from)
+                .ok_or_else(|| ConfigError::MissingRequired {
+                    key: "VENICE_API_KEY".to_string(),
+                    hint: "Set VENICE_API_KEY when LLM_BACKEND=venice".to_string(),
+                })?;
+            let base_url = optional_env("VENICE_BASE_URL")?
+                .unwrap_or_else(|| "https://api.venice.ai/api/v1".to_string());
+            let model = optional_env("VENICE_MODEL")?
+                .unwrap_or_else(|| "zai-org-glm-5".to_string());
+            let web_search = optional_env("VENICE_WEB_SEARCH")?;
+            if let Some(ref ws) = web_search {
+                match ws.as_str() {
+                    "off" | "on" | "auto" => {}
+                    _ => {
+                        return Err(ConfigError::InvalidValue {
+                            key: "VENICE_WEB_SEARCH".to_string(),
+                            message: format!(
+                                "must be 'off', 'on', or 'auto', got '{}'",
+                                ws
+                            ),
+                        });
+                    }
+                }
+            }
+            let web_scraping = optional_env("VENICE_WEB_SCRAPING")?
+                .map(|s| s.parse())
+                .transpose()
+                .map_err(|e| ConfigError::InvalidValue {
+                    key: "VENICE_WEB_SCRAPING".to_string(),
+                    message: format!("must be 'true' or 'false': {e}"),
+                })?;
+            let include_venice_system_prompt = optional_env("VENICE_INCLUDE_SYSTEM_PROMPT")?
+                .map(|s| s.parse())
+                .transpose()
+                .map_err(|e| ConfigError::InvalidValue {
+                    key: "VENICE_INCLUDE_SYSTEM_PROMPT".to_string(),
+                    message: format!("must be 'true' or 'false': {e}"),
+                })?;
+            Some(VeniceConfig {
+                api_key,
+                base_url,
+                model,
+                web_search,
+                web_scraping,
+                include_venice_system_prompt,
+            })
+        } else {
+            None
+        };
+
         Ok(Self {
             backend,
             nearai,
@@ -504,6 +576,7 @@ impl LlmConfig {
             anthropic,
             ollama,
             openai_compatible,
+            venice,
         })
     }
 }

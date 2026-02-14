@@ -658,6 +658,7 @@ impl SetupWizard {
             anthropic: None,
             ollama: None,
             openai_compatible: None,
+            venice: None,
         };
 
         match create_llm_provider(&config, Arc::clone(session)) {
