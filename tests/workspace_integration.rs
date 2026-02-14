@@ -1,3 +1,4 @@
+#![cfg(feature = "postgres")]
 //! Integration tests for the workspace module.
 //!
 //! Requires a running PostgreSQL with pgvector extension.
