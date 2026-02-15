@@ -136,7 +136,7 @@ fn parse_message(v: &serde_json::Value) -> Message {
         date: get_header(payload, "Date"),
         body: extract_body(payload),
         snippet: v["snippet"].as_str().unwrap_or("").to_string(),
-        is_unread: label_ids.contains(&"UNREAD".to_string()),
+        is_unread: label_ids.iter().any(|l| l == "UNREAD"),
         label_ids,
     }
 }
@@ -198,7 +198,7 @@ pub fn list_messages(
                     to: get_header(payload, "To"),
                     date: get_header(payload, "Date"),
                     snippet: msg["snippet"].as_str().unwrap_or("").to_string(),
-                    is_unread: label_ids.contains(&"UNREAD".to_string()),
+                    is_unread: label_ids.iter().any(|l| l == "UNREAD"),
                     label_ids,
                 });
             }

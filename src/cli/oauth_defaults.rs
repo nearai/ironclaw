@@ -80,14 +80,13 @@ pub enum OAuthCallbackError {
 
 /// Bind the OAuth callback listener on the fixed port.
 ///
-/// Tries IPv6 loopback (`[::1]`) first so that `http://localhost:…` redirects
-/// work on systems where `localhost` resolves to `::1`. Falls back to IPv4
-/// (`127.0.0.1`) only if IPv6 fails for a reason other than `AddrInUse`
-/// (e.g., IPv6 not supported on the host). If the port is already occupied
-/// on IPv6, the port is occupied period, so we fail immediately.
+/// Binds to IPv4 `127.0.0.1` first because callback URLs use `127.0.0.1`
+/// explicitly (e.g., NEAR AI redirects to `http://127.0.0.1:9876/auth/callback`).
+/// Falls back to IPv6 `[::1]` only if IPv4 binding fails for a reason other
+/// than `AddrInUse`. If the port is already occupied, fails immediately.
 pub async fn bind_callback_listener() -> Result<TcpListener, OAuthCallbackError> {
-    let ipv6_addr = format!("[::1]:{}", OAUTH_CALLBACK_PORT);
-    match TcpListener::bind(&ipv6_addr).await {
+    let ipv4_addr = format!("127.0.0.1:{}", OAUTH_CALLBACK_PORT);
+    match TcpListener::bind(&ipv4_addr).await {
         Ok(listener) => return Ok(listener),
         Err(e) if e.kind() == std::io::ErrorKind::AddrInUse => {
             return Err(OAuthCallbackError::PortInUse(
@@ -96,10 +95,10 @@ pub async fn bind_callback_listener() -> Result<TcpListener, OAuthCallbackError>
             ));
         }
         Err(_) => {
-            // IPv6 not available on this host, fall back to IPv4
+            // IPv4 not available, fall back to IPv6
         }
     }
-    TcpListener::bind(format!("127.0.0.1:{}", OAUTH_CALLBACK_PORT))
+    TcpListener::bind(format!("[::1]:{}", OAUTH_CALLBACK_PORT))
         .await
         .map_err(|e| {
             if e.kind() == std::io::ErrorKind::AddrInUse {

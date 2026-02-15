@@ -22,15 +22,36 @@ pub async fn run_status_command() -> anyhow::Result<()> {
     );
 
     // Database
-    let db_url_set = std::env::var("DATABASE_URL").is_ok();
     print!("  Database:    ");
-    if db_url_set {
-        match check_database().await {
-            Ok(()) => println!("connected"),
-            Err(e) => println!("error ({})", e),
+    let db_backend = std::env::var("DATABASE_BACKEND")
+        .ok()
+        .unwrap_or_else(|| "postgres".to_string());
+    match db_backend.as_str() {
+        "libsql" | "turso" | "sqlite" => {
+            let path = std::env::var("LIBSQL_PATH")
+                .map(std::path::PathBuf::from)
+                .unwrap_or_else(|_| crate::config::default_libsql_path());
+            if path.exists() {
+                let turso = if std::env::var("LIBSQL_URL").is_ok() {
+                    " + Turso sync"
+                } else {
+                    ""
+                };
+                println!("libSQL ({}{})", path.display(), turso);
+            } else {
+                println!("libSQL (file missing: {})", path.display());
+            }
         }
-    } else {
-        println!("not configured");
+        _ => {
+            if std::env::var("DATABASE_URL").is_ok() {
+                match check_database().await {
+                    Ok(()) => println!("connected (PostgreSQL)"),
+                    Err(e) => println!("error ({})", e),
+                }
+            } else {
+                println!("not configured");
+            }
+        }
     }
 
     // Session / Auth
@@ -42,16 +63,17 @@ pub async fn run_status_command() -> anyhow::Result<()> {
         println!("not found (run `ironclaw onboard`)");
     }
 
-    // Secrets (auto-detect: env var or keychain)
+    // Secrets (auto-detect from env only; skip keychain probe to avoid
+    // triggering macOS system password dialogs on a simple status check)
     print!("  Secrets:     ");
-    let has_env_key = std::env::var("SECRETS_MASTER_KEY").is_ok();
-    let has_keychain = crate::secrets::keychain::has_master_key().await;
-    if has_env_key {
+    if std::env::var("SECRETS_MASTER_KEY").is_ok() {
         println!("configured (env)");
-    } else if has_keychain {
-        println!("configured (keychain)");
     } else {
-        println!("not configured");
+        // We don't probe the keychain here because get_generic_password()
+        // triggers macOS unlock+authorization dialogs, which is bad UX for
+        // a read-only status command. If onboarding completed with keychain
+        // storage, the key is there; we just can't cheaply verify it.
+        println!("env not set (keychain may be configured)");
     }
 
     // Embeddings

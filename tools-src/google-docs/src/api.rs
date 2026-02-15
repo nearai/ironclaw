@@ -269,8 +269,13 @@ pub fn replace_text(
 
     let parsed = batch_update_raw(document_id, vec![request])?;
 
-    let occurrences = parsed["replies"][0]["replaceAllText"]["occurrencesChanged"]
-        .as_i64()
+    let first_reply = parsed["replies"].as_array().and_then(|arr| arr.first());
+    let occurrences = first_reply
+        .map(|r| {
+            r["replaceAllText"]["occurrencesChanged"]
+                .as_i64()
+                .unwrap_or(0)
+        })
         .unwrap_or(0);
 
     Ok(ReplaceResult {
