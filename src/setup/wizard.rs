@@ -656,6 +656,7 @@ impl SetupWizard {
                 fallback_model: None,
                 max_retries: 3,
             },
+            openrouter: None,
             openai: None,
             anthropic: None,
             ollama: None,

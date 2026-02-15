@@ -2,6 +2,7 @@
 //!
 //! Supports multiple backends:
 //! - **NEAR AI** (default): Session-based or API key auth via NEAR AI proxy
+//! - **OpenRouter**: Broad model access via OpenAI-compatible API
 //! - **OpenAI**: Direct API access with your own key
 //! - **Anthropic**: Direct API access with your own key
 //! - **Ollama**: Local model inference
@@ -39,6 +40,12 @@ use secrecy::ExposeSecret;
 use crate::config::{LlmBackend, LlmConfig, NearAiApiMode, NearAiConfig};
 use crate::error::LlmError;
 
+// OpenRouter defaults
+const OPENROUTER_BASE_URL: &str = "https://openrouter.ai/api/v1";
+pub const OPENROUTER_DEFAULT_MODEL: &str = "anthropic/claude-sonnet-4";
+const OPENROUTER_REFERER: &str = "https://github.com/nearai/ironclaw";
+const OPENROUTER_TITLE: &str = "ironclaw";
+
 /// Create an LLM provider based on configuration.
 ///
 /// - `NearAi` backend: Uses session manager for authentication (Responses API)
@@ -49,12 +56,49 @@ pub fn create_llm_provider(
     session: Arc<SessionManager>,
 ) -> Result<Arc<dyn LlmProvider>, LlmError> {
     match config.backend {
+        LlmBackend::OpenRouter => create_openrouter_provider(config),
         LlmBackend::NearAi => create_llm_provider_with_config(&config.nearai, session),
         LlmBackend::OpenAi => create_openai_provider(config),
         LlmBackend::Anthropic => create_anthropic_provider(config),
         LlmBackend::Ollama => create_ollama_provider(config),
         LlmBackend::OpenAiCompatible => create_openai_compatible_provider(config),
     }
+}
+
+fn create_openrouter_provider(config: &LlmConfig) -> Result<Arc<dyn LlmProvider>, LlmError> {
+    let or = config
+        .openrouter
+        .as_ref()
+        .ok_or_else(|| LlmError::AuthFailed {
+            provider: "openrouter".to_string(),
+        })?;
+
+    use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
+    use rig::providers::openai;
+
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        HeaderName::from_static("http-referer"),
+        HeaderValue::from_static(OPENROUTER_REFERER),
+    );
+    headers.insert(
+        HeaderName::from_static("x-title"),
+        HeaderValue::from_static(OPENROUTER_TITLE),
+    );
+
+    let client: openai::Client = openai::Client::builder()
+        .base_url(OPENROUTER_BASE_URL)
+        .api_key(or.api_key.expose_secret())
+        .http_headers(headers)
+        .build()
+        .map_err(|e| LlmError::RequestFailed {
+            provider: "openrouter".to_string(),
+            reason: format!("Failed to create OpenRouter client: {}", e),
+        })?;
+
+    let model = client.completion_model(&or.model);
+    tracing::info!("Using OpenRouter API (model: {})", or.model);
+    Ok(Arc::new(RigAdapter::new(model, &or.model)))
 }
 
 /// Create an LLM provider from a `NearAiConfig` directly.

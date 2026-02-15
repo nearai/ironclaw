@@ -252,12 +252,14 @@ pub fn default_libsql_path() -> PathBuf {
 /// Which LLM backend to use.
 ///
 /// Defaults to `NearAi` to keep IronClaw close to the NEAR ecosystem.
-/// Users can override with `LLM_BACKEND` env var to use their own API keys.
+/// Users can override with `LLM_BACKEND` env var to use other providers.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum LlmBackend {
     /// NEAR AI proxy (default) -- session or API key auth
     #[default]
     NearAi,
+    /// OpenRouter -- OpenAI-compatible API with access to many models
+    OpenRouter,
     /// Direct OpenAI API
     OpenAi,
     /// Direct Anthropic API
@@ -273,13 +275,14 @@ impl std::str::FromStr for LlmBackend {
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s.to_lowercase().as_str() {
+            "openrouter" | "open_router" => Ok(Self::OpenRouter),
             "nearai" | "near_ai" | "near" => Ok(Self::NearAi),
             "openai" | "open_ai" => Ok(Self::OpenAi),
             "anthropic" | "claude" => Ok(Self::Anthropic),
             "ollama" => Ok(Self::Ollama),
             "openai_compatible" | "openai-compatible" | "compatible" => Ok(Self::OpenAiCompatible),
             _ => Err(format!(
-                "invalid LLM backend '{}', expected one of: nearai, openai, anthropic, ollama, openai_compatible",
+                "invalid LLM backend '{}', expected one of: openrouter, nearai, openai, anthropic, ollama, openai_compatible",
                 s
             )),
         }
@@ -289,6 +292,7 @@ impl std::str::FromStr for LlmBackend {
 impl std::fmt::Display for LlmBackend {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            Self::OpenRouter => write!(f, "openrouter"),
             Self::NearAi => write!(f, "nearai"),
             Self::OpenAi => write!(f, "openai"),
             Self::Anthropic => write!(f, "anthropic"),
@@ -319,6 +323,13 @@ pub struct OllamaConfig {
     pub model: String,
 }
 
+/// Configuration for OpenRouter API.
+#[derive(Debug, Clone)]
+pub struct OpenRouterConfig {
+    pub api_key: SecretString,
+    pub model: String,
+}
+
 /// Configuration for any OpenAI-compatible endpoint.
 #[derive(Debug, Clone)]
 pub struct OpenAiCompatibleConfig {
@@ -329,14 +340,16 @@ pub struct OpenAiCompatibleConfig {
 
 /// LLM provider configuration.
 ///
-/// NEAR AI remains the default backend. Users can switch to other providers
-/// by setting `LLM_BACKEND` (e.g. `openai`, `anthropic`, `ollama`).
+/// NEAR AI is the default backend. Users can switch to other providers
+/// by setting `LLM_BACKEND` (e.g. `openrouter`, `openai`, `anthropic`, `ollama`).
 #[derive(Debug, Clone)]
 pub struct LlmConfig {
     /// Which backend to use (default: NearAi)
     pub backend: LlmBackend,
     /// NEAR AI config (always populated for NEAR AI embeddings, etc.)
     pub nearai: NearAiConfig,
+    /// OpenRouter config (populated when backend=openrouter)
+    pub openrouter: Option<OpenRouterConfig>,
     /// Direct OpenAI config (populated when backend=openai)
     pub openai: Option<OpenAiDirectConfig>,
     /// Direct Anthropic config (populated when backend=anthropic)
@@ -409,7 +422,7 @@ impl LlmConfig {
                 message: e,
             })?
         } else {
-            LlmBackend::NearAi
+            LlmBackend::default()
         };
 
         // Always resolve NEAR AI config (used as fallback and for embeddings)
@@ -447,6 +460,20 @@ impl LlmConfig {
         };
 
         // Resolve provider-specific configs based on backend
+        let openrouter = if backend == LlmBackend::OpenRouter {
+            let api_key = optional_env("OPENROUTER_API_KEY")?
+                .map(SecretString::from)
+                .ok_or_else(|| ConfigError::MissingRequired {
+                    key: "OPENROUTER_API_KEY".to_string(),
+                    hint: "Set OPENROUTER_API_KEY when LLM_BACKEND=openrouter".to_string(),
+                })?;
+            let model = optional_env("OPENROUTER_MODEL")?
+                .unwrap_or_else(|| crate::llm::OPENROUTER_DEFAULT_MODEL.to_string());
+            Some(OpenRouterConfig { api_key, model })
+        } else {
+            None
+        };
+
         let openai = if backend == LlmBackend::OpenAi {
             let api_key = optional_env("OPENAI_API_KEY")?
                 .map(SecretString::from)
@@ -503,6 +530,7 @@ impl LlmConfig {
         Ok(Self {
             backend,
             nearai,
+            openrouter,
             openai,
             anthropic,
             ollama,
@@ -1365,4 +1393,32 @@ where
         })
         .transpose()
         .map(|opt| opt.unwrap_or(default))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_openrouter_backend() {
+        assert_eq!(
+            "openrouter".parse::<LlmBackend>().unwrap(),
+            LlmBackend::OpenRouter
+        );
+        assert_eq!(
+            "open_router".parse::<LlmBackend>().unwrap(),
+            LlmBackend::OpenRouter
+        );
+    }
+
+    #[test]
+    fn openrouter_roundtrip() {
+        let backend = LlmBackend::OpenRouter;
+        assert_eq!(backend.to_string().parse::<LlmBackend>().unwrap(), backend);
+    }
+
+    #[test]
+    fn default_backend_is_nearai() {
+        assert_eq!(LlmBackend::default(), LlmBackend::NearAi);
+    }
 }
