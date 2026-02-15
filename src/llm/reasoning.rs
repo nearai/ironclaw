@@ -160,8 +160,6 @@ pub struct Reasoning {
     workspace_system_prompt: Option<String>,
     /// Optional skill context block to inject into system prompt.
     skill_context: Option<String>,
-    /// Minimum trust level of active skills (for tool attenuation).
-    active_skill_trust: Option<crate::skills::SkillTrust>,
 }
 
 impl Reasoning {
@@ -172,7 +170,6 @@ impl Reasoning {
             safety,
             workspace_system_prompt: None,
             skill_context: None,
-            active_skill_trust: None,
         }
     }
 
@@ -195,12 +192,6 @@ impl Reasoning {
         if !context.is_empty() {
             self.skill_context = Some(context);
         }
-        self
-    }
-
-    /// Set the minimum trust level of active skills for tool attenuation.
-    pub fn with_skill_trust(mut self, trust: crate::skills::SkillTrust) -> Self {
-        self.active_skill_trust = Some(trust);
         self
     }
 
@@ -356,18 +347,6 @@ Respond in JSON format:
         let mut messages = vec![ChatMessage::system(system_prompt)];
         messages.extend(context.messages.clone());
 
-        // Apply trust-based tool attenuation if skills are active.
-        // Tools above the trust ceiling are removed entirely -- the LLM
-        // cannot call tools it doesn't know exist.
-        // Attenuation is performed in agent_loop.rs; context.available_tools
-        // already contains the filtered set by the time we get here.
-        if self.active_skill_trust.is_some() {
-            tracing::debug!(
-                "Skills active (min trust: {:?}), {} tools available after attenuation",
-                self.active_skill_trust,
-                context.available_tools.len()
-            );
-        }
         let effective_tools = context.available_tools.clone();
 
         // If we have tools, use tool completion mode

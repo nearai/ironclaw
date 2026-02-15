@@ -22,7 +22,7 @@ use crate::context::JobContext;
 use crate::error::Error;
 use crate::extensions::ExtensionManager;
 use crate::history::Store;
-use crate::llm::{ChatMessage, LlmProvider, Reasoning, ReasoningContext, RespondResult};
+use crate::llm::{ChatMessage, LlmProvider, Reasoning, ReasoningContext, RespondResult, Role};
 use crate::safety::SafetyLayer;
 use crate::skills::SkillRegistry;
 use crate::tools::ToolRegistry;
@@ -152,6 +152,44 @@ impl Agent {
 
     fn skill_registry(&self) -> Option<&Arc<SkillRegistry>> {
         self.deps.skill_registry.as_ref()
+    }
+
+    /// Select active skills for a message using deterministic prefiltering.
+    async fn select_active_skills(&self, message_content: &str) -> Vec<crate::skills::LoadedSkill> {
+        if let Some(registry) = self.skill_registry() {
+            let available = registry.available().await;
+            let skills_cfg = &self.deps.skills_config;
+            let selected = crate::skills::prefilter_skills(
+                message_content,
+                &available,
+                skills_cfg.max_active_skills,
+                skills_cfg.max_context_tokens,
+            );
+
+            if !selected.is_empty() {
+                tracing::debug!(
+                    "Selected {} skill(s) for message: {}",
+                    selected.len(),
+                    selected
+                        .iter()
+                        .map(|s| s.name())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                );
+            }
+
+            selected.into_iter().cloned().collect()
+        } else {
+            vec![]
+        }
+    }
+
+    fn last_user_message(messages: &[ChatMessage]) -> Option<&str> {
+        messages
+            .iter()
+            .rev()
+            .find(|m| m.role == Role::User)
+            .map(|m| m.content.as_str())
     }
 
     /// Run the agent main loop.
@@ -1041,33 +1079,7 @@ impl Agent {
         };
 
         // Select and prepare active skills (if skills system is enabled)
-        let active_skills: Vec<crate::skills::LoadedSkill> =
-            if let Some(registry) = self.skill_registry() {
-                let available = registry.available().await;
-                let skills_cfg = &self.deps.skills_config;
-                let selected = crate::skills::prefilter_skills(
-                    &message.content,
-                    &available,
-                    skills_cfg.max_active_skills,
-                    skills_cfg.max_context_tokens,
-                );
-
-                if !selected.is_empty() {
-                    tracing::debug!(
-                        "Selected {} skill(s) for message: {}",
-                        selected.len(),
-                        selected
-                            .iter()
-                            .map(|s| s.name())
-                            .collect::<Vec<_>>()
-                            .join(", ")
-                    );
-                }
-
-                selected.into_iter().cloned().collect()
-            } else {
-                vec![]
-            };
+        let active_skills = self.select_active_skills(&message.content).await;
 
         // Build HTTP scopes for active skills (enforced in execute_chat_tool)
         let skill_http_scopes = if !active_skills.is_empty() {
@@ -1104,14 +1116,8 @@ impl Agent {
             *handle.write().await = serialized;
         }
 
-        // Build skill context block and compute trust attenuation
-        let (skill_context, skill_trust) = if !active_skills.is_empty() {
-            let min_trust = active_skills
-                .iter()
-                .map(|s| s.trust)
-                .min()
-                .unwrap_or(crate::skills::SkillTrust::Local);
-
+        // Build skill context block
+        let skill_context = if !active_skills.is_empty() {
             // Build the context block with structural isolation
             let mut context_parts = Vec::new();
             for skill in &active_skills {
@@ -1163,9 +1169,9 @@ impl Agent {
                 ));
             }
 
-            (Some(context_parts.join("\n\n")), Some(min_trust))
+            Some(context_parts.join("\n\n"))
         } else {
-            (None, None)
+            None
         };
 
         let mut reasoning = Reasoning::new(self.llm().clone(), self.safety().clone());
@@ -1174,9 +1180,6 @@ impl Agent {
         }
         if let Some(ctx) = skill_context {
             reasoning = reasoning.with_skill_context(ctx);
-        }
-        if let Some(trust) = skill_trust {
-            reasoning = reasoning.with_skill_trust(trust);
         }
 
         // Build context with messages that we'll mutate during the loop
@@ -1886,6 +1889,34 @@ impl Agent {
             // Execute the approved tool and continue the loop
             let job_ctx =
                 JobContext::with_user(&message.user_id, "chat", "Interactive chat session");
+            let approval_basis = Self::last_user_message(&pending.context_messages)
+                .unwrap_or_default()
+                .to_string();
+            if approval_basis.is_empty() {
+                tracing::warn!(
+                    tool_name = pending.tool_name.as_str(),
+                    "No prior user message found while rebuilding skill enforcement context for approved tool call"
+                );
+            }
+            let active_skills = self.select_active_skills(&approval_basis).await;
+            let skill_http_scopes = if !active_skills.is_empty() {
+                Some(crate::skills::SkillHttpScopes::from_active_skills(
+                    &active_skills,
+                ))
+            } else {
+                None
+            };
+            let skill_permission_enforcer = if !active_skills.is_empty() {
+                let enforcer =
+                    crate::skills::SkillPermissionEnforcer::from_active_skills(&active_skills);
+                if enforcer.has_enforcement() {
+                    Some(enforcer)
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
 
             let _ = self
                 .channels
@@ -1898,15 +1929,18 @@ impl Agent {
                 )
                 .await;
 
-            // User explicitly approved this tool call, so skip HTTP scoping
-            // and permission enforcement
+            tracing::info!(
+                tool_name = pending.tool_name.as_str(),
+                skill_scope_count = active_skills.len(),
+                "Executing approved tool call with skill scoping/enforcement"
+            );
             let tool_result = self
                 .execute_chat_tool(
                     &pending.tool_name,
                     &pending.parameters,
                     &job_ctx,
-                    None,
-                    None,
+                    skill_http_scopes.as_ref(),
+                    skill_permission_enforcer.as_ref(),
                 )
                 .await;
 

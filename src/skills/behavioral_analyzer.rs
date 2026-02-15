@@ -11,7 +11,7 @@
 //! - **Max 8 KiB sent** -- content truncated to limit token usage.
 //! - **Temperature 0.0** -- deterministic results for caching consistency.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 
 use tokio::sync::RwLock;
@@ -114,7 +114,48 @@ impl BehavioralAnalysisResult {
 /// LLM-based behavioral analyzer for skill prompt content.
 pub struct BehavioralAnalyzer {
     llm: Arc<dyn LlmProvider>,
-    cache: Arc<RwLock<HashMap<String, BehavioralAnalysisResult>>>,
+    cache: Arc<RwLock<BehavioralCache>>,
+}
+
+#[derive(Debug, Default)]
+struct BehavioralCache {
+    entries: HashMap<String, BehavioralAnalysisResult>,
+    lru_order: VecDeque<String>,
+}
+
+impl BehavioralCache {
+    fn get(&mut self, key: &str) -> Option<BehavioralAnalysisResult> {
+        let result = self.entries.get(key).cloned();
+        if result.is_some() {
+            self.touch(key);
+        }
+        result
+    }
+
+    fn insert(&mut self, key: String, value: BehavioralAnalysisResult) {
+        let existed = self.entries.insert(key.clone(), value).is_some();
+        if existed {
+            self.touch(&key);
+            return;
+        }
+
+        self.lru_order.push_back(key.clone());
+        if self.entries.len() > MAX_CACHE_ENTRIES {
+            while let Some(oldest) = self.lru_order.pop_front() {
+                if oldest != key {
+                    self.entries.remove(&oldest);
+                    break;
+                }
+            }
+        }
+    }
+
+    fn touch(&mut self, key: &str) {
+        if let Some(idx) = self.lru_order.iter().position(|k| k == key) {
+            self.lru_order.remove(idx);
+        }
+        self.lru_order.push_back(key.to_string());
+    }
 }
 
 impl BehavioralAnalyzer {
@@ -122,7 +163,7 @@ impl BehavioralAnalyzer {
     pub fn new(llm: Arc<dyn LlmProvider>) -> Self {
         Self {
             llm,
-            cache: Arc::new(RwLock::new(HashMap::new())),
+            cache: Arc::new(RwLock::new(BehavioralCache::default())),
         }
     }
 
@@ -138,26 +179,18 @@ impl BehavioralAnalyzer {
     ) -> BehavioralAnalysisResult {
         // Check cache
         {
-            let cache = self.cache.read().await;
+            let mut cache = self.cache.write().await;
             if let Some(cached) = cache.get(content_hash) {
-                return cached.clone();
+                return cached;
             }
         }
 
         // Run analysis
         let result = self.run_analysis(content, content_hash, skill_name).await;
 
-        // Cache the result (with bounded size).
-        // Note: eviction is arbitrary (HashMap order) rather than LRU. At the
-        // current MAX_CACHE_ENTRIES=256 this is acceptable -- a full LRU would
-        // add a dependency for negligible benefit.
+        // Cache the result with LRU eviction.
         {
             let mut cache = self.cache.write().await;
-            if cache.len() >= MAX_CACHE_ENTRIES {
-                if let Some(key) = cache.keys().next().cloned() {
-                    cache.remove(&key);
-                }
-            }
             cache.insert(content_hash.to_string(), result.clone());
         }
 
@@ -482,7 +515,37 @@ FINDING|data_exfiltration|medium|Another valid finding";
 
         // Cache should not exceed MAX_CACHE_ENTRIES
         let cache = analyzer.cache.read().await;
-        assert!(cache.len() <= MAX_CACHE_ENTRIES);
+        assert!(cache.entries.len() <= MAX_CACHE_ENTRIES);
+    }
+
+    #[tokio::test]
+    async fn test_cache_uses_lru_eviction() {
+        let (llm, call_count) = CountingLlm::new("CLEAN");
+        let analyzer = BehavioralAnalyzer::new(Arc::new(llm));
+
+        for i in 0..MAX_CACHE_ENTRIES {
+            let hash = format!("sha256:{:04}", i);
+            analyzer.analyze("content", &hash, "skill").await;
+        }
+        assert_eq!(call_count.load(Ordering::SeqCst), MAX_CACHE_ENTRIES);
+
+        // Touch the oldest entry so it becomes most-recently used.
+        analyzer.analyze("content", "sha256:0000", "skill").await;
+        assert_eq!(call_count.load(Ordering::SeqCst), MAX_CACHE_ENTRIES);
+
+        // Insert one more; this should evict sha256:0001 (the oldest untouched).
+        analyzer
+            .analyze("content", "sha256:extra", "skill-extra")
+            .await;
+        assert_eq!(call_count.load(Ordering::SeqCst), MAX_CACHE_ENTRIES + 1);
+
+        // Evicted entry requires a new LLM call.
+        analyzer.analyze("content", "sha256:0001", "skill").await;
+        assert_eq!(call_count.load(Ordering::SeqCst), MAX_CACHE_ENTRIES + 2);
+
+        // Recently touched entry remains cached.
+        analyzer.analyze("content", "sha256:0000", "skill").await;
+        assert_eq!(call_count.load(Ordering::SeqCst), MAX_CACHE_ENTRIES + 2);
     }
 
     #[test]
