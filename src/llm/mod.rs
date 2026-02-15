@@ -6,6 +6,7 @@
 //! - **Anthropic**: Direct API access with your own key
 //! - **Ollama**: Local model inference
 //! - **OpenAI-compatible**: Any endpoint that speaks the OpenAI API
+//! - **Venice**: Venice AI inference API with web search, scraping, and dynamic pricing
 
 mod costs;
 pub mod failover;
@@ -16,10 +17,12 @@ mod reasoning;
 mod retry;
 mod rig_adapter;
 pub mod session;
+mod venice;
 
 pub use failover::FailoverProvider;
 pub use nearai::{ModelInfo, NearAiProvider};
 pub use nearai_chat::NearAiChatProvider;
+pub use venice::VeniceProvider;
 pub use provider::{
     ChatMessage, CompletionRequest, CompletionResponse, FinishReason, LlmProvider, ModelMetadata,
     Role, ToolCall, ToolCompletionRequest, ToolCompletionResponse, ToolDefinition, ToolResult,
@@ -54,6 +57,7 @@ pub fn create_llm_provider(
         LlmBackend::Anthropic => create_anthropic_provider(config),
         LlmBackend::Ollama => create_ollama_provider(config),
         LlmBackend::OpenAiCompatible => create_openai_compatible_provider(config),
+        LlmBackend::Venice => create_venice_provider(config),
     }
 }
 
@@ -182,4 +186,12 @@ fn create_openai_compatible_provider(config: &LlmConfig) -> Result<Arc<dyn LlmPr
         compat.model
     );
     Ok(Arc::new(RigAdapter::new(model, &compat.model)))
+}
+
+fn create_venice_provider(config: &LlmConfig) -> Result<Arc<dyn LlmProvider>, LlmError> {
+    let venice = config.venice.as_ref().ok_or_else(|| LlmError::AuthFailed {
+        provider: "venice".to_string(),
+    })?;
+    tracing::info!("Using Venice API (model: {})", venice.model);
+    Ok(Arc::new(VeniceProvider::new(venice.clone())?))
 }

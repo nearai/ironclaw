@@ -156,6 +156,7 @@ pub fn default_allowlist() -> Vec<String> {
         "api.openai.com".to_string(),
         "api.anthropic.com".to_string(),
         "api.near.ai".to_string(),
+        "api.venice.ai".to_string(),
     ]
 }
 

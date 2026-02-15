@@ -38,7 +38,9 @@ use ironclaw::{
         mcp::{McpClient, McpSessionManager, config::load_mcp_servers_from_db, is_authenticated},
         wasm::{WasmToolLoader, WasmToolRuntime, load_dev_tools},
     },
-    workspace::{EmbeddingProvider, NearAiEmbeddings, OpenAiEmbeddings, Workspace},
+    workspace::{
+        EmbeddingProvider, NearAiEmbeddings, OpenAiEmbeddings, VeniceEmbeddings, Workspace,
+    },
 };
 
 #[cfg(feature = "libsql")]
@@ -114,6 +116,24 @@ async fn main() -> anyhow::Result<()> {
                             )
                             .with_model(&config.embeddings.model, 1536),
                         )),
+                        "venice" => {
+                            if let Some(api_key) = config.embeddings.venice_api_key() {
+                                let dim = match config.embeddings.model.as_str() {
+                                    "text-embedding-3-large" => 3072,
+                                    _ => 1536,
+                                };
+                                Some(Arc::new(
+                                    ironclaw::workspace::VeniceEmbeddings::new(
+                                        api_key,
+                                        config.embeddings.venice_base_url(),
+                                    )
+                                    .with_model(&config.embeddings.model, dim),
+                                ))
+                            } else {
+                                tracing::warn!("Embeddings configured for Venice but VENICE_API_KEY not set");
+                                None
+                            }
+                        }
                         _ => {
                             if let Some(api_key) = config.embeddings.openai_api_key() {
                                 let dim = match config.embeddings.model.as_str() {
@@ -490,6 +510,25 @@ async fn main() -> anyhow::Result<()> {
                     NearAiEmbeddings::new(&config.llm.nearai.base_url, session.clone())
                         .with_model(&config.embeddings.model, 1536),
                 ))
+            }
+            "venice" => {
+                if let Some(api_key) = config.embeddings.venice_api_key() {
+                    tracing::info!(
+                        "Embeddings enabled via Venice (model: {})",
+                        config.embeddings.model
+                    );
+                    let dim = match config.embeddings.model.as_str() {
+                        "text-embedding-3-large" => 3072,
+                        _ => 1536,
+                    };
+                    Some(Arc::new(
+                        VeniceEmbeddings::new(api_key, config.embeddings.venice_base_url())
+                            .with_model(&config.embeddings.model, dim),
+                    ))
+                } else {
+                    tracing::warn!("Embeddings configured for Venice but VENICE_API_KEY not set");
+                    None
+                }
             }
             _ => {
                 // Default to OpenAI for unknown providers
