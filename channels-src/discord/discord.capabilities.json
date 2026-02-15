@@ -1,0 +1,39 @@
+{
+  "type": "channel",
+  "name": "discord",
+  "description": "Discord Gateway/Webhook channel for handling slash commands, buttons, and messages",
+  "capabilities": {
+    "http": {
+      "allowlist": [
+        { "host": "discord.com", "path_prefix": "/api/v10" }
+      ],
+      "credentials": {
+        "discord_bot_token": {
+          "secret_name": "discord_bot_token",
+          "location": { "type": "header", "header_name": "Authorization", "prefix": "Bot " },
+          "host_patterns": ["discord.com"]
+        }
+      },
+      "rate_limit": {
+        "requests_per_minute": 60,
+        "requests_per_hour": 3600
+      }
+    },
+    "secrets": {
+      "allowed_names": ["discord_bot_token", "discord_*"]
+    },
+    "channel": {
+      "allowed_paths": ["/webhook/discord"],
+      "allow_polling": false,
+      "callback_timeout_secs": 45,
+      "workspace_prefix": "channels/discord/",
+      "emit_rate_limit": {
+        "messages_per_minute": 100,
+        "messages_per_hour": 5000
+      }
+    }
+  },
+  "config": {
+    "require_signature_verification": true
+  }
+}

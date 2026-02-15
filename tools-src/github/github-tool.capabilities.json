@@ -1,0 +1,41 @@
+{
+  "capabilities": {
+    "http": {
+      "allowlist": [
+        {
+          "host": "api.github.com",
+          "path_prefix": "/",
+          "methods": [
+            "GET",
+            "POST"
+          ]
+        }
+      ],
+      "credentials": {
+        "github_token": {
+          "secret_name": "github_token",
+          "location": {
+            "type": "bearer"
+          },
+          "host_patterns": [
+            "api.github.com"
+          ]
+        }
+      },
+      "rate_limit": {
+        "requests_per_minute": 60,
+        "requests_per_hour": 3600
+      }
+    },
+    "secrets": {
+      "allowed_names": [
+        "github_token",
+        "github_*"
+      ]
+    }
+  },
+  "config": {
+    "default_limit": 30,
+    "max_limit": 100
+  }
+}
