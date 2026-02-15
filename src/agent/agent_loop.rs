@@ -1473,6 +1473,9 @@ impl Agent {
         session: Arc<Mutex<Session>>,
         thread_id: Uuid,
     ) -> Result<SubmissionResult, Error> {
+        // Lock session first, then undo manager -- consistent with process_user_input
+        // to avoid potential deadlocks.
+        let mut sess = session.lock().await;
         let undo_mgr = self.session_manager.get_undo_manager(thread_id).await;
         let mut mgr = undo_mgr.lock().await;
 
@@ -1480,7 +1483,6 @@ impl Agent {
             return Ok(SubmissionResult::ok_with_message("Nothing to undo."));
         }
 
-        let mut sess = session.lock().await;
         let thread = sess
             .threads
             .get_mut(&thread_id)
@@ -1491,12 +1493,10 @@ impl Agent {
         let current_turn = thread.turn_number();
 
         if let Some(checkpoint) = mgr.undo(current_turn, current_messages) {
-            // Extract values before consuming the reference
             let turn_number = checkpoint.turn_number;
-            let messages = checkpoint.messages.clone();
             let undo_count = mgr.undo_count();
             // Restore thread from checkpoint
-            thread.restore_from_messages(messages);
+            thread.restore_from_messages(checkpoint.messages);
             Ok(SubmissionResult::ok_with_message(format!(
                 "Undone to turn {}. {} undo(s) remaining.",
                 turn_number, undo_count
@@ -1511,6 +1511,9 @@ impl Agent {
         session: Arc<Mutex<Session>>,
         thread_id: Uuid,
     ) -> Result<SubmissionResult, Error> {
+        // Lock session first, then undo manager -- consistent with process_user_input
+        // to avoid potential deadlocks.
+        let mut sess = session.lock().await;
         let undo_mgr = self.session_manager.get_undo_manager(thread_id).await;
         let mut mgr = undo_mgr.lock().await;
 
@@ -1518,12 +1521,15 @@ impl Agent {
             return Ok(SubmissionResult::ok_with_message("Nothing to redo."));
         }
 
-        if let Some(checkpoint) = mgr.redo() {
-            let mut sess = session.lock().await;
-            let thread = sess
-                .threads
-                .get_mut(&thread_id)
-                .ok_or_else(|| Error::from(crate::error::JobError::NotFound { id: thread_id }))?;
+        let thread = sess
+            .threads
+            .get_mut(&thread_id)
+            .ok_or_else(|| Error::from(crate::error::JobError::NotFound { id: thread_id }))?;
+
+        let current_messages = thread.messages();
+        let current_turn = thread.turn_number();
+
+        if let Some(checkpoint) = mgr.redo(current_turn, current_messages) {
             thread.restore_from_messages(checkpoint.messages);
             Ok(SubmissionResult::ok_with_message(format!(
                 "Redone to turn {}.",
