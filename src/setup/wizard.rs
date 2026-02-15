@@ -503,7 +503,6 @@ impl SetupWizard {
     async fn step_security(&mut self) -> Result<(), SetupError> {
         // Check current configuration
         let env_key_exists = std::env::var("SECRETS_MASTER_KEY").is_ok();
-        let keychain_key_exists = crate::secrets::keychain::has_master_key().await;
 
         if env_key_exists {
             print_info("Secrets master key found in SECRETS_MASTER_KEY environment variable.");
@@ -512,13 +511,30 @@ impl SetupWizard {
             return Ok(());
         }
 
-        if keychain_key_exists {
+        // Try to retrieve existing key from keychain. We use get_master_key()
+        // instead of has_master_key() so we can cache the key bytes and build
+        // SecretsCrypto eagerly, avoiding redundant keychain accesses later
+        // (each access triggers macOS system dialogs).
+        print_info("Checking OS keychain for existing master key...");
+        if let Ok(keychain_key_bytes) = crate::secrets::keychain::get_master_key().await {
+            let key_hex: String = keychain_key_bytes
+                .iter()
+                .map(|b| format!("{:02x}", b))
+                .collect();
+            self.secrets_crypto = Some(Arc::new(
+                SecretsCrypto::new(SecretString::from(key_hex))
+                    .map_err(|e| SetupError::Config(e.to_string()))?,
+            ));
+
             print_info("Existing master key found in OS keychain.");
             if confirm("Use existing keychain key?", true).map_err(SetupError::Io)? {
                 self.settings.secrets_master_key_source = KeySource::Keychain;
                 print_success("Security configured (keychain)");
                 return Ok(());
             }
+            // User declined the existing key; clear the cached crypto so a fresh
+            // key can be generated below.
+            self.secrets_crypto = None;
         }
 
         // Offer options
