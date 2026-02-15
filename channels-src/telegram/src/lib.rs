@@ -285,11 +285,7 @@ impl Guest for TelegramChannel {
         }
 
         // Persist dm_policy and allow_from for DM pairing in handle_message
-        let dm_policy = config
-            .dm_policy
-            .as_deref()
-            .unwrap_or("pairing")
-            .to_string();
+        let dm_policy = config.dm_policy.as_deref().unwrap_or("pairing").to_string();
         let _ = channel_host::workspace_write(DM_POLICY_PATH, &dm_policy);
 
         let allow_from_json = serde_json::to_string(&config.allow_from.unwrap_or_default())
@@ -844,8 +840,8 @@ fn send_pairing_reply(chat_id: i64, code: &str) -> Result<(), String> {
         "parse_mode": "Markdown",
     });
 
-    let payload_bytes = serde_json::to_vec(&payload)
-        .map_err(|e| format!("Failed to serialize payload: {}", e))?;
+    let payload_bytes =
+        serde_json::to_vec(&payload).map_err(|e| format!("Failed to serialize payload: {}", e))?;
 
     let headers = serde_json::json!({
         "Content-Type": "application/json"
@@ -915,15 +911,10 @@ fn handle_message(message: TelegramMessage) {
     let is_private = message.chat.chat_type == "private";
 
     // Owner validation: when owner_id is set, only that user can message
-    let owner_configured = channel_host::workspace_read(OWNER_ID_PATH)
-        .map(|s| !s.is_empty())
-        .unwrap_or(false);
+    let owner_id_str = channel_host::workspace_read(OWNER_ID_PATH).filter(|s| !s.is_empty());
 
-    if owner_configured {
-        if let Ok(owner_id) = channel_host::workspace_read(OWNER_ID_PATH)
-            .unwrap()
-            .parse::<i64>()
-        {
+    if let Some(ref id_str) = owner_id_str {
+        if let Ok(owner_id) = id_str.parse::<i64>() {
             if from.id != owner_id {
                 channel_host::log(
                     channel_host::LogLevel::Debug,
@@ -937,8 +928,8 @@ fn handle_message(message: TelegramMessage) {
         }
     } else if is_private {
         // No owner_id: apply dm_policy for private chats
-        let dm_policy = channel_host::workspace_read(DM_POLICY_PATH)
-            .unwrap_or_else(|| "pairing".to_string());
+        let dm_policy =
+            channel_host::workspace_read(DM_POLICY_PATH).unwrap_or_else(|| "pairing".to_string());
 
         if dm_policy != "open" {
             // Build effective allow list: config allow_from + pairing store
@@ -1001,8 +992,7 @@ fn handle_message(message: TelegramMessage) {
 
         if !respond_to_all {
             let has_command = content.starts_with('/');
-            let bot_username = channel_host::workspace_read(BOT_USERNAME_PATH)
-                .unwrap_or_default();
+            let bot_username = channel_host::workspace_read(BOT_USERNAME_PATH).unwrap_or_default();
             let has_bot_mention = if bot_username.is_empty() {
                 content.contains('@')
             } else {

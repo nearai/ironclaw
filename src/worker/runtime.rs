@@ -313,6 +313,7 @@ Work independently to complete this job. Report when done."#,
                                 parameters: tc.arguments.clone(),
                                 reasoning: String::new(),
                                 alternatives: vec![],
+                                tool_call_id: tc.id.clone(),
                             };
                             self.process_result(reason_ctx, &selection, result);
                         }
@@ -422,7 +423,7 @@ Work independently to complete this job. Report when done."#,
                 );
 
                 reason_ctx.messages.push(ChatMessage::tool_result(
-                    "tool_call_id",
+                    &selection.tool_call_id,
                     &selection.tool_name,
                     wrapped,
                 ));
@@ -436,7 +437,7 @@ Work independently to complete this job. Report when done."#,
             Err(e) => {
                 tracing::warn!("Tool {} failed: {}", selection.tool_name, e);
                 reason_ctx.messages.push(ChatMessage::tool_result(
-                    "tool_call_id",
+                    &selection.tool_call_id,
                     &selection.tool_name,
                     format!("Error: {}", e),
                 ));
