@@ -52,166 +52,76 @@ impl exports::near::agent::tool::Guest for GoogleCalendarTool {
         r#"{
             "type": "object",
             "required": ["action"],
-            "oneOf": [
-                {
-                    "properties": {
-                        "action": { "const": "list_events" },
-                        "calendar_id": {
-                            "type": "string",
-                            "description": "Calendar ID (default: 'primary')",
-                            "default": "primary"
-                        },
-                        "time_min": {
-                            "type": "string",
-                            "description": "Lower bound for event start time (RFC3339, e.g., '2025-01-15T00:00:00Z')"
-                        },
-                        "time_max": {
-                            "type": "string",
-                            "description": "Upper bound for event end time (RFC3339)"
-                        },
-                        "max_results": {
-                            "type": "integer",
-                            "description": "Maximum number of events to return (default: 25)",
-                            "default": 25
-                        },
-                        "query": {
-                            "type": "string",
-                            "description": "Free text search terms to filter events"
-                        }
-                    },
-                    "required": ["action"]
+            "properties": {
+                "action": {
+                    "type": "string",
+                    "enum": ["list_events", "get_event", "create_event", "update_event", "delete_event"],
+                    "description": "The calendar operation to perform"
                 },
-                {
-                    "properties": {
-                        "action": { "const": "get_event" },
-                        "calendar_id": {
-                            "type": "string",
-                            "description": "Calendar ID (default: 'primary')",
-                            "default": "primary"
-                        },
-                        "event_id": {
-                            "type": "string",
-                            "description": "The event ID to retrieve"
-                        }
-                    },
-                    "required": ["action", "event_id"]
+                "calendar_id": {
+                    "type": "string",
+                    "description": "Calendar ID (default: 'primary')",
+                    "default": "primary"
                 },
-                {
-                    "properties": {
-                        "action": { "const": "create_event" },
-                        "calendar_id": {
-                            "type": "string",
-                            "description": "Calendar ID (default: 'primary')",
-                            "default": "primary"
-                        },
-                        "summary": {
-                            "type": "string",
-                            "description": "Event title"
-                        },
-                        "description": {
-                            "type": "string",
-                            "description": "Event description"
-                        },
-                        "location": {
-                            "type": "string",
-                            "description": "Event location"
-                        },
-                        "start_datetime": {
-                            "type": "string",
-                            "description": "Start time as RFC3339 (e.g., '2025-01-15T09:00:00-05:00'). Use start_date for all-day events."
-                        },
-                        "end_datetime": {
-                            "type": "string",
-                            "description": "End time as RFC3339. Use end_date for all-day events."
-                        },
-                        "start_date": {
-                            "type": "string",
-                            "description": "Start date for all-day events (e.g., '2025-01-15')"
-                        },
-                        "end_date": {
-                            "type": "string",
-                            "description": "End date for all-day events (exclusive, e.g., '2025-01-16' for a single day)"
-                        },
-                        "timezone": {
-                            "type": "string",
-                            "description": "Timezone (e.g., 'America/New_York')"
-                        },
-                        "attendees": {
-                            "type": "array",
-                            "items": { "type": "string" },
-                            "description": "Attendee email addresses"
-                        }
-                    },
-                    "required": ["action", "summary"]
+                "event_id": {
+                    "type": "string",
+                    "description": "Event ID. Required for: get_event, update_event, delete_event"
                 },
-                {
-                    "properties": {
-                        "action": { "const": "update_event" },
-                        "calendar_id": {
-                            "type": "string",
-                            "description": "Calendar ID (default: 'primary')",
-                            "default": "primary"
-                        },
-                        "event_id": {
-                            "type": "string",
-                            "description": "The event ID to update"
-                        },
-                        "summary": {
-                            "type": "string",
-                            "description": "New event title"
-                        },
-                        "description": {
-                            "type": "string",
-                            "description": "New event description"
-                        },
-                        "location": {
-                            "type": "string",
-                            "description": "New event location"
-                        },
-                        "start_datetime": {
-                            "type": "string",
-                            "description": "New start time (RFC3339)"
-                        },
-                        "end_datetime": {
-                            "type": "string",
-                            "description": "New end time (RFC3339)"
-                        },
-                        "start_date": {
-                            "type": "string",
-                            "description": "New start date for all-day events"
-                        },
-                        "end_date": {
-                            "type": "string",
-                            "description": "New end date for all-day events"
-                        },
-                        "timezone": {
-                            "type": "string",
-                            "description": "Timezone for datetime fields"
-                        },
-                        "attendees": {
-                            "type": "array",
-                            "items": { "type": "string" },
-                            "description": "Replace attendees with these email addresses"
-                        }
-                    },
-                    "required": ["action", "event_id"]
+                "time_min": {
+                    "type": "string",
+                    "description": "Lower bound for event start time (RFC3339, e.g., '2025-01-15T00:00:00Z'). Used by: list_events"
                 },
-                {
-                    "properties": {
-                        "action": { "const": "delete_event" },
-                        "calendar_id": {
-                            "type": "string",
-                            "description": "Calendar ID (default: 'primary')",
-                            "default": "primary"
-                        },
-                        "event_id": {
-                            "type": "string",
-                            "description": "The event ID to delete"
-                        }
-                    },
-                    "required": ["action", "event_id"]
+                "time_max": {
+                    "type": "string",
+                    "description": "Upper bound for event end time (RFC3339). Used by: list_events"
+                },
+                "max_results": {
+                    "type": "integer",
+                    "description": "Maximum number of events to return (default: 25). Used by: list_events",
+                    "default": 25
+                },
+                "query": {
+                    "type": "string",
+                    "description": "Free text search terms to filter events. Used by: list_events"
+                },
+                "summary": {
+                    "type": "string",
+                    "description": "Event title. Required for: create_event. Optional for: update_event"
+                },
+                "description": {
+                    "type": "string",
+                    "description": "Event description. Used by: create_event, update_event"
+                },
+                "location": {
+                    "type": "string",
+                    "description": "Event location. Used by: create_event, update_event"
+                },
+                "start_datetime": {
+                    "type": "string",
+                    "description": "Start time (RFC3339, e.g., '2025-01-15T09:00:00-05:00'). For all-day events use start_date. Used by: create_event, update_event"
+                },
+                "end_datetime": {
+                    "type": "string",
+                    "description": "End time (RFC3339). For all-day events use end_date. Used by: create_event, update_event"
+                },
+                "start_date": {
+                    "type": "string",
+                    "description": "Start date for all-day events (e.g., '2025-01-15'). Used by: create_event, update_event"
+                },
+                "end_date": {
+                    "type": "string",
+                    "description": "End date for all-day events (exclusive, e.g., '2025-01-16'). Used by: create_event, update_event"
+                },
+                "timezone": {
+                    "type": "string",
+                    "description": "Timezone (e.g., 'America/New_York'). Used by: create_event, update_event"
+                },
+                "attendees": {
+                    "type": "array",
+                    "items": { "type": "string" },
+                    "description": "Attendee email addresses. Used by: create_event, update_event"
                 }
-            ]
+            }
         }"#
         .to_string()
     }

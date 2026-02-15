@@ -1,9 +1,9 @@
 //! Configuration for IronClaw.
 //!
 //! Settings are loaded with priority: env var > database > default.
-//! The database replaces the old `settings.json` file for all settings
-//! except the 4 bootstrap fields (database_url, pool_size, secrets key
-//! source, onboard_completed) which live in `~/.ironclaw/bootstrap.json`.
+//! `DATABASE_URL` lives in `~/.ironclaw/.env` (loaded via dotenvy early
+//! in startup). Everything else comes from env vars, the DB settings
+//! table, or auto-detection.
 
 use std::path::PathBuf;
 use std::time::Duration;
@@ -40,9 +40,9 @@ impl Config {
     pub async fn from_db(
         store: &dyn crate::db::Database,
         user_id: &str,
-        bootstrap: &crate::bootstrap::BootstrapConfig,
     ) -> Result<Self, ConfigError> {
         let _ = dotenvy::dotenv();
+        crate::bootstrap::load_ironclaw_env();
 
         // Load all settings from DB into a Settings struct
         let db_settings = match store.get_all_settings(user_id).await {
@@ -53,7 +53,7 @@ impl Config {
             }
         };
 
-        Self::build(bootstrap, &db_settings).await
+        Self::build(&db_settings).await
     }
 
     /// Load configuration from environment variables only (no database).
@@ -61,20 +61,20 @@ impl Config {
     /// Used during early startup before the database is connected,
     /// and by CLI commands that don't have DB access.
     /// Falls back to legacy `settings.json` on disk if present.
+    ///
+    /// Loads both `./.env` (standard, higher priority) and `~/.ironclaw/.env`
+    /// (lower priority) via dotenvy, which never overwrites existing vars.
     pub async fn from_env() -> Result<Self, ConfigError> {
         let _ = dotenvy::dotenv();
-        let bootstrap = crate::bootstrap::BootstrapConfig::load();
+        crate::bootstrap::load_ironclaw_env();
         let settings = Settings::load();
-        Self::build(&bootstrap, &settings).await
+        Self::build(&settings).await
     }
 
-    /// Build config from bootstrap + settings (shared by from_env and from_db).
-    async fn build(
-        bootstrap: &crate::bootstrap::BootstrapConfig,
-        settings: &Settings,
-    ) -> Result<Self, ConfigError> {
+    /// Build config from settings (shared by from_env and from_db).
+    async fn build(settings: &Settings) -> Result<Self, ConfigError> {
         Ok(Self {
-            database: DatabaseConfig::resolve(bootstrap)?,
+            database: DatabaseConfig::resolve()?,
             llm: LlmConfig::resolve(settings)?,
             embeddings: EmbeddingsConfig::resolve(settings)?,
             tunnel: TunnelConfig::resolve(settings)?,
@@ -82,7 +82,7 @@ impl Config {
             agent: AgentConfig::resolve(settings)?,
             safety: SafetyConfig::resolve()?,
             wasm: WasmConfig::resolve()?,
-            secrets: SecretsConfig::resolve(bootstrap).await?,
+            secrets: SecretsConfig::resolve().await?,
             builder: BuilderModeConfig::resolve()?,
             heartbeat: HeartbeatConfig::resolve(settings)?,
             routines: RoutineConfig::resolve()?,
@@ -179,7 +179,7 @@ pub struct DatabaseConfig {
 }
 
 impl DatabaseConfig {
-    fn resolve(bootstrap: &crate::bootstrap::BootstrapConfig) -> Result<Self, ConfigError> {
+    fn resolve() -> Result<Self, ConfigError> {
         let backend: DatabaseBackend = if let Some(b) = optional_env("DATABASE_BACKEND")? {
             b.parse().map_err(|e| ConfigError::InvalidValue {
                 key: "DATABASE_BACKEND".to_string(),
@@ -191,8 +191,8 @@ impl DatabaseConfig {
 
         // PostgreSQL URL is required only when using the postgres backend.
         // For libsql backend, default to an empty placeholder.
+        // DATABASE_URL is loaded from ~/.ironclaw/.env via dotenvy early in startup.
         let url = optional_env("DATABASE_URL")?
-            .or_else(|| bootstrap.database_url.clone())
             .or_else(|| {
                 if backend == DatabaseBackend::LibSql {
                     Some("unused://libsql".to_string())
@@ -205,15 +205,7 @@ impl DatabaseConfig {
                 hint: "Run 'ironclaw onboard' or set DATABASE_URL environment variable".to_string(),
             })?;
 
-        let pool_size = optional_env("DATABASE_POOL_SIZE")?
-            .map(|s| s.parse())
-            .transpose()
-            .map_err(|e| ConfigError::InvalidValue {
-                key: "DATABASE_POOL_SIZE".to_string(),
-                message: format!("must be a positive integer: {e}"),
-            })?
-            .or(bootstrap.database_pool_size)
-            .unwrap_or(10);
+        let pool_size = parse_optional_env("DATABASE_POOL_SIZE", 10)?;
 
         let libsql_path = optional_env("LIBSQL_PATH")?.map(PathBuf::from).or_else(|| {
             if backend == DatabaseBackend::LibSql {
@@ -864,39 +856,23 @@ impl std::fmt::Debug for SecretsConfig {
 }
 
 impl SecretsConfig {
-    async fn resolve(bootstrap: &crate::bootstrap::BootstrapConfig) -> Result<Self, ConfigError> {
+    /// Auto-detect secrets master key from env var, then OS keychain.
+    ///
+    /// Sequential probe: SECRETS_MASTER_KEY env var first, then OS keychain.
+    /// No saved "source" needed; just try each source in order.
+    async fn resolve() -> Result<Self, ConfigError> {
         use crate::settings::KeySource;
 
         let (master_key, source) = if let Some(env_key) = optional_env("SECRETS_MASTER_KEY")? {
             (Some(SecretString::from(env_key)), KeySource::Env)
         } else {
-            match bootstrap.secrets_master_key_source {
-                KeySource::Keychain => {
-                    // Try to load from OS keychain (async on Linux)
-                    match crate::secrets::keychain::get_master_key().await {
-                        Ok(key_bytes) => {
-                            let key_hex: String =
-                                key_bytes.iter().map(|b| format!("{:02x}", b)).collect();
-                            (Some(SecretString::from(key_hex)), KeySource::Keychain)
-                        }
-                        Err(_) => {
-                            // Keychain configured but key not found
-                            // This might happen if keychain was cleared
-                            tracing::warn!(
-                                "Secrets configured for keychain but key not found. \
-                                 Run 'ironclaw onboard' to reconfigure."
-                            );
-                            (None, KeySource::None)
-                        }
-                    }
+            // Probe the OS keychain; if a key is stored, use it
+            match crate::secrets::keychain::get_master_key().await {
+                Ok(key_bytes) => {
+                    let key_hex: String = key_bytes.iter().map(|b| format!("{:02x}", b)).collect();
+                    (Some(SecretString::from(key_hex)), KeySource::Keychain)
                 }
-                KeySource::Env => {
-                    tracing::warn!(
-                        "Secrets configured for env var but SECRETS_MASTER_KEY not set."
-                    );
-                    (None, KeySource::None)
-                }
-                KeySource::None => (None, KeySource::None),
+                Err(_) => (None, KeySource::None),
             }
         };
 

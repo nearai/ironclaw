@@ -829,18 +829,71 @@ async fn auth_tool(name: String, dir: Option<PathBuf>, user_id: String) -> anyho
         }
 
         // Save the token
-        save_token(secrets_store.as_ref(), &user_id, &auth, &token).await?;
+        save_token(secrets_store.as_ref(), &user_id, &auth, &token, None, None).await?;
         print_success(display_name);
         return Ok(());
     }
 
     // Check for OAuth configuration
     if let Some(ref oauth) = auth.oauth {
-        return auth_tool_oauth(secrets_store.as_ref(), &user_id, &auth, oauth).await;
+        // For providers with shared tokens (e.g., all Google tools share google_oauth_token),
+        // combine scopes from all installed tools so one auth covers everything.
+        let combined = combine_provider_scopes(&tools_dir, &auth.secret_name, oauth).await;
+        if combined.scopes.len() > oauth.scopes.len() {
+            let extra = combined.scopes.len() - oauth.scopes.len();
+            println!(
+                "  Including scopes from {} other installed tool(s) sharing this credential.",
+                extra
+            );
+            println!();
+        }
+        return auth_tool_oauth(secrets_store.as_ref(), &user_id, &auth, &combined).await;
     }
 
     // Fall back to manual entry
     auth_tool_manual(secrets_store.as_ref(), &user_id, &auth).await
+}
+
+/// Scan the tools directory for all capabilities files sharing the same secret_name
+/// and combine their OAuth scopes. This way, authing any Google tool requests scopes
+/// for ALL installed Google tools, so one login covers everything.
+async fn combine_provider_scopes(
+    tools_dir: &Path,
+    secret_name: &str,
+    base_oauth: &crate::tools::wasm::OAuthConfigSchema,
+) -> crate::tools::wasm::OAuthConfigSchema {
+    let mut all_scopes: std::collections::HashSet<String> =
+        base_oauth.scopes.iter().cloned().collect();
+
+    if let Ok(mut entries) = tokio::fs::read_dir(tools_dir).await {
+        while let Ok(Some(entry)) = entries.next_entry().await {
+            let path = entry.path();
+            if path.extension().and_then(|e| e.to_str()) != Some("json") {
+                continue;
+            }
+            let name = path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or_default();
+            if !name.ends_with(".capabilities.json") {
+                continue;
+            }
+
+            if let Ok(content) = tokio::fs::read_to_string(&path).await
+                && let Ok(caps) = CapabilitiesFile::from_json(&content)
+                && let Some(auth) = &caps.auth
+                && auth.secret_name == secret_name
+                && let Some(oauth) = &auth.oauth
+            {
+                all_scopes.extend(oauth.scopes.iter().cloned());
+            }
+        }
+    }
+
+    let mut combined = base_oauth.clone();
+    combined.scopes = all_scopes.into_iter().collect();
+    combined.scopes.sort(); // deterministic ordering
+    combined
 }
 
 /// OAuth browser-based login flow.
@@ -853,12 +906,14 @@ async fn auth_tool_oauth(
     use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
     use rand::RngCore;
     use sha2::{Digest, Sha256};
-    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-    use tokio::net::TcpListener;
+
+    use crate::cli::oauth_defaults::{self, OAUTH_CALLBACK_PORT};
 
     let display_name = auth.display_name.as_deref().unwrap_or(&auth.secret_name);
 
-    // Get client_id from config or env
+    // Get client_id: capabilities file > runtime env var > built-in defaults
+    let builtin = oauth_defaults::builtin_credentials(&auth.secret_name);
+
     let client_id = oauth
         .client_id
         .clone()
@@ -868,41 +923,32 @@ async fn auth_tool_oauth(
                 .as_ref()
                 .and_then(|env| std::env::var(env).ok())
         })
+        .or_else(|| builtin.as_ref().map(|c| c.client_id.to_string()))
         .ok_or_else(|| {
             anyhow::anyhow!(
                 "OAuth client_id not configured.\n\
-                 Set it in the capabilities file or via environment variable."
+                 Set {} env var, or build with IRONCLAW_GOOGLE_CLIENT_ID.",
+                oauth.client_id_env.as_deref().unwrap_or("the client_id")
             )
         })?;
 
-    // Get client_secret if provided
-    let client_secret = oauth.client_secret.clone().or_else(|| {
-        oauth
-            .client_secret_env
-            .as_ref()
-            .and_then(|env| std::env::var(env).ok())
-    });
+    // Get client_secret: capabilities file > runtime env var > built-in defaults
+    let client_secret = oauth
+        .client_secret
+        .clone()
+        .or_else(|| {
+            oauth
+                .client_secret_env
+                .as_ref()
+                .and_then(|env| std::env::var(env).ok())
+        })
+        .or_else(|| builtin.as_ref().map(|c| c.client_secret.to_string()));
 
     println!("  Starting OAuth authentication...");
     println!();
 
-    // Find an available port for the callback
-    let mut listener = None;
-    let mut port = 0;
-
-    for p in 9876..=9886 {
-        match TcpListener::bind(format!("127.0.0.1:{}", p)).await {
-            Ok(l) => {
-                listener = Some(l);
-                port = p;
-                break;
-            }
-            Err(_) => continue,
-        }
-    }
-
-    let listener = listener.ok_or_else(|| anyhow::anyhow!("Could not find available port"))?;
-    let redirect_uri = format!("http://localhost:{}/callback", port);
+    let listener = oauth_defaults::bind_callback_listener().await?;
+    let redirect_uri = format!("http://localhost:{}/callback", OAUTH_CALLBACK_PORT);
 
     // Generate PKCE verifier and challenge
     let (code_verifier, code_challenge) = if oauth.use_pkce {
@@ -961,63 +1007,8 @@ async fn auth_tool_oauth(
 
     println!("  Waiting for authorization...");
 
-    // Wait for callback with timeout
-    let timeout = std::time::Duration::from_secs(300);
-    let code = tokio::time::timeout(timeout, async {
-        loop {
-            let (mut socket, _) = listener.accept().await?;
-
-            let mut reader = BufReader::new(&mut socket);
-            let mut request_line = String::new();
-            reader.read_line(&mut request_line).await?;
-
-            // Parse GET /callback?code=xxx HTTP/1.1
-            if let Some(path) = request_line.split_whitespace().nth(1)
-                && path.starts_with("/callback")
-                    && let Some(query) = path.split('?').nth(1) {
-                        for param in query.split('&') {
-                            let parts: Vec<&str> = param.splitn(2, '=').collect();
-                            if parts.len() == 2 && parts[0] == "code" {
-                                let code = urlencoding::decode(parts[1])
-                                    .unwrap_or_else(|_| parts[1].into())
-                                    .into_owned();
-
-                                // Send success response
-                                let response = format!(
-                                    "HTTP/1.1 200 OK\r\n\
-                                     Content-Type: text/html\r\n\
-                                     \r\n\
-                                     <!DOCTYPE html><html><body style=\"font-family: sans-serif; \
-                                     display: flex; justify-content: center; align-items: center; \
-                                     height: 100vh; margin: 0; background: #191919; color: white;\">\
-                                     <div style=\"text-align: center;\">\
-                                     <h1>✓ {} Connected!</h1>\
-                                     <p>You can close this window.</p>\
-                                     </div></body></html>",
-                                    display_name
-                                );
-                                let _ = socket.write_all(response.as_bytes()).await;
-                                let _ = socket.shutdown().await;
-
-                                return Ok::<_, anyhow::Error>(code);
-                            }
-                        }
-
-                        // Check for error
-                        if query.contains("error=") {
-                            let response =
-                                "HTTP/1.1 400 Bad Request\r\n\r\nAuthorization denied";
-                            let _ = socket.write_all(response.as_bytes()).await;
-                            return Err(anyhow::anyhow!("Authorization denied by user"));
-                        }
-                    }
-
-            let response = "HTTP/1.1 404 Not Found\r\n\r\n";
-            let _ = socket.write_all(response.as_bytes()).await;
-        }
-    })
-    .await
-    .map_err(|_| anyhow::anyhow!("Timed out waiting for authorization"))??;
+    let code =
+        oauth_defaults::wait_for_callback(listener, "/callback", "code", display_name).await?;
 
     println!();
     println!("  Exchanging code for token...");
@@ -1068,8 +1059,19 @@ async fn auth_tool_oauth(
             )
         })?;
 
-    // Save the token
-    save_token(store, user_id, auth, access_token).await?;
+    let refresh_token = token_data.get("refresh_token").and_then(|v| v.as_str());
+    let expires_in = token_data.get("expires_in").and_then(|v| v.as_u64());
+
+    // Save the token (with refresh token and expiry if provided)
+    save_token(
+        store,
+        user_id,
+        auth,
+        access_token,
+        refresh_token,
+        expires_in,
+    )
+    .await?;
 
     // Extract any additional info for display
     let workspace_name = token_data
@@ -1171,8 +1173,8 @@ async fn auth_tool_manual(
         }
     }
 
-    // Save the token
-    save_token(store, user_id, auth, &token).await?;
+    // Save the token (manual path: no refresh token or expiry)
+    save_token(store, user_id, auth, &token, None, None).await?;
     print_success(display_name);
     Ok(())
 }
@@ -1263,11 +1265,16 @@ async fn validate_token(
 }
 
 /// Save token to secrets store.
+///
+/// Optionally stores a refresh token (as `{secret_name}_refresh_token`) and
+/// sets `expires_at` on the access token so the runtime can auto-refresh.
 async fn save_token(
     store: &(dyn SecretsStore + Send + Sync),
     user_id: &str,
     auth: &crate::tools::wasm::AuthCapabilitySchema,
     token: &str,
+    refresh_token: Option<&str>,
+    expires_in: Option<u64>,
 ) -> anyhow::Result<()> {
     let mut params = CreateSecretParams::new(&auth.secret_name, token);
 
@@ -1275,10 +1282,28 @@ async fn save_token(
         params = params.with_provider(provider);
     }
 
+    if let Some(secs) = expires_in {
+        let expires_at = chrono::Utc::now() + chrono::Duration::seconds(secs as i64);
+        params = params.with_expiry(expires_at);
+    }
+
     store
         .create(user_id, params)
         .await
         .map_err(|e| anyhow::anyhow!("Failed to save token: {}", e))?;
+
+    // Store refresh token separately (no expiry, it's long-lived)
+    if let Some(rt) = refresh_token {
+        let refresh_name = format!("{}_refresh_token", auth.secret_name);
+        let mut refresh_params = CreateSecretParams::new(&refresh_name, rt);
+        if let Some(ref provider) = auth.provider {
+            refresh_params = refresh_params.with_provider(provider);
+        }
+        store
+            .create(user_id, refresh_params)
+            .await
+            .map_err(|e| anyhow::anyhow!("Failed to save refresh token: {}", e))?;
+    }
 
     Ok(())
 }

@@ -36,6 +36,11 @@ pub struct Store {
 
 #[cfg(feature = "postgres")]
 impl Store {
+    /// Wrap an existing pool (useful when the caller already has a connection).
+    pub fn from_pool(pool: Pool) -> Self {
+        Self { pool }
+    }
+
     /// Create a new store and connect to the database.
     pub async fn new(config: &DatabaseConfig) -> Result<Self, DatabaseError> {
         let mut cfg = Config::new();

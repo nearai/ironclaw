@@ -94,7 +94,7 @@ pub use limits::{
     WasmResourceLimiter,
 };
 pub use runtime::{PreparedModule, WasmRuntimeConfig, WasmToolRuntime};
-pub use wrapper::WasmToolWrapper;
+pub use wrapper::{OAuthRefreshConfig, WasmToolWrapper};
 
 // Capabilities (V2)
 pub use capabilities::{

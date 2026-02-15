@@ -22,7 +22,7 @@ tokio-stream = { version = "0.1", features = ["sync"] }
 futures = "0.3"
 
 # HTTP client
-reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls-native-roots", "stream"] }
 
 # Serialization
 serde = { version = "1", features = ["derive"] }
@@ -84,7 +84,8 @@ fs4 = "0.6"
 # Secrecy for sensitive values
 secrecy = { version = "0.10", features = ["serde"] }
 
-# URL encoding for OAuth flow
+# URL parsing and encoding
+url = "2"
 urlencoding = "2"
 
 # Open URLs in browser

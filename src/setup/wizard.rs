@@ -83,7 +83,7 @@ impl SetupWizard {
     pub fn new() -> Self {
         Self {
             config: SetupConfig::default(),
-            settings: Settings::load(),
+            settings: Settings::default(),
             session_manager: None,
             #[cfg(feature = "postgres")]
             db_pool: None,
@@ -97,7 +97,7 @@ impl SetupWizard {
     pub fn with_config(config: SetupConfig) -> Self {
         Self {
             config,
-            settings: Settings::load(),
+            settings: Settings::default(),
             session_manager: None,
             #[cfg(feature = "postgres")]
             db_pool: None,
@@ -158,7 +158,7 @@ impl SetupWizard {
         }
 
         // Save settings and print summary
-        self.save_and_summarize()?;
+        self.save_and_summarize().await?;
 
         Ok(())
     }
@@ -818,7 +818,7 @@ impl SetupWizard {
     /// Step 6: Channel configuration.
     async fn step_channels(&mut self) -> Result<(), SetupError> {
         // First, configure tunnel (shared across all channels that need webhooks)
-        match setup_tunnel() {
+        match setup_tunnel(&self.settings) {
             Ok(Some(url)) => {
                 self.settings.tunnel.public_url = Some(url);
             }
@@ -934,8 +934,9 @@ impl SetupWizard {
                             .await
                             .map_err(SetupError::Channel)?
                     } else if channel_name == "telegram" {
-                        let telegram_result =
-                            setup_telegram(ctx).await.map_err(SetupError::Channel)?;
+                        let telegram_result = setup_telegram(ctx, &self.settings)
+                            .await
+                            .map_err(SetupError::Channel)?;
                         if let Some(owner_id) = telegram_result.owner_id {
                             self.settings.channels.telegram_owner_id = Some(owner_id);
                         }
@@ -1018,16 +1019,77 @@ impl SetupWizard {
         Ok(())
     }
 
-    /// Save settings and print summary.
-    fn save_and_summarize(&mut self) -> Result<(), SetupError> {
+    /// Save settings to the database and `~/.ironclaw/.env`, then print summary.
+    async fn save_and_summarize(&mut self) -> Result<(), SetupError> {
         self.settings.onboard_completed = true;
 
-        self.settings
-            .save()
-            .map_err(|e| std::io::Error::other(format!("Failed to save settings: {}", e)))?;
+        // Write all settings to the database (whichever backend is active).
+        {
+            let db_map = self.settings.to_db_map();
+            let saved = false;
+
+            #[cfg(feature = "postgres")]
+            let saved = if !saved {
+                if let Some(ref pool) = self.db_pool {
+                    let store = crate::history::Store::from_pool(pool.clone());
+                    store
+                        .set_all_settings("default", &db_map)
+                        .await
+                        .map_err(|e| {
+                            SetupError::Database(format!(
+                                "Failed to save settings to database: {}",
+                                e
+                            ))
+                        })?;
+                    true
+                } else {
+                    false
+                }
+            } else {
+                saved
+            };
+
+            #[cfg(feature = "libsql")]
+            let saved = if !saved {
+                if let Some(ref backend) = self.db_backend {
+                    use crate::db::Database as _;
+                    backend
+                        .set_all_settings("default", &db_map)
+                        .await
+                        .map_err(|e| {
+                            SetupError::Database(format!(
+                                "Failed to save settings to database: {}",
+                                e
+                            ))
+                        })?;
+                    true
+                } else {
+                    false
+                }
+            } else {
+                saved
+            };
+
+            if !saved {
+                return Err(SetupError::Database(
+                    "No database connection, cannot save settings".to_string(),
+                ));
+            }
+        }
+
+        // Save DATABASE_URL to ~/.ironclaw/.env (the only field that needs
+        // disk persistence before the DB is available).
+        if let Some(ref url) = self.settings.database_url {
+            crate::bootstrap::save_database_url(url).map_err(|e| {
+                SetupError::Io(std::io::Error::other(format!(
+                    "Failed to save DATABASE_URL to .env: {}",
+                    e
+                )))
+            })?;
+        }
 
         println!();
-        print_success("Configuration saved to ~/.ironclaw/");
+        print_success("Configuration saved to database");
         println!();
 
         // Print summary
