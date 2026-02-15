@@ -217,9 +217,16 @@ impl Guest for DiscordChannel {
         // Truncate content to 2000 characters to comply with Discord limits
         let content = truncate_message(&response.content);
 
-        let payload = serde_json::json!({
+        let mut payload = serde_json::json!({
             "content": content,
         });
+
+        // Check for embeds in metadata
+        if let Ok(meta_json) = serde_json::from_str::<serde_json::Value>(&response.metadata_json) {
+            if let Some(embeds) = meta_json.get("embeds") {
+                payload["embeds"] = embeds.clone();
+            }
+        }
 
         let payload_bytes =
             serde_json::to_vec(&payload).map_err(|e| format!("Failed to serialize: {}", e))?;
@@ -315,7 +322,23 @@ fn handle_slash_command(interaction: &DiscordInteraction) {
                 channel_host::LogLevel::Error,
                 &format!("Failed to serialize metadata: {}", e),
             );
-            return; // Don't emit message if metadata can't be serialized
+            // Attempt to notify user of internal error
+            let url = format!(
+                "https://discord.com/api/v10/webhooks/{}/{}",
+                interaction.application_id, interaction.token
+            );
+            let payload = serde_json::json!({
+                "content": "❌ Internal Error: Failed to process command metadata.",
+                "flags": 64 // Ephemeral
+            });
+            let _ = channel_host::http_request(
+                "POST",
+                &url,
+                &serde_json::json!({"Content-Type": "application/json"}).to_string(),
+                Some(&serde_json::to_vec(&payload).unwrap_or_default()),
+                None,
+            );
+            return;
         }
     };
 
@@ -419,6 +442,21 @@ mod tests {
         let truncated = truncate_message(&long);
         assert_eq!(truncated.len(), 2006); // 1990 + 16 chars suffix
         assert!(truncated.ends_with("\n... (truncated)"));
+
+        // Test with multibyte characters (Euro sign is 3 bytes)
+        // 1000 chars * 3 bytes = 3000 bytes
+        let multi = "€".repeat(1000);
+        let truncated_multi = truncate_message(&multi);
+
+        // 1990 bytes limit. 1990 / 3 = 663 with remainder 1.
+        // Should truncate at 663 chars (1989 bytes).
+        // Suffix is 16 bytes. Total: 1989 + 16 = 2005 bytes.
+        assert!(truncated_multi.len() <= 2006);
+        assert!(truncated_multi.len() >= 2006 - 4); // Allow for max utf8 char width variance
+        assert!(truncated_multi.ends_with("\n... (truncated)"));
+
+        let content_part = &truncated_multi[..truncated_multi.len() - 16];
+        assert!(content_part.chars().all(|c| c == '€'));
     }
 
     #[test]

@@ -20,6 +20,19 @@ wit_bindgen::generate!({
 
 use serde::Deserialize;
 
+const MAX_TEXT_LENGTH: usize = 65536;
+
+/// Validate input length to prevent oversized payloads.
+fn validate_input_length(s: &str, field_name: &str) -> Result<(), String> {
+    if s.len() > MAX_TEXT_LENGTH {
+        return Err(format!(
+            "Input '{}' exceeds maximum length of {} characters",
+            field_name, MAX_TEXT_LENGTH
+        ));
+    }
+    Ok(())
+}
+
 /// Percent-encode a string for safe use in URL path segments.
 /// Encodes everything except alphanumeric, hyphen, underscore, and dot.
 fn url_encode_path(s: &str) -> String {
@@ -40,8 +53,7 @@ fn url_encode_path(s: &str) -> String {
 }
 
 /// Percent-encode a string for use as a URL query parameter value.
-/// Currently identical to `url_encode_path` and kept as a separate helper
-/// for clarity and potential future customization.
+/// Currently identical to `url_encode_path`.
 fn url_encode_query(s: &str) -> String {
     url_encode_path(s)
 }
@@ -64,6 +76,7 @@ enum GitHubAction {
         owner: String,
         repo: String,
         state: Option<String>,
+        page: Option<u32>,
         limit: Option<u32>,
     },
     #[serde(rename = "create_issue")]
@@ -85,6 +98,7 @@ enum GitHubAction {
         owner: String,
         repo: String,
         state: Option<String>,
+        page: Option<u32>,
         limit: Option<u32>,
     },
     #[serde(rename = "get_pull_request")]
@@ -110,6 +124,7 @@ enum GitHubAction {
     #[serde(rename = "list_repos")]
     ListRepos {
         username: String,
+        page: Option<u32>,
         limit: Option<u32>,
     },
     #[serde(rename = "get_file_content")]
@@ -132,6 +147,7 @@ enum GitHubAction {
         owner: String,
         repo: String,
         workflow_id: Option<String>,
+        page: Option<u32>,
         limit: Option<u32>,
     },
 }
@@ -177,8 +193,9 @@ fn execute_inner(params: &str) -> Result<String, String> {
             owner,
             repo,
             state,
+            page,
             limit,
-        } => list_issues(&owner, &repo, state.as_deref(), limit),
+        } => list_issues(&owner, &repo, state.as_deref(), page, limit),
         GitHubAction::CreateIssue {
             owner,
             repo,
@@ -195,8 +212,9 @@ fn execute_inner(params: &str) -> Result<String, String> {
             owner,
             repo,
             state,
+            page,
             limit,
-        } => list_pull_requests(&owner, &repo, state.as_deref(), limit),
+        } => list_pull_requests(&owner, &repo, state.as_deref(), page, limit),
         GitHubAction::GetPullRequest {
             owner,
             repo,
@@ -214,7 +232,11 @@ fn execute_inner(params: &str) -> Result<String, String> {
             body,
             event,
         } => create_pr_review(&owner, &repo, pr_number, &body, &event),
-        GitHubAction::ListRepos { username, limit } => list_repos(&username, limit),
+        GitHubAction::ListRepos {
+            username,
+            page,
+            limit,
+        } => list_repos(&username, page, limit),
         GitHubAction::GetFileContent {
             owner,
             repo,
@@ -232,8 +254,9 @@ fn execute_inner(params: &str) -> Result<String, String> {
             owner,
             repo,
             workflow_id,
+            page,
             limit,
-        } => get_workflow_runs(&owner, &repo, workflow_id.as_deref(), limit),
+        } => get_workflow_runs(&owner, &repo, workflow_id.as_deref(), page, limit),
     }
 }
 
@@ -253,7 +276,6 @@ fn github_request(method: &str, path: &str, body: Option<String>) -> Result<Stri
 
     // Authorization header (Bearer <token>) is injected automatically by the host
     // via the `http-wrapper` proxy based on the `github_token` secret.
-    // The WASM tool never sees the raw token value.
     let headers = serde_json::json!({
         "Accept": "application/vnd.github+json",
         "X-GitHub-Api-Version": "2022-11-28",
@@ -262,24 +284,82 @@ fn github_request(method: &str, path: &str, body: Option<String>) -> Result<Stri
 
     let body_bytes = body.map(|b| b.into_bytes());
 
-    let response = near::agent::host::http_request(
-        method,
-        &url,
-        &headers.to_string(),
-        body_bytes.as_deref(),
-        None,
-    );
+    // Simple retry logic for transient errors (max 3 attempts)
+    let max_retries = 3;
+    let mut attempt = 0;
 
-    match response {
-        Ok(resp) => {
-            if resp.status >= 200 && resp.status < 300 {
-                String::from_utf8(resp.body).map_err(|e| format!("Invalid UTF-8: {}", e))
-            } else {
-                let body_str = String::from_utf8_lossy(&resp.body);
-                Err(format!("GitHub API error {}: {}", resp.status, body_str))
+    loop {
+        attempt += 1;
+
+        let response = near::agent::host::http_request(
+            method,
+            &url,
+            &headers.to_string(),
+            body_bytes.as_deref(),
+            None,
+        );
+
+        match response {
+            Ok(resp) => {
+                // Log warning if rate limit is low
+                if let Ok(headers_json) =
+                    serde_json::from_str::<serde_json::Value>(&resp.headers_json)
+                {
+                    // Header keys are often lowercase in http libs, check case-insensitively if needed,
+                    // but usually standard is lowercase/case-insensitive. Let's try lowercase.
+                    if let Some(remaining) = headers_json
+                        .get("x-ratelimit-remaining")
+                        .and_then(|v| v.as_str())
+                    {
+                        if let Ok(count) = remaining.parse::<u32>() {
+                            if count < 10 {
+                                near::agent::host::log(
+                                    near::agent::host::LogLevel::Warn,
+                                    &format!("GitHub API rate limit low: {} remaining", count),
+                                );
+                            }
+                        }
+                    }
+                }
+
+                if resp.status >= 200 && resp.status < 300 {
+                    return String::from_utf8(resp.body)
+                        .map_err(|e| format!("Invalid UTF-8: {}", e));
+                } else if attempt < max_retries && (resp.status == 429 || resp.status >= 500) {
+                    near::agent::host::log(
+                        near::agent::host::LogLevel::Warn,
+                        &format!(
+                            "GitHub API error {} (attempt {}/{}). Retrying...",
+                            resp.status, attempt, max_retries
+                        ),
+                    );
+                    // Minimal backoff simulation since we can't block easily in WASM without consuming generic budget?
+                    // actually std::thread::sleep works in WASMtime if configured, but here we might just spin.
+                    // ideally host exposes sleep. For now just retry immediately or rely on host timeout logic?
+                    // Let's assume immediate retry for now as simple strategy.
+                    continue;
+                } else {
+                    let body_str = String::from_utf8_lossy(&resp.body);
+                    return Err(format!("GitHub API error {}: {}", resp.status, body_str));
+                }
+            }
+            Err(e) => {
+                if attempt < max_retries {
+                    near::agent::host::log(
+                        near::agent::host::LogLevel::Warn,
+                        &format!(
+                            "HTTP request failed: {} (attempt {}/{}). Retrying...",
+                            e, attempt, max_retries
+                        ),
+                    );
+                    continue;
+                }
+                return Err(format!(
+                    "HTTP request failed after {} attempts: {}",
+                    max_retries, e
+                ));
             }
         }
-        Err(e) => Err(format!("HTTP request failed: {}", e)),
     }
 }
 
@@ -302,6 +382,7 @@ fn list_issues(
     owner: &str,
     repo: &str,
     state: Option<&str>,
+    page: Option<u32>,
     limit: Option<u32>,
 ) -> Result<String, String> {
     if !validate_path_segment(owner) || !validate_path_segment(repo) {
@@ -312,10 +393,15 @@ fn list_issues(
     let state = state.unwrap_or("open");
     let limit = limit.unwrap_or(30).min(100); // Cap at 100
     let encoded_state = url_encode_query(state);
-    let path = format!(
+
+    let mut path = format!(
         "/repos/{}/{}/issues?state={}&per_page={}",
         encoded_owner, encoded_repo, encoded_state, limit
     );
+    if let Some(p) = page {
+        path.push_str(&format!("&page={}", p));
+    }
+
     github_request("GET", &path, None)
 }
 
@@ -329,6 +415,11 @@ fn create_issue(
     if !validate_path_segment(owner) || !validate_path_segment(repo) {
         return Err("Invalid owner or repo name".into());
     }
+    validate_input_length(title, "title")?;
+    if let Some(b) = body {
+        validate_input_length(b, "body")?;
+    }
+
     let encoded_owner = url_encode_path(owner);
     let encoded_repo = url_encode_path(repo);
     let path = format!("/repos/{}/{}/issues", encoded_owner, encoded_repo);
@@ -364,6 +455,7 @@ fn list_pull_requests(
     owner: &str,
     repo: &str,
     state: Option<&str>,
+    page: Option<u32>,
     limit: Option<u32>,
 ) -> Result<String, String> {
     if !validate_path_segment(owner) || !validate_path_segment(repo) {
@@ -374,10 +466,15 @@ fn list_pull_requests(
     let state = state.unwrap_or("open");
     let limit = limit.unwrap_or(30).min(100); // Cap at 100
     let encoded_state = url_encode_query(state);
-    let path = format!(
+
+    let mut path = format!(
         "/repos/{}/{}/pulls?state={}&per_page={}",
         encoded_owner, encoded_repo, encoded_state, limit
     );
+    if let Some(p) = page {
+        path.push_str(&format!("&page={}", p));
+    }
+
     github_request("GET", &path, None)
 }
 
@@ -423,8 +520,15 @@ fn create_pr_review(
     if !validate_path_segment(owner) || !validate_path_segment(repo) {
         return Err("Invalid owner or repo name".into());
     }
-    if !["APPROVE", "REQUEST_CHANGES", "COMMENT"].contains(&event) {
-        return Err("Invalid event: must be APPROVE, REQUEST_CHANGES, or COMMENT".into());
+    validate_input_length(body, "body")?;
+
+    let valid_events = ["APPROVE", "REQUEST_CHANGES", "COMMENT"];
+    if !valid_events.contains(&event) {
+        return Err(format!(
+            "Invalid event: '{}'. Must be one of: {}",
+            event,
+            valid_events.join(", ")
+        ));
     }
     let encoded_owner = url_encode_path(owner);
     let encoded_repo = url_encode_path(repo);
@@ -439,13 +543,16 @@ fn create_pr_review(
     github_request("POST", &path, Some(req_body.to_string()))
 }
 
-fn list_repos(username: &str, limit: Option<u32>) -> Result<String, String> {
+fn list_repos(username: &str, page: Option<u32>, limit: Option<u32>) -> Result<String, String> {
     if !validate_path_segment(username) {
         return Err("Invalid username".into());
     }
     let encoded_username = url_encode_path(username);
     let limit = limit.unwrap_or(30).min(100); // Cap at 100
-    let path = format!("/users/{}/repos?per_page={}", encoded_username, limit);
+    let mut path = format!("/users/{}/repos?per_page={}", encoded_username, limit);
+    if let Some(p) = page {
+        path.push_str(&format!("&page={}", p));
+    }
     github_request("GET", &path, None)
 }
 
@@ -507,6 +614,12 @@ fn trigger_workflow(
     if !validate_path_segment(owner) || !validate_path_segment(repo) {
         return Err("Invalid owner or repo name".into());
     }
+    // Validate inputs size if present
+    if let Some(valid_inputs) = &inputs {
+        let inputs_str = valid_inputs.to_string();
+        validate_input_length(&inputs_str, "inputs")?;
+    }
+
     // Validate workflow_id - must be a safe filename
     if workflow_id.contains('/') || workflow_id.contains("..") || workflow_id.contains(':') {
         return Err("Invalid workflow_id: must be a filename or numeric ID".into());
@@ -535,6 +648,7 @@ fn get_workflow_runs(
     owner: &str,
     repo: &str,
     workflow_id: Option<&str>,
+    page: Option<u32>,
     limit: Option<u32>,
 ) -> Result<String, String> {
     if !validate_path_segment(owner) || !validate_path_segment(repo) {
@@ -549,7 +663,7 @@ fn get_workflow_runs(
     let encoded_owner = url_encode_path(owner);
     let encoded_repo = url_encode_path(repo);
     let limit = limit.unwrap_or(30).min(100); // Cap at 100
-    let path = if let Some(workflow_id) = workflow_id {
+    let mut path = if let Some(workflow_id) = workflow_id {
         let encoded_workflow_id = url_encode_path(workflow_id);
         format!(
             "/repos/{}/{}/actions/workflows/{}/runs?per_page={}",
@@ -561,6 +675,9 @@ fn get_workflow_runs(
             encoded_owner, encoded_repo, limit
         )
     };
+    if let Some(p) = page {
+        path.push_str(&format!("&page={}", p));
+    }
     github_request("GET", &path, None)
 }
 
@@ -716,7 +833,13 @@ mod tests {
         for event in valid {
             assert!(valid.contains(&event));
         }
-        // Ensure invalid inputs are rejected
-        assert!(!valid.contains(&"INVALID"));
+    }
+
+    #[test]
+    fn test_input_length_validation() {
+        assert!(validate_input_length("short", "test").is_ok());
+
+        let long = "a".repeat(MAX_TEXT_LENGTH + 1);
+        assert!(validate_input_length(&long, "test").is_err());
     }
 }

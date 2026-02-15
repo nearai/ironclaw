@@ -12,9 +12,10 @@ WASM tool for GitHub integration - manage repos, issues, PRs, and workflows.
 
 ## Setup
 
-1. Create a GitHub Personal Access Token at https://github.com/settings/tokens
+1. Create a GitHub Personal Access Token at <https://github.com/settings/tokens>
 2. Required scopes: `repo`, `workflow`, `read:org`
 3. Store the token:
+
    ```
    ironclaw secret set github_token YOUR_TOKEN
    ```
@@ -22,6 +23,7 @@ WASM tool for GitHub integration - manage repos, issues, PRs, and workflows.
 ## Usage Examples
 
 ### Get Repository Info
+
 ```json
 {
   "action": "get_repo",
@@ -31,6 +33,7 @@ WASM tool for GitHub integration - manage repos, issues, PRs, and workflows.
 ```
 
 ### List Open Issues
+
 ```json
 {
   "action": "list_issues",
@@ -42,6 +45,7 @@ WASM tool for GitHub integration - manage repos, issues, PRs, and workflows.
 ```
 
 ### Create Issue
+
 ```json
 {
   "action": "create_issue",
@@ -54,6 +58,7 @@ WASM tool for GitHub integration - manage repos, issues, PRs, and workflows.
 ```
 
 ### List Pull Requests
+
 ```json
 {
   "action": "list_pull_requests",
@@ -65,6 +70,7 @@ WASM tool for GitHub integration - manage repos, issues, PRs, and workflows.
 ```
 
 ### Review PR
+
 ```json
 {
   "action": "create_pr_review",
@@ -77,6 +83,7 @@ WASM tool for GitHub integration - manage repos, issues, PRs, and workflows.
 ```
 
 ### Get File Content
+
 ```json
 {
   "action": "get_file_content",
@@ -88,6 +95,7 @@ WASM tool for GitHub integration - manage repos, issues, PRs, and workflows.
 ```
 
 ### Trigger Workflow
+
 ```json
 {
   "action": "trigger_workflow",
@@ -102,6 +110,7 @@ WASM tool for GitHub integration - manage repos, issues, PRs, and workflows.
 ```
 
 ### Check Workflow Runs
+
 ```json
 {
   "action": "get_workflow_runs",
@@ -110,6 +119,63 @@ WASM tool for GitHub integration - manage repos, issues, PRs, and workflows.
   "limit": 5
 }
 ```
+
+### List Workflow Runs (Pagination)
+
+```json
+{
+  "action": "get_workflow_runs",
+  "owner": "nearai",
+  "repo": "ironclaw",
+  "limit": 5,
+  "page": 2
+}
+```
+
+## Error Handling
+
+Errors are returned as strings in the `error` field of the response.
+
+### Rate Limit Exceeded
+
+When the GitHub API rate limit is exceeded (and retries fail), you might see:
+
+```text
+GitHub API error 429: { "message": "API rate limit exceeded for user ID ...", ... }
+```
+
+The tool automatically logs warnings when the rate limit is low (<10 remaining) and retries on 429/5xx errors.
+
+### Invalid Parameters
+
+```text
+Invalid event: 'INVALID'. Must be one of: APPROVE, REQUEST_CHANGES, COMMENT
+```
+
+### Missing Token
+
+```text
+GitHub token not found in secret store. Set it with: ironclaw secret set github_token <token>...
+```
+
+## Troubleshooting
+
+### "GitHub API error 404: Not Found"
+
+- Check that the `owner` and `repo` are correct.
+- Ensure the `github_token` has access to the repository (especially for private repos).
+- Verify the token scopes include `repo` and `read:org`.
+
+### "GitHub API error 401: Bad credentials"
+
+- The token might be invalid or expired.
+- Update the token: `ironclaw secret set github_token NEW_TOKEN`.
+
+### Rate Limiting
+
+- The tool logs a warning when remaining requests drop below 10.
+- Check logs for "GitHub API rate limit low".
+- If you hit the limit, wait for the reset time (usually 1 hour).
 
 ## Building
 

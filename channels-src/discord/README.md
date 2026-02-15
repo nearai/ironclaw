@@ -76,6 +76,39 @@ User: @username
 Content: [Button clicked] Original message content
 ```
 
+## Error Handling
+
+If an internal error occurs (e.g., metadata serialization failure), the tool attempts to send an ephemeral message to the user:
+
+```text
+❌ Internal Error: Failed to process command metadata.
+```
+
+Check the host logs for detailed error information.
+
+## Advanced Usage
+
+### Embeds
+
+To send embeds, include an `embeds` array in the `metadata_json` field of the agent's response. The structure should match the Discord API `embed` object.
+
+## Troubleshooting
+
+### "Invalid Signature"
+
+- Check that `discord_public_key` is set correctly in IronClaw secrets.
+- This validation happens on the host before reaching the WASM.
+
+### "401 Unauthorized"
+
+- Check that `discord_bot_token` is set correctly in IronClaw secrets.
+- Ensure the bot is added to the server.
+
+### "Interaction Failed"
+
+- The interaction might have timed out (Discord requires a response within 3 seconds).
+- The `interactions_endpoint_url` might be unreachable.
+
 ## Building
 
 ```bash
