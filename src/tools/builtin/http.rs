@@ -9,7 +9,7 @@ use reqwest::Client;
 
 use crate::context::JobContext;
 use crate::safety::LeakDetector;
-use crate::tools::tool::{Tool, ToolError, ToolOutput};
+use crate::tools::tool::{Tool, ToolError, ToolOutput, require_str};
 
 /// Maximum response body size (5 MB). Prevents OOM from unbounded responses.
 const MAX_RESPONSE_SIZE: usize = 5 * 1024 * 1024;
@@ -54,12 +54,12 @@ fn validate_url(url: &str) -> Result<reqwest::Url, ToolError> {
     }
 
     // Check literal IP addresses
-    if let Ok(ip) = host.parse::<IpAddr>() {
-        if is_disallowed_ip(&ip) {
-            return Err(ToolError::NotAuthorized(
-                "private or local IPs are not allowed".to_string(),
-            ));
-        }
+    if let Ok(ip) = host.parse::<IpAddr>()
+        && is_disallowed_ip(&ip)
+    {
+        return Err(ToolError::NotAuthorized(
+            "private or local IPs are not allowed".to_string(),
+        ));
     }
 
     // Resolve hostname and check all resolved IPs against the blocklist.
@@ -154,17 +154,9 @@ impl Tool for HttpTool {
     ) -> Result<ToolOutput, ToolError> {
         let start = std::time::Instant::now();
 
-        let method = params
-            .get("method")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| {
-                ToolError::InvalidParameters("missing 'method' parameter".to_string())
-            })?;
+        let method = require_str(&params, "method")?;
 
-        let url = params
-            .get("url")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| ToolError::InvalidParameters("missing 'url' parameter".to_string()))?;
+        let url = require_str(&params, "url")?;
         let parsed_url = validate_url(url)?;
 
         // Parse headers

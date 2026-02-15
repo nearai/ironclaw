@@ -15,7 +15,7 @@ use tokio::sync::{Mutex, broadcast};
 use uuid::Uuid;
 
 use crate::channels::web::types::SseEvent;
-use crate::history::Store;
+use crate::db::Database;
 use crate::llm::{CompletionRequest, LlmProvider, ToolCompletionRequest};
 use crate::orchestrator::auth::{TokenStore, worker_auth_middleware};
 use crate::orchestrator::job_manager::ContainerJobManager;
@@ -43,7 +43,7 @@ pub struct OrchestratorState {
     /// Buffered follow-up prompts for sandbox jobs, keyed by job_id.
     pub prompt_queue: Arc<Mutex<HashMap<Uuid, VecDeque<PendingPrompt>>>>,
     /// Database handle for persisting job events.
-    pub store: Option<Arc<Store>>,
+    pub store: Option<Arc<dyn Database>>,
 }
 
 /// The orchestrator's internal API server.
@@ -203,7 +203,7 @@ async fn report_complete(
     State(state): State<OrchestratorState>,
     Path(job_id): Path<Uuid>,
     Json(report): Json<CompletionReport>,
-) -> Result<StatusCode, StatusCode> {
+) -> Result<Json<serde_json::Value>, StatusCode> {
     if report.success {
         tracing::info!(
             job_id = %job_id,
@@ -224,7 +224,7 @@ async fn report_complete(
     };
     let _ = state.job_manager.complete_job(job_id, result).await;
 
-    Ok(StatusCode::OK)
+    Ok(Json(serde_json::json!({"status": "ok"})))
 }
 
 // -- Sandbox job event handlers --
@@ -340,16 +340,16 @@ async fn get_prompt_handler(
     Path(job_id): Path<Uuid>,
 ) -> Result<(StatusCode, Json<serde_json::Value>), StatusCode> {
     let mut queue = state.prompt_queue.lock().await;
-    if let Some(prompts) = queue.get_mut(&job_id) {
-        if let Some(prompt) = prompts.pop_front() {
-            return Ok((
-                StatusCode::OK,
-                Json(serde_json::json!({
-                    "content": prompt.content,
-                    "done": prompt.done,
-                })),
-            ));
-        }
+    if let Some(prompts) = queue.get_mut(&job_id)
+        && let Some(prompt) = prompts.pop_front()
+    {
+        return Ok((
+            StatusCode::OK,
+            Json(serde_json::json!({
+                "content": prompt.content,
+                "done": prompt.done,
+            })),
+        ));
     }
 
     // Return 204 with an empty body. The Json wrapper requires some value

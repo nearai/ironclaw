@@ -53,119 +53,56 @@ impl exports::near::agent::tool::Guest for GmailTool {
         r#"{
             "type": "object",
             "required": ["action"],
-            "oneOf": [
-                {
-                    "properties": {
-                        "action": { "const": "list_messages" },
-                        "query": {
-                            "type": "string",
-                            "description": "Gmail search query (same syntax as Gmail search box). Examples: 'is:unread', 'from:alice@example.com', 'subject:meeting after:2025/01/01'"
-                        },
-                        "max_results": {
-                            "type": "integer",
-                            "description": "Maximum number of messages to return (default: 20)",
-                            "default": 20
-                        },
-                        "label_ids": {
-                            "type": "array",
-                            "items": { "type": "string" },
-                            "description": "Label IDs to filter by (e.g., 'INBOX', 'SENT', 'DRAFT')"
-                        }
-                    },
-                    "required": ["action"]
+            "properties": {
+                "action": {
+                    "type": "string",
+                    "enum": ["list_messages", "get_message", "send_message", "create_draft", "reply_to_message", "trash_message"],
+                    "description": "The Gmail operation to perform"
                 },
-                {
-                    "properties": {
-                        "action": { "const": "get_message" },
-                        "message_id": {
-                            "type": "string",
-                            "description": "The message ID to retrieve"
-                        }
-                    },
-                    "required": ["action", "message_id"]
+                "query": {
+                    "type": "string",
+                    "description": "Gmail search query (same syntax as Gmail search box, e.g., 'is:unread', 'from:alice@example.com'). Used by: list_messages"
                 },
-                {
-                    "properties": {
-                        "action": { "const": "send_message" },
-                        "to": {
-                            "type": "string",
-                            "description": "Recipient email address(es), comma-separated"
-                        },
-                        "subject": {
-                            "type": "string",
-                            "description": "Email subject"
-                        },
-                        "body": {
-                            "type": "string",
-                            "description": "Email body (plain text)"
-                        },
-                        "cc": {
-                            "type": "string",
-                            "description": "CC recipients, comma-separated"
-                        },
-                        "bcc": {
-                            "type": "string",
-                            "description": "BCC recipients, comma-separated"
-                        }
-                    },
-                    "required": ["action", "to", "subject", "body"]
+                "max_results": {
+                    "type": "integer",
+                    "description": "Maximum number of messages to return (default: 20). Used by: list_messages",
+                    "default": 20
                 },
-                {
-                    "properties": {
-                        "action": { "const": "create_draft" },
-                        "to": {
-                            "type": "string",
-                            "description": "Recipient email address(es), comma-separated"
-                        },
-                        "subject": {
-                            "type": "string",
-                            "description": "Email subject"
-                        },
-                        "body": {
-                            "type": "string",
-                            "description": "Email body (plain text)"
-                        },
-                        "cc": {
-                            "type": "string",
-                            "description": "CC recipients, comma-separated"
-                        },
-                        "bcc": {
-                            "type": "string",
-                            "description": "BCC recipients, comma-separated"
-                        }
-                    },
-                    "required": ["action", "to", "subject", "body"]
+                "label_ids": {
+                    "type": "array",
+                    "items": { "type": "string" },
+                    "description": "Label IDs to filter by (e.g., 'INBOX', 'SENT', 'DRAFT'). Used by: list_messages"
                 },
-                {
-                    "properties": {
-                        "action": { "const": "reply_to_message" },
-                        "message_id": {
-                            "type": "string",
-                            "description": "The message ID to reply to"
-                        },
-                        "body": {
-                            "type": "string",
-                            "description": "Reply body (plain text)"
-                        },
-                        "reply_all": {
-                            "type": "boolean",
-                            "description": "If true, reply to all recipients (default: false)",
-                            "default": false
-                        }
-                    },
-                    "required": ["action", "message_id", "body"]
+                "message_id": {
+                    "type": "string",
+                    "description": "Message ID. Required for: get_message, reply_to_message, trash_message"
                 },
-                {
-                    "properties": {
-                        "action": { "const": "trash_message" },
-                        "message_id": {
-                            "type": "string",
-                            "description": "The message ID to move to trash"
-                        }
-                    },
-                    "required": ["action", "message_id"]
+                "to": {
+                    "type": "string",
+                    "description": "Recipient email address(es), comma-separated. Required for: send_message, create_draft"
+                },
+                "subject": {
+                    "type": "string",
+                    "description": "Email subject. Required for: send_message, create_draft"
+                },
+                "body": {
+                    "type": "string",
+                    "description": "Email body (plain text). Required for: send_message, create_draft, reply_to_message"
+                },
+                "cc": {
+                    "type": "string",
+                    "description": "CC recipients, comma-separated. Used by: send_message, create_draft"
+                },
+                "bcc": {
+                    "type": "string",
+                    "description": "BCC recipients, comma-separated. Used by: send_message, create_draft"
+                },
+                "reply_all": {
+                    "type": "boolean",
+                    "description": "If true, reply to all recipients (default: false). Used by: reply_to_message",
+                    "default": false
                 }
-            ]
+            }
         }"#
         .to_string()
     }

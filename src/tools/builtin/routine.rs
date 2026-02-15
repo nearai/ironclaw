@@ -19,18 +19,18 @@ use crate::agent::routine::{
 };
 use crate::agent::routine_engine::RoutineEngine;
 use crate::context::JobContext;
-use crate::history::Store;
-use crate::tools::tool::{Tool, ToolError, ToolOutput};
+use crate::db::Database;
+use crate::tools::tool::{Tool, ToolError, ToolOutput, require_str};
 
 // ==================== routine_create ====================
 
 pub struct RoutineCreateTool {
-    store: Arc<Store>,
+    store: Arc<dyn Database>,
     engine: Arc<RoutineEngine>,
 }
 
 impl RoutineCreateTool {
-    pub fn new(store: Arc<Store>, engine: Arc<RoutineEngine>) -> Self {
+    pub fn new(store: Arc<dyn Database>, engine: Arc<RoutineEngine>) -> Self {
         Self { store, engine }
     }
 }
@@ -106,25 +106,16 @@ impl Tool for RoutineCreateTool {
     ) -> Result<ToolOutput, ToolError> {
         let start = std::time::Instant::now();
 
-        let name = params
-            .get("name")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| ToolError::InvalidParameters("missing 'name'".to_string()))?;
+        let name = require_str(&params, "name")?;
 
         let description = params
             .get("description")
             .and_then(|v| v.as_str())
             .unwrap_or("");
 
-        let trigger_type = params
-            .get("trigger_type")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| ToolError::InvalidParameters("missing 'trigger_type'".to_string()))?;
+        let trigger_type = require_str(&params, "trigger_type")?;
 
-        let prompt = params
-            .get("prompt")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| ToolError::InvalidParameters("missing 'prompt'".to_string()))?;
+        let prompt = require_str(&params, "prompt")?;
 
         // Build trigger
         let trigger = match trigger_type {
@@ -277,11 +268,11 @@ impl Tool for RoutineCreateTool {
 // ==================== routine_list ====================
 
 pub struct RoutineListTool {
-    store: Arc<Store>,
+    store: Arc<dyn Database>,
 }
 
 impl RoutineListTool {
-    pub fn new(store: Arc<Store>) -> Self {
+    pub fn new(store: Arc<dyn Database>) -> Self {
         Self { store }
     }
 }
@@ -351,12 +342,12 @@ impl Tool for RoutineListTool {
 // ==================== routine_update ====================
 
 pub struct RoutineUpdateTool {
-    store: Arc<Store>,
+    store: Arc<dyn Database>,
     engine: Arc<RoutineEngine>,
 }
 
 impl RoutineUpdateTool {
-    pub fn new(store: Arc<Store>, engine: Arc<RoutineEngine>) -> Self {
+    pub fn new(store: Arc<dyn Database>, engine: Arc<RoutineEngine>) -> Self {
         Self { store, engine }
     }
 }
@@ -408,10 +399,7 @@ impl Tool for RoutineUpdateTool {
     ) -> Result<ToolOutput, ToolError> {
         let start = std::time::Instant::now();
 
-        let name = params
-            .get("name")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| ToolError::InvalidParameters("missing 'name'".to_string()))?;
+        let name = require_str(&params, "name")?;
 
         let mut routine = self
             .store
@@ -474,12 +462,12 @@ impl Tool for RoutineUpdateTool {
 // ==================== routine_delete ====================
 
 pub struct RoutineDeleteTool {
-    store: Arc<Store>,
+    store: Arc<dyn Database>,
     engine: Arc<RoutineEngine>,
 }
 
 impl RoutineDeleteTool {
-    pub fn new(store: Arc<Store>, engine: Arc<RoutineEngine>) -> Self {
+    pub fn new(store: Arc<dyn Database>, engine: Arc<RoutineEngine>) -> Self {
         Self { store, engine }
     }
 }
@@ -514,10 +502,7 @@ impl Tool for RoutineDeleteTool {
     ) -> Result<ToolOutput, ToolError> {
         let start = std::time::Instant::now();
 
-        let name = params
-            .get("name")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| ToolError::InvalidParameters("missing 'name'".to_string()))?;
+        let name = require_str(&params, "name")?;
 
         let routine = self
             .store
@@ -551,11 +536,11 @@ impl Tool for RoutineDeleteTool {
 // ==================== routine_history ====================
 
 pub struct RoutineHistoryTool {
-    store: Arc<Store>,
+    store: Arc<dyn Database>,
 }
 
 impl RoutineHistoryTool {
-    pub fn new(store: Arc<Store>) -> Self {
+    pub fn new(store: Arc<dyn Database>) -> Self {
         Self { store }
     }
 }
@@ -595,10 +580,7 @@ impl Tool for RoutineHistoryTool {
     ) -> Result<ToolOutput, ToolError> {
         let start = std::time::Instant::now();
 
-        let name = params
-            .get("name")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| ToolError::InvalidParameters("missing 'name'".to_string()))?;
+        let name = require_str(&params, "name")?;
 
         let limit = params
             .get("limit")

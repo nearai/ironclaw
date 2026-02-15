@@ -158,10 +158,10 @@ impl CredentialInjector {
             if pattern == name {
                 return true;
             }
-            if let Some(prefix) = pattern.strip_suffix('*') {
-                if name.starts_with(prefix) {
-                    return true;
-                }
+            if let Some(prefix) = pattern.strip_suffix('*')
+                && name.starts_with(prefix)
+            {
+                return true;
             }
         }
         false
@@ -169,7 +169,7 @@ impl CredentialInjector {
 }
 
 /// Inject a single credential into the result.
-fn inject_credential(
+pub(crate) fn inject_credential(
     result: &mut InjectedCredentials,
     location: &CredentialLocation,
     secret: &DecryptedSecret,
@@ -208,18 +208,19 @@ fn inject_credential(
 }
 
 /// Check if a host matches a pattern (supports wildcards).
-fn host_matches_pattern(host: &str, pattern: &str) -> bool {
+pub(crate) fn host_matches_pattern(host: &str, pattern: &str) -> bool {
     if pattern == host {
         return true;
     }
 
     // Support wildcard: *.example.com matches sub.example.com
-    if let Some(suffix) = pattern.strip_prefix("*.") {
-        if host.ends_with(suffix) && host.len() > suffix.len() {
-            let prefix = &host[..host.len() - suffix.len()];
-            if prefix.ends_with('.') || prefix.is_empty() {
-                return true;
-            }
+    if let Some(suffix) = pattern.strip_prefix("*.")
+        && host.ends_with(suffix)
+        && host.len() > suffix.len()
+    {
+        let prefix = &host[..host.len() - suffix.len()];
+        if prefix.ends_with('.') || prefix.is_empty() {
+            return true;
         }
     }
 

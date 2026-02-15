@@ -8,8 +8,8 @@ use chrono::{DateTime, Utc};
 use uuid::Uuid;
 
 use crate::context::{ContextManager, JobState};
+use crate::db::Database;
 use crate::error::RepairError;
-use crate::history::Store;
 use crate::tools::{BuildRequirement, Language, SoftwareBuilder, SoftwareType, ToolRegistry};
 
 /// A job that has been detected as stuck.
@@ -69,7 +69,7 @@ pub struct DefaultSelfRepair {
     #[allow(dead_code)] // Will be used for time-based stuck detection
     stuck_threshold: Duration,
     max_repair_attempts: u32,
-    store: Option<Arc<Store>>,
+    store: Option<Arc<dyn Database>>,
     builder: Option<Arc<dyn SoftwareBuilder>>,
     #[allow(dead_code)] // Will be used for tool hot-reload after repair
     tools: Option<Arc<ToolRegistry>>,
@@ -94,7 +94,7 @@ impl DefaultSelfRepair {
 
     /// Add a Store for tool failure tracking.
     #[allow(dead_code)] // Public API for configuring repair with persistence
-    pub fn with_store(mut self, store: Arc<Store>) -> Self {
+    pub fn with_store(mut self, store: Arc<dyn Database>) -> Self {
         self.store = Some(store);
         self
     }
@@ -119,25 +119,25 @@ impl SelfRepair for DefaultSelfRepair {
         let mut stuck_jobs = Vec::new();
 
         for job_id in stuck_ids {
-            if let Ok(ctx) = self.context_manager.get_context(job_id).await {
-                if ctx.state == JobState::Stuck {
-                    let stuck_duration = ctx
-                        .started_at
-                        .map(|start| {
-                            let now = Utc::now();
-                            let duration = now.signed_duration_since(start);
-                            Duration::from_secs(duration.num_seconds().max(0) as u64)
-                        })
-                        .unwrap_or_default();
+            if let Ok(ctx) = self.context_manager.get_context(job_id).await
+                && ctx.state == JobState::Stuck
+            {
+                let stuck_duration = ctx
+                    .started_at
+                    .map(|start| {
+                        let now = Utc::now();
+                        let duration = now.signed_duration_since(start);
+                        Duration::from_secs(duration.num_seconds().max(0) as u64)
+                    })
+                    .unwrap_or_default();
 
-                    stuck_jobs.push(StuckJob {
-                        job_id,
-                        last_activity: ctx.started_at.unwrap_or(ctx.created_at),
-                        stuck_duration,
-                        last_error: None,
-                        repair_attempts: ctx.repair_attempts,
-                    });
-                }
+                stuck_jobs.push(StuckJob {
+                    job_id,
+                    last_activity: ctx.started_at.unwrap_or(ctx.created_at),
+                    stuck_duration,
+                    last_error: None,
+                    repair_attempts: ctx.repair_attempts,
+                });
             }
         }
 

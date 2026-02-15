@@ -250,17 +250,17 @@ impl ContainerJobManager {
                 .unwrap_or_else(|| PathBuf::from("."))
                 .join(".ironclaw")
                 .join("projects");
-            if let Ok(canonical_base) = projects_base.canonicalize() {
-                if !canonical.starts_with(&canonical_base) {
-                    return Err(OrchestratorError::ContainerCreationFailed {
-                        job_id,
-                        reason: format!(
-                            "project directory {} is outside allowed base {}",
-                            canonical.display(),
-                            canonical_base.display()
-                        ),
-                    });
-                }
+            if let Ok(canonical_base) = projects_base.canonicalize()
+                && !canonical.starts_with(&canonical_base)
+            {
+                return Err(OrchestratorError::ContainerCreationFailed {
+                    job_id,
+                    reason: format!(
+                        "project directory {} is outside allowed base {}",
+                        canonical.display(),
+                        canonical_base.display()
+                    ),
+                });
             }
             binds.push(format!("{}:/workspace:rw", canonical.display()));
             env_vec.push("IRONCLAW_WORKSPACE=/workspace".to_string());
@@ -463,35 +463,35 @@ impl ContainerJobManager {
             let containers = self.containers.read().await;
             containers.get(&job_id).map(|h| h.container_id.clone())
         };
-        if let Some(cid) = container_id {
-            if !cid.is_empty() {
-                match connect_docker().await {
-                    Ok(docker) => {
-                        if let Err(e) = docker
-                            .stop_container(
-                                &cid,
-                                Some(bollard::container::StopContainerOptions { t: 5 }),
-                            )
-                            .await
-                        {
-                            tracing::warn!(job_id = %job_id, error = %e, "Failed to stop completed container");
-                        }
-                        if let Err(e) = docker
-                            .remove_container(
-                                &cid,
-                                Some(bollard::container::RemoveContainerOptions {
-                                    force: true,
-                                    ..Default::default()
-                                }),
-                            )
-                            .await
-                        {
-                            tracing::warn!(job_id = %job_id, error = %e, "Failed to remove completed container");
-                        }
+        if let Some(cid) = container_id
+            && !cid.is_empty()
+        {
+            match connect_docker().await {
+                Ok(docker) => {
+                    if let Err(e) = docker
+                        .stop_container(
+                            &cid,
+                            Some(bollard::container::StopContainerOptions { t: 5 }),
+                        )
+                        .await
+                    {
+                        tracing::warn!(job_id = %job_id, error = %e, "Failed to stop completed container");
                     }
-                    Err(e) => {
-                        tracing::warn!(job_id = %job_id, error = %e, "Failed to connect to Docker for container cleanup");
+                    if let Err(e) = docker
+                        .remove_container(
+                            &cid,
+                            Some(bollard::container::RemoveContainerOptions {
+                                force: true,
+                                ..Default::default()
+                            }),
+                        )
+                        .await
+                    {
+                        tracing::warn!(job_id = %job_id, error = %e, "Failed to remove completed container");
                     }
+                }
+                Err(e) => {
+                    tracing::warn!(job_id = %job_id, error = %e, "Failed to connect to Docker for container cleanup");
                 }
             }
         }

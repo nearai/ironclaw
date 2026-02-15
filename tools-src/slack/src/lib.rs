@@ -53,84 +53,44 @@ impl exports::near::agent::tool::Guest for SlackTool {
     }
 
     fn schema() -> String {
-        // JSON Schema for the tool's parameters
         r#"{
             "type": "object",
             "required": ["action"],
-            "oneOf": [
-                {
-                    "properties": {
-                        "action": { "const": "send_message" },
-                        "channel": {
-                            "type": "string",
-                            "description": "Channel ID or name (e.g., '#general' or 'C1234567890')"
-                        },
-                        "text": {
-                            "type": "string",
-                            "description": "Message text (supports Slack mrkdwn formatting)"
-                        },
-                        "thread_ts": {
-                            "type": "string",
-                            "description": "Optional thread timestamp to reply in a thread"
-                        }
-                    },
-                    "required": ["action", "channel", "text"]
+            "properties": {
+                "action": {
+                    "type": "string",
+                    "enum": ["send_message", "list_channels", "get_channel_history", "post_reaction", "get_user_info"],
+                    "description": "The Slack operation to perform"
                 },
-                {
-                    "properties": {
-                        "action": { "const": "list_channels" },
-                        "limit": {
-                            "type": "integer",
-                            "description": "Maximum number of channels to return (default: 100)",
-                            "default": 100
-                        }
-                    },
-                    "required": ["action"]
+                "channel": {
+                    "type": "string",
+                    "description": "Channel ID or name (e.g., '#general' or 'C1234567890'). Required for: send_message, get_channel_history, post_reaction"
                 },
-                {
-                    "properties": {
-                        "action": { "const": "get_channel_history" },
-                        "channel": {
-                            "type": "string",
-                            "description": "Channel ID (e.g., 'C1234567890')"
-                        },
-                        "limit": {
-                            "type": "integer",
-                            "description": "Maximum number of messages to return (default: 20)",
-                            "default": 20
-                        }
-                    },
-                    "required": ["action", "channel"]
+                "text": {
+                    "type": "string",
+                    "description": "Message text (supports Slack mrkdwn formatting). Required for: send_message"
                 },
-                {
-                    "properties": {
-                        "action": { "const": "post_reaction" },
-                        "channel": {
-                            "type": "string",
-                            "description": "Channel ID containing the message"
-                        },
-                        "timestamp": {
-                            "type": "string",
-                            "description": "Timestamp of the message to react to"
-                        },
-                        "emoji": {
-                            "type": "string",
-                            "description": "Emoji name without colons (e.g., 'thumbsup')"
-                        }
-                    },
-                    "required": ["action", "channel", "timestamp", "emoji"]
+                "thread_ts": {
+                    "type": "string",
+                    "description": "Thread timestamp to reply in a thread. Used by: send_message"
                 },
-                {
-                    "properties": {
-                        "action": { "const": "get_user_info" },
-                        "user_id": {
-                            "type": "string",
-                            "description": "User ID (e.g., 'U1234567890')"
-                        }
-                    },
-                    "required": ["action", "user_id"]
+                "limit": {
+                    "type": "integer",
+                    "description": "Maximum number of results to return. Used by: list_channels, get_channel_history"
+                },
+                "timestamp": {
+                    "type": "string",
+                    "description": "Timestamp of the message to react to. Required for: post_reaction"
+                },
+                "emoji": {
+                    "type": "string",
+                    "description": "Emoji name without colons (e.g., 'thumbsup'). Required for: post_reaction"
+                },
+                "user_id": {
+                    "type": "string",
+                    "description": "User ID (e.g., 'U1234567890'). Required for: get_user_info"
                 }
-            ]
+            }
         }"#
         .to_string()
     }

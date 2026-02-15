@@ -1,0 +1,20 @@
+[Unit]
+Description=IronClaw AI Assistant
+After=cloud-sql-proxy.service docker.service
+Requires=cloud-sql-proxy.service
+
+[Service]
+Type=simple
+ExecStartPre=/usr/bin/docker pull us-central1-docker.pkg.dev/ironclaw-prod/ironclaw/agent:latest
+ExecStart=/usr/bin/docker run --rm \
+  --name ironclaw \
+  --env-file /opt/ironclaw/.env \
+  --network=host \
+  us-central1-docker.pkg.dev/ironclaw-prod/ironclaw/agent:latest \
+  --no-onboard
+ExecStop=/usr/bin/docker stop ironclaw
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target

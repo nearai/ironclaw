@@ -21,6 +21,7 @@ use secrecy::SecretString;
 /// Display a numbered menu and get user selection.
 ///
 /// Returns the index (0-based) of the selected option.
+/// Pressing Enter without input selects the first option (index 0).
 ///
 /// # Example
 ///
@@ -54,10 +55,11 @@ pub fn select_one(prompt: &str, options: &[&str]) -> io::Result<usize> {
         }
 
         // Parse number
-        if let Ok(num) = input.parse::<usize>() {
-            if num >= 1 && num <= options.len() {
-                return Ok(num - 1);
-            }
+        if let Ok(num) = input.parse::<usize>()
+            && num >= 1
+            && num <= options.len()
+        {
+            return Ok(num - 1);
         }
 
         writeln!(
@@ -83,6 +85,10 @@ pub fn select_one(prompt: &str, options: &[&str]) -> io::Result<usize> {
 /// ])?;
 /// ```
 pub fn select_many(prompt: &str, options: &[(&str, bool)]) -> io::Result<Vec<usize>> {
+    if options.is_empty() {
+        return Ok(vec![]);
+    }
+
     let mut stdout = io::stdout();
     let mut selected: Vec<bool> = options.iter().map(|(_, s)| *s).collect();
     let mut cursor_pos = 0;

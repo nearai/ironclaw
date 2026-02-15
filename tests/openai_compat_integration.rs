@@ -302,10 +302,10 @@ async fn test_chat_completions_streaming() {
             if data == "[DONE]" {
                 continue;
             }
-            if let Ok(chunk) = serde_json::from_str::<serde_json::Value>(data) {
-                if let Some(content) = chunk["choices"][0]["delta"]["content"].as_str() {
-                    full_content.push_str(content);
-                }
+            if let Ok(chunk) = serde_json::from_str::<serde_json::Value>(data)
+                && let Some(content) = chunk["choices"][0]["delta"]["content"].as_str()
+            {
+                full_content.push_str(content);
             }
         }
     }

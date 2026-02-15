@@ -151,6 +151,12 @@ src/
 │       ├── rate_limiter.rs # Per-tool rate limiting
 │       └── storage.rs  # Linear memory persistence
 │
+├── db/                 # Database abstraction layer
+│   ├── mod.rs          # Database trait (~60 async methods)
+│   ├── postgres.rs     # PostgreSQL backend (delegates to Store + Repository)
+│   ├── libsql_backend.rs # libSQL/Turso backend (embedded SQLite)
+│   └── libsql_migrations.rs # SQLite-dialect schema (idempotent)
+│
 ├── workspace/          # Persistent memory system (OpenClaw-inspired)
 │   ├── mod.rs          # Workspace struct, memory operations
 │   ├── document.rs     # MemoryDocument, MemoryChunk, WorkspaceEntry
@@ -192,8 +198,9 @@ When designing new features or systems, always prefer generic/extensible archite
 
 ### Error Handling
 - Use `thiserror` for error types in `error.rs`
-- Never use `.unwrap()` in production code (tests are fine)
+- Never use `.unwrap()` or `.expect()` in production code (tests are fine)
 - Map errors with context: `.map_err(|e| SomeError::Variant { reason: e.to_string() })?`
+- Before committing, grep for `.unwrap()` and `.expect(` in changed files to catch violations mechanically
 
 ### Async
 - All I/O is async with tokio
@@ -201,6 +208,7 @@ When designing new features or systems, always prefer generic/extensible archite
 - Use `RwLock` for concurrent read/write access
 
 ### Traits for Extensibility
+- `Database` - Add new database backends (must implement all ~60 methods)
 - `Channel` - Add new input sources
 - `Tool` - Add new capabilities
 - `LlmProvider` - Add new LLM backends
@@ -248,7 +256,12 @@ Pending -> InProgress -> Completed -> Submitted -> Accepted
 
 Environment variables (see `.env.example`):
 ```bash
+# Database backend (default: postgres)
+DATABASE_BACKEND=postgres               # or "libsql" / "turso"
 DATABASE_URL=postgres://user:pass@localhost/ironclaw
+LIBSQL_PATH=~/.ironclaw/ironclaw.db    # libSQL local path (default)
+# LIBSQL_URL=libsql://xxx.turso.io    # Turso cloud (optional)
+# LIBSQL_AUTH_TOKEN=xxx                # Required with LIBSQL_URL
 
 # NEAR AI (required)
 NEARAI_SESSION_TOKEN=sess_...
@@ -308,7 +321,51 @@ Session tokens have the format `sess_xxx` (37 characters). They are authenticate
 
 ## Database
 
-Single migration in `migrations/V1__initial.sql`. Tables:
+IronClaw supports two database backends, selected at compile time via Cargo feature flags and at runtime via the `DATABASE_BACKEND` environment variable.
+
+**IMPORTANT: All new features that touch persistence MUST support both backends.** Implement the operation as a method on the `Database` trait in `src/db/mod.rs`, then add the implementation in both `src/db/postgres.rs` (delegate to Store/Repository) and `src/db/libsql_backend.rs` (native SQL).
+
+### Backends
+
+| Backend | Feature Flag | Default | Use Case |
+|---------|-------------|---------|----------|
+| PostgreSQL | `postgres` (default) | Yes | Production, existing deployments |
+| libSQL/Turso | `libsql` | No | Zero-dependency local mode, edge, Turso cloud |
+
+```bash
+# Build with PostgreSQL only (default)
+cargo build
+
+# Build with libSQL only
+cargo build --no-default-features --features libsql
+
+# Build with both backends available
+cargo build --features "postgres,libsql"
+```
+
+### Database Trait
+
+The `Database` trait (`src/db/mod.rs`) defines ~60 async methods covering all persistence:
+- Conversations, messages, metadata
+- Jobs, actions, LLM calls, estimation snapshots
+- Sandbox jobs, job events
+- Routines, routine runs
+- Tool failures, settings
+- Workspace: documents, chunks, hybrid search
+
+Both backends implement this trait. PostgreSQL delegates to the existing `Store` + `Repository`. libSQL implements native SQLite-dialect SQL.
+
+### Schema
+
+**PostgreSQL:** `migrations/V1__initial.sql` (351 lines). Uses pgvector for embeddings, tsvector for FTS, PL/pgSQL functions. Managed by `refinery`.
+
+**libSQL:** `src/db/libsql_migrations.rs` (consolidated schema, ~480 lines). Translates PG types:
+- `UUID` -> `TEXT`, `TIMESTAMPTZ` -> `TEXT` (ISO-8601), `JSONB` -> `TEXT`
+- `VECTOR(1536)` -> `F32_BLOB(1536)` with `libsql_vector_idx`
+- `tsvector`/`ts_rank_cd` -> FTS5 virtual table with sync triggers
+- PL/pgSQL functions -> SQLite triggers
+
+**Tables (both backends):**
 
 **Core:**
 - `conversations` - Multi-channel conversation tracking
@@ -320,12 +377,41 @@ Single migration in `migrations/V1__initial.sql`. Tables:
 
 **Workspace/Memory:**
 - `memory_documents` - Flexible path-based files (e.g., "context/vision.md", "daily/2024-01-15.md")
-- `memory_chunks` - Chunked content with FTS (tsvector) and vector (pgvector) indexes
+- `memory_chunks` - Chunked content with FTS and vector indexes
 - `heartbeat_state` - Periodic execution tracking
 
-Requires pgvector extension: `CREATE EXTENSION IF NOT EXISTS vector;`
+**Other:**
+- `routines`, `routine_runs` - Scheduled/reactive execution
+- `settings` - Per-user key-value settings
+- `tool_failures` - Self-repair tracking
+- `secrets`, `wasm_tools`, `tool_capabilities` - Extension infrastructure
 
-Run migrations: `refinery migrate -c refinery.toml`
+### Configuration
+
+```bash
+# Backend selection (default: postgres)
+DATABASE_BACKEND=libsql
+
+# PostgreSQL
+DATABASE_URL=postgres://user:pass@localhost/ironclaw
+
+# libSQL (embedded)
+LIBSQL_PATH=~/.ironclaw/ironclaw.db    # Default path
+
+# libSQL (Turso cloud sync)
+LIBSQL_URL=libsql://your-db.turso.io
+LIBSQL_AUTH_TOKEN=your-token            # Required when LIBSQL_URL is set
+```
+
+### Current Limitations (libSQL backend)
+
+- **Workspace/memory system** not yet wired through Database trait (requires Store migration)
+- **Secrets store** not yet available (still requires PostgresSecretsStore)
+- **Hybrid search** uses FTS5 only (vector search via libsql_vector_idx not yet implemented)
+- **Settings reload from DB** skipped (Config::from_db requires Store)
+- No incremental migration versioning (schema is CREATE IF NOT EXISTS, no ALTER TABLE support yet)
+- **No encryption at rest** -- The local SQLite database file stores conversation content, job data, workspace memory, and other application data in plaintext. Only secrets (API tokens, credentials) are encrypted via AES-256-GCM before storage. Users handling sensitive data should use full-disk encryption (FileVault, LUKS, BitLocker) or consider the PostgreSQL backend with TDE/encrypted storage.
+- **JSON merge patch vs path-targeted update** -- The libSQL backend uses RFC 7396 JSON Merge Patch (`json_patch`) for metadata updates, while PostgreSQL uses path-targeted `jsonb_set`. Merge patch replaces top-level keys entirely, which may drop nested keys not present in the patch. Callers should avoid relying on partial nested object updates in metadata fields.
 
 ## Safety Layer
 
@@ -387,6 +473,7 @@ Key test patterns:
 - ✅ **Claude Code mode** - Delegate jobs to Claude CLI inside containers
 - ✅ **Routines system** - Cron, event, webhook, and manual triggers with guardrails
 - ✅ **Extension management** - Install, auth, activate MCP/WASM extensions via CLI and web UI
+- ✅ **libSQL/Turso backend** - Database trait abstraction (`src/db/`), feature-gated dual backend support (postgres/libsql), embedded SQLite for zero-dependency local mode
 
 ## Adding a New Tool
 
@@ -543,6 +630,22 @@ RUST_LOG=ironclaw::agent=debug cargo run
 RUST_LOG=ironclaw=debug,tower_http=debug cargo run
 ```
 
+## Module Specifications
+
+Some modules have a `README.md` that serves as the authoritative specification
+for that module's behavior. When modifying code in a module that has a spec:
+
+1. **Read the spec first** before making changes
+2. **Code follows spec**: if the spec says X, the code must do X
+3. **Update both sides**: if you change behavior, update the spec to match;
+   if you're implementing a spec change, update the code to match
+4. **Spec is the tiebreaker**: when code and spec disagree, the spec is correct
+   (unless the spec is clearly outdated, in which case fix the spec first)
+
+| Module | Spec File |
+|--------|-----------|
+| `src/setup/` | `src/setup/README.md` |
+
 ## Code Style
 
 - Use `crate::` imports, not `super::`
@@ -550,6 +653,37 @@ RUST_LOG=ironclaw=debug,tower_http=debug cargo run
 - Prefer strong types over strings (enums, newtypes)
 - Keep functions focused, extract helpers when logic is reused
 - Comments for non-obvious logic only
+
+## Review & Fix Discipline
+
+Hard-won lessons from code review -- follow these when fixing bugs or addressing review feedback.
+
+### Fix the pattern, not just the instance
+When a reviewer flags a bug (e.g., TOCTOU race in INSERT + SELECT-back), search the entire codebase for all instances of that same pattern. A fix in `SecretsStore::create()` that doesn't also fix `WasmToolStore::store()` is half a fix.
+
+### Propagate architectural fixes to satellite types
+If a core type changes its concurrency model (e.g., `LibSqlBackend` switches to connection-per-operation), every type that was handed a resource from the old model (e.g., `LibSqlSecretsStore`, `LibSqlWasmToolStore` holding a single `Connection`) must also be updated. Grep for the old type across the codebase.
+
+### Schema translation is more than DDL
+When translating a database schema between backends (PostgreSQL to libSQL, etc.), check for:
+- **Indexes** -- diff `CREATE INDEX` statements between the two schemas
+- **Seed data** -- check for `INSERT INTO` in migrations (e.g., `leak_detection_patterns`)
+- **Semantic differences** -- document where SQL functions behave differently (e.g., `json_patch` vs `jsonb_set`)
+
+### Feature flag testing
+When adding feature-gated code, test compilation with each feature in isolation:
+```bash
+cargo check                                          # default features
+cargo check --no-default-features --features libsql  # libsql only
+cargo check --all-features                           # all features
+```
+Dead code behind the wrong `#[cfg]` gate will only show up when building with a single feature.
+
+### Mechanical verification before committing
+Run these checks on changed files before committing:
+- `grep -rnE '\.unwrap\(|\.expect\(' <files>` -- no panics in production
+- `grep -rn 'super::' <files>` -- use `crate::` imports
+- If you fixed a pattern bug, `grep` for other instances of that pattern across `src/`
 
 ## Workspace & Memory System
 
@@ -625,13 +759,17 @@ Four tools for LLM use:
 
 ### Hybrid Search (RRF)
 
-Combines full-text search (PostgreSQL `ts_rank_cd`) and vector similarity (pgvector cosine) using Reciprocal Rank Fusion:
+Combines full-text search and vector similarity using Reciprocal Rank Fusion:
 
 ```
 score(d) = Σ 1/(k + rank(d)) for each method where d appears
 ```
 
 Default k=60. Results from both methods are combined, with documents appearing in both getting boosted scores.
+
+**Backend differences:**
+- **PostgreSQL:** `ts_rank_cd` for FTS, pgvector cosine distance for vectors, full RRF
+- **libSQL:** FTS5 for keyword search only (vector search via `libsql_vector_idx` not yet wired)
 
 ### Heartbeat System
 

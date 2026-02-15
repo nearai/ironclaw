@@ -94,7 +94,7 @@ pub use limits::{
     WasmResourceLimiter,
 };
 pub use runtime::{PreparedModule, WasmRuntimeConfig, WasmToolRuntime};
-pub use wrapper::WasmToolWrapper;
+pub use wrapper::{OAuthRefreshConfig, WasmToolWrapper};
 
 // Capabilities (V2)
 pub use capabilities::{
@@ -108,10 +108,13 @@ pub use credential_injector::{CredentialInjector, InjectedCredentials, Injection
 pub use rate_limiter::{LimitType, RateLimitError, RateLimitResult, RateLimiter};
 
 // Storage (V2)
+#[cfg(feature = "libsql")]
+pub use storage::LibSqlWasmToolStore;
+#[cfg(feature = "postgres")]
+pub use storage::PostgresWasmToolStore;
 pub use storage::{
-    PostgresWasmToolStore, StoreToolParams, StoredCapabilities, StoredWasmTool,
-    StoredWasmToolWithBinary, ToolStatus, TrustLevel, WasmStorageError, WasmToolStore,
-    compute_binary_hash, verify_binary_integrity,
+    StoreToolParams, StoredCapabilities, StoredWasmTool, StoredWasmToolWithBinary, ToolStatus,
+    TrustLevel, WasmStorageError, WasmToolStore, compute_binary_hash, verify_binary_integrity,
 };
 
 // Loader

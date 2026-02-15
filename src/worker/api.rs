@@ -133,11 +133,15 @@ impl WorkerHttpClient {
         format!("{}/worker/{}/{}", self.orchestrator_url, self.job_id, path)
     }
 
-    /// Fetch the job description from the orchestrator.
-    pub async fn get_job(&self) -> Result<JobDescription, WorkerError> {
+    /// Send a GET request, check the status, and deserialize the JSON body.
+    async fn get_json<T: serde::de::DeserializeOwned>(
+        &self,
+        path: &str,
+        context: &str,
+    ) -> Result<T, WorkerError> {
         let resp = self
             .client
-            .get(self.url("job"))
+            .get(self.url(path))
             .bearer_auth(&self.token)
             .send()
             .await
@@ -149,13 +153,49 @@ impl WorkerHttpClient {
         if !resp.status().is_success() {
             return Err(WorkerError::OrchestratorRejected {
                 job_id: self.job_id,
-                reason: format!("GET /job returned {}", resp.status()),
+                reason: format!("{} returned {}", context, resp.status()),
             });
         }
 
         resp.json().await.map_err(|e| WorkerError::LlmProxyFailed {
-            reason: format!("failed to parse job description: {}", e),
+            reason: format!("{}: failed to parse response: {}", context, e),
         })
+    }
+
+    /// Send a POST request with a JSON body, check the status, and deserialize the response.
+    async fn post_json<B: Serialize, T: serde::de::DeserializeOwned>(
+        &self,
+        path: &str,
+        body: &B,
+        context: &str,
+    ) -> Result<T, WorkerError> {
+        let resp = self
+            .client
+            .post(self.url(path))
+            .bearer_auth(&self.token)
+            .json(body)
+            .send()
+            .await
+            .map_err(|e| WorkerError::LlmProxyFailed {
+                reason: format!("{}: {}", context, e),
+            })?;
+
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let body = resp.text().await.unwrap_or_default();
+            return Err(WorkerError::LlmProxyFailed {
+                reason: format!("{}: orchestrator returned {}: {}", context, status, body),
+            });
+        }
+
+        resp.json().await.map_err(|e| WorkerError::LlmProxyFailed {
+            reason: format!("{}: failed to parse response: {}", context, e),
+        })
+    }
+
+    /// Fetch the job description from the orchestrator.
+    pub async fn get_job(&self) -> Result<JobDescription, WorkerError> {
+        self.get_json("job", "GET /job").await
     }
 
     /// Proxy an LLM completion request through the orchestrator.
@@ -170,29 +210,9 @@ impl WorkerHttpClient {
             stop_sequences: request.stop_sequences.clone(),
         };
 
-        let resp = self
-            .client
-            .post(self.url("llm/complete"))
-            .bearer_auth(&self.token)
-            .json(&proxy_req)
-            .send()
-            .await
-            .map_err(|e| WorkerError::LlmProxyFailed {
-                reason: e.to_string(),
-            })?;
-
-        if !resp.status().is_success() {
-            let status = resp.status();
-            let body = resp.text().await.unwrap_or_default();
-            return Err(WorkerError::LlmProxyFailed {
-                reason: format!("orchestrator returned {}: {}", status, body),
-            });
-        }
-
-        let proxy_resp: ProxyCompletionResponse =
-            resp.json().await.map_err(|e| WorkerError::LlmProxyFailed {
-                reason: format!("failed to parse LLM response: {}", e),
-            })?;
+        let proxy_resp: ProxyCompletionResponse = self
+            .post_json("llm/complete", &proxy_req, "LLM complete")
+            .await?;
 
         Ok(CompletionResponse {
             content: proxy_resp.content,
@@ -216,29 +236,9 @@ impl WorkerHttpClient {
             tool_choice: request.tool_choice.clone(),
         };
 
-        let resp = self
-            .client
-            .post(self.url("llm/complete_with_tools"))
-            .bearer_auth(&self.token)
-            .json(&proxy_req)
-            .send()
-            .await
-            .map_err(|e| WorkerError::LlmProxyFailed {
-                reason: e.to_string(),
-            })?;
-
-        if !resp.status().is_success() {
-            let status = resp.status();
-            let body = resp.text().await.unwrap_or_default();
-            return Err(WorkerError::LlmProxyFailed {
-                reason: format!("orchestrator returned {}: {}", status, body),
-            });
-        }
-
-        let proxy_resp: ProxyToolCompletionResponse =
-            resp.json().await.map_err(|e| WorkerError::LlmProxyFailed {
-                reason: format!("failed to parse tool completion response: {}", e),
-            })?;
+        let proxy_resp: ProxyToolCompletionResponse = self
+            .post_json("llm/complete_with_tools", &proxy_req, "LLM tool complete")
+            .await?;
 
         Ok(ToolCompletionResponse {
             content: proxy_resp.content,
@@ -341,25 +341,9 @@ impl WorkerHttpClient {
 
     /// Signal job completion to the orchestrator.
     pub async fn report_complete(&self, report: &CompletionReport) -> Result<(), WorkerError> {
-        let resp = self
-            .client
-            .post(self.url("complete"))
-            .bearer_auth(&self.token)
-            .json(report)
-            .send()
-            .await
-            .map_err(|e| WorkerError::ConnectionFailed {
-                url: self.orchestrator_url.clone(),
-                reason: e.to_string(),
-            })?;
-
-        if !resp.status().is_success() {
-            return Err(WorkerError::OrchestratorRejected {
-                job_id: self.job_id,
-                reason: format!("completion report rejected: {}", resp.status()),
-            });
-        }
-
+        let _: serde_json::Value = self
+            .post_json("complete", report, "report complete")
+            .await?;
         Ok(())
     }
 }

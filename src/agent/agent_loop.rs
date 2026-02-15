@@ -19,9 +19,9 @@ use crate::channels::{ChannelManager, IncomingMessage, OutgoingResponse, StatusU
 use crate::config::{AgentConfig, HeartbeatConfig, RoutineConfig, SkillsConfig};
 use crate::context::ContextManager;
 use crate::context::JobContext;
+use crate::db::Database;
 use crate::error::Error;
 use crate::extensions::ExtensionManager;
-use crate::history::Store;
 use crate::llm::{ChatMessage, LlmProvider, Reasoning, ReasoningContext, RespondResult, Role};
 use crate::safety::SafetyLayer;
 use crate::skills::SkillRegistry;
@@ -29,7 +29,7 @@ use crate::tools::ToolRegistry;
 use crate::workspace::Workspace;
 
 /// Collapse a tool output string into a single-line preview for display.
-fn truncate_for_preview(output: &str, max_chars: usize) -> String {
+pub(crate) fn truncate_for_preview(output: &str, max_chars: usize) -> String {
     let collapsed: String = output
         .chars()
         .take(max_chars + 50)
@@ -38,8 +38,14 @@ fn truncate_for_preview(output: &str, max_chars: usize) -> String {
         .split_whitespace()
         .collect::<Vec<_>>()
         .join(" ");
-    if collapsed.len() > max_chars {
-        format!("{}...", &collapsed[..max_chars])
+    // char_indices gives us byte offsets at char boundaries, so the slice is always valid UTF-8.
+    if collapsed.chars().count() > max_chars {
+        let byte_offset = collapsed
+            .char_indices()
+            .nth(max_chars)
+            .map(|(i, _)| i)
+            .unwrap_or(collapsed.len());
+        format!("{}...", &collapsed[..byte_offset])
     } else {
         collapsed
     }
@@ -60,7 +66,7 @@ enum AgenticLoopResult {
 ///
 /// Bundles the shared components to reduce argument count.
 pub struct AgentDeps {
-    pub store: Option<Arc<Store>>,
+    pub store: Option<Arc<dyn Database>>,
     pub llm: Arc<dyn LlmProvider>,
     pub safety: Arc<SafetyLayer>,
     pub tools: Arc<ToolRegistry>,
@@ -130,7 +136,7 @@ impl Agent {
     }
 
     // Convenience accessors
-    fn store(&self) -> Option<&Arc<Store>> {
+    fn store(&self) -> Option<&Arc<dyn Database>> {
         self.deps.store.as_ref()
     }
 
@@ -702,19 +708,17 @@ impl Agent {
         }
 
         // Restore response chain from conversation metadata
-        if let Some(store) = self.store() {
-            if let Ok(Some(metadata)) = store.get_conversation_metadata(thread_uuid).await {
-                if let Some(rid) = metadata
-                    .get("last_response_id")
-                    .and_then(|v| v.as_str())
-                    .map(String::from)
-                {
-                    thread.last_response_id = Some(rid.clone());
-                    self.llm()
-                        .seed_response_chain(&thread_uuid.to_string(), rid);
-                    tracing::debug!("Restored response chain for thread {}", thread_uuid);
-                }
-            }
+        if let Some(store) = self.store()
+            && let Ok(Some(metadata)) = store.get_conversation_metadata(thread_uuid).await
+            && let Some(rid) = metadata
+                .get("last_response_id")
+                .and_then(|v| v.as_str())
+                .map(String::from)
+        {
+            thread.last_response_id = Some(rid.clone());
+            self.llm()
+                .seed_response_chain(&thread_uuid.to_string(), rid);
+            tracing::debug!("Restored response chain for thread {}", thread_uuid);
         }
 
         // Insert into session and register with session manager
@@ -1002,13 +1006,12 @@ impl Agent {
                 return;
             }
 
-            if let Some(ref resp) = response {
-                if let Err(e) = store
+            if let Some(ref resp) = response
+                && let Err(e) = store
                     .add_conversation_message(thread_id, "assistant", resp)
                     .await
-                {
-                    tracing::warn!("Failed to persist assistant message: {}", e);
-                }
+            {
+                tracing::warn!("Failed to persist assistant message: {}", e);
             }
         });
     }
@@ -1205,14 +1208,14 @@ impl Agent {
             // Check if interrupted
             {
                 let sess = session.lock().await;
-                if let Some(thread) = sess.threads.get(&thread_id) {
-                    if thread.state == ThreadState::Interrupted {
-                        return Err(crate::error::JobError::ContextError {
-                            id: thread_id,
-                            reason: "Interrupted".to_string(),
-                        }
-                        .into());
+                if let Some(thread) = sess.threads.get(&thread_id)
+                    && thread.state == ThreadState::Interrupted
+                {
+                    return Err(crate::error::JobError::ContextError {
+                        id: thread_id,
+                        reason: "Interrupted".to_string(),
                     }
+                    .into());
                 }
             }
 
@@ -1305,11 +1308,11 @@ impl Agent {
                     // Record tool calls in the thread
                     {
                         let mut sess = session.lock().await;
-                        if let Some(thread) = sess.threads.get_mut(&thread_id) {
-                            if let Some(turn) = thread.last_turn_mut() {
-                                for tc in &tool_calls {
-                                    turn.record_tool_call(&tc.name, tc.arguments.clone());
-                                }
+                        if let Some(thread) = sess.threads.get_mut(&thread_id)
+                            && let Some(turn) = thread.last_turn_mut()
+                        {
+                            for tc in &tool_calls {
+                                turn.record_tool_call(&tc.name, tc.arguments.clone());
                             }
                         }
                     }
@@ -1317,54 +1320,56 @@ impl Agent {
                     // Execute each tool (with approval checking)
                     for tc in tool_calls {
                         // Check if tool requires approval
-                        if let Some(tool) = self.tools().get(&tc.name).await {
-                            if tool.requires_approval() {
-                                // Check if auto-approved for this session
-                                let mut is_auto_approved = {
-                                    let sess = session.lock().await;
-                                    sess.is_tool_auto_approved(&tc.name)
+                        if let Some(tool) = self.tools().get(&tc.name).await
+                            && tool.requires_approval()
+                        {
+                            // Check if auto-approved for this session
+                            let mut is_auto_approved = {
+                                let sess = session.lock().await;
+                                sess.is_tool_auto_approved(&tc.name)
+                            };
+
+                            // For shell commands, override auto-approval for
+                            // destructive patterns that should always require
+                            // explicit per-invocation approval.
+                            if is_auto_approved
+                                && tc.name == "shell"
+                                && let Some(cmd) = tc
+                                    .arguments
+                                    .get("command")
+                                    .and_then(|c| c.as_str().map(String::from))
+                                    .or_else(|| {
+                                        tc.arguments
+                                            .as_str()
+                                            .and_then(|s| {
+                                                serde_json::from_str::<serde_json::Value>(s).ok()
+                                            })
+                                            .and_then(|v| {
+                                                v.get("command")
+                                                    .and_then(|c| c.as_str().map(String::from))
+                                            })
+                                    })
+                                && crate::tools::builtin::shell::requires_explicit_approval(&cmd)
+                            {
+                                tracing::info!(
+                                    "Shell command '{}' requires explicit approval despite auto-approve",
+                                    cmd.chars().take(80).collect::<String>()
+                                );
+                                is_auto_approved = false;
+                            }
+
+                            if !is_auto_approved {
+                                // Need approval - store pending request and return
+                                let pending = PendingApproval {
+                                    request_id: Uuid::new_v4(),
+                                    tool_name: tc.name.clone(),
+                                    parameters: tc.arguments.clone(),
+                                    description: tool.description().to_string(),
+                                    tool_call_id: tc.id.clone(),
+                                    context_messages: context_messages.clone(),
                                 };
 
-                                // For shell commands, override auto-approval for
-                                // destructive patterns that should always require
-                                // explicit per-invocation approval.
-                                if is_auto_approved && tc.name == "shell" {
-                                    if let Some(cmd) = tc
-                                        .arguments
-                                        .as_str()
-                                        .and_then(|s| {
-                                            serde_json::from_str::<serde_json::Value>(s).ok()
-                                        })
-                                        .and_then(|v| {
-                                            v.get("command")
-                                                .and_then(|c| c.as_str().map(String::from))
-                                        })
-                                    {
-                                        if crate::tools::builtin::shell::requires_explicit_approval(
-                                            &cmd,
-                                        ) {
-                                            tracing::info!(
-                                                "Shell command '{}' requires explicit approval despite auto-approve",
-                                                cmd.chars().take(80).collect::<String>()
-                                            );
-                                            is_auto_approved = false;
-                                        }
-                                    }
-                                }
-
-                                if !is_auto_approved {
-                                    // Need approval - store pending request and return
-                                    let pending = PendingApproval {
-                                        request_id: Uuid::new_v4(),
-                                        tool_name: tc.name.clone(),
-                                        parameters: tc.arguments.clone(),
-                                        description: tool.description().to_string(),
-                                        tool_call_id: tc.id.clone(),
-                                        context_messages: context_messages.clone(),
-                                    };
-
-                                    return Ok(AgenticLoopResult::NeedApproval { pending });
-                                }
+                                return Ok(AgenticLoopResult::NeedApproval { pending });
                             }
                         }
 
@@ -1401,34 +1406,34 @@ impl Agent {
                             )
                             .await;
 
-                        if let Ok(ref output) = tool_result {
-                            if !output.is_empty() {
-                                let _ = self
-                                    .channels
-                                    .send_status(
-                                        &message.channel,
-                                        StatusUpdate::ToolResult {
-                                            name: tc.name.clone(),
-                                            preview: truncate_for_preview(output, 200),
-                                        },
-                                        &message.metadata,
-                                    )
-                                    .await;
-                            }
+                        if let Ok(ref output) = tool_result
+                            && !output.is_empty()
+                        {
+                            let _ = self
+                                .channels
+                                .send_status(
+                                    &message.channel,
+                                    StatusUpdate::ToolResult {
+                                        name: tc.name.clone(),
+                                        preview: output.clone(),
+                                    },
+                                    &message.metadata,
+                                )
+                                .await;
                         }
 
                         // Record result in thread
                         {
                             let mut sess = session.lock().await;
-                            if let Some(thread) = sess.threads.get_mut(&thread_id) {
-                                if let Some(turn) = thread.last_turn_mut() {
-                                    match &tool_result {
-                                        Ok(output) => {
-                                            turn.record_tool_result(serde_json::json!(output));
-                                        }
-                                        Err(e) => {
-                                            turn.record_tool_error(e.to_string());
-                                        }
+                            if let Some(thread) = sess.threads.get_mut(&thread_id)
+                                && let Some(turn) = thread.last_turn_mut()
+                            {
+                                match &tool_result {
+                                    Ok(output) => {
+                                        turn.record_tool_result(serde_json::json!(output));
+                                    }
+                                    Err(e) => {
+                                        turn.record_tool_error(e.to_string());
                                     }
                                 }
                             }
@@ -1853,17 +1858,17 @@ impl Agent {
         };
 
         // Verify request ID if provided
-        if let Some(req_id) = request_id {
-            if req_id != pending.request_id {
-                // Put it back and return error
-                let mut sess = session.lock().await;
-                if let Some(thread) = sess.threads.get_mut(&thread_id) {
-                    thread.await_approval(pending);
-                }
-                return Ok(SubmissionResult::error(
-                    "Request ID mismatch. Use the correct request ID.",
-                ));
+        if let Some(req_id) = request_id
+            && req_id != pending.request_id
+        {
+            // Put it back and return error
+            let mut sess = session.lock().await;
+            if let Some(thread) = sess.threads.get_mut(&thread_id) {
+                thread.await_approval(pending);
             }
+            return Ok(SubmissionResult::error(
+                "Request ID mismatch. Use the correct request ID.",
+            ));
         }
 
         if approved {
@@ -1956,20 +1961,20 @@ impl Agent {
                 )
                 .await;
 
-            if let Ok(ref output) = tool_result {
-                if !output.is_empty() {
-                    let _ = self
-                        .channels
-                        .send_status(
-                            &message.channel,
-                            StatusUpdate::ToolResult {
-                                name: pending.tool_name.clone(),
-                                preview: truncate_for_preview(output, 200),
-                            },
-                            &message.metadata,
-                        )
-                        .await;
-                }
+            if let Ok(ref output) = tool_result
+                && !output.is_empty()
+            {
+                let _ = self
+                    .channels
+                    .send_status(
+                        &message.channel,
+                        StatusUpdate::ToolResult {
+                            name: pending.tool_name.clone(),
+                            preview: output.clone(),
+                        },
+                        &message.metadata,
+                    )
+                    .await;
             }
 
             // Build context including the tool result
@@ -1978,15 +1983,15 @@ impl Agent {
             // Record result in thread
             {
                 let mut sess = session.lock().await;
-                if let Some(thread) = sess.threads.get_mut(&thread_id) {
-                    if let Some(turn) = thread.last_turn_mut() {
-                        match &tool_result {
-                            Ok(output) => {
-                                turn.record_tool_result(serde_json::json!(output));
-                            }
-                            Err(e) => {
-                                turn.record_tool_error(e.to_string());
-                            }
+                if let Some(thread) = sess.threads.get_mut(&thread_id)
+                    && let Some(turn) = thread.last_turn_mut()
+                {
+                    match &tool_result {
+                        Ok(output) => {
+                            turn.record_tool_result(serde_json::json!(output));
+                        }
+                        Err(e) => {
+                            turn.record_tool_error(e.to_string());
                         }
                     }
                 }
@@ -2346,15 +2351,15 @@ impl Agent {
         }
 
         // Persist new job to database (fire-and-forget)
-        if let Some(store) = self.store() {
-            if let Ok(ctx) = self.context_manager.get_context(job_id).await {
-                let store = store.clone();
-                tokio::spawn(async move {
-                    if let Err(e) = store.save_job(&ctx).await {
-                        tracing::warn!("Failed to persist new job {}: {}", job_id, e);
-                    }
-                });
-            }
+        if let Some(store) = self.store()
+            && let Ok(ctx) = self.context_manager.get_context(job_id).await
+        {
+            let store = store.clone();
+            tokio::spawn(async move {
+                if let Err(e) = store.save_job(&ctx).await {
+                    tracing::warn!("Failed to persist new job {}: {}", job_id, e);
+                }
+            });
         }
 
         // Schedule for execution
@@ -2434,10 +2439,10 @@ impl Agent {
 
         let mut output = String::from("Jobs:\n");
         for job_id in jobs {
-            if let Ok(ctx) = self.context_manager.get_context(job_id).await {
-                if ctx.user_id == user_id {
-                    output.push_str(&format!("  {} - {} ({:?})\n", job_id, ctx.title, ctx.state));
-                }
+            if let Ok(ctx) = self.context_manager.get_context(job_id).await
+                && ctx.user_id == user_id
+            {
+                output.push_str(&format!("  {} - {} ({:?})\n", job_id, ctx.title, ctx.state));
             }
         }
 
@@ -2887,5 +2892,71 @@ mod tests {
         .to_string());
 
         assert!(detect_auth_awaiting("tool_activate", &result).is_none());
+    }
+
+    // --- truncate_for_preview tests ---
+
+    use super::truncate_for_preview;
+
+    #[test]
+    fn test_truncate_short_input() {
+        assert_eq!(truncate_for_preview("hello", 10), "hello");
+    }
+
+    #[test]
+    fn test_truncate_empty_input() {
+        assert_eq!(truncate_for_preview("", 10), "");
+    }
+
+    #[test]
+    fn test_truncate_exact_length() {
+        assert_eq!(truncate_for_preview("hello", 5), "hello");
+    }
+
+    #[test]
+    fn test_truncate_over_limit() {
+        let result = truncate_for_preview("hello world, this is long", 10);
+        assert!(result.ends_with("..."));
+        // "hello worl" = 10 chars + "..."
+        assert_eq!(result, "hello worl...");
+    }
+
+    #[test]
+    fn test_truncate_collapses_newlines() {
+        let result = truncate_for_preview("line1\nline2\nline3", 100);
+        assert!(!result.contains('\n'));
+        assert_eq!(result, "line1 line2 line3");
+    }
+
+    #[test]
+    fn test_truncate_collapses_whitespace() {
+        let result = truncate_for_preview("hello   world", 100);
+        assert_eq!(result, "hello world");
+    }
+
+    #[test]
+    fn test_truncate_multibyte_utf8() {
+        // Each emoji is 4 bytes. Truncating at char boundary must not panic.
+        let input = "😀😁😂🤣😃😄😅😆😉😊";
+        let result = truncate_for_preview(input, 5);
+        assert!(result.ends_with("..."));
+        // First 5 chars = 5 emoji
+        assert_eq!(result, "😀😁😂🤣😃...");
+    }
+
+    #[test]
+    fn test_truncate_cjk_characters() {
+        // CJK chars are 3 bytes each in UTF-8.
+        let input = "你好世界测试数据很长的字符串";
+        let result = truncate_for_preview(input, 4);
+        assert_eq!(result, "你好世界...");
+    }
+
+    #[test]
+    fn test_truncate_mixed_multibyte_and_ascii() {
+        let input = "hello 世界 foo";
+        let result = truncate_for_preview(input, 8);
+        // 'h','e','l','l','o',' ','世','界' = 8 chars
+        assert_eq!(result, "hello 世界...");
     }
 }
