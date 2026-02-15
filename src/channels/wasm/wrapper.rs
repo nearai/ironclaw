@@ -76,6 +76,9 @@ struct ChannelStoreData {
     credentials: HashMap<String, String>,
     /// Pairing store for DM pairing (guest access control).
     pairing_store: Arc<PairingStore>,
+    /// Dedicated tokio runtime for HTTP requests, lazily initialized.
+    /// Reused across multiple `http_request` calls within one execution.
+    http_runtime: Option<tokio::runtime::Runtime>,
 }
 
 impl ChannelStoreData {
@@ -96,6 +99,7 @@ impl ChannelStoreData {
             table: ResourceTable::new(),
             credentials,
             pairing_store,
+            http_runtime: None,
         }
     }
 
@@ -283,10 +287,25 @@ impl near::agent::channel_host::Host for ChannelStoreData {
             .map(|h| h.max_response_bytes)
             .unwrap_or(10 * 1024 * 1024);
 
-        // Make the HTTP request using blocking I/O
-        // We're already in a spawn_blocking context, so we can use block_on
-        let result = tokio::runtime::Handle::current().block_on(async {
-            let client = reqwest::Client::new();
+        // Make the HTTP request using a dedicated single-threaded runtime.
+        // We're inside spawn_blocking, so we can't rely on the main runtime's
+        // I/O driver (it may be busy with WASM compilation or other startup work).
+        // A dedicated runtime gives us our own I/O driver and avoids contention.
+        // The runtime is lazily created and reused across calls within one execution.
+        if self.http_runtime.is_none() {
+            self.http_runtime = Some(
+                tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .map_err(|e| format!("Failed to create HTTP runtime: {e}"))?,
+            );
+        }
+        let rt = self.http_runtime.as_ref().expect("just initialized");
+        let result = rt.block_on(async {
+            let client = reqwest::Client::builder()
+                .connect_timeout(std::time::Duration::from_secs(10))
+                .build()
+                .map_err(|e| format!("Failed to build HTTP client: {e}"))?;
 
             let mut request = match method.to_uppercase().as_str() {
                 "GET" => client.get(&url),
@@ -308,9 +327,9 @@ impl near::agent::channel_host::Host for ChannelStoreData {
                 request = request.body(body_bytes);
             }
 
-            // Send request with caller-specified timeout (default 30s).
-            // Cap at callback_timeout to prevent outliving the host wrapper.
-            let timeout = std::time::Duration::from_millis(timeout_ms.unwrap_or(30_000) as u64);
+            // Send request with caller-specified timeout (default 30s, max 5min).
+            let timeout_ms = timeout_ms.unwrap_or(30_000).min(300_000) as u64;
+            let timeout = std::time::Duration::from_millis(timeout_ms);
             let response = request.timeout(timeout).send().await.map_err(|e| {
                 // Walk the full error chain so we get the actual root cause
                 // (DNS, TLS, connection refused, etc.) instead of just
@@ -795,7 +814,21 @@ impl WasmChannel {
         .await;
 
         match result {
-            Ok(Ok((config, _host_state))) => {
+            Ok(Ok((config, mut host_state))) => {
+                // Surface WASM guest logs (errors/warnings from webhook setup, etc.)
+                for entry in host_state.take_logs() {
+                    match entry.level {
+                        crate::tools::wasm::LogLevel::Error => {
+                            tracing::error!(channel = %self.name, "{}", entry.message);
+                        }
+                        crate::tools::wasm::LogLevel::Warn => {
+                            tracing::warn!(channel = %self.name, "{}", entry.message);
+                        }
+                        _ => {
+                            tracing::debug!(channel = %self.name, "{}", entry.message);
+                        }
+                    }
+                }
                 tracing::info!(
                     channel = %self.name,
                     display_name = %config.display_name,
@@ -2615,15 +2648,52 @@ mod tests {
         assert_eq!(store.redact_credentials(input), input);
     }
 
-    /// Verify that the block_on-inside-spawn_blocking pattern used by the WASM
-    /// channel HTTP host function doesn't deadlock or panic.
+    /// Verify that WASM HTTP host functions work using a dedicated
+    /// current-thread runtime inside spawn_blocking.
     #[tokio::test]
-    async fn test_block_on_inside_spawn_blocking_does_not_deadlock() {
+    async fn test_dedicated_runtime_inside_spawn_blocking() {
         let result = tokio::task::spawn_blocking(|| {
-            tokio::runtime::Handle::current().block_on(async { 42 })
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("failed to build runtime");
+            rt.block_on(async { 42 })
         })
         .await
         .expect("spawn_blocking panicked");
         assert_eq!(result, 42);
+    }
+
+    /// Verify a real HTTP request works using the dedicated-runtime pattern.
+    /// This catches DNS, TLS, and I/O driver issues that trivial tests miss.
+    #[tokio::test]
+    #[ignore] // requires network
+    async fn test_dedicated_runtime_real_http() {
+        let result = tokio::task::spawn_blocking(|| {
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("failed to build runtime");
+            rt.block_on(async {
+                let client = reqwest::Client::builder()
+                    .connect_timeout(std::time::Duration::from_secs(10))
+                    .build()
+                    .expect("failed to build client");
+                let resp = client
+                    .get("https://api.telegram.org/bot000/getMe")
+                    .timeout(std::time::Duration::from_secs(10))
+                    .send()
+                    .await;
+                match resp {
+                    Ok(r) => r.status().as_u16(),
+                    Err(e) if e.is_timeout() => panic!("request timed out: {e}"),
+                    Err(e) => panic!("unexpected error: {e}"),
+                }
+            })
+        })
+        .await
+        .expect("spawn_blocking panicked");
+        // 404 because "000" is not a valid bot token
+        assert_eq!(result, 404);
     }
 }

@@ -9,7 +9,7 @@ use crate::settings::Settings;
 
 /// Run the status command, printing system health info.
 pub async fn run_status_command() -> anyhow::Result<()> {
-    let settings = Settings::load();
+    let settings = Settings::default();
 
     println!("IronClaw Status");
     println!("===============\n");
@@ -22,10 +22,9 @@ pub async fn run_status_command() -> anyhow::Result<()> {
     );
 
     // Database
-    let db_url_set = settings.database_url.is_some() || std::env::var("DATABASE_URL").is_ok();
+    let db_url_set = std::env::var("DATABASE_URL").is_ok();
     print!("  Database:    ");
     if db_url_set {
-        // Try to connect
         match check_database().await {
             Ok(()) => println!("connected"),
             Err(e) => println!("error ({})", e),
@@ -43,13 +42,14 @@ pub async fn run_status_command() -> anyhow::Result<()> {
         println!("not found (run `ironclaw onboard`)");
     }
 
-    // Secrets
+    // Secrets (auto-detect: env var or keychain)
     print!("  Secrets:     ");
-    let secrets_configured = settings.secrets_master_key_source != crate::settings::KeySource::None
-        || std::env::var("SECRETS_MASTER_KEY").is_ok()
-        || crate::secrets::keychain::has_master_key().await;
-    if secrets_configured {
-        println!("configured ({:?})", settings.secrets_master_key_source);
+    let has_env_key = std::env::var("SECRETS_MASTER_KEY").is_ok();
+    let has_keychain = crate::secrets::keychain::has_master_key().await;
+    if has_env_key {
+        println!("configured (env)");
+    } else if has_keychain {
+        println!("configured (keychain)");
     } else {
         println!("not configured");
     }
@@ -129,20 +129,18 @@ pub async fn run_status_command() -> anyhow::Result<()> {
         Err(_) => println!("none configured"),
     }
 
-    // Settings path
-    println!("\n  Settings:    {}", Settings::default_path().display());
+    // Config path
+    println!(
+        "\n  Config:      {}",
+        crate::bootstrap::ironclaw_env_path().display()
+    );
 
     Ok(())
 }
 
 #[cfg(feature = "postgres")]
 async fn check_database() -> anyhow::Result<()> {
-    let _ = dotenvy::dotenv();
-    let settings = Settings::load();
-    let url = std::env::var("DATABASE_URL")
-        .ok()
-        .or(settings.database_url)
-        .ok_or_else(|| anyhow::anyhow!("no URL"))?;
+    let url = std::env::var("DATABASE_URL").map_err(|_| anyhow::anyhow!("DATABASE_URL not set"))?;
 
     let config: deadpool_postgres::Config = deadpool_postgres::Config {
         url: Some(url),

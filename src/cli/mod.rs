@@ -12,6 +12,7 @@
 mod config;
 mod mcp;
 pub mod memory;
+pub mod oauth_defaults;
 mod pairing;
 pub mod status;
 mod tool;
