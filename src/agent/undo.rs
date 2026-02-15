@@ -43,6 +43,10 @@ impl Checkpoint {
 }
 
 /// Manager for undo/redo functionality.
+///
+/// Each undo/redo operation pops from one stack and pushes the current state
+/// onto the other, so `undo_count() + redo_count()` stays constant across
+/// undo/redo cycles (only `checkpoint()` and `clear()` change the total).
 pub struct UndoManager {
     /// Stack of past checkpoints (for undo).
     undo_stack: VecDeque<Checkpoint>,
@@ -97,6 +101,9 @@ impl UndoManager {
     /// Saves the current state to the redo stack and pops the most recent
     /// checkpoint from the undo stack so that repeated undos walk backwards
     /// through history.
+    ///
+    /// Takes ownership of `current_messages`; callers must clone first if
+    /// they need to retain a copy.
     pub fn undo(
         &mut self,
         current_turn: usize,
@@ -127,6 +134,9 @@ impl UndoManager {
     ///
     /// Saves the current state to the undo stack and pops the most recent
     /// checkpoint from the redo stack.
+    ///
+    /// Takes ownership of `current_messages`; callers must clone first if
+    /// they need to retain a copy.
     pub fn redo(
         &mut self,
         current_turn: usize,
