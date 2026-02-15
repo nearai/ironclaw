@@ -6,6 +6,10 @@ use futures::StreamExt;
 use tokio::sync::Mutex;
 use uuid::Uuid;
 
+use crate::agent::cognitive::{
+    CheckpointTracker, checkpoint_gate_message, memory_search_reminder,
+    pre_compaction_breadcrumb, pre_reset_breadcrumb, auto_breadcrumb, write_breadcrumb,
+};
 use crate::agent::compaction::ContextCompactor;
 use crate::agent::context_monitor::ContextMonitor;
 use crate::agent::heartbeat::spawn_heartbeat;
@@ -787,6 +791,23 @@ impl Agent {
                 let pct = self.context_monitor.usage_percent(&messages);
                 tracing::info!("Context at {:.1}% capacity, auto-compacting", pct);
 
+                // Memory Guardian: write pre-compaction breadcrumb before context is lost.
+                //
+                // This is the "black box recorder" — a raw snapshot of session state
+                // written synchronously before compaction runs. The compactor also writes
+                // an LLM-generated summary, but that summary is lossy (generated after
+                // compression, by the LLM, focused on content not tool patterns). The
+                // breadcrumb captures what the summary can't: tool call counts, recent
+                // tools, and structured metadata.
+                if let Some(ws) = self.workspace() {
+                    let breadcrumb = pre_compaction_breadcrumb(&thread.checkpoint_tracker);
+                    if let Err(e) = write_breadcrumb(ws.as_ref(), &breadcrumb).await {
+                        tracing::warn!("Failed to write pre-compaction breadcrumb: {}", e);
+                    } else {
+                        tracing::debug!("Memory guardian: wrote pre-compaction breadcrumb");
+                    }
+                }
+
                 // Notify the user that compaction is happening
                 let _ = self
                     .channels
@@ -835,6 +856,7 @@ impl Agent {
                 .get_mut(&thread_id)
                 .ok_or_else(|| Error::from(crate::error::JobError::NotFound { id: thread_id }))?;
             thread.start_turn(content);
+            thread.checkpoint_tracker.record_exchange();
             thread.messages()
         };
 
@@ -1031,6 +1053,32 @@ impl Agent {
             }
         } else {
             None
+        };
+
+        // Memory Guardian: append checkpoint gate and memory search reminders to system prompt.
+        //
+        // These are dynamic — they change based on the thread's checkpoint tracker state.
+        // The workspace system_prompt() provides static context (identity files, daily notes,
+        // cognitive instructions). The guardian adds per-turn pressure based on tool call counts.
+        let system_prompt = {
+            let mut prompt = system_prompt.unwrap_or_default();
+            let sess = session.lock().await;
+            if let Some(thread) = sess.threads.get(&thread_id) {
+                let tracker = &thread.checkpoint_tracker;
+
+                // Checkpoint gate: escalating pressure based on tool calls
+                if let Some(gate_msg) = checkpoint_gate_message(tracker, [12, 20, 30]) {
+                    prompt.push_str("\n\n---\n\n");
+                    prompt.push_str(&gate_msg);
+                }
+
+                // Memory search reminder
+                if let Some(search_msg) = memory_search_reminder(tracker, 8) {
+                    prompt.push_str("\n\n");
+                    prompt.push_str(&search_msg);
+                }
+            }
+            if prompt.is_empty() { None } else { Some(prompt) }
         };
 
         let mut reasoning = Reasoning::new(self.llm().clone(), self.safety().clone());
@@ -1263,6 +1311,81 @@ impl Agent {
                                     }
                                     Err(e) => {
                                         turn.record_tool_error(e.to_string());
+                                    }
+                                }
+                            }
+                        }
+
+                        // Memory Guardian: track tool calls for breadcrumbs and checkpoint gate.
+                        //
+                        // This runs after every tool execution. It:
+                        // 1. Records the tool call in the checkpoint tracker
+                        // 2. Detects agent-initiated checkpoints (writes to daily/*.md)
+                        // 3. Writes auto-breadcrumbs at the configured interval
+                        //
+                        // The breadcrumb interval defaults to 10 tool calls. This creates
+                        // a paper trail even if the agent ignores checkpoint pressure.
+                        {
+                            let mut needs_breadcrumb = false;
+                            let mut is_checkpoint = false;
+
+                            // Extract file path from tool arguments for checkpoint detection
+                            let target_path = tc
+                                .arguments
+                                .get("path")
+                                .or_else(|| tc.arguments.get("file_path"))
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("");
+
+                            {
+                                let mut sess = session.lock().await;
+                                if let Some(thread) = sess.threads.get_mut(&thread_id) {
+                                    // TODO: make breadcrumb_interval configurable via CognitiveConfig
+                                    needs_breadcrumb = thread
+                                        .checkpoint_tracker
+                                        .record_tool_call(&tc.name, 10);
+
+                                    if CheckpointTracker::is_checkpoint_write(
+                                        &tc.name,
+                                        target_path,
+                                    ) {
+                                        thread.checkpoint_tracker.on_agent_checkpoint();
+                                        is_checkpoint = true;
+                                        tracing::debug!(
+                                            "Memory guardian: detected agent checkpoint write to {}",
+                                            target_path
+                                        );
+                                    }
+                                }
+                            }
+
+                            // Write auto-breadcrumb outside the session lock (async I/O)
+                            if needs_breadcrumb && !is_checkpoint {
+                                if let Some(ws) = self.workspace() {
+                                    let breadcrumb_content = {
+                                        let sess = session.lock().await;
+                                        sess.threads
+                                            .get(&thread_id)
+                                            .map(|t| auto_breadcrumb(&t.checkpoint_tracker))
+                                    };
+                                    if let Some(content) = breadcrumb_content {
+                                        if let Err(e) =
+                                            write_breadcrumb(ws.as_ref(), &content).await
+                                        {
+                                            tracing::warn!(
+                                                "Failed to write auto-breadcrumb: {}",
+                                                e
+                                            );
+                                        } else {
+                                            tracing::debug!(
+                                                "Memory guardian: wrote auto-breadcrumb"
+                                            );
+                                        }
+                                    }
+                                    // Reset breadcrumb counter
+                                    let mut sess = session.lock().await;
+                                    if let Some(thread) = sess.threads.get_mut(&thread_id) {
+                                        thread.checkpoint_tracker.on_breadcrumb_written();
                                     }
                                 }
                             }
@@ -1573,6 +1696,14 @@ impl Agent {
             .unwrap_or(
                 crate::agent::context_monitor::CompactionStrategy::Summarize { keep_recent: 5 },
             );
+
+        // Memory Guardian: write breadcrumb before manual compaction too.
+        if let Some(ws) = self.workspace() {
+            let breadcrumb = pre_compaction_breadcrumb(&thread.checkpoint_tracker);
+            if let Err(e) = write_breadcrumb(ws.as_ref(), &breadcrumb).await {
+                tracing::warn!("Failed to write pre-compaction breadcrumb: {}", e);
+            }
+        }
 
         let compactor = ContextCompactor::new(self.llm().clone());
         match compactor
@@ -2022,6 +2153,26 @@ impl Agent {
             .get_or_create_session(&message.user_id)
             .await;
         let mut sess = session.lock().await;
+
+        // Memory Guardian: write pre-reset breadcrumb before creating new thread.
+        //
+        // When the user starts a new thread, the old thread's context becomes
+        // inactive. Write a breadcrumb to daily notes so there's a record of
+        // what was happening in the previous thread.
+        if let Some(ws) = self.workspace() {
+            if let Some(active_id) = sess.active_thread {
+                if let Some(old_thread) = sess.threads.get(&active_id) {
+                    if old_thread.checkpoint_tracker.tool_calls_since_checkpoint > 0 {
+                        let breadcrumb =
+                            pre_reset_breadcrumb(&old_thread.checkpoint_tracker);
+                        if let Err(e) = write_breadcrumb(ws.as_ref(), &breadcrumb).await {
+                            tracing::warn!("Failed to write pre-reset breadcrumb: {}", e);
+                        }
+                    }
+                }
+            }
+        }
+
         let thread = sess.create_thread();
         let thread_id = thread.id;
         Ok(SubmissionResult::ok_with_message(format!(

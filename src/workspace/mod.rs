@@ -189,6 +189,37 @@ impl WorkspaceStorage {
         }
     }
 
+    async fn insert_chunk_with_lines(
+        &self,
+        document_id: Uuid,
+        chunk_index: i32,
+        content: &str,
+        embedding: Option<&[f32]>,
+        line_start: Option<u32>,
+        line_end: Option<u32>,
+    ) -> Result<Uuid, WorkspaceError> {
+        match self {
+            #[cfg(feature = "postgres")]
+            Self::Repo(repo) => {
+                repo.insert_chunk_with_lines(
+                    document_id,
+                    chunk_index,
+                    content,
+                    embedding,
+                    line_start,
+                    line_end,
+                )
+                .await
+            }
+            // Generic DB backend doesn't support line tracking yet;
+            // fall back to insert_chunk (line info is lost but chunks still work).
+            Self::Db(db) => {
+                db.insert_chunk(document_id, chunk_index, content, embedding)
+                    .await
+            }
+        }
+    }
+
     async fn update_chunk_embedding(
         &self,
         chunk_id: Uuid,
@@ -339,7 +370,8 @@ impl Workspace {
     /// println!("{}", doc.content);
     /// ```
     pub async fn read(&self, path: &str) -> Result<MemoryDocument, WorkspaceError> {
-        let path = normalize_path(path);
+        let path = normalize_path(path)
+            .ok_or_else(|| WorkspaceError::InvalidPath { path: path.to_string(), reason: "path traversal or invalid characters".to_string() })?;
         self.storage
             .get_document_by_path(&self.user_id, self.agent_id, &path)
             .await
@@ -411,7 +443,8 @@ impl Workspace {
     /// Also deletes associated chunks.
     /// Rejects paths with traversal attempts (../).
     pub async fn delete(&self, path: &str) -> Result<(), WorkspaceError> {
-        let path = normalize_path(path);
+        let path = normalize_path(path)
+            .ok_or_else(|| WorkspaceError::InvalidPath { path: path.to_string(), reason: "path traversal or invalid characters".to_string() })?;
         self.storage
             .delete_document_by_path(&self.user_id, self.agent_id, &path)
             .await
@@ -435,7 +468,8 @@ impl Workspace {
     /// }
     /// ```
     pub async fn list(&self, directory: &str) -> Result<Vec<WorkspaceEntry>, WorkspaceError> {
-        let directory = normalize_directory(directory);
+        let directory = normalize_path(directory)
+            .ok_or_else(|| WorkspaceError::InvalidPath { path: directory.to_string(), reason: "path traversal or invalid characters".to_string() })?;
         self.storage
             .list_directory(&self.user_id, self.agent_id, &directory)
             .await
