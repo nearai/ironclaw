@@ -58,6 +58,7 @@ pub mod sandbox;
 pub mod secrets;
 pub mod settings;
 pub mod setup;
+pub mod skills;
 pub mod tools;
 pub mod tracing_fmt;
 pub mod util;
