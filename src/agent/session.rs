@@ -16,6 +16,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+use crate::agent::cognitive::CheckpointTracker;
 use crate::llm::ChatMessage;
 
 /// A session containing one or more threads.
@@ -177,6 +178,16 @@ pub struct Thread {
     /// metadata so we can resume chaining across restarts.
     #[serde(default)]
     pub last_response_id: Option<String>,
+
+    /// Memory guardian checkpoint tracker.
+    ///
+    /// Tracks tool calls, exchanges, and memory search usage for this thread.
+    /// Used by the guardian to decide when to write auto-breadcrumbs and inject
+    /// checkpoint pressure into the system prompt. Not serialized — resets on
+    /// session reload, which is fine because it's a running tally that only
+    /// matters within a single conversation flow.
+    #[serde(skip)]
+    pub checkpoint_tracker: CheckpointTracker,
 }
 
 impl Thread {
@@ -194,6 +205,7 @@ impl Thread {
             pending_approval: None,
             pending_auth: None,
             last_response_id: None,
+            checkpoint_tracker: CheckpointTracker::default(),
         }
     }
 
@@ -211,6 +223,7 @@ impl Thread {
             pending_approval: None,
             pending_auth: None,
             last_response_id: None,
+            checkpoint_tracker: CheckpointTracker::default(),
         }
     }
 

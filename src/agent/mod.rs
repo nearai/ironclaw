@@ -35,8 +35,10 @@ pub mod worker;
 pub(crate) use agent_loop::truncate_for_preview;
 pub use agent_loop::{Agent, AgentDeps};
 pub use cognitive::{
-    CheckpointTracker, CognitiveConfig, after_action_template, post_compaction_recovery,
-    pre_game_instructions, write_checkpoint,
+    CheckpointTracker, CognitiveConfig, after_action_template, auto_breadcrumb,
+    checkpoint_gate_message, memory_search_reminder, post_compaction_recovery,
+    pre_compaction_breadcrumb, pre_game_instructions, pre_reset_breadcrumb, write_breadcrumb,
+    write_checkpoint,
 };
 pub use compaction::{CompactionResult, ContextCompactor};
 pub use context_monitor::{CompactionStrategy, ContextBreakdown, ContextMonitor};

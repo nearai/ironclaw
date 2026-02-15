@@ -21,8 +21,8 @@ pub async fn run_memory_command_with_db(
     }
 
     match cmd {
-        MemoryCommand::Search { query, limit } => search(&workspace, &query, limit).await,
-        MemoryCommand::Read { path } => read(&workspace, &path).await,
+        MemoryCommand::Search { query, limit, full } => search(&workspace, &query, limit, full).await,
+        MemoryCommand::Read { path, from, lines } => read(&workspace, &path, from, lines).await,
         MemoryCommand::Write {
             path,
             content,
@@ -30,6 +30,7 @@ pub async fn run_memory_command_with_db(
         } => write(&workspace, &path, content, append).await,
         MemoryCommand::Tree { path, depth } => tree(&workspace, &path, depth).await,
         MemoryCommand::Status => status(&workspace).await,
+        MemoryCommand::Index => index(&workspace).await,
     }
 }
 

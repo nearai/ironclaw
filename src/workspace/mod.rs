@@ -191,6 +191,37 @@ impl WorkspaceStorage {
         }
     }
 
+    async fn insert_chunk_with_lines(
+        &self,
+        document_id: Uuid,
+        chunk_index: i32,
+        content: &str,
+        embedding: Option<&[f32]>,
+        line_start: Option<u32>,
+        line_end: Option<u32>,
+    ) -> Result<Uuid, WorkspaceError> {
+        match self {
+            #[cfg(feature = "postgres")]
+            Self::Repo(repo) => {
+                repo.insert_chunk_with_lines(
+                    document_id,
+                    chunk_index,
+                    content,
+                    embedding,
+                    line_start,
+                    line_end,
+                )
+                .await
+            }
+            // Generic DB backend doesn't support line tracking yet;
+            // fall back to insert_chunk (line info is lost but chunks still work).
+            Self::Db(db) => {
+                db.insert_chunk(document_id, chunk_index, content, embedding)
+                    .await
+            }
+        }
+    }
+
     async fn update_chunk_embedding(
         &self,
         chunk_id: Uuid,
