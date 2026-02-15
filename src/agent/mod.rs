@@ -11,6 +11,7 @@
 //! - Context compaction for long conversations
 
 mod agent_loop;
+pub mod cognitive;
 pub mod compaction;
 pub mod context_monitor;
 mod heartbeat;
@@ -28,6 +29,10 @@ pub mod worker;
 
 pub(crate) use agent_loop::truncate_for_preview;
 pub use agent_loop::{Agent, AgentDeps};
+pub use cognitive::{
+    CheckpointTracker, CognitiveConfig, after_action_template, post_compaction_recovery,
+    pre_game_instructions, write_checkpoint,
+};
 pub use compaction::{CompactionResult, ContextCompactor};
 pub use context_monitor::{CompactionStrategy, ContextBreakdown, ContextMonitor};
 pub use heartbeat::{HeartbeatConfig, HeartbeatResult, HeartbeatRunner, spawn_heartbeat};

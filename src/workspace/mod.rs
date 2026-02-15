@@ -47,10 +47,9 @@ mod embeddings;
 mod repository;
 mod search;
 
-pub use chunker::{ChunkConfig, chunk_document};
+pub use chunker::{ChunkConfig, ChunkWithPosition, chunk_document, chunk_document_with_positions};
 pub use document::{MemoryChunk, MemoryDocument, WorkspaceEntry, paths};
-pub use embeddings::{EmbeddingProvider, MockEmbeddings, NearAiEmbeddings, OpenAiEmbeddings};
-#[cfg(feature = "postgres")]
+pub use embeddings::{EmbeddingProvider, GeminiEmbeddings, MockEmbeddings, NearAiEmbeddings, OpenAiEmbeddings};
 pub use repository::Repository;
 pub use search::{RankedResult, SearchConfig, SearchResult, reciprocal_rank_fusion};
 
@@ -312,6 +311,11 @@ impl Workspace {
         self
     }
 
+    /// Check if an embedding provider is configured.
+    pub fn has_embeddings(&self) -> bool {
+        self.embeddings.is_some()
+    }
+
     /// Get the user ID.
     pub fn user_id(&self) -> &str {
         &self.user_id
@@ -327,6 +331,7 @@ impl Workspace {
     /// Read a file by path.
     ///
     /// Returns the document if it exists, or an error if not found.
+    /// Rejects paths with traversal attempts (../).
     ///
     /// # Example
     /// ```ignore
@@ -344,13 +349,14 @@ impl Workspace {
     ///
     /// Creates parent directories implicitly (they're virtual in the DB).
     /// Re-indexes the document for search after writing.
+    /// Rejects paths with traversal attempts (../).
     ///
     /// # Example
     /// ```ignore
     /// workspace.write("projects/alpha/README.md", "# Project Alpha\n\nDescription here.").await?;
     /// ```
     pub async fn write(&self, path: &str, content: &str) -> Result<MemoryDocument, WorkspaceError> {
-        let path = normalize_path(path);
+        let path = validate_path(path)?;
         let doc = self
             .storage
             .get_or_create_document_by_path(&self.user_id, self.agent_id, &path)
@@ -366,8 +372,9 @@ impl Workspace {
     ///
     /// Creates the file if it doesn't exist.
     /// Adds a newline separator between existing and new content.
+    /// Rejects paths with traversal attempts (../).
     pub async fn append(&self, path: &str, content: &str) -> Result<(), WorkspaceError> {
-        let path = normalize_path(path);
+        let path = validate_path(path)?;
         let doc = self
             .storage
             .get_or_create_document_by_path(&self.user_id, self.agent_id, &path)
@@ -385,8 +392,9 @@ impl Workspace {
     }
 
     /// Check if a file exists.
+    /// Rejects paths with traversal attempts (../).
     pub async fn exists(&self, path: &str) -> Result<bool, WorkspaceError> {
-        let path = normalize_path(path);
+        let path = validate_path(path)?;
         match self
             .storage
             .get_document_by_path(&self.user_id, self.agent_id, &path)
@@ -401,6 +409,7 @@ impl Workspace {
     /// Delete a file.
     ///
     /// Also deletes associated chunks.
+    /// Rejects paths with traversal attempts (../).
     pub async fn delete(&self, path: &str) -> Result<(), WorkspaceError> {
         let path = normalize_path(path);
         self.storage
@@ -412,6 +421,7 @@ impl Workspace {
     ///
     /// Returns immediate children (not recursive).
     /// Use empty string or "/" for root directory.
+    /// Rejects paths with traversal attempts (../).
     ///
     /// # Example
     /// ```ignore
@@ -519,7 +529,8 @@ impl Workspace {
     /// Build the system prompt from identity files.
     ///
     /// Loads AGENTS.md, SOUL.md, USER.md, and IDENTITY.md to compose
-    /// the agent's system prompt.
+    /// the agent's system prompt. Also includes cognitive routine instructions
+    /// for pre-game checks and memory recall requirements.
     pub async fn system_prompt(&self) -> Result<String, WorkspaceError> {
         let mut parts = Vec::new();
 
@@ -539,6 +550,9 @@ impl Workspace {
             }
         }
 
+        // Add cognitive routine instructions
+        parts.push(Self::cognitive_instructions());
+
         // Add today's memory context (last 2 days of daily logs)
         let today = Utc::now().date_naive();
         let yesterday = today.pred_opt().unwrap_or(today);
@@ -557,6 +571,33 @@ impl Workspace {
         }
 
         Ok(parts.join("\n\n---\n\n"))
+    }
+
+    /// Generate cognitive routine instructions for the system prompt.
+    fn cognitive_instructions() -> String {
+        r#"## Cognitive Routines
+
+### Memory Recall (MANDATORY)
+Before answering questions about prior work, decisions, dates, people, preferences, or todos:
+1. Run memory_search to check memory
+2. Use memory_read to pull relevant context
+3. If low confidence after search, say you checked but aren't certain
+
+Always cite sources when helpful: "Source: path#line"
+
+### Pre-Game Routine
+Before executing any non-trivial task:
+1. Restate the task in one sentence
+2. List constraints and success criteria
+3. Retrieve only minimum relevant memory
+4. Prefer tools over guessing when facts matter
+5. Identify mode: Preparation (assembling context) or Execution (running tools)
+
+### Checkpointing
+During long conversations, periodically write state to daily notes:
+- Current topic and key decisions
+- Work done and next steps
+This is not optional — if you did work, log it."#.to_string()
     }
 
     // ==================== Search ====================
@@ -612,17 +653,17 @@ impl Workspace {
         // Get the document
         let doc = self.storage.get_document_by_id(document_id).await?;
 
-        // Chunk the content
-        let chunks = chunk_document(&doc.content, ChunkConfig::default());
+        // Chunk the content with position tracking for citations
+        let chunks = chunk_document_with_positions(&doc.content, ChunkConfig::default());
 
         // Delete old chunks
         self.storage.delete_chunks(document_id).await?;
 
-        // Insert new chunks
-        for (index, content) in chunks.into_iter().enumerate() {
+        // Insert new chunks with line numbers
+        for (index, chunk) in chunks.into_iter().enumerate() {
             // Generate embedding if provider available
             let embedding = if let Some(ref provider) = self.embeddings {
-                match provider.embed(&content).await {
+                match provider.embed(&chunk.content).await {
                     Ok(emb) => Some(emb),
                     Err(e) => {
                         tracing::warn!("Failed to generate embedding: {}", e);
@@ -634,7 +675,14 @@ impl Workspace {
             };
 
             self.storage
-                .insert_chunk(document_id, index as i32, &content, embedding.as_deref())
+                .insert_chunk_with_lines(
+                    document_id,
+                    index as i32,
+                    &chunk.content,
+                    embedding.as_deref(),
+                    Some(chunk.line_start),
+                    Some(chunk.line_end),
+                )
                 .await?;
         }
 
@@ -764,9 +812,22 @@ impl Workspace {
     }
 }
 
-/// Normalize a file path (remove leading/trailing slashes, collapse //).
-fn normalize_path(path: &str) -> String {
+/// Normalize a file path (remove leading/trailing slashes, collapse //, prevent traversal).
+///
+/// Returns None if the path attempts directory traversal (../).
+fn normalize_path(path: &str) -> Option<String> {
     let path = path.trim().trim_matches('/');
+    
+    // Check for path traversal attempts
+    if path.contains("..") {
+        return None;
+    }
+    
+    // Reject null bytes (path injection)
+    if path.contains('\0') {
+        return None;
+    }
+    
     // Collapse multiple slashes
     let mut result = String::new();
     let mut last_was_slash = false;
@@ -781,13 +842,15 @@ fn normalize_path(path: &str) -> String {
             last_was_slash = false;
         }
     }
-    result
+    Some(result)
 }
 
-/// Normalize a directory path (ensure no trailing slash for consistency).
-fn normalize_directory(path: &str) -> String {
-    let path = normalize_path(path);
-    path.trim_end_matches('/').to_string()
+/// Validate and normalize a path, returning an error on invalid paths.
+fn validate_path(path: &str) -> Result<String, WorkspaceError> {
+    normalize_path(path).ok_or_else(|| WorkspaceError::InvalidPath {
+        path: path.to_string(),
+        reason: "path traversal or invalid characters detected".to_string(),
+    })
 }
 
 #[cfg(test)]
@@ -796,18 +859,38 @@ mod tests {
 
     #[test]
     fn test_normalize_path() {
-        assert_eq!(normalize_path("foo/bar"), "foo/bar");
-        assert_eq!(normalize_path("/foo/bar/"), "foo/bar");
-        assert_eq!(normalize_path("foo//bar"), "foo/bar");
-        assert_eq!(normalize_path("  /foo/  "), "foo");
-        assert_eq!(normalize_path("README.md"), "README.md");
+        assert_eq!(normalize_path("foo/bar"), Some("foo/bar".to_string()));
+        assert_eq!(normalize_path("/foo/bar/"), Some("foo/bar".to_string()));
+        assert_eq!(normalize_path("foo//bar"), Some("foo/bar".to_string()));
+        assert_eq!(normalize_path("  /foo/  "), Some("foo".to_string()));
+        assert_eq!(normalize_path("README.md"), Some("README.md".to_string()));
     }
 
     #[test]
-    fn test_normalize_directory() {
-        assert_eq!(normalize_directory("foo/bar/"), "foo/bar");
-        assert_eq!(normalize_directory("foo/bar"), "foo/bar");
-        assert_eq!(normalize_directory("/"), "");
-        assert_eq!(normalize_directory(""), "");
+    fn test_normalize_path_rejects_traversal() {
+        // Path traversal attempts should be rejected
+        assert_eq!(normalize_path("../etc/passwd"), None);
+        assert_eq!(normalize_path("foo/../bar"), None);
+        assert_eq!(normalize_path("foo/bar/.."), None);
+        assert_eq!(normalize_path(".."), None);
+        assert_eq!(normalize_path("foo/.."), None);
+    }
+
+    #[test]
+    fn test_normalize_path_rejects_null_bytes() {
+        assert_eq!(normalize_path("foo\0bar"), None);
+        assert_eq!(normalize_path("README.md\0.txt"), None);
+    }
+
+    #[test]
+    fn test_validate_path_error() {
+        let result = validate_path("../etc/passwd");
+        assert!(result.is_err());
+        if let Err(WorkspaceError::InvalidPath { path, reason }) = result {
+            assert_eq!(path, "../etc/passwd");
+            assert!(reason.contains("traversal"));
+        } else {
+            panic!("Expected InvalidPath error");
+        }
     }
 }
