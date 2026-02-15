@@ -12,7 +12,11 @@ use crate::context::JobContext;
 use crate::safety::LeakDetector;
 use crate::tools::tool::{Tool, ToolError, ToolOutput};
 
-/// Maximum response body size (5 MB). Prevents OOM from unbounded responses.
+/// Maximum response body size (5 MB).
+///
+/// 5 MB is large enough for typical JSON API responses and moderate HTML pages,
+/// but small enough to prevent OOM from malicious or runaway servers.  The WASM
+/// HTTP wrapper uses the same limit for consistency.
 const MAX_RESPONSE_SIZE: usize = 5 * 1024 * 1024;
 
 /// Tool for making HTTP requests.
@@ -246,6 +250,12 @@ impl Tool for HttpTool {
             && let Ok(len) = s.parse::<usize>()
             && len > MAX_RESPONSE_SIZE
         {
+            tracing::warn!(
+                url = %parsed_url,
+                content_length = len,
+                max = MAX_RESPONSE_SIZE,
+                "Rejected HTTP response: Content-Length exceeds limit"
+            );
             return Err(ToolError::ExecutionFailed(format!(
                 "Response Content-Length ({} bytes) exceeds maximum allowed size ({} bytes)",
                 len, MAX_RESPONSE_SIZE
