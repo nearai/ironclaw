@@ -77,6 +77,9 @@ cron = "0.13"
 regex = "1"
 aho-corasick = "1"
 
+# TOML parsing for skill manifests
+toml = "0.8"
+
 # Filesystem paths
 dirs = "6"
 fs4 = "0.6"
