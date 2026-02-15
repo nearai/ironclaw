@@ -17,7 +17,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 
 use crate::context::JobContext;
-use crate::tools::tool::{Tool, ToolError, ToolOutput};
+use crate::tools::tool::{Tool, ToolError, ToolOutput, require_str};
 use crate::workspace::{Workspace, paths};
 
 /// Identity files that the LLM must not overwrite via tool calls.
@@ -81,10 +81,7 @@ impl Tool for MemorySearchTool {
     ) -> Result<ToolOutput, ToolError> {
         let start = std::time::Instant::now();
 
-        let query = params
-            .get("query")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| ToolError::InvalidParameters("missing 'query' parameter".to_string()))?;
+        let query = require_str(&params, "query")?;
 
         let limit = params
             .get("limit")
@@ -176,12 +173,7 @@ impl Tool for MemoryWriteTool {
     ) -> Result<ToolOutput, ToolError> {
         let start = std::time::Instant::now();
 
-        let content = params
-            .get("content")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| {
-                ToolError::InvalidParameters("missing 'content' parameter".to_string())
-            })?;
+        let content = require_str(&params, "content")?;
 
         if content.trim().is_empty() {
             return Err(ToolError::InvalidParameters(
@@ -337,10 +329,7 @@ impl Tool for MemoryReadTool {
     ) -> Result<ToolOutput, ToolError> {
         let start = std::time::Instant::now();
 
-        let path = params
-            .get("path")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| ToolError::InvalidParameters("missing 'path' parameter".to_string()))?;
+        let path = require_str(&params, "path")?;
 
         let doc = self
             .workspace

@@ -30,7 +30,7 @@ use tokio::process::Command;
 
 use crate::context::JobContext;
 use crate::sandbox::{SandboxManager, SandboxPolicy};
-use crate::tools::tool::{Tool, ToolDomain, ToolError, ToolOutput};
+use crate::tools::tool::{Tool, ToolDomain, ToolError, ToolOutput, require_str};
 
 /// Maximum output size before truncation (64KB).
 const MAX_OUTPUT_SIZE: usize = 64 * 1024;
@@ -401,10 +401,7 @@ impl Tool for ShellTool {
         params: serde_json::Value,
         _ctx: &JobContext,
     ) -> Result<ToolOutput, ToolError> {
-        let command = params
-            .get("command")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| ToolError::InvalidParameters("missing 'command' parameter".into()))?;
+        let command = require_str(&params, "command")?;
 
         let workdir = params.get("workdir").and_then(|v| v.as_str());
         let timeout = params.get("timeout").and_then(|v| v.as_u64());

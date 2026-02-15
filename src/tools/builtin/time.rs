@@ -4,7 +4,7 @@ use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 
 use crate::context::JobContext;
-use crate::tools::tool::{Tool, ToolError, ToolOutput};
+use crate::tools::tool::{Tool, ToolError, ToolOutput, require_str};
 
 /// Tool for getting current time and date operations.
 pub struct TimeTool;
@@ -52,12 +52,7 @@ impl Tool for TimeTool {
     ) -> Result<ToolOutput, ToolError> {
         let start = std::time::Instant::now();
 
-        let operation = params
-            .get("operation")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| {
-                ToolError::InvalidParameters("missing 'operation' parameter".to_string())
-            })?;
+        let operation = require_str(&params, "operation")?;
 
         let result = match operation {
             "now" => {
@@ -69,12 +64,7 @@ impl Tool for TimeTool {
                 })
             }
             "parse" => {
-                let timestamp = params
-                    .get("timestamp")
-                    .and_then(|v| v.as_str())
-                    .ok_or_else(|| {
-                        ToolError::InvalidParameters("missing 'timestamp' parameter".to_string())
-                    })?;
+                let timestamp = require_str(&params, "timestamp")?;
 
                 let dt: DateTime<Utc> = timestamp.parse().map_err(|e| {
                     ToolError::InvalidParameters(format!("invalid timestamp: {}", e))
@@ -87,19 +77,9 @@ impl Tool for TimeTool {
                 })
             }
             "diff" => {
-                let ts1 = params
-                    .get("timestamp")
-                    .and_then(|v| v.as_str())
-                    .ok_or_else(|| {
-                        ToolError::InvalidParameters("missing 'timestamp' parameter".to_string())
-                    })?;
+                let ts1 = require_str(&params, "timestamp")?;
 
-                let ts2 = params
-                    .get("timestamp2")
-                    .and_then(|v| v.as_str())
-                    .ok_or_else(|| {
-                        ToolError::InvalidParameters("missing 'timestamp2' parameter".to_string())
-                    })?;
+                let ts2 = require_str(&params, "timestamp2")?;
 
                 let dt1: DateTime<Utc> = ts1.parse().map_err(|e| {
                     ToolError::InvalidParameters(format!("invalid timestamp: {}", e))

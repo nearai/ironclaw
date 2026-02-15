@@ -3,7 +3,7 @@
 use async_trait::async_trait;
 
 use crate::context::JobContext;
-use crate::tools::tool::{Tool, ToolError, ToolOutput};
+use crate::tools::tool::{Tool, ToolError, ToolOutput, require_param, require_str};
 
 /// Tool for JSON manipulation (parse, query, transform).
 pub struct JsonTool;
@@ -46,16 +46,9 @@ impl Tool for JsonTool {
     ) -> Result<ToolOutput, ToolError> {
         let start = std::time::Instant::now();
 
-        let operation = params
-            .get("operation")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| {
-                ToolError::InvalidParameters("missing 'operation' parameter".to_string())
-            })?;
+        let operation = require_str(&params, "operation")?;
 
-        let data = params
-            .get("data")
-            .ok_or_else(|| ToolError::InvalidParameters("missing 'data' parameter".to_string()))?;
+        let data = require_param(&params, "data")?;
 
         let result = match operation {
             "parse" => {

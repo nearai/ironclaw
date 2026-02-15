@@ -202,7 +202,7 @@ async fn report_complete(
     State(state): State<OrchestratorState>,
     Path(job_id): Path<Uuid>,
     Json(report): Json<CompletionReport>,
-) -> Result<StatusCode, StatusCode> {
+) -> Result<Json<serde_json::Value>, StatusCode> {
     if report.success {
         tracing::info!(
             job_id = %job_id,
@@ -223,7 +223,7 @@ async fn report_complete(
     };
     let _ = state.job_manager.complete_job(job_id, result).await;
 
-    Ok(StatusCode::OK)
+    Ok(Json(serde_json::json!({"status": "ok"})))
 }
 
 // -- Sandbox job event handlers --
