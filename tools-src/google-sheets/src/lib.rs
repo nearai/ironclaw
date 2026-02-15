@@ -70,236 +70,100 @@ impl exports::near::agent::tool::Guest for GoogleSheetsTool {
         r#"{
             "type": "object",
             "required": ["action"],
-            "oneOf": [
-                {
-                    "properties": {
-                        "action": { "const": "create_spreadsheet" },
-                        "title": {
-                            "type": "string",
-                            "description": "Spreadsheet title"
-                        },
-                        "sheet_names": {
-                            "type": "array",
-                            "items": { "type": "string" },
-                            "description": "Names for sheets (tabs). Defaults to ['Sheet1'] if omitted."
-                        }
-                    },
-                    "required": ["action", "title"]
+            "properties": {
+                "action": {
+                    "type": "string",
+                    "enum": ["create_spreadsheet", "get_spreadsheet", "read_values", "batch_read_values", "write_values", "append_values", "clear_values", "add_sheet", "delete_sheet", "rename_sheet", "format_cells"],
+                    "description": "The Google Sheets operation to perform"
                 },
-                {
-                    "properties": {
-                        "action": { "const": "get_spreadsheet" },
-                        "spreadsheet_id": {
-                            "type": "string",
-                            "description": "The spreadsheet ID (same as Google Drive file ID)"
-                        }
-                    },
-                    "required": ["action", "spreadsheet_id"]
+                "spreadsheet_id": {
+                    "type": "string",
+                    "description": "Spreadsheet ID (same as Google Drive file ID). Required for all actions except create_spreadsheet"
                 },
-                {
-                    "properties": {
-                        "action": { "const": "read_values" },
-                        "spreadsheet_id": {
-                            "type": "string",
-                            "description": "The spreadsheet ID"
-                        },
-                        "range": {
-                            "type": "string",
-                            "description": "A1 notation range (e.g., 'Sheet1!A1:D10', 'A1:B5')"
-                        }
-                    },
-                    "required": ["action", "spreadsheet_id", "range"]
+                "title": {
+                    "type": "string",
+                    "description": "Title/name. Required for: create_spreadsheet, add_sheet, rename_sheet"
                 },
-                {
-                    "properties": {
-                        "action": { "const": "batch_read_values" },
-                        "spreadsheet_id": {
-                            "type": "string",
-                            "description": "The spreadsheet ID"
-                        },
-                        "ranges": {
-                            "type": "array",
-                            "items": { "type": "string" },
-                            "description": "List of A1 notation ranges to read"
-                        }
-                    },
-                    "required": ["action", "spreadsheet_id", "ranges"]
+                "sheet_names": {
+                    "type": "array",
+                    "items": { "type": "string" },
+                    "description": "Names for sheets (tabs, defaults to ['Sheet1']). Used by: create_spreadsheet"
                 },
-                {
-                    "properties": {
-                        "action": { "const": "write_values" },
-                        "spreadsheet_id": {
-                            "type": "string",
-                            "description": "The spreadsheet ID"
-                        },
-                        "range": {
-                            "type": "string",
-                            "description": "A1 notation range (e.g., 'Sheet1!A1')"
-                        },
-                        "values": {
-                            "type": "array",
-                            "items": { "type": "array" },
-                            "description": "2D array of values (rows of columns)"
-                        },
-                        "value_input_option": {
-                            "type": "string",
-                            "enum": ["RAW", "USER_ENTERED"],
-                            "description": "How to interpret input. USER_ENTERED (default) parses like typing in the UI. RAW stores as-is.",
-                            "default": "USER_ENTERED"
-                        }
-                    },
-                    "required": ["action", "spreadsheet_id", "range", "values"]
+                "range": {
+                    "type": "string",
+                    "description": "A1 notation range (e.g., 'Sheet1!A1:D10'). Required for: read_values, write_values, append_values, clear_values"
                 },
-                {
-                    "properties": {
-                        "action": { "const": "append_values" },
-                        "spreadsheet_id": {
-                            "type": "string",
-                            "description": "The spreadsheet ID"
-                        },
-                        "range": {
-                            "type": "string",
-                            "description": "A1 notation range to find the table (e.g., 'Sheet1!A:E')"
-                        },
-                        "values": {
-                            "type": "array",
-                            "items": { "type": "array" },
-                            "description": "Rows to append (2D array)"
-                        },
-                        "value_input_option": {
-                            "type": "string",
-                            "enum": ["RAW", "USER_ENTERED"],
-                            "description": "How to interpret input (default: USER_ENTERED)",
-                            "default": "USER_ENTERED"
-                        }
-                    },
-                    "required": ["action", "spreadsheet_id", "range", "values"]
+                "ranges": {
+                    "type": "array",
+                    "items": { "type": "string" },
+                    "description": "List of A1 notation ranges. Required for: batch_read_values"
                 },
-                {
-                    "properties": {
-                        "action": { "const": "clear_values" },
-                        "spreadsheet_id": {
-                            "type": "string",
-                            "description": "The spreadsheet ID"
-                        },
-                        "range": {
-                            "type": "string",
-                            "description": "A1 notation range to clear"
-                        }
-                    },
-                    "required": ["action", "spreadsheet_id", "range"]
+                "values": {
+                    "type": "array",
+                    "items": { "type": "array" },
+                    "description": "2D array of values (rows of columns). Required for: write_values, append_values"
                 },
-                {
-                    "properties": {
-                        "action": { "const": "add_sheet" },
-                        "spreadsheet_id": {
-                            "type": "string",
-                            "description": "The spreadsheet ID"
-                        },
-                        "title": {
-                            "type": "string",
-                            "description": "Name for the new sheet (tab)"
-                        }
-                    },
-                    "required": ["action", "spreadsheet_id", "title"]
+                "value_input_option": {
+                    "type": "string",
+                    "enum": ["RAW", "USER_ENTERED"],
+                    "description": "How to interpret input (USER_ENTERED parses like the UI, RAW stores as-is, default: USER_ENTERED). Used by: write_values, append_values",
+                    "default": "USER_ENTERED"
                 },
-                {
-                    "properties": {
-                        "action": { "const": "delete_sheet" },
-                        "spreadsheet_id": {
-                            "type": "string",
-                            "description": "The spreadsheet ID"
-                        },
-                        "sheet_id": {
-                            "type": "integer",
-                            "description": "Numeric sheet ID (get from get_spreadsheet, NOT the sheet name)"
-                        }
-                    },
-                    "required": ["action", "spreadsheet_id", "sheet_id"]
+                "sheet_id": {
+                    "type": "integer",
+                    "description": "Numeric sheet ID (from get_spreadsheet, NOT the sheet name). Required for: delete_sheet, rename_sheet, format_cells"
                 },
-                {
-                    "properties": {
-                        "action": { "const": "rename_sheet" },
-                        "spreadsheet_id": {
-                            "type": "string",
-                            "description": "The spreadsheet ID"
-                        },
-                        "sheet_id": {
-                            "type": "integer",
-                            "description": "Numeric sheet ID"
-                        },
-                        "title": {
-                            "type": "string",
-                            "description": "New name for the sheet"
-                        }
-                    },
-                    "required": ["action", "spreadsheet_id", "sheet_id", "title"]
+                "start_row": {
+                    "type": "integer",
+                    "description": "Start row (0-indexed, inclusive). Required for: format_cells"
                 },
-                {
-                    "properties": {
-                        "action": { "const": "format_cells" },
-                        "spreadsheet_id": {
-                            "type": "string",
-                            "description": "The spreadsheet ID"
-                        },
-                        "sheet_id": {
-                            "type": "integer",
-                            "description": "Numeric sheet ID"
-                        },
-                        "start_row": {
-                            "type": "integer",
-                            "description": "Start row (0-indexed, inclusive)"
-                        },
-                        "end_row": {
-                            "type": "integer",
-                            "description": "End row (0-indexed, exclusive)"
-                        },
-                        "start_column": {
-                            "type": "integer",
-                            "description": "Start column (0-indexed, inclusive)"
-                        },
-                        "end_column": {
-                            "type": "integer",
-                            "description": "End column (0-indexed, exclusive)"
-                        },
-                        "bold": {
-                            "type": "boolean",
-                            "description": "Make text bold"
-                        },
-                        "italic": {
-                            "type": "boolean",
-                            "description": "Make text italic"
-                        },
-                        "font_size": {
-                            "type": "integer",
-                            "description": "Font size in points"
-                        },
-                        "text_color": {
-                            "type": "string",
-                            "description": "Text color as hex (e.g., '#FF0000' for red)"
-                        },
-                        "background_color": {
-                            "type": "string",
-                            "description": "Cell background color as hex (e.g., '#FFFF00' for yellow)"
-                        },
-                        "horizontal_alignment": {
-                            "type": "string",
-                            "enum": ["LEFT", "CENTER", "RIGHT"],
-                            "description": "Horizontal text alignment"
-                        },
-                        "number_format": {
-                            "type": "string",
-                            "description": "Number format pattern (e.g., '#,##0.00', 'yyyy-mm-dd', '$#,##0')"
-                        },
-                        "number_format_type": {
-                            "type": "string",
-                            "enum": ["NUMBER", "CURRENCY", "PERCENT", "DATE", "TIME", "TEXT"],
-                            "description": "Type of number format (default: NUMBER)"
-                        }
-                    },
-                    "required": ["action", "spreadsheet_id", "sheet_id", "start_row", "end_row", "start_column", "end_column"]
+                "end_row": {
+                    "type": "integer",
+                    "description": "End row (0-indexed, exclusive). Required for: format_cells"
+                },
+                "start_column": {
+                    "type": "integer",
+                    "description": "Start column (0-indexed, inclusive). Required for: format_cells"
+                },
+                "end_column": {
+                    "type": "integer",
+                    "description": "End column (0-indexed, exclusive). Required for: format_cells"
+                },
+                "bold": {
+                    "type": "boolean",
+                    "description": "Make text bold. Used by: format_cells"
+                },
+                "italic": {
+                    "type": "boolean",
+                    "description": "Make text italic. Used by: format_cells"
+                },
+                "font_size": {
+                    "type": "integer",
+                    "description": "Font size in points. Used by: format_cells"
+                },
+                "text_color": {
+                    "type": "string",
+                    "description": "Text color as hex (e.g., '#FF0000'). Used by: format_cells"
+                },
+                "background_color": {
+                    "type": "string",
+                    "description": "Cell background color as hex (e.g., '#FFFF00'). Used by: format_cells"
+                },
+                "horizontal_alignment": {
+                    "type": "string",
+                    "enum": ["LEFT", "CENTER", "RIGHT"],
+                    "description": "Horizontal text alignment. Used by: format_cells"
+                },
+                "number_format": {
+                    "type": "string",
+                    "description": "Number format pattern (e.g., '#,##0.00', 'yyyy-mm-dd'). Used by: format_cells"
+                },
+                "number_format_type": {
+                    "type": "string",
+                    "enum": ["NUMBER", "CURRENCY", "PERCENT", "DATE", "TIME", "TEXT"],
+                    "description": "Type of number format (default: NUMBER). Used by: format_cells"
                 }
-            ]
+            }
         }"#
         .to_string()
     }

@@ -79,326 +79,124 @@ impl exports::near::agent::tool::Guest for GoogleSlidesTool {
         r#"{
             "type": "object",
             "required": ["action"],
-            "oneOf": [
-                {
-                    "properties": {
-                        "action": { "const": "create_presentation" },
-                        "title": {
-                            "type": "string",
-                            "description": "Presentation title"
-                        }
-                    },
-                    "required": ["action", "title"]
+            "properties": {
+                "action": {
+                    "type": "string",
+                    "enum": ["create_presentation", "get_presentation", "get_thumbnail", "create_slide", "delete_object", "insert_text", "delete_text", "replace_all_text", "create_shape", "insert_image", "format_text", "format_paragraph", "replace_shapes_with_image", "batch_update"],
+                    "description": "The Google Slides operation to perform"
                 },
-                {
-                    "properties": {
-                        "action": { "const": "get_presentation" },
-                        "presentation_id": {
-                            "type": "string",
-                            "description": "The presentation ID (same as Google Drive file ID)"
-                        }
-                    },
-                    "required": ["action", "presentation_id"]
+                "title": {
+                    "type": "string",
+                    "description": "Presentation title. Required for: create_presentation"
                 },
-                {
-                    "properties": {
-                        "action": { "const": "get_thumbnail" },
-                        "presentation_id": {
-                            "type": "string",
-                            "description": "The presentation ID"
-                        },
-                        "slide_object_id": {
-                            "type": "string",
-                            "description": "The slide's object ID"
-                        }
-                    },
-                    "required": ["action", "presentation_id", "slide_object_id"]
+                "presentation_id": {
+                    "type": "string",
+                    "description": "Presentation ID (same as Google Drive file ID). Required for all actions except create_presentation"
                 },
-                {
-                    "properties": {
-                        "action": { "const": "create_slide" },
-                        "presentation_id": {
-                            "type": "string",
-                            "description": "The presentation ID"
-                        },
-                        "insertion_index": {
-                            "type": "integer",
-                            "description": "Position to insert (0-based). Omit to append at end."
-                        },
-                        "layout": {
-                            "type": "string",
-                            "enum": ["BLANK", "TITLE", "TITLE_AND_BODY", "TITLE_AND_TWO_COLUMNS", "TITLE_ONLY", "SECTION_HEADER", "CAPTION_ONLY", "BIG_NUMBER", "ONE_COLUMN_TEXT", "MAIN_POINT"],
-                            "description": "Predefined layout (default: BLANK)",
-                            "default": "BLANK"
-                        }
-                    },
-                    "required": ["action", "presentation_id"]
+                "slide_object_id": {
+                    "type": "string",
+                    "description": "Slide object ID. Required for: get_thumbnail, create_shape, insert_image"
                 },
-                {
-                    "properties": {
-                        "action": { "const": "delete_object" },
-                        "presentation_id": {
-                            "type": "string",
-                            "description": "The presentation ID"
-                        },
-                        "object_id": {
-                            "type": "string",
-                            "description": "Object ID of the slide or element to delete"
-                        }
-                    },
-                    "required": ["action", "presentation_id", "object_id"]
+                "object_id": {
+                    "type": "string",
+                    "description": "Object ID of a slide element. Required for: delete_object, insert_text, delete_text, format_text, format_paragraph"
                 },
-                {
-                    "properties": {
-                        "action": { "const": "insert_text" },
-                        "presentation_id": {
-                            "type": "string",
-                            "description": "The presentation ID"
-                        },
-                        "object_id": {
-                            "type": "string",
-                            "description": "Object ID of the shape or text box"
-                        },
-                        "text": {
-                            "type": "string",
-                            "description": "Text to insert"
-                        },
-                        "insertion_index": {
-                            "type": "integer",
-                            "description": "Character index to insert at (0-based). Default: 0.",
-                            "default": 0
-                        }
-                    },
-                    "required": ["action", "presentation_id", "object_id", "text"]
+                "text": {
+                    "type": "string",
+                    "description": "Text to insert. Required for: insert_text"
                 },
-                {
-                    "properties": {
-                        "action": { "const": "delete_text" },
-                        "presentation_id": {
-                            "type": "string",
-                            "description": "The presentation ID"
-                        },
-                        "object_id": {
-                            "type": "string",
-                            "description": "Object ID of the shape"
-                        },
-                        "start_index": {
-                            "type": "integer",
-                            "description": "Start index (inclusive, 0-based)",
-                            "default": 0
-                        },
-                        "end_index": {
-                            "type": "integer",
-                            "description": "End index (exclusive). Omit to delete from start_index to end."
-                        }
-                    },
-                    "required": ["action", "presentation_id", "object_id"]
+                "insertion_index": {
+                    "type": "integer",
+                    "description": "Position to insert at (0-based). Used by: create_slide (omit to append at end), insert_text (default: 0)"
                 },
-                {
-                    "properties": {
-                        "action": { "const": "replace_all_text" },
-                        "presentation_id": {
-                            "type": "string",
-                            "description": "The presentation ID"
-                        },
-                        "find": {
-                            "type": "string",
-                            "description": "Text to search for"
-                        },
-                        "replace": {
-                            "type": "string",
-                            "description": "Replacement text"
-                        },
-                        "match_case": {
-                            "type": "boolean",
-                            "description": "Case-sensitive match (default: true)",
-                            "default": true
-                        }
-                    },
-                    "required": ["action", "presentation_id", "find", "replace"]
+                "layout": {
+                    "type": "string",
+                    "enum": ["BLANK", "TITLE", "TITLE_AND_BODY", "TITLE_AND_TWO_COLUMNS", "TITLE_ONLY", "SECTION_HEADER", "CAPTION_ONLY", "BIG_NUMBER", "ONE_COLUMN_TEXT", "MAIN_POINT"],
+                    "description": "Predefined slide layout (default: BLANK). Used by: create_slide",
+                    "default": "BLANK"
                 },
-                {
-                    "properties": {
-                        "action": { "const": "create_shape" },
-                        "presentation_id": {
-                            "type": "string",
-                            "description": "The presentation ID"
-                        },
-                        "slide_object_id": {
-                            "type": "string",
-                            "description": "Slide object ID to place the shape on"
-                        },
-                        "shape_type": {
-                            "type": "string",
-                            "enum": ["TEXT_BOX", "RECTANGLE", "ROUND_RECTANGLE", "ELLIPSE"],
-                            "description": "Shape type (default: TEXT_BOX)",
-                            "default": "TEXT_BOX"
-                        },
-                        "x": {
-                            "type": "number",
-                            "description": "X position in points from left edge"
-                        },
-                        "y": {
-                            "type": "number",
-                            "description": "Y position in points from top edge"
-                        },
-                        "width": {
-                            "type": "number",
-                            "description": "Width in points"
-                        },
-                        "height": {
-                            "type": "number",
-                            "description": "Height in points"
-                        }
-                    },
-                    "required": ["action", "presentation_id", "slide_object_id", "x", "y", "width", "height"]
+                "start_index": {
+                    "type": "integer",
+                    "description": "Start index (inclusive, 0-based). Used by: delete_text, format_text, format_paragraph"
                 },
-                {
-                    "properties": {
-                        "action": { "const": "insert_image" },
-                        "presentation_id": {
-                            "type": "string",
-                            "description": "The presentation ID"
-                        },
-                        "slide_object_id": {
-                            "type": "string",
-                            "description": "Slide object ID to place the image on"
-                        },
-                        "image_url": {
-                            "type": "string",
-                            "description": "Publicly accessible image URL"
-                        },
-                        "x": {
-                            "type": "number",
-                            "description": "X position in points"
-                        },
-                        "y": {
-                            "type": "number",
-                            "description": "Y position in points"
-                        },
-                        "width": {
-                            "type": "number",
-                            "description": "Width in points"
-                        },
-                        "height": {
-                            "type": "number",
-                            "description": "Height in points"
-                        }
-                    },
-                    "required": ["action", "presentation_id", "slide_object_id", "image_url", "x", "y", "width", "height"]
+                "end_index": {
+                    "type": "integer",
+                    "description": "End index (exclusive). Used by: delete_text, format_text, format_paragraph"
                 },
-                {
-                    "properties": {
-                        "action": { "const": "format_text" },
-                        "presentation_id": {
-                            "type": "string",
-                            "description": "The presentation ID"
-                        },
-                        "object_id": {
-                            "type": "string",
-                            "description": "Object ID of the shape"
-                        },
-                        "start_index": {
-                            "type": "integer",
-                            "description": "Start index (inclusive). Omit to format all text."
-                        },
-                        "end_index": {
-                            "type": "integer",
-                            "description": "End index (exclusive). Omit to format to end."
-                        },
-                        "bold": {
-                            "type": "boolean",
-                            "description": "Make text bold"
-                        },
-                        "italic": {
-                            "type": "boolean",
-                            "description": "Make text italic"
-                        },
-                        "underline": {
-                            "type": "boolean",
-                            "description": "Underline text"
-                        },
-                        "font_size": {
-                            "type": "number",
-                            "description": "Font size in points (e.g., 12, 18, 24)"
-                        },
-                        "font_family": {
-                            "type": "string",
-                            "description": "Font family (e.g., 'Arial', 'Roboto', 'Times New Roman')"
-                        },
-                        "foreground_color": {
-                            "type": "string",
-                            "description": "Text color as hex (e.g., '#FF0000' for red)"
-                        }
-                    },
-                    "required": ["action", "presentation_id", "object_id"]
+                "find": {
+                    "type": "string",
+                    "description": "Text to search for. Required for: replace_all_text, replace_shapes_with_image"
                 },
-                {
-                    "properties": {
-                        "action": { "const": "format_paragraph" },
-                        "presentation_id": {
-                            "type": "string",
-                            "description": "The presentation ID"
-                        },
-                        "object_id": {
-                            "type": "string",
-                            "description": "Object ID of the shape"
-                        },
-                        "alignment": {
-                            "type": "string",
-                            "enum": ["START", "CENTER", "END", "JUSTIFIED"],
-                            "description": "Paragraph alignment"
-                        },
-                        "start_index": {
-                            "type": "integer",
-                            "description": "Start index (inclusive). Omit to format all."
-                        },
-                        "end_index": {
-                            "type": "integer",
-                            "description": "End index (exclusive). Omit to format to end."
-                        }
-                    },
-                    "required": ["action", "presentation_id", "object_id", "alignment"]
+                "replace": {
+                    "type": "string",
+                    "description": "Replacement text. Required for: replace_all_text"
                 },
-                {
-                    "properties": {
-                        "action": { "const": "replace_shapes_with_image" },
-                        "presentation_id": {
-                            "type": "string",
-                            "description": "The presentation ID"
-                        },
-                        "find": {
-                            "type": "string",
-                            "description": "Text to match in shapes"
-                        },
-                        "image_url": {
-                            "type": "string",
-                            "description": "Image URL to replace matched shapes with"
-                        },
-                        "match_case": {
-                            "type": "boolean",
-                            "description": "Case-sensitive match (default: true)",
-                            "default": true
-                        }
-                    },
-                    "required": ["action", "presentation_id", "find", "image_url"]
+                "match_case": {
+                    "type": "boolean",
+                    "description": "Case-sensitive match (default: true). Used by: replace_all_text, replace_shapes_with_image",
+                    "default": true
                 },
-                {
-                    "properties": {
-                        "action": { "const": "batch_update" },
-                        "presentation_id": {
-                            "type": "string",
-                            "description": "The presentation ID"
-                        },
-                        "requests": {
-                            "type": "array",
-                            "items": { "type": "object" },
-                            "description": "Array of raw Slides API batchUpdate request objects"
-                        }
-                    },
-                    "required": ["action", "presentation_id", "requests"]
+                "shape_type": {
+                    "type": "string",
+                    "enum": ["TEXT_BOX", "RECTANGLE", "ROUND_RECTANGLE", "ELLIPSE"],
+                    "description": "Shape type (default: TEXT_BOX). Used by: create_shape",
+                    "default": "TEXT_BOX"
+                },
+                "x": {
+                    "type": "number",
+                    "description": "X position in points from left edge. Required for: create_shape, insert_image"
+                },
+                "y": {
+                    "type": "number",
+                    "description": "Y position in points from top edge. Required for: create_shape, insert_image"
+                },
+                "width": {
+                    "type": "number",
+                    "description": "Width in points. Required for: create_shape, insert_image"
+                },
+                "height": {
+                    "type": "number",
+                    "description": "Height in points. Required for: create_shape, insert_image"
+                },
+                "image_url": {
+                    "type": "string",
+                    "description": "Publicly accessible image URL. Required for: insert_image, replace_shapes_with_image"
+                },
+                "bold": {
+                    "type": "boolean",
+                    "description": "Make text bold. Used by: format_text"
+                },
+                "italic": {
+                    "type": "boolean",
+                    "description": "Make text italic. Used by: format_text"
+                },
+                "underline": {
+                    "type": "boolean",
+                    "description": "Underline text. Used by: format_text"
+                },
+                "font_size": {
+                    "type": "number",
+                    "description": "Font size in points (e.g., 12, 18, 24). Used by: format_text"
+                },
+                "font_family": {
+                    "type": "string",
+                    "description": "Font family (e.g., 'Arial', 'Roboto'). Used by: format_text"
+                },
+                "foreground_color": {
+                    "type": "string",
+                    "description": "Text color as hex (e.g., '#FF0000'). Used by: format_text"
+                },
+                "alignment": {
+                    "type": "string",
+                    "enum": ["START", "CENTER", "END", "JUSTIFIED"],
+                    "description": "Paragraph alignment. Required for: format_paragraph"
+                },
+                "requests": {
+                    "type": "array",
+                    "items": { "type": "object" },
+                    "description": "Array of raw Slides API batchUpdate request objects. Required for: batch_update"
                 }
-            ]
+            }
         }"#
         .to_string()
     }

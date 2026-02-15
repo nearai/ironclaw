@@ -81,7 +81,6 @@ async fn main() -> anyhow::Result<()> {
     let session = create_session_manager(SessionConfig {
         auth_base_url: config.llm.nearai.auth_base_url.clone(),
         session_path: config.llm.nearai.session_path.clone(),
-        ..Default::default()
     })
     .await;
     let llm = create_llm_provider(&config.llm, session)?;

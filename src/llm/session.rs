@@ -31,8 +31,6 @@ pub struct SessionConfig {
     pub auth_base_url: String,
     /// Path to session file (e.g., ~/.ironclaw/session.json).
     pub session_path: PathBuf,
-    /// Port range for OAuth callback server.
-    pub callback_port_range: (u16, u16),
 }
 
 impl Default for SessionConfig {
@@ -40,7 +38,6 @@ impl Default for SessionConfig {
         Self {
             auth_base_url: "https://private.near.ai".to_string(),
             session_path: default_session_path(),
-            callback_port_range: (9876, 9886),
         }
     }
 }
@@ -222,38 +219,21 @@ impl SessionManager {
 
     /// Start the OAuth login flow.
     ///
-    /// 1. Find an available port for the callback server
+    /// 1. Bind the fixed callback port
     /// 2. Print the auth URL and attempt to open browser
     /// 3. Wait for OAuth callback with session token
     /// 4. Save and return the token
     async fn initiate_login(&self) -> Result<(), LlmError> {
-        use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-        use tokio::net::TcpListener;
+        use crate::cli::oauth_defaults::{self, OAUTH_CALLBACK_PORT};
 
-        // Find an available port
-        let mut listener = None;
-        let mut port = 0;
+        let listener = oauth_defaults::bind_callback_listener()
+            .await
+            .map_err(|e| LlmError::SessionRenewalFailed {
+                provider: "nearai".to_string(),
+                reason: e.to_string(),
+            })?;
 
-        for p in self.config.callback_port_range.0..=self.config.callback_port_range.1 {
-            match TcpListener::bind(format!("127.0.0.1:{}", p)).await {
-                Ok(l) => {
-                    listener = Some(l);
-                    port = p;
-                    break;
-                }
-                Err(_) => continue,
-            }
-        }
-
-        let listener = listener.ok_or_else(|| LlmError::SessionRenewalFailed {
-            provider: "nearai".to_string(),
-            reason: format!(
-                "Could not find available port in range {}-{}",
-                self.config.callback_port_range.0, self.config.callback_port_range.1
-            ),
-        })?;
-
-        let callback_url = format!("http://127.0.0.1:{}", port);
+        let callback_url = format!("http://127.0.0.1:{}", OAUTH_CALLBACK_PORT);
 
         // Show auth provider menu
         println!();
@@ -333,137 +313,16 @@ impl SessionManager {
         println!();
         println!("Waiting for authentication...");
 
-        // Wait for callback with timeout
-        // The API redirects to: {frontend_callback}/auth/callback?token=X&session_id=X&expires_at=X&is_new_user=X
-        let timeout = std::time::Duration::from_secs(300); // 5 minutes
-        let selected_provider = auth_provider.to_string();
-        let (session_token, auth_provider) = tokio::time::timeout(timeout, async move {
-            loop {
-                let (mut socket, _) = listener.accept().await.map_err(|e| {
-                    LlmError::SessionRenewalFailed {
-                        provider: "nearai".to_string(),
-                        reason: format!("Failed to accept connection: {}", e),
-                    }
+        // The NEAR AI API redirects to: {frontend_callback}/auth/callback?token=X&...
+        let session_token =
+            oauth_defaults::wait_for_callback(listener, "/auth/callback", "token", "NEAR AI")
+                .await
+                .map_err(|e| LlmError::SessionRenewalFailed {
+                    provider: "nearai".to_string(),
+                    reason: e.to_string(),
                 })?;
 
-                let mut reader = BufReader::new(&mut socket);
-                let mut request_line = String::new();
-                reader.read_line(&mut request_line).await.map_err(|e| {
-                    LlmError::SessionRenewalFailed {
-                        provider: "nearai".to_string(),
-                        reason: format!("Failed to read request: {}", e),
-                    }
-                })?;
-
-                // Parse GET /auth/callback?token=xxx&session_id=xxx&expires_at=xxx&is_new_user=xxx HTTP/1.1
-                if let Some(path) = request_line.split_whitespace().nth(1)
-                    && path.starts_with("/auth/callback") {
-                        // Parse query parameters
-                        if let Some(query) = path.split('?').nth(1) {
-                            let mut token = None;
-
-                            for param in query.split('&') {
-                                let parts: Vec<&str> = param.splitn(2, '=').collect();
-                                if parts.len() == 2 && parts[0] == "token" {
-                                    token = Some(
-                                        urlencoding::decode(parts[1])
-                                            .unwrap_or_else(|_| parts[1].into())
-                                            .into_owned(),
-                                    );
-                                }
-                            }
-
-                            if let Some(token) = token {
-                                // Send success response with nice styling
-                                let response = concat!(
-                                    "HTTP/1.1 200 OK\r\n",
-                                    "Content-Type: text/html; charset=utf-8\r\n",
-                                    "Connection: close\r\n",
-                                    "\r\n",
-                                    "<!DOCTYPE html>\n",
-                                    "<html>\n",
-                                    "<head>\n",
-                                    "  <meta charset=\"utf-8\">\n",
-                                    "  <title>NEAR AI - Authentication Successful</title>\n",
-                                    "  <style>\n",
-                                    "    * { margin: 0; padding: 0; box-sizing: border-box; }\n",
-                                    "    body {\n",
-                                    "      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;\n",
-                                    "      background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%);\n",
-                                    "      min-height: 100vh;\n",
-                                    "      display: flex;\n",
-                                    "      align-items: center;\n",
-                                    "      justify-content: center;\n",
-                                    "      color: #fff;\n",
-                                    "    }\n",
-                                    "    .container {\n",
-                                    "      text-align: center;\n",
-                                    "      padding: 3rem;\n",
-                                    "      background: rgba(255,255,255,0.05);\n",
-                                    "      border-radius: 16px;\n",
-                                    "      backdrop-filter: blur(10px);\n",
-                                    "      border: 1px solid rgba(255,255,255,0.1);\n",
-                                    "      max-width: 400px;\n",
-                                    "    }\n",
-                                    "    .checkmark {\n",
-                                    "      width: 80px;\n",
-                                    "      height: 80px;\n",
-                                    "      background: linear-gradient(135deg, #00d9a5 0%, #00b386 100%);\n",
-                                    "      border-radius: 50%;\n",
-                                    "      display: flex;\n",
-                                    "      align-items: center;\n",
-                                    "      justify-content: center;\n",
-                                    "      margin: 0 auto 1.5rem;\n",
-                                    "      font-size: 40px;\n",
-                                    "    }\n",
-                                    "    h1 {\n",
-                                    "      font-size: 1.5rem;\n",
-                                    "      font-weight: 600;\n",
-                                    "      margin-bottom: 0.75rem;\n",
-                                    "    }\n",
-                                    "    p {\n",
-                                    "      color: rgba(255,255,255,0.7);\n",
-                                    "      font-size: 0.95rem;\n",
-                                    "      line-height: 1.5;\n",
-                                    "    }\n",
-                                    "    .brand {\n",
-                                    "      margin-top: 2rem;\n",
-                                    "      padding-top: 1.5rem;\n",
-                                    "      border-top: 1px solid rgba(255,255,255,0.1);\n",
-                                    "      font-size: 0.8rem;\n",
-                                    "      color: rgba(255,255,255,0.4);\n",
-                                    "    }\n",
-                                    "  </style>\n",
-                                    "</head>\n",
-                                    "<body>\n",
-                                    "  <div class=\"container\">\n",
-                                    "    <div class=\"checkmark\">&#10003;</div>\n",
-                                    "    <h1>Authentication Successful</h1>\n",
-                                    "    <p>You can close this window and return to the terminal.</p>\n",
-                                    "    <div class=\"brand\">NEAR AI Agent</div>\n",
-                                    "  </div>\n",
-                                    "</body>\n",
-                                    "</html>"
-                                );
-
-                                let _ = socket.write_all(response.as_bytes()).await;
-                                let _ = socket.shutdown().await;
-
-                                return Ok::<_, LlmError>((token, Some(selected_provider.clone())));
-                            }
-                        }
-                    }
-
-                // Not the callback we're looking for, send 404
-                let response = "HTTP/1.1 404 Not Found\r\nConnection: close\r\n\r\n";
-                let _ = socket.write_all(response.as_bytes()).await;
-            }
-        })
-        .await
-        .map_err(|_| LlmError::SessionRenewalFailed {
-            provider: "nearai".to_string(),
-            reason: "Authentication timed out after 5 minutes".to_string(),
-        })??;
+        let auth_provider = Some(auth_provider.to_string());
 
         // Save the token
         self.save_session(&session_token, auth_provider.as_deref())
@@ -669,7 +528,6 @@ mod tests {
         let config = SessionConfig {
             auth_base_url: "https://example.com".to_string(),
             session_path: session_path.clone(),
-            callback_port_range: (9900, 9910),
         };
 
         let manager = SessionManager::new_async(config.clone()).await;
@@ -710,7 +568,6 @@ mod tests {
         let config = SessionConfig {
             auth_base_url: "https://example.com".to_string(),
             session_path: dir.path().join("nonexistent.json"),
-            callback_port_range: (9900, 9910),
         };
 
         let manager = SessionManager::new_async(config).await;

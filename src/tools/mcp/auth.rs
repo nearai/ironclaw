@@ -11,9 +11,9 @@ use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::TcpListener;
 
+use crate::cli::oauth_defaults::{self, OAUTH_CALLBACK_PORT};
 use crate::secrets::{CreateSecretParams, SecretsStore};
 use crate::tools::mcp::config::McpServerConfig;
 
@@ -466,14 +466,12 @@ pub async fn authorize_mcp_server(
     Ok(token)
 }
 
-/// Find an available port for the OAuth callback.
+/// Bind the OAuth callback listener on the shared fixed port.
 pub async fn find_available_port() -> Result<(TcpListener, u16), AuthError> {
-    for port in 9876..=9886 {
-        if let Ok(listener) = TcpListener::bind(format!("127.0.0.1:{}", port)).await {
-            return Ok((listener, port));
-        }
-    }
-    Err(AuthError::PortUnavailable)
+    let listener = oauth_defaults::bind_callback_listener()
+        .await
+        .map_err(|_| AuthError::PortUnavailable)?;
+    Ok((listener, OAUTH_CALLBACK_PORT))
 }
 
 /// Build the authorization URL with all required parameters.
@@ -522,69 +520,16 @@ pub async fn wait_for_authorization_callback(
     listener: TcpListener,
     server_name: &str,
 ) -> Result<String, AuthError> {
-    let timeout = Duration::from_secs(300);
-
-    tokio::time::timeout(timeout, async {
-        loop {
-            let (mut socket, _) = listener
-                .accept()
-                .await
-                .map_err(|e| AuthError::Http(e.to_string()))?;
-
-            let mut reader = BufReader::new(&mut socket);
-            let mut request_line = String::new();
-            reader
-                .read_line(&mut request_line)
-                .await
-                .map_err(|e| AuthError::Http(e.to_string()))?;
-
-            // Parse GET /callback?code=xxx HTTP/1.1
-            if let Some(path) = request_line.split_whitespace().nth(1)
-                && path.starts_with("/callback")
-                    && let Some(query) = path.split('?').nth(1) {
-                        // Check for error first
-                        if query.contains("error=") {
-                            let response = "HTTP/1.1 400 Bad Request\r\n\r\nAuthorization denied";
-                            let _ = socket.write_all(response.as_bytes()).await;
-                            return Err(AuthError::AuthorizationDenied);
-                        }
-
-                        // Look for code
-                        for param in query.split('&') {
-                            let parts: Vec<&str> = param.splitn(2, '=').collect();
-                            if parts.len() == 2 && parts[0] == "code" {
-                                let code = urlencoding::decode(parts[1])
-                                    .unwrap_or_else(|_| parts[1].into())
-                                    .into_owned();
-
-                                // Send success response
-                                let response = format!(
-                                    "HTTP/1.1 200 OK\r\n\
-                                     Content-Type: text/html\r\n\
-                                     \r\n\
-                                     <!DOCTYPE html><html><body style=\"font-family: sans-serif; \
-                                     display: flex; justify-content: center; align-items: center; \
-                                     height: 100vh; margin: 0; background: #191919; color: white;\">\
-                                     <div style=\"text-align: center;\">\
-                                     <h1>✓ {} Connected!</h1>\
-                                     <p>You can close this window.</p>\
-                                     </div></body></html>",
-                                    server_name
-                                );
-                                let _ = socket.write_all(response.as_bytes()).await;
-                                let _ = socket.shutdown().await;
-
-                                return Ok(code);
-                            }
-                        }
-                    }
-
-            let response = "HTTP/1.1 404 Not Found\r\n\r\n";
-            let _ = socket.write_all(response.as_bytes()).await;
-        }
-    })
-    .await
-    .map_err(|_| AuthError::Timeout)?
+    oauth_defaults::wait_for_callback(listener, "/callback", "code", server_name)
+        .await
+        .map_err(|e| match e {
+            oauth_defaults::OAuthCallbackError::Denied => AuthError::AuthorizationDenied,
+            oauth_defaults::OAuthCallbackError::Timeout => AuthError::Timeout,
+            oauth_defaults::OAuthCallbackError::PortInUse(_, msg) => {
+                AuthError::Http(format!("Port error: {}", msg))
+            }
+            oauth_defaults::OAuthCallbackError::Io(msg) => AuthError::Http(msg),
+        })
 }
 
 /// Exchange the authorization code for an access token.

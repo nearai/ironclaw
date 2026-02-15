@@ -695,12 +695,21 @@ pub mod testing {
         }
 
         async fn get(&self, user_id: &str, name: &str) -> Result<Secret, SecretError> {
-            self.secrets
+            let secret = self
+                .secrets
                 .read()
                 .await
                 .get(&(user_id.to_string(), name.to_string()))
                 .cloned()
-                .ok_or_else(|| SecretError::NotFound(name.to_string()))
+                .ok_or_else(|| SecretError::NotFound(name.to_string()))?;
+
+            if let Some(expires_at) = secret.expires_at
+                && expires_at < Utc::now()
+            {
+                return Err(SecretError::Expired);
+            }
+
+            Ok(secret)
         }
 
         async fn get_decrypted(
@@ -887,6 +896,34 @@ mod tests {
                 .await
                 .unwrap()
         );
+    }
+
+    #[tokio::test]
+    async fn test_expired_secret_returns_error() {
+        let store = test_store();
+        let expires_at = chrono::Utc::now() - chrono::Duration::hours(1);
+        let params = CreateSecretParams::new("expired_key", "value").with_expiry(expires_at);
+
+        store.create("user1", params).await.unwrap();
+
+        let result = store.get("user1", "expired_key").await;
+        assert!(result.is_err());
+        assert!(matches!(
+            result.unwrap_err(),
+            crate::secrets::SecretError::Expired
+        ));
+    }
+
+    #[tokio::test]
+    async fn test_non_expired_secret_succeeds() {
+        let store = test_store();
+        let expires_at = chrono::Utc::now() + chrono::Duration::hours(1);
+        let params = CreateSecretParams::new("fresh_key", "value").with_expiry(expires_at);
+
+        store.create("user1", params).await.unwrap();
+
+        let result = store.get("user1", "fresh_key").await;
+        assert!(result.is_ok());
     }
 
     #[tokio::test]
