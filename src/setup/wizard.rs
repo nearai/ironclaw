@@ -2107,8 +2107,9 @@ mod tests {
         .unwrap();
 
         // Point to our stub channel source directory
+        // Note: set_var/remove_var are unsafe in Rust 1.92+ due to potential undefined behavior
+        // in multi-threaded programs. This is test-only code with proper cleanup in drop.
         let old_env = std::env::var("IRONCLAW_CHANNELS_SRC").ok();
-        // SAFETY: This is test-only code, setting env var for test duration
         unsafe {
             std::env::set_var("IRONCLAW_CHANNELS_SRC", channels_src.path());
         }
@@ -2119,7 +2120,7 @@ mod tests {
         let result = install_missing_bundled_channels(dir.path(), &installed).await;
 
         // Restore env var
-        // SAFETY: Restoring original env var value after test
+        // Note: set_var/remove_var are unsafe in Rust 1.92+ due to potential undefined behavior
         unsafe {
             if let Some(old) = old_env {
                 std::env::set_var("IRONCLAW_CHANNELS_SRC", old);
