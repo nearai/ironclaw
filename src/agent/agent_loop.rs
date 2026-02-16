@@ -1164,31 +1164,10 @@ impl Agent {
                                 sess.is_tool_auto_approved(&tc.name)
                             };
 
-                            // For shell commands, override auto-approval for
-                            // destructive patterns that should always require
-                            // explicit per-invocation approval.
-                            if is_auto_approved
-                                && tc.name == "shell"
-                                && let Some(cmd) = tc
-                                    .arguments
-                                    .get("command")
-                                    .and_then(|c| c.as_str().map(String::from))
-                                    .or_else(|| {
-                                        tc.arguments
-                                            .as_str()
-                                            .and_then(|s| {
-                                                serde_json::from_str::<serde_json::Value>(s).ok()
-                                            })
-                                            .and_then(|v| {
-                                                v.get("command")
-                                                    .and_then(|c| c.as_str().map(String::from))
-                                            })
-                                    })
-                                && crate::tools::builtin::shell::requires_explicit_approval(&cmd)
-                            {
+                            if is_auto_approved && tool.requires_approval_for(&tc.arguments) {
                                 tracing::info!(
-                                    "Shell command '{}' requires explicit approval despite auto-approve",
-                                    cmd.chars().take(80).collect::<String>()
+                                    "Tool '{}' invocation requires explicit approval despite auto-approve",
+                                    tc.name
                                 );
                                 is_auto_approved = false;
                             }

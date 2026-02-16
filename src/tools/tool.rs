@@ -172,6 +172,15 @@ pub trait Tool: Send + Sync {
         false
     }
 
+    /// Whether this invocation requires explicit approval even when the tool
+    /// was previously auto-approved for the session.
+    ///
+    /// Default: `false` (auto-approval can proceed if enabled). Tools can
+    /// override to enforce per-invocation checks for destructive arguments.
+    fn requires_approval_for(&self, _params: &serde_json::Value) -> bool {
+        false
+    }
+
     /// Maximum time this tool is allowed to run before the caller kills it.
     /// Override for long-running tools like sandbox execution.
     /// Default: 60 seconds.

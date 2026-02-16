@@ -126,6 +126,18 @@ pub fn requires_explicit_approval(command: &str) -> bool {
         .any(|p| lower.contains(&p.to_lowercase()))
 }
 
+fn command_from_params(params: &serde_json::Value) -> Option<String> {
+    params
+        .get("command")
+        .and_then(|c| c.as_str().map(String::from))
+        .or_else(|| {
+            params
+                .as_str()
+                .and_then(|s| serde_json::from_str::<serde_json::Value>(s).ok())
+                .and_then(|v| v.get("command").and_then(|c| c.as_str().map(String::from)))
+        })
+}
+
 /// Shell command execution tool.
 pub struct ShellTool {
     /// Working directory for commands (if None, uses job's working dir or cwd).
@@ -426,6 +438,12 @@ impl Tool for ShellTool {
         true // Shell commands should require approval
     }
 
+    fn requires_approval_for(&self, params: &serde_json::Value) -> bool {
+        command_from_params(params)
+            .as_deref()
+            .is_some_and(requires_explicit_approval)
+    }
+
     fn requires_sanitization(&self) -> bool {
         true // Shell output could contain anything
     }
@@ -524,46 +542,39 @@ mod tests {
         ));
     }
 
-    /// Replicate the extraction logic from agent_loop.rs to prove it works
-    /// when `arguments` is a `serde_json::Value::Object` (the common case
-    /// that was previously broken because `Value::Object.as_str()` returns None).
+    /// Ensure command extraction works for object-form arguments.
     #[test]
-    fn test_destructive_command_extraction_from_object_args() {
+    fn test_command_extraction_from_object_args() {
         let arguments = serde_json::json!({"command": "rm -rf /tmp/stuff"});
 
-        let cmd = arguments
-            .get("command")
-            .and_then(|c| c.as_str().map(String::from))
-            .or_else(|| {
-                arguments
-                    .as_str()
-                    .and_then(|s| serde_json::from_str::<serde_json::Value>(s).ok())
-                    .and_then(|v| v.get("command").and_then(|c| c.as_str().map(String::from)))
-            });
+        let cmd = command_from_params(&arguments);
 
         assert_eq!(cmd.as_deref(), Some("rm -rf /tmp/stuff"));
         assert!(requires_explicit_approval(cmd.as_deref().unwrap()));
     }
 
-    /// Verify extraction still works when `arguments` is a JSON string
-    /// (rare, but possible if the LLM provider returns string-encoded JSON).
+    /// Ensure command extraction works for string-encoded JSON arguments.
     #[test]
-    fn test_destructive_command_extraction_from_string_args() {
+    fn test_command_extraction_from_string_args() {
         let arguments =
             serde_json::Value::String(r#"{"command": "git push --force origin main"}"#.to_string());
 
-        let cmd = arguments
-            .get("command")
-            .and_then(|c| c.as_str().map(String::from))
-            .or_else(|| {
-                arguments
-                    .as_str()
-                    .and_then(|s| serde_json::from_str::<serde_json::Value>(s).ok())
-                    .and_then(|v| v.get("command").and_then(|c| c.as_str().map(String::from)))
-            });
+        let cmd = command_from_params(&arguments);
 
         assert_eq!(cmd.as_deref(), Some("git push --force origin main"));
         assert!(requires_explicit_approval(cmd.as_deref().unwrap()));
+    }
+
+    #[test]
+    fn test_requires_approval_for_destructive_and_safe_commands() {
+        let tool = ShellTool::new();
+
+        assert!(tool.requires_approval_for(&serde_json::json!({
+            "command": "rm -rf /tmp/stuff"
+        })));
+        assert!(!tool.requires_approval_for(&serde_json::json!({
+            "command": "echo hello"
+        })));
     }
 
     #[test]
