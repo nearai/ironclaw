@@ -199,6 +199,28 @@ pub trait Tool: Send + Sync {
     }
 }
 
+/// Extract a required string parameter from a JSON object.
+///
+/// Returns `ToolError::InvalidParameters` if the key is missing or not a string.
+pub fn require_str<'a>(params: &'a serde_json::Value, name: &str) -> Result<&'a str, ToolError> {
+    params
+        .get(name)
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| ToolError::InvalidParameters(format!("missing '{}' parameter", name)))
+}
+
+/// Extract a required parameter of any type from a JSON object.
+///
+/// Returns `ToolError::InvalidParameters` if the key is missing.
+pub fn require_param<'a>(
+    params: &'a serde_json::Value,
+    name: &str,
+) -> Result<&'a serde_json::Value, ToolError> {
+    params
+        .get(name)
+        .ok_or_else(|| ToolError::InvalidParameters(format!("missing '{}' parameter", name)))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -235,12 +257,7 @@ mod tests {
             params: serde_json::Value,
             _ctx: &JobContext,
         ) -> Result<ToolOutput, ToolError> {
-            let message = params
-                .get("message")
-                .and_then(|v| v.as_str())
-                .ok_or_else(|| {
-                    ToolError::InvalidParameters("missing 'message' parameter".to_string())
-                })?;
+            let message = require_str(&params, "message")?;
 
             Ok(ToolOutput::text(message, Duration::from_millis(1)))
         }
@@ -276,5 +293,41 @@ mod tests {
     fn test_execution_timeout_default() {
         let tool = EchoTool;
         assert_eq!(tool.execution_timeout(), Duration::from_secs(60));
+    }
+
+    #[test]
+    fn test_require_str_present() {
+        let params = serde_json::json!({"name": "alice"});
+        assert_eq!(require_str(&params, "name").unwrap(), "alice");
+    }
+
+    #[test]
+    fn test_require_str_missing() {
+        let params = serde_json::json!({});
+        let err = require_str(&params, "name").unwrap_err();
+        assert!(err.to_string().contains("missing 'name'"));
+    }
+
+    #[test]
+    fn test_require_str_wrong_type() {
+        let params = serde_json::json!({"name": 42});
+        let err = require_str(&params, "name").unwrap_err();
+        assert!(err.to_string().contains("missing 'name'"));
+    }
+
+    #[test]
+    fn test_require_param_present() {
+        let params = serde_json::json!({"data": [1, 2, 3]});
+        assert_eq!(
+            require_param(&params, "data").unwrap(),
+            &serde_json::json!([1, 2, 3])
+        );
+    }
+
+    #[test]
+    fn test_require_param_missing() {
+        let params = serde_json::json!({});
+        let err = require_param(&params, "data").unwrap_err();
+        assert!(err.to_string().contains("missing 'data'"));
     }
 }

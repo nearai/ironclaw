@@ -40,8 +40,18 @@ pub struct Settings {
     #[serde(default)]
     pub secrets_master_key_source: KeySource,
 
-    // === Step 3: NEAR AI Auth ===
-    // Session stored separately in session.json
+    // === Step 3: Inference Provider ===
+    /// LLM backend: "nearai", "anthropic", "openai", "ollama", "openai_compatible".
+    #[serde(default)]
+    pub llm_backend: Option<String>,
+
+    /// Ollama base URL (when llm_backend = "ollama").
+    #[serde(default)]
+    pub ollama_base_url: Option<String>,
+
+    /// OpenAI-compatible endpoint base URL (when llm_backend = "openai_compatible").
+    #[serde(default)]
+    pub openai_compatible_base_url: Option<String>,
 
     // === Step 4: Model Selection ===
     /// Currently selected model.
@@ -499,20 +509,16 @@ impl Default for BuilderSettings {
 }
 
 impl Settings {
-    /// Get the default settings file path (~/.ironclaw/settings.json).
-    pub fn default_path() -> PathBuf {
-        dirs::home_dir()
-            .unwrap_or_else(|| PathBuf::from("."))
-            .join(".ironclaw")
-            .join("settings.json")
-    }
-
     /// Reconstruct Settings from a flat key-value map (as stored in the DB).
     ///
     /// Each key is a dotted path (e.g., "agent.name"), value is a JSONB value.
     /// Missing keys get their default value.
     pub fn from_db_map(map: &std::collections::HashMap<String, serde_json::Value>) -> Self {
-        // Start with defaults, then overlay each DB setting
+        // Start with defaults, then overlay each DB setting.
+        //
+        // The settings table stores both Settings struct fields and app-specific
+        // data (e.g. nearai.session_token). Skip keys that don't correspond to
+        // a known Settings path.
         let mut settings = Self::default();
 
         for (key, value) in map {
@@ -521,17 +527,23 @@ impl Settings {
                 serde_json::Value::String(s) => s.clone(),
                 serde_json::Value::Bool(b) => b.to_string(),
                 serde_json::Value::Number(n) => n.to_string(),
-                serde_json::Value::Null => "null".to_string(),
+                serde_json::Value::Null => continue, // null means default, skip
                 other => other.to_string(),
             };
 
-            if let Err(e) = settings.set(key, &value_str) {
-                tracing::warn!(
-                    "Failed to apply DB setting '{}' = '{}': {}",
-                    key,
-                    value_str,
-                    e
-                );
+            match settings.set(key, &value_str) {
+                Ok(()) => {}
+                // The settings table stores both Settings fields and app-specific
+                // data (e.g. nearai.session_token). Silently skip unknown paths.
+                Err(e) if e.starts_with("Path not found") => {}
+                Err(e) => {
+                    tracing::warn!(
+                        "Failed to apply DB setting '{}' = '{}': {}",
+                        key,
+                        value_str,
+                        e
+                    );
+                }
             }
         }
 
@@ -552,48 +564,25 @@ impl Settings {
         map
     }
 
+    /// Get the default settings file path (~/.ironclaw/settings.json).
+    pub fn default_path() -> std::path::PathBuf {
+        dirs::home_dir()
+            .unwrap_or_else(|| std::path::PathBuf::from("."))
+            .join(".ironclaw")
+            .join("settings.json")
+    }
+
     /// Load settings from disk, returning default if not found.
     pub fn load() -> Self {
         Self::load_from(&Self::default_path())
     }
 
-    /// Load settings from a specific path.
-    pub fn load_from(path: &PathBuf) -> Self {
+    /// Load settings from a specific path (used by bootstrap legacy migration).
+    pub fn load_from(path: &std::path::Path) -> Self {
         match std::fs::read_to_string(path) {
             Ok(data) => serde_json::from_str(&data).unwrap_or_default(),
             Err(_) => Self::default(),
         }
-    }
-
-    /// Save settings to disk.
-    pub fn save(&self) -> std::io::Result<()> {
-        self.save_to(&Self::default_path())
-    }
-
-    /// Save settings to a specific path.
-    pub fn save_to(&self, path: &PathBuf) -> std::io::Result<()> {
-        // Ensure parent directory exists
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
-
-        let json = serde_json::to_string_pretty(self)
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string()))?;
-
-        std::fs::write(path, json)
-    }
-
-    /// Get the selected model, falling back to the provided default.
-    pub fn model_or(&self, default: &str) -> String {
-        self.selected_model
-            .clone()
-            .unwrap_or_else(|| default.to_string())
-    }
-
-    /// Set the selected model and save.
-    pub fn set_model(&mut self, model: &str) -> std::io::Result<()> {
-        self.selected_model = Some(model.to_string());
-        self.save()
     }
 
     /// Get a setting value by dotted path (e.g., "agent.max_parallel_jobs").
@@ -780,40 +769,20 @@ fn collect_settings(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tempfile::tempdir;
 
     #[test]
-    fn test_settings_save_load() {
-        let dir = tempdir().unwrap();
-        let path = dir.path().join("settings.json");
-
+    fn test_db_map_round_trip() {
         let settings = Settings {
             selected_model: Some("claude-3-5-sonnet-20241022".to_string()),
             ..Default::default()
         };
 
-        settings.save_to(&path).unwrap();
-
-        let loaded = Settings::load_from(&path);
+        let map = settings.to_db_map();
+        let restored = Settings::from_db_map(&map);
         assert_eq!(
-            loaded.selected_model,
+            restored.selected_model,
             Some("claude-3-5-sonnet-20241022".to_string())
         );
-    }
-
-    #[test]
-    fn test_model_or_default() {
-        let settings = Settings::default();
-        assert_eq!(
-            settings.model_or("default-model"),
-            "default-model".to_string()
-        );
-
-        let settings = Settings {
-            selected_model: Some("my-model".to_string()),
-            ..Default::default()
-        };
-        assert_eq!(settings.model_or("default-model"), "my-model".to_string());
     }
 
     #[test]
@@ -886,16 +855,13 @@ mod tests {
     }
 
     #[test]
-    fn test_telegram_owner_id_round_trip() {
-        let dir = tempdir().unwrap();
-        let path = dir.path().join("settings.json");
-
+    fn test_telegram_owner_id_db_round_trip() {
         let mut settings = Settings::default();
         settings.channels.telegram_owner_id = Some(123456789);
-        settings.save_to(&path).unwrap();
 
-        let loaded = Settings::load_from(&path);
-        assert_eq!(loaded.channels.telegram_owner_id, Some(123456789));
+        let map = settings.to_db_map();
+        let restored = Settings::from_db_map(&map);
+        assert_eq!(restored.channels.telegram_owner_id, Some(123456789));
     }
 
     #[test]
@@ -911,5 +877,31 @@ mod tests {
             .set("channels.telegram_owner_id", "987654321")
             .unwrap();
         assert_eq!(settings.channels.telegram_owner_id, Some(987654321));
+    }
+
+    #[test]
+    fn test_llm_backend_round_trip() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+
+        let settings = Settings {
+            llm_backend: Some("anthropic".to_string()),
+            ollama_base_url: Some("http://localhost:11434".to_string()),
+            openai_compatible_base_url: Some("http://my-vllm:8000/v1".to_string()),
+            ..Default::default()
+        };
+        let json = serde_json::to_string_pretty(&settings).unwrap();
+        std::fs::write(&path, json).unwrap();
+
+        let loaded = Settings::load_from(&path);
+        assert_eq!(loaded.llm_backend, Some("anthropic".to_string()));
+        assert_eq!(
+            loaded.ollama_base_url,
+            Some("http://localhost:11434".to_string())
+        );
+        assert_eq!(
+            loaded.openai_compatible_base_url,
+            Some("http://my-vllm:8000/v1".to_string())
+        );
     }
 }

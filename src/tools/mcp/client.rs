@@ -190,10 +190,15 @@ impl McpClient {
                 req_builder = req_builder.header("Mcp-Session-Id", session_id);
             }
 
-            let response = req_builder
-                .send()
-                .await
-                .map_err(|e| ToolError::ExternalService(format!("MCP request failed: {}", e)))?;
+            let response = req_builder.send().await.map_err(|e| {
+                let mut chain = format!("MCP request failed: {}", e);
+                let mut source = std::error::Error::source(&e);
+                while let Some(cause) = source {
+                    chain.push_str(&format!(" -> {}", cause));
+                    source = cause.source();
+                }
+                ToolError::ExternalService(chain)
+            })?;
 
             // Check for 401 Unauthorized - try to refresh token on first attempt
             if response.status() == reqwest::StatusCode::UNAUTHORIZED {

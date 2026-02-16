@@ -248,154 +248,64 @@ fn get_api_hash() -> Result<String, String> {
 const SCHEMA: &str = r#"{
     "type": "object",
     "required": ["action"],
-    "oneOf": [
-        {
-            "properties": {
-                "action": { "const": "login" },
-                "phone_number": {
-                    "type": "string",
-                    "description": "Phone number in international format (e.g., '+1234567890')"
-                }
-            },
-            "required": ["action", "phone_number"]
+    "properties": {
+        "action": {
+            "type": "string",
+            "enum": ["login", "submit_auth_code", "submit_2fa_password", "get_me", "get_contacts", "get_chats", "get_messages", "send_message", "forward_message", "delete_message", "search_messages", "get_updates"],
+            "description": "The Telegram operation to perform"
         },
-        {
-            "properties": {
-                "action": { "const": "submit_auth_code" },
-                "code": {
-                    "type": "string",
-                    "description": "Verification code received via SMS or Telegram"
-                }
-            },
-            "required": ["action", "code"]
+        "phone_number": {
+            "type": "string",
+            "description": "Phone number in international format (e.g., '+1234567890'). Required for: login"
         },
-        {
-            "properties": {
-                "action": { "const": "submit_2fa_password" },
-                "password": {
-                    "type": "string",
-                    "description": "Two-factor authentication password"
-                }
-            },
-            "required": ["action", "password"]
+        "code": {
+            "type": "string",
+            "description": "Verification code received via SMS or Telegram. Required for: submit_auth_code"
         },
-        {
-            "properties": {
-                "action": { "const": "get_me" }
-            },
-            "required": ["action"]
+        "password": {
+            "type": "string",
+            "description": "Two-factor authentication password. Required for: submit_2fa_password"
         },
-        {
-            "properties": {
-                "action": { "const": "get_contacts" }
-            },
-            "required": ["action"]
+        "chat_id": {
+            "type": "integer",
+            "description": "Chat ID (negative for groups/channels). Required for: get_messages, send_message. Optional for: search_messages"
         },
-        {
-            "properties": {
-                "action": { "const": "get_chats" },
-                "limit": {
-                    "type": "integer",
-                    "description": "Maximum number of chats to return (default: 20)",
-                    "default": 20
-                }
-            },
-            "required": ["action"]
+        "limit": {
+            "type": "integer",
+            "description": "Maximum number of results (default: 20). Used by: get_chats, get_messages, search_messages",
+            "default": 20
         },
-        {
-            "properties": {
-                "action": { "const": "get_messages" },
-                "chat_id": {
-                    "type": "integer",
-                    "description": "Chat ID (negative for groups/channels)"
-                },
-                "limit": {
-                    "type": "integer",
-                    "description": "Maximum number of messages (default: 20)",
-                    "default": 20
-                },
-                "from_message_id": {
-                    "type": "integer",
-                    "description": "Start from this message ID for pagination"
-                }
-            },
-            "required": ["action", "chat_id"]
+        "from_message_id": {
+            "type": "integer",
+            "description": "Start from this message ID for pagination. Used by: get_messages"
         },
-        {
-            "properties": {
-                "action": { "const": "send_message" },
-                "chat_id": {
-                    "type": "integer",
-                    "description": "Chat ID to send the message to"
-                },
-                "text": {
-                    "type": "string",
-                    "description": "Message text"
-                }
-            },
-            "required": ["action", "chat_id", "text"]
+        "text": {
+            "type": "string",
+            "description": "Message text. Required for: send_message"
         },
-        {
-            "properties": {
-                "action": { "const": "forward_message" },
-                "from_chat_id": {
-                    "type": "integer",
-                    "description": "Source chat ID"
-                },
-                "to_chat_id": {
-                    "type": "integer",
-                    "description": "Destination chat ID"
-                },
-                "message_ids": {
-                    "type": "array",
-                    "items": { "type": "integer" },
-                    "description": "Message IDs to forward"
-                }
-            },
-            "required": ["action", "from_chat_id", "to_chat_id", "message_ids"]
+        "from_chat_id": {
+            "type": "integer",
+            "description": "Source chat ID. Required for: forward_message"
         },
-        {
-            "properties": {
-                "action": { "const": "delete_message" },
-                "message_ids": {
-                    "type": "array",
-                    "items": { "type": "integer" },
-                    "description": "Message IDs to delete"
-                },
-                "revoke": {
-                    "type": "boolean",
-                    "description": "Also delete for other participants (default: false)",
-                    "default": false
-                }
-            },
-            "required": ["action", "message_ids"]
+        "to_chat_id": {
+            "type": "integer",
+            "description": "Destination chat ID. Required for: forward_message"
         },
-        {
-            "properties": {
-                "action": { "const": "search_messages" },
-                "query": {
-                    "type": "string",
-                    "description": "Search query"
-                },
-                "chat_id": {
-                    "type": "integer",
-                    "description": "Chat ID to search within (omit for global search)"
-                },
-                "limit": {
-                    "type": "integer",
-                    "description": "Maximum number of results (default: 20)",
-                    "default": 20
-                }
-            },
-            "required": ["action", "query"]
+        "message_ids": {
+            "type": "array",
+            "items": { "type": "integer" },
+            "description": "Message IDs. Required for: forward_message, delete_message"
         },
-        {
-            "properties": {
-                "action": { "const": "get_updates" }
-            },
-            "required": ["action"]
+        "revoke": {
+            "type": "boolean",
+            "description": "Also delete for other participants (default: false). Used by: delete_message",
+            "default": false
+        },
+        "query": {
+            "type": "string",
+            "description": "Search query. Required for: search_messages"
         }
-    ]
+    }
 }"#;
 
 export!(TelegramTool);

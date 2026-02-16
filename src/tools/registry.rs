@@ -11,6 +11,7 @@ use crate::extensions::ExtensionManager;
 use crate::llm::{LlmProvider, ToolDefinition};
 use crate::orchestrator::job_manager::ContainerJobManager;
 use crate::safety::SafetyLayer;
+use crate::secrets::SecretsStore;
 use crate::tools::builder::{BuildSoftwareTool, BuilderConfig, LlmSoftwareBuilder};
 use crate::tools::builtin::{
     ApplyPatchTool, CancelJobTool, CreateJobTool, EchoTool, HttpTool, JobStatusTool, JsonTool,
@@ -20,8 +21,8 @@ use crate::tools::builtin::{
 };
 use crate::tools::tool::{Tool, ToolDomain};
 use crate::tools::wasm::{
-    Capabilities, ResourceLimits, WasmError, WasmStorageError, WasmToolRuntime, WasmToolStore,
-    WasmToolWrapper,
+    Capabilities, OAuthRefreshConfig, ResourceLimits, WasmError, WasmStorageError, WasmToolRuntime,
+    WasmToolStore, WasmToolWrapper,
 };
 use crate::workspace::Workspace;
 
@@ -366,6 +367,12 @@ impl ToolRegistry {
         if let Some(s) = reg.schema {
             wrapper = wrapper.with_schema(s);
         }
+        if let Some(store) = reg.secrets_store {
+            wrapper = wrapper.with_secrets_store(store);
+        }
+        if let Some(oauth) = reg.oauth_refresh {
+            wrapper = wrapper.with_oauth_refresh(oauth);
+        }
 
         // Register the tool
         self.register(Arc::new(wrapper)).await;
@@ -421,6 +428,8 @@ impl ToolRegistry {
             limits: None,
             description: Some(&tool_with_binary.tool.description),
             schema: Some(tool_with_binary.tool.parameters_schema.clone()),
+            secrets_store: None,
+            oauth_refresh: None,
         })
         .await
         .map_err(WasmRegistrationError::Wasm)?;
@@ -462,6 +471,10 @@ pub struct WasmToolRegistration<'a> {
     pub description: Option<&'a str>,
     /// Optional parameter schema override.
     pub schema: Option<serde_json::Value>,
+    /// Secrets store for credential injection at request time.
+    pub secrets_store: Option<Arc<dyn SecretsStore + Send + Sync>>,
+    /// OAuth refresh configuration for auto-refreshing expired tokens.
+    pub oauth_refresh: Option<OAuthRefreshConfig>,
 }
 
 impl Default for ToolRegistry {

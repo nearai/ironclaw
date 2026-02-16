@@ -74,251 +74,120 @@ impl exports::near::agent::tool::Guest for GoogleDocsTool {
         r#"{
             "type": "object",
             "required": ["action"],
-            "oneOf": [
-                {
-                    "properties": {
-                        "action": { "const": "create_document" },
-                        "title": {
-                            "type": "string",
-                            "description": "Document title"
-                        }
-                    },
-                    "required": ["action", "title"]
+            "properties": {
+                "action": {
+                    "type": "string",
+                    "enum": ["create_document", "get_document", "read_content", "insert_text", "delete_content", "replace_text", "format_text", "format_paragraph", "insert_table", "create_list", "batch_update"],
+                    "description": "The Google Docs operation to perform"
                 },
-                {
-                    "properties": {
-                        "action": { "const": "get_document" },
-                        "document_id": {
-                            "type": "string",
-                            "description": "The document ID (same as Google Drive file ID)"
-                        }
-                    },
-                    "required": ["action", "document_id"]
+                "title": {
+                    "type": "string",
+                    "description": "Document title. Required for: create_document"
                 },
-                {
-                    "properties": {
-                        "action": { "const": "read_content" },
-                        "document_id": {
-                            "type": "string",
-                            "description": "The document ID"
-                        }
-                    },
-                    "required": ["action", "document_id"]
+                "document_id": {
+                    "type": "string",
+                    "description": "The document ID (same as Google Drive file ID). Required for all actions except create_document"
                 },
-                {
-                    "properties": {
-                        "action": { "const": "insert_text" },
-                        "document_id": {
-                            "type": "string",
-                            "description": "The document ID"
-                        },
-                        "text": {
-                            "type": "string",
-                            "description": "Text to insert"
-                        },
-                        "index": {
-                            "type": "integer",
-                            "description": "Character index to insert at (1 for start of body). Use -1 to append at end.",
-                            "default": -1
-                        },
-                        "segment_id": {
-                            "type": "string",
-                            "description": "Segment ID (empty string for body, or a header/footer ID)",
-                            "default": ""
-                        }
-                    },
-                    "required": ["action", "document_id", "text"]
+                "text": {
+                    "type": "string",
+                    "description": "Text to insert. Required for: insert_text"
                 },
-                {
-                    "properties": {
-                        "action": { "const": "delete_content" },
-                        "document_id": {
-                            "type": "string",
-                            "description": "The document ID"
-                        },
-                        "start_index": {
-                            "type": "integer",
-                            "description": "Start index (inclusive)"
-                        },
-                        "end_index": {
-                            "type": "integer",
-                            "description": "End index (exclusive)"
-                        },
-                        "segment_id": {
-                            "type": "string",
-                            "description": "Segment ID (empty for body)",
-                            "default": ""
-                        }
-                    },
-                    "required": ["action", "document_id", "start_index", "end_index"]
+                "index": {
+                    "type": "integer",
+                    "description": "Character index (1 for start of body, -1 to append at end). Required for: insert_table. Used by: insert_text (default: -1)"
                 },
-                {
-                    "properties": {
-                        "action": { "const": "replace_text" },
-                        "document_id": {
-                            "type": "string",
-                            "description": "The document ID"
-                        },
-                        "find": {
-                            "type": "string",
-                            "description": "Text to search for"
-                        },
-                        "replace": {
-                            "type": "string",
-                            "description": "Replacement text"
-                        },
-                        "match_case": {
-                            "type": "boolean",
-                            "description": "Case-sensitive match (default: true)",
-                            "default": true
-                        }
-                    },
-                    "required": ["action", "document_id", "find", "replace"]
+                "segment_id": {
+                    "type": "string",
+                    "description": "Segment ID (empty for body, or a header/footer ID). Used by: insert_text, delete_content",
+                    "default": ""
                 },
-                {
-                    "properties": {
-                        "action": { "const": "format_text" },
-                        "document_id": {
-                            "type": "string",
-                            "description": "The document ID"
-                        },
-                        "start_index": {
-                            "type": "integer",
-                            "description": "Start index (inclusive)"
-                        },
-                        "end_index": {
-                            "type": "integer",
-                            "description": "End index (exclusive)"
-                        },
-                        "bold": {
-                            "type": "boolean",
-                            "description": "Make text bold"
-                        },
-                        "italic": {
-                            "type": "boolean",
-                            "description": "Make text italic"
-                        },
-                        "underline": {
-                            "type": "boolean",
-                            "description": "Underline text"
-                        },
-                        "strikethrough": {
-                            "type": "boolean",
-                            "description": "Strikethrough text"
-                        },
-                        "font_size": {
-                            "type": "number",
-                            "description": "Font size in points (e.g., 12, 14, 18)"
-                        },
-                        "font_family": {
-                            "type": "string",
-                            "description": "Font family (e.g., 'Arial', 'Times New Roman', 'Courier New')"
-                        },
-                        "foreground_color": {
-                            "type": "string",
-                            "description": "Text color as hex (e.g., '#FF0000' for red)"
-                        },
-                        "background_color": {
-                            "type": "string",
-                            "description": "Text background/highlight color as hex"
-                        }
-                    },
-                    "required": ["action", "document_id", "start_index", "end_index"]
+                "start_index": {
+                    "type": "integer",
+                    "description": "Start index (inclusive). Required for: delete_content, format_text, format_paragraph, create_list"
                 },
-                {
-                    "properties": {
-                        "action": { "const": "format_paragraph" },
-                        "document_id": {
-                            "type": "string",
-                            "description": "The document ID"
-                        },
-                        "start_index": {
-                            "type": "integer",
-                            "description": "Start index (inclusive)"
-                        },
-                        "end_index": {
-                            "type": "integer",
-                            "description": "End index (exclusive)"
-                        },
-                        "named_style": {
-                            "type": "string",
-                            "enum": ["NORMAL_TEXT", "TITLE", "SUBTITLE", "HEADING_1", "HEADING_2", "HEADING_3", "HEADING_4", "HEADING_5", "HEADING_6"],
-                            "description": "Paragraph style (heading level)"
-                        },
-                        "alignment": {
-                            "type": "string",
-                            "enum": ["START", "CENTER", "END", "JUSTIFIED"],
-                            "description": "Text alignment"
-                        },
-                        "line_spacing": {
-                            "type": "number",
-                            "description": "Line spacing as percentage (e.g., 100 for single, 150 for 1.5x, 200 for double)"
-                        }
-                    },
-                    "required": ["action", "document_id", "start_index", "end_index"]
+                "end_index": {
+                    "type": "integer",
+                    "description": "End index (exclusive). Required for: delete_content, format_text, format_paragraph, create_list"
                 },
-                {
-                    "properties": {
-                        "action": { "const": "insert_table" },
-                        "document_id": {
-                            "type": "string",
-                            "description": "The document ID"
-                        },
-                        "rows": {
-                            "type": "integer",
-                            "description": "Number of rows"
-                        },
-                        "columns": {
-                            "type": "integer",
-                            "description": "Number of columns"
-                        },
-                        "index": {
-                            "type": "integer",
-                            "description": "Character index to insert the table at"
-                        }
-                    },
-                    "required": ["action", "document_id", "rows", "columns", "index"]
+                "find": {
+                    "type": "string",
+                    "description": "Text to search for. Required for: replace_text"
                 },
-                {
-                    "properties": {
-                        "action": { "const": "create_list" },
-                        "document_id": {
-                            "type": "string",
-                            "description": "The document ID"
-                        },
-                        "start_index": {
-                            "type": "integer",
-                            "description": "Start index (inclusive)"
-                        },
-                        "end_index": {
-                            "type": "integer",
-                            "description": "End index (exclusive)"
-                        },
-                        "bullet_preset": {
-                            "type": "string",
-                            "enum": ["BULLET_DISC_CIRCLE_SQUARE", "BULLET_CHECKBOX", "BULLET_ARROW_DIAMOND_DISC", "NUMBERED_DECIMAL_ALPHA_ROMAN", "NUMBERED_DECIMAL_NESTED", "NUMBERED_UPPERALPHA_ALPHA_ROMAN"],
-                            "description": "Bullet style preset (default: BULLET_DISC_CIRCLE_SQUARE)",
-                            "default": "BULLET_DISC_CIRCLE_SQUARE"
-                        }
-                    },
-                    "required": ["action", "document_id", "start_index", "end_index"]
+                "replace": {
+                    "type": "string",
+                    "description": "Replacement text. Required for: replace_text"
                 },
-                {
-                    "properties": {
-                        "action": { "const": "batch_update" },
-                        "document_id": {
-                            "type": "string",
-                            "description": "The document ID"
-                        },
-                        "requests": {
-                            "type": "array",
-                            "items": { "type": "object" },
-                            "description": "Array of raw Docs API batchUpdate request objects"
-                        }
-                    },
-                    "required": ["action", "document_id", "requests"]
+                "match_case": {
+                    "type": "boolean",
+                    "description": "Case-sensitive match (default: true). Used by: replace_text",
+                    "default": true
+                },
+                "bold": {
+                    "type": "boolean",
+                    "description": "Make text bold. Used by: format_text"
+                },
+                "italic": {
+                    "type": "boolean",
+                    "description": "Make text italic. Used by: format_text"
+                },
+                "underline": {
+                    "type": "boolean",
+                    "description": "Underline text. Used by: format_text"
+                },
+                "strikethrough": {
+                    "type": "boolean",
+                    "description": "Strikethrough text. Used by: format_text"
+                },
+                "font_size": {
+                    "type": "number",
+                    "description": "Font size in points (e.g., 12, 14, 18). Used by: format_text"
+                },
+                "font_family": {
+                    "type": "string",
+                    "description": "Font family (e.g., 'Arial', 'Times New Roman'). Used by: format_text"
+                },
+                "foreground_color": {
+                    "type": "string",
+                    "description": "Text color as hex (e.g., '#FF0000'). Used by: format_text"
+                },
+                "background_color": {
+                    "type": "string",
+                    "description": "Text background/highlight color as hex. Used by: format_text"
+                },
+                "named_style": {
+                    "type": "string",
+                    "enum": ["NORMAL_TEXT", "TITLE", "SUBTITLE", "HEADING_1", "HEADING_2", "HEADING_3", "HEADING_4", "HEADING_5", "HEADING_6"],
+                    "description": "Paragraph style (heading level). Used by: format_paragraph"
+                },
+                "alignment": {
+                    "type": "string",
+                    "enum": ["START", "CENTER", "END", "JUSTIFIED"],
+                    "description": "Text alignment. Used by: format_paragraph"
+                },
+                "line_spacing": {
+                    "type": "number",
+                    "description": "Line spacing as percentage (100=single, 150=1.5x, 200=double). Used by: format_paragraph"
+                },
+                "rows": {
+                    "type": "integer",
+                    "description": "Number of rows. Required for: insert_table"
+                },
+                "columns": {
+                    "type": "integer",
+                    "description": "Number of columns. Required for: insert_table"
+                },
+                "bullet_preset": {
+                    "type": "string",
+                    "enum": ["BULLET_DISC_CIRCLE_SQUARE", "BULLET_CHECKBOX", "BULLET_ARROW_DIAMOND_DISC", "NUMBERED_DECIMAL_ALPHA_ROMAN", "NUMBERED_DECIMAL_NESTED", "NUMBERED_UPPERALPHA_ALPHA_ROMAN"],
+                    "description": "Bullet style preset (default: BULLET_DISC_CIRCLE_SQUARE). Used by: create_list",
+                    "default": "BULLET_DISC_CIRCLE_SQUARE"
+                },
+                "requests": {
+                    "type": "array",
+                    "items": { "type": "object" },
+                    "description": "Array of raw Docs API batchUpdate request objects. Required for: batch_update"
                 }
-            ]
+            }
         }"#
         .to_string()
     }

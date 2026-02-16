@@ -30,7 +30,7 @@ use tokio::process::Command;
 
 use crate::context::JobContext;
 use crate::sandbox::{SandboxManager, SandboxPolicy};
-use crate::tools::tool::{Tool, ToolDomain, ToolError, ToolOutput};
+use crate::tools::tool::{Tool, ToolDomain, ToolError, ToolOutput, require_str};
 
 /// Maximum output size before truncation (64KB).
 const MAX_OUTPUT_SIZE: usize = 64 * 1024;
@@ -401,10 +401,7 @@ impl Tool for ShellTool {
         params: serde_json::Value,
         _ctx: &JobContext,
     ) -> Result<ToolOutput, ToolError> {
-        let command = params
-            .get("command")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| ToolError::InvalidParameters("missing 'command' parameter".into()))?;
+        let command = require_str(&params, "command")?;
 
         let workdir = params.get("workdir").and_then(|v| v.as_str());
         let timeout = params.get("timeout").and_then(|v| v.as_u64());
@@ -525,6 +522,48 @@ mod tests {
         assert!(!requires_explicit_approval(
             "git push origin feature-branch"
         ));
+    }
+
+    /// Replicate the extraction logic from agent_loop.rs to prove it works
+    /// when `arguments` is a `serde_json::Value::Object` (the common case
+    /// that was previously broken because `Value::Object.as_str()` returns None).
+    #[test]
+    fn test_destructive_command_extraction_from_object_args() {
+        let arguments = serde_json::json!({"command": "rm -rf /tmp/stuff"});
+
+        let cmd = arguments
+            .get("command")
+            .and_then(|c| c.as_str().map(String::from))
+            .or_else(|| {
+                arguments
+                    .as_str()
+                    .and_then(|s| serde_json::from_str::<serde_json::Value>(s).ok())
+                    .and_then(|v| v.get("command").and_then(|c| c.as_str().map(String::from)))
+            });
+
+        assert_eq!(cmd.as_deref(), Some("rm -rf /tmp/stuff"));
+        assert!(requires_explicit_approval(cmd.as_deref().unwrap()));
+    }
+
+    /// Verify extraction still works when `arguments` is a JSON string
+    /// (rare, but possible if the LLM provider returns string-encoded JSON).
+    #[test]
+    fn test_destructive_command_extraction_from_string_args() {
+        let arguments =
+            serde_json::Value::String(r#"{"command": "git push --force origin main"}"#.to_string());
+
+        let cmd = arguments
+            .get("command")
+            .and_then(|c| c.as_str().map(String::from))
+            .or_else(|| {
+                arguments
+                    .as_str()
+                    .and_then(|s| serde_json::from_str::<serde_json::Value>(s).ok())
+                    .and_then(|v| v.get("command").and_then(|c| c.as_str().map(String::from)))
+            });
+
+        assert_eq!(cmd.as_deref(), Some("git push --force origin main"));
+        assert!(requires_explicit_approval(cmd.as_deref().unwrap()));
     }
 
     #[test]
