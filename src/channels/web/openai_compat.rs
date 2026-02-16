@@ -24,6 +24,8 @@ use crate::llm::{
 
 use super::server::GatewayState;
 
+const MAX_MODEL_NAME_BYTES: usize = 256;
+
 // ---------------------------------------------------------------------------
 // OpenAI request types
 // ---------------------------------------------------------------------------
@@ -380,6 +382,19 @@ fn unix_timestamp() -> u64 {
         .as_secs()
 }
 
+fn validate_model_name(model: &str) -> Result<(), String> {
+    if model.is_empty() {
+        return Err("model must not be empty".to_string());
+    }
+    if model.len() > MAX_MODEL_NAME_BYTES {
+        return Err(format!(
+            "model must be at most {} bytes",
+            MAX_MODEL_NAME_BYTES
+        ));
+    }
+    Ok(())
+}
+
 /// Extract stop sequences from the flexible `stop` field.
 fn parse_stop(val: &serde_json::Value) -> Option<Vec<String>> {
     match val {
@@ -423,6 +438,13 @@ pub async fn chat_completions_handler(
         return Err(openai_error(
             StatusCode::BAD_REQUEST,
             "messages must not be empty",
+            "invalid_request_error",
+        ));
+    }
+    if let Err(e) = validate_model_name(&req.model) {
+        return Err(openai_error(
+            StatusCode::BAD_REQUEST,
+            e,
             "invalid_request_error",
         ));
     }
