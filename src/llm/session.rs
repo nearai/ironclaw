@@ -428,17 +428,31 @@ impl SessionManager {
             })?;
 
         let user_id = self.user_id.read().await.clone();
-        let value = store
+        let value = match store
             .get_setting(&user_id, "nearai.session_token")
             .await
             .map_err(|e| LlmError::SessionRenewalFailed {
                 provider: "nearai".to_string(),
                 reason: format!("DB query failed: {}", e),
-            })?
-            .ok_or_else(|| LlmError::SessionRenewalFailed {
-                provider: "nearai".to_string(),
-                reason: "No session in DB".to_string(),
-            })?;
+            })? {
+            Some(value) => value,
+            None => {
+                tracing::warn!(
+                    "nearai.session_token missing; falling back to legacy nearai.session for backwards compatibility"
+                );
+                store
+                    .get_setting(&user_id, "nearai.session")
+                    .await
+                    .map_err(|e| LlmError::SessionRenewalFailed {
+                        provider: "nearai".to_string(),
+                        reason: format!("DB query failed: {}", e),
+                    })?
+                    .ok_or_else(|| LlmError::SessionRenewalFailed {
+                        provider: "nearai".to_string(),
+                        reason: "No session in DB".to_string(),
+                    })?
+            }
+        };
 
         let session: SessionData =
             serde_json::from_value(value).map_err(|e| LlmError::SessionRenewalFailed {
