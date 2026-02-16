@@ -1038,11 +1038,11 @@ function snippetAround(text, query, len) {
 function highlightQuery(text, query) {
   if (!query) return escapeHtml(text);
   const escaped = escapeHtml(text);
-  const queryEscaped = query.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const normalizedQuery = query.slice(0, 100);
+  const queryEscaped = normalizedQuery.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
   const re = new RegExp('(' + queryEscaped + ')', 'gi');
   return escaped.replace(re, '<mark>$1</mark>');
 }
-
 // --- Logs ---
 
 const LOG_MAX_ENTRIES = 2000;
