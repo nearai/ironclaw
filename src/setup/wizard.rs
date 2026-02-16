@@ -753,7 +753,11 @@ impl SetupWizard {
                 if let Ok(ctx) = self.init_secrets_context().await {
                     let key = SecretString::from(existing.clone());
                     if let Err(e) = ctx.save_secret("llm_claude_oauth_token", &key).await {
-                        tracing::warn!("Failed to persist OAuth token to secrets: {}", e);
+                        print_error(&format!(
+                            "Failed to persist OAuth token to secrets: {}. \
+                             Please ensure CLAUDE_CODE_OAUTH_TOKEN is set in your environment.",
+                            e,
+                        ));
                     }
                 }
                 print_success("Anthropic (Max) configured (from env)");

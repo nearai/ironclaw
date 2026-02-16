@@ -4,7 +4,8 @@
 //! - **API key**: Standard `x-api-key` header (pay-per-token billing)
 //! - **OAuth token**: `Authorization: Bearer` header from Claude Code /
 //!   Anthropic Max subscription (included in subscription, no per-token cost).
-//!   Automatically refreshes expired tokens via the Anthropic console endpoint.
+//!   Includes framework to refresh expired tokens, but requires a refresh
+//!   token which is not yet collected in the setup flow.
 
 use std::sync::RwLock;
 
@@ -43,9 +44,9 @@ impl AnthropicProvider {
     pub fn new(config: AnthropicDirectConfig) -> Self {
         let active_model = RwLock::new(config.model.clone());
         let oauth_access_token = match &config.auth {
-            AnthropicAuth::OAuthToken { access_token, .. } => RwLock::new(Some(
-                SecretString::from(access_token.expose_secret().to_string()),
-            )),
+            AnthropicAuth::OAuthToken { access_token, .. } => {
+                RwLock::new(Some(access_token.clone()))
+            }
             AnthropicAuth::ApiKey(_) => RwLock::new(None),
         };
 
