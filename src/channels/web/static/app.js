@@ -1000,10 +1000,15 @@ function buildBreadcrumb(path) {
   return html;
 }
 
+const MEMORY_SEARCH_QUERY_MAX_LENGTH = 100;
+
 function searchMemory(query) {
+  const normalizedQuery = normalizeSearchQuery(query);
+  if (!normalizedQuery) return;
+
   apiFetch('/api/memory/search', {
     method: 'POST',
-    body: { query, limit: 20 },
+    body: { query: normalizedQuery, limit: 20 },
   }).then((data) => {
     const tree = document.getElementById('memory-tree');
     tree.innerHTML = '';
@@ -1014,18 +1019,23 @@ function searchMemory(query) {
     for (const result of data.results) {
       const item = document.createElement('div');
       item.className = 'search-result';
-      const snippet = snippetAround(result.content, query, 120);
+      const snippet = snippetAround(result.content, normalizedQuery, 120);
       item.innerHTML = '<div class="path">' + escapeHtml(result.path) + '</div>'
-        + '<div class="snippet">' + highlightQuery(snippet, query) + '</div>';
+        + '<div class="snippet">' + highlightQuery(snippet, normalizedQuery) + '</div>';
       item.addEventListener('click', () => readMemoryFile(result.path));
       tree.appendChild(item);
     }
   }).catch(() => {});
 }
 
+function normalizeSearchQuery(query) {
+  return (typeof query === 'string' ? query : '').slice(0, MEMORY_SEARCH_QUERY_MAX_LENGTH);
+}
+
 function snippetAround(text, query, len) {
+  const normalizedQuery = normalizeSearchQuery(query);
   const lower = text.toLowerCase();
-  const idx = lower.indexOf(query.toLowerCase());
+  const idx = lower.indexOf(normalizedQuery.toLowerCase());
   if (idx < 0) return text.substring(0, len);
   const start = Math.max(0, idx - Math.floor(len / 2));
   const end = Math.min(text.length, start + len);
@@ -1038,7 +1048,7 @@ function snippetAround(text, query, len) {
 function highlightQuery(text, query) {
   if (!query) return escapeHtml(text);
   const escaped = escapeHtml(text);
-  const normalizedQuery = query.slice(0, 100);
+  const normalizedQuery = normalizeSearchQuery(query);
   const queryEscaped = normalizedQuery.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
   const re = new RegExp('(' + queryEscaped + ')', 'gi');
   return escaped.replace(re, '<mark>$1</mark>');
