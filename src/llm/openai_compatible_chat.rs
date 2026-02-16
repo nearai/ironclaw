@@ -85,12 +85,6 @@ impl OpenAiCompatibleChatProvider {
                 attempt + 1,
             );
 
-            if tracing::enabled!(tracing::Level::DEBUG)
-                && let Ok(json) = serde_json::to_string(body)
-            {
-                tracing::debug!("OpenAI-compatible request body: {}", json);
-            }
-
             let response = self
                 .client
                 .post(&url)
@@ -126,7 +120,6 @@ impl OpenAiCompatibleChatProvider {
             let response_text = response.text().await.unwrap_or_default();
 
             tracing::debug!("OpenAI-compatible response status: {}", status);
-            tracing::debug!("OpenAI-compatible response body: {}", response_text);
 
             if !status.is_success() {
                 let status_code = status.as_u16();
@@ -157,15 +150,16 @@ impl OpenAiCompatibleChatProvider {
                     });
                 }
 
+                let truncated = crate::agent::truncate_for_preview(&response_text, 512);
                 return Err(LlmError::RequestFailed {
                     provider: "openai_compatible_chat".to_string(),
-                    reason: format!("HTTP {}: {}", status, response_text),
+                    reason: format!("HTTP {}: {}", status, truncated),
                 });
             }
 
             return serde_json::from_str(&response_text).map_err(|e| LlmError::InvalidResponse {
                 provider: "openai_compatible_chat".to_string(),
-                reason: format!("JSON parse error: {}. Raw: {}", e, response_text),
+                reason: format!("JSON parse error: {}", e),
             });
         }
 
@@ -193,9 +187,10 @@ impl OpenAiCompatibleChatProvider {
         let response_text = response.text().await.unwrap_or_default();
 
         if !status.is_success() {
+            let truncated = crate::agent::truncate_for_preview(&response_text, 512);
             return Err(LlmError::RequestFailed {
                 provider: "openai_compatible_chat".to_string(),
-                reason: format!("HTTP {}: {}", status, response_text),
+                reason: format!("HTTP {}: {}", status, truncated),
             });
         }
 

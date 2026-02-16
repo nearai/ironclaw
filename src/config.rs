@@ -527,7 +527,9 @@ impl LlmConfig {
                     hint: "Set LLM_BASE_URL when LLM_BACKEND=openai_compatible".to_string(),
                 })?;
             let api_key = optional_env("LLM_API_KEY")?.map(SecretString::from);
-            let model = optional_env("LLM_MODEL")?.unwrap_or_else(|| "default".to_string());
+            let model = optional_env("LLM_MODEL")?
+                .or_else(|| settings.selected_model.clone())
+                .unwrap_or_else(|| "default".to_string());
             Some(OpenAiCompatibleConfig {
                 base_url,
                 api_key,

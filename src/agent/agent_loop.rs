@@ -22,7 +22,7 @@ use crate::context::JobContext;
 use crate::db::Database;
 use crate::error::Error;
 use crate::extensions::ExtensionManager;
-use crate::llm::{ChatMessage, LlmProvider, Reasoning, ReasoningContext, RespondResult};
+use crate::llm::{ChatMessage, LlmProvider, Reasoning, ReasoningContext, RespondResult, ToolCall};
 use crate::safety::SafetyLayer;
 use crate::tools::ToolRegistry;
 use crate::workspace::Workspace;
@@ -1158,61 +1158,16 @@ impl Agent {
                         let tc = tool_calls[idx].clone();
 
                         // Check if tool requires approval
-                        if let Some(tool) = self.tools().get(&tc.name).await
-                            && tool.requires_approval()
+                        if let Some(pending) = self
+                            .maybe_pending_for_tool_call(
+                                session.clone(),
+                                &tc,
+                                context_messages.clone(),
+                                tool_calls[idx + 1..].to_vec(),
+                            )
+                            .await
                         {
-                            // Check if auto-approved for this session
-                            let mut is_auto_approved = {
-                                let sess = session.lock().await;
-                                sess.is_tool_auto_approved(&tc.name)
-                            };
-
-                            // For shell commands, override auto-approval for
-                            // destructive patterns that should always require
-                            // explicit per-invocation approval.
-                            if is_auto_approved
-                                && tc.name == "shell"
-                                && let Some(cmd) = tc
-                                    .arguments
-                                    .get("command")
-                                    .and_then(|c| c.as_str().map(String::from))
-                                    .or_else(|| {
-                                        tc.arguments
-                                            .as_str()
-                                            .and_then(|s| {
-                                                serde_json::from_str::<serde_json::Value>(s).ok()
-                                            })
-                                            .and_then(|v| {
-                                                v.get("command")
-                                                    .and_then(|c| c.as_str().map(String::from))
-                                            })
-                                    })
-                                && crate::tools::builtin::shell::requires_explicit_approval(&cmd)
-                            {
-                                tracing::info!(
-                                    "Shell command '{}' requires explicit approval despite auto-approve",
-                                    cmd.chars().take(80).collect::<String>()
-                                );
-                                is_auto_approved = false;
-                            }
-
-                            if !is_auto_approved {
-                                // Need approval - store pending request and return.
-                                // Preserve remaining tool calls from this same assistant message,
-                                // so resuming after approval never leaves orphaned tool_use IDs.
-                                let deferred_tool_calls = tool_calls[idx + 1..].to_vec();
-                                let pending = PendingApproval {
-                                    request_id: Uuid::new_v4(),
-                                    tool_name: tc.name.clone(),
-                                    parameters: tc.arguments.clone(),
-                                    description: tool.description().to_string(),
-                                    tool_call_id: tc.id.clone(),
-                                    context_messages: context_messages.clone(),
-                                    deferred_tool_calls,
-                                };
-
-                                return Ok(AgenticLoopResult::NeedApproval { pending });
-                            }
+                            return Ok(AgenticLoopResult::NeedApproval { pending });
                         }
 
                         let _ = self
@@ -1622,6 +1577,104 @@ impl Agent {
         Ok(SubmissionResult::ok_with_message("Thread cleared."))
     }
 
+    fn is_tool_call_auto_approved(&self, session: &Session, tool_call: &ToolCall) -> bool {
+        let mut is_auto_approved = session.is_tool_auto_approved(&tool_call.name);
+
+        if is_auto_approved
+            && tool_call.name == "shell"
+            && let Some(cmd) = tool_call
+                .arguments
+                .get("command")
+                .and_then(|c| c.as_str().map(String::from))
+                .or_else(|| {
+                    tool_call
+                        .arguments
+                        .as_str()
+                        .and_then(|s| serde_json::from_str::<serde_json::Value>(s).ok())
+                        .and_then(|v| v.get("command").and_then(|c| c.as_str().map(String::from)))
+                })
+            && crate::tools::builtin::shell::requires_explicit_approval(&cmd)
+        {
+            tracing::info!(
+                "Shell command '{}' requires explicit approval despite auto-approve",
+                cmd.chars().take(80).collect::<String>()
+            );
+            is_auto_approved = false;
+        }
+
+        is_auto_approved
+    }
+
+    async fn maybe_pending_for_tool_call(
+        &self,
+        session: Arc<Mutex<Session>>,
+        tc: &ToolCall,
+        context_messages: Vec<ChatMessage>,
+        deferred_tool_calls: Vec<ToolCall>,
+    ) -> Option<PendingApproval> {
+        let tool = self.tools().get(&tc.name).await?;
+        if !tool.requires_approval() {
+            return None;
+        }
+
+        let is_auto_approved = {
+            let sess = session.lock().await;
+            self.is_tool_call_auto_approved(&sess, tc)
+        };
+
+        if is_auto_approved {
+            return None;
+        }
+
+        Some(PendingApproval {
+            request_id: Uuid::new_v4(),
+            tool_name: tc.name.clone(),
+            parameters: tc.arguments.clone(),
+            description: tool.description().to_string(),
+            tool_call_id: tc.id.clone(),
+            context_messages,
+            deferred_tool_calls,
+        })
+    }
+
+    async fn return_auth_required_response(
+        &self,
+        message: &IncomingMessage,
+        session: Arc<Mutex<Session>>,
+        thread_id: Uuid,
+        extension_name: String,
+        instructions: String,
+        auth_data: ParsedAuthData,
+    ) -> Result<SubmissionResult, Error> {
+        {
+            let mut sess = session.lock().await;
+            if let Some(thread) = sess.threads.get_mut(&thread_id) {
+                let user_input = thread.last_turn().map(|t| t.user_input.clone());
+                thread.enter_auth_mode(extension_name.clone());
+                thread.complete_turn(&instructions);
+                if let Some(input) = user_input {
+                    self.persist_turn(thread_id, &message.user_id, &input, Some(&instructions));
+                }
+            }
+        }
+
+        let _ = self
+            .channels
+            .send_status(
+                &message.channel,
+                StatusUpdate::AuthRequired {
+                    extension_name,
+                    instructions: Some(instructions.clone()),
+                    auth_url: auth_data.auth_url,
+                    setup_url: auth_data.setup_url,
+                },
+                &message.metadata,
+            )
+            .await;
+
+        Ok(SubmissionResult::response(instructions))
+    }
+
     /// Process an approval or rejection of a pending tool execution.
     async fn process_approval(
         &self,
@@ -1632,8 +1685,8 @@ impl Agent {
         approved: bool,
         always: bool,
     ) -> Result<SubmissionResult, Error> {
-        // Get thread state and pending approval
-        let (_thread_state, pending) = {
+        // Get pending approval for this thread
+        let pending = {
             let mut sess = session.lock().await;
             let thread = sess
                 .threads
@@ -1644,8 +1697,7 @@ impl Agent {
                 return Ok(SubmissionResult::error("No pending approval request."));
             }
 
-            let pending = thread.take_pending_approval();
-            (thread.state, pending)
+            thread.take_pending_approval()
         };
 
         let pending = match pending {
@@ -1761,27 +1813,16 @@ impl Agent {
                 detect_auth_awaiting(&pending.tool_name, &tool_result)
             {
                 let auth_data = parse_auth_result(&tool_result);
-                {
-                    let mut sess = session.lock().await;
-                    if let Some(thread) = sess.threads.get_mut(&thread_id) {
-                        thread.enter_auth_mode(ext_name.clone());
-                        thread.complete_turn(&instructions);
-                    }
-                }
-                let _ = self
-                    .channels
-                    .send_status(
-                        &message.channel,
-                        StatusUpdate::AuthRequired {
-                            extension_name: ext_name,
-                            instructions: Some(instructions.clone()),
-                            auth_url: auth_data.auth_url,
-                            setup_url: auth_data.setup_url,
-                        },
-                        &message.metadata,
+                return self
+                    .return_auth_required_response(
+                        message,
+                        session.clone(),
+                        thread_id,
+                        ext_name,
+                        instructions,
+                        auth_data,
                     )
                     .await;
-                return Ok(SubmissionResult::response(instructions));
             }
 
             // Add tool result to context
@@ -1822,7 +1863,46 @@ impl Agent {
                     .await;
             }
 
-            for tc in deferred_tool_calls {
+            let mut deferred_queue = std::collections::VecDeque::from(deferred_tool_calls);
+            while let Some(tc) = deferred_queue.pop_front() {
+                if let Some(pending) = self
+                    .maybe_pending_for_tool_call(
+                        session.clone(),
+                        &tc,
+                        context_messages.clone(),
+                        deferred_queue.iter().cloned().collect(),
+                    )
+                    .await
+                {
+                    let request_id = pending.request_id;
+                    let tool_name = pending.tool_name.clone();
+                    let description = pending.description.clone();
+                    let parameters = pending.parameters.clone();
+
+                    {
+                        let mut sess = session.lock().await;
+                        if let Some(thread) = sess.threads.get_mut(&thread_id) {
+                            thread.await_approval(pending);
+                        }
+                    }
+
+                    let _ = self
+                        .channels
+                        .send_status(
+                            &message.channel,
+                            StatusUpdate::Status("Awaiting approval".into()),
+                            &message.metadata,
+                        )
+                        .await;
+
+                    return Ok(SubmissionResult::NeedApproval {
+                        request_id,
+                        tool_name,
+                        description,
+                        parameters,
+                    });
+                }
+
                 let _ = self
                     .channels
                     .send_status(
@@ -1888,27 +1968,16 @@ impl Agent {
                 if let Some((ext_name, instructions)) = detect_auth_awaiting(&tc.name, &tool_result)
                 {
                     let auth_data = parse_auth_result(&tool_result);
-                    {
-                        let mut sess = session.lock().await;
-                        if let Some(thread) = sess.threads.get_mut(&thread_id) {
-                            thread.enter_auth_mode(ext_name.clone());
-                            thread.complete_turn(&instructions);
-                        }
-                    }
-                    let _ = self
-                        .channels
-                        .send_status(
-                            &message.channel,
-                            StatusUpdate::AuthRequired {
-                                extension_name: ext_name,
-                                instructions: Some(instructions.clone()),
-                                auth_url: auth_data.auth_url,
-                                setup_url: auth_data.setup_url,
-                            },
-                            &message.metadata,
+                    return self
+                        .return_auth_required_response(
+                            message,
+                            session.clone(),
+                            thread_id,
+                            ext_name,
+                            instructions,
+                            auth_data,
                         )
                         .await;
-                    return Ok(SubmissionResult::response(instructions));
                 }
 
                 let result_content = match tool_result {
@@ -1940,8 +2009,12 @@ impl Agent {
 
             match result {
                 Ok(AgenticLoopResult::Response(response)) => {
+                    let user_input = thread.last_turn().map(|t| t.user_input.clone());
                     thread.complete_turn(&response);
                     self.persist_response_chain(thread);
+                    if let Some(input) = user_input {
+                        self.persist_turn(thread_id, &message.user_id, &input, Some(&response));
+                    }
                     let _ = self
                         .channels
                         .send_status(
@@ -1976,7 +2049,11 @@ impl Agent {
                     })
                 }
                 Err(e) => {
+                    let user_input = thread.last_turn().map(|t| t.user_input.clone());
                     thread.fail_turn(e.to_string());
+                    if let Some(input) = user_input {
+                        self.persist_turn(thread_id, &message.user_id, &input, None);
+                    }
                     Ok(SubmissionResult::error(e.to_string()))
                 }
             }
@@ -2677,9 +2754,208 @@ fn detect_auth_awaiting(
 
 #[cfg(test)]
 mod tests {
-    use crate::error::Error;
+    use std::sync::Arc;
+    use std::time::Duration;
 
-    use super::{detect_auth_awaiting, truncate_for_preview};
+    use async_trait::async_trait;
+    use rust_decimal::Decimal;
+    use tokio::sync::Mutex;
+
+    use crate::agent::session::Session;
+    use crate::channels::IncomingMessage;
+    use crate::config::{AgentConfig, SafetyConfig};
+    use crate::context::ContextManager;
+    use crate::error::Error;
+    use crate::llm::{
+        CompletionRequest, CompletionResponse, FinishReason, LlmProvider, ToolCall,
+        ToolCompletionRequest, ToolCompletionResponse,
+    };
+    use crate::safety::SafetyLayer;
+    use crate::tools::ToolRegistry;
+
+    use super::{Agent, AgentDeps, detect_auth_awaiting, truncate_for_preview};
+
+    struct StaticLlmProvider;
+
+    #[async_trait]
+    impl LlmProvider for StaticLlmProvider {
+        fn model_name(&self) -> &str {
+            "static-mock"
+        }
+
+        fn cost_per_token(&self) -> (Decimal, Decimal) {
+            (Decimal::ZERO, Decimal::ZERO)
+        }
+
+        async fn complete(
+            &self,
+            _request: CompletionRequest,
+        ) -> Result<CompletionResponse, crate::error::LlmError> {
+            Ok(CompletionResponse {
+                content: "ok".to_string(),
+                input_tokens: 0,
+                output_tokens: 0,
+                finish_reason: FinishReason::Stop,
+                response_id: None,
+            })
+        }
+
+        async fn complete_with_tools(
+            &self,
+            _request: ToolCompletionRequest,
+        ) -> Result<ToolCompletionResponse, crate::error::LlmError> {
+            Ok(ToolCompletionResponse {
+                content: Some("ok".to_string()),
+                tool_calls: Vec::new(),
+                input_tokens: 0,
+                output_tokens: 0,
+                finish_reason: FinishReason::Stop,
+                response_id: None,
+            })
+        }
+    }
+
+    fn make_test_agent() -> Agent {
+        let deps = AgentDeps {
+            store: None,
+            llm: Arc::new(StaticLlmProvider),
+            safety: Arc::new(SafetyLayer::new(&SafetyConfig {
+                max_output_length: 100_000,
+                injection_check_enabled: true,
+            })),
+            tools: Arc::new(ToolRegistry::new()),
+            workspace: None,
+            extension_manager: None,
+        };
+
+        Agent::new(
+            AgentConfig {
+                name: "test-agent".to_string(),
+                max_parallel_jobs: 1,
+                job_timeout: Duration::from_secs(60),
+                stuck_threshold: Duration::from_secs(60),
+                repair_check_interval: Duration::from_secs(30),
+                max_repair_attempts: 1,
+                use_planning: false,
+                session_idle_timeout: Duration::from_secs(300),
+                allow_local_tools: false,
+            },
+            deps,
+            crate::channels::ChannelManager::new(),
+            None,
+            None,
+            Some(Arc::new(ContextManager::new(1))),
+            None,
+        )
+    }
+
+    #[test]
+    fn test_is_tool_call_auto_approved_regular_tool() {
+        let agent = make_test_agent();
+        let mut session = Session::new("user-1");
+        session.auto_approve_tool("http");
+
+        let call = ToolCall {
+            id: "call_1".to_string(),
+            name: "http".to_string(),
+            arguments: serde_json::json!({"url": "https://example.com", "method": "GET"}),
+        };
+
+        assert!(agent.is_tool_call_auto_approved(&session, &call));
+    }
+
+    #[test]
+    fn test_is_tool_call_auto_approved_shell_destructive_object_args_denied() {
+        let agent = make_test_agent();
+        let mut session = Session::new("user-1");
+        session.auto_approve_tool("shell");
+
+        let call = ToolCall {
+            id: "call_2".to_string(),
+            name: "shell".to_string(),
+            arguments: serde_json::json!({"command": "rm -rf /tmp/test"}),
+        };
+
+        assert!(!agent.is_tool_call_auto_approved(&session, &call));
+    }
+
+    #[test]
+    fn test_is_tool_call_auto_approved_shell_destructive_string_args_denied() {
+        let agent = make_test_agent();
+        let mut session = Session::new("user-1");
+        session.auto_approve_tool("shell");
+
+        let args = serde_json::json!({"command": "git push --force origin main"}).to_string();
+        let call = ToolCall {
+            id: "call_3".to_string(),
+            name: "shell".to_string(),
+            arguments: serde_json::Value::String(args),
+        };
+
+        assert!(!agent.is_tool_call_auto_approved(&session, &call));
+    }
+
+    #[test]
+    fn test_is_tool_call_auto_approved_shell_safe_args_allowed() {
+        let agent = make_test_agent();
+        let mut session = Session::new("user-1");
+        session.auto_approve_tool("shell");
+
+        let call = ToolCall {
+            id: "call_4".to_string(),
+            name: "shell".to_string(),
+            arguments: serde_json::json!({"command": "git status"}),
+        };
+
+        assert!(agent.is_tool_call_auto_approved(&session, &call));
+    }
+
+    #[tokio::test]
+    async fn test_return_auth_required_response_completes_turn_and_persists_response() {
+        let agent = make_test_agent();
+        let session = Arc::new(Mutex::new(Session::new("user-1")));
+        let thread_id = {
+            let mut sess = session.lock().await;
+            let thread = sess.create_thread();
+            thread.start_turn("Authenticate extension");
+            thread.id
+        };
+
+        let message = IncomingMessage::new("repl", "user-1", "approve");
+
+        let result = agent
+            .return_auth_required_response(
+                &message,
+                session.clone(),
+                thread_id,
+                "notion".to_string(),
+                "Please provide your API token/key.".to_string(),
+                super::ParsedAuthData {
+                    auth_url: None,
+                    setup_url: Some("https://notion.so/my-integrations".to_string()),
+                },
+            )
+            .await
+            .expect("auth-required response should succeed");
+
+        match result {
+            crate::agent::submission::SubmissionResult::Response { content } => {
+                assert_eq!(content, "Please provide your API token/key.");
+            }
+            other => panic!("unexpected submission result: {other:?}"),
+        }
+
+        let sess = session.lock().await;
+        let thread = sess
+            .threads
+            .get(&thread_id)
+            .expect("thread should still exist");
+        assert!(thread.pending_auth.is_some());
+        assert_eq!(
+            thread.last_turn().and_then(|t| t.response.clone()),
+            Some("Please provide your API token/key.".to_string())
+        );
+    }
 
     #[test]
     fn test_detect_auth_awaiting_positive() {

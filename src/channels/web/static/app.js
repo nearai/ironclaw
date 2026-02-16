@@ -158,6 +158,7 @@ function connectSSE() {
 
   eventSource.addEventListener('approval_needed', (e) => {
     const data = JSON.parse(e.data);
+    if (!isCurrentThread(data.thread_id)) return;
     showApproval(data);
   });
 
