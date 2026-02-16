@@ -6,7 +6,7 @@
 //! # Capabilities Required
 //!
 //! - HTTP: `www.googleapis.com/calendar/v3/*` (GET, POST, PUT, PATCH, DELETE)
-//! - Secrets: `google_calendar_token` (OAuth 2.0 token, injected automatically)
+//! - Secrets: `google_oauth_token` (OAuth 2.0 token, injected automatically)
 //!
 //! # Supported Actions
 //!

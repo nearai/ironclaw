@@ -164,7 +164,7 @@ This document tracks feature parity between IronClaw (Rust implementation) and O
 | AWS Bedrock | ✅ | ❌ | P3 | |
 | Google Gemini | ✅ | ❌ | P3 | |
 | OpenRouter | ✅ | ❌ | P3 | |
-| Ollama (local) | ✅ | ❌ | P2 | Local models |
+| Ollama (local) | ✅ | ✅ | - | via `rig::providers::ollama` (full support) |
 | node-llama-cpp | ✅ | ➖ | - | N/A for Rust |
 | llama.cpp (native) | ❌ | 🔮 | P3 | Rust bindings |
 

@@ -330,7 +330,13 @@ pub fn add_sheet(spreadsheet_id: &str, title: &str) -> Result<AddSheetResult, St
 
     let parsed = batch_update(spreadsheet_id, requests)?;
 
-    let reply = &parsed["replies"][0]["addSheet"]["properties"];
+    let reply = parsed["replies"]
+        .as_array()
+        .and_then(|arr| arr.first())
+        .map(|r| &r["addSheet"]["properties"]);
+
+    let reply = reply.ok_or_else(|| "No reply from batch update".to_string())?;
+
     Ok(AddSheetResult {
         sheet: SheetInfo {
             sheet_id: reply["sheetId"].as_i64().unwrap_or(0),

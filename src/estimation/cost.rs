@@ -20,10 +20,6 @@ impl CostEstimator {
 
         // Default tool costs (in USD or equivalent)
         tool_costs.insert("http".to_string(), dec!(0.0001)); // API call
-        tool_costs.insert("marketplace".to_string(), dec!(0.01)); // Gas costs
-        tool_costs.insert("ecommerce".to_string(), dec!(0.001)); // API call
-        tool_costs.insert("taskrabbit".to_string(), dec!(0.0)); // Cost comes from task itself
-        tool_costs.insert("restaurant".to_string(), dec!(0.001)); // API call
         tool_costs.insert("echo".to_string(), dec!(0.0)); // Free
         tool_costs.insert("time".to_string(), dec!(0.0)); // Free
         tool_costs.insert("json".to_string(), dec!(0.0)); // Free
@@ -74,7 +70,7 @@ mod tests {
         let estimator = CostEstimator::new();
 
         assert_eq!(estimator.estimate_tool("echo"), dec!(0.0));
-        assert_eq!(estimator.estimate_tool("marketplace"), dec!(0.01));
+        assert_eq!(estimator.estimate_tool("http"), dec!(0.0001));
         assert!(estimator.estimate_tool("unknown") > dec!(0.0));
     }
 

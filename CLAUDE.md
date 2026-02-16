@@ -34,6 +34,7 @@ Same four invariants as all agents:
 3. ✅ Pass validation (`decapod validate` before done)
 4. ✅ Stop if missing (ask for guidance)
 
+
 **All authority defers to AGENTS.md and the embedded constitution.**
 
 ## Links

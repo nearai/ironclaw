@@ -5,13 +5,22 @@
 //! in startup). Everything else comes from env vars, the DB settings
 //! table, or auto-detection.
 
+use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::OnceLock;
 use std::time::Duration;
 
 use secrecy::{ExposeSecret, SecretString};
 
 use crate::error::ConfigError;
 use crate::settings::Settings;
+
+/// Thread-safe overlay for injected env vars (secrets loaded from DB).
+///
+/// Used by `inject_llm_keys_from_secrets()` to make API keys available to
+/// `optional_env()` without unsafe `set_var` calls. `optional_env()` checks
+/// real env vars first, then falls back to this overlay.
+static INJECTED_VARS: OnceLock<HashMap<String, String>> = OnceLock::new();
 
 /// Main configuration for the agent.
 #[derive(Debug, Clone)]
@@ -402,12 +411,24 @@ pub struct NearAiConfig {
 
 impl LlmConfig {
     fn resolve(settings: &Settings) -> Result<Self, ConfigError> {
-        // Determine backend (default: NearAi)
+        // Determine backend: env var > settings > default (NearAi)
         let backend: LlmBackend = if let Some(b) = optional_env("LLM_BACKEND")? {
             b.parse().map_err(|e| ConfigError::InvalidValue {
                 key: "LLM_BACKEND".to_string(),
                 message: e,
             })?
+        } else if let Some(ref b) = settings.llm_backend {
+            match b.parse() {
+                Ok(backend) => backend,
+                Err(e) => {
+                    tracing::warn!(
+                        "Invalid llm_backend '{}' in settings: {}. Using default NearAi.",
+                        b,
+                        e
+                    );
+                    LlmBackend::NearAi
+                }
+            }
         } else {
             LlmBackend::NearAi
         };
@@ -476,6 +497,7 @@ impl LlmConfig {
 
         let ollama = if backend == LlmBackend::Ollama {
             let base_url = optional_env("OLLAMA_BASE_URL")?
+                .or_else(|| settings.ollama_base_url.clone())
                 .unwrap_or_else(|| "http://localhost:11434".to_string());
             let model = optional_env("OLLAMA_MODEL")?.unwrap_or_else(|| "llama3".to_string());
             Some(OllamaConfig { base_url, model })
@@ -484,8 +506,9 @@ impl LlmConfig {
         };
 
         let openai_compatible = if backend == LlmBackend::OpenAiCompatible {
-            let base_url =
-                optional_env("LLM_BASE_URL")?.ok_or_else(|| ConfigError::MissingRequired {
+            let base_url = optional_env("LLM_BASE_URL")?
+                .or_else(|| settings.openai_compatible_base_url.clone())
+                .ok_or_else(|| ConfigError::MissingRequired {
                     key: "LLM_BASE_URL".to_string(),
                     hint: "Set LLM_BASE_URL when LLM_BACKEND=openai_compatible".to_string(),
                 })?;
@@ -855,6 +878,11 @@ impl std::fmt::Debug for SecretsConfig {
     }
 }
 
+/// Process-wide cache for the keychain master key.
+///
+/// Avoids re-prompting the OS keychain on every `SecretsConfig::resolve()` call
+/// (e.g. `Config::from_env()` then `Config::from_db()`). Thread-safe alternative
+/// to caching in a process env var.
 impl SecretsConfig {
     /// Auto-detect secrets master key from env var, then OS keychain.
     ///
@@ -1338,17 +1366,64 @@ impl ClaudeCodeConfig {
     }
 }
 
+/// Load API keys from the encrypted secrets store into a thread-safe overlay.
+///
+/// This bridges the gap between secrets stored during onboarding and the
+/// env-var-first resolution in `LlmConfig::resolve()`. Keys in the overlay
+/// are read by `optional_env()` before falling back to `std::env::var()`,
+/// so explicit env vars always win.
+pub async fn inject_llm_keys_from_secrets(
+    secrets: &dyn crate::secrets::SecretsStore,
+    user_id: &str,
+) {
+    let mappings = [
+        ("llm_openai_api_key", "OPENAI_API_KEY"),
+        ("llm_anthropic_api_key", "ANTHROPIC_API_KEY"),
+        ("llm_compatible_api_key", "LLM_API_KEY"),
+    ];
+
+    let mut injected = HashMap::new();
+
+    for (secret_name, env_var) in mappings {
+        match std::env::var(env_var) {
+            Ok(val) if !val.is_empty() => continue,
+            _ => {}
+        }
+        match secrets.get_decrypted(user_id, secret_name).await {
+            Ok(decrypted) => {
+                injected.insert(env_var.to_string(), decrypted.expose().to_string());
+                tracing::debug!("Loaded secret '{}' for env var '{}'", secret_name, env_var);
+            }
+            Err(_) => {
+                // Secret doesn't exist, that's fine
+            }
+        }
+    }
+
+    let _ = INJECTED_VARS.set(injected);
+}
+
 // Helper functions
 
 fn optional_env(key: &str) -> Result<Option<String>, ConfigError> {
+    // Check real env vars first (always win over injected secrets)
     match std::env::var(key) {
-        Ok(val) if val.is_empty() => Ok(None),
-        Ok(val) => Ok(Some(val)),
-        Err(std::env::VarError::NotPresent) => Ok(None),
-        Err(e) => Err(ConfigError::ParseError(format!(
-            "failed to read {key}: {e}"
-        ))),
+        Ok(val) if val.is_empty() => {}
+        Ok(val) => return Ok(Some(val)),
+        Err(std::env::VarError::NotPresent) => {}
+        Err(e) => {
+            return Err(ConfigError::ParseError(format!(
+                "failed to read {key}: {e}"
+            )));
+        }
     }
+
+    // Fall back to thread-safe overlay (secrets injected from DB)
+    if let Some(val) = INJECTED_VARS.get().and_then(|map| map.get(key)) {
+        return Ok(Some(val.clone()));
+    }
+
+    Ok(None)
 }
 
 fn parse_optional_env<T>(key: &str, default: T) -> Result<T, ConfigError>
