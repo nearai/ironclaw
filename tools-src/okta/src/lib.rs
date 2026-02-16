@@ -54,56 +54,25 @@ impl exports::near::agent::tool::Guest for OktaTool {
         r#"{
             "type": "object",
             "required": ["action"],
-            "oneOf": [
-                {
-                    "properties": {
-                        "action": { "const": "get_profile" }
-                    },
-                    "required": ["action"]
+            "properties": {
+                "action": {
+                    "type": "string",
+                    "enum": ["get_profile", "update_profile", "list_apps", "search_apps", "get_app_sso_link", "get_org_info"],
+                    "description": "The Okta operation to perform"
                 },
-                {
-                    "properties": {
-                        "action": { "const": "update_profile" },
-                        "fields": {
-                            "type": "object",
-                            "description": "Profile fields to update. Common: firstName, lastName, email, mobilePhone, displayName, nickName, title, department, organization"
-                        }
-                    },
-                    "required": ["action", "fields"]
+                "fields": {
+                    "type": "object",
+                    "description": "Profile fields to update (e.g., firstName, lastName, email, mobilePhone, displayName, title, department). Required for: update_profile"
                 },
-                {
-                    "properties": {
-                        "action": { "const": "list_apps" }
-                    },
-                    "required": ["action"]
+                "query": {
+                    "type": "string",
+                    "description": "Case-insensitive search query to match against app labels and names. Required for: search_apps"
                 },
-                {
-                    "properties": {
-                        "action": { "const": "search_apps" },
-                        "query": {
-                            "type": "string",
-                            "description": "Case-insensitive search query to match against app labels and names"
-                        }
-                    },
-                    "required": ["action", "query"]
-                },
-                {
-                    "properties": {
-                        "action": { "const": "get_app_sso_link" },
-                        "app": {
-                            "type": "string",
-                            "description": "App instance ID (e.g., '0oa1xxx') or app label (e.g., 'Google Workspace')"
-                        }
-                    },
-                    "required": ["action", "app"]
-                },
-                {
-                    "properties": {
-                        "action": { "const": "get_org_info" }
-                    },
-                    "required": ["action"]
+                "app": {
+                    "type": "string",
+                    "description": "App instance ID (e.g., '0oa1xxx') or app label (e.g., 'Google Workspace'). Required for: get_app_sso_link"
                 }
-            ]
+            }
         }"#
         .to_string()
     }

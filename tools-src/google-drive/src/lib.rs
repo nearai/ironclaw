@@ -62,215 +62,95 @@ impl exports::near::agent::tool::Guest for GoogleDriveTool {
         r#"{
             "type": "object",
             "required": ["action"],
-            "oneOf": [
-                {
-                    "properties": {
-                        "action": { "const": "list_files" },
-                        "query": {
-                            "type": "string",
-                            "description": "Drive search query. Examples: \"name contains 'report'\", \"mimeType = 'application/pdf'\", \"'folderId' in parents\", \"sharedWithMe = true\""
-                        },
-                        "page_size": {
-                            "type": "integer",
-                            "description": "Max results (default: 25, max: 1000)",
-                            "default": 25
-                        },
-                        "order_by": {
-                            "type": "string",
-                            "description": "Sort order (e.g., 'modifiedTime desc', 'name')"
-                        },
-                        "corpora": {
-                            "type": "string",
-                            "enum": ["user", "drive", "domain", "allDrives"],
-                            "description": "Search scope: 'user' (personal, default), 'drive' (specific shared drive), 'domain' (org-wide), 'allDrives' (everything)",
-                            "default": "user"
-                        },
-                        "drive_id": {
-                            "type": "string",
-                            "description": "Shared drive ID (required when corpora is 'drive')"
-                        },
-                        "page_token": {
-                            "type": "string",
-                            "description": "Token for next page of results"
-                        }
-                    },
-                    "required": ["action"]
+            "properties": {
+                "action": {
+                    "type": "string",
+                    "enum": ["list_files", "get_file", "download_file", "upload_file", "update_file", "create_folder", "delete_file", "trash_file", "share_file", "list_permissions", "remove_permission", "list_shared_drives"],
+                    "description": "The Google Drive operation to perform"
                 },
-                {
-                    "properties": {
-                        "action": { "const": "get_file" },
-                        "file_id": {
-                            "type": "string",
-                            "description": "The file ID"
-                        }
-                    },
-                    "required": ["action", "file_id"]
+                "file_id": {
+                    "type": "string",
+                    "description": "File ID. Required for: get_file, download_file, update_file, delete_file, trash_file, share_file, list_permissions, remove_permission"
                 },
-                {
-                    "properties": {
-                        "action": { "const": "download_file" },
-                        "file_id": {
-                            "type": "string",
-                            "description": "The file ID to download"
-                        },
-                        "export_mime_type": {
-                            "type": "string",
-                            "description": "Export format for Google Workspace files (e.g., 'text/plain', 'text/csv', 'application/pdf')"
-                        }
-                    },
-                    "required": ["action", "file_id"]
+                "query": {
+                    "type": "string",
+                    "description": "Drive search query (e.g., \"name contains 'report'\", \"mimeType = 'application/pdf'\"). Used by: list_files"
                 },
-                {
-                    "properties": {
-                        "action": { "const": "upload_file" },
-                        "name": {
-                            "type": "string",
-                            "description": "File name"
-                        },
-                        "content": {
-                            "type": "string",
-                            "description": "File content (text)"
-                        },
-                        "mime_type": {
-                            "type": "string",
-                            "description": "MIME type (default: 'text/plain')",
-                            "default": "text/plain"
-                        },
-                        "parent_id": {
-                            "type": "string",
-                            "description": "Parent folder ID (omit for root)"
-                        },
-                        "description": {
-                            "type": "string",
-                            "description": "File description"
-                        }
-                    },
-                    "required": ["action", "name", "content"]
+                "page_size": {
+                    "type": "integer",
+                    "description": "Max results (default: 25, max: 1000). Used by: list_files, list_shared_drives",
+                    "default": 25
                 },
-                {
-                    "properties": {
-                        "action": { "const": "update_file" },
-                        "file_id": {
-                            "type": "string",
-                            "description": "The file ID to update"
-                        },
-                        "name": {
-                            "type": "string",
-                            "description": "New file name"
-                        },
-                        "description": {
-                            "type": "string",
-                            "description": "New description"
-                        },
-                        "move_to_parent": {
-                            "type": "string",
-                            "description": "Move file to this folder ID"
-                        },
-                        "starred": {
-                            "type": "boolean",
-                            "description": "Star or unstar the file"
-                        }
-                    },
-                    "required": ["action", "file_id"]
+                "order_by": {
+                    "type": "string",
+                    "description": "Sort order (e.g., 'modifiedTime desc', 'name'). Used by: list_files"
                 },
-                {
-                    "properties": {
-                        "action": { "const": "create_folder" },
-                        "name": {
-                            "type": "string",
-                            "description": "Folder name"
-                        },
-                        "parent_id": {
-                            "type": "string",
-                            "description": "Parent folder ID (omit for root)"
-                        },
-                        "description": {
-                            "type": "string",
-                            "description": "Folder description"
-                        }
-                    },
-                    "required": ["action", "name"]
+                "corpora": {
+                    "type": "string",
+                    "enum": ["user", "drive", "domain", "allDrives"],
+                    "description": "Search scope: 'user' (default), 'drive' (shared drive), 'domain', 'allDrives'. Used by: list_files",
+                    "default": "user"
                 },
-                {
-                    "properties": {
-                        "action": { "const": "delete_file" },
-                        "file_id": {
-                            "type": "string",
-                            "description": "The file ID to permanently delete"
-                        }
-                    },
-                    "required": ["action", "file_id"]
+                "drive_id": {
+                    "type": "string",
+                    "description": "Shared drive ID (required when corpora is 'drive'). Used by: list_files"
                 },
-                {
-                    "properties": {
-                        "action": { "const": "trash_file" },
-                        "file_id": {
-                            "type": "string",
-                            "description": "The file ID to move to trash"
-                        }
-                    },
-                    "required": ["action", "file_id"]
+                "page_token": {
+                    "type": "string",
+                    "description": "Token for next page of results. Used by: list_files"
                 },
-                {
-                    "properties": {
-                        "action": { "const": "share_file" },
-                        "file_id": {
-                            "type": "string",
-                            "description": "The file ID to share"
-                        },
-                        "email": {
-                            "type": "string",
-                            "description": "Recipient email address"
-                        },
-                        "role": {
-                            "type": "string",
-                            "enum": ["reader", "commenter", "writer", "organizer"],
-                            "description": "Permission level (default: 'reader')",
-                            "default": "reader"
-                        },
-                        "message": {
-                            "type": "string",
-                            "description": "Optional message in sharing notification"
-                        }
-                    },
-                    "required": ["action", "file_id", "email"]
+                "export_mime_type": {
+                    "type": "string",
+                    "description": "Export format for Google Workspace files (e.g., 'text/plain', 'text/csv'). Used by: download_file"
                 },
-                {
-                    "properties": {
-                        "action": { "const": "list_permissions" },
-                        "file_id": {
-                            "type": "string",
-                            "description": "The file ID to check permissions for"
-                        }
-                    },
-                    "required": ["action", "file_id"]
+                "name": {
+                    "type": "string",
+                    "description": "File/folder name. Required for: upload_file, create_folder. Optional for: update_file"
                 },
-                {
-                    "properties": {
-                        "action": { "const": "remove_permission" },
-                        "file_id": {
-                            "type": "string",
-                            "description": "The file ID"
-                        },
-                        "permission_id": {
-                            "type": "string",
-                            "description": "The permission ID to remove (get from list_permissions)"
-                        }
-                    },
-                    "required": ["action", "file_id", "permission_id"]
+                "content": {
+                    "type": "string",
+                    "description": "File content (text). Required for: upload_file"
                 },
-                {
-                    "properties": {
-                        "action": { "const": "list_shared_drives" },
-                        "page_size": {
-                            "type": "integer",
-                            "description": "Max results (default: 25)",
-                            "default": 25
-                        }
-                    },
-                    "required": ["action"]
+                "mime_type": {
+                    "type": "string",
+                    "description": "MIME type (default: 'text/plain'). Used by: upload_file",
+                    "default": "text/plain"
+                },
+                "parent_id": {
+                    "type": "string",
+                    "description": "Parent folder ID (omit for root). Used by: upload_file, create_folder"
+                },
+                "description": {
+                    "type": "string",
+                    "description": "File/folder description. Used by: upload_file, update_file, create_folder"
+                },
+                "move_to_parent": {
+                    "type": "string",
+                    "description": "Move file to this folder ID. Used by: update_file"
+                },
+                "starred": {
+                    "type": "boolean",
+                    "description": "Star or unstar the file. Used by: update_file"
+                },
+                "email": {
+                    "type": "string",
+                    "description": "Recipient email address. Required for: share_file"
+                },
+                "role": {
+                    "type": "string",
+                    "enum": ["reader", "commenter", "writer", "organizer"],
+                    "description": "Permission level (default: 'reader'). Used by: share_file",
+                    "default": "reader"
+                },
+                "message": {
+                    "type": "string",
+                    "description": "Optional message in sharing notification. Used by: share_file"
+                },
+                "permission_id": {
+                    "type": "string",
+                    "description": "Permission ID to remove (from list_permissions). Required for: remove_permission"
                 }
-            ]
+            }
         }"#
         .to_string()
     }

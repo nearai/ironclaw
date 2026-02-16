@@ -169,7 +169,7 @@ impl CredentialInjector {
 }
 
 /// Inject a single credential into the result.
-fn inject_credential(
+pub(crate) fn inject_credential(
     result: &mut InjectedCredentials,
     location: &CredentialLocation,
     secret: &DecryptedSecret,
@@ -208,7 +208,7 @@ fn inject_credential(
 }
 
 /// Check if a host matches a pattern (supports wildcards).
-fn host_matches_pattern(host: &str, pattern: &str) -> bool {
+pub(crate) fn host_matches_pattern(host: &str, pattern: &str) -> bool {
     if pattern == host {
         return true;
     }

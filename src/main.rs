@@ -23,7 +23,10 @@ use ironclaw::{
     context::ContextManager,
     extensions::ExtensionManager,
     hooks::HookRegistry,
-    llm::{SessionConfig, create_llm_provider, create_session_manager},
+    llm::{
+        FailoverProvider, LlmProvider, SessionConfig, create_llm_provider,
+        create_llm_provider_with_config, create_session_manager,
+    },
     orchestrator::{
         ContainerJobConfig, ContainerJobManager, OrchestratorApi, TokenStore,
         api::OrchestratorState,
@@ -46,7 +49,6 @@ use ironclaw::secrets::PostgresSecretsStore;
 use ironclaw::secrets::SecretsCrypto;
 #[cfg(any(feature = "postgres", feature = "libsql"))]
 use ironclaw::setup::{SetupConfig, SetupWizard};
-
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
@@ -91,7 +93,6 @@ async fn main() -> anyhow::Result<()> {
                 .init();
 
             // Memory commands need database (and optionally embeddings)
-            let _ = dotenvy::dotenv();
             let config = Config::from_env()
                 .await
                 .map_err(|e| anyhow::anyhow!("{}", e))?;
@@ -100,7 +101,6 @@ async fn main() -> anyhow::Result<()> {
             let session = ironclaw::llm::create_session_manager(ironclaw::llm::SessionConfig {
                 auth_base_url: config.llm.nearai.auth_base_url.clone(),
                 session_path: config.llm.nearai.session_path.clone(),
-                ..Default::default()
             })
             .await;
 
@@ -153,7 +153,6 @@ async fn main() -> anyhow::Result<()> {
             return run_pairing_command(pairing_cmd.clone()).map_err(|e| anyhow::anyhow!("{}", e));
         }
         Some(Command::Status) => {
-            let _ = dotenvy::dotenv();
             tracing_subscriber::fmt()
                 .with_env_filter(
                     EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("warn")),
@@ -244,8 +243,10 @@ async fn main() -> anyhow::Result<()> {
             skip_auth,
             channels_only,
         }) => {
-            // Load .env before running onboarding wizard
+            // Load .env files before running onboarding wizard.
+            // Standard ./.env first (higher priority), then ~/.ironclaw/.env.
             let _ = dotenvy::dotenv();
+            ironclaw::bootstrap::load_ironclaw_env();
 
             #[cfg(any(feature = "postgres", feature = "libsql"))]
             {
@@ -268,22 +269,22 @@ async fn main() -> anyhow::Result<()> {
         }
     }
 
-    // Load .env if present
+    // Load .env files early so DATABASE_URL (and any other vars) are
+    // available to all subsequent env-based config resolution.
+    // Standard ./.env first (higher priority), then ~/.ironclaw/.env.
     let _ = dotenvy::dotenv();
+    ironclaw::bootstrap::load_ironclaw_env();
 
     // Enhanced first-run detection
     #[cfg(any(feature = "postgres", feature = "libsql"))]
     if !cli.no_onboard
-        && let Some(reason) = check_onboard_needed().await
+        && let Some(reason) = check_onboard_needed()
     {
         println!("Onboarding needed: {}", reason);
         println!();
         let mut wizard = SetupWizard::new();
         wizard.run().await?;
     }
-
-    // Load bootstrap config (4 fields that must live on disk)
-    let bootstrap = ironclaw::bootstrap::BootstrapConfig::load();
 
     // Load initial config from env + disk (before DB is available)
     let mut config = match Config::from_env().await {
@@ -304,7 +305,6 @@ async fn main() -> anyhow::Result<()> {
     let session_config = SessionConfig {
         auth_base_url: config.llm.nearai.auth_base_url.clone(),
         session_path: config.llm.nearai.session_path.clone(),
-        ..Default::default()
     };
     let session = create_session_manager(session_config).await;
 
@@ -315,7 +315,7 @@ async fn main() -> anyhow::Result<()> {
 
     // Initialize tracing
     let env_filter = EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| EnvFilter::new("ironclaw=info,tower_http=debug"));
+        .unwrap_or_else(|_| EnvFilter::new("ironclaw=info,tower_http=warn"));
 
     // Create log broadcaster before tracing init so the WebLogLayer can capture all events.
     // This gets wired to the gateway's /api/logs/events SSE endpoint later.
@@ -423,7 +423,7 @@ async fn main() -> anyhow::Result<()> {
         }
 
         // Reload config from DB now that we have a connection.
-        match Config::from_db(db.as_ref(), "default", &bootstrap).await {
+        match Config::from_db(db.as_ref(), "default").await {
             Ok(db_config) => {
                 config = db_config;
                 tracing::info!("Configuration reloaded from database");
@@ -444,9 +444,96 @@ async fn main() -> anyhow::Result<()> {
             tracing::warn!("Failed to cleanup stale sandbox jobs: {}", e);
         }
     }
+
+    // Create secrets store early: needed for injecting LLM API keys from encrypted
+    // storage before creating the LLM provider, and later for MCP auth + WASM channels.
+    //
+    // When both `postgres` and `libsql` features are compiled, the runtime-selected
+    // backend determines which store is created: whichever DB init branch ran will
+    // have set its handle (pg_pool or libsql_db), and the or_else chain picks it up.
+    let secrets_store: Option<Arc<dyn SecretsStore + Send + Sync>> =
+        if let Some(master_key) = config.secrets.master_key() {
+            match SecretsCrypto::new(master_key.clone()) {
+                Ok(crypto) => {
+                    let crypto = Arc::new(crypto);
+                    let store: Option<Arc<dyn SecretsStore + Send + Sync>> = None;
+
+                    #[cfg(feature = "libsql")]
+                    let store = store.or_else(|| {
+                        libsql_db.take().map(|db| {
+                            Arc::new(LibSqlSecretsStore::new(db, Arc::clone(&crypto)))
+                                as Arc<dyn SecretsStore + Send + Sync>
+                        })
+                    });
+
+                    #[cfg(feature = "postgres")]
+                    let store = store.or_else(|| {
+                        pg_pool.as_ref().map(|pool| {
+                            Arc::new(PostgresSecretsStore::new(pool.clone(), Arc::clone(&crypto)))
+                                as Arc<dyn SecretsStore + Send + Sync>
+                        })
+                    });
+
+                    store
+                }
+                Err(e) => {
+                    tracing::warn!("Failed to initialize secrets crypto: {}", e);
+                    #[cfg(feature = "libsql")]
+                    let _ = libsql_db.take();
+                    None
+                }
+            }
+        } else {
+            #[cfg(feature = "libsql")]
+            let _ = libsql_db.take();
+            None
+        };
+
+    // Inject LLM API keys from the encrypted secrets store into a thread-safe
+    // overlay so that optional_env() (used by LlmConfig::resolve()) picks them
+    // up. Then re-resolve LlmConfig with the newly available keys (backend may
+    // have been set during onboarding but the API key is in the secrets store).
+    if let Some(ref secrets) = secrets_store {
+        ironclaw::config::inject_llm_keys_from_secrets(secrets.as_ref(), "default").await;
+
+        // Re-resolve LlmConfig now that secrets overlay has been populated
+        if let Some(ref db_ref) = db {
+            match Config::from_db(db_ref.as_ref(), "default").await {
+                Ok(refreshed) => {
+                    config = refreshed;
+                    tracing::debug!("LlmConfig re-resolved after secret injection");
+                }
+                Err(e) => {
+                    tracing::warn!("Failed to re-resolve config after secret injection: {}", e);
+                }
+            }
+        }
+    }
+
     // Initialize LLM provider (clone session so we can reuse it for embeddings)
     let llm = create_llm_provider(&config.llm, session.clone())?;
     tracing::info!("LLM provider initialized: {}", llm.model_name());
+
+    // Wrap in failover if a fallback model is configured
+    let llm: Arc<dyn LlmProvider> =
+        if let Some(fallback_model) = config.llm.nearai.fallback_model.as_ref() {
+            if fallback_model == &config.llm.nearai.model {
+                tracing::warn!(
+                    "fallback_model is the same as primary model, failover may not be effective"
+                );
+            }
+            let mut fallback_config = config.llm.nearai.clone();
+            fallback_config.model = fallback_model.clone();
+            let fallback = create_llm_provider_with_config(&fallback_config, session.clone())?;
+            tracing::info!(
+                primary = %llm.model_name(),
+                fallback = %fallback.model_name(),
+                "LLM failover enabled"
+            );
+            Arc::new(FailoverProvider::new(vec![llm, fallback])?)
+        } else {
+            llm
+        };
 
     // Initialize safety layer
     let safety = Arc::new(SafetyLayer::new(&config.safety));
@@ -521,49 +608,6 @@ async fn main() -> anyhow::Result<()> {
         tracing::info!("Builder mode enabled");
     }
 
-    // Create secrets store if master key is configured (needed for MCP auth and WASM channels).
-    //
-    // When both `postgres` and `libsql` features are compiled, the runtime-selected
-    // backend determines which store is created: whichever DB init branch ran will
-    // have set its handle (pg_pool or libsql_db), and the or_else chain picks it up.
-    let secrets_store: Option<Arc<dyn SecretsStore + Send + Sync>> =
-        if let Some(master_key) = config.secrets.master_key() {
-            match SecretsCrypto::new(master_key.clone()) {
-                Ok(crypto) => {
-                    let crypto = Arc::new(crypto);
-                    let store: Option<Arc<dyn SecretsStore + Send + Sync>> = None;
-
-                    #[cfg(feature = "libsql")]
-                    let store = store.or_else(|| {
-                        libsql_db.take().map(|db| {
-                            Arc::new(LibSqlSecretsStore::new(db, Arc::clone(&crypto)))
-                                as Arc<dyn SecretsStore + Send + Sync>
-                        })
-                    });
-
-                    #[cfg(feature = "postgres")]
-                    let store = store.or_else(|| {
-                        pg_pool.as_ref().map(|pool| {
-                            Arc::new(PostgresSecretsStore::new(pool.clone(), Arc::clone(&crypto)))
-                                as Arc<dyn SecretsStore + Send + Sync>
-                        })
-                    });
-
-                    store
-                }
-                Err(e) => {
-                    tracing::warn!("Failed to initialize secrets crypto: {}", e);
-                    #[cfg(feature = "libsql")]
-                    let _ = libsql_db.take();
-                    None
-                }
-            }
-        } else {
-            #[cfg(feature = "libsql")]
-            let _ = libsql_db.take();
-            None
-        };
-
     let mcp_session_manager = Arc::new(McpSessionManager::new());
 
     // Create WASM tool runtime (sync, just builds the wasmtime engine)
@@ -584,7 +628,10 @@ async fn main() -> anyhow::Result<()> {
     // Both register into the shared ToolRegistry (RwLock-based) so concurrent writes are safe.
     let wasm_tools_future = async {
         if let Some(ref runtime) = wasm_tool_runtime {
-            let loader = WasmToolLoader::new(Arc::clone(runtime), Arc::clone(&tools));
+            let mut loader = WasmToolLoader::new(Arc::clone(runtime), Arc::clone(&tools));
+            if let Some(ref secrets) = secrets_store {
+                loader = loader.with_secrets_store(Arc::clone(secrets));
+            }
 
             // Load installed tools from ~/.ironclaw/tools/
             match loader.load_from_dir(&config.wasm.tools_dir).await {
@@ -1175,33 +1222,16 @@ async fn main() -> anyhow::Result<()> {
 /// Check if onboarding is needed and return the reason.
 ///
 /// Returns `Some(reason)` if onboarding should be triggered, `None` otherwise.
+/// Called after `load_ironclaw_env()`, so DATABASE_URL from `~/.ironclaw/.env`
+/// is already in the environment.
 #[cfg(any(feature = "postgres", feature = "libsql"))]
-async fn check_onboard_needed() -> Option<&'static str> {
-    let bootstrap = ironclaw::bootstrap::BootstrapConfig::load();
-
-    // Database not configured (and not in env)
-    let has_db = bootstrap.database_url.is_some()
-        || std::env::var("DATABASE_URL").is_ok()
+fn check_onboard_needed() -> Option<&'static str> {
+    let has_db = std::env::var("DATABASE_URL").is_ok()
         || std::env::var("LIBSQL_PATH").is_ok()
         || ironclaw::config::default_libsql_path().exists();
 
     if !has_db {
         return Some("Database not configured");
-    }
-
-    // Secrets not configured (and not in env)
-    if bootstrap.secrets_master_key_source == ironclaw::settings::KeySource::None
-        && std::env::var("SECRETS_MASTER_KEY").is_err()
-        && !ironclaw::secrets::keychain::has_master_key().await
-    {
-        // Only require secrets setup if user hasn't explicitly disabled it
-        // For now, we don't require it for first run
-    }
-
-    // First run (onboarding never completed and no session)
-    let session_path = ironclaw::llm::session::default_session_path();
-    if !bootstrap.onboard_completed && !session_path.exists() {
-        return Some("First run");
     }
 
     None

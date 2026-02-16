@@ -1,6 +1,7 @@
 
 .env
 .env.local
+.env.*
 
 # Claude Code worktrees
 .claude/worktrees/

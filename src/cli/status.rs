@@ -9,7 +9,7 @@ use crate::settings::Settings;
 
 /// Run the status command, printing system health info.
 pub async fn run_status_command() -> anyhow::Result<()> {
-    let settings = Settings::load();
+    let settings = Settings::default();
 
     println!("IronClaw Status");
     println!("===============\n");
@@ -22,16 +22,36 @@ pub async fn run_status_command() -> anyhow::Result<()> {
     );
 
     // Database
-    let db_url_set = settings.database_url.is_some() || std::env::var("DATABASE_URL").is_ok();
     print!("  Database:    ");
-    if db_url_set {
-        // Try to connect
-        match check_database().await {
-            Ok(()) => println!("connected"),
-            Err(e) => println!("error ({})", e),
+    let db_backend = std::env::var("DATABASE_BACKEND")
+        .ok()
+        .unwrap_or_else(|| "postgres".to_string());
+    match db_backend.as_str() {
+        "libsql" | "turso" | "sqlite" => {
+            let path = std::env::var("LIBSQL_PATH")
+                .map(std::path::PathBuf::from)
+                .unwrap_or_else(|_| crate::config::default_libsql_path());
+            if path.exists() {
+                let turso = if std::env::var("LIBSQL_URL").is_ok() {
+                    " + Turso sync"
+                } else {
+                    ""
+                };
+                println!("libSQL ({}{})", path.display(), turso);
+            } else {
+                println!("libSQL (file missing: {})", path.display());
+            }
         }
-    } else {
-        println!("not configured");
+        _ => {
+            if std::env::var("DATABASE_URL").is_ok() {
+                match check_database().await {
+                    Ok(()) => println!("connected (PostgreSQL)"),
+                    Err(e) => println!("error ({})", e),
+                }
+            } else {
+                println!("not configured");
+            }
+        }
     }
 
     // Session / Auth
@@ -43,15 +63,17 @@ pub async fn run_status_command() -> anyhow::Result<()> {
         println!("not found (run `ironclaw onboard`)");
     }
 
-    // Secrets
+    // Secrets (auto-detect from env only; skip keychain probe to avoid
+    // triggering macOS system password dialogs on a simple status check)
     print!("  Secrets:     ");
-    let secrets_configured = settings.secrets_master_key_source != crate::settings::KeySource::None
-        || std::env::var("SECRETS_MASTER_KEY").is_ok()
-        || crate::secrets::keychain::has_master_key().await;
-    if secrets_configured {
-        println!("configured ({:?})", settings.secrets_master_key_source);
+    if std::env::var("SECRETS_MASTER_KEY").is_ok() {
+        println!("configured (env)");
     } else {
-        println!("not configured");
+        // We don't probe the keychain here because get_generic_password()
+        // triggers macOS unlock+authorization dialogs, which is bad UX for
+        // a read-only status command. If onboarding completed with keychain
+        // storage, the key is there; we just can't cheaply verify it.
+        println!("env not set (keychain may be configured)");
     }
 
     // Embeddings
@@ -129,20 +151,18 @@ pub async fn run_status_command() -> anyhow::Result<()> {
         Err(_) => println!("none configured"),
     }
 
-    // Settings path
-    println!("\n  Settings:    {}", Settings::default_path().display());
+    // Config path
+    println!(
+        "\n  Config:      {}",
+        crate::bootstrap::ironclaw_env_path().display()
+    );
 
     Ok(())
 }
 
 #[cfg(feature = "postgres")]
 async fn check_database() -> anyhow::Result<()> {
-    let _ = dotenvy::dotenv();
-    let settings = Settings::load();
-    let url = std::env::var("DATABASE_URL")
-        .ok()
-        .or(settings.database_url)
-        .ok_or_else(|| anyhow::anyhow!("no URL"))?;
+    let url = std::env::var("DATABASE_URL").map_err(|_| anyhow::anyhow!("DATABASE_URL not set"))?;
 
     let config: deadpool_postgres::Config = deadpool_postgres::Config {
         url: Some(url),

@@ -254,10 +254,19 @@ struct WhatsAppChannel;
 
 impl Guest for WhatsAppChannel {
     fn on_start(config_json: String) -> Result<ChannelConfig, String> {
-        let config: WhatsAppConfig = serde_json::from_str(&config_json).unwrap_or(WhatsAppConfig {
-            api_version: default_api_version(),
-            reply_to_message: default_reply_to_message(),
-        });
+        let config: WhatsAppConfig = match serde_json::from_str(&config_json) {
+            Ok(c) => c,
+            Err(e) => {
+                channel_host::log(
+                    channel_host::LogLevel::Warn,
+                    &format!("Failed to parse WhatsApp config, using defaults: {}", e),
+                );
+                WhatsAppConfig {
+                    api_version: default_api_version(),
+                    reply_to_message: default_reply_to_message(),
+                }
+            }
+        };
 
         channel_host::log(
             channel_host::LogLevel::Info,
@@ -266,6 +275,9 @@ impl Guest for WhatsAppChannel {
                 config.api_version
             ),
         );
+
+        // Persist api_version in workspace so on_respond() can read it
+        let _ = channel_host::workspace_write("channels/whatsapp/api_version", &config.api_version);
 
         // WhatsApp Cloud API is webhook-only, no polling available
         Ok(ChannelConfig {
@@ -327,11 +339,16 @@ impl Guest for WhatsAppChannel {
         let metadata: WhatsAppMessageMetadata = serde_json::from_str(&response.metadata_json)
             .map_err(|e| format!("Failed to parse metadata: {}", e))?;
 
+        // Read api_version from workspace (set during on_start), fallback to default
+        let api_version = channel_host::workspace_read("channels/whatsapp/api_version")
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| "v18.0".to_string());
+
         // Build WhatsApp API URL with token placeholder
         // Host will replace {WHATSAPP_ACCESS_TOKEN} with actual token in Authorization header
         let api_url = format!(
-            "https://graph.facebook.com/v18.0/{}/messages",
-            metadata.phone_number_id
+            "https://graph.facebook.com/{}/{}/messages",
+            api_version, metadata.phone_number_id
         );
 
         // Build sendMessage payload
