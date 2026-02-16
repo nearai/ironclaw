@@ -427,28 +427,9 @@ pub async fn chat_completions_handler(
         ));
     }
 
-    // Validate the requested model matches the active model.
-    // Per-request model switching is not yet supported (see GH issue).
-    let active_model = llm.active_model_name();
-    if req.model != active_model {
-        return Err((
-            StatusCode::NOT_FOUND,
-            Json(OpenAiErrorResponse {
-                error: OpenAiErrorDetail {
-                    message: format!(
-                        "Model '{}' not found. The active model is '{}'.",
-                        req.model, active_model
-                    ),
-                    error_type: "invalid_request_error".to_string(),
-                    param: Some("model".to_string()),
-                    code: Some("model_not_found".to_string()),
-                },
-            }),
-        ));
-    }
-
     let has_tools = req.tools.as_ref().is_some_and(|t| !t.is_empty());
     let stream = req.stream.unwrap_or(false);
+    let requested_model = req.model.clone();
 
     if stream {
         return handle_streaming(llm.clone(), req, has_tools)
@@ -460,13 +441,13 @@ pub async fn chat_completions_handler(
 
     let messages = convert_messages(&req.messages)
         .map_err(|e| openai_error(StatusCode::BAD_REQUEST, e, "invalid_request_error"))?;
-    let model_name = llm.active_model_name();
+    let model_name = requested_model;
     let id = chat_completion_id();
     let created = unix_timestamp();
 
     if has_tools {
         let tools = convert_tools(req.tools.as_deref().unwrap_or(&[]));
-        let mut tool_req = ToolCompletionRequest::new(messages, tools);
+        let mut tool_req = ToolCompletionRequest::new(messages, tools).with_model(req.model);
         if let Some(t) = req.temperature {
             tool_req = tool_req.with_temperature(t);
         }
@@ -515,7 +496,7 @@ pub async fn chat_completions_handler(
 
         Ok(Json(response).into_response())
     } else {
-        let mut comp_req = CompletionRequest::new(messages);
+        let mut comp_req = CompletionRequest::new(messages).with_model(req.model);
         if let Some(t) = req.temperature {
             comp_req = comp_req.with_temperature(t);
         }
@@ -570,7 +551,7 @@ async fn handle_streaming(
     let messages = convert_messages(&req.messages)
         .map_err(|e| openai_error(StatusCode::BAD_REQUEST, e, "invalid_request_error"))?;
 
-    let model_name = llm.active_model_name();
+    let model_name = req.model.clone();
     let id = chat_completion_id();
     let created = unix_timestamp();
 
@@ -584,7 +565,7 @@ async fn handle_streaming(
 
     let llm_result = if has_tools {
         let tools = convert_tools(req.tools.as_deref().unwrap_or(&[]));
-        let mut tool_req = ToolCompletionRequest::new(messages, tools);
+        let mut tool_req = ToolCompletionRequest::new(messages, tools).with_model(req.model);
         if let Some(t) = req.temperature {
             tool_req = tool_req.with_temperature(t);
         }
@@ -602,7 +583,7 @@ async fn handle_streaming(
                 .map_err(map_llm_error)?,
         )
     } else {
-        let mut comp_req = CompletionRequest::new(messages);
+        let mut comp_req = CompletionRequest::new(messages).with_model(req.model);
         if let Some(t) = req.temperature {
             comp_req = comp_req.with_temperature(t);
         }

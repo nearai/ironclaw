@@ -37,7 +37,7 @@ This document tracks feature parity between IronClaw (Rust implementation) and O
 | Session management/routing | ✅ | ✅ | SessionManager exists |
 | Configuration hot-reload | ✅ | ❌ | |
 | Network modes (loopback/LAN/remote) | ✅ | 🚧 | HTTP only |
-| OpenAI-compatible HTTP API | ✅ | ✅ | /v1/chat/completions |
+| OpenAI-compatible HTTP API | ✅ | ✅ | /v1/chat/completions, per-request `model` override |
 | Canvas hosting | ✅ | ❌ | Agent-driven UI |
 | Gateway lock (PID-based) | ✅ | ❌ | |
 | launchd/systemd integration | ✅ | ❌ | |

@@ -450,11 +450,12 @@ fn split_messages(
 #[async_trait]
 impl LlmProvider for NearAiProvider {
     async fn complete(&self, req: CompletionRequest) -> Result<CompletionResponse, LlmError> {
+        let model = req.model.unwrap_or_else(|| self.active_model_name());
         let thread_id = req.metadata.get("thread_id").cloned();
         let (instructions, input) = split_messages(req.messages, false);
 
         let request = NearAiRequest {
-            model: self.active_model_name(),
+            model,
             instructions,
             input,
             previous_response_id: None,
@@ -567,6 +568,7 @@ impl LlmProvider for NearAiProvider {
         &self,
         req: ToolCompletionRequest,
     ) -> Result<ToolCompletionResponse, LlmError> {
+        let model = req.model.unwrap_or_else(|| self.active_model_name());
         let thread_id = req.metadata.get("thread_id").cloned();
 
         // Look up chaining state for this thread
@@ -607,7 +609,7 @@ impl LlmProvider for NearAiProvider {
             .collect();
 
         let request = NearAiRequest {
-            model: self.active_model_name(),
+            model: model.clone(),
             instructions: if chaining { None } else { instructions.clone() },
             input,
             previous_response_id: previous_response_id.clone(),
@@ -648,7 +650,7 @@ impl LlmProvider for NearAiProvider {
                     false,
                 );
                 let retry_request = NearAiRequest {
-                    model: self.active_model_name(),
+                    model,
                     instructions: instructions_full,
                     input: input_full,
                     previous_response_id: None,

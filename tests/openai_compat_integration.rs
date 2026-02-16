@@ -3,7 +3,7 @@
 //! Uses a mock LLM provider so no real API key is needed.
 
 use std::net::SocketAddr;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -24,7 +24,21 @@ const AUTH_TOKEN: &str = "test-openai-token";
 // Mock LLM provider
 // ---------------------------------------------------------------------------
 
-struct MockLlmProvider;
+#[derive(Default)]
+struct MockLlmState {
+    completion_models: Mutex<Vec<Option<String>>>,
+    tool_completion_models: Mutex<Vec<Option<String>>>,
+}
+
+struct MockLlmProvider {
+    state: Arc<MockLlmState>,
+}
+
+impl MockLlmProvider {
+    fn new(state: Arc<MockLlmState>) -> Self {
+        Self { state }
+    }
+}
 
 #[async_trait]
 impl LlmProvider for MockLlmProvider {
@@ -37,6 +51,12 @@ impl LlmProvider for MockLlmProvider {
     }
 
     async fn complete(&self, req: CompletionRequest) -> Result<CompletionResponse, LlmError> {
+        self.state
+            .completion_models
+            .lock()
+            .expect("completion_models lock poisoned")
+            .push(req.model.clone());
+
         // Echo the last user message back
         let user_msg = req
             .messages
@@ -59,6 +79,12 @@ impl LlmProvider for MockLlmProvider {
         &self,
         req: ToolCompletionRequest,
     ) -> Result<ToolCompletionResponse, LlmError> {
+        self.state
+            .tool_completion_models
+            .lock()
+            .expect("tool_completion_models lock poisoned")
+            .push(req.model.clone());
+
         // If tools are provided, return a tool call
         if let Some(tool) = req.tools.first() {
             Ok(ToolCompletionResponse {
@@ -97,7 +123,8 @@ impl LlmProvider for MockLlmProvider {
 // Test helpers
 // ---------------------------------------------------------------------------
 
-async fn start_test_server() -> (SocketAddr, Arc<GatewayState>) {
+async fn start_test_server() -> (SocketAddr, Arc<GatewayState>, Arc<MockLlmState>) {
+    let mock_state = Arc::new(MockLlmState::default());
     let state = Arc::new(GatewayState {
         msg_tx: tokio::sync::RwLock::new(None),
         sse: SseManager::new(),
@@ -112,7 +139,7 @@ async fn start_test_server() -> (SocketAddr, Arc<GatewayState>) {
         user_id: "test-user".to_string(),
         shutdown_tx: tokio::sync::RwLock::new(None),
         ws_tracker: Some(Arc::new(WsConnectionTracker::new())),
-        llm_provider: Some(Arc::new(MockLlmProvider)),
+        llm_provider: Some(Arc::new(MockLlmProvider::new(mock_state.clone()))),
         chat_rate_limiter: ironclaw::channels::web::server::RateLimiter::new(30, 60),
     });
 
@@ -121,7 +148,7 @@ async fn start_test_server() -> (SocketAddr, Arc<GatewayState>) {
         .await
         .expect("Failed to start test server");
 
-    (bound_addr, state)
+    (bound_addr, state, mock_state)
 }
 
 fn client() -> reqwest::Client {
@@ -137,7 +164,7 @@ fn client() -> reqwest::Client {
 
 #[tokio::test]
 async fn test_chat_completions_basic() {
-    let (addr, _state) = start_test_server().await;
+    let (addr, _state, mock_state) = start_test_server().await;
     let url = format!("http://{}/v1/chat/completions", addr);
 
     let resp = client()
@@ -171,11 +198,17 @@ async fn test_chat_completions_basic() {
     assert_eq!(body["usage"]["prompt_tokens"], 10);
     assert_eq!(body["usage"]["completion_tokens"], 5);
     assert_eq!(body["usage"]["total_tokens"], 15);
+
+    let models = mock_state
+        .completion_models
+        .lock()
+        .expect("completion_models lock poisoned");
+    assert_eq!(*models, vec![Some("mock-model-v1".to_string())]);
 }
 
 #[tokio::test]
 async fn test_chat_completions_with_system_message() {
-    let (addr, _state) = start_test_server().await;
+    let (addr, _state, _mock_state) = start_test_server().await;
     let url = format!("http://{}/v1/chat/completions", addr);
 
     let resp = client()
@@ -202,7 +235,7 @@ async fn test_chat_completions_with_system_message() {
 
 #[tokio::test]
 async fn test_chat_completions_with_tools() {
-    let (addr, _state) = start_test_server().await;
+    let (addr, _state, mock_state) = start_test_server().await;
     let url = format!("http://{}/v1/chat/completions", addr);
 
     let resp = client()
@@ -241,11 +274,17 @@ async fn test_chat_completions_with_tools() {
     assert_eq!(tool_calls[0]["id"], "call_mock_001");
     assert_eq!(tool_calls[0]["type"], "function");
     assert_eq!(tool_calls[0]["function"]["name"], "get_weather");
+
+    let models = mock_state
+        .tool_completion_models
+        .lock()
+        .expect("tool_completion_models lock poisoned");
+    assert_eq!(*models, vec![Some("mock-model-v1".to_string())]);
 }
 
 #[tokio::test]
 async fn test_chat_completions_streaming() {
-    let (addr, _state) = start_test_server().await;
+    let (addr, _state, mock_state) = start_test_server().await;
     let url = format!("http://{}/v1/chat/completions", addr);
 
     let resp = client()
@@ -314,11 +353,17 @@ async fn test_chat_completions_streaming() {
         "Expected reassembled content to contain 'Stream test', got: '{}'",
         full_content
     );
+
+    let models = mock_state
+        .completion_models
+        .lock()
+        .expect("completion_models lock poisoned");
+    assert_eq!(*models, vec![Some("mock-model-v1".to_string())]);
 }
 
 #[tokio::test]
 async fn test_chat_completions_empty_messages() {
-    let (addr, _state) = start_test_server().await;
+    let (addr, _state, _mock_state) = start_test_server().await;
     let url = format!("http://{}/v1/chat/completions", addr);
 
     let resp = client()
@@ -338,8 +383,8 @@ async fn test_chat_completions_empty_messages() {
 }
 
 #[tokio::test]
-async fn test_chat_completions_model_mismatch() {
-    let (addr, _state) = start_test_server().await;
+async fn test_chat_completions_model_override() {
+    let (addr, _state, mock_state) = start_test_server().await;
     let url = format!("http://{}/v1/chat/completions", addr);
 
     let resp = client()
@@ -353,20 +398,20 @@ async fn test_chat_completions_model_mismatch() {
         .await
         .unwrap();
 
-    assert_eq!(resp.status(), 404);
+    assert_eq!(resp.status(), 200);
     let body: serde_json::Value = resp.json().await.unwrap();
-    assert_eq!(body["error"]["code"], "model_not_found");
-    assert!(
-        body["error"]["message"]
-            .as_str()
-            .unwrap()
-            .contains("mock-model-v1")
-    );
+    assert_eq!(body["model"], "gpt-4");
+
+    let models = mock_state
+        .completion_models
+        .lock()
+        .expect("completion_models lock poisoned");
+    assert_eq!(*models, vec![Some("gpt-4".to_string())]);
 }
 
 #[tokio::test]
 async fn test_chat_completions_no_auth() {
-    let (addr, _state) = start_test_server().await;
+    let (addr, _state, _mock_state) = start_test_server().await;
     let url = format!("http://{}/v1/chat/completions", addr);
 
     let resp = client()
@@ -385,7 +430,7 @@ async fn test_chat_completions_no_auth() {
 
 #[tokio::test]
 async fn test_models_endpoint() {
-    let (addr, _state) = start_test_server().await;
+    let (addr, _state, _mock_state) = start_test_server().await;
     let url = format!("http://{}/v1/models", addr);
 
     let resp = client()
@@ -408,7 +453,7 @@ async fn test_models_endpoint() {
 
 #[tokio::test]
 async fn test_models_no_auth() {
-    let (addr, _state) = start_test_server().await;
+    let (addr, _state, _mock_state) = start_test_server().await;
     let url = format!("http://{}/v1/models", addr);
 
     let resp = client().get(&url).send().await.unwrap();
@@ -458,7 +503,7 @@ async fn test_no_llm_provider_returns_503() {
 
 #[tokio::test]
 async fn test_chat_completions_body_too_large() {
-    let (addr, _state) = start_test_server().await;
+    let (addr, _state, _mock_state) = start_test_server().await;
     let url = format!("http://{}/v1/chat/completions", addr);
 
     // Build a payload over 1 MB (the gateway's DefaultBodyLimit)
