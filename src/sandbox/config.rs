@@ -34,7 +34,7 @@ impl Default for SandboxConfig {
             memory_limit_mb: 2048,
             cpu_shares: 1024,
             network_allowlist: default_allowlist(),
-            image: "ghcr.io/nearai/sandbox:latest".to_string(),
+            image: "ironclaw-worker:latest".to_string(),
             auto_pull_image: true,
             proxy_port: 0,
         }

@@ -312,6 +312,8 @@ impl std::fmt::Display for LlmBackend {
 pub struct OpenAiDirectConfig {
     pub api_key: SecretString,
     pub model: String,
+    /// Optional base URL override (e.g. for proxies like VibeProxy).
+    pub base_url: Option<String>,
 }
 
 /// Configuration for direct Anthropic API access.
@@ -319,6 +321,8 @@ pub struct OpenAiDirectConfig {
 pub struct AnthropicDirectConfig {
     pub api_key: SecretString,
     pub model: String,
+    /// Optional base URL override (e.g. for proxies like VibeProxy).
+    pub base_url: Option<String>,
 }
 
 /// Configuration for local Ollama.
@@ -476,7 +480,12 @@ impl LlmConfig {
                     hint: "Set OPENAI_API_KEY when LLM_BACKEND=openai".to_string(),
                 })?;
             let model = optional_env("OPENAI_MODEL")?.unwrap_or_else(|| "gpt-4o".to_string());
-            Some(OpenAiDirectConfig { api_key, model })
+            let base_url = optional_env("OPENAI_BASE_URL")?;
+            Some(OpenAiDirectConfig {
+                api_key,
+                model,
+                base_url,
+            })
         } else {
             None
         };
@@ -490,7 +499,12 @@ impl LlmConfig {
                 })?;
             let model = optional_env("ANTHROPIC_MODEL")?
                 .unwrap_or_else(|| "claude-sonnet-4-20250514".to_string());
-            Some(AnthropicDirectConfig { api_key, model })
+            let base_url = optional_env("ANTHROPIC_BASE_URL")?;
+            Some(AnthropicDirectConfig {
+                api_key,
+                model,
+                base_url,
+            })
         } else {
             None
         };
@@ -539,12 +553,14 @@ impl LlmConfig {
 pub struct EmbeddingsConfig {
     /// Whether embeddings are enabled.
     pub enabled: bool,
-    /// Provider to use: "openai" or "nearai"
+    /// Provider to use: "openai", "nearai", or "ollama"
     pub provider: String,
     /// OpenAI API key (for OpenAI provider).
     pub openai_api_key: Option<SecretString>,
     /// Model to use for embeddings.
     pub model: String,
+    /// Ollama base URL (for Ollama provider). Defaults to http://localhost:11434.
+    pub ollama_base_url: String,
 }
 
 impl Default for EmbeddingsConfig {
@@ -554,6 +570,7 @@ impl Default for EmbeddingsConfig {
             provider: "openai".to_string(),
             openai_api_key: None,
             model: "text-embedding-3-small".to_string(),
+            ollama_base_url: "http://localhost:11434".to_string(),
         }
     }
 }
@@ -568,6 +585,10 @@ impl EmbeddingsConfig {
         let model =
             optional_env("EMBEDDING_MODEL")?.unwrap_or_else(|| settings.embeddings.model.clone());
 
+        let ollama_base_url = optional_env("OLLAMA_BASE_URL")?
+            .or_else(|| settings.ollama_base_url.clone())
+            .unwrap_or_else(|| "http://localhost:11434".to_string());
+
         let enabled = optional_env("EMBEDDING_ENABLED")?
             .map(|s| s.parse())
             .transpose()
@@ -575,13 +596,16 @@ impl EmbeddingsConfig {
                 key: "EMBEDDING_ENABLED".to_string(),
                 message: format!("must be 'true' or 'false': {e}"),
             })?
-            .unwrap_or_else(|| settings.embeddings.enabled || openai_api_key.is_some());
+            .unwrap_or_else(|| {
+                settings.embeddings.enabled || openai_api_key.is_some() || provider == "ollama"
+            });
 
         Ok(Self {
             enabled,
             provider,
             openai_api_key,
             model,
+            ollama_base_url,
         })
     }
 
@@ -1197,7 +1221,7 @@ impl Default for SandboxModeConfig {
             timeout_secs: 120,
             memory_limit_mb: 2048,
             cpu_shares: 1024,
-            image: "ghcr.io/nearai/sandbox:latest".to_string(),
+            image: "ironclaw-worker:latest".to_string(),
             auto_pull_image: true,
             extra_allowed_domains: Vec::new(),
         }

@@ -38,7 +38,9 @@ use ironclaw::{
         mcp::{McpClient, McpSessionManager, config::load_mcp_servers_from_db, is_authenticated},
         wasm::{WasmToolLoader, WasmToolRuntime, load_dev_tools},
     },
-    workspace::{EmbeddingProvider, NearAiEmbeddings, OpenAiEmbeddings, Workspace},
+    workspace::{
+        EmbeddingProvider, NearAiEmbeddings, OllamaEmbeddings, OpenAiEmbeddings, Workspace,
+    },
 };
 
 #[cfg(feature = "libsql")]
@@ -112,6 +114,12 @@ async fn main() -> anyhow::Result<()> {
                                 session,
                             )
                             .with_model(&config.embeddings.model, 1536),
+                        )),
+                        "ollama" => Some(Arc::new(
+                            ironclaw::workspace::OllamaEmbeddings::new(
+                                &config.embeddings.ollama_base_url,
+                            )
+                            .with_model(&config.embeddings.model, 768),
                         )),
                         _ => {
                             if let Some(api_key) = config.embeddings.openai_api_key() {
@@ -554,6 +562,17 @@ async fn main() -> anyhow::Result<()> {
                 Some(Arc::new(
                     NearAiEmbeddings::new(&config.llm.nearai.base_url, session.clone())
                         .with_model(&config.embeddings.model, 1536),
+                ))
+            }
+            "ollama" => {
+                tracing::info!(
+                    "Embeddings enabled via Ollama (model: {}, url: {})",
+                    config.embeddings.model,
+                    config.embeddings.ollama_base_url,
+                );
+                Some(Arc::new(
+                    OllamaEmbeddings::new(&config.embeddings.ollama_base_url)
+                        .with_model(&config.embeddings.model, 768),
                 ))
             }
             _ => {

@@ -1152,8 +1152,11 @@ impl Agent {
                         }
                     }
 
-                    // Execute each tool (with approval checking)
-                    for tc in tool_calls {
+                    // Execute tools in order (with approval checking)
+                    let mut idx = 0usize;
+                    while idx < tool_calls.len() {
+                        let tc = tool_calls[idx].clone();
+
                         // Check if tool requires approval
                         if let Some(tool) = self.tools().get(&tc.name).await
                             && tool.requires_approval()
@@ -1194,7 +1197,10 @@ impl Agent {
                             }
 
                             if !is_auto_approved {
-                                // Need approval - store pending request and return
+                                // Need approval - store pending request and return.
+                                // Preserve remaining tool calls from this same assistant message,
+                                // so resuming after approval never leaves orphaned tool_use IDs.
+                                let deferred_tool_calls = tool_calls[idx + 1..].to_vec();
                                 let pending = PendingApproval {
                                     request_id: Uuid::new_v4(),
                                     tool_name: tc.name.clone(),
@@ -1202,6 +1208,7 @@ impl Agent {
                                     description: tool.description().to_string(),
                                     tool_call_id: tc.id.clone(),
                                     context_messages: context_messages.clone(),
+                                    deferred_tool_calls,
                                 };
 
                                 return Ok(AgenticLoopResult::NeedApproval { pending });
@@ -1317,6 +1324,8 @@ impl Agent {
                             &tc.name,
                             result_content,
                         ));
+
+                        idx += 1;
                     }
                 }
             }
@@ -1727,6 +1736,7 @@ impl Agent {
 
             // Build context including the tool result
             let mut context_messages = pending.context_messages;
+            let deferred_tool_calls = pending.deferred_tool_calls;
 
             // Record result in thread
             {
@@ -1794,6 +1804,127 @@ impl Agent {
                 &pending.tool_name,
                 result_content,
             ));
+
+            // If the original assistant message had additional tool calls after the
+            // approved one, execute them now so every prior tool_use gets a matching
+            // tool_result before the next LLM call.
+            if !deferred_tool_calls.is_empty() {
+                let _ = self
+                    .channels
+                    .send_status(
+                        &message.channel,
+                        StatusUpdate::Thinking(format!(
+                            "Executing {} deferred tool(s)...",
+                            deferred_tool_calls.len()
+                        )),
+                        &message.metadata,
+                    )
+                    .await;
+            }
+
+            for tc in deferred_tool_calls {
+                let _ = self
+                    .channels
+                    .send_status(
+                        &message.channel,
+                        StatusUpdate::ToolStarted {
+                            name: tc.name.clone(),
+                        },
+                        &message.metadata,
+                    )
+                    .await;
+
+                let tool_result = self
+                    .execute_chat_tool(&tc.name, &tc.arguments, &job_ctx)
+                    .await;
+
+                let _ = self
+                    .channels
+                    .send_status(
+                        &message.channel,
+                        StatusUpdate::ToolCompleted {
+                            name: tc.name.clone(),
+                            success: tool_result.is_ok(),
+                        },
+                        &message.metadata,
+                    )
+                    .await;
+
+                if let Ok(ref output) = tool_result
+                    && !output.is_empty()
+                {
+                    let _ = self
+                        .channels
+                        .send_status(
+                            &message.channel,
+                            StatusUpdate::ToolResult {
+                                name: tc.name.clone(),
+                                preview: output.clone(),
+                            },
+                            &message.metadata,
+                        )
+                        .await;
+                }
+
+                // Record result in thread
+                {
+                    let mut sess = session.lock().await;
+                    if let Some(thread) = sess.threads.get_mut(&thread_id)
+                        && let Some(turn) = thread.last_turn_mut()
+                    {
+                        match &tool_result {
+                            Ok(output) => {
+                                turn.record_tool_result(serde_json::json!(output));
+                            }
+                            Err(e) => {
+                                turn.record_tool_error(e.to_string());
+                            }
+                        }
+                    }
+                }
+
+                // If auth flow is triggered while replaying deferred calls,
+                // switch to auth mode and stop the turn immediately.
+                if let Some((ext_name, instructions)) = detect_auth_awaiting(&tc.name, &tool_result)
+                {
+                    let auth_data = parse_auth_result(&tool_result);
+                    {
+                        let mut sess = session.lock().await;
+                        if let Some(thread) = sess.threads.get_mut(&thread_id) {
+                            thread.enter_auth_mode(ext_name.clone());
+                            thread.complete_turn(&instructions);
+                        }
+                    }
+                    let _ = self
+                        .channels
+                        .send_status(
+                            &message.channel,
+                            StatusUpdate::AuthRequired {
+                                extension_name: ext_name,
+                                instructions: Some(instructions.clone()),
+                                auth_url: auth_data.auth_url,
+                                setup_url: auth_data.setup_url,
+                            },
+                            &message.metadata,
+                        )
+                        .await;
+                    return Ok(SubmissionResult::response(instructions));
+                }
+
+                let result_content = match tool_result {
+                    Ok(output) => {
+                        let sanitized = self.safety().sanitize_tool_output(&tc.name, &output);
+                        self.safety().wrap_for_llm(
+                            &tc.name,
+                            &sanitized.content,
+                            sanitized.was_modified,
+                        )
+                    }
+                    Err(e) => format!("Error: {}", e),
+                };
+
+                context_messages.push(ChatMessage::tool_result(&tc.id, &tc.name, result_content));
+            }
 
             // Continue the agentic loop (a tool was already executed this turn)
             let result = self
@@ -2548,7 +2679,7 @@ fn detect_auth_awaiting(
 mod tests {
     use crate::error::Error;
 
-    use super::detect_auth_awaiting;
+    use super::{detect_auth_awaiting, truncate_for_preview};
 
     #[test]
     fn test_detect_auth_awaiting_positive() {
@@ -2642,9 +2773,25 @@ mod tests {
         assert!(detect_auth_awaiting("tool_activate", &result).is_none());
     }
 
-    // --- truncate_for_preview tests ---
+    #[test]
+    fn test_pending_approval_serialization_backcompat_without_deferred_calls() {
+        let json = serde_json::json!({
+            "request_id": uuid::Uuid::new_v4(),
+            "tool_name": "http",
+            "parameters": {"url": "https://example.com", "method": "GET"},
+            "description": "Make HTTP request",
+            "tool_call_id": "call_123",
+            "context_messages": [{"role": "user", "content": "go"}]
+        })
+        .to_string();
 
-    use super::truncate_for_preview;
+        let parsed: crate::agent::session::PendingApproval =
+            serde_json::from_str(&json).expect("pending approval should deserialize");
+
+        assert!(parsed.deferred_tool_calls.is_empty());
+    }
+
+    // --- truncate_for_preview tests ---
 
     #[test]
     fn test_truncate_short_input() {

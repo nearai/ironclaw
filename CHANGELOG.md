@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Added `OpenAiCompatibleChatProvider` and wired OpenAI-compatible chat completion routing for custom base URL usage.
+- Added Ollama embeddings provider support (`EMBEDDING_PROVIDER=ollama`, `OLLAMA_BASE_URL`) in workspace embeddings.
+- Added migration `V9__flexible_embedding_dimension.sql` for flexible embedding vector dimensions.
+
+### Changed
+
+- Changed default sandbox image to `ironclaw-worker:latest` in config/settings/sandbox defaults.
+- Improved tool-message sanitization and provider compatibility handling across NEAR AI, rig adapter, and shared LLM provider code.
+
+### Fixed
+
+- Fixed approval-input aliases (`a`, `/approve`, `/always`, `/deny`, etc.) in submission parsing.
+- Fixed multi-tool approval resume flow by preserving and replaying deferred tool calls so all prior `tool_use` IDs receive matching `tool_result` messages.
+- Fixed REPL quit/exit handling to route shutdown through the agent loop for graceful termination.
+
 ## [0.1.3](https://github.com/nearai/ironclaw/compare/v0.1.2...v0.1.3) - 2026-02-12
 
 ### Other
