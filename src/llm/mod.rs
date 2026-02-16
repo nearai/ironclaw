@@ -7,6 +7,7 @@
 //! - **Ollama**: Local model inference
 //! - **OpenAI-compatible**: Any endpoint that speaks the OpenAI API
 
+mod anthropic;
 mod costs;
 pub mod failover;
 mod nearai;
@@ -18,6 +19,7 @@ mod rig_adapter;
 pub mod session;
 
 pub use failover::FailoverProvider;
+pub use anthropic::AnthropicProvider;
 pub use nearai::{ModelInfo, NearAiProvider};
 pub use nearai_chat::NearAiChatProvider;
 pub use provider::{
@@ -109,19 +111,18 @@ fn create_anthropic_provider(config: &LlmConfig) -> Result<Arc<dyn LlmProvider>,
             provider: "anthropic".to_string(),
         })?;
 
-    use rig::providers::anthropic;
+    let auth_mode = match &anth.auth {
+        crate::config::AnthropicAuth::ApiKey(_) => "API key",
+        crate::config::AnthropicAuth::OAuthToken { .. } => "OAuth (Max subscription)",
+    };
 
-    let client: anthropic::Client =
-        anthropic::Client::new(anth.api_key.expose_secret()).map_err(|e| {
-            LlmError::RequestFailed {
-                provider: "anthropic".to_string(),
-                reason: format!("Failed to create Anthropic client: {}", e),
-            }
-        })?;
+    tracing::info!(
+        "Using Anthropic direct API (model: {}, auth: {})",
+        anth.model,
+        auth_mode,
+    );
 
-    let model = client.completion_model(&anth.model);
-    tracing::info!("Using Anthropic direct API (model: {})", anth.model);
-    Ok(Arc::new(RigAdapter::new(model, &anth.model)))
+    Ok(Arc::new(anthropic::AnthropicProvider::new(anth.clone())))
 }
 
 fn create_ollama_provider(config: &LlmConfig) -> Result<Arc<dyn LlmProvider>, LlmError> {

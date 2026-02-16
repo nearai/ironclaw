@@ -314,11 +314,25 @@ pub struct OpenAiDirectConfig {
     pub model: String,
 }
 
+/// Authentication method for the Anthropic API.
+#[derive(Debug, Clone)]
+pub enum AnthropicAuth {
+    /// Standard API key (`x-api-key` header).
+    ApiKey(SecretString),
+    /// OAuth token from Claude Code / Anthropic Max subscription.
+    /// Uses `Authorization: Bearer` header + `anthropic-beta: oauth-2025-04-20`.
+    OAuthToken {
+        access_token: SecretString,
+        refresh_token: Option<SecretString>,
+    },
+}
+
 /// Configuration for direct Anthropic API access.
 #[derive(Debug, Clone)]
 pub struct AnthropicDirectConfig {
-    pub api_key: SecretString,
+    pub auth: AnthropicAuth,
     pub model: String,
+    pub max_retries: u32,
 }
 
 /// Configuration for local Ollama.
@@ -482,15 +496,31 @@ impl LlmConfig {
         };
 
         let anthropic = if backend == LlmBackend::Anthropic {
-            let api_key = optional_env("ANTHROPIC_API_KEY")?
-                .map(SecretString::from)
-                .ok_or_else(|| ConfigError::MissingRequired {
+            let api_key = optional_env("ANTHROPIC_API_KEY")?.map(SecretString::from);
+            let oauth_token = optional_env("CLAUDE_CODE_OAUTH_TOKEN")?.map(SecretString::from);
+
+            let auth = if let Some(key) = api_key {
+                AnthropicAuth::ApiKey(key)
+            } else if let Some(token) = oauth_token {
+                AnthropicAuth::OAuthToken {
+                    access_token: token,
+                    refresh_token: None,
+                }
+            } else {
+                return Err(ConfigError::MissingRequired {
                     key: "ANTHROPIC_API_KEY".to_string(),
-                    hint: "Set ANTHROPIC_API_KEY when LLM_BACKEND=anthropic".to_string(),
-                })?;
+                    hint: "Set ANTHROPIC_API_KEY or CLAUDE_CODE_OAUTH_TOKEN when LLM_BACKEND=anthropic".to_string(),
+                });
+            };
+
             let model = optional_env("ANTHROPIC_MODEL")?
                 .unwrap_or_else(|| "claude-sonnet-4-20250514".to_string());
-            Some(AnthropicDirectConfig { api_key, model })
+            let max_retries = parse_optional_env("ANTHROPIC_MAX_RETRIES", 3)?;
+            Some(AnthropicDirectConfig {
+                auth,
+                model,
+                max_retries,
+            })
         } else {
             None
         };
@@ -1379,6 +1409,7 @@ pub async fn inject_llm_keys_from_secrets(
     let mappings = [
         ("llm_openai_api_key", "OPENAI_API_KEY"),
         ("llm_anthropic_api_key", "ANTHROPIC_API_KEY"),
+        ("llm_claude_oauth_token", "CLAUDE_CODE_OAUTH_TOKEN"),
         ("llm_compatible_api_key", "LLM_API_KEY"),
     ];
 
