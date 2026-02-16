@@ -17,7 +17,7 @@ mod retry;
 mod rig_adapter;
 pub mod session;
 
-pub use failover::FailoverProvider;
+pub use failover::{CooldownConfig, FailoverProvider};
 pub use nearai::{ModelInfo, NearAiProvider};
 pub use nearai_chat::NearAiChatProvider;
 pub use provider::{
@@ -235,6 +235,8 @@ mod tests {
             api_key: None,
             fallback_model: None,
             max_retries: 3,
+            failover_cooldown_secs: 300,
+            failover_cooldown_threshold: 3,
         }
     }
 

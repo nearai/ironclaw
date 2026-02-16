@@ -1022,6 +1022,8 @@ impl SetupWizard {
                 api_key: None,
                 fallback_model: None,
                 max_retries: 3,
+                failover_cooldown_secs: 300,
+                failover_cooldown_threshold: 3,
             },
             openai: None,
             anthropic: None,
