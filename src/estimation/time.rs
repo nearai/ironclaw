@@ -16,10 +16,6 @@ impl TimeEstimator {
 
         // Default tool durations
         tool_durations.insert("http".to_string(), Duration::from_secs(5));
-        tool_durations.insert("marketplace".to_string(), Duration::from_secs(10));
-        tool_durations.insert("ecommerce".to_string(), Duration::from_secs(8));
-        tool_durations.insert("taskrabbit".to_string(), Duration::from_secs(30)); // Just API, not task itself
-        tool_durations.insert("restaurant".to_string(), Duration::from_secs(5));
         tool_durations.insert("echo".to_string(), Duration::from_millis(10));
         tool_durations.insert("time".to_string(), Duration::from_millis(1));
         tool_durations.insert("json".to_string(), Duration::from_millis(5));

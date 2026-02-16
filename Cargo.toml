@@ -139,7 +139,7 @@ pretty_assertions = "1"
 tempfile = "3"
 
 [features]
-default = ["postgres"]
+default = ["postgres", "libsql"]
 postgres = [
     "dep:deadpool-postgres",
     "dep:tokio-postgres",

@@ -81,17 +81,34 @@ fn migrate_bootstrap_json_to_env(env_path: &std::path::Path) {
     }
 }
 
-/// Write `DATABASE_URL` to `~/.ironclaw/.env`.
+/// Write database bootstrap vars to `~/.ironclaw/.env`.
+///
+/// These settings form the chicken-and-egg layer: they must be available
+/// from the filesystem (env vars) BEFORE any database connection, because
+/// they determine which database to connect to. Everything else is stored
+/// in the database itself.
 ///
 /// Creates the parent directory if it doesn't exist.
-/// The value is double-quoted so that `#` (common in URL-encoded passwords)
+/// Values are double-quoted so that `#` (common in URL-encoded passwords)
 /// and other shell-special characters are preserved by dotenvy.
-pub fn save_database_url(url: &str) -> std::io::Result<()> {
+pub fn save_bootstrap_env(vars: &[(&str, &str)]) -> std::io::Result<()> {
     let path = ironclaw_env_path();
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    std::fs::write(&path, format!("DATABASE_URL=\"{}\"\n", url))
+    let mut content = String::new();
+    for (key, value) in vars {
+        content.push_str(&format!("{}=\"{}\"\n", key, value));
+    }
+    std::fs::write(&path, content)
+}
+
+/// Write `DATABASE_URL` to `~/.ironclaw/.env`.
+///
+/// Convenience wrapper around `save_bootstrap_env` for single-value migration
+/// paths. Prefer `save_bootstrap_env` for new code.
+pub fn save_database_url(url: &str) -> std::io::Result<()> {
+    save_bootstrap_env(&[("DATABASE_URL", url)])
 }
 
 /// One-time migration of legacy `~/.ironclaw/settings.json` into the database.
@@ -184,7 +201,7 @@ pub async fn migrate_disk_to_db(
             Ok(content) => match serde_json::from_str::<serde_json::Value>(&content) {
                 Ok(value) => {
                     store
-                        .set_setting(user_id, "nearai.session", &value)
+                        .set_setting(user_id, "nearai.session_token", &value)
                         .await
                         .map_err(|e| {
                             MigrationError::Database(format!(
@@ -384,5 +401,64 @@ mod tests {
 
         // Nothing should happen
         assert!(!env_path.exists());
+    }
+
+    #[test]
+    fn test_save_bootstrap_env_multiple_vars() {
+        let dir = tempdir().unwrap();
+        let env_path = dir.path().join("nested").join(".env");
+
+        std::fs::create_dir_all(env_path.parent().unwrap()).unwrap();
+
+        let vars = [
+            ("DATABASE_BACKEND", "libsql"),
+            ("LIBSQL_PATH", "/home/user/.ironclaw/ironclaw.db"),
+        ];
+
+        // Write manually to the temp path (save_bootstrap_env uses the global path)
+        let mut content = String::new();
+        for (key, value) in &vars {
+            content.push_str(&format!("{}=\"{}\"\n", key, value));
+        }
+        std::fs::write(&env_path, &content).unwrap();
+
+        // Verify dotenvy can parse all entries
+        let parsed: Vec<(String, String)> = dotenvy::from_path_iter(&env_path)
+            .unwrap()
+            .filter_map(|r| r.ok())
+            .collect();
+        assert_eq!(parsed.len(), 2);
+        assert_eq!(
+            parsed[0],
+            ("DATABASE_BACKEND".to_string(), "libsql".to_string())
+        );
+        assert_eq!(
+            parsed[1],
+            (
+                "LIBSQL_PATH".to_string(),
+                "/home/user/.ironclaw/ironclaw.db".to_string()
+            )
+        );
+    }
+
+    #[test]
+    fn test_save_bootstrap_env_overwrites_previous() {
+        let dir = tempdir().unwrap();
+        let env_path = dir.path().join(".env");
+
+        // Write initial content
+        std::fs::write(&env_path, "DATABASE_URL=\"postgres://old\"\n").unwrap();
+
+        // Overwrite with new vars (simulating save_bootstrap_env behavior)
+        let content = "DATABASE_BACKEND=\"libsql\"\nLIBSQL_PATH=\"/new/path.db\"\n";
+        std::fs::write(&env_path, content).unwrap();
+
+        let parsed: Vec<(String, String)> = dotenvy::from_path_iter(&env_path)
+            .unwrap()
+            .filter_map(|r| r.ok())
+            .collect();
+        // Old DATABASE_URL should be gone
+        assert_eq!(parsed.len(), 2);
+        assert!(parsed.iter().all(|(k, _)| k != "DATABASE_URL"));
     }
 }

@@ -630,6 +630,22 @@ RUST_LOG=ironclaw::agent=debug cargo run
 RUST_LOG=ironclaw=debug,tower_http=debug cargo run
 ```
 
+## Module Specifications
+
+Some modules have a `README.md` that serves as the authoritative specification
+for that module's behavior. When modifying code in a module that has a spec:
+
+1. **Read the spec first** before making changes
+2. **Code follows spec**: if the spec says X, the code must do X
+3. **Update both sides**: if you change behavior, update the spec to match;
+   if you're implementing a spec change, update the code to match
+4. **Spec is the tiebreaker**: when code and spec disagree, the spec is correct
+   (unless the spec is clearly outdated, in which case fix the spec first)
+
+| Module | Spec File |
+|--------|-----------|
+| `src/setup/` | `src/setup/README.md` |
+
 ## Code Style
 
 - Use `crate::` imports, not `super::`

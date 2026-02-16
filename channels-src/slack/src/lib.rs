@@ -338,7 +338,13 @@ fn emit_message(
         team_id,
     };
 
-    let metadata_json = serde_json::to_string(&metadata).unwrap_or_else(|_| "{}".to_string());
+    let metadata_json = serde_json::to_string(&metadata).unwrap_or_else(|e| {
+        channel_host::log(
+            channel_host::LogLevel::Error,
+            &format!("Failed to serialize Slack metadata: {}", e),
+        );
+        "{}".to_string()
+    });
 
     // Strip @ mentions of the bot from the text for cleaner messages
     let cleaned_text = strip_bot_mention(&text);
@@ -366,7 +372,13 @@ fn strip_bot_mention(text: &str) -> String {
 
 /// Create a JSON HTTP response.
 fn json_response(status: u16, value: serde_json::Value) -> OutgoingHttpResponse {
-    let body = serde_json::to_vec(&value).unwrap_or_default();
+    let body = serde_json::to_vec(&value).unwrap_or_else(|e| {
+        channel_host::log(
+            channel_host::LogLevel::Error,
+            &format!("Failed to serialize JSON response: {}", e),
+        );
+        Vec::new()
+    });
     let headers = serde_json::json!({"Content-Type": "application/json"});
 
     OutgoingHttpResponse {
