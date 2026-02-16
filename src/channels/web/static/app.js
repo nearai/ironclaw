@@ -12,6 +12,7 @@ let loadingOlder = false;
 let jobEvents = new Map(); // job_id -> Array of events
 let jobListRefreshTimer = null;
 const JOB_EVENTS_CAP = 500;
+const MEMORY_SEARCH_QUERY_MAX_LENGTH = 100;
 
 // --- Auth ---
 
@@ -999,8 +1000,6 @@ function buildBreadcrumb(path) {
   }
   return html;
 }
-
-const MEMORY_SEARCH_QUERY_MAX_LENGTH = 100;
 
 function searchMemory(query) {
   const normalizedQuery = normalizeSearchQuery(query);
