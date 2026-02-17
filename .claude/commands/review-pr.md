@@ -1,7 +1,7 @@
 ---
 description: Paranoid architect review of a PR — fetches diff, reads changed files, deep review across 6 lenses, posts findings as GitHub comments
 disable-model-invocation: true
-allowed-tools: Bash(gh *), Bash(git *), Read, Grep, Glob
+allowed-tools: Bash(gh pr view:*), Bash(gh pr diff:*), Bash(gh pr comment:*), Bash(gh api:*), Bash(gh repo view:*), Bash(git diff:*), Bash(git log:*), Read, Grep, Glob
 argument-hint: "<pr-number or github-pr-url>"
 ---
 
@@ -16,11 +16,13 @@ Parse `$ARGUMENTS` to extract the PR number:
 - If it's a bare number, use it directly.
 - If empty, stop and ask the user for a PR number.
 
-Fetch PR metadata:
+Fetch PR metadata (including head commit SHA for posting line comments later):
 
 ```
-gh pr view {number} --json title,body,baseRefName,headRefName,files,additions,deletions
+gh pr view {number} --json title,body,baseRefName,headRefName,headRefOid,files,additions,deletions
 ```
+
+Save the `headRefOid` value, you'll need it as `commit_id` in Step 6.
 
 ## Step 2: Load the full diff
 
@@ -41,7 +43,7 @@ For each changed file, read the ENTIRE current file (not just the diff hunks). Y
 - Trait/interface contracts that the change may violate
 - Invariants established elsewhere that the diff breaks
 
-If the PR touches more than 20 files, prioritize: service logic > routes/handlers > models/types > tests > docs.
+If the PR touches more than 20 files, still read all of them, but process in this priority order: service logic > routes/handlers > models/types > tests > docs. Batch reads in groups of ~20 if needed.
 
 ## Step 4: Deep review
 
@@ -127,13 +129,19 @@ Ask the user which findings to post as PR comments. Default: all Critical, High,
 
 ## Step 6: Post comments on GitHub
 
-For each approved finding, post a review comment on the PR at the specific file and line:
+Resolve the repo owner and name if not already known:
+
+```
+gh repo view --json owner,name --jq '"\(.owner.login)/\(.name)"'
+```
+
+For each approved finding, post a review comment on the PR at the specific file and line. Use the `headRefOid` from Step 1 as the `commit_id`:
 
 ```
 gh api repos/{owner}/{repo}/pulls/{number}/comments \
   -f body="..." \
   -f path="..." \
-  -f commit_id="..." \
+  -f commit_id="{headRefOid}" \
   -F line=... \
   -f side="RIGHT"
 ```

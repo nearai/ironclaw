@@ -1,7 +1,7 @@
 ---
 description: Respond to PR review comments — triage, plan fixes, implement after confirmation, push, and reply to reviewers
 disable-model-invocation: true
-allowed-tools: Bash(gh *), Bash(git *), Bash(cargo *), Read, Edit, Write, Grep, Glob
+allowed-tools: Bash(gh pr list:*), Bash(gh pr comment:*), Bash(gh api:*), Bash(gh repo view:*), Bash(git branch:*), Bash(git status:*), Bash(git add:*), Bash(git commit:*), Bash(git push:*), Bash(cargo fmt:*), Bash(cargo clippy:*), Bash(cargo test:*), Read, Edit, Write, Grep, Glob
 argument-hint: "[pr-number (optional, auto-detects from branch)]"
 ---
 
@@ -19,16 +19,22 @@ If no PR is found, tell the user and stop.
 
 ## Step 2: Fetch all review comments
 
+Resolve the repo owner and name:
+
+```
+gh repo view --json owner,name --jq '"\(.owner.login)/\(.name)"'
+```
+
 Fetch the full set of review comments (not issue-level comments):
 
 ```
-gh api repos/{owner}/{repo}/pulls/{number}/comments
+gh api --paginate repos/{owner}/{repo}/pulls/{number}/comments
 ```
 
 Also fetch the review summaries:
 
 ```
-gh api repos/{owner}/{repo}/pulls/{number}/reviews
+gh api --paginate repos/{owner}/{repo}/pulls/{number}/reviews
 ```
 
 Deduplicate comments that appear multiple times (bots sometimes post the same finding under different IDs). Group by the actual issue being raised, not by comment ID.

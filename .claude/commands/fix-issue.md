@@ -1,7 +1,7 @@
 ---
 description: Fetch a GitHub issue, create a branch, research the codebase, plan the fix, implement with tests, and commit
 disable-model-invocation: true
-allowed-tools: Bash(gh *), Bash(git *), Bash(cargo *), Read, Edit, Write, Grep, Glob
+allowed-tools: Bash(gh issue view:*), Bash(gh repo view:*), Bash(git fetch:*), Bash(git checkout:*), Bash(git status:*), Bash(git branch:*), Bash(git add:*), Bash(git commit:*), Bash(cargo fmt:*), Bash(cargo clippy:*), Bash(cargo test:*), Read, Edit, Write, Grep, Glob
 argument-hint: "<issue-number or github-issue-url>"
 ---
 
@@ -27,7 +27,7 @@ If the issue is closed, warn the user and ask if they still want to proceed.
 Create a fresh branch off the latest main:
 
 1. Fetch latest: `git fetch origin`
-2. Detect default branch: try `origin/main`, fall back to `origin/master`
+2. Detect default branch: `gh repo view --json defaultBranchRef --jq .defaultBranchRef.name`
 3. Create and switch to a new branch: `git checkout -b fix/{number}-{short-slug} origin/{default-branch}`
    - `{short-slug}` is 3-5 words from the issue title, lowercase, hyphenated (e.g. `fix/42-idor-workspace-check`)
 

@@ -1,7 +1,7 @@
 ---
 description: Deep audit of the IronClaw crate for vulnerabilities, bugs, unfinished work, inconsistencies, and oversights
 disable-model-invocation: true
-allowed-tools: Bash(cargo *), Bash(git diff *), Bash(git log *), Bash(git show *), Bash(wc *), Read, Grep, Glob, Task
+allowed-tools: Bash(cargo fmt:*), Bash(cargo clippy:*), Bash(cargo test:*), Bash(cargo audit:*), Bash(git diff:*), Bash(git log:*), Bash(git show:*), Bash(wc:*), Read, Grep, Glob, Task
 argument-hint: "[path/to/crate]"
 ---
 
@@ -189,7 +189,7 @@ IronClaw key traits: `Database` (~60 methods), `Channel`, `Tool`, `LlmProvider`,
 
 Review `Cargo.toml` and `Cargo.lock`:
 - Are there duplicate versions of the same crate in the lock file? (potential version conflicts)
-- Are there dependencies with known security advisories? Run `cargo audit` if available.
+- Are there dependencies with known security advisories? Run `cargo audit` to check (install with `cargo install cargo-audit` if not present).
 - Are there heavy dependencies used for trivial functionality?
 - Are dependency features minimal?
 
