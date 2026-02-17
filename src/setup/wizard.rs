@@ -603,7 +603,13 @@ impl SetupWizard {
         if let Some(ref current) = self.settings.llm_backend {
             let display = match current.as_str() {
                 "nearai" => "NEAR AI",
-                "anthropic" => "Anthropic (Claude)",
+                "anthropic" => {
+                    if std::env::var("CLAUDE_CODE_OAUTH_TOKEN").is_ok() {
+                        "Anthropic (Max)"
+                    } else {
+                        "Anthropic (API key)"
+                    }
+                }
                 "openai" => "OpenAI",
                 "ollama" => "Ollama (local)",
                 "openai_compatible" => "OpenAI-compatible endpoint",
@@ -621,7 +627,12 @@ impl SetupWizard {
                 // Still run the auth sub-flow in case they need to update keys
                 match current.as_str() {
                     "nearai" => return self.setup_nearai().await,
-                    "anthropic" => return self.setup_anthropic().await,
+                    "anthropic" => {
+                        if std::env::var("CLAUDE_CODE_OAUTH_TOKEN").is_ok() {
+                            return self.setup_anthropic_oauth().await;
+                        }
+                        return self.setup_anthropic().await;
+                    }
                     "openai" => return self.setup_openai().await,
                     "ollama" => return self.setup_ollama(),
                     "openai_compatible" => return self.setup_openai_compatible().await,
@@ -648,6 +659,7 @@ impl SetupWizard {
         let options = &[
             "NEAR AI          - multi-model access via NEAR account",
             "Anthropic        - Claude models (direct API key)",
+            "Anthropic (Max)  - Claude models (Max/Pro subscription, no API key)",
             "OpenAI           - GPT models (direct API key)",
             "Ollama           - local models, no API key needed",
             "OpenAI-compatible - custom endpoint (vLLM, LiteLLM, Together, etc.)",
@@ -658,9 +670,10 @@ impl SetupWizard {
         match choice {
             0 => self.setup_nearai().await?,
             1 => self.setup_anthropic().await?,
-            2 => self.setup_openai().await?,
-            3 => self.setup_ollama()?,
-            4 => self.setup_openai_compatible().await?,
+            2 => self.setup_anthropic_oauth().await?,
+            3 => self.setup_openai().await?,
+            4 => self.setup_ollama()?,
+            5 => self.setup_openai_compatible().await?,
             _ => return Err(SetupError::Config("Invalid provider selection".to_string())),
         }
 
@@ -716,6 +729,79 @@ impl SetupWizard {
             "https://console.anthropic.com/settings/keys",
         )
         .await
+    }
+
+    /// Anthropic OAuth provider setup: collect OAuth token from Claude Code.
+    ///
+    /// Uses `CLAUDE_CODE_OAUTH_TOKEN` from `claude setup-token` for Max/Pro
+    /// subscription users who don't need a separate API key.
+    async fn setup_anthropic_oauth(&mut self) -> Result<(), SetupError> {
+        self.settings.llm_backend = Some("anthropic".to_string());
+        if self.settings.selected_model.is_some() {
+            self.settings.selected_model = None;
+        }
+
+        // Check env var first
+        if let Ok(existing) = std::env::var("CLAUDE_CODE_OAUTH_TOKEN")
+            && !existing.is_empty()
+        {
+            print_info(&format!(
+                "CLAUDE_CODE_OAUTH_TOKEN found: {}",
+                mask_api_key(&existing)
+            ));
+            if confirm("Use this token?", true).map_err(SetupError::Io)? {
+                if let Ok(ctx) = self.init_secrets_context().await {
+                    let key = SecretString::from(existing.clone());
+                    if let Err(e) = ctx.save_secret("llm_claude_oauth_token", &key).await {
+                        print_error(&format!(
+                            "Failed to persist OAuth token to secrets: {}. \
+                             Please ensure CLAUDE_CODE_OAUTH_TOKEN is set in your environment.",
+                            e,
+                        ));
+                    }
+                }
+                print_success("Anthropic (Max) configured (from env)");
+                return Ok(());
+            }
+        }
+
+        println!();
+        print_info("To use your Anthropic Max/Pro subscription:");
+        print_info("  1. Install Claude Code: https://docs.anthropic.com/en/docs/claude-code");
+        print_info("  2. Run: claude setup-token");
+        print_info("  3. Paste the token below");
+        println!();
+
+        let token = secret_input("OAuth token").map_err(SetupError::Io)?;
+        let token_str = token.expose_secret();
+
+        if token_str.is_empty() {
+            return Err(SetupError::Config(
+                "OAuth token cannot be empty".to_string(),
+            ));
+        }
+
+        if !token_str.starts_with("sk-ant-") {
+            print_info("Note: this doesn't look like an Anthropic OAuth token (expected prefix 'sk-ant-').");
+            if !confirm("Use anyway?", false).map_err(SetupError::Io)? {
+                return Err(SetupError::Config(
+                    "Token entry cancelled".to_string(),
+                ));
+            }
+        }
+
+        // Store in secrets if available
+        if let Ok(ctx) = self.init_secrets_context().await {
+            ctx.save_secret("llm_claude_oauth_token", &token)
+                .await
+                .map_err(|e| SetupError::Config(format!("Failed to save OAuth token: {e}")))?;
+            print_success("OAuth token encrypted and saved");
+        } else {
+            print_info("Secrets not available. Set CLAUDE_CODE_OAUTH_TOKEN in your environment.");
+        }
+
+        print_success("Anthropic (Max) configured");
+        Ok(())
     }
 
     /// OpenAI provider setup: collect API key and store in secrets.

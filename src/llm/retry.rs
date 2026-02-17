@@ -9,7 +9,7 @@ use rand::Rng;
 
 /// Returns `true` if the HTTP status code is transient and worth retrying.
 pub(crate) fn is_retryable_status(status: u16) -> bool {
-    matches!(status, 429 | 500 | 502 | 503 | 504)
+    matches!(status, 429 | 500 | 502 | 503 | 504 | 529)
 }
 
 /// Calculate exponential backoff delay with random jitter.
@@ -43,6 +43,7 @@ mod tests {
         assert!(is_retryable_status(502));
         assert!(is_retryable_status(503));
         assert!(is_retryable_status(504));
+        assert!(is_retryable_status(529)); // Anthropic overloaded
 
         // Client errors should not be retryable
         assert!(!is_retryable_status(400));
