@@ -39,28 +39,41 @@ pub struct Config {
     pub routines: RoutineConfig,
     pub sandbox: SandboxModeConfig,
     pub claude_code: ClaudeCodeConfig,
+    pub observability: crate::observability::ObservabilityConfig,
 }
 
 impl Config {
     /// Load configuration from environment variables and the database.
     ///
-    /// Priority: env var > DB settings > default.
+    /// Priority: env var > TOML config file > DB settings > default.
     /// This is the primary way to load config after DB is connected.
     pub async fn from_db(
         store: &dyn crate::db::Database,
         user_id: &str,
     ) -> Result<Self, ConfigError> {
+        Self::from_db_with_toml(store, user_id, None).await
+    }
+
+    /// Load from DB with an optional TOML config file overlay.
+    pub async fn from_db_with_toml(
+        store: &dyn crate::db::Database,
+        user_id: &str,
+        toml_path: Option<&std::path::Path>,
+    ) -> Result<Self, ConfigError> {
         let _ = dotenvy::dotenv();
         crate::bootstrap::load_ironclaw_env();
 
         // Load all settings from DB into a Settings struct
-        let db_settings = match store.get_all_settings(user_id).await {
+        let mut db_settings = match store.get_all_settings(user_id).await {
             Ok(map) => Settings::from_db_map(&map),
             Err(e) => {
                 tracing::warn!("Failed to load settings from DB, using defaults: {}", e);
                 Settings::default()
             }
         };
+
+        // Overlay TOML config file (values win over DB settings)
+        Self::apply_toml_overlay(&mut db_settings, toml_path)?;
 
         Self::build(&db_settings).await
     }
@@ -74,10 +87,61 @@ impl Config {
     /// Loads both `./.env` (standard, higher priority) and `~/.ironclaw/.env`
     /// (lower priority) via dotenvy, which never overwrites existing vars.
     pub async fn from_env() -> Result<Self, ConfigError> {
+        Self::from_env_with_toml(None).await
+    }
+
+    /// Load from env with an optional TOML config file overlay.
+    pub async fn from_env_with_toml(
+        toml_path: Option<&std::path::Path>,
+    ) -> Result<Self, ConfigError> {
         let _ = dotenvy::dotenv();
         crate::bootstrap::load_ironclaw_env();
-        let settings = Settings::load();
+        let mut settings = Settings::load();
+
+        // Overlay TOML config file (values win over JSON settings)
+        Self::apply_toml_overlay(&mut settings, toml_path)?;
+
         Self::build(&settings).await
+    }
+
+    /// Load and merge a TOML config file into settings.
+    ///
+    /// If `explicit_path` is `Some`, loads from that path (errors are fatal).
+    /// If `None`, tries the default path `~/.ironclaw/config.toml` (missing
+    /// file is silently ignored).
+    fn apply_toml_overlay(
+        settings: &mut Settings,
+        explicit_path: Option<&std::path::Path>,
+    ) -> Result<(), ConfigError> {
+        let path = explicit_path
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(Settings::default_toml_path);
+
+        match Settings::load_toml(&path) {
+            Ok(Some(toml_settings)) => {
+                settings.merge_from(&toml_settings);
+                tracing::debug!("Loaded TOML config from {}", path.display());
+            }
+            Ok(None) => {
+                if explicit_path.is_some() {
+                    return Err(ConfigError::ParseError(format!(
+                        "Config file not found: {}",
+                        path.display()
+                    )));
+                }
+            }
+            Err(e) => {
+                if explicit_path.is_some() {
+                    return Err(ConfigError::ParseError(format!(
+                        "Failed to load config file {}: {}",
+                        path.display(),
+                        e
+                    )));
+                }
+                tracing::warn!("Failed to load default config file: {}", e);
+            }
+        }
+        Ok(())
     }
 
     /// Build config from settings (shared by from_env and from_db).
@@ -97,6 +161,9 @@ impl Config {
             routines: RoutineConfig::resolve()?,
             sandbox: SandboxModeConfig::resolve()?,
             claude_code: ClaudeCodeConfig::resolve()?,
+            observability: crate::observability::ObservabilityConfig {
+                backend: std::env::var("OBSERVABILITY_BACKEND").unwrap_or_else(|_| "none".into()),
+            },
         })
     }
 }
@@ -105,10 +172,21 @@ impl Config {
 ///
 /// Used by channels and tools that need public webhook endpoints.
 /// The tunnel URL is shared across all channels (Telegram, Slack, etc.).
+///
+/// Two modes:
+/// - **Static URL** (`TUNNEL_URL`): set the public URL directly (manual tunnel)
+/// - **Managed provider** (`TUNNEL_PROVIDER`): lifecycle-managed tunnel process
+///
+/// When a managed provider is configured _and_ no static URL is set,
+/// the gateway starts the tunnel on boot and populates `public_url`.
 #[derive(Debug, Clone, Default)]
 pub struct TunnelConfig {
     /// Public URL from tunnel provider (e.g., "https://abc123.ngrok.io").
+    /// Set statically via `TUNNEL_URL` or populated at runtime by a managed tunnel.
     pub public_url: Option<String>,
+    /// Provider configuration for lifecycle-managed tunnels.
+    /// `None` when using a static URL or no tunnel at all.
+    pub provider: Option<crate::tunnel::TunnelProviderConfig>,
 }
 
 impl TunnelConfig {
@@ -125,12 +203,65 @@ impl TunnelConfig {
             });
         }
 
-        Ok(Self { public_url })
+        // Resolve managed tunnel provider config.
+        // Priority: env var > settings > default (none).
+        let provider_name = optional_env("TUNNEL_PROVIDER")?
+            .or_else(|| settings.tunnel.provider.clone())
+            .unwrap_or_default();
+
+        let provider = if provider_name.is_empty() || provider_name == "none" {
+            None
+        } else {
+            Some(crate::tunnel::TunnelProviderConfig {
+                provider: provider_name.clone(),
+                cloudflare: optional_env("TUNNEL_CF_TOKEN")?
+                    .or_else(|| settings.tunnel.cf_token.clone())
+                    .map(|token| crate::tunnel::CloudflareTunnelConfig { token }),
+                tailscale: Some(crate::tunnel::TailscaleTunnelConfig {
+                    funnel: optional_env("TUNNEL_TS_FUNNEL")
+                        .ok()
+                        .flatten()
+                        .map(|s| s == "true" || s == "1")
+                        .unwrap_or(settings.tunnel.ts_funnel),
+                    hostname: optional_env("TUNNEL_TS_HOSTNAME")
+                        .ok()
+                        .flatten()
+                        .or_else(|| settings.tunnel.ts_hostname.clone()),
+                }),
+                ngrok: optional_env("TUNNEL_NGROK_TOKEN")?
+                    .or_else(|| settings.tunnel.ngrok_token.clone())
+                    .map(|auth_token| crate::tunnel::NgrokTunnelConfig {
+                        auth_token,
+                        domain: optional_env("TUNNEL_NGROK_DOMAIN")
+                            .ok()
+                            .flatten()
+                            .or_else(|| settings.tunnel.ngrok_domain.clone()),
+                    }),
+                custom: optional_env("TUNNEL_CUSTOM_COMMAND")?
+                    .or_else(|| settings.tunnel.custom_command.clone())
+                    .map(|start_command| crate::tunnel::CustomTunnelConfig {
+                        start_command,
+                        health_url: optional_env("TUNNEL_CUSTOM_HEALTH_URL")
+                            .ok()
+                            .flatten()
+                            .or_else(|| settings.tunnel.custom_health_url.clone()),
+                        url_pattern: optional_env("TUNNEL_CUSTOM_URL_PATTERN")
+                            .ok()
+                            .flatten()
+                            .or_else(|| settings.tunnel.custom_url_pattern.clone()),
+                    }),
+            })
+        };
+
+        Ok(Self {
+            public_url,
+            provider,
+        })
     }
 
-    /// Check if a tunnel is configured.
+    /// Check if a tunnel is configured (static URL or managed provider).
     pub fn is_enabled(&self) -> bool {
-        self.public_url.is_some()
+        self.public_url.is_some() || self.provider.is_some()
     }
 
     /// Get the webhook URL for a given path.
@@ -419,6 +550,19 @@ pub struct NearAiConfig {
     /// With the default of 3, the provider makes up to 4 total attempts
     /// (1 initial + 3 retries) before giving up.
     pub max_retries: u32,
+    /// Consecutive transient failures before the circuit breaker opens.
+    /// None = disabled (default). E.g. 5 means after 5 consecutive failures
+    /// all requests are rejected until recovery timeout elapses.
+    pub circuit_breaker_threshold: Option<u32>,
+    /// How long (seconds) the circuit stays open before allowing a probe (default: 30).
+    pub circuit_breaker_recovery_secs: u64,
+    /// Enable in-memory response caching for `complete()` calls.
+    /// Saves tokens on repeated prompts within a session. Default: false.
+    pub response_cache_enabled: bool,
+    /// TTL in seconds for cached responses (default: 3600 = 1 hour).
+    pub response_cache_ttl_secs: u64,
+    /// Max cached responses before LRU eviction (default: 1000).
+    pub response_cache_max_entries: usize,
     /// Cooldown duration in seconds for the failover provider (default: 300).
     /// When a provider accumulates enough consecutive failures it is skipped
     /// for this many seconds.
@@ -485,6 +629,17 @@ impl LlmConfig {
             api_key: nearai_api_key,
             fallback_model: optional_env("NEARAI_FALLBACK_MODEL")?,
             max_retries: parse_optional_env("NEARAI_MAX_RETRIES", 3)?,
+            circuit_breaker_threshold: optional_env("CIRCUIT_BREAKER_THRESHOLD")?
+                .map(|s| s.parse())
+                .transpose()
+                .map_err(|e| ConfigError::InvalidValue {
+                    key: "CIRCUIT_BREAKER_THRESHOLD".to_string(),
+                    message: format!("must be a positive integer: {e}"),
+                })?,
+            circuit_breaker_recovery_secs: parse_optional_env("CIRCUIT_BREAKER_RECOVERY_SECS", 30)?,
+            response_cache_enabled: parse_optional_env("RESPONSE_CACHE_ENABLED", false)?,
+            response_cache_ttl_secs: parse_optional_env("RESPONSE_CACHE_TTL_SECS", 3600)?,
+            response_cache_max_entries: parse_optional_env("RESPONSE_CACHE_MAX_ENTRIES", 1000)?,
             failover_cooldown_secs: parse_optional_env("LLM_FAILOVER_COOLDOWN_SECS", 300)?,
             failover_cooldown_threshold: parse_optional_env("LLM_FAILOVER_THRESHOLD", 3)?,
         };
@@ -755,6 +910,10 @@ pub struct AgentConfig {
     pub session_idle_timeout: Duration,
     /// Allow chat to use filesystem/shell tools directly (bypass sandbox).
     pub allow_local_tools: bool,
+    /// Maximum daily LLM spend in cents (e.g. 10000 = $100). None = unlimited.
+    pub max_cost_per_day_cents: Option<u64>,
+    /// Maximum LLM/tool actions per hour. None = unlimited.
+    pub max_actions_per_hour: Option<u64>,
 }
 
 impl AgentConfig {
@@ -833,6 +992,20 @@ impl AgentConfig {
                     message: format!("must be 'true' or 'false': {e}"),
                 })?
                 .unwrap_or(false),
+            max_cost_per_day_cents: optional_env("MAX_COST_PER_DAY_CENTS")?
+                .map(|s| s.parse())
+                .transpose()
+                .map_err(|e| ConfigError::InvalidValue {
+                    key: "MAX_COST_PER_DAY_CENTS".to_string(),
+                    message: format!("must be a positive integer: {e}"),
+                })?,
+            max_actions_per_hour: optional_env("MAX_ACTIONS_PER_HOUR")?
+                .map(|s| s.parse())
+                .transpose()
+                .map_err(|e| ConfigError::InvalidValue {
+                    key: "MAX_ACTIONS_PER_HOUR".to_string(),
+                    message: format!("must be a positive integer: {e}"),
+                })?,
         })
     }
 }

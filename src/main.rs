@@ -17,15 +17,18 @@ use ironclaw::{
         web::log_layer::{LogBroadcaster, WebLogLayer},
     },
     cli::{
-        Cli, Command, run_mcp_command, run_pairing_command, run_status_command, run_tool_command,
+        Cli, Command, run_mcp_command, run_pairing_command, run_service_command,
+        run_status_command, run_tool_command,
     },
     config::Config,
     context::ContextManager,
     extensions::ExtensionManager,
     hooks::HookRegistry,
     llm::{
-        CooldownConfig, FailoverProvider, LlmProvider, SessionConfig, create_cheap_llm_provider,
-        create_llm_provider, create_llm_provider_with_config, create_session_manager,
+        CachedProvider, CircuitBreakerConfig, CircuitBreakerProvider, CooldownConfig,
+        FailoverProvider, LlmProvider, ResponseCacheConfig, SessionConfig,
+        create_cheap_llm_provider, create_llm_provider, create_llm_provider_with_config,
+        create_session_manager,
     },
     orchestrator::{
         ContainerJobConfig, ContainerJobManager, OrchestratorApi, TokenStore,
@@ -151,6 +154,24 @@ async fn main() -> anyhow::Result<()> {
                 .init();
 
             return run_pairing_command(pairing_cmd.clone()).map_err(|e| anyhow::anyhow!("{}", e));
+        }
+        Some(Command::Service(service_cmd)) => {
+            tracing_subscriber::fmt()
+                .with_env_filter(
+                    EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("warn")),
+                )
+                .init();
+
+            return run_service_command(service_cmd);
+        }
+        Some(Command::Doctor) => {
+            tracing_subscriber::fmt()
+                .with_env_filter(
+                    EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("warn")),
+                )
+                .init();
+
+            return ironclaw::cli::run_doctor_command().await;
         }
         Some(Command::Status) => {
             tracing_subscriber::fmt()
@@ -286,8 +307,9 @@ async fn main() -> anyhow::Result<()> {
         wizard.run().await?;
     }
 
-    // Load initial config from env + disk (before DB is available)
-    let mut config = match Config::from_env().await {
+    // Load initial config from env + disk + optional TOML (before DB is available)
+    let toml_path = cli.config.as_deref();
+    let mut config = match Config::from_env_with_toml(toml_path).await {
         Ok(c) => c,
         Err(ironclaw::error::ConfigError::MissingRequired { key, hint }) => {
             eprintln!("Configuration error: Missing required setting '{}'", key);
@@ -429,7 +451,7 @@ async fn main() -> anyhow::Result<()> {
         }
 
         // Reload config from DB now that we have a connection.
-        match Config::from_db(db.as_ref(), "default").await {
+        match Config::from_db_with_toml(db.as_ref(), "default", toml_path).await {
             Ok(db_config) => {
                 config = db_config;
                 tracing::info!("Configuration reloaded from database");
@@ -504,7 +526,7 @@ async fn main() -> anyhow::Result<()> {
 
         // Re-resolve LlmConfig now that secrets overlay has been populated
         if let Some(ref db_ref) = db {
-            match Config::from_db(db_ref.as_ref(), "default").await {
+            match Config::from_db_with_toml(db_ref.as_ref(), "default", toml_path).await {
                 Ok(refreshed) => {
                     config = refreshed;
                     tracing::debug!("LlmConfig re-resolved after secret injection");
@@ -515,6 +537,62 @@ async fn main() -> anyhow::Result<()> {
             }
         }
     }
+
+    // Start managed tunnel if configured and no static URL is already set.
+    //
+    // The tunnel process runs in the background, exposing the local gateway
+    // port to the internet. The resulting public URL is injected into
+    // config.tunnel.public_url so channels and extensions pick it up.
+    let active_tunnel: Option<Box<dyn ironclaw::tunnel::Tunnel>> =
+        if config.tunnel.public_url.is_some() {
+            tracing::info!(
+                "Static tunnel URL in use: {}",
+                config.tunnel.public_url.as_deref().unwrap_or("?")
+            );
+            None
+        } else if let Some(ref provider_config) = config.tunnel.provider {
+            let gateway_port = config
+                .channels
+                .gateway
+                .as_ref()
+                .map(|g| g.port)
+                .unwrap_or(3000);
+            let gateway_host = config
+                .channels
+                .gateway
+                .as_ref()
+                .map(|g| g.host.as_str())
+                .unwrap_or("127.0.0.1");
+
+            match ironclaw::tunnel::create_tunnel(provider_config) {
+                Ok(Some(tunnel)) => {
+                    tracing::info!(
+                        "Starting {} tunnel on {}:{}...",
+                        tunnel.name(),
+                        gateway_host,
+                        gateway_port
+                    );
+                    match tunnel.start(gateway_host, gateway_port).await {
+                        Ok(url) => {
+                            tracing::info!("Tunnel started: {}", url);
+                            config.tunnel.public_url = Some(url);
+                            Some(tunnel)
+                        }
+                        Err(e) => {
+                            tracing::error!("Failed to start tunnel: {}", e);
+                            None
+                        }
+                    }
+                }
+                Ok(None) => None,
+                Err(e) => {
+                    tracing::error!("Failed to create tunnel: {}", e);
+                    None
+                }
+            }
+        } else {
+            None
+        };
 
     // Initialize LLM provider (clone session so we can reuse it for embeddings)
     let llm = create_llm_provider(&config.llm, session.clone())?;
@@ -549,6 +627,42 @@ async fn main() -> anyhow::Result<()> {
         } else {
             llm
         };
+
+    // Wrap in circuit breaker if configured
+    let llm: Arc<dyn LlmProvider> =
+        if let Some(threshold) = config.llm.nearai.circuit_breaker_threshold {
+            let cb_config = CircuitBreakerConfig {
+                failure_threshold: threshold,
+                recovery_timeout: std::time::Duration::from_secs(
+                    config.llm.nearai.circuit_breaker_recovery_secs,
+                ),
+                ..CircuitBreakerConfig::default()
+            };
+            tracing::info!(
+                threshold,
+                recovery_secs = config.llm.nearai.circuit_breaker_recovery_secs,
+                "LLM circuit breaker enabled"
+            );
+            Arc::new(CircuitBreakerProvider::new(llm, cb_config))
+        } else {
+            llm
+        };
+
+    // Wrap in response cache if configured
+    let llm: Arc<dyn LlmProvider> = if config.llm.nearai.response_cache_enabled {
+        let rc_config = ResponseCacheConfig {
+            ttl: std::time::Duration::from_secs(config.llm.nearai.response_cache_ttl_secs),
+            max_entries: config.llm.nearai.response_cache_max_entries,
+        };
+        tracing::info!(
+            ttl_secs = config.llm.nearai.response_cache_ttl_secs,
+            max_entries = config.llm.nearai.response_cache_max_entries,
+            "LLM response cache enabled"
+        );
+        Arc::new(CachedProvider::new(llm, rc_config))
+    } else {
+        llm
+    };
 
     // Initialize cheap LLM provider for lightweight tasks (heartbeat, evaluation)
     let cheap_llm = create_cheap_llm_provider(&config.llm, session.clone())?;
@@ -1227,6 +1341,12 @@ async fn main() -> anyhow::Result<()> {
     let boot_cheap_model = cheap_llm.as_ref().map(|c| c.model_name().to_string());
 
     // Create and run the agent
+    let cost_guard = Arc::new(ironclaw::agent::cost_guard::CostGuard::new(
+        ironclaw::agent::cost_guard::CostGuardConfig {
+            max_cost_per_day_cents: config.agent.max_cost_per_day_cents,
+            max_actions_per_hour: config.agent.max_actions_per_hour,
+        },
+    ));
     let deps = AgentDeps {
         store: db,
         llm,
@@ -1236,6 +1356,7 @@ async fn main() -> anyhow::Result<()> {
         workspace,
         extension_manager,
         hooks,
+        cost_guard,
     };
     let agent = Agent::new(
         config.agent.clone(),
@@ -1277,6 +1398,11 @@ async fn main() -> anyhow::Result<()> {
             claude_code_enabled: config.claude_code.enabled,
             routines_enabled: config.routines.enabled,
             channels: channel_names,
+            tunnel_url: active_tunnel
+                .as_ref()
+                .and_then(|t| t.public_url())
+                .or_else(|| config.tunnel.public_url.clone()),
+            tunnel_provider: active_tunnel.as_ref().map(|t| t.name().to_string()),
         };
         ironclaw::boot_screen::print_boot_screen(&boot_info);
     }
@@ -1287,6 +1413,14 @@ async fn main() -> anyhow::Result<()> {
     // Shut down the webhook server if one was started
     if let Some(ref mut server) = webhook_server {
         server.shutdown().await;
+    }
+
+    // Stop managed tunnel if one was started
+    if let Some(tunnel) = active_tunnel {
+        tracing::info!("Stopping {} tunnel...", tunnel.name());
+        if let Err(e) = tunnel.stop().await {
+            tracing::warn!("Failed to stop tunnel cleanly: {}", e);
+        }
     }
 
     tracing::info!("Agent shutdown complete");
