@@ -22,6 +22,7 @@ use crate::context::JobContext;
 use crate::db::Database;
 use crate::error::Error;
 use crate::extensions::ExtensionManager;
+use crate::hooks::HookRegistry;
 use crate::llm::{ChatMessage, LlmProvider, Reasoning, ReasoningContext, RespondResult};
 use crate::safety::SafetyLayer;
 use crate::tools::ToolRegistry;
@@ -67,10 +68,14 @@ enum AgenticLoopResult {
 pub struct AgentDeps {
     pub store: Option<Arc<dyn Database>>,
     pub llm: Arc<dyn LlmProvider>,
+    /// Cheap/fast LLM for lightweight tasks (heartbeat, routing, evaluation).
+    /// Falls back to the main `llm` if None.
+    pub cheap_llm: Option<Arc<dyn LlmProvider>>,
     pub safety: Arc<SafetyLayer>,
     pub tools: Arc<ToolRegistry>,
     pub workspace: Option<Arc<Workspace>>,
     pub extension_manager: Option<Arc<ExtensionManager>>,
+    pub hooks: Arc<HookRegistry>,
 }
 
 /// The main agent that coordinates all components.
@@ -113,6 +118,7 @@ impl Agent {
             deps.safety.clone(),
             deps.tools.clone(),
             deps.store.clone(),
+            deps.hooks.clone(),
         ));
 
         Self {
@@ -138,6 +144,11 @@ impl Agent {
         &self.deps.llm
     }
 
+    /// Get the cheap/fast LLM provider, falling back to the main one.
+    fn cheap_llm(&self) -> &Arc<dyn LlmProvider> {
+        self.deps.cheap_llm.as_ref().unwrap_or(&self.deps.llm)
+    }
+
     fn safety(&self) -> &Arc<SafetyLayer> {
         &self.deps.safety
     }
@@ -148,6 +159,10 @@ impl Agent {
 
     fn workspace(&self) -> Option<&Arc<Workspace>> {
         self.deps.workspace.as_ref()
+    }
+
+    fn hooks(&self) -> &Arc<HookRegistry> {
+        &self.deps.hooks
     }
 
     /// Run the agent main loop.
@@ -301,7 +316,7 @@ impl Agent {
                     Some(spawn_heartbeat(
                         config,
                         workspace.clone(),
-                        self.llm().clone(),
+                        self.cheap_llm().clone(),
                         Some(notify_tx),
                     ))
                 } else {
@@ -417,10 +432,32 @@ impl Agent {
 
             match self.handle_message(&message).await {
                 Ok(Some(response)) if !response.is_empty() => {
-                    let _ = self
-                        .channels
-                        .respond(&message, OutgoingResponse::text(response))
-                        .await;
+                    // Hook: BeforeOutbound — allow hooks to modify or suppress outbound
+                    let event = crate::hooks::HookEvent::Outbound {
+                        user_id: message.user_id.clone(),
+                        channel: message.channel.clone(),
+                        content: response.clone(),
+                        thread_id: message.thread_id.clone(),
+                    };
+                    match self.hooks().run(&event).await {
+                        Err(err) => {
+                            tracing::warn!("BeforeOutbound hook blocked response: {}", err);
+                        }
+                        Ok(crate::hooks::HookOutcome::Continue {
+                            modified: Some(new_content),
+                        }) => {
+                            let _ = self
+                                .channels
+                                .respond(&message, OutgoingResponse::text(new_content))
+                                .await;
+                        }
+                        _ => {
+                            let _ = self
+                                .channels
+                                .respond(&message, OutgoingResponse::text(response))
+                                .await;
+                        }
+                    }
                 }
                 Ok(Some(_)) => {
                     // Empty response, nothing to send (e.g. approval handled via send_status)
@@ -466,7 +503,33 @@ impl Agent {
 
     async fn handle_message(&self, message: &IncomingMessage) -> Result<Option<String>, Error> {
         // Parse submission type first
-        let submission = SubmissionParser::parse(&message.content);
+        let mut submission = SubmissionParser::parse(&message.content);
+
+        // Hook: BeforeInbound — allow hooks to modify or reject user input
+        if let Submission::UserInput { ref content } = submission {
+            let event = crate::hooks::HookEvent::Inbound {
+                user_id: message.user_id.clone(),
+                channel: message.channel.clone(),
+                content: content.clone(),
+                thread_id: message.thread_id.clone(),
+            };
+            match self.hooks().run(&event).await {
+                Err(crate::hooks::HookError::Rejected { reason }) => {
+                    return Ok(Some(format!("[Message rejected: {}]", reason)));
+                }
+                Err(err) => {
+                    return Ok(Some(format!("[Message blocked by hook policy: {}]", err)));
+                }
+                Ok(crate::hooks::HookOutcome::Continue {
+                    modified: Some(new_content),
+                }) => {
+                    submission = Submission::UserInput {
+                        content: new_content,
+                    };
+                }
+                _ => {} // Continue, fail-open errors already logged in registry
+            }
+        }
 
         // Hydrate thread from DB if it's a historical thread not in memory
         if let Some(ref external_thread_id) = message.thread_id {
@@ -875,6 +938,27 @@ impl Agent {
         // Complete, fail, or request approval
         match result {
             Ok(AgenticLoopResult::Response(response)) => {
+                // Hook: TransformResponse — allow hooks to modify or reject the final response
+                let response = {
+                    let event = crate::hooks::HookEvent::ResponseTransform {
+                        user_id: message.user_id.clone(),
+                        thread_id: thread_id.to_string(),
+                        response: response.clone(),
+                    };
+                    match self.hooks().run(&event).await {
+                        Err(crate::hooks::HookError::Rejected { reason }) => {
+                            format!("[Response filtered: {}]", reason)
+                        }
+                        Err(err) => {
+                            format!("[Response blocked by hook policy: {}]", err)
+                        }
+                        Ok(crate::hooks::HookOutcome::Continue {
+                            modified: Some(new_response),
+                        }) => new_response,
+                        _ => response, // fail-open: use original
+                    }
+                };
+
                 thread.complete_turn(&response);
                 self.persist_response_chain(thread);
                 let _ = self
@@ -1152,8 +1236,8 @@ impl Agent {
                         }
                     }
 
-                    // Execute each tool (with approval checking)
-                    for tc in tool_calls {
+                    // Execute each tool (with approval checking and hook interception)
+                    for mut tc in tool_calls {
                         // Check if tool requires approval
                         if let Some(tool) = self.tools().get(&tc.name).await
                             && tool.requires_approval()
@@ -1164,31 +1248,12 @@ impl Agent {
                                 sess.is_tool_auto_approved(&tc.name)
                             };
 
-                            // For shell commands, override auto-approval for
-                            // destructive patterns that should always require
-                            // explicit per-invocation approval.
-                            if is_auto_approved
-                                && tc.name == "shell"
-                                && let Some(cmd) = tc
-                                    .arguments
-                                    .get("command")
-                                    .and_then(|c| c.as_str().map(String::from))
-                                    .or_else(|| {
-                                        tc.arguments
-                                            .as_str()
-                                            .and_then(|s| {
-                                                serde_json::from_str::<serde_json::Value>(s).ok()
-                                            })
-                                            .and_then(|v| {
-                                                v.get("command")
-                                                    .and_then(|c| c.as_str().map(String::from))
-                                            })
-                                    })
-                                && crate::tools::builtin::shell::requires_explicit_approval(&cmd)
-                            {
+                            // Let the tool inspect the specific parameters and
+                            // override auto-approval (e.g. destructive shell commands).
+                            if is_auto_approved && tool.requires_approval_for(&tc.arguments) {
                                 tracing::info!(
-                                    "Shell command '{}' requires explicit approval despite auto-approve",
-                                    cmd.chars().take(80).collect::<String>()
+                                    tool = %tc.name,
+                                    "Tool requires explicit approval for these parameters despite auto-approve"
                                 );
                                 is_auto_approved = false;
                             }
@@ -1205,6 +1270,47 @@ impl Agent {
                                 };
 
                                 return Ok(AgenticLoopResult::NeedApproval { pending });
+                            }
+                        }
+
+                        // Hook: BeforeToolCall — allow hooks to modify or reject tool calls
+                        {
+                            let event = crate::hooks::HookEvent::ToolCall {
+                                tool_name: tc.name.clone(),
+                                parameters: tc.arguments.clone(),
+                                user_id: message.user_id.clone(),
+                                context: "chat".to_string(),
+                            };
+                            match self.hooks().run(&event).await {
+                                Err(crate::hooks::HookError::Rejected { reason }) => {
+                                    context_messages.push(ChatMessage::tool_result(
+                                        &tc.id,
+                                        &tc.name,
+                                        format!("Tool call rejected by hook: {}", reason),
+                                    ));
+                                    continue;
+                                }
+                                Err(err) => {
+                                    context_messages.push(ChatMessage::tool_result(
+                                        &tc.id,
+                                        &tc.name,
+                                        format!("Tool call blocked by hook policy: {}", err),
+                                    ));
+                                    continue;
+                                }
+                                Ok(crate::hooks::HookOutcome::Continue {
+                                    modified: Some(new_params),
+                                }) => match serde_json::from_str(&new_params) {
+                                    Ok(parsed) => tc.arguments = parsed,
+                                    Err(e) => {
+                                        tracing::warn!(
+                                            tool = %tc.name,
+                                            "Hook returned non-JSON modification for ToolCall, ignoring: {}",
+                                            e
+                                        );
+                                    }
+                                },
+                                _ => {} // Continue, fail-open errors already logged
                             }
                         }
 

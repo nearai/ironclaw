@@ -14,6 +14,7 @@ use crate::config::AgentConfig;
 use crate::context::{ContextManager, JobContext, JobState};
 use crate::db::Database;
 use crate::error::{Error, JobError};
+use crate::hooks::HookRegistry;
 use crate::llm::LlmProvider;
 use crate::safety::SafetyLayer;
 use crate::tools::ToolRegistry;
@@ -49,6 +50,7 @@ pub struct Scheduler {
     safety: Arc<SafetyLayer>,
     tools: Arc<ToolRegistry>,
     store: Option<Arc<dyn Database>>,
+    hooks: Arc<HookRegistry>,
     /// Running jobs (main LLM-driven jobs).
     jobs: Arc<RwLock<HashMap<Uuid, ScheduledJob>>>,
     /// Running sub-tasks (tool executions, background tasks).
@@ -64,6 +66,7 @@ impl Scheduler {
         safety: Arc<SafetyLayer>,
         tools: Arc<ToolRegistry>,
         store: Option<Arc<dyn Database>>,
+        hooks: Arc<HookRegistry>,
     ) -> Self {
         Self {
             config,
@@ -72,6 +75,7 @@ impl Scheduler {
             safety,
             tools,
             store,
+            hooks,
             jobs: Arc::new(RwLock::new(HashMap::new())),
             subtasks: Arc::new(RwLock::new(HashMap::new())),
         }
@@ -118,6 +122,7 @@ impl Scheduler {
                 safety: self.safety.clone(),
                 tools: self.tools.clone(),
                 store: self.store.clone(),
+                hooks: self.hooks.clone(),
                 timeout: self.config.job_timeout,
                 use_planning: self.config.use_planning,
             };

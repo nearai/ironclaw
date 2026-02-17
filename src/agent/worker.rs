@@ -12,6 +12,7 @@ use crate::agent::task::TaskOutput;
 use crate::context::{ContextManager, JobState};
 use crate::db::Database;
 use crate::error::Error;
+use crate::hooks::HookRegistry;
 use crate::llm::{
     ActionPlan, ChatMessage, LlmProvider, Reasoning, ReasoningContext, RespondResult, ToolSelection,
 };
@@ -29,6 +30,7 @@ pub struct WorkerDeps {
     pub safety: Arc<SafetyLayer>,
     pub tools: Arc<ToolRegistry>,
     pub store: Option<Arc<dyn Database>>,
+    pub hooks: Arc<HookRegistry>,
     pub timeout: Duration,
     pub use_planning: bool,
 }
@@ -352,23 +354,11 @@ Report when the job is complete or if you encounter issues you cannot resolve."#
             .map(|selection| {
                 let tool_name = selection.tool_name.clone();
                 let params = selection.parameters.clone();
-                let tools = self.tools().clone();
-                let context_manager = self.context_manager().clone();
-                let safety = self.safety().clone();
+                let deps = self.deps.clone();
                 let job_id = self.job_id;
-                let store = self.deps.store.clone();
 
                 async move {
-                    let result = Self::execute_tool_inner(
-                        tools,
-                        context_manager,
-                        safety,
-                        store,
-                        job_id,
-                        &tool_name,
-                        &params,
-                    )
-                    .await;
+                    let result = Self::execute_tool_inner(&deps, job_id, &tool_name, &params).await;
                     ToolExecResult { result }
                 }
             })
@@ -379,20 +369,18 @@ Report when the job is complete or if you encounter issues you cannot resolve."#
 
     /// Inner tool execution logic that can be called from both single and parallel paths.
     async fn execute_tool_inner(
-        tools: Arc<ToolRegistry>,
-        context_manager: Arc<ContextManager>,
-        safety: Arc<SafetyLayer>,
-        store: Option<Arc<dyn Database>>,
+        deps: &WorkerDeps,
         job_id: Uuid,
         tool_name: &str,
         params: &serde_json::Value,
     ) -> Result<String, Error> {
-        let tool = tools
-            .get(tool_name)
-            .await
-            .ok_or_else(|| crate::error::ToolError::NotFound {
-                name: tool_name.to_string(),
-            })?;
+        let tool =
+            deps.tools
+                .get(tool_name)
+                .await
+                .ok_or_else(|| crate::error::ToolError::NotFound {
+                    name: tool_name.to_string(),
+                })?;
 
         // Tools requiring approval are blocked in autonomous jobs
         if tool.requires_approval() {
@@ -402,8 +390,46 @@ Report when the job is complete or if you encounter issues you cannot resolve."#
             .into());
         }
 
-        // Get job context for the tool
-        let job_ctx = context_manager.get_context(job_id).await?;
+        // Fetch job context early so we have the real user_id for hooks
+        let job_ctx = deps.context_manager.get_context(job_id).await?;
+
+        // Run BeforeToolCall hook
+        let params = {
+            use crate::hooks::{HookError, HookEvent, HookOutcome};
+            let event = HookEvent::ToolCall {
+                tool_name: tool_name.to_string(),
+                parameters: params.clone(),
+                user_id: job_ctx.user_id.clone(),
+                context: format!("job:{}", job_id),
+            };
+            match deps.hooks.run(&event).await {
+                Err(HookError::Rejected { reason }) => {
+                    return Err(crate::error::ToolError::ExecutionFailed {
+                        name: tool_name.to_string(),
+                        reason: format!("Blocked by hook: {}", reason),
+                    }
+                    .into());
+                }
+                Err(err) => {
+                    return Err(crate::error::ToolError::ExecutionFailed {
+                        name: tool_name.to_string(),
+                        reason: format!("Blocked by hook failure mode: {}", err),
+                    }
+                    .into());
+                }
+                Ok(HookOutcome::Continue {
+                    modified: Some(new_params),
+                }) => serde_json::from_str(&new_params).unwrap_or_else(|e| {
+                    tracing::warn!(
+                        tool = %tool_name,
+                        "Hook returned non-JSON modification for ToolCall, ignoring: {}",
+                        e
+                    );
+                    params.clone()
+                }),
+                _ => params.clone(),
+            }
+        };
         if job_ctx.state == JobState::Cancelled {
             return Err(crate::error::ToolError::ExecutionFailed {
                 name: tool_name.to_string(),
@@ -413,7 +439,7 @@ Report when the job is complete or if you encounter issues you cannot resolve."#
         }
 
         // Validate tool parameters
-        let validation = safety.validator().validate_tool_params(params);
+        let validation = deps.safety.validator().validate_tool_params(&params);
         if !validation.is_valid {
             let details = validation
                 .errors
@@ -478,8 +504,8 @@ Report when the job is complete or if you encounter issues you cannot resolve."#
             Ok(Ok(output)) => {
                 let output_str = serde_json::to_string_pretty(&output.result)
                     .ok()
-                    .map(|s| safety.sanitize_tool_output(tool_name, &s).content);
-                context_manager
+                    .map(|s| deps.safety.sanitize_tool_output(tool_name, &s).content);
+                deps.context_manager
                     .update_memory(job_id, |mem| {
                         let rec = mem.create_action(tool_name, params.clone()).succeed(
                             output_str.clone(),
@@ -492,7 +518,8 @@ Report when the job is complete or if you encounter issues you cannot resolve."#
                     .await
                     .ok()
             }
-            Ok(Err(e)) => context_manager
+            Ok(Err(e)) => deps
+                .context_manager
                 .update_memory(job_id, |mem| {
                     let rec = mem
                         .create_action(tool_name, params.clone())
@@ -502,7 +529,8 @@ Report when the job is complete or if you encounter issues you cannot resolve."#
                 })
                 .await
                 .ok(),
-            Err(_) => context_manager
+            Err(_) => deps
+                .context_manager
                 .update_memory(job_id, |mem| {
                     let rec = mem
                         .create_action(tool_name, params.clone())
@@ -515,7 +543,7 @@ Report when the job is complete or if you encounter issues you cannot resolve."#
         };
 
         // Persist action to database (fire-and-forget)
-        if let (Some(action), Some(store)) = (action, store) {
+        if let (Some(action), Some(store)) = (action, deps.store.clone()) {
             tokio::spawn(async move {
                 if let Err(e) = store.save_action(job_id, &action).await {
                     tracing::warn!("Failed to persist action for job {}: {}", job_id, e);
@@ -701,16 +729,7 @@ Report when the job is complete or if you encounter issues you cannot resolve."#
         tool_name: &str,
         params: &serde_json::Value,
     ) -> Result<String, Error> {
-        Self::execute_tool_inner(
-            self.tools().clone(),
-            self.context_manager().clone(),
-            self.safety().clone(),
-            self.deps.store.clone(),
-            self.job_id,
-            tool_name,
-            params,
-        )
-        .await
+        Self::execute_tool_inner(&self.deps, self.job_id, tool_name, params).await
     }
 
     async fn mark_completed(&self) -> Result<(), Error> {

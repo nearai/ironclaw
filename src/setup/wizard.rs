@@ -1014,6 +1014,7 @@ impl SetupWizard {
             backend: crate::config::LlmBackend::NearAi,
             nearai: crate::config::NearAiConfig {
                 model: "dummy".to_string(),
+                cheap_model: None,
                 base_url,
                 auth_base_url,
                 session_path: crate::llm::session::default_session_path(),
@@ -2089,8 +2090,6 @@ mod tests {
 
     #[tokio::test]
     async fn test_install_missing_bundled_channels_installs_telegram() {
-        use crate::channels::wasm::available_channel_names;
-
         // WASM artifacts only exist in dev builds (not CI). Skip gracefully
         // rather than fail when the telegram channel hasn't been compiled.
         if !available_channel_names().contains(&"telegram") {
