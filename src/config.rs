@@ -563,6 +563,13 @@ pub struct NearAiConfig {
     pub response_cache_ttl_secs: u64,
     /// Max cached responses before LRU eviction (default: 1000).
     pub response_cache_max_entries: usize,
+    /// Cooldown duration in seconds for the failover provider (default: 300).
+    /// When a provider accumulates enough consecutive failures it is skipped
+    /// for this many seconds.
+    pub failover_cooldown_secs: u64,
+    /// Number of consecutive retryable failures before a provider enters
+    /// cooldown (default: 3).
+    pub failover_cooldown_threshold: u32,
 }
 
 impl LlmConfig {
@@ -633,6 +640,8 @@ impl LlmConfig {
             response_cache_enabled: parse_optional_env("RESPONSE_CACHE_ENABLED", false)?,
             response_cache_ttl_secs: parse_optional_env("RESPONSE_CACHE_TTL_SECS", 3600)?,
             response_cache_max_entries: parse_optional_env("RESPONSE_CACHE_MAX_ENTRIES", 1000)?,
+            failover_cooldown_secs: parse_optional_env("LLM_FAILOVER_COOLDOWN_SECS", 300)?,
+            failover_cooldown_threshold: parse_optional_env("LLM_FAILOVER_THRESHOLD", 3)?,
         };
 
         // Resolve provider-specific configs based on backend

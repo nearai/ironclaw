@@ -499,12 +499,16 @@ impl Agent {
             return Ok(SubmissionResult::ok_with_message("Nothing to redo."));
         }
 
-        if let Some(checkpoint) = mgr.redo() {
-            let mut sess = session.lock().await;
-            let thread = sess
-                .threads
-                .get_mut(&thread_id)
-                .ok_or_else(|| Error::from(crate::error::JobError::NotFound { id: thread_id }))?;
+        let mut sess = session.lock().await;
+        let thread = sess
+            .threads
+            .get_mut(&thread_id)
+            .ok_or_else(|| Error::from(crate::error::JobError::NotFound { id: thread_id }))?;
+
+        let current_messages = thread.messages();
+        let current_turn = thread.turn_number();
+
+        if let Some(checkpoint) = mgr.redo(current_turn, current_messages) {
             thread.restore_from_messages(checkpoint.messages);
             Ok(SubmissionResult::ok_with_message(format!(
                 "Redone to turn {}.",

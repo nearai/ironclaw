@@ -426,6 +426,26 @@ impl Tool for ShellTool {
         true // Shell commands should require approval
     }
 
+    fn requires_approval_for(&self, params: &serde_json::Value) -> bool {
+        let cmd = params
+            .get("command")
+            .and_then(|c| c.as_str().map(String::from))
+            .or_else(|| {
+                params
+                    .as_str()
+                    .and_then(|s| serde_json::from_str::<serde_json::Value>(s).ok())
+                    .and_then(|v| v.get("command").and_then(|c| c.as_str().map(String::from)))
+            });
+
+        if let Some(ref cmd) = cmd
+            && requires_explicit_approval(cmd)
+        {
+            return true;
+        }
+
+        false
+    }
+
     fn requires_sanitization(&self) -> bool {
         true // Shell output could contain anything
     }
@@ -564,6 +584,34 @@ mod tests {
 
         assert_eq!(cmd.as_deref(), Some("git push --force origin main"));
         assert!(requires_explicit_approval(cmd.as_deref().unwrap()));
+    }
+
+    #[test]
+    fn test_requires_approval_for_destructive_command() {
+        let tool = ShellTool::new();
+        // Destructive commands must return true even though shell already
+        // requires base approval -- the distinction matters for auto-approve override.
+        assert!(tool.requires_approval_for(&serde_json::json!({"command": "rm -rf /tmp"})));
+        assert!(tool.requires_approval_for(
+            &serde_json::json!({"command": "git push --force origin main"})
+        ));
+        assert!(tool.requires_approval_for(&serde_json::json!({"command": "DROP TABLE users;"})));
+    }
+
+    #[test]
+    fn test_requires_approval_for_safe_command() {
+        let tool = ShellTool::new();
+        // Safe commands should not override auto-approval; only destructive ones do.
+        assert!(!tool.requires_approval_for(&serde_json::json!({"command": "cargo build"})));
+        assert!(!tool.requires_approval_for(&serde_json::json!({"command": "echo hello"})));
+    }
+
+    #[test]
+    fn test_requires_approval_for_string_encoded_args() {
+        let tool = ShellTool::new();
+        // When arguments are string-encoded JSON (rare LLM behavior).
+        let args = serde_json::Value::String(r#"{"command": "rm -rf /tmp/stuff"}"#.to_string());
+        assert!(tool.requires_approval_for(&args));
     }
 
     #[test]

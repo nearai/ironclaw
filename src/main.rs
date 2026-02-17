@@ -25,9 +25,10 @@ use ironclaw::{
     extensions::ExtensionManager,
     hooks::HookRegistry,
     llm::{
-        CachedProvider, CircuitBreakerConfig, CircuitBreakerProvider, FailoverProvider,
-        LlmProvider, ResponseCacheConfig, SessionConfig, create_cheap_llm_provider,
-        create_llm_provider, create_llm_provider_with_config, create_session_manager,
+        CachedProvider, CircuitBreakerConfig, CircuitBreakerProvider, CooldownConfig,
+        FailoverProvider, LlmProvider, ResponseCacheConfig, SessionConfig,
+        create_cheap_llm_provider, create_llm_provider, create_llm_provider_with_config,
+        create_session_manager,
     },
     orchestrator::{
         ContainerJobConfig, ContainerJobManager, OrchestratorApi, TokenStore,
@@ -613,7 +614,16 @@ async fn main() -> anyhow::Result<()> {
                 fallback = %fallback.model_name(),
                 "LLM failover enabled"
             );
-            Arc::new(FailoverProvider::new(vec![llm, fallback])?)
+            let cooldown_config = CooldownConfig {
+                cooldown_duration: std::time::Duration::from_secs(
+                    config.llm.nearai.failover_cooldown_secs,
+                ),
+                failure_threshold: config.llm.nearai.failover_cooldown_threshold,
+            };
+            Arc::new(FailoverProvider::with_cooldown(
+                vec![llm, fallback],
+                cooldown_config,
+            )?)
         } else {
             llm
         };

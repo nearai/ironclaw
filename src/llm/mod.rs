@@ -20,7 +20,7 @@ mod rig_adapter;
 pub mod session;
 
 pub use circuit_breaker::{CircuitBreakerConfig, CircuitBreakerProvider};
-pub use failover::FailoverProvider;
+pub use failover::{CooldownConfig, FailoverProvider};
 pub use nearai::{ModelInfo, NearAiProvider};
 pub use nearai_chat::NearAiChatProvider;
 pub use provider::{
@@ -244,6 +244,8 @@ mod tests {
             response_cache_enabled: false,
             response_cache_ttl_secs: 3600,
             response_cache_max_entries: 1000,
+            failover_cooldown_secs: 300,
+            failover_cooldown_threshold: 3,
         }
     }
 

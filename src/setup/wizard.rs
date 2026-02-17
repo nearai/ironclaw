@@ -1027,6 +1027,8 @@ impl SetupWizard {
                 response_cache_enabled: false,
                 response_cache_ttl_secs: 3600,
                 response_cache_max_entries: 1000,
+                failover_cooldown_secs: 300,
+                failover_cooldown_threshold: 3,
             },
             openai: None,
             anthropic: None,
