@@ -8,6 +8,7 @@
 //! - **OpenAI-compatible**: Any endpoint that speaks the OpenAI API
 
 mod costs;
+mod discovery;
 pub mod failover;
 mod nearai;
 mod nearai_chat;
@@ -97,8 +98,15 @@ fn create_openai_provider(config: &LlmConfig) -> Result<Arc<dyn LlmProvider>, Ll
         })?;
 
     let model = client.completion_model(&oai.model);
+    let fetcher = Arc::new(discovery::OpenAiModelFetcher::new(
+        "https://api.openai.com",
+        Some(oai.api_key.clone()),
+        "openai",
+    ));
     tracing::info!("Using OpenAI direct API (model: {})", oai.model);
-    Ok(Arc::new(RigAdapter::new(model, &oai.model)))
+    Ok(Arc::new(
+        RigAdapter::new(model, &oai.model).with_discovery(fetcher),
+    ))
 }
 
 fn create_anthropic_provider(config: &LlmConfig) -> Result<Arc<dyn LlmProvider>, LlmError> {
@@ -142,12 +150,15 @@ fn create_ollama_provider(config: &LlmConfig) -> Result<Arc<dyn LlmProvider>, Ll
         })?;
 
     let model = client.completion_model(&oll.model);
+    let fetcher = Arc::new(discovery::OllamaModelFetcher::new(&oll.base_url));
     tracing::info!(
         "Using Ollama (base_url: {}, model: {})",
         oll.base_url,
         oll.model
     );
-    Ok(Arc::new(RigAdapter::new(model, &oll.model)))
+    Ok(Arc::new(
+        RigAdapter::new(model, &oll.model).with_discovery(fetcher),
+    ))
 }
 
 fn create_openai_compatible_provider(config: &LlmConfig) -> Result<Arc<dyn LlmProvider>, LlmError> {
@@ -176,12 +187,19 @@ fn create_openai_compatible_provider(config: &LlmConfig) -> Result<Arc<dyn LlmPr
         })?;
 
     let model = client.completion_model(&compat.model);
+    let fetcher = Arc::new(discovery::OpenAiModelFetcher::new(
+        &compat.base_url,
+        compat.api_key.clone(),
+        "openai_compatible",
+    ));
     tracing::info!(
         "Using OpenAI-compatible endpoint (base_url: {}, model: {})",
         compat.base_url,
         compat.model
     );
-    Ok(Arc::new(RigAdapter::new(model, &compat.model)))
+    Ok(Arc::new(
+        RigAdapter::new(model, &compat.model).with_discovery(fetcher),
+    ))
 }
 
 /// Create a cheap/fast LLM provider for lightweight tasks (heartbeat, routing, evaluation).
