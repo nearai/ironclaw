@@ -1195,7 +1195,7 @@ async fn main() -> anyhow::Result<()> {
             gw_config.host,
             gw_config.port
         );
-        tracing::info!("Web UI: {}", gateway_url.as_deref().unwrap_or(""));
+        tracing::info!("Web UI: http://{}:{}/", gw_config.host, gw_config.port);
 
         channel_names.push("gateway".to_string());
         channels.add(Box::new(gw));
@@ -1239,10 +1239,7 @@ async fn main() -> anyhow::Result<()> {
             db_backend: if cli.no_db {
                 "none".to_string()
             } else {
-                match config.database.backend {
-                    ironclaw::config::DatabaseBackend::Postgres => "postgres".to_string(),
-                    ironclaw::config::DatabaseBackend::LibSql => "libsql".to_string(),
-                }
+                config.database.backend.to_string()
             },
             db_connected: !cli.no_db,
             tool_count: boot_tool_count,

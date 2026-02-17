@@ -39,12 +39,15 @@ pub fn print_boot_screen(info: &BootInfo) {
     println!();
     println!("{border}");
     println!();
-    println!("  {bold}IronClaw{reset} v{}", info.version);
+    println!("  {bold}{}{reset} v{}", info.agent_name, info.version);
     println!();
 
     // Model line
     let model_display = if let Some(ref cheap) = info.cheap_model {
-        format!("{cyan}{}{reset}  {dim}cheap{reset} {cyan}{}{reset}", info.llm_model, cheap)
+        format!(
+            "{cyan}{}{reset}  {dim}cheap{reset} {cyan}{}{reset}",
+            info.llm_model, cheap
+        )
     } else {
         format!("{cyan}{}{reset}", info.llm_model)
     };
@@ -73,7 +76,11 @@ pub fn print_boot_screen(info: &BootInfo) {
     // Features line
     let mut features = Vec::new();
     if info.embeddings_enabled {
-        features.push("embeddings".to_string());
+        if let Some(ref provider) = info.embeddings_provider {
+            features.push(format!("embeddings ({provider})"));
+        } else {
+            features.push("embeddings".to_string());
+        }
     }
     if info.heartbeat_enabled {
         let mins = info.heartbeat_interval_secs / 60;
