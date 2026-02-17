@@ -90,11 +90,17 @@ fn create_openai_provider(config: &LlmConfig) -> Result<Arc<dyn LlmProvider>, Ll
 
     use rig::providers::openai;
 
-    let client: openai::Client =
-        openai::Client::new(oai.api_key.expose_secret()).map_err(|e| LlmError::RequestFailed {
-            provider: "openai".to_string(),
-            reason: format!("Failed to create OpenAI client: {}", e),
-        })?;
+    // Use CompletionsClient (Chat Completions API) instead of the default Client
+    // (Responses API). The Responses API path in rig-core panics when tool results
+    // are sent back because ironclaw doesn't thread `call_id` through its ToolCall
+    // type. The Chat Completions API works correctly with the existing code.
+    let client: openai::CompletionsClient =
+        openai::Client::new(oai.api_key.expose_secret())
+            .map_err(|e| LlmError::RequestFailed {
+                provider: "openai".to_string(),
+                reason: format!("Failed to create OpenAI client: {}", e),
+            })?
+            .completions_api();
 
     let model = client.completion_model(&oai.model);
     tracing::info!("Using OpenAI direct API (model: {})", oai.model);
