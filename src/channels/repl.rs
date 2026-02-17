@@ -184,6 +184,8 @@ pub struct ReplChannel {
     debug_mode: Arc<AtomicBool>,
     /// Whether we're currently streaming (chunks have been printed without a trailing newline).
     is_streaming: Arc<AtomicBool>,
+    /// When true, the one-liner startup banner is suppressed (boot screen shown instead).
+    suppress_banner: Arc<AtomicBool>,
 }
 
 impl ReplChannel {
@@ -193,6 +195,7 @@ impl ReplChannel {
             single_message: None,
             debug_mode: Arc::new(AtomicBool::new(false)),
             is_streaming: Arc::new(AtomicBool::new(false)),
+            suppress_banner: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -202,7 +205,13 @@ impl ReplChannel {
             single_message: Some(message),
             debug_mode: Arc::new(AtomicBool::new(false)),
             is_streaming: Arc::new(AtomicBool::new(false)),
+            suppress_banner: Arc::new(AtomicBool::new(false)),
         }
+    }
+
+    /// Suppress the one-liner startup banner (boot screen will be shown instead).
+    pub fn suppress_banner(&self) {
+        self.suppress_banner.store(true, Ordering::Relaxed);
     }
 
     fn is_debug(&self) -> bool {
@@ -264,6 +273,7 @@ impl Channel for ReplChannel {
         let (tx, rx) = mpsc::channel(32);
         let single_message = self.single_message.clone();
         let debug_mode = Arc::clone(&self.debug_mode);
+        let suppress_banner = Arc::clone(&self.suppress_banner);
 
         std::thread::spawn(move || {
             // Single message mode: send it and return
@@ -298,8 +308,10 @@ impl Channel for ReplChannel {
             }
             let _ = rl.load_history(&hist_path);
 
-            println!("\x1b[1mIronClaw\x1b[0m  /help for commands, /quit to exit");
-            println!();
+            if !suppress_banner.load(Ordering::Relaxed) {
+                println!("\x1b[1mIronClaw\x1b[0m  /help for commands, /quit to exit");
+                println!();
+            }
 
             loop {
                 let prompt = if debug_mode.load(Ordering::Relaxed) {
