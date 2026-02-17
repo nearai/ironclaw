@@ -306,8 +306,9 @@ async fn main() -> anyhow::Result<()> {
         wizard.run().await?;
     }
 
-    // Load initial config from env + disk (before DB is available)
-    let mut config = match Config::from_env().await {
+    // Load initial config from env + disk + optional TOML (before DB is available)
+    let toml_path = cli.config.as_deref();
+    let mut config = match Config::from_env_with_toml(toml_path).await {
         Ok(c) => c,
         Err(ironclaw::error::ConfigError::MissingRequired { key, hint }) => {
             eprintln!("Configuration error: Missing required setting '{}'", key);
@@ -449,7 +450,7 @@ async fn main() -> anyhow::Result<()> {
         }
 
         // Reload config from DB now that we have a connection.
-        match Config::from_db(db.as_ref(), "default").await {
+        match Config::from_db_with_toml(db.as_ref(), "default", toml_path).await {
             Ok(db_config) => {
                 config = db_config;
                 tracing::info!("Configuration reloaded from database");
@@ -524,7 +525,7 @@ async fn main() -> anyhow::Result<()> {
 
         // Re-resolve LlmConfig now that secrets overlay has been populated
         if let Some(ref db_ref) = db {
-            match Config::from_db(db_ref.as_ref(), "default").await {
+            match Config::from_db_with_toml(db_ref.as_ref(), "default", toml_path).await {
                 Ok(refreshed) => {
                     config = refreshed;
                     tracing::debug!("LlmConfig re-resolved after secret injection");

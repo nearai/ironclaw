@@ -45,23 +45,35 @@ pub struct Config {
 impl Config {
     /// Load configuration from environment variables and the database.
     ///
-    /// Priority: env var > DB settings > default.
+    /// Priority: env var > TOML config file > DB settings > default.
     /// This is the primary way to load config after DB is connected.
     pub async fn from_db(
         store: &dyn crate::db::Database,
         user_id: &str,
     ) -> Result<Self, ConfigError> {
+        Self::from_db_with_toml(store, user_id, None).await
+    }
+
+    /// Load from DB with an optional TOML config file overlay.
+    pub async fn from_db_with_toml(
+        store: &dyn crate::db::Database,
+        user_id: &str,
+        toml_path: Option<&std::path::Path>,
+    ) -> Result<Self, ConfigError> {
         let _ = dotenvy::dotenv();
         crate::bootstrap::load_ironclaw_env();
 
         // Load all settings from DB into a Settings struct
-        let db_settings = match store.get_all_settings(user_id).await {
+        let mut db_settings = match store.get_all_settings(user_id).await {
             Ok(map) => Settings::from_db_map(&map),
             Err(e) => {
                 tracing::warn!("Failed to load settings from DB, using defaults: {}", e);
                 Settings::default()
             }
         };
+
+        // Overlay TOML config file (values win over DB settings)
+        Self::apply_toml_overlay(&mut db_settings, toml_path);
 
         Self::build(&db_settings).await
     }
@@ -75,10 +87,51 @@ impl Config {
     /// Loads both `./.env` (standard, higher priority) and `~/.ironclaw/.env`
     /// (lower priority) via dotenvy, which never overwrites existing vars.
     pub async fn from_env() -> Result<Self, ConfigError> {
+        Self::from_env_with_toml(None).await
+    }
+
+    /// Load from env with an optional TOML config file overlay.
+    pub async fn from_env_with_toml(
+        toml_path: Option<&std::path::Path>,
+    ) -> Result<Self, ConfigError> {
         let _ = dotenvy::dotenv();
         crate::bootstrap::load_ironclaw_env();
-        let settings = Settings::load();
+        let mut settings = Settings::load();
+
+        // Overlay TOML config file (values win over JSON settings)
+        Self::apply_toml_overlay(&mut settings, toml_path);
+
         Self::build(&settings).await
+    }
+
+    /// Load and merge a TOML config file into settings.
+    ///
+    /// If `explicit_path` is `Some`, loads from that path (errors are fatal).
+    /// If `None`, tries the default path `~/.ironclaw/config.toml` (missing
+    /// file is silently ignored).
+    fn apply_toml_overlay(settings: &mut Settings, explicit_path: Option<&std::path::Path>) {
+        let path = explicit_path
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(Settings::default_toml_path);
+
+        match Settings::load_toml(&path) {
+            Ok(Some(toml_settings)) => {
+                settings.merge_from(&toml_settings);
+                tracing::debug!("Loaded TOML config from {}", path.display());
+            }
+            Ok(None) => {
+                if explicit_path.is_some() {
+                    tracing::warn!("Config file not found: {}", path.display());
+                }
+            }
+            Err(e) => {
+                if explicit_path.is_some() {
+                    tracing::error!("Failed to load config file: {}", e);
+                } else {
+                    tracing::warn!("Failed to load default config file: {}", e);
+                }
+            }
+        }
     }
 
     /// Build config from settings (shared by from_env and from_db).

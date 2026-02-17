@@ -55,6 +55,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 
 # Configuration
 dotenvy = "0.15"
+toml = "0.8"
 
 # Core types
 uuid = { version = "1", features = ["v4", "serde"] }
