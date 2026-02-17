@@ -2,6 +2,14 @@
 .env
 .env.local
 .env.*
+!.env.example
+
+# Claude Code worktrees
+.claude/worktrees/
+
+# Sidecar tool data
+.sidecar/
+.todos/
 
 target/
 

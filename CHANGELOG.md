@@ -7,6 +7,60 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.0](https://github.com/nearai/ironclaw/compare/v0.4.0...v0.5.0) - 2026-02-17
+
+### Added
+
+- add cooldown management to FailoverProvider ([#114](https://github.com/nearai/ironclaw/pull/114))
+
+## [0.4.0](https://github.com/nearai/ironclaw/compare/v0.3.0...v0.4.0) - 2026-02-17
+
+### Added
+
+- move per-invocation approval check into Tool trait ([#119](https://github.com/nearai/ironclaw/pull/119))
+- add polished boot screen on CLI startup ([#118](https://github.com/nearai/ironclaw/pull/118))
+- Add lifecycle hooks system with 6 interception points ([#18](https://github.com/nearai/ironclaw/pull/18))
+
+### Other
+
+- remove accidentally committed .sidecar and .todos directories ([#123](https://github.com/nearai/ironclaw/pull/123))
+
+## [0.3.0](https://github.com/nearai/ironclaw/compare/v0.2.0...v0.3.0) - 2026-02-17
+
+### Added
+
+- direct api key and cheap model ([#116](https://github.com/nearai/ironclaw/pull/116))
+
+## [0.2.0](https://github.com/nearai/ironclaw/compare/v0.1.3...v0.2.0) - 2026-02-16
+
+### Added
+
+- mark Ollama + OpenAI-compatible as implemented ([#102](https://github.com/nearai/ironclaw/pull/102))
+- multi-provider inference + libSQL onboarding selection ([#92](https://github.com/nearai/ironclaw/pull/92))
+- add multi-provider LLM failover with retry backoff ([#28](https://github.com/nearai/ironclaw/pull/28))
+- add libSQL/Turso embedded database backend ([#47](https://github.com/nearai/ironclaw/pull/47))
+- Move debug log truncation from agent loop to REPL channel ([#65](https://github.com/nearai/ironclaw/pull/65))
+
+### Fixed
+
+- shell destructive-command check bypassed by Value::Object arguments ([#72](https://github.com/nearai/ironclaw/pull/72))
+- propagate real tool_call_id instead of hardcoded placeholder ([#73](https://github.com/nearai/ironclaw/pull/73))
+- Fix wasm tool schemas and runtime ([#42](https://github.com/nearai/ironclaw/pull/42))
+- flatten tool messages for NEAR AI cloud-api compatibility ([#41](https://github.com/nearai/ironclaw/pull/41))
+- security hardening across all layers ([#35](https://github.com/nearai/ironclaw/pull/35))
+
+### Other
+
+- Explicitly enable cargo-dist caching for binary artifacts building
+- Skip building binary artifacts on every PR
+- add module specification rules to CLAUDE.md
+- add setup/onboarding specification (src/setup/README.md)
+- deduplicate tool code and remove dead stubs ([#98](https://github.com/nearai/ironclaw/pull/98))
+- Reformat architecture diagram in README ([#64](https://github.com/nearai/ironclaw/pull/64))
+- Add review discipline guidelines to CLAUDE.md ([#68](https://github.com/nearai/ironclaw/pull/68))
+- Bump MSRV to 1.92, add GCP deployment files ([#40](https://github.com/nearai/ironclaw/pull/40))
+- Add OpenAI-compatible HTTP API (/v1/chat/completions, /v1/models)   ([#31](https://github.com/nearai/ironclaw/pull/31))
+
 ## [0.1.3](https://github.com/nearai/ironclaw/compare/v0.1.2...v0.1.3) - 2026-02-12
 
 ### Other
