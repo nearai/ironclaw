@@ -78,8 +78,14 @@ impl Tunnel for CustomTunnel {
                     Ok(Ok(Some(l))) => {
                         tracing::debug!("custom-tunnel: {l}");
                         if let Some(url) = extract_url(&l) {
-                            public_url = url;
-                            break;
+                            let matches_pattern = self
+                                .url_pattern
+                                .as_ref()
+                                .is_none_or(|pat| url.contains(pat.as_str()));
+                            if matches_pattern {
+                                public_url = url;
+                                break;
+                            }
                         }
                     }
                     Ok(Ok(None) | Err(_)) => break,
@@ -167,6 +173,21 @@ mod tests {
         );
         let url = tunnel.start("localhost", 9999).await.unwrap();
         assert_eq!(url, "https://public.example");
+        tunnel.stop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn pattern_filters_non_matching_urls() {
+        // The command outputs two lines: first a non-matching URL, then a matching one.
+        // The pattern filter should skip the first and grab the second.
+        // No shell quoting needed; Command passes args directly to the binary.
+        let tunnel = CustomTunnel::new(
+            r"printf http://internal:1234\nhttps://real.tunnel.io/abc\n".into(),
+            None,
+            Some("tunnel.io".into()),
+        );
+        let url = tunnel.start("localhost", 9999).await.unwrap();
+        assert_eq!(url, "https://real.tunnel.io/abc");
         tunnel.stop().await.unwrap();
     }
 

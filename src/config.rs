@@ -73,7 +73,7 @@ impl Config {
         };
 
         // Overlay TOML config file (values win over DB settings)
-        Self::apply_toml_overlay(&mut db_settings, toml_path);
+        Self::apply_toml_overlay(&mut db_settings, toml_path)?;
 
         Self::build(&db_settings).await
     }
@@ -99,7 +99,7 @@ impl Config {
         let mut settings = Settings::load();
 
         // Overlay TOML config file (values win over JSON settings)
-        Self::apply_toml_overlay(&mut settings, toml_path);
+        Self::apply_toml_overlay(&mut settings, toml_path)?;
 
         Self::build(&settings).await
     }
@@ -109,7 +109,10 @@ impl Config {
     /// If `explicit_path` is `Some`, loads from that path (errors are fatal).
     /// If `None`, tries the default path `~/.ironclaw/config.toml` (missing
     /// file is silently ignored).
-    fn apply_toml_overlay(settings: &mut Settings, explicit_path: Option<&std::path::Path>) {
+    fn apply_toml_overlay(
+        settings: &mut Settings,
+        explicit_path: Option<&std::path::Path>,
+    ) -> Result<(), ConfigError> {
         let path = explicit_path
             .map(std::path::PathBuf::from)
             .unwrap_or_else(Settings::default_toml_path);
@@ -121,17 +124,24 @@ impl Config {
             }
             Ok(None) => {
                 if explicit_path.is_some() {
-                    tracing::warn!("Config file not found: {}", path.display());
+                    return Err(ConfigError::ParseError(format!(
+                        "Config file not found: {}",
+                        path.display()
+                    )));
                 }
             }
             Err(e) => {
                 if explicit_path.is_some() {
-                    tracing::error!("Failed to load config file: {}", e);
-                } else {
-                    tracing::warn!("Failed to load default config file: {}", e);
+                    return Err(ConfigError::ParseError(format!(
+                        "Failed to load config file {}: {}",
+                        path.display(),
+                        e
+                    )));
                 }
+                tracing::warn!("Failed to load default config file: {}", e);
             }
         }
+        Ok(())
     }
 
     /// Build config from settings (shared by from_env and from_db).
