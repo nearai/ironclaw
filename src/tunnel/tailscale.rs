@@ -64,7 +64,9 @@ impl Tunnel for TailscaleTunnel {
             .kill_on_drop(true)
             .spawn()?;
 
-        let public_url = format!("https://{hostname}:{local_port}");
+        // tailscale serve/funnel expose on standard HTTPS port (443),
+        // the local_port is what gets forwarded to, not the public endpoint.
+        let public_url = format!("https://{hostname}");
 
         let mut guard = self.proc.lock().await;
         *guard = Some(TunnelProcess {

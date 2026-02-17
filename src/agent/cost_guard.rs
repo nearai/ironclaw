@@ -219,13 +219,8 @@ impl CostGuard {
 
 /// Convert a Decimal USD amount to whole cents (truncated).
 fn to_cents(usd: Decimal) -> u64 {
-    let cents = usd * dec!(100);
-    // Use to_string + parse to avoid pulling in num-traits just for ToPrimitive
-    cents
-        .to_string()
-        .parse::<f64>()
-        .map(|f| f as u64)
-        .unwrap_or(0)
+    let cents = (usd * dec!(100)).trunc();
+    cents.to_string().parse::<u64>().unwrap_or(0)
 }
 
 #[cfg(test)]

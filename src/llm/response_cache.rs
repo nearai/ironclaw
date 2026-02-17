@@ -98,9 +98,9 @@ impl CachedProvider {
 
 /// Build a deterministic cache key from a completion request.
 ///
-/// Hashes the model name and the serialized message array via SHA-256.
-/// Two requests with identical messages to the same model will produce
-/// the same key regardless of metadata or optional parameters.
+/// Hashes the model name, messages, and response-affecting parameters
+/// (max_tokens, temperature, stop_sequences) via SHA-256. Two requests
+/// with identical content and parameters produce the same key.
 fn cache_key(model: &str, request: &CompletionRequest) -> String {
     let mut hasher = Sha256::new();
     hasher.update(model.as_bytes());
@@ -110,6 +110,24 @@ fn cache_key(model: &str, request: &CompletionRequest) -> String {
     // serde_json produces stable output for the same input structure.
     if let Ok(json) = serde_json::to_string(&request.messages) {
         hasher.update(json.as_bytes());
+    }
+
+    // Include response-affecting parameters so different temperatures,
+    // max_tokens, or stop sequences produce distinct cache keys.
+    hasher.update(b"|");
+    if let Some(max_tokens) = request.max_tokens {
+        hasher.update(max_tokens.to_le_bytes());
+    }
+    hasher.update(b"|");
+    if let Some(temp) = request.temperature {
+        hasher.update(temp.to_le_bytes());
+    }
+    hasher.update(b"|");
+    if let Some(ref stops) = request.stop_sequences {
+        for s in stops {
+            hasher.update(s.as_bytes());
+            hasher.update(b"\x00");
+        }
     }
 
     format!("{:x}", hasher.finalize())
@@ -329,6 +347,24 @@ mod tests {
         let k1 = cache_key("model-a", &simple_request());
         let k2 = cache_key("model-a", &different_request());
         assert_ne!(k1, k2);
+    }
+
+    #[test]
+    fn cache_key_varies_by_temperature() {
+        let mut req_a = simple_request();
+        req_a.temperature = Some(0.0);
+        let mut req_b = simple_request();
+        req_b.temperature = Some(1.0);
+        assert_ne!(cache_key("m", &req_a), cache_key("m", &req_b));
+    }
+
+    #[test]
+    fn cache_key_varies_by_max_tokens() {
+        let mut req_a = simple_request();
+        req_a.max_tokens = Some(100);
+        let mut req_b = simple_request();
+        req_b.max_tokens = Some(500);
+        assert_ne!(cache_key("m", &req_a), cache_key("m", &req_b));
     }
 
     #[tokio::test]
