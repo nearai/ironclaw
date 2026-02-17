@@ -136,6 +136,7 @@ impl Tool for HttpTool {
                     "description": "HTTP headers to include"
                 },
                 "body": {
+                    "type": "object",
                     "description": "Request body (for POST/PUT/PATCH)"
                 },
                 "timeout_secs": {
