@@ -130,6 +130,10 @@ bytes = "1"
 base64 = "0.22.1"
 mime_guess = "2.0.5"
 
+# HTML to Markdown conversion (feature gated)
+html-to-markdown-rs = { version = "2.3", optional = true }
+readabilityrs = { version = "0.1.2", optional = true }
+
 # macOS keychain
 [target.'cfg(target_os = "macos")'.dependencies]
 security-framework = "3"
@@ -140,6 +144,8 @@ secret-service = { version = "4", features = ["rt-tokio-crypto-rust"] }
 zbus = "4"
 
 [dev-dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
 tokio-test = "0.4"
 tokio-tungstenite = "0.26"
 testcontainers-modules = { version = "0.11", features = ["postgres"] }
@@ -158,10 +164,15 @@ postgres = [
 ]
 libsql = ["dep:libsql"]
 integration = []
+html-to-markdown = ["dep:html-to-markdown-rs", "dep:readabilityrs"]
 
 [[example]]
 name = "test_heartbeat"
 required-features = ["postgres"]
+
+[[test]]
+name = "html_to_markdown"
+required-features = ["html-to-markdown"]
 
 # The profile that 'cargo dist' will build with
 [profile.dist]

@@ -25,3 +25,7 @@ pub use routine::{
 };
 pub use shell::ShellTool;
 pub use time::TimeTool;
+
+mod html_converter;
+
+pub use html_converter::convert_html_to_markdown;

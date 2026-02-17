@@ -11,6 +11,9 @@ use crate::context::JobContext;
 use crate::safety::LeakDetector;
 use crate::tools::tool::{Tool, ToolError, ToolOutput, require_str};
 
+#[cfg(feature = "html-to-markdown")]
+use crate::tools::builtin::convert_html_to_markdown;
+
 /// Maximum response body size (5 MB). Prevents OOM from unbounded responses.
 const MAX_RESPONSE_SIZE: usize = 5 * 1024 * 1024;
 
@@ -99,6 +102,16 @@ fn is_disallowed_ip(ip: &IpAddr) -> bool {
                 || v6.is_unspecified()
         }
     }
+}
+
+#[cfg(feature = "html-to-markdown")]
+/// Heuristic: treat as HTML if Content-Type suggests it or body looks like HTML.
+fn is_html_response(headers: &HashMap<String, String>) -> bool {
+    headers
+        .iter()
+        .find(|(k, _)| k.eq_ignore_ascii_case("content-type"))
+        .map(|(_, v)| v.to_lowercase().contains("text/html"))
+        .unwrap_or(false)
 }
 
 impl Default for HttpTool {
@@ -244,6 +257,13 @@ impl Tool for HttpTool {
         }
 
         let body_text = String::from_utf8_lossy(&body_bytes).into_owned();
+
+        #[cfg(feature = "html-to-markdown")]
+        let body_text = if is_html_response(&headers) {
+            convert_html_to_markdown(&body_text, parsed_url.as_str())?
+        } else {
+            body_text
+        };
 
         // Try to parse as JSON, fall back to string
         let body: serde_json::Value = serde_json::from_str(&body_text)
