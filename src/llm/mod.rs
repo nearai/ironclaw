@@ -86,7 +86,7 @@ fn create_openrouter_provider(config: &LlmConfig) -> Result<Arc<dyn LlmProvider>
         HeaderValue::from_static(OPENROUTER_TITLE),
     );
 
-    let client: openai::Client = openai::Client::builder()
+    let client: openai::CompletionsClient = openai::CompletionsClient::builder()
         .base_url(OPENROUTER_BASE_URL)
         .api_key(or.api_key.expose_secret())
         .http_headers(headers)
@@ -288,6 +288,7 @@ mod tests {
         LlmConfig {
             backend: LlmBackend::NearAi,
             nearai: test_nearai_config(),
+            openrouter: None,
             openai: None,
             anthropic: None,
             ollama: None,

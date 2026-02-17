@@ -605,6 +605,7 @@ impl SetupWizard {
                 "nearai" => "NEAR AI",
                 "anthropic" => "Anthropic (Claude)",
                 "openai" => "OpenAI",
+                "openrouter" => "OpenRouter",
                 "ollama" => "Ollama (local)",
                 "openai_compatible" => "OpenAI-compatible endpoint",
                 other => other,
@@ -614,7 +615,7 @@ impl SetupWizard {
 
             let is_known = matches!(
                 current.as_str(),
-                "nearai" | "anthropic" | "openai" | "ollama" | "openai_compatible"
+                "nearai" | "anthropic" | "openai" | "openrouter" | "ollama" | "openai_compatible"
             );
 
             if is_known && confirm("Keep current provider?", true).map_err(SetupError::Io)? {
@@ -623,6 +624,7 @@ impl SetupWizard {
                     "nearai" => return self.setup_nearai().await,
                     "anthropic" => return self.setup_anthropic().await,
                     "openai" => return self.setup_openai().await,
+                    "openrouter" => return self.setup_openrouter().await,
                     "ollama" => return self.setup_ollama(),
                     "openai_compatible" => return self.setup_openai_compatible().await,
                     _ => {
@@ -649,6 +651,7 @@ impl SetupWizard {
             "NEAR AI          - multi-model access via NEAR account",
             "Anthropic        - Claude models (direct API key)",
             "OpenAI           - GPT models (direct API key)",
+            "OpenRouter       - hundreds of models via single API key",
             "Ollama           - local models, no API key needed",
             "OpenAI-compatible - custom endpoint (vLLM, LiteLLM, Together, etc.)",
         ];
@@ -659,8 +662,9 @@ impl SetupWizard {
             0 => self.setup_nearai().await?,
             1 => self.setup_anthropic().await?,
             2 => self.setup_openai().await?,
-            3 => self.setup_ollama()?,
-            4 => self.setup_openai_compatible().await?,
+            3 => self.setup_openrouter().await?,
+            4 => self.setup_ollama()?,
+            5 => self.setup_openai_compatible().await?,
             _ => return Err(SetupError::Config("Invalid provider selection".to_string())),
         }
 
@@ -730,6 +734,18 @@ impl SetupWizard {
         .await
     }
 
+    /// OpenRouter provider setup: collect API key and store in secrets.
+    async fn setup_openrouter(&mut self) -> Result<(), SetupError> {
+        self.setup_api_key_provider(
+            "openrouter",
+            "OPENROUTER_API_KEY",
+            "llm_openrouter_api_key",
+            "OpenRouter API key",
+            "https://openrouter.ai/keys",
+        )
+        .await
+    }
+
     /// Shared setup flow for API-key-based providers (Anthropic, OpenAI).
     async fn setup_api_key_provider(
         &mut self,
@@ -742,6 +758,7 @@ impl SetupWizard {
         let display_name = match backend {
             "anthropic" => "Anthropic",
             "openai" => "OpenAI",
+            "openrouter" => "OpenRouter",
             other => other,
         };
 
@@ -925,6 +942,16 @@ impl SetupWizard {
                     print_info("No models found. Pull one first: ollama pull llama3");
                 }
                 self.select_from_model_list(&models)?;
+            }
+            "openrouter" => {
+                // OpenRouter has hundreds of models; free-text entry is most flexible
+                let model_id = input("Model name (e.g., anthropic/claude-sonnet-4, openai/gpt-4o)")
+                    .map_err(SetupError::Io)?;
+                if model_id.is_empty() {
+                    return Err(SetupError::Config("Model name is required".to_string()));
+                }
+                self.settings.selected_model = Some(model_id.clone());
+                print_success(&format!("Selected {}", model_id));
             }
             "openai_compatible" => {
                 // No standard API for listing models on arbitrary endpoints
@@ -1582,6 +1609,7 @@ impl SetupWizard {
                 "nearai" => "NEAR AI",
                 "anthropic" => "Anthropic",
                 "openai" => "OpenAI",
+                "openrouter" => "OpenRouter",
                 "ollama" => "Ollama",
                 "openai_compatible" => "OpenAI-compatible",
                 other => other,
