@@ -80,6 +80,9 @@ aho-corasick = "1"
 # TOML parsing for skill manifests
 toml = "0.8"
 
+# YAML parsing for SKILL.md frontmatter
+serde_yaml = "0.9"
+
 # Filesystem paths
 dirs = "6"
 fs4 = "0.6"

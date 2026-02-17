@@ -1127,7 +1127,7 @@ async fn main() -> anyhow::Result<()> {
     let session_manager = Arc::new(SessionManager::new());
 
     // Register job tools (sandbox deps auto-injected when container_job_manager is available)
-    let job_skill_permissions_handle = tools.register_job_tools(
+    tools.register_job_tools(
         Arc::clone(&context_manager),
         container_job_manager.clone(),
         db.clone(),
@@ -1184,16 +1184,9 @@ async fn main() -> anyhow::Result<()> {
     // Initialize skills system
     let skill_registry = if config.skills.enabled {
         let mut registry = ironclaw::skills::SkillRegistry::new(config.skills.local_dir.clone());
-        // Wire LLM behavioral analyzer for non-local skill analysis
-        let analyzer = Arc::new(ironclaw::skills::BehavioralAnalyzer::new(Arc::clone(&llm)));
-        registry = registry.with_behavioral_analyzer(analyzer);
-        let loaded = registry.discover_local().await;
+        let loaded = registry.discover_all().await;
         if !loaded.is_empty() {
-            tracing::info!(
-                "Loaded {} local skill(s): {}",
-                loaded.len(),
-                loaded.join(", ")
-            );
+            tracing::info!("Loaded {} skill(s): {}", loaded.len(), loaded.join(", "));
         }
         Some(Arc::new(registry))
     } else {
@@ -1210,7 +1203,6 @@ async fn main() -> anyhow::Result<()> {
         extension_manager,
         skill_registry,
         skills_config: config.skills.clone(),
-        job_skill_permissions: job_skill_permissions_handle,
     };
     let agent = Agent::new(
         config.agent.clone(),

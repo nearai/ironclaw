@@ -14,13 +14,10 @@ use async_trait::async_trait;
 use chrono::Utc;
 use uuid::Uuid;
 
-use tokio::sync::RwLock;
-
 use crate::context::{ContextManager, JobContext, JobState};
 use crate::db::Database;
 use crate::history::SandboxJobRecord;
 use crate::orchestrator::job_manager::{ContainerJobManager, JobMode};
-use crate::skills::enforcer::SerializedToolPermission;
 use crate::tools::tool::{Tool, ToolError, ToolOutput, require_str};
 
 /// Tool for creating a new job.
@@ -32,8 +29,6 @@ pub struct CreateJobTool {
     context_manager: Arc<ContextManager>,
     job_manager: Option<Arc<ContainerJobManager>>,
     store: Option<Arc<dyn Database>>,
-    /// Current session's skill permissions, updated each iteration by the agent loop.
-    skill_permissions: Arc<RwLock<Vec<SerializedToolPermission>>>,
 }
 
 impl CreateJobTool {
@@ -42,7 +37,6 @@ impl CreateJobTool {
             context_manager,
             job_manager: None,
             store: None,
-            skill_permissions: Arc::new(RwLock::new(Vec::new())),
         }
     }
 
@@ -55,11 +49,6 @@ impl CreateJobTool {
         self.job_manager = Some(job_manager);
         self.store = store;
         self
-    }
-
-    /// Get a shared handle to the skill permissions for external updates.
-    pub fn skill_permissions_handle(&self) -> Arc<RwLock<Vec<SerializedToolPermission>>> {
-        Arc::clone(&self.skill_permissions)
     }
 
     pub fn sandbox_enabled(&self) -> bool {
@@ -183,12 +172,9 @@ impl CreateJobTool {
             });
         }
 
-        // Snapshot current skill permissions for the worker
-        let perms = self.skill_permissions.read().await.clone();
-
         // Create the container job with the pre-determined job_id.
         let _token = jm
-            .create_job_with_permissions(job_id, task, Some(project_dir), mode, perms)
+            .create_job(job_id, task, Some(project_dir), mode)
             .await
             .map_err(|e| {
                 self.update_status(

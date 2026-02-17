@@ -245,24 +245,17 @@ impl ToolRegistry {
         context_manager: Arc<ContextManager>,
         job_manager: Option<Arc<ContainerJobManager>>,
         store: Option<Arc<dyn Database>>,
-    ) -> Option<Arc<tokio::sync::RwLock<Vec<crate::skills::enforcer::SerializedToolPermission>>>>
-    {
+    ) {
         let mut create_tool = CreateJobTool::new(Arc::clone(&context_manager));
         if let Some(jm) = job_manager {
             create_tool = create_tool.with_sandbox(jm, store);
         }
-        let perms_handle = if create_tool.sandbox_enabled() {
-            Some(create_tool.skill_permissions_handle())
-        } else {
-            None
-        };
         self.register_sync(Arc::new(create_tool));
         self.register_sync(Arc::new(ListJobsTool::new(Arc::clone(&context_manager))));
         self.register_sync(Arc::new(JobStatusTool::new(Arc::clone(&context_manager))));
         self.register_sync(Arc::new(CancelJobTool::new(context_manager)));
 
         tracing::info!("Registered 4 job management tools");
-        perms_handle
     }
 
     /// Register extension management tools (search, install, auth, activate, list, remove).

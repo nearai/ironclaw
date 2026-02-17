@@ -127,7 +127,6 @@ async fn get_job(
         title: format!("Job {}", job_id),
         description: handle.task_description,
         project_dir: handle.project_dir.map(|p| p.display().to_string()),
-        skill_permissions: handle.skill_permissions,
     }))
 }
 

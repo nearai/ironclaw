@@ -119,16 +119,9 @@ fn score_skill(skill: &LoadedSkill, message_lower: &str, message_original: &str)
     }
     score += keyword_score.min(MAX_KEYWORD_SCORE);
 
-    // Tag scoring (from manifest.skill.tags merged with activation.tags), with cap
-    let all_tags: Vec<&str> = criteria
-        .tags
-        .iter()
-        .chain(skill.manifest.skill.tags.iter())
-        .map(|s| s.as_str())
-        .collect();
-
+    // Tag scoring from activation.tags
     let mut tag_score: u32 = 0;
-    for tag in &all_tags {
+    for tag in &criteria.tags {
         let tag_lower = tag.to_lowercase();
         if message_lower.contains(&tag_lower) {
             tag_score += 3;
@@ -151,10 +144,7 @@ fn score_skill(skill: &LoadedSkill, message_lower: &str, message_original: &str)
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::skills::{
-        ActivationCriteria, IntegrityInfo, LoadedSkill, SkillManifest, SkillMeta, SkillSource,
-        SkillTrust,
-    };
+    use crate::skills::{ActivationCriteria, LoadedSkill, SkillManifest, SkillSource, SkillTrust};
     use std::path::PathBuf;
 
     fn make_skill(name: &str, keywords: &[&str], tags: &[&str], patterns: &[&str]) -> LoadedSkill {
@@ -162,28 +152,21 @@ mod tests {
         let compiled = LoadedSkill::compile_patterns(&pattern_strings);
         LoadedSkill {
             manifest: SkillManifest {
-                skill: SkillMeta {
-                    name: name.to_string(),
-                    version: "1.0.0".to_string(),
-                    description: format!("{} skill", name),
-                    author: "test".to_string(),
-                    tags: tags.iter().map(|s| s.to_string()).collect(),
-                },
+                name: name.to_string(),
+                version: "1.0.0".to_string(),
+                description: format!("{} skill", name),
                 activation: ActivationCriteria {
                     keywords: keywords.iter().map(|s| s.to_string()).collect(),
                     patterns: pattern_strings,
-                    tags: vec![],
+                    tags: tags.iter().map(|s| s.to_string()).collect(),
                     max_context_tokens: 1000,
                 },
-                permissions: Default::default(),
-                integrity: IntegrityInfo::default(),
-                http: None,
+                metadata: None,
             },
             prompt_content: "Test prompt".to_string(),
-            trust: SkillTrust::Local,
-            source: SkillSource::Local(PathBuf::from("/tmp/test")),
+            trust: SkillTrust::Trusted,
+            source: SkillSource::User(PathBuf::from("/tmp/test")),
             content_hash: "sha256:000".to_string(),
-            scan_warnings: vec![],
             compiled_patterns: compiled,
         }
     }
@@ -308,21 +291,17 @@ mod tests {
 
     #[test]
     fn test_invalid_regex_handled_gracefully() {
-        // Invalid patterns won't compile, so compiled_patterns will be empty.
-        // But keyword still matches, so the skill is still selected.
         let skills = vec![make_skill("bad", &["test"], &[], &["[invalid regex"])];
         let result = prefilter_skills("test", &skills, 3, MAX_SKILL_CONTEXT_TOKENS);
-        assert_eq!(result.len(), 1); // Still matches on keyword
+        assert_eq!(result.len(), 1);
     }
 
     #[test]
     fn test_keyword_score_capped() {
-        // A skill with many keywords should not get an unbounded score
         let many_keywords: Vec<&str> = vec![
             "a", "b", "c", "d", "e", "f", "g", "h", "i", "j", "k", "l", "m", "n", "o", "p",
         ];
         let skill = make_skill("spammer", &many_keywords, &[], &[]);
-        // Message that matches all keywords
         let skills = vec![skill];
         let result = prefilter_skills(
             "a b c d e f g h i j k l m n o p",
@@ -331,12 +310,10 @@ mod tests {
             MAX_SKILL_CONTEXT_TOKENS,
         );
         assert_eq!(result.len(), 1);
-        // Score should be capped at MAX_KEYWORD_SCORE (30), not 16 * 10 = 160
     }
 
     #[test]
     fn test_tag_score_capped() {
-        // A skill with many tags should not get an unbounded score
         let many_tags: Vec<&str> = vec![
             "alpha", "bravo", "charlie", "delta", "echo", "foxtrot", "golf", "hotel",
         ];
@@ -349,12 +326,10 @@ mod tests {
             MAX_SKILL_CONTEXT_TOKENS,
         );
         assert_eq!(result.len(), 1);
-        // Tag score should be capped at MAX_TAG_SCORE (15), not 8 * 3 = 24
     }
 
     #[test]
     fn test_regex_score_capped() {
-        // A skill with many regex patterns should have its score capped
         let skill = make_skill(
             "regex-spammer",
             &[],
@@ -375,13 +350,10 @@ mod tests {
             MAX_SKILL_CONTEXT_TOKENS,
         );
         assert_eq!(result.len(), 1);
-        // Regex score should be capped at MAX_REGEX_SCORE (40), not 5 * 20 = 100
     }
 
     #[test]
     fn test_zero_context_tokens_still_costs_budget() {
-        // Edge case: empty prompt + max_context_tokens=0 should still cost
-        // at least 1 token so it can't bypass budget limits entirely.
         let mut skill = make_skill("free", &["test"], &[], &[]);
         skill.manifest.activation.max_context_tokens = 0;
         skill.prompt_content = String::new();
@@ -390,7 +362,6 @@ mod tests {
         skill2.prompt_content = String::new();
 
         let skills = vec![skill, skill2];
-        // Budget of 1 should only fit one skill (each costs at least 1)
         let result = prefilter_skills("test", &skills, 5, 1);
         assert_eq!(result.len(), 1);
     }

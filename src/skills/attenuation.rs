@@ -5,12 +5,11 @@
 //! the LLM's tool list entirely. The LLM cannot be manipulated into calling
 //! a tool it doesn't know exists.
 //!
-//! | Trust Tier         | Tool Ceiling                                                  |
-//! |--------------------|---------------------------------------------------------------|
-//! | No skills active   | All tools (normal behavior)                                   |
-//! | Local only         | All tools (user placed these, full trust)                     |
-//! | Verified present   | Skill-declared tools + read-only tools                        |
-//! | Community present  | Read-only tools ONLY                                          |
+//! | Trust State        | Tool Ceiling                                      |
+//! |--------------------|---------------------------------------------------|
+//! | No skills active   | All tools (normal behavior)                       |
+//! | Trusted only       | All tools (user placed these, full trust)         |
+//! | Installed present  | Read-only tools ONLY                              |
 
 use crate::llm::ToolDefinition;
 use crate::skills::{LoadedSkill, SkillTrust};
@@ -19,7 +18,7 @@ use crate::skills::{LoadedSkill, SkillTrust};
 ///
 /// **Maintenance note**: This list is intentionally hardcoded and conservative.
 /// When adding new tools to IronClaw, they default to *excluded* from the
-/// read-only list (i.e., blocked under Community/Verified ceilings). A tool
+/// read-only list (i.e., blocked under Installed ceilings). A tool
 /// should only be added here if it is provably free of side effects -- it must
 /// not write files, make network requests, execute commands, or modify any state.
 /// Review by the security team is required before expanding this list.
@@ -59,7 +58,7 @@ pub fn attenuate_tools(
     if active_skills.is_empty() {
         return AttenuationResult {
             tools: tools.to_vec(),
-            min_trust: SkillTrust::Local,
+            min_trust: SkillTrust::Trusted,
             explanation: "No skills active, all tools available".to_string(),
             removed_tools: vec![],
         };
@@ -70,58 +69,21 @@ pub fn attenuate_tools(
         .iter()
         .map(|s| s.trust)
         .min()
-        .unwrap_or(SkillTrust::Local);
+        .unwrap_or(SkillTrust::Trusted);
 
     match min_trust {
-        SkillTrust::Local => {
-            // Local skills have full trust -- no filtering
+        SkillTrust::Trusted => {
+            // Trusted skills have full trust -- no filtering
             AttenuationResult {
                 tools: tools.to_vec(),
                 min_trust,
-                explanation: "All active skills are local (full trust), all tools available"
+                explanation: "All active skills are trusted (full trust), all tools available"
                     .to_string(),
                 removed_tools: vec![],
             }
         }
-        SkillTrust::Verified => {
-            // Verified: read-only tools + tools declared by any active skill
-            let declared: std::collections::HashSet<&str> = active_skills
-                .iter()
-                .flat_map(|s| s.declared_tools())
-                .collect();
-
-            let mut kept = Vec::new();
-            let mut removed = Vec::new();
-
-            for tool in tools {
-                if READ_ONLY_TOOLS.contains(&tool.name.as_str())
-                    || declared.contains(tool.name.as_str())
-                {
-                    kept.push(tool.clone());
-                } else {
-                    removed.push(tool.name.clone());
-                }
-            }
-
-            let explanation = if removed.is_empty() {
-                "Verified trust: all requested tools within ceiling".to_string()
-            } else {
-                format!(
-                    "Verified trust: removed {} tool(s) above ceiling: {}",
-                    removed.len(),
-                    removed.join(", ")
-                )
-            };
-
-            AttenuationResult {
-                tools: kept,
-                min_trust,
-                explanation,
-                removed_tools: removed,
-            }
-        }
-        SkillTrust::Community => {
-            // Community: read-only tools ONLY
+        SkillTrust::Installed => {
+            // Installed: read-only tools ONLY
             let mut kept = Vec::new();
             let mut removed = Vec::new();
 
@@ -134,7 +96,7 @@ pub fn attenuate_tools(
             }
 
             let explanation = format!(
-                "Community trust: restricted to read-only tools, removed {} tool(s): {}",
+                "Installed skill present: restricted to read-only tools, removed {} tool(s): {}",
                 removed.len(),
                 removed.join(", ")
             );
@@ -152,10 +114,7 @@ pub fn attenuate_tools(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::skills::{
-        ActivationCriteria, IntegrityInfo, SkillManifest, SkillMeta, SkillSource,
-        ToolPermissionDeclaration,
-    };
+    use crate::skills::{ActivationCriteria, SkillManifest, SkillSource};
     use std::path::PathBuf;
 
     fn make_tool(name: &str) -> ToolDefinition {
@@ -166,41 +125,19 @@ mod tests {
         }
     }
 
-    fn make_skill_with_trust(
-        name: &str,
-        trust: SkillTrust,
-        declared_tools: &[&str],
-    ) -> LoadedSkill {
-        let mut permissions = std::collections::HashMap::new();
-        for tool in declared_tools {
-            permissions.insert(
-                tool.to_string(),
-                ToolPermissionDeclaration {
-                    reason: "test".to_string(),
-                    allowed_patterns: vec![],
-                },
-            );
-        }
-
+    fn make_skill_with_trust(name: &str, trust: SkillTrust) -> LoadedSkill {
         LoadedSkill {
             manifest: SkillManifest {
-                skill: SkillMeta {
-                    name: name.to_string(),
-                    version: "1.0.0".to_string(),
-                    description: String::new(),
-                    author: String::new(),
-                    tags: vec![],
-                },
+                name: name.to_string(),
+                version: "1.0.0".to_string(),
+                description: String::new(),
                 activation: ActivationCriteria::default(),
-                permissions,
-                integrity: IntegrityInfo::default(),
-                http: None,
+                metadata: None,
             },
             prompt_content: "test".to_string(),
             trust,
-            source: SkillSource::Local(PathBuf::from("/tmp")),
+            source: SkillSource::User(PathBuf::from("/tmp")),
             content_hash: "sha256:000".to_string(),
-            scan_warnings: vec![],
             compiled_patterns: vec![],
         }
     }
@@ -228,48 +165,24 @@ mod tests {
     }
 
     #[test]
-    fn test_local_skills_no_filtering() {
+    fn test_trusted_skills_no_filtering() {
         let tools = all_tools();
-        let skills = vec![make_skill_with_trust("local_skill", SkillTrust::Local, &[])];
+        let skills = vec![make_skill_with_trust("trusted_skill", SkillTrust::Trusted)];
         let result = attenuate_tools(&tools, &skills);
         assert_eq!(result.tools.len(), tools.len());
         assert!(result.removed_tools.is_empty());
-        assert_eq!(result.min_trust, SkillTrust::Local);
+        assert_eq!(result.min_trust, SkillTrust::Trusted);
     }
 
     #[test]
-    fn test_verified_allows_declared_tools() {
+    fn test_installed_only_read_only() {
         let tools = all_tools();
         let skills = vec![make_skill_with_trust(
-            "verified_skill",
-            SkillTrust::Verified,
-            &["shell"],
+            "installed_skill",
+            SkillTrust::Installed,
         )];
         let result = attenuate_tools(&tools, &skills);
 
-        // Should have: shell (declared) + read-only tools
-        let kept_names: Vec<&str> = result.tools.iter().map(|t| t.name.as_str()).collect();
-        assert!(kept_names.contains(&"shell"));
-        assert!(kept_names.contains(&"memory_search"));
-        assert!(kept_names.contains(&"time"));
-
-        // Should NOT have: http, memory_write (not declared, not read-only)
-        assert!(!kept_names.contains(&"http"));
-        assert!(!kept_names.contains(&"memory_write"));
-        assert_eq!(result.min_trust, SkillTrust::Verified);
-    }
-
-    #[test]
-    fn test_community_only_read_only() {
-        let tools = all_tools();
-        let skills = vec![make_skill_with_trust(
-            "community_skill",
-            SkillTrust::Community,
-            &["shell"], // declared but ignored at community tier
-        )];
-        let result = attenuate_tools(&tools, &skills);
-
-        // Community skills get read-only tools only, regardless of declarations
         let kept_names: Vec<&str> = result.tools.iter().map(|t| t.name.as_str()).collect();
         assert!(!kept_names.contains(&"shell"));
         assert!(!kept_names.contains(&"http"));
@@ -277,47 +190,28 @@ mod tests {
         assert!(kept_names.contains(&"memory_search"));
         assert!(kept_names.contains(&"memory_read"));
         assert!(kept_names.contains(&"time"));
-        assert_eq!(result.min_trust, SkillTrust::Community);
+        assert_eq!(result.min_trust, SkillTrust::Installed);
     }
 
     #[test]
     fn test_mixed_trust_drops_to_lowest() {
         let tools = all_tools();
         let skills = vec![
-            make_skill_with_trust("local_skill", SkillTrust::Local, &[]),
-            make_skill_with_trust("community_skill", SkillTrust::Community, &[]),
+            make_skill_with_trust("trusted_skill", SkillTrust::Trusted),
+            make_skill_with_trust("installed_skill", SkillTrust::Installed),
         ];
         let result = attenuate_tools(&tools, &skills);
 
-        // Mixed: community + local = community ceiling
-        assert_eq!(result.min_trust, SkillTrust::Community);
+        // Mixed: installed + trusted = installed ceiling
+        assert_eq!(result.min_trust, SkillTrust::Installed);
         let kept_names: Vec<&str> = result.tools.iter().map(|t| t.name.as_str()).collect();
         assert!(!kept_names.contains(&"shell"));
     }
 
     #[test]
-    fn test_verified_plus_local_stays_verified() {
-        let tools = all_tools();
-        let skills = vec![
-            make_skill_with_trust("local_skill", SkillTrust::Local, &[]),
-            make_skill_with_trust("verified_skill", SkillTrust::Verified, &["http"]),
-        ];
-        let result = attenuate_tools(&tools, &skills);
-
-        assert_eq!(result.min_trust, SkillTrust::Verified);
-        let kept_names: Vec<&str> = result.tools.iter().map(|t| t.name.as_str()).collect();
-        assert!(kept_names.contains(&"http")); // declared by verified skill
-        assert!(!kept_names.contains(&"shell")); // not declared
-    }
-
-    #[test]
     fn test_attenuation_result_has_explanation() {
         let tools = vec![make_tool("shell"), make_tool("time")];
-        let skills = vec![make_skill_with_trust(
-            "community",
-            SkillTrust::Community,
-            &[],
-        )];
+        let skills = vec![make_skill_with_trust("installed", SkillTrust::Installed)];
         let result = attenuate_tools(&tools, &skills);
 
         assert!(!result.explanation.is_empty());
