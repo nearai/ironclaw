@@ -125,6 +125,16 @@ pub fn append_task_result(path: &Path, result: &TaskResult) -> Result<(), BenchE
     Ok(())
 }
 
+/// Overwrite the JSONL file with the given results (used after scoring).
+pub fn write_task_results(path: &Path, results: &[TaskResult]) -> Result<(), BenchError> {
+    let mut file = std::fs::File::create(path)?;
+    for result in results {
+        let line = serde_json::to_string(result)?;
+        writeln!(file, "{line}")?;
+    }
+    Ok(())
+}
+
 /// Read all task results from a JSONL file.
 pub fn read_task_results(path: &Path) -> Result<Vec<TaskResult>, BenchError> {
     if !path.exists() {
@@ -388,5 +398,55 @@ mod tests {
         let ids = completed_task_ids(&path).expect("ids");
         assert!(ids.contains("unique-id-1"));
         assert!(!ids.contains("unique-id-2"));
+    }
+
+    #[test]
+    fn test_write_task_results_overwrites() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let path = dir.path().join("tasks.jsonl");
+
+        // Write initial "pending" result via append
+        let pending = TaskResult {
+            task_id: "t1".to_string(),
+            suite_id: "spot".to_string(),
+            score: BenchScore {
+                value: 0.0,
+                label: "pending".to_string(),
+                details: None,
+            },
+            trace: Trace {
+                wall_time_ms: 100,
+                llm_calls: 1,
+                input_tokens: 10,
+                output_tokens: 5,
+                estimated_cost_usd: 0.001,
+                tool_calls: vec![],
+                turns: 1,
+                hit_iteration_limit: false,
+                hit_timeout: false,
+            },
+            response: "42".to_string(),
+            started_at: Utc::now(),
+            finished_at: Utc::now(),
+            config_label: "default".to_string(),
+            error: None,
+        };
+        append_task_result(&path, &pending).expect("append");
+
+        // Verify pending score
+        let before = read_task_results(&path).expect("read");
+        assert_eq!(before.len(), 1);
+        assert_eq!(before[0].score.label, "pending");
+
+        // Overwrite with scored result
+        let mut scored = pending;
+        scored.score = BenchScore::pass();
+        write_task_results(&path, &[scored]).expect("write");
+
+        // Verify scored result replaced pending
+        let after = read_task_results(&path).expect("read");
+        assert_eq!(after.len(), 1);
+        assert_eq!(after[0].score.label, "pass");
+        assert_eq!(after[0].score.value, 1.0);
     }
 }

@@ -19,7 +19,7 @@ use crate::error::BenchError;
 use crate::instrumented_llm::InstrumentedLlm;
 use crate::results::{
     RunResult, TaskResult, Trace, append_task_result, completed_task_ids, run_dir, run_json_path,
-    tasks_jsonl_path, write_run_result,
+    tasks_jsonl_path, write_run_result, write_task_results,
 };
 use crate::suite::{BenchSuite, BenchTask, ConversationTurn, TaskSubmission, TurnRole};
 
@@ -258,6 +258,9 @@ impl BenchRunner {
         let scored_ids: HashSet<String> = scored.iter().map(|r| r.task_id.clone()).collect();
         all_for_aggregate.retain(|r| !scored_ids.contains(&r.task_id));
         all_for_aggregate.extend(scored);
+
+        // Rewrite JSONL with scored results so `results` command shows final scores
+        write_task_results(&jsonl_path, &all_for_aggregate)?;
 
         let model_name = matrix.model.as_deref().unwrap_or(self.llm.model_name());
 
