@@ -29,18 +29,16 @@ pub fn model_cost(model_id: &str) -> Option<(Decimal, Decimal)> {
         "o1-mini" | "o1-mini-2024-09-12" => Some((dec!(0.000003), dec!(0.000012))),
         "o3-mini" | "o3-mini-2025-01-31" => Some((dec!(0.0000011), dec!(0.0000044))),
 
-        // Anthropic models (includes OpenRouter short aliases like "claude-sonnet-4")
-        "claude-3-5-sonnet-20241022"
-        | "claude-3-5-sonnet-latest"
-        | "claude-sonnet-4-20250514"
-        | "claude-sonnet-4" => Some((dec!(0.000003), dec!(0.000015))),
-        "claude-3-5-haiku-20241022" | "claude-3-5-haiku-latest" | "claude-haiku-3-5" => {
+        // Anthropic models
+        "claude-3-5-sonnet-20241022" | "claude-3-5-sonnet-latest" | "claude-sonnet-4-20250514" => {
+            Some((dec!(0.000003), dec!(0.000015)))
+        }
+        "claude-3-5-haiku-20241022" | "claude-3-5-haiku-latest" => {
             Some((dec!(0.0000008), dec!(0.000004)))
         }
-        "claude-3-opus-20240229"
-        | "claude-3-opus-latest"
-        | "claude-opus-4-20250514"
-        | "claude-opus-4" => Some((dec!(0.000015), dec!(0.000075))),
+        "claude-3-opus-20240229" | "claude-3-opus-latest" | "claude-opus-4-20250514" => {
+            Some((dec!(0.000015), dec!(0.000075)))
+        }
         "claude-3-haiku-20240307" => Some((dec!(0.00000025), dec!(0.00000125))),
 
         // Ollama / local models -- free
@@ -121,20 +119,6 @@ mod tests {
     #[test]
     fn test_provider_prefix_stripped() {
         // "openai/gpt-4o" should resolve to same as "gpt-4o"
-        assert_eq!(model_cost("openai/gpt-4o"), model_cost("gpt-4o"));
-    }
-
-    #[test]
-    fn test_openrouter_model_ids() {
-        // OpenRouter uses "provider/model" format with short aliases
-        assert_eq!(
-            model_cost("anthropic/claude-sonnet-4"),
-            model_cost("claude-sonnet-4-20250514")
-        );
-        assert_eq!(
-            model_cost("anthropic/claude-opus-4"),
-            model_cost("claude-opus-4-20250514")
-        );
         assert_eq!(model_cost("openai/gpt-4o"), model_cost("gpt-4o"));
     }
 }
