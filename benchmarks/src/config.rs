@@ -53,6 +53,11 @@ impl BenchConfig {
         }
         let content = std::fs::read_to_string(path)?;
         let config: BenchConfig = toml::from_str(&content)?;
+        if config.matrix.is_empty() {
+            return Err(BenchError::Config(
+                "config must have at least one [[matrix]] entry".to_string(),
+            ));
+        }
         Ok(config)
     }
 
@@ -148,6 +153,25 @@ mod tests {
         assert_eq!(config.matrix.len(), 1);
         assert_eq!(config.matrix[0].label, "test-model");
         assert_eq!(config.parallelism, 1);
+    }
+
+    #[test]
+    fn test_config_rejects_empty_matrix() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("empty.toml");
+        std::fs::write(
+            &path,
+            r#"
+results_dir = "./results"
+task_timeout = "60s"
+"#,
+        )
+        .unwrap();
+        let err = BenchConfig::from_file(&path).unwrap_err();
+        assert!(
+            err.to_string().contains("at least one [[matrix]]"),
+            "got: {err}"
+        );
     }
 
     #[test]

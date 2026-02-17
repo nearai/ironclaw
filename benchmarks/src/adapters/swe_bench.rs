@@ -10,8 +10,10 @@ use crate::suite::{BenchScore, BenchSuite, BenchTask, TaskSubmission};
 
 /// Validate that a string is safe for use as a filesystem path component.
 /// Allows alphanumerics, hyphens, underscores, dots, and forward slashes (for nested paths).
+/// Rejects absolute paths, `..` traversal, and shell metacharacters.
 fn is_safe_path_component(s: &str) -> bool {
     !s.is_empty()
+        && !s.starts_with('/')
         && !s.contains("..")
         && s.chars()
             .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.' | '/'))
@@ -352,6 +354,7 @@ mod tests {
         assert!(is_safe_path_component("abc123"));
         assert!(!is_safe_path_component(""));
         assert!(!is_safe_path_component("../../etc/passwd"));
+        assert!(!is_safe_path_component("/etc/passwd"));
         assert!(!is_safe_path_component("foo;rm -rf /"));
         assert!(!is_safe_path_component("foo bar"));
     }
