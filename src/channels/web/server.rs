@@ -1586,7 +1586,7 @@ async fn extensions_list_handler(
 ) -> Result<Json<ExtensionListResponse>, (StatusCode, String)> {
     let ext_mgr = state.extension_manager.as_ref().ok_or((
         StatusCode::NOT_IMPLEMENTED,
-        "Extension manager not available (secrets store required)".to_string(),
+        "Extension manager not available".to_string(),
     ))?;
 
     let installed = ext_mgr
@@ -1636,7 +1636,7 @@ async fn extensions_install_handler(
 ) -> Result<Json<ActionResponse>, (StatusCode, String)> {
     let ext_mgr = state.extension_manager.as_ref().ok_or((
         StatusCode::NOT_IMPLEMENTED,
-        "Extension manager not available (secrets store required)".to_string(),
+        "Extension manager not available".to_string(),
     ))?;
 
     let kind_hint = req.kind.as_deref().and_then(|k| match k {
@@ -1661,7 +1661,7 @@ async fn extensions_activate_handler(
 ) -> Result<Json<ActionResponse>, (StatusCode, String)> {
     let ext_mgr = state.extension_manager.as_ref().ok_or((
         StatusCode::NOT_IMPLEMENTED,
-        "Extension manager not available (secrets store required)".to_string(),
+        "Extension manager not available".to_string(),
     ))?;
 
     match ext_mgr.activate(&name).await {
@@ -1777,7 +1777,7 @@ async fn extensions_remove_handler(
 ) -> Result<Json<ActionResponse>, (StatusCode, String)> {
     let ext_mgr = state.extension_manager.as_ref().ok_or((
         StatusCode::NOT_IMPLEMENTED,
-        "Extension manager not available (secrets store required)".to_string(),
+        "Extension manager not available".to_string(),
     ))?;
 
     match ext_mgr.remove(&name).await {

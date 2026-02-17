@@ -50,6 +50,22 @@ pub(crate) fn truncate_for_preview(output: &str, max_chars: usize) -> String {
     }
 }
 
+fn parse_force_tool_retry_decision(raw: &str) -> Option<bool> {
+    let parse_json = |candidate: &str| -> Option<bool> {
+        let value: serde_json::Value = serde_json::from_str(candidate).ok()?;
+        value.get("force_retry").and_then(|v| v.as_bool())
+    };
+
+    parse_json(raw).or_else(|| {
+        let start = raw.find('{')?;
+        let end = raw.rfind('}')?;
+        if end <= start {
+            return None;
+        }
+        parse_json(&raw[start..=end])
+    })
+}
+
 /// Result of the agentic loop execution.
 enum AgenticLoopResult {
     /// Completed with a response.
@@ -1003,6 +1019,33 @@ impl Agent {
         });
     }
 
+    async fn decide_force_tool_retry(
+        &self,
+        initial_messages: &[ChatMessage],
+        user_input: &str,
+    ) -> bool {
+        let mut decision_messages = initial_messages.to_vec();
+        decision_messages.push(ChatMessage::assistant(
+            "No tools were used in this first response.",
+        ));
+        decision_messages.push(ChatMessage::user(format!(
+            "Decide if the assistant should force another tool-use attempt when the model just returned plain text without tool calls.\nReturn strict JSON only: {{\"force_retry\": true|false}}.\nUse true only when the user explicitly requested external actions/data retrieval (web fetch, search, file/system operations, booking, execution).\nUse false for meta/config/how-to questions, clarifications, or likely topic shifts away from the previous task.\n\nLatest user input:\n{}\n\nShould we force a tool-use retry?",
+            user_input
+        )));
+
+        let request = crate::llm::CompletionRequest::new(decision_messages)
+            .with_temperature(0.0)
+            .with_max_tokens(64);
+
+        match self.llm().complete(request).await {
+            Ok(resp) => parse_force_tool_retry_decision(&resp.content).unwrap_or(false),
+            Err(e) => {
+                tracing::debug!("Failed to decide force-tool retry: {}", e);
+                false
+            }
+        }
+    }
+
     /// Run the agentic loop: call LLM, execute tools, repeat until text response.
     ///
     /// Returns `AgenticLoopResult::Response` on completion, or
@@ -1038,7 +1081,10 @@ impl Agent {
             reasoning = reasoning.with_system_prompt(prompt);
         }
 
-        // Build context with messages that we'll mutate during the loop
+        // Keep the original turn context for force-retry decisioning.
+        let decision_seed_messages = initial_messages.clone();
+
+        // Build context with messages that we'll mutate during the loop.
         let mut context_messages = initial_messages;
 
         // Create a JobContext for tool execution (chat doesn't have a real job)
@@ -1047,6 +1093,8 @@ impl Agent {
         const MAX_TOOL_ITERATIONS: usize = 10;
         let mut iteration = 0;
         let mut tools_executed = resume_after_tool;
+        let mut force_tool_retry_allowed = false;
+        let mut force_tool_retry_decided = resume_after_tool;
 
         loop {
             iteration += 1;
@@ -1096,22 +1144,28 @@ impl Agent {
 
             match output.result {
                 RespondResult::Text(text) => {
-                    // If no tools have been executed yet, prompt the LLM to use tools
-                    // This handles the case where the model explains what it will do
-                    // instead of actually calling tools
-                    if !tools_executed && iteration < 3 {
-                        tracing::debug!(
-                            "No tools executed yet (iteration {}), prompting for tool use",
-                            iteration
-                        );
-                        context_messages.push(ChatMessage::assistant(&text));
-                        context_messages.push(ChatMessage::user(
-                            "Please proceed and use the available tools to complete this task.",
-                        ));
-                        continue;
+                    if !tools_executed {
+                        if !force_tool_retry_decided {
+                            force_tool_retry_allowed = self
+                                .decide_force_tool_retry(&decision_seed_messages, &message.content)
+                                .await;
+                            force_tool_retry_decided = true;
+                        }
+
+                        if force_tool_retry_allowed && iteration < 3 {
+                            tracing::debug!(
+                                "No tools executed yet (iteration {}), prompting for tool use",
+                                iteration
+                            );
+                            context_messages.push(ChatMessage::assistant(&text));
+                            context_messages.push(ChatMessage::user(
+                                "Please proceed and use the available tools to complete this task.",
+                            ));
+                            continue;
+                        }
                     }
 
-                    // Tools have been executed or we've tried multiple times, return response
+                    // Tools have been executed, retries are exhausted, or forcing tools is disabled.
                     return Ok(AgenticLoopResult::Response(text));
                 }
                 RespondResult::ToolCalls {
@@ -2773,7 +2827,10 @@ mod tests {
     use crate::safety::SafetyLayer;
     use crate::tools::ToolRegistry;
 
-    use super::{Agent, AgentDeps, detect_auth_awaiting, truncate_for_preview};
+    use crate::agent::agent_loop::{
+        Agent, AgentDeps, ParsedAuthData, detect_auth_awaiting, parse_force_tool_retry_decision,
+        truncate_for_preview,
+    };
 
     struct StaticLlmProvider;
 
@@ -2930,7 +2987,7 @@ mod tests {
                 thread_id,
                 "notion".to_string(),
                 "Please provide your API token/key.".to_string(),
-                super::ParsedAuthData {
+                ParsedAuthData {
                     auth_url: None,
                     setup_url: Some("https://notion.so/my-integrations".to_string()),
                 },
@@ -2955,6 +3012,25 @@ mod tests {
             thread.last_turn().and_then(|t| t.response.clone()),
             Some("Please provide your API token/key.".to_string())
         );
+    }
+
+    #[test]
+    fn test_parse_force_tool_retry_decision_strict_json_true() {
+        assert_eq!(
+            parse_force_tool_retry_decision("{\"force_retry\":true}"),
+            Some(true)
+        );
+    }
+
+    #[test]
+    fn test_parse_force_tool_retry_decision_embedded_json_false() {
+        let raw = "Decision:\n{\"force_retry\":false}";
+        assert_eq!(parse_force_tool_retry_decision(raw), Some(false));
+    }
+
+    #[test]
+    fn test_parse_force_tool_retry_decision_invalid() {
+        assert_eq!(parse_force_tool_retry_decision("not json"), None);
     }
 
     #[test]

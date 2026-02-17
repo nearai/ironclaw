@@ -7,22 +7,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.0](https://github.com/nearai/ironclaw/compare/v0.1.3...v0.2.0) - 2026-02-16
+
 ### Added
 
-- Added `OpenAiCompatibleChatProvider` and wired OpenAI-compatible chat completion routing for custom base URL usage.
-- Added Ollama embeddings provider support (`EMBEDDING_PROVIDER=ollama`, `OLLAMA_BASE_URL`) in workspace embeddings.
-- Added migration `V9__flexible_embedding_dimension.sql` for flexible embedding vector dimensions.
-
-### Changed
-
-- Changed default sandbox image to `ironclaw-worker:latest` in config/settings/sandbox defaults.
-- Improved tool-message sanitization and provider compatibility handling across NEAR AI, rig adapter, and shared LLM provider code.
+- mark Ollama + OpenAI-compatible as implemented ([#102](https://github.com/nearai/ironclaw/pull/102))
+- multi-provider inference + libSQL onboarding selection ([#92](https://github.com/nearai/ironclaw/pull/92))
+- add multi-provider LLM failover with retry backoff ([#28](https://github.com/nearai/ironclaw/pull/28))
+- add libSQL/Turso embedded database backend ([#47](https://github.com/nearai/ironclaw/pull/47))
+- Move debug log truncation from agent loop to REPL channel ([#65](https://github.com/nearai/ironclaw/pull/65))
 
 ### Fixed
 
-- Fixed approval-input aliases (`a`, `/approve`, `/always`, `/deny`, etc.) in submission parsing.
-- Fixed multi-tool approval resume flow by preserving and replaying deferred tool calls so all prior `tool_use` IDs receive matching `tool_result` messages.
-- Fixed REPL quit/exit handling to route shutdown through the agent loop for graceful termination.
+- shell destructive-command check bypassed by Value::Object arguments ([#72](https://github.com/nearai/ironclaw/pull/72))
+- propagate real tool_call_id instead of hardcoded placeholder ([#73](https://github.com/nearai/ironclaw/pull/73))
+- Fix wasm tool schemas and runtime ([#42](https://github.com/nearai/ironclaw/pull/42))
+- flatten tool messages for NEAR AI cloud-api compatibility ([#41](https://github.com/nearai/ironclaw/pull/41))
+- security hardening across all layers ([#35](https://github.com/nearai/ironclaw/pull/35))
+
+### Other
+
+- Explicitly enable cargo-dist caching for binary artifacts building
+- Skip building binary artifacts on every PR
+- add module specification rules to CLAUDE.md
+- add setup/onboarding specification (src/setup/README.md)
+- deduplicate tool code and remove dead stubs ([#98](https://github.com/nearai/ironclaw/pull/98))
+- Reformat architecture diagram in README ([#64](https://github.com/nearai/ironclaw/pull/64))
+- Add review discipline guidelines to CLAUDE.md ([#68](https://github.com/nearai/ironclaw/pull/68))
+- Bump MSRV to 1.92, add GCP deployment files ([#40](https://github.com/nearai/ironclaw/pull/40))
+- Add OpenAI-compatible HTTP API (/v1/chat/completions, /v1/models)   ([#31](https://github.com/nearai/ironclaw/pull/31))
 
 ## [0.1.3](https://github.com/nearai/ironclaw/compare/v0.1.2...v0.1.3) - 2026-02-12
 
