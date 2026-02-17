@@ -1022,6 +1022,8 @@ impl SetupWizard {
                 api_key: None,
                 fallback_model: None,
                 max_retries: 3,
+                circuit_breaker_threshold: None,
+                circuit_breaker_recovery_secs: 30,
             },
             openai: None,
             anthropic: None,

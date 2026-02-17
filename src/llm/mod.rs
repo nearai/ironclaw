@@ -7,6 +7,7 @@
 //! - **Ollama**: Local model inference
 //! - **OpenAI-compatible**: Any endpoint that speaks the OpenAI API
 
+pub mod circuit_breaker;
 pub mod costs;
 pub mod failover;
 mod nearai;
@@ -17,6 +18,7 @@ mod retry;
 mod rig_adapter;
 pub mod session;
 
+pub use circuit_breaker::{CircuitBreakerConfig, CircuitBreakerProvider};
 pub use failover::FailoverProvider;
 pub use nearai::{ModelInfo, NearAiProvider};
 pub use nearai_chat::NearAiChatProvider;
@@ -235,6 +237,8 @@ mod tests {
             api_key: None,
             fallback_model: None,
             max_retries: 3,
+            circuit_breaker_threshold: None,
+            circuit_breaker_recovery_secs: 30,
         }
     }
 

@@ -419,6 +419,12 @@ pub struct NearAiConfig {
     /// With the default of 3, the provider makes up to 4 total attempts
     /// (1 initial + 3 retries) before giving up.
     pub max_retries: u32,
+    /// Consecutive transient failures before the circuit breaker opens.
+    /// None = disabled (default). E.g. 5 means after 5 consecutive failures
+    /// all requests are rejected until recovery timeout elapses.
+    pub circuit_breaker_threshold: Option<u32>,
+    /// How long (seconds) the circuit stays open before allowing a probe (default: 30).
+    pub circuit_breaker_recovery_secs: u64,
 }
 
 impl LlmConfig {
@@ -478,6 +484,14 @@ impl LlmConfig {
             api_key: nearai_api_key,
             fallback_model: optional_env("NEARAI_FALLBACK_MODEL")?,
             max_retries: parse_optional_env("NEARAI_MAX_RETRIES", 3)?,
+            circuit_breaker_threshold: optional_env("CIRCUIT_BREAKER_THRESHOLD")?
+                .map(|s| s.parse())
+                .transpose()
+                .map_err(|e| ConfigError::InvalidValue {
+                    key: "CIRCUIT_BREAKER_THRESHOLD".to_string(),
+                    message: format!("must be a positive integer: {e}"),
+                })?,
+            circuit_breaker_recovery_secs: parse_optional_env("CIRCUIT_BREAKER_RECOVERY_SECS", 30)?,
         };
 
         // Resolve provider-specific configs based on backend

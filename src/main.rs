@@ -24,8 +24,9 @@ use ironclaw::{
     extensions::ExtensionManager,
     hooks::HookRegistry,
     llm::{
-        FailoverProvider, LlmProvider, SessionConfig, create_cheap_llm_provider,
-        create_llm_provider, create_llm_provider_with_config, create_session_manager,
+        CircuitBreakerConfig, CircuitBreakerProvider, FailoverProvider, LlmProvider, SessionConfig,
+        create_cheap_llm_provider, create_llm_provider, create_llm_provider_with_config,
+        create_session_manager,
     },
     orchestrator::{
         ContainerJobConfig, ContainerJobManager, OrchestratorApi, TokenStore,
@@ -537,6 +538,26 @@ async fn main() -> anyhow::Result<()> {
                 "LLM failover enabled"
             );
             Arc::new(FailoverProvider::new(vec![llm, fallback])?)
+        } else {
+            llm
+        };
+
+    // Wrap in circuit breaker if configured
+    let llm: Arc<dyn LlmProvider> =
+        if let Some(threshold) = config.llm.nearai.circuit_breaker_threshold {
+            let cb_config = CircuitBreakerConfig {
+                failure_threshold: threshold,
+                recovery_timeout: std::time::Duration::from_secs(
+                    config.llm.nearai.circuit_breaker_recovery_secs,
+                ),
+                ..CircuitBreakerConfig::default()
+            };
+            tracing::info!(
+                threshold,
+                recovery_secs = config.llm.nearai.circuit_breaker_recovery_secs,
+                "LLM circuit breaker enabled"
+            );
+            Arc::new(CircuitBreakerProvider::new(llm, cb_config))
         } else {
             llm
         };
