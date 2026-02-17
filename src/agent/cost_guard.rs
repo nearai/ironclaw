@@ -19,7 +19,7 @@ use crate::llm::costs;
 pub struct CostGuardConfig {
     /// Maximum spend per day in cents (e.g. 10000 = $100). None = unlimited.
     pub max_cost_per_day_cents: Option<u64>,
-    /// Maximum LLM/tool actions per hour. None = unlimited.
+    /// Maximum LLM calls per hour. None = unlimited.
     pub max_actions_per_hour: Option<u64>,
 }
 
