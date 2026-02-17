@@ -153,6 +153,15 @@ pub enum DatabaseBackend {
     LibSql,
 }
 
+impl std::fmt::Display for DatabaseBackend {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Postgres => write!(f, "postgres"),
+            Self::LibSql => write!(f, "libsql"),
+        }
+    }
+}
+
 impl std::str::FromStr for DatabaseBackend {
     type Err = String;
 
