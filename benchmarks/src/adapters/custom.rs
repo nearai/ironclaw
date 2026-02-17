@@ -150,6 +150,10 @@ impl BenchSuite for CustomSuite {
             }
             "llm" => {
                 // TODO: LLM-as-judge scoring
+                tracing::warn!(
+                    task_id = %task.id,
+                    "LLM-as-judge scoring not implemented, returning placeholder 0.5"
+                );
                 Ok(BenchScore::partial(0.5, "LLM scoring not yet implemented"))
             }
             other => Err(BenchError::Scoring {

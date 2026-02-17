@@ -28,7 +28,7 @@ struct Cli {
 enum Commands {
     /// Run a benchmark suite.
     Run {
-        /// Suite to run (custom, gaia, tau_bench, swe_bench).
+        /// Suite to run (custom, gaia, spot, tau_bench, swe_bench).
         #[arg(long)]
         suite: String,
 

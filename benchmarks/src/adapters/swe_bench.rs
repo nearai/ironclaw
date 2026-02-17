@@ -229,12 +229,19 @@ impl BenchSuite for SweBenchSuite {
         if let Some(_test_patch) = test_patch {
             // TODO: Apply agent's patch, then apply test patch, then run tests.
             // For now, give partial credit if the agent produced some output.
+            tracing::warn!(
+                task_id = %task.id,
+                "SWE-bench test execution not implemented, returning placeholder 0.25"
+            );
             Ok(BenchScore::partial(
                 0.25,
                 "test execution not yet implemented; partial credit for response",
             ))
         } else {
-            // No test patch available; can't automatically score
+            tracing::warn!(
+                task_id = %task.id,
+                "no test_patch available, returning placeholder 0.25"
+            );
             Ok(BenchScore::partial(
                 0.25,
                 "no test_patch available for automated scoring",

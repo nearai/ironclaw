@@ -162,9 +162,13 @@ impl BenchSuite for TauBenchSuite {
             }
         }
 
-        // For now, multi-turn simulation requires an LLM (not implemented yet).
-        // Return None to end after the first turn.
+        // Multi-turn simulation requires an LLM to play the customer role.
+        // Until that's implemented, every scenario is single-turn only.
         // TODO: Use LLM to simulate customer based on user_persona.
+        tracing::warn!(
+            task_id = %task.id,
+            "multi-turn simulation not implemented, ending after first turn"
+        );
         Ok(None)
     }
 }

@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -37,7 +37,7 @@ struct TaskRunParams<'a> {
 /// Orchestrates benchmark execution: loads tasks, runs agent per task,
 /// scores results, writes JSONL output.
 pub struct BenchRunner {
-    suite: Box<dyn BenchSuite>,
+    suite: Arc<dyn BenchSuite>,
     config: BenchConfig,
     llm: Arc<dyn LlmProvider>,
     safety: Arc<SafetyLayer>,
@@ -51,7 +51,7 @@ impl BenchRunner {
         safety: Arc<SafetyLayer>,
     ) -> Self {
         Self {
-            suite,
+            suite: Arc::from(suite),
             config,
             llm,
             safety,
@@ -136,6 +136,9 @@ impl BenchRunner {
                     total_tasks,
                     task.id
                 );
+                if let Err(e) = self.suite.setup_task(task).await {
+                    tracing::warn!("setup_task failed for {}: {}", task.id, e);
+                }
                 let params = TaskRunParams {
                     task,
                     suite_id: self.suite.id(),
@@ -146,6 +149,9 @@ impl BenchRunner {
                     additional_tools: &additional_tools,
                 };
                 let result = run_task_isolated(params).await;
+                if let Err(e) = self.suite.teardown_task(task).await {
+                    tracing::warn!("teardown_task failed for {}: {}", task.id, e);
+                }
                 append_task_result(&jsonl_path, &result)?;
                 all_results.lock().await.push(result);
             }
@@ -156,7 +162,7 @@ impl BenchRunner {
             let mut handles = Vec::new();
             for (i, task) in tasks.into_iter().enumerate() {
                 let sem = Arc::clone(&semaphore);
-                let suite_id = self.suite.id().to_string();
+                let suite = Arc::clone(&self.suite);
                 let config_label = matrix.label.clone();
                 let llm = Arc::clone(&self.llm);
                 let safety = Arc::clone(&self.safety);
@@ -175,6 +181,10 @@ impl BenchRunner {
                         total,
                         task.id
                     );
+                    if let Err(e) = suite.setup_task(&task).await {
+                        tracing::warn!("setup_task failed for {}: {}", task.id, e);
+                    }
+                    let suite_id = suite.id().to_string();
                     let params = TaskRunParams {
                         task: &task,
                         suite_id: &suite_id,
@@ -185,6 +195,9 @@ impl BenchRunner {
                         additional_tools: &additional_tools,
                     };
                     let result = run_task_isolated(params).await;
+                    if let Err(e) = suite.teardown_task(&task).await {
+                        tracing::warn!("teardown_task failed for {}: {}", task.id, e);
+                    }
                     if let Err(e) = append_task_result(&jsonl, &result) {
                         tracing::error!("Failed to write result for {}: {}", task.id, e);
                     }
@@ -199,18 +212,19 @@ impl BenchRunner {
             }
         }
 
-        // Score all results
+        // Score all results (load tasks once, index by ID)
         let results = all_results.lock().await;
+        let task_index: HashMap<String, BenchTask> = self
+            .suite
+            .load_tasks()
+            .await?
+            .into_iter()
+            .map(|t| (t.id.clone(), t))
+            .collect();
+
         let mut scored: Vec<TaskResult> = Vec::with_capacity(results.len());
         for result in results.iter() {
-            let task_opt = self
-                .suite
-                .load_tasks()
-                .await?
-                .into_iter()
-                .find(|t| t.id == result.task_id);
-
-            if let Some(task) = task_opt {
+            if let Some(task) = task_index.get(&result.task_id) {
                 let submission = TaskSubmission {
                     response: result.response.clone(),
                     conversation: vec![],
@@ -222,7 +236,7 @@ impl BenchRunner {
                         .collect(),
                     error: result.error.clone(),
                 };
-                match self.suite.score(&task, &submission).await {
+                match self.suite.score(task, &submission).await {
                     Ok(score) => {
                         let mut scored_result = result.clone();
                         scored_result.score = score;

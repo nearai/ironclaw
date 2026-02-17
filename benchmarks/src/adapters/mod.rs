@@ -52,6 +52,18 @@ pub fn create_suite(name: &str, config: &BenchConfig) -> Result<Box<dyn BenchSui
                 attachments_dir,
             )))
         }
+        "spot" => {
+            let dataset_path = suite_map
+                .get("dataset_path")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string())
+                .ok_or_else(|| {
+                    BenchError::Config(
+                        "suite_config.dataset_path is required for 'spot' suite".to_string(),
+                    )
+                })?;
+            Ok(Box::new(spot::SpotSuite::new(dataset_path)))
+        }
         "tau_bench" => {
             let dataset_path = suite_map
                 .get("dataset_path")
@@ -71,18 +83,6 @@ pub fn create_suite(name: &str, config: &BenchConfig) -> Result<Box<dyn BenchSui
                 dataset_path,
                 domain,
             )))
-        }
-        "spot" => {
-            let dataset_path = suite_map
-                .get("dataset_path")
-                .and_then(|v| v.as_str())
-                .map(|s| s.to_string())
-                .ok_or_else(|| {
-                    BenchError::Config(
-                        "suite_config.dataset_path is required for 'spot' suite".to_string(),
-                    )
-                })?;
-            Ok(Box::new(spot::SpotSuite::new(dataset_path)))
         }
         "swe_bench" => {
             let dataset_path = suite_map

@@ -24,7 +24,8 @@ pub struct SpotAssertions {
     #[serde(default)]
     pub response_not_contains: Vec<String>,
 
-    /// Each tool name must appear in the tool_calls list.
+    /// Each tool name must appear in the tool_calls list (checked by name,
+    /// not by count; duplicates in tool_calls are collapsed).
     #[serde(default)]
     pub tools_used: Vec<String>,
 
@@ -40,11 +41,11 @@ pub struct SpotAssertions {
     #[serde(default)]
     pub no_error: bool,
 
-    /// Minimum number of tool calls expected.
+    /// Minimum number of tool calls expected (counts duplicates).
     #[serde(default)]
     pub min_tool_calls: Option<usize>,
 
-    /// Maximum number of tool calls allowed.
+    /// Maximum number of tool calls allowed (counts duplicates).
     #[serde(default)]
     pub max_tool_calls: Option<usize>,
 }

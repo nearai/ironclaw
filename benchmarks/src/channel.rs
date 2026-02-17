@@ -10,6 +10,18 @@ use ironclaw::error::ChannelError;
 use crate::results::TraceToolCall;
 use crate::suite::ConversationTurn;
 
+/// Truncate a string to at most `max_bytes` without splitting a UTF-8 character.
+fn truncate_str(s: &str, max_bytes: usize) -> &str {
+    if s.len() <= max_bytes {
+        return s;
+    }
+    let mut end = max_bytes;
+    while !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    &s[..end]
+}
+
 /// Captured state from a benchmark channel run.
 #[derive(Debug, Default)]
 pub struct ChannelCapture {
@@ -129,7 +141,7 @@ impl Channel for BenchChannel {
             } => {
                 cap.status_log.push(format!(
                     "tool_result: {name} -> {}",
-                    &preview[..preview.len().min(100)]
+                    truncate_str(preview, 100)
                 ));
             }
             StatusUpdate::StreamChunk(_) => {}
@@ -170,7 +182,7 @@ impl Channel for BenchChannel {
         let mut cap = self.capture.lock().await;
         cap.status_log.push(format!(
             "broadcast: {}",
-            &response.content[..response.content.len().min(100)]
+            truncate_str(&response.content, 100)
         ));
         Ok(())
     }
