@@ -1472,22 +1472,18 @@ mod tests {
 
     static ENV_MUTEX: Mutex<()> = Mutex::new(());
 
-    fn clear_embedding_env() {
-        unsafe {
+    unsafe fn clear_embedding_env() {
             std::env::remove_var("EMBEDDING_ENABLED");
             std::env::remove_var("EMBEDDING_PROVIDER");
             std::env::remove_var("EMBEDDING_MODEL");
             std::env::remove_var("OPENAI_API_KEY");
-        }
     }
 
-    /// Regression test for #129: when the user disables embeddings in the wizard,
-    /// the presence of OPENAI_API_KEY in the environment must not re-enable them.
     #[test]
     fn embeddings_disabled_not_overridden_by_openai_key() {
         let _guard = ENV_MUTEX.lock().expect("env mutex poisoned");
 
-        clear_embedding_env();
+        unsafe { clear_embedding_env(); }
         unsafe {
             std::env::set_var("OPENAI_API_KEY", "sk-test-key-for-issue-129");
         }
@@ -1510,11 +1506,10 @@ mod tests {
         unsafe { std::env::remove_var("OPENAI_API_KEY"); }
     }
 
-    /// When the user enables embeddings in settings, it should be enabled.
     #[test]
     fn embeddings_enabled_from_settings() {
         let _guard = ENV_MUTEX.lock().expect("env mutex poisoned");
-        clear_embedding_env();
+        unsafe { clear_embedding_env(); }
 
         let settings = Settings {
             embeddings: EmbeddingsSettings {
@@ -1528,12 +1523,11 @@ mod tests {
         assert!(config.enabled, "embeddings should be enabled when settings say so");
     }
 
-    /// EMBEDDING_ENABLED env var should override settings (explicit user override).
     #[test]
     fn embeddings_env_override_takes_precedence() {
         let _guard = ENV_MUTEX.lock().expect("env mutex poisoned");
 
-        clear_embedding_env();
+        unsafe { clear_embedding_env(); }
         unsafe {
             std::env::set_var("EMBEDDING_ENABLED", "true");
         }
