@@ -3,7 +3,10 @@
 use anyhow::{Result, bail};
 use tokio::process::Command;
 
-use crate::tunnel::{SharedProcess, Tunnel, TunnelProcess, kill_shared, new_shared_process};
+use crate::tunnel::{
+    SharedProcess, SharedUrl, Tunnel, TunnelProcess, kill_shared, new_shared_process,
+    new_shared_url,
+};
 
 /// Uses `tailscale serve` (tailnet-only) or `tailscale funnel` (public).
 ///
@@ -12,6 +15,7 @@ pub struct TailscaleTunnel {
     funnel: bool,
     hostname: Option<String>,
     proc: SharedProcess,
+    url: SharedUrl,
 }
 
 impl TailscaleTunnel {
@@ -20,6 +24,7 @@ impl TailscaleTunnel {
             funnel,
             hostname,
             proc: new_shared_process(),
+            url: new_shared_url(),
         }
     }
 }
@@ -30,16 +35,20 @@ impl Tunnel for TailscaleTunnel {
         "tailscale"
     }
 
-    async fn start(&self, _local_host: &str, local_port: u16) -> Result<String> {
+    async fn start(&self, local_host: &str, local_port: u16) -> Result<String> {
         let subcommand = if self.funnel { "funnel" } else { "serve" };
 
         let hostname = if let Some(ref h) = self.hostname {
             h.clone()
         } else {
-            let output = Command::new("tailscale")
-                .args(["status", "--json"])
-                .output()
-                .await?;
+            let output = tokio::time::timeout(
+                tokio::time::Duration::from_secs(10),
+                Command::new("tailscale")
+                    .args(["status", "--json"])
+                    .output(),
+            )
+            .await
+            .map_err(|_| anyhow::anyhow!("tailscale status --json timed out after 10s"))??;
 
             if !output.status.success() {
                 bail!(
@@ -48,43 +57,48 @@ impl Tunnel for TailscaleTunnel {
                 );
             }
 
-            let status: serde_json::Value =
-                serde_json::from_slice(&output.stdout).unwrap_or_default();
+            let status: serde_json::Value = serde_json::from_slice(&output.stdout)
+                .map_err(|e| anyhow::anyhow!("Failed to parse tailscale status JSON: {e}"))?;
             status["Self"]["DNSName"]
                 .as_str()
-                .unwrap_or("localhost")
+                .ok_or_else(|| anyhow::anyhow!("tailscale status missing Self.DNSName field"))?
                 .trim_end_matches('.')
                 .to_string()
         };
 
+        let target = format!("http://{local_host}:{local_port}");
         let child = Command::new("tailscale")
-            .args([subcommand, &local_port.to_string()])
+            .args([subcommand, &target])
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
             .kill_on_drop(true)
             .spawn()?;
 
-        // tailscale serve/funnel expose on standard HTTPS port (443),
-        // the local_port is what gets forwarded to, not the public endpoint.
         let public_url = format!("https://{hostname}");
 
+        if let Ok(mut guard) = self.url.write() {
+            *guard = Some(public_url.clone());
+        }
+
         let mut guard = self.proc.lock().await;
-        *guard = Some(TunnelProcess {
-            child,
-            public_url: public_url.clone(),
-        });
+        *guard = Some(TunnelProcess { child });
 
         Ok(public_url)
     }
 
     async fn stop(&self) -> Result<()> {
         let subcommand = if self.funnel { "funnel" } else { "serve" };
-        Command::new("tailscale")
+        if let Err(e) = Command::new("tailscale")
             .args([subcommand, "reset"])
             .output()
             .await
-            .ok();
+        {
+            tracing::warn!("tailscale {subcommand} reset failed: {e}");
+        }
 
+        if let Ok(mut guard) = self.url.write() {
+            *guard = None;
+        }
         kill_shared(&self.proc).await
     }
 
@@ -94,10 +108,7 @@ impl Tunnel for TailscaleTunnel {
     }
 
     fn public_url(&self) -> Option<String> {
-        self.proc
-            .try_lock()
-            .ok()
-            .and_then(|g| g.as_ref().map(|tp| tp.public_url.clone()))
+        self.url.read().ok().and_then(|guard| guard.clone())
     }
 }
 

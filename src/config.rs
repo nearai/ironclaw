@@ -203,36 +203,53 @@ impl TunnelConfig {
             });
         }
 
-        // Resolve managed tunnel provider config
-        let provider_name = optional_env("TUNNEL_PROVIDER")?.unwrap_or_default();
+        // Resolve managed tunnel provider config.
+        // Priority: env var > settings > default (none).
+        let provider_name = optional_env("TUNNEL_PROVIDER")?
+            .or_else(|| settings.tunnel.provider.clone())
+            .unwrap_or_default();
+
         let provider = if provider_name.is_empty() || provider_name == "none" {
             None
         } else {
             Some(crate::tunnel::TunnelProviderConfig {
                 provider: provider_name.clone(),
                 cloudflare: optional_env("TUNNEL_CF_TOKEN")?
+                    .or_else(|| settings.tunnel.cf_token.clone())
                     .map(|token| crate::tunnel::CloudflareTunnelConfig { token }),
                 tailscale: Some(crate::tunnel::TailscaleTunnelConfig {
                     funnel: optional_env("TUNNEL_TS_FUNNEL")
                         .ok()
                         .flatten()
                         .map(|s| s == "true" || s == "1")
-                        .unwrap_or(false),
-                    hostname: optional_env("TUNNEL_TS_HOSTNAME").ok().flatten(),
+                        .unwrap_or(settings.tunnel.ts_funnel),
+                    hostname: optional_env("TUNNEL_TS_HOSTNAME")
+                        .ok()
+                        .flatten()
+                        .or_else(|| settings.tunnel.ts_hostname.clone()),
                 }),
-                ngrok: optional_env("TUNNEL_NGROK_TOKEN")?.map(|auth_token| {
-                    crate::tunnel::NgrokTunnelConfig {
+                ngrok: optional_env("TUNNEL_NGROK_TOKEN")?
+                    .or_else(|| settings.tunnel.ngrok_token.clone())
+                    .map(|auth_token| crate::tunnel::NgrokTunnelConfig {
                         auth_token,
-                        domain: optional_env("TUNNEL_NGROK_DOMAIN").ok().flatten(),
-                    }
-                }),
-                custom: optional_env("TUNNEL_CUSTOM_COMMAND")?.map(|start_command| {
-                    crate::tunnel::CustomTunnelConfig {
+                        domain: optional_env("TUNNEL_NGROK_DOMAIN")
+                            .ok()
+                            .flatten()
+                            .or_else(|| settings.tunnel.ngrok_domain.clone()),
+                    }),
+                custom: optional_env("TUNNEL_CUSTOM_COMMAND")?
+                    .or_else(|| settings.tunnel.custom_command.clone())
+                    .map(|start_command| crate::tunnel::CustomTunnelConfig {
                         start_command,
-                        health_url: optional_env("TUNNEL_CUSTOM_HEALTH_URL").ok().flatten(),
-                        url_pattern: optional_env("TUNNEL_CUSTOM_URL_PATTERN").ok().flatten(),
-                    }
-                }),
+                        health_url: optional_env("TUNNEL_CUSTOM_HEALTH_URL")
+                            .ok()
+                            .flatten()
+                            .or_else(|| settings.tunnel.custom_health_url.clone()),
+                        url_pattern: optional_env("TUNNEL_CUSTOM_URL_PATTERN")
+                            .ok()
+                            .flatten()
+                            .or_else(|| settings.tunnel.custom_url_pattern.clone()),
+                    }),
             })
         };
 

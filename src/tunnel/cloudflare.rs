@@ -4,12 +4,16 @@ use anyhow::{Result, bail};
 use tokio::io::AsyncBufReadExt;
 use tokio::process::Command;
 
-use crate::tunnel::{SharedProcess, Tunnel, TunnelProcess, kill_shared, new_shared_process};
+use crate::tunnel::{
+    SharedProcess, SharedUrl, Tunnel, TunnelProcess, kill_shared, new_shared_process,
+    new_shared_url,
+};
 
 /// Wraps `cloudflared` with token-based auth from the Zero Trust dashboard.
 pub struct CloudflareTunnel {
     token: String,
     proc: SharedProcess,
+    url: SharedUrl,
 }
 
 impl CloudflareTunnel {
@@ -17,6 +21,7 @@ impl CloudflareTunnel {
         Self {
             token,
             proc: new_shared_process(),
+            url: new_shared_url(),
         }
     }
 }
@@ -27,7 +32,8 @@ impl Tunnel for CloudflareTunnel {
         "cloudflare"
     }
 
-    async fn start(&self, _local_host: &str, local_port: u16) -> Result<String> {
+    async fn start(&self, local_host: &str, local_port: u16) -> Result<String> {
+        let origin = format!("http://{local_host}:{local_port}");
         let mut child = Command::new("cloudflared")
             .args([
                 "tunnel",
@@ -36,7 +42,7 @@ impl Tunnel for CloudflareTunnel {
                 "--token",
                 &self.token,
                 "--url",
-                &format!("http://localhost:{local_port}"),
+                &origin,
             ])
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
@@ -80,16 +86,20 @@ impl Tunnel for CloudflareTunnel {
             bail!("cloudflared did not produce a public URL within 30s. Is the token valid?");
         }
 
+        if let Ok(mut guard) = self.url.write() {
+            *guard = Some(public_url.clone());
+        }
+
         let mut guard = self.proc.lock().await;
-        *guard = Some(TunnelProcess {
-            child,
-            public_url: public_url.clone(),
-        });
+        *guard = Some(TunnelProcess { child });
 
         Ok(public_url)
     }
 
     async fn stop(&self) -> Result<()> {
+        if let Ok(mut guard) = self.url.write() {
+            *guard = None;
+        }
         kill_shared(&self.proc).await
     }
 
@@ -99,10 +109,7 @@ impl Tunnel for CloudflareTunnel {
     }
 
     fn public_url(&self) -> Option<String> {
-        self.proc
-            .try_lock()
-            .ok()
-            .and_then(|g| g.as_ref().map(|tp| tp.public_url.clone()))
+        self.url.read().ok().and_then(|guard| guard.clone())
     }
 }
 

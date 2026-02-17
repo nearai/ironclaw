@@ -28,6 +28,14 @@ use std::sync::Arc;
 use anyhow::{Result, bail};
 use tokio::sync::Mutex;
 
+/// Lock-free URL storage. Uses `std::sync::RwLock` so `public_url()` (sync)
+/// never returns a spurious `None` due to async lock contention.
+pub(crate) type SharedUrl = Arc<std::sync::RwLock<Option<String>>>;
+
+pub(crate) fn new_shared_url() -> SharedUrl {
+    Arc::new(std::sync::RwLock::new(None))
+}
+
 // ── Tunnel trait ─────────────────────────────────────────────────
 
 /// Provider-agnostic tunnel with lifecycle management.
@@ -58,7 +66,6 @@ pub trait Tunnel: Send + Sync {
 /// Wraps a spawned tunnel child process.
 pub(crate) struct TunnelProcess {
     pub child: tokio::process::Child,
-    pub public_url: String,
 }
 
 pub(crate) type SharedProcess = Arc<Mutex<Option<TunnelProcess>>>;
@@ -313,10 +320,7 @@ mod tests {
 
         {
             let mut guard = proc.lock().await;
-            *guard = Some(TunnelProcess {
-                child,
-                public_url: "https://example.test".into(),
-            });
+            *guard = Some(TunnelProcess { child });
         }
 
         kill_shared(&proc).await.unwrap();

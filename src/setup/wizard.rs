@@ -1257,11 +1257,8 @@ impl SetupWizard {
     async fn step_channels(&mut self) -> Result<(), SetupError> {
         // First, configure tunnel (shared across all channels that need webhooks)
         match setup_tunnel(&self.settings) {
-            Ok(Some(url)) => {
-                self.settings.tunnel.public_url = Some(url);
-            }
-            Ok(None) => {
-                self.settings.tunnel.public_url = None;
+            Ok(tunnel_settings) => {
+                self.settings.tunnel = tunnel_settings;
             }
             Err(e) => {
                 print_info(&format!("Tunnel setup skipped: {}", e));
@@ -1612,8 +1609,13 @@ impl SetupWizard {
         }
 
         if let Some(ref tunnel_url) = self.settings.tunnel.public_url {
-            println!("  Tunnel: {}", tunnel_url);
+            println!("  Tunnel: {} (static)", tunnel_url);
+        } else if let Some(ref provider) = self.settings.tunnel.provider {
+            println!("  Tunnel: {} (managed, starts at boot)", provider);
         }
+
+        let has_tunnel =
+            self.settings.tunnel.public_url.is_some() || self.settings.tunnel.provider.is_some();
 
         println!("  Channels:");
         println!("    - CLI/TUI: enabled");
@@ -1624,11 +1626,7 @@ impl SetupWizard {
         }
 
         for channel_name in &self.settings.channels.wasm_channels {
-            let mode = if self.settings.tunnel.public_url.is_some() {
-                "webhook"
-            } else {
-                "polling"
-            };
+            let mode = if has_tunnel { "webhook" } else { "polling" };
             println!(
                 "    - {}: enabled ({})",
                 capitalize_first(channel_name),

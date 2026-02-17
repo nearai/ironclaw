@@ -149,11 +149,52 @@ impl Default for EmbeddingsSettings {
 /// Tunnel settings for public webhook endpoints.
 ///
 /// The tunnel URL is shared across all channels that need webhooks.
+/// Two modes:
+/// - **Static URL**: `public_url` set directly (manual tunnel management).
+/// - **Managed provider**: `provider` is set and the agent starts/stops the
+///   tunnel process automatically at boot/shutdown.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct TunnelSettings {
     /// Public URL from tunnel provider (e.g., "https://abc123.ngrok.io").
+    /// When set without a provider, treated as a static (externally managed) URL.
     #[serde(default)]
     pub public_url: Option<String>,
+
+    /// Managed tunnel provider: "ngrok", "cloudflare", "tailscale", "custom".
+    #[serde(default)]
+    pub provider: Option<String>,
+
+    /// Cloudflare tunnel token.
+    #[serde(default)]
+    pub cf_token: Option<String>,
+
+    /// ngrok auth token.
+    #[serde(default)]
+    pub ngrok_token: Option<String>,
+
+    /// ngrok custom domain (paid plans).
+    #[serde(default)]
+    pub ngrok_domain: Option<String>,
+
+    /// Use Tailscale Funnel (public) instead of Serve (tailnet-only).
+    #[serde(default)]
+    pub ts_funnel: bool,
+
+    /// Tailscale hostname override.
+    #[serde(default)]
+    pub ts_hostname: Option<String>,
+
+    /// Shell command for custom tunnel (with `{port}` / `{host}` placeholders).
+    #[serde(default)]
+    pub custom_command: Option<String>,
+
+    /// Health check URL for custom tunnel.
+    #[serde(default)]
+    pub custom_health_url: Option<String>,
+
+    /// Substring pattern to extract URL from custom tunnel stdout.
+    #[serde(default)]
+    pub custom_url_pattern: Option<String>,
 }
 
 /// Channel-specific settings.
@@ -1120,5 +1161,44 @@ mod tests {
         let path = Settings::default_toml_path();
         assert!(path.to_string_lossy().contains(".ironclaw"));
         assert!(path.to_string_lossy().ends_with("config.toml"));
+    }
+
+    #[test]
+    fn tunnel_settings_round_trip() {
+        let settings = Settings {
+            tunnel: TunnelSettings {
+                provider: Some("ngrok".to_string()),
+                ngrok_token: Some("tok_abc123".to_string()),
+                ngrok_domain: Some("my.ngrok.dev".to_string()),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+
+        // JSON round-trip
+        let json = serde_json::to_string(&settings).unwrap();
+        let restored: Settings = serde_json::from_str(&json).unwrap();
+        assert_eq!(restored.tunnel.provider, Some("ngrok".to_string()));
+        assert_eq!(restored.tunnel.ngrok_token, Some("tok_abc123".to_string()));
+        assert_eq!(
+            restored.tunnel.ngrok_domain,
+            Some("my.ngrok.dev".to_string())
+        );
+        assert!(restored.tunnel.public_url.is_none());
+
+        // DB map round-trip
+        let map = settings.to_db_map();
+        let from_db = Settings::from_db_map(&map);
+        assert_eq!(from_db.tunnel.provider, Some("ngrok".to_string()));
+        assert_eq!(from_db.tunnel.ngrok_token, Some("tok_abc123".to_string()));
+
+        // get/set round-trip
+        let mut s = Settings::default();
+        s.set("tunnel.provider", "cloudflare").unwrap();
+        s.set("tunnel.cf_token", "cf_tok_xyz").unwrap();
+        s.set("tunnel.ts_funnel", "true").unwrap();
+        assert_eq!(s.tunnel.provider, Some("cloudflare".to_string()));
+        assert_eq!(s.tunnel.cf_token, Some("cf_tok_xyz".to_string()));
+        assert!(s.tunnel.ts_funnel);
     }
 }

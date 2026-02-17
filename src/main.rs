@@ -537,6 +537,62 @@ async fn main() -> anyhow::Result<()> {
         }
     }
 
+    // Start managed tunnel if configured and no static URL is already set.
+    //
+    // The tunnel process runs in the background, exposing the local gateway
+    // port to the internet. The resulting public URL is injected into
+    // config.tunnel.public_url so channels and extensions pick it up.
+    let active_tunnel: Option<Box<dyn ironclaw::tunnel::Tunnel>> =
+        if config.tunnel.public_url.is_some() {
+            tracing::info!(
+                "Static tunnel URL in use: {}",
+                config.tunnel.public_url.as_deref().unwrap_or("?")
+            );
+            None
+        } else if let Some(ref provider_config) = config.tunnel.provider {
+            let gateway_port = config
+                .channels
+                .gateway
+                .as_ref()
+                .map(|g| g.port)
+                .unwrap_or(3000);
+            let gateway_host = config
+                .channels
+                .gateway
+                .as_ref()
+                .map(|g| g.host.as_str())
+                .unwrap_or("127.0.0.1");
+
+            match ironclaw::tunnel::create_tunnel(provider_config) {
+                Ok(Some(tunnel)) => {
+                    tracing::info!(
+                        "Starting {} tunnel on {}:{}...",
+                        tunnel.name(),
+                        gateway_host,
+                        gateway_port
+                    );
+                    match tunnel.start(gateway_host, gateway_port).await {
+                        Ok(url) => {
+                            tracing::info!("Tunnel started: {}", url);
+                            config.tunnel.public_url = Some(url);
+                            Some(tunnel)
+                        }
+                        Err(e) => {
+                            tracing::error!("Failed to start tunnel: {}", e);
+                            None
+                        }
+                    }
+                }
+                Ok(None) => None,
+                Err(e) => {
+                    tracing::error!("Failed to create tunnel: {}", e);
+                    None
+                }
+            }
+        } else {
+            None
+        };
+
     // Initialize LLM provider (clone session so we can reuse it for embeddings)
     let llm = create_llm_provider(&config.llm, session.clone())?;
     tracing::info!("LLM provider initialized: {}", llm.model_name());
@@ -1325,6 +1381,11 @@ async fn main() -> anyhow::Result<()> {
             claude_code_enabled: config.claude_code.enabled,
             routines_enabled: config.routines.enabled,
             channels: channel_names,
+            tunnel_url: active_tunnel
+                .as_ref()
+                .and_then(|t| t.public_url())
+                .or_else(|| config.tunnel.public_url.clone()),
+            tunnel_provider: active_tunnel.as_ref().map(|t| t.name().to_string()),
         };
         ironclaw::boot_screen::print_boot_screen(&boot_info);
     }
@@ -1335,6 +1396,14 @@ async fn main() -> anyhow::Result<()> {
     // Shut down the webhook server if one was started
     if let Some(ref mut server) = webhook_server {
         server.shutdown().await;
+    }
+
+    // Stop managed tunnel if one was started
+    if let Some(tunnel) = active_tunnel {
+        tracing::info!("Stopping {} tunnel...", tunnel.name());
+        if let Err(e) = tunnel.stop().await {
+            tracing::warn!("Failed to stop tunnel cleanly: {}", e);
+        }
     }
 
     tracing::info!("Agent shutdown complete");

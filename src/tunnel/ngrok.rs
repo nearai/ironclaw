@@ -4,13 +4,17 @@ use anyhow::{Result, bail};
 use tokio::io::AsyncBufReadExt;
 use tokio::process::Command;
 
-use crate::tunnel::{SharedProcess, Tunnel, TunnelProcess, kill_shared, new_shared_process};
+use crate::tunnel::{
+    SharedProcess, SharedUrl, Tunnel, TunnelProcess, kill_shared, new_shared_process,
+    new_shared_url,
+};
 
 /// Wraps `ngrok` with optional custom domain support (paid plan).
 pub struct NgrokTunnel {
     auth_token: String,
     domain: Option<String>,
     proc: SharedProcess,
+    url: SharedUrl,
 }
 
 impl NgrokTunnel {
@@ -19,6 +23,7 @@ impl NgrokTunnel {
             auth_token,
             domain,
             proc: new_shared_process(),
+            url: new_shared_url(),
         }
     }
 }
@@ -29,14 +34,8 @@ impl Tunnel for NgrokTunnel {
         "ngrok"
     }
 
-    async fn start(&self, _local_host: &str, local_port: u16) -> Result<String> {
-        // Register auth token
-        Command::new("ngrok")
-            .args(["config", "add-authtoken", &self.auth_token])
-            .output()
-            .await?;
-
-        let mut args = vec!["http".to_string(), local_port.to_string()];
+    async fn start(&self, local_host: &str, local_port: u16) -> Result<String> {
+        let mut args = vec!["http".to_string(), format!("{local_host}:{local_port}")];
         if let Some(ref domain) = self.domain {
             args.push("--domain".into());
             args.push(domain.clone());
@@ -45,6 +44,7 @@ impl Tunnel for NgrokTunnel {
 
         let mut child = Command::new("ngrok")
             .args(&args)
+            .env("NGROK_AUTHTOKEN", &self.auth_token)
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
             .kill_on_drop(true)
@@ -88,16 +88,20 @@ impl Tunnel for NgrokTunnel {
             bail!("ngrok did not produce a public URL within 15s. Is the auth token valid?");
         }
 
+        if let Ok(mut guard) = self.url.write() {
+            *guard = Some(public_url.clone());
+        }
+
         let mut guard = self.proc.lock().await;
-        *guard = Some(TunnelProcess {
-            child,
-            public_url: public_url.clone(),
-        });
+        *guard = Some(TunnelProcess { child });
 
         Ok(public_url)
     }
 
     async fn stop(&self) -> Result<()> {
+        if let Ok(mut guard) = self.url.write() {
+            *guard = None;
+        }
         kill_shared(&self.proc).await
     }
 
@@ -107,10 +111,7 @@ impl Tunnel for NgrokTunnel {
     }
 
     fn public_url(&self) -> Option<String> {
-        self.proc
-            .try_lock()
-            .ok()
-            .and_then(|g| g.as_ref().map(|tp| tp.public_url.clone()))
+        self.url.read().ok().and_then(|guard| guard.clone())
     }
 }
 

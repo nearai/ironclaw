@@ -4,7 +4,10 @@ use anyhow::{Result, bail};
 use tokio::io::AsyncBufReadExt;
 use tokio::process::Command;
 
-use crate::tunnel::{SharedProcess, Tunnel, TunnelProcess, kill_shared, new_shared_process};
+use crate::tunnel::{
+    SharedProcess, SharedUrl, Tunnel, TunnelProcess, kill_shared, new_shared_process,
+    new_shared_url,
+};
 
 /// Bring-your-own tunnel binary.
 ///
@@ -20,6 +23,7 @@ pub struct CustomTunnel {
     health_url: Option<String>,
     url_pattern: Option<String>,
     proc: SharedProcess,
+    url: SharedUrl,
 }
 
 impl CustomTunnel {
@@ -33,6 +37,7 @@ impl CustomTunnel {
             health_url,
             url_pattern,
             proc: new_shared_process(),
+            url: new_shared_url(),
         }
     }
 }
@@ -94,16 +99,20 @@ impl Tunnel for CustomTunnel {
             }
         }
 
+        if let Ok(mut guard) = self.url.write() {
+            *guard = Some(public_url.clone());
+        }
+
         let mut guard = self.proc.lock().await;
-        *guard = Some(TunnelProcess {
-            child,
-            public_url: public_url.clone(),
-        });
+        *guard = Some(TunnelProcess { child });
 
         Ok(public_url)
     }
 
     async fn stop(&self) -> Result<()> {
+        if let Ok(mut guard) = self.url.write() {
+            *guard = None;
+        }
         kill_shared(&self.proc).await
     }
 
@@ -122,10 +131,7 @@ impl Tunnel for CustomTunnel {
     }
 
     fn public_url(&self) -> Option<String> {
-        self.proc
-            .try_lock()
-            .ok()
-            .and_then(|g| g.as_ref().map(|tp| tp.public_url.clone()))
+        self.url.read().ok().and_then(|guard| guard.clone())
     }
 }
 
