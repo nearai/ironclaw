@@ -3,6 +3,8 @@
 //! This lets us use any rig-core provider (OpenAI, Anthropic, Ollama, etc.) as an
 //! `Arc<dyn LlmProvider>` without changing any of the agent, reasoning, or tool code.
 
+use std::sync::Arc;
+
 use async_trait::async_trait;
 use rig::OneOrMany;
 use rig::completion::{
@@ -22,8 +24,9 @@ use std::collections::HashSet;
 
 use crate::error::LlmError;
 use crate::llm::costs;
+use crate::llm::discovery::ModelListFetcher;
 use crate::llm::provider::{
-    ChatMessage, CompletionRequest, CompletionResponse, FinishReason, LlmProvider,
+    ChatMessage, CompletionRequest, CompletionResponse, FinishReason, LlmProvider, ModelMetadata,
     ToolCall as IronToolCall, ToolCompletionRequest, ToolCompletionResponse,
     ToolDefinition as IronToolDefinition,
 };
@@ -34,6 +37,7 @@ pub struct RigAdapter<M: CompletionModel> {
     model_name: String,
     input_cost: Decimal,
     output_cost: Decimal,
+    discovery: Option<Arc<dyn ModelListFetcher>>,
 }
 
 impl<M: CompletionModel> RigAdapter<M> {
@@ -47,7 +51,14 @@ impl<M: CompletionModel> RigAdapter<M> {
             model_name: name,
             input_cost,
             output_cost,
+            discovery: None,
         }
+    }
+
+    /// Attach a model list fetcher for auto-discovery.
+    pub(crate) fn with_discovery(mut self, fetcher: Arc<dyn ModelListFetcher>) -> Self {
+        self.discovery = Some(fetcher);
+        self
     }
 }
 
@@ -510,6 +521,25 @@ where
             input_tokens: saturate_u32(response.usage.input_tokens),
             output_tokens: saturate_u32(response.usage.output_tokens),
             finish_reason: finish,
+        })
+    }
+
+    async fn list_models(&self) -> Result<Vec<String>, LlmError> {
+        match &self.discovery {
+            Some(fetcher) => fetcher.fetch_model_ids().await,
+            None => Ok(Vec::new()),
+        }
+    }
+
+    async fn model_metadata(&self) -> Result<ModelMetadata, LlmError> {
+        if let Some(fetcher) = &self.discovery
+            && let Some(meta) = fetcher.fetch_model_entry(&self.model_name).await?
+        {
+            return Ok(meta);
+        }
+        Ok(ModelMetadata {
+            id: self.model_name.clone(),
+            context_length: None,
         })
     }
 
