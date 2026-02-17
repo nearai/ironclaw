@@ -58,6 +58,9 @@ pub struct RunResult {
     pub suite_id: String,
     pub config_label: String,
     pub model: String,
+    /// Short git commit hash at the time of the run.
+    #[serde(default)]
+    pub commit_hash: String,
     pub pass_rate: f64,
     pub avg_score: f64,
     pub total_tasks: usize,
@@ -75,6 +78,7 @@ impl RunResult {
         suite_id: &str,
         config_label: &str,
         model: &str,
+        commit_hash: &str,
         total_tasks: usize,
         tasks: &[TaskResult],
         started_at: DateTime<Utc>,
@@ -98,6 +102,7 @@ impl RunResult {
             suite_id: suite_id.to_string(),
             config_label: config_label.to_string(),
             model: model.to_string(),
+            commit_hash: commit_hash.to_string(),
             pass_rate,
             avg_score,
             total_tasks,
@@ -212,9 +217,14 @@ pub fn find_latest_run(base: &Path) -> Result<Option<Uuid>, BenchError> {
 /// Print a summary table of task results.
 pub fn print_results_table(tasks: &[TaskResult], run: &RunResult) {
     println!();
+    let commit_suffix = if run.commit_hash.is_empty() {
+        String::new()
+    } else {
+        format!(" | Commit: {}", run.commit_hash)
+    };
     println!(
-        "Run: {} | Suite: {} | Config: {} | Model: {}",
-        run.run_id, run.suite_id, run.config_label, run.model
+        "Run: {} | Suite: {} | Model: {}{}",
+        run.run_id, run.suite_id, run.model, commit_suffix
     );
     println!(
         "Pass rate: {:.1}% | Avg score: {:.3} | Tasks: {}/{} | Cost: ${:.4} | Time: {:.1}s",
@@ -319,6 +329,7 @@ mod tests {
             "custom",
             "default",
             "test-model",
+            "abc1234",
             2,
             &tasks,
             Utc::now(),

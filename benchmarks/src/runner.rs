@@ -114,11 +114,13 @@ impl BenchRunner {
         }
 
         let total_tasks = tasks.len() + completed.len();
+        let model_label = matrix.model.as_deref().unwrap_or(self.llm.model_name());
         tracing::info!(
-            "Running {} tasks for suite '{}' (config: {}, run: {})",
+            "[{} @ {}] Running {} tasks for suite '{}' (run: {})",
+            model_label,
+            git_short_hash(),
             tasks.len(),
             self.suite.id(),
-            matrix.label,
             run_id
         );
 
@@ -263,12 +265,14 @@ impl BenchRunner {
         write_task_results(&jsonl_path, &all_for_aggregate)?;
 
         let model_name = matrix.model.as_deref().unwrap_or(self.llm.model_name());
+        let commit_hash = git_short_hash();
 
         let run_result = RunResult::from_tasks(
             run_id,
             self.suite.id(),
             &matrix.label,
             model_name,
+            &commit_hash,
             total_tasks,
             &all_for_aggregate,
             started_at,
@@ -277,7 +281,9 @@ impl BenchRunner {
         write_run_result(&json_path, &run_result)?;
 
         tracing::info!(
-            "Run {} complete: {:.1}% pass rate, {:.3} avg score, ${:.4} cost",
+            "[{} @ {}] Run {} complete: {:.1}% pass rate, {:.3} avg score, ${:.4} cost",
+            model_name,
+            commit_hash,
             run_id,
             run_result.pass_rate * 100.0,
             run_result.avg_score,
@@ -478,4 +484,20 @@ fn make_error_result(
         config_label: config_label.to_string(),
         error: Some(reason.to_string()),
     }
+}
+
+/// Get the short git commit hash of HEAD, or "unknown" if not in a repo.
+fn git_short_hash() -> String {
+    std::process::Command::new("git")
+        .args(["rev-parse", "--short", "HEAD"])
+        .output()
+        .ok()
+        .and_then(|o| {
+            if o.status.success() {
+                Some(String::from_utf8_lossy(&o.stdout).trim().to_string())
+            } else {
+                None
+            }
+        })
+        .unwrap_or_else(|| "unknown".to_string())
 }
