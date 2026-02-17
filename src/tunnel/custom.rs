@@ -15,6 +15,9 @@ use crate::tunnel::{
 /// If `url_pattern` is set, stdout is scanned for a URL matching that
 /// substring. If `health_url` is set, health checks poll that endpoint.
 ///
+/// **Note:** The command is split on whitespace, so quoted arguments like
+/// `--arg "hello world"` won't work. Each token must be a single word.
+///
 /// Examples:
 /// - `bore local {port} --to bore.pub`
 /// - `ssh -R 80:localhost:{port} serveo.net`
