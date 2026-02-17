@@ -535,7 +535,9 @@ impl LlmConfig {
                     hint: "Set LLM_BASE_URL when LLM_BACKEND=openai_compatible".to_string(),
                 })?;
             let api_key = optional_env("LLM_API_KEY")?.map(SecretString::from);
-            let model = optional_env("LLM_MODEL")?.unwrap_or_else(|| "default".to_string());
+            let model = optional_env("LLM_MODEL")?
+                .or_else(|| settings.selected_model.clone())
+                .unwrap_or_else(|| "default".to_string());
             Some(OpenAiCompatibleConfig {
                 base_url,
                 api_key,
@@ -1546,5 +1548,60 @@ mod tests {
         assert!(config.enabled, "EMBEDDING_ENABLED=true env var should override settings");
 
         unsafe { std::env::remove_var("EMBEDDING_ENABLED"); }
+    }
+
+    fn clear_openai_compatible_env() {
+        unsafe {
+            std::env::remove_var("LLM_BACKEND");
+            std::env::remove_var("LLM_BASE_URL");
+            std::env::remove_var("LLM_MODEL");
+        }
+    }
+
+    #[test]
+    fn openai_compatible_uses_selected_model_when_llm_model_unset() {
+        let _guard = ENV_MUTEX.lock().expect("env mutex poisoned");
+        clear_openai_compatible_env();
+
+        let settings = Settings {
+            llm_backend: Some("openai_compatible".to_string()),
+            openai_compatible_base_url: Some("https://openrouter.ai/api/v1".to_string()),
+            selected_model: Some("openai/gpt-5.1-codex".to_string()),
+            ..Default::default()
+        };
+
+        let cfg = LlmConfig::resolve(&settings).expect("resolve should succeed");
+        let compat = cfg
+            .openai_compatible
+            .expect("openai-compatible config should be present");
+
+        assert_eq!(compat.model, "openai/gpt-5.1-codex");
+    }
+
+    #[test]
+    fn openai_compatible_llm_model_env_overrides_selected_model() {
+        let _guard = ENV_MUTEX.lock().expect("env mutex poisoned");
+        clear_openai_compatible_env();
+        unsafe {
+            std::env::set_var("LLM_MODEL", "openai/gpt-5-codex");
+        }
+
+        let settings = Settings {
+            llm_backend: Some("openai_compatible".to_string()),
+            openai_compatible_base_url: Some("https://openrouter.ai/api/v1".to_string()),
+            selected_model: Some("openai/gpt-5.1-codex".to_string()),
+            ..Default::default()
+        };
+
+        let cfg = LlmConfig::resolve(&settings).expect("resolve should succeed");
+        let compat = cfg
+            .openai_compatible
+            .expect("openai-compatible config should be present");
+
+        assert_eq!(compat.model, "openai/gpt-5-codex");
+
+        unsafe {
+            std::env::remove_var("LLM_MODEL");
+        }
     }
 }
