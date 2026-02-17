@@ -112,7 +112,7 @@ fn install_linux() -> Result<()> {
          \n\
          [Service]\n\
          Type=simple\n\
-         ExecStart={exe} run\n\
+         ExecStart=\"{exe}\" run\n\
          Restart=always\n\
          RestartSec=3\n\
          \n\

@@ -141,8 +141,8 @@ async fn check_database() -> CheckResult {
             if path.exists() {
                 CheckResult::Pass(format!("libSQL database exists ({})", path.display()))
             } else {
-                CheckResult::Fail(format!(
-                    "libSQL database not found at {}. It will be created on first run",
+                CheckResult::Pass(format!(
+                    "libSQL database not found at {} (will be created on first run)",
                     path.display()
                 ))
             }
