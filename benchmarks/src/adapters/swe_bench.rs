@@ -2,10 +2,36 @@ use std::io::BufRead;
 use std::path::PathBuf;
 
 use async_trait::async_trait;
+use regex::Regex;
 use serde::Deserialize;
 
 use crate::error::BenchError;
 use crate::suite::{BenchScore, BenchSuite, BenchTask, TaskSubmission};
+
+/// Validate that a string is safe for use as a filesystem path component.
+/// Allows alphanumerics, hyphens, underscores, dots, and forward slashes (for nested paths).
+fn is_safe_path_component(s: &str) -> bool {
+    !s.is_empty()
+        && !s.contains("..")
+        && s.chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.' | '/'))
+}
+
+/// Validate that a repo string matches the expected `owner/repo` GitHub format.
+fn is_valid_github_repo(repo: &str) -> bool {
+    // Match "owner/repo" where both parts are alphanumeric with hyphens/underscores/dots
+    static REPO_PATTERN: std::sync::LazyLock<Regex> =
+        std::sync::LazyLock::new(|| Regex::new(r"^[a-zA-Z0-9._-]+/[a-zA-Z0-9._-]+$").unwrap());
+    REPO_PATTERN.is_match(repo)
+}
+
+/// Validate that a string looks like a git ref (hex SHA or valid ref name).
+fn is_valid_git_ref(s: &str) -> bool {
+    !s.is_empty()
+        && s.chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.' | '/'))
+        && !s.contains("..")
+}
 
 /// SWE-bench dataset entry.
 #[derive(Debug, Deserialize)]
@@ -71,6 +97,28 @@ impl BenchSuite for SweBenchSuite {
             let entry: SweBenchEntry = serde_json::from_str(trimmed).map_err(|e| {
                 BenchError::Config(format!("swe_bench line {}: {}", line_num + 1, e))
             })?;
+
+            if !is_safe_path_component(&entry.instance_id) {
+                return Err(BenchError::Config(format!(
+                    "swe_bench line {}: unsafe instance_id \"{}\"",
+                    line_num + 1,
+                    entry.instance_id,
+                )));
+            }
+            if !is_valid_github_repo(&entry.repo) {
+                return Err(BenchError::Config(format!(
+                    "swe_bench line {}: invalid repo format \"{}\"",
+                    line_num + 1,
+                    entry.repo,
+                )));
+            }
+            if !is_valid_git_ref(&entry.base_commit) {
+                return Err(BenchError::Config(format!(
+                    "swe_bench line {}: invalid base_commit \"{}\"",
+                    line_num + 1,
+                    entry.base_commit,
+                )));
+            }
 
             let metadata = serde_json::json!({
                 "repo": entry.repo,
@@ -295,5 +343,71 @@ mod tests {
         };
         let score = suite.score(&tasks[0], &submission).await.unwrap();
         assert_eq!(score.value, 0.0);
+    }
+
+    #[test]
+    fn test_is_safe_path_component() {
+        assert!(is_safe_path_component("django__django-12345"));
+        assert!(is_safe_path_component("org/repo"));
+        assert!(is_safe_path_component("abc123"));
+        assert!(!is_safe_path_component(""));
+        assert!(!is_safe_path_component("../../etc/passwd"));
+        assert!(!is_safe_path_component("foo;rm -rf /"));
+        assert!(!is_safe_path_component("foo bar"));
+    }
+
+    #[test]
+    fn test_is_valid_github_repo() {
+        assert!(is_valid_github_repo("django/django"));
+        assert!(is_valid_github_repo("org/repo-name"));
+        assert!(is_valid_github_repo("Org.Name/Repo_v2"));
+        assert!(!is_valid_github_repo(""));
+        assert!(!is_valid_github_repo("no-slash"));
+        assert!(!is_valid_github_repo("too/many/slashes"));
+        assert!(!is_valid_github_repo("spa ce/repo"));
+    }
+
+    #[test]
+    fn test_is_valid_git_ref() {
+        assert!(is_valid_git_ref("abc123"));
+        assert!(is_valid_git_ref("deadbeef0123456789abcdef0123456789abcdef"));
+        assert!(is_valid_git_ref("v1.2.3"));
+        assert!(is_valid_git_ref("main"));
+        assert!(!is_valid_git_ref(""));
+        assert!(!is_valid_git_ref("bad..ref"));
+        assert!(!is_valid_git_ref("has space"));
+        assert!(!is_valid_git_ref("semi;colon"));
+    }
+
+    #[tokio::test]
+    async fn test_swe_bench_rejects_path_traversal() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("swe.jsonl");
+        let mut file = std::fs::File::create(&path).unwrap();
+        writeln!(
+            file,
+            r#"{{"instance_id": "../../etc/passwd", "repo": "org/repo", "base_commit": "abc", "problem_statement": "evil"}}"#
+        )
+        .unwrap();
+
+        let suite = SweBenchSuite::new(&path, "/tmp/swe-test", false);
+        let err = suite.load_tasks().await.unwrap_err();
+        assert!(err.to_string().contains("unsafe instance_id"));
+    }
+
+    #[tokio::test]
+    async fn test_swe_bench_rejects_bad_repo() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("swe.jsonl");
+        let mut file = std::fs::File::create(&path).unwrap();
+        writeln!(
+            file,
+            r#"{{"instance_id": "task1", "repo": "not-a-repo-format", "base_commit": "abc", "problem_statement": "bad"}}"#
+        )
+        .unwrap();
+
+        let suite = SweBenchSuite::new(&path, "/tmp/swe-test", false);
+        let err = suite.load_tasks().await.unwrap_err();
+        assert!(err.to_string().contains("invalid repo format"));
     }
 }

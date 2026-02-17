@@ -67,7 +67,7 @@ pub enum TurnRole {
 }
 
 /// Score for a single task.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct BenchScore {
     /// 0.0 to 1.0 (1.0 = perfect).
     pub value: f64,

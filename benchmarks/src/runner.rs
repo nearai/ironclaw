@@ -167,6 +167,8 @@ impl BenchRunner {
         } else {
             // Parallel execution with bounded concurrency
             let semaphore = Arc::new(tokio::sync::Semaphore::new(self.config.parallelism));
+            let shared_tools: Arc<[Arc<dyn ironclaw::tools::Tool>]> =
+                Arc::from(self.suite.additional_tools());
 
             let mut handles = Vec::new();
             for (i, task) in tasks.into_iter().enumerate() {
@@ -179,10 +181,16 @@ impl BenchRunner {
                 let results_ref = Arc::clone(&all_results);
                 let completed_count = completed.len();
                 let total = total_tasks;
-                let additional_tools = self.suite.additional_tools();
+                let additional_tools = Arc::clone(&shared_tools);
 
                 handles.push(tokio::spawn(async move {
-                    let _permit = sem.acquire().await.expect("semaphore closed");
+                    let _permit = match sem.acquire().await {
+                        Ok(p) => p,
+                        Err(_) => {
+                            tracing::error!("Semaphore closed for task {}", task.id);
+                            return;
+                        }
+                    };
                     tracing::info!(
                         "[{}/{}] Running task: {}",
                         i + 1 + completed_count,
@@ -300,6 +308,15 @@ impl BenchRunner {
 ///
 /// Creates a fresh Agent + BenchChannel + InstrumentedLlm for the task,
 /// injects the prompt, waits for the response, and returns the result.
+///
+/// # Current limitations
+///
+/// - **Single-turn only**: After the first assistant response, `/quit` is sent.
+///   Multi-turn suites (e.g., Tau-bench's `next_user_message()`) are not yet wired.
+/// - **Resources not injected**: `BenchTask.resources` (e.g., GAIA file attachments)
+///   are not included in the prompt or made available via the workspace.
+/// - **Conversation not captured**: `TaskSubmission.conversation` is always empty,
+///   which prevents multi-turn scoring hooks from working.
 async fn run_task_isolated(params: TaskRunParams<'_>) -> TaskResult {
     let TaskRunParams {
         task,
@@ -341,7 +358,13 @@ async fn run_task_isolated(params: TaskRunParams<'_>) -> TaskResult {
         use_planning: false,
         session_idle_timeout: timeout,
         allow_local_tools: true,
+        max_cost_per_day_cents: None,
+        max_actions_per_hour: None,
     };
+
+    let cost_guard = Arc::new(ironclaw::agent::cost_guard::CostGuard::new(
+        ironclaw::agent::cost_guard::CostGuardConfig::default(),
+    ));
 
     let deps = AgentDeps {
         store: None,
@@ -352,6 +375,7 @@ async fn run_task_isolated(params: TaskRunParams<'_>) -> TaskResult {
         workspace: None,
         extension_manager: None,
         hooks: Arc::new(ironclaw::hooks::HookRegistry::new()),
+        cost_guard,
     };
 
     let mut channels = ChannelManager::new();

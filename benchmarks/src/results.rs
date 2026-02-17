@@ -175,9 +175,16 @@ pub fn read_run_result(path: &Path) -> Result<RunResult, BenchError> {
 }
 
 /// Get the set of already-completed task IDs from a JSONL file (for resume).
+///
+/// Only includes tasks that have been scored (label != "pending"). Tasks that
+/// were written but not scored (e.g., from an interrupted run) will be re-executed.
 pub fn completed_task_ids(path: &Path) -> Result<HashSet<String>, BenchError> {
     let results = read_task_results(path)?;
-    Ok(results.into_iter().map(|r| r.task_id).collect())
+    Ok(results
+        .into_iter()
+        .filter(|r| r.score.label != "pending")
+        .map(|r| r.task_id)
+        .collect())
 }
 
 /// Get the results directory for a specific run.
@@ -195,7 +202,11 @@ pub fn run_json_path(base: &Path, run_id: Uuid) -> PathBuf {
     run_dir(base, run_id).join("run.json")
 }
 
-/// Find the latest run directory (by modification time).
+/// Find the latest run directory by the modification time of its `run.json`.
+///
+/// Falls back to `tasks.jsonl` mtime, then directory mtime. This avoids the
+/// issue where modifying files inside a directory doesn't update the directory's
+/// mtime on many filesystems.
 pub fn find_latest_run(base: &Path) -> Result<Option<Uuid>, BenchError> {
     if !base.exists() {
         return Ok(None);
@@ -206,7 +217,15 @@ pub fn find_latest_run(base: &Path) -> Result<Option<Uuid>, BenchError> {
         .filter_map(|e| {
             let name = e.file_name().to_string_lossy().to_string();
             let uuid = Uuid::parse_str(&name).ok()?;
-            let modified = e.metadata().ok()?.modified().ok()?;
+            let dir_path = e.path();
+            // Prefer run.json mtime, fall back to tasks.jsonl, then directory
+            let modified = std::fs::metadata(dir_path.join("run.json"))
+                .and_then(|m| m.modified())
+                .or_else(|_| {
+                    std::fs::metadata(dir_path.join("tasks.jsonl")).and_then(|m| m.modified())
+                })
+                .or_else(|_| e.metadata().and_then(|m| m.modified()))
+                .ok()?;
             Some((uuid, modified))
         })
         .collect();

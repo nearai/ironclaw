@@ -4,6 +4,7 @@ use std::time::Instant;
 
 use async_trait::async_trait;
 use rust_decimal::Decimal;
+use rust_decimal::prelude::ToPrimitive;
 use tokio::sync::Mutex;
 
 use ironclaw::error::LlmError;
@@ -71,8 +72,7 @@ impl InstrumentedLlm {
         let output_cost =
             output_rate * Decimal::from(self.total_output_tokens.load(Ordering::Relaxed));
         let total = input_cost + output_cost;
-        // Convert Decimal to f64 for the trace (benchmarks don't need exact precision)
-        total.to_string().parse::<f64>().unwrap_or(0.0)
+        total.to_f64().unwrap_or(0.0)
     }
 
     /// Reset all counters and records.
