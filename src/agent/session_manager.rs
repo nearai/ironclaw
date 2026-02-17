@@ -11,6 +11,7 @@ use uuid::Uuid;
 
 use crate::agent::session::Session;
 use crate::agent::undo::UndoManager;
+use crate::hooks::HookRegistry;
 
 /// Key for mapping external thread IDs to internal ones.
 #[derive(Clone, Hash, Eq, PartialEq)]
@@ -25,6 +26,7 @@ pub struct SessionManager {
     sessions: RwLock<HashMap<String, Arc<Mutex<Session>>>>,
     thread_map: RwLock<HashMap<ThreadKey, Uuid>>,
     undo_managers: RwLock<HashMap<Uuid, Arc<Mutex<UndoManager>>>>,
+    hooks: Option<Arc<HookRegistry>>,
 }
 
 impl SessionManager {
@@ -34,7 +36,14 @@ impl SessionManager {
             sessions: RwLock::new(HashMap::new()),
             thread_map: RwLock::new(HashMap::new()),
             undo_managers: RwLock::new(HashMap::new()),
+            hooks: None,
         }
+    }
+
+    /// Attach a hook registry for session lifecycle events.
+    pub fn with_hooks(mut self, hooks: Arc<HookRegistry>) -> Self {
+        self.hooks = Some(hooks);
+        self
     }
 
     /// Get or create a session for a user.
@@ -54,8 +63,28 @@ impl SessionManager {
             return Arc::clone(session);
         }
 
-        let session = Arc::new(Mutex::new(Session::new(user_id)));
+        let new_session = Session::new(user_id);
+        let session_id = new_session.id.to_string();
+        let session = Arc::new(Mutex::new(new_session));
         sessions.insert(user_id.to_string(), Arc::clone(&session));
+
+        // Fire OnSessionStart hook (fire-and-forget)
+        if let Some(ref hooks) = self.hooks {
+            let hooks = hooks.clone();
+            let uid = user_id.to_string();
+            let sid = session_id;
+            tokio::spawn(async move {
+                use crate::hooks::HookEvent;
+                let event = HookEvent::SessionStart {
+                    user_id: uid,
+                    session_id: sid,
+                };
+                if let Err(e) = hooks.run(&event).await {
+                    tracing::warn!("OnSessionStart hook error: {}", e);
+                }
+            });
+        }
+
         session
     }
 
@@ -173,8 +202,8 @@ impl SessionManager {
     pub async fn prune_stale_sessions(&self, max_idle: std::time::Duration) -> usize {
         let cutoff = chrono::Utc::now() - chrono::TimeDelta::seconds(max_idle.as_secs() as i64);
 
-        // Find stale session user_ids
-        let stale_users: Vec<String> = {
+        // Find stale sessions (user_id + session_id)
+        let stale_sessions: Vec<(String, String)> = {
             let sessions = self.sessions.read().await;
             sessions
                 .iter()
@@ -182,13 +211,18 @@ impl SessionManager {
                     // Try to lock; skip if contended (someone is actively using it)
                     let sess = session.try_lock().ok()?;
                     if sess.last_active_at < cutoff {
-                        Some(user_id.clone())
+                        Some((user_id.clone(), sess.id.to_string()))
                     } else {
                         None
                     }
                 })
                 .collect()
         };
+
+        let stale_users: Vec<String> = stale_sessions
+            .iter()
+            .map(|(user_id, _)| user_id.clone())
+            .collect();
 
         if stale_users.is_empty() {
             return 0;
@@ -204,6 +238,25 @@ impl SessionManager {
                 {
                     stale_thread_ids.extend(sess.threads.keys());
                 }
+            }
+        }
+
+        // Fire OnSessionEnd hooks for stale sessions (fire-and-forget)
+        if let Some(ref hooks) = self.hooks {
+            for (user_id, session_id) in &stale_sessions {
+                let hooks = hooks.clone();
+                let uid = user_id.clone();
+                let sid = session_id.clone();
+                tokio::spawn(async move {
+                    use crate::hooks::HookEvent;
+                    let event = HookEvent::SessionEnd {
+                        user_id: uid,
+                        session_id: sid,
+                    };
+                    if let Err(e) = hooks.run(&event).await {
+                        tracing::warn!("OnSessionEnd hook error: {}", e);
+                    }
+                });
             }
         }
 
