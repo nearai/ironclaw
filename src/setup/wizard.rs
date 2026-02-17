@@ -3,7 +3,7 @@
 //! The wizard guides users through:
 //! 1. Database connection
 //! 2. Security (secrets master key)
-//! 3. Inference provider (NEAR AI, Anthropic, OpenAI, Ollama, OpenAI-compatible)
+//! 3. Inference provider (NEAR AI, Anthropic, OpenAI, OpenRouter, Ollama, OpenAI-compatible)
 //! 4. Model selection
 //! 5. Embeddings
 //! 6. Channel configuration
@@ -944,14 +944,8 @@ impl SetupWizard {
                 self.select_from_model_list(&models)?;
             }
             "openrouter" => {
-                // OpenRouter has hundreds of models; free-text entry is most flexible
-                let model_id = input("Model name (e.g., anthropic/claude-sonnet-4, openai/gpt-4o)")
-                    .map_err(SetupError::Io)?;
-                if model_id.is_empty() {
-                    return Err(SetupError::Config("Model name is required".to_string()));
-                }
-                self.settings.selected_model = Some(model_id.clone());
-                print_success(&format!("Selected {}", model_id));
+                let models = openrouter_recommended_models();
+                self.select_from_model_list(&models)?;
             }
             "openai_compatible" => {
                 // No standard API for listing models on arbitrary endpoints
@@ -1682,6 +1676,18 @@ impl SetupWizard {
     }
 }
 
+fn openrouter_recommended_models() -> Vec<(String, String)> {
+    vec![
+        (
+            "anthropic/claude-sonnet-4.5".into(),
+            "Claude Sonnet 4.5 (recommended)".into(),
+        ),
+        ("anthropic/claude-opus-4.6".into(), "Claude Opus 4.6".into()),
+        ("openai/gpt-5.2".into(), "GPT-5.2".into()),
+        ("moonshotai/kimi-k2.5".into(), "Kimi K2.5".into()),
+    ]
+}
+
 impl Default for SetupWizard {
     fn default() -> Self {
         Self::new()
@@ -2194,6 +2200,22 @@ mod tests {
         // Point at a port nothing listens on
         let models = fetch_ollama_models("http://127.0.0.1:1").await;
         assert!(!models.is_empty(), "should fall back to static defaults");
+    }
+
+    #[test]
+    fn test_openrouter_recommended_models() {
+        let models = openrouter_recommended_models();
+        let ids: Vec<&str> = models.iter().map(|(id, _)| id.as_str()).collect();
+
+        assert_eq!(
+            ids,
+            vec![
+                "anthropic/claude-sonnet-4.5",
+                "anthropic/claude-opus-4.6",
+                "openai/gpt-5.2",
+                "moonshotai/kimi-k2.5",
+            ]
+        );
     }
 
     #[tokio::test]
