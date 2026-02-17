@@ -630,7 +630,8 @@ Before executing any non-trivial task:
 During long conversations, periodically write state to daily notes:
 - Current topic and key decisions
 - Work done and next steps
-This is not optional — if you did work, log it."#.to_string()
+This is not optional — if you did work, log it."#
+            .to_string()
     }
 
     // ==================== Search ====================
@@ -850,17 +851,17 @@ This is not optional — if you did work, log it."#.to_string()
 /// Returns None if the path attempts directory traversal (../).
 fn normalize_path(path: &str) -> Option<String> {
     let path = path.trim().trim_matches('/');
-    
+
     // Check for path traversal attempts
     if path.contains("..") {
         return None;
     }
-    
+
     // Reject null bytes (path injection)
     if path.contains('\0') {
         return None;
     }
-    
+
     // Collapse multiple slashes
     let mut result = String::new();
     let mut last_was_slash = false;

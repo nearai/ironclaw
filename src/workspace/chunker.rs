@@ -119,8 +119,8 @@ pub fn chunk_document(content: &str, config: ChunkConfig) -> Vec<String> {
         let chunk_words = &words[start..end];
 
         // Don't create tiny trailing chunks, merge with previous
-        if chunk_words.len() < config.min_chunk_size && !chunks.is_empty() {
-            let last = chunks.pop().unwrap();
+        if chunk_words.len() < config.min_chunk_size {
+            let Some(last) = chunks.pop() else { break };
             let combined = format!("{} {}", last, chunk_words.join(" "));
             chunks.push(combined);
             break;
@@ -212,7 +212,7 @@ pub fn chunk_document_with_positions(content: &str, config: ChunkConfig) -> Vec<
     }
 
     let step = config.step_size();
-    let mut chunks = Vec::new();
+    let mut chunks: Vec<ChunkWithPosition> = Vec::new();
     let mut start_idx = 0;
 
     while start_idx < words.len() {
@@ -220,13 +220,17 @@ pub fn chunk_document_with_positions(content: &str, config: ChunkConfig) -> Vec<
         let chunk_words = &words[start_idx..end_idx];
 
         // Don't create tiny trailing chunks, merge with previous
-        if chunk_words.len() < config.min_chunk_size && !chunks.is_empty() {
-            let last: ChunkWithPosition = chunks.pop().unwrap();
+        if chunk_words.len() < config.min_chunk_size {
+            let Some(last) = chunks.pop() else { break };
             let char_end = chunk_words.last().map(|w| w.end).unwrap_or(last.char_end);
             let combined_content = format!(
                 "{} {}",
                 last.content,
-                chunk_words.iter().map(|w| w.word).collect::<Vec<_>>().join(" ")
+                chunk_words
+                    .iter()
+                    .map(|w| w.word)
+                    .collect::<Vec<_>>()
+                    .join(" ")
             );
             chunks.push(ChunkWithPosition {
                 content: combined_content,
@@ -242,7 +246,11 @@ pub fn chunk_document_with_positions(content: &str, config: ChunkConfig) -> Vec<
         let char_end = chunk_words.last().map(|w| w.end).unwrap_or(0);
 
         chunks.push(ChunkWithPosition {
-            content: chunk_words.iter().map(|w| w.word).collect::<Vec<_>>().join(" "),
+            content: chunk_words
+                .iter()
+                .map(|w| w.word)
+                .collect::<Vec<_>>()
+                .join(" "),
             line_start: char_to_line(char_start),
             line_end: char_to_line(char_end.saturating_sub(1)),
             char_start,
@@ -323,9 +331,12 @@ pub fn chunk_by_paragraphs(content: &str, config: ChunkConfig) -> Vec<String> {
     // Flush remaining content
     if !current_chunk.is_empty() {
         // If too small, merge with previous chunk if possible
-        if current_word_count < config.min_chunk_size && !chunks.is_empty() {
-            let last = chunks.pop().unwrap();
-            chunks.push(format!("{}\n\n{}", last, current_chunk.trim()));
+        if current_word_count < config.min_chunk_size {
+            if let Some(last) = chunks.pop() {
+                chunks.push(format!("{}\n\n{}", last, current_chunk.trim()));
+            } else {
+                chunks.push(current_chunk.trim().to_string());
+            }
         } else {
             chunks.push(current_chunk.trim().to_string());
         }
