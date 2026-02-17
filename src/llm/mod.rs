@@ -332,4 +332,22 @@ mod tests {
         assert!(result.is_ok());
         assert!(result.unwrap().is_none());
     }
+
+    #[test]
+    fn test_create_llm_provider_openrouter_requires_openrouter_config() {
+        let mut config = test_llm_config();
+        config.backend = LlmBackend::OpenRouter;
+        config.openrouter = None;
+
+        let session = Arc::new(SessionManager::new(SessionConfig::default()));
+        let err = match create_llm_provider(&config, session) {
+            Ok(_) => panic!("Expected OpenRouter config validation to fail"),
+            Err(err) => err,
+        };
+
+        assert!(matches!(
+            err,
+            LlmError::AuthFailed { provider } if provider == "openrouter"
+        ));
+    }
 }

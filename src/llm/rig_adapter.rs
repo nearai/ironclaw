@@ -103,15 +103,20 @@ fn convert_messages(messages: &[ChatMessage]) -> (Option<String>, Vec<RigMessage
                 }
             }
             crate::llm::Role::Tool => {
-                // Tool result message: wrap as User { ToolResult }
-                let tool_id = msg.tool_call_id.clone().unwrap_or_default();
-                history.push(RigMessage::User {
-                    content: OneOrMany::one(UserContent::ToolResult(RigToolResult {
-                        id: tool_id.clone(),
-                        call_id: Some(tool_id),
-                        content: OneOrMany::one(ToolResultContent::text(&msg.content)),
-                    })),
-                });
+                // Tool result message: wrap as User { ToolResult } when we have a
+                // valid tool_call_id; otherwise degrade to plain user text.
+                match msg.tool_call_id.as_ref().filter(|id| !id.is_empty()) {
+                    Some(tool_id) => {
+                        history.push(RigMessage::User {
+                            content: OneOrMany::one(UserContent::ToolResult(RigToolResult {
+                                id: tool_id.clone(),
+                                call_id: Some(tool_id.clone()),
+                                content: OneOrMany::one(ToolResultContent::text(&msg.content)),
+                            })),
+                        });
+                    }
+                    None => history.push(RigMessage::user(&msg.content)),
+                }
             }
         }
     }
@@ -358,7 +363,37 @@ mod tests {
         assert_eq!(history.len(), 1);
         // Tool results become User messages in rig-core
         match &history[0] {
-            RigMessage::User { .. } => {}
+            RigMessage::User { content } => {
+                let Some(UserContent::ToolResult(result)) = content.iter().next() else {
+                    panic!("Expected tool result content")
+                };
+                assert_eq!(result.id, "call_123");
+                assert_eq!(result.call_id.as_deref(), Some("call_123"));
+            }
+            other => panic!("Expected User message, got: {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_convert_messages_tool_result_without_call_id_falls_back_to_user_text() {
+        let messages = vec![ChatMessage {
+            role: crate::llm::Role::Tool,
+            content: "result text".to_string(),
+            tool_call_id: None,
+            name: Some("search".to_string()),
+            tool_calls: None,
+        }];
+
+        let (_preamble, history) = convert_messages(&messages);
+        assert_eq!(history.len(), 1);
+
+        match &history[0] {
+            RigMessage::User { content } => {
+                let Some(UserContent::Text(text)) = content.iter().next() else {
+                    panic!("Expected plain user text fallback")
+                };
+                assert_eq!(text.text, "result text");
+            }
             other => panic!("Expected User message, got: {:?}", other),
         }
     }
@@ -378,6 +413,14 @@ mod tests {
             RigMessage::Assistant { content, .. } => {
                 // Should have both text and tool call
                 assert!(content.iter().count() >= 2);
+                let tool_call = content
+                    .iter()
+                    .find_map(|c| match c {
+                        AssistantContent::ToolCall(tc) => Some(tc),
+                        _ => None,
+                    })
+                    .expect("Expected tool call in assistant content");
+                assert_eq!(tool_call.call_id.as_deref(), Some("call_1"));
             }
             other => panic!("Expected Assistant message, got: {:?}", other),
         }

@@ -746,7 +746,7 @@ impl SetupWizard {
         .await
     }
 
-    /// Shared setup flow for API-key-based providers (Anthropic, OpenAI).
+    /// Shared setup flow for API-key-based providers (Anthropic, OpenAI, OpenRouter).
     async fn setup_api_key_provider(
         &mut self,
         backend: &str,
