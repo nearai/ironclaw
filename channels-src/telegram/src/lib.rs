@@ -1039,7 +1039,7 @@ fn handle_message(message: TelegramMessage) {
     );
 
     // For /start with no args, emit placeholder so agent can respond with welcome
-    let content_to_emit = if cleaned_text.is_empty() && content.trim().starts_with('/') {
+    let content_to_emit = if cleaned_text.is_empty() && content.trim().eq_ignore_ascii_case("/start") {
         "[User started the bot]".to_string()
     } else if cleaned_text.is_empty() {
         return;
@@ -1075,8 +1075,8 @@ fn clean_message_text(text: &str, bot_username: Option<&str>) -> String {
         if let Some(space_idx) = result.find(' ') {
             result = result[space_idx..].trim_start().to_string();
         } else {
-            // Just a command with no text
-            return String::new();
+            // Just a command with no text - pass through unchanged
+            return result;
         }
     }
 
@@ -1157,6 +1157,19 @@ mod tests {
             "@alice hello"
         );
         assert_eq!(clean_message_text("@MyBot", Some("MyBot")), "");
+    }
+
+    #[test]
+    fn test_clean_message_text_control_commands() {
+        // Control commands should pass through unchanged
+        assert_eq!(clean_message_text("/interrupt", None), "/interrupt");
+        assert_eq!(clean_message_text("/stop", None), "/stop");
+        assert_eq!(clean_message_text("/help", None), "/help");
+        assert_eq!(clean_message_text("/undo", None), "/undo");
+
+        // Commands with args still get stripped
+        assert_eq!(clean_message_text("/start hello", None), "hello");
+        assert_eq!(clean_message_text("/help me please", None), "me please");
     }
 
     #[test]
