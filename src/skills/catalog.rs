@@ -219,10 +219,14 @@ struct CatalogSearchResult {
 
 /// Construct the download URL for a skill's SKILL.md from the registry.
 ///
-/// The ClawHub download endpoint returns a zip, but for quick install we can
-/// try fetching the raw SKILL.md from the skills archive repo.
+/// The slug is URL-encoded to prevent query string injection via special
+/// characters like `&` or `#`.
 pub fn skill_download_url(registry_url: &str, slug: &str) -> String {
-    format!("{}/api/v1/download?slug={}", registry_url, slug)
+    format!(
+        "{}/api/v1/download?slug={}",
+        registry_url,
+        urlencoding::encode(slug)
+    )
 }
 
 /// Convenience wrapper for creating a shared catalog.
@@ -281,8 +285,14 @@ mod tests {
         let url = skill_download_url("https://clawhub.ai", "owner/my-skill");
         assert_eq!(
             url,
-            "https://clawhub.ai/api/v1/download?slug=owner/my-skill"
+            "https://clawhub.ai/api/v1/download?slug=owner%2Fmy-skill"
         );
+    }
+
+    #[test]
+    fn test_skill_download_url_encodes_special_chars() {
+        let url = skill_download_url("https://clawhub.ai", "foo&bar=baz#frag");
+        assert!(url.contains("slug=foo%26bar%3Dbaz%23frag"));
     }
 
     #[test]

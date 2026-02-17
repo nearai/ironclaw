@@ -85,11 +85,8 @@ cron = "0.13"
 regex = "1"
 aho-corasick = "1"
 
-# TOML parsing for skill manifests
-toml = "0.8"
-
 # YAML parsing for SKILL.md frontmatter
-serde_yaml = "0.9"
+serde_yml = "0.0.12"
 
 # Filesystem paths
 dirs = "6"

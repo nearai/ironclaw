@@ -1897,8 +1897,22 @@ async fn skills_search_handler(
 
 async fn skills_install_handler(
     State(state): State<Arc<GatewayState>>,
+    headers: axum::http::HeaderMap,
     Json(req): Json<super::types::SkillInstallRequest>,
 ) -> Result<Json<ActionResponse>, (StatusCode, String)> {
+    // Require explicit confirmation header to prevent accidental installs.
+    // Chat tools have requires_approval(); this is the equivalent for the web API.
+    if headers
+        .get("x-confirm-action")
+        .and_then(|v| v.to_str().ok())
+        != Some("true")
+    {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "Skill install requires X-Confirm-Action: true header".to_string(),
+        ));
+    }
+
     let registry = state.skill_registry.as_ref().ok_or((
         StatusCode::NOT_IMPLEMENTED,
         "Skills system not enabled".to_string(),
@@ -1907,76 +1921,68 @@ async fn skills_install_handler(
     let content = if let Some(ref raw) = req.content {
         raw.clone()
     } else if let Some(ref url) = req.url {
-        // Fetch from URL
-        let client = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(15))
-            .user_agent("ironclaw/0.1")
-            .build()
-            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-
-        let resp = client
-            .get(url.as_str())
-            .send()
+        // Fetch from explicit URL (with SSRF protection)
+        crate::tools::builtin::skill_tools::fetch_skill_content(url)
             .await
-            .map_err(|e| (StatusCode::BAD_GATEWAY, format!("Fetch failed: {}", e)))?;
-
-        if !resp.status().is_success() {
-            return Ok(Json(ActionResponse::fail(format!(
-                "Fetch returned HTTP {}",
-                resp.status()
-            ))));
-        }
-
-        resp.text()
-            .await
-            .map_err(|e| (StatusCode::BAD_GATEWAY, format!("Read body failed: {}", e)))?
+            .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?
     } else if let Some(ref catalog) = state.skill_catalog {
         let url = crate::skills::catalog::skill_download_url(catalog.registry_url(), &req.name);
-        let client = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(15))
-            .user_agent("ironclaw/0.1")
-            .build()
-            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-
-        let resp = client
-            .get(&url)
-            .send()
+        crate::tools::builtin::skill_tools::fetch_skill_content(&url)
             .await
-            .map_err(|e| (StatusCode::BAD_GATEWAY, format!("Fetch failed: {}", e)))?;
-
-        if !resp.status().is_success() {
-            return Ok(Json(ActionResponse::fail(format!(
-                "Catalog fetch returned HTTP {}",
-                resp.status()
-            ))));
-        }
-
-        resp.text()
-            .await
-            .map_err(|e| (StatusCode::BAD_GATEWAY, format!("Read body failed: {}", e)))?
+            .map_err(|e| (StatusCode::BAD_GATEWAY, e.to_string()))?
     } else {
         return Ok(Json(ActionResponse::fail(
             "Provide 'content' or 'url' to install a skill".to_string(),
         )));
     };
 
-    let result = {
-        let mut guard = registry.write().map_err(|e| {
+    // Parse, check duplicates, and get user_dir under a brief read lock.
+    let (user_dir, skill_name_from_parse) = {
+        let guard = registry.read().map_err(|e| {
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 format!("Skill registry lock poisoned: {}", e),
             )
         })?;
-        // Bridge sync lock with async install
-        tokio::task::block_in_place(|| {
-            tokio::runtime::Handle::current().block_on(guard.install_skill(&content))
-        })
+
+        let normalized = crate::skills::normalize_line_endings(&content);
+        let parsed = crate::skills::parser::parse_skill_md(&normalized)
+            .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
+        let skill_name = parsed.manifest.name.clone();
+
+        if guard.has(&skill_name) {
+            return Ok(Json(ActionResponse::fail(format!(
+                "Skill '{}' already exists",
+                skill_name
+            ))));
+        }
+
+        (guard.user_dir().to_path_buf(), skill_name)
     };
 
-    match result {
-        Ok(name) => Ok(Json(ActionResponse::ok(format!(
+    // Perform async I/O (write to disk, load) with no lock held.
+    let normalized = crate::skills::normalize_line_endings(&content);
+    let (skill_name, loaded_skill) =
+        crate::skills::registry::SkillRegistry::prepare_install_to_disk(
+            &user_dir,
+            &skill_name_from_parse,
+            &normalized,
+        )
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    // Commit: brief write lock for in-memory addition
+    let mut guard = registry.write().map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Skill registry lock poisoned: {}", e),
+        )
+    })?;
+
+    match guard.commit_install(&skill_name, loaded_skill) {
+        Ok(()) => Ok(Json(ActionResponse::ok(format!(
             "Skill '{}' installed",
-            name
+            skill_name
         )))),
         Err(e) => Ok(Json(ActionResponse::fail(e.to_string()))),
     }
@@ -1984,26 +1990,53 @@ async fn skills_install_handler(
 
 async fn skills_remove_handler(
     State(state): State<Arc<GatewayState>>,
+    headers: axum::http::HeaderMap,
     Path(name): Path<String>,
 ) -> Result<Json<ActionResponse>, (StatusCode, String)> {
+    // Require explicit confirmation header to prevent accidental removals.
+    if headers
+        .get("x-confirm-action")
+        .and_then(|v| v.to_str().ok())
+        != Some("true")
+    {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "Skill removal requires X-Confirm-Action: true header".to_string(),
+        ));
+    }
+
     let registry = state.skill_registry.as_ref().ok_or((
         StatusCode::NOT_IMPLEMENTED,
         "Skills system not enabled".to_string(),
     ))?;
 
-    let result = {
-        let mut guard = registry.write().map_err(|e| {
+    // Validate removal under a brief read lock
+    let skill_path = {
+        let guard = registry.read().map_err(|e| {
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 format!("Skill registry lock poisoned: {}", e),
             )
         })?;
-        tokio::task::block_in_place(|| {
-            tokio::runtime::Handle::current().block_on(guard.remove_skill(&name))
-        })
+        guard
+            .validate_remove(&name)
+            .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?
     };
 
-    match result {
+    // Delete files from disk (async I/O, no lock held)
+    crate::skills::registry::SkillRegistry::delete_skill_files(&skill_path)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    // Remove from in-memory registry under a brief write lock
+    let mut guard = registry.write().map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Skill registry lock poisoned: {}", e),
+        )
+    })?;
+
+    match guard.commit_remove(&name) {
         Ok(()) => Ok(Json(ActionResponse::ok(format!(
             "Skill '{}' removed",
             name

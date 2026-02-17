@@ -298,27 +298,49 @@ impl Tool for SkillInstallTool {
             fetch_skill_content(&download_url).await?
         };
 
-        // Install into registry
+        // Check for duplicates and get user_dir under a brief read lock.
+        let (user_dir, skill_name_from_parse) = {
+            let guard = self
+                .registry
+                .read()
+                .map_err(|e| ToolError::ExecutionFailed(format!("Lock poisoned: {}", e)))?;
+
+            // Parse to extract the name (cheap, in-memory)
+            let normalized = crate::skills::normalize_line_endings(&content);
+            let parsed = crate::skills::parser::parse_skill_md(&normalized)
+                .map_err(|e| ToolError::ExecutionFailed(e.to_string()))?;
+            let skill_name = parsed.manifest.name.clone();
+
+            if guard.has(&skill_name) {
+                return Err(ToolError::ExecutionFailed(format!(
+                    "Skill '{}' already exists",
+                    skill_name
+                )));
+            }
+
+            (guard.user_dir().to_path_buf(), skill_name)
+        };
+
+        // Perform async I/O (write to disk, validate round-trip) with no lock held.
+        let (skill_name, loaded_skill) =
+            crate::skills::registry::SkillRegistry::prepare_install_to_disk(
+                &user_dir,
+                &skill_name_from_parse,
+                &crate::skills::normalize_line_endings(&content),
+            )
+            .await
+            .map_err(|e| ToolError::ExecutionFailed(e.to_string()))?;
+
+        // Commit the in-memory addition under a brief write lock.
         let installed_name = {
             let mut guard = self
                 .registry
                 .write()
                 .map_err(|e| ToolError::ExecutionFailed(format!("Lock poisoned: {}", e)))?;
-
-            // install_skill is async but we hold a sync lock. We need to use
-            // tokio::task::block_in_place to bridge.
-            // Actually, install_skill does filesystem I/O which requires async.
-            // We'll need to drop the lock, do the install preparation, then re-acquire.
-            // For now, since install_skill takes &mut self, we use a blocking approach.
-            //
-            // The RwLock is only held briefly during in-memory operations.
-            // File I/O happens inside install_skill which we call while holding the lock.
-            // This is acceptable because install is rare and the lock duration is bounded.
-            tokio::task::block_in_place(|| {
-                tokio::runtime::Handle::current()
-                    .block_on(guard.install_skill(&content))
-                    .map_err(|e| ToolError::ExecutionFailed(e.to_string()))
-            })?
+            guard
+                .commit_install(&skill_name, loaded_skill)
+                .map_err(|e| ToolError::ExecutionFailed(e.to_string()))?;
+            skill_name
         };
 
         let output = serde_json::json!({
@@ -339,11 +361,90 @@ impl Tool for SkillInstallTool {
     }
 }
 
-/// Fetch SKILL.md content from a URL.
-async fn fetch_skill_content(url: &str) -> Result<String, ToolError> {
+/// Validate that a URL is safe to fetch (SSRF prevention).
+///
+/// Rejects:
+/// - Non-HTTPS URLs (except in tests)
+/// - URLs pointing to private, loopback, or link-local IP addresses
+/// - URLs without a host
+pub fn validate_fetch_url(url_str: &str) -> Result<(), ToolError> {
+    let parsed = url::Url::parse(url_str)
+        .map_err(|e| ToolError::ExecutionFailed(format!("Invalid URL '{}': {}", url_str, e)))?;
+
+    // Require HTTPS
+    if parsed.scheme() != "https" {
+        return Err(ToolError::ExecutionFailed(format!(
+            "Only HTTPS URLs are allowed for skill fetching, got scheme '{}'",
+            parsed.scheme()
+        )));
+    }
+
+    let host = parsed
+        .host_str()
+        .ok_or_else(|| ToolError::ExecutionFailed("URL has no host".to_string()))?;
+
+    // Check if host is an IP address and reject private ranges
+    if let Ok(ip) = host.parse::<std::net::IpAddr>()
+        && (ip.is_loopback()
+            || ip.is_unspecified()
+            || is_private_ip(&ip)
+            || is_link_local_ip(&ip))
+    {
+        return Err(ToolError::ExecutionFailed(format!(
+            "URL points to a private/loopback/link-local address: {}",
+            host
+        )));
+    }
+
+    // Reject common internal hostnames
+    let host_lower = host.to_lowercase();
+    if host_lower == "localhost"
+        || host_lower == "metadata.google.internal"
+        || host_lower.ends_with(".internal")
+        || host_lower.ends_with(".local")
+    {
+        return Err(ToolError::ExecutionFailed(format!(
+            "URL points to an internal hostname: {}",
+            host
+        )));
+    }
+
+    Ok(())
+}
+
+fn is_private_ip(ip: &std::net::IpAddr) -> bool {
+    match ip {
+        std::net::IpAddr::V4(v4) => {
+            // 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 169.254.0.0/16
+            v4.is_private() || v4.is_link_local()
+        }
+        std::net::IpAddr::V6(v6) => {
+            // Unique local (fc00::/7)
+            let segments = v6.segments();
+            (segments[0] & 0xfe00) == 0xfc00
+        }
+    }
+}
+
+fn is_link_local_ip(ip: &std::net::IpAddr) -> bool {
+    match ip {
+        std::net::IpAddr::V4(v4) => v4.is_link_local(),
+        std::net::IpAddr::V6(v6) => {
+            // fe80::/10
+            let segments = v6.segments();
+            (segments[0] & 0xffc0) == 0xfe80
+        }
+    }
+}
+
+/// Fetch SKILL.md content from a URL with SSRF protection.
+pub async fn fetch_skill_content(url: &str) -> Result<String, ToolError> {
+    validate_fetch_url(url)?;
+
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(15))
         .user_agent("ironclaw/0.1")
+        .redirect(reqwest::redirect::Policy::none())
         .build()
         .map_err(|e| ToolError::ExecutionFailed(format!("HTTP client error: {}", e)))?;
 
@@ -419,17 +520,31 @@ impl Tool for SkillRemoveTool {
         let start = std::time::Instant::now();
         let name = require_str(&params, "name")?;
 
+        // Validate removal and get the filesystem path under a brief read lock.
+        let skill_path = {
+            let guard = self
+                .registry
+                .read()
+                .map_err(|e| ToolError::ExecutionFailed(format!("Lock poisoned: {}", e)))?;
+            guard
+                .validate_remove(name)
+                .map_err(|e| ToolError::ExecutionFailed(e.to_string()))?
+        };
+
+        // Delete files from disk (async I/O, no lock held).
+        crate::skills::registry::SkillRegistry::delete_skill_files(&skill_path)
+            .await
+            .map_err(|e| ToolError::ExecutionFailed(e.to_string()))?;
+
+        // Remove from in-memory registry under a brief write lock.
         {
             let mut guard = self
                 .registry
                 .write()
                 .map_err(|e| ToolError::ExecutionFailed(format!("Lock poisoned: {}", e)))?;
-
-            tokio::task::block_in_place(|| {
-                tokio::runtime::Handle::current()
-                    .block_on(guard.remove_skill(name))
-                    .map_err(|e| ToolError::ExecutionFailed(e.to_string()))
-            })?;
+            guard
+                .commit_remove(name)
+                .map_err(|e| ToolError::ExecutionFailed(e.to_string()))?;
         }
 
         let output = serde_json::json!({
@@ -497,5 +612,54 @@ mod tests {
         assert!(tool.requires_approval());
         let schema = tool.parameters_schema();
         assert!(schema["properties"].get("name").is_some());
+    }
+
+    #[test]
+    fn test_validate_fetch_url_allows_https() {
+        assert!(super::validate_fetch_url("https://clawhub.ai/api/v1/download?slug=foo").is_ok());
+    }
+
+    #[test]
+    fn test_validate_fetch_url_rejects_http() {
+        let err = super::validate_fetch_url("http://example.com/skill.md").unwrap_err();
+        assert!(err.to_string().contains("Only HTTPS"));
+    }
+
+    #[test]
+    fn test_validate_fetch_url_rejects_private_ip() {
+        let err = super::validate_fetch_url("https://192.168.1.1/skill.md").unwrap_err();
+        assert!(err.to_string().contains("private"));
+    }
+
+    #[test]
+    fn test_validate_fetch_url_rejects_loopback() {
+        let err = super::validate_fetch_url("https://127.0.0.1/skill.md").unwrap_err();
+        assert!(err.to_string().contains("private"));
+    }
+
+    #[test]
+    fn test_validate_fetch_url_rejects_localhost() {
+        let err = super::validate_fetch_url("https://localhost/skill.md").unwrap_err();
+        assert!(err.to_string().contains("internal hostname"));
+    }
+
+    #[test]
+    fn test_validate_fetch_url_rejects_metadata_endpoint() {
+        let err =
+            super::validate_fetch_url("https://169.254.169.254/latest/meta-data/").unwrap_err();
+        assert!(err.to_string().contains("private"));
+    }
+
+    #[test]
+    fn test_validate_fetch_url_rejects_internal_domain() {
+        let err =
+            super::validate_fetch_url("https://metadata.google.internal/something").unwrap_err();
+        assert!(err.to_string().contains("internal hostname"));
+    }
+
+    #[test]
+    fn test_validate_fetch_url_rejects_file_scheme() {
+        let err = super::validate_fetch_url("file:///etc/passwd").unwrap_err();
+        assert!(err.to_string().contains("Only HTTPS"));
     }
 }

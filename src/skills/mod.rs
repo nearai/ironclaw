@@ -401,7 +401,7 @@ activation:
   patterns: ["(?i)\\b(write|draft)\\b.*\\b(email|letter)\\b"]
   max_context_tokens: 2000
 "#;
-        let manifest: SkillManifest = serde_yaml::from_str(yaml).expect("parse failed");
+        let manifest: SkillManifest = serde_yml::from_str(yaml).expect("parse failed");
         assert_eq!(manifest.name, "writing-assistant");
         assert_eq!(manifest.activation.keywords.len(), 3);
     }
@@ -417,7 +417,7 @@ metadata:
       env: ["VALE_CONFIG"]
       config: ["/etc/vale.ini"]
 "#;
-        let manifest: SkillManifest = serde_yaml::from_str(yaml).expect("parse failed");
+        let manifest: SkillManifest = serde_yml::from_str(yaml).expect("parse failed");
         let meta = manifest.metadata.unwrap();
         let openclaw = meta.openclaw.unwrap();
         assert_eq!(openclaw.requires.bins, vec!["vale"]);

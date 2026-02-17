@@ -310,7 +310,8 @@ impl SkillRegistry {
         }
 
         // Check token budget (reject if prompt is > 2x declared budget)
-        let approx_tokens = (prompt_content.len() as f64 * 0.75) as usize;
+        // ~4 bytes per token for English prose = ~0.25 tokens per byte
+        let approx_tokens = (prompt_content.len() as f64 * 0.25) as usize;
         let declared = manifest.activation.max_context_tokens;
         if declared > 0 && approx_tokens > declared * 2 {
             return Err(SkillRegistryError::TokenBudgetExceeded {
@@ -359,15 +360,65 @@ impl SkillRegistry {
         self.skills.iter().find(|s| s.manifest.name == name)
     }
 
+    /// Perform the disk I/O and loading for a skill install.
+    ///
+    /// This is a static method so it doesn't borrow `&self`, allowing callers
+    /// to drop their registry lock before awaiting.
+    pub async fn prepare_install_to_disk(
+        user_dir: &Path,
+        skill_name: &str,
+        normalized_content: &str,
+    ) -> Result<(String, LoadedSkill), SkillRegistryError> {
+        let skill_dir = user_dir.join(skill_name);
+        tokio::fs::create_dir_all(&skill_dir).await.map_err(|e| {
+            SkillRegistryError::WriteError {
+                path: skill_dir.display().to_string(),
+                reason: e.to_string(),
+            }
+        })?;
+
+        let skill_path = skill_dir.join("SKILL.md");
+        tokio::fs::write(&skill_path, normalized_content)
+            .await
+            .map_err(|e| SkillRegistryError::WriteError {
+                path: skill_path.display().to_string(),
+                reason: e.to_string(),
+            })?;
+
+        // Load by re-reading from disk (validates round-trip)
+        let source = SkillSource::User(skill_dir);
+        // Use a temporary registry-less load (load_skill_md_standalone)
+        load_skill_md_standalone(&skill_path, SkillTrust::Installed, source).await
+    }
+
+    /// Commit a prepared skill into the in-memory registry.
+    ///
+    /// This is a fast, synchronous operation that only adds to the Vec.
+    /// Call after `prepare_install` completes.
+    pub fn commit_install(
+        &mut self,
+        name: &str,
+        skill: LoadedSkill,
+    ) -> Result<(), SkillRegistryError> {
+        // Re-check for duplicates (another thread may have installed between prepare and commit)
+        if self.has(name) {
+            return Err(SkillRegistryError::AlreadyExists {
+                name: name.to_string(),
+            });
+        }
+        self.skills.push(skill);
+        tracing::info!("Installed skill: {}", name);
+        Ok(())
+    }
+
     /// Install a skill at runtime from SKILL.md content.
     ///
-    /// Parses the content, validates it, writes it to `user_dir/<name>/SKILL.md`,
-    /// and loads it into the registry. Installed skills get `SkillTrust::Installed`
-    /// since they come from external sources.
+    /// Convenience method that parses, writes to disk, and commits in-memory.
+    /// When called through tool execution where a lock is involved, prefer using
+    /// `prepare_install_to_disk` + `commit_install` separately to minimize lock
+    /// hold time.
     pub async fn install_skill(&mut self, content: &str) -> Result<String, SkillRegistryError> {
         let normalized = normalize_line_endings(content);
-
-        // Parse and validate before writing to disk
         let parsed = parse_skill_md(&normalized).map_err(|e: SkillParseError| match e {
             SkillParseError::InvalidName { ref name } => SkillRegistryError::ParseError {
                 name: name.clone(),
@@ -378,48 +429,23 @@ impl SkillRegistry {
                 reason: e.to_string(),
             },
         })?;
-
         let skill_name = parsed.manifest.name.clone();
-
-        // Reject duplicates
         if self.has(&skill_name) {
             return Err(SkillRegistryError::AlreadyExists { name: skill_name });
         }
-
-        // Write to user_dir/<name>/SKILL.md
-        let skill_dir = self.user_dir.join(&skill_name);
-        tokio::fs::create_dir_all(&skill_dir).await.map_err(|e| {
-            SkillRegistryError::WriteError {
-                path: skill_dir.display().to_string(),
-                reason: e.to_string(),
-            }
-        })?;
-
-        let skill_path = skill_dir.join("SKILL.md");
-        tokio::fs::write(&skill_path, content).await.map_err(|e| {
-            SkillRegistryError::WriteError {
-                path: skill_path.display().to_string(),
-                reason: e.to_string(),
-            }
-        })?;
-
-        // Load with Installed trust (external source)
-        let source = SkillSource::User(skill_dir);
-        let (name, skill) = self
-            .load_skill_md(&skill_path, SkillTrust::Installed, source)
-            .await?;
-
-        self.skills.push(skill);
-        tracing::info!("Installed skill: {}", name);
-
+        let user_dir = self.user_dir.clone();
+        let (name, skill) =
+            Self::prepare_install_to_disk(&user_dir, &skill_name, &normalized).await?;
+        self.commit_install(&name, skill)?;
         Ok(name)
     }
 
-    /// Remove a skill by name.
+    /// Validate that a skill can be removed and return its filesystem path.
     ///
-    /// Only allows removing skills from the user directory. Workspace and bundled
-    /// skills cannot be removed through this interface.
-    pub async fn remove_skill(&mut self, name: &str) -> Result<(), SkillRegistryError> {
+    /// Performs validation without modifying state. Callers can then do async
+    /// filesystem cleanup without holding the registry lock, and call
+    /// `commit_remove` afterward.
+    pub fn validate_remove(&self, name: &str) -> Result<PathBuf, SkillRegistryError> {
         let idx = self
             .skills
             .iter()
@@ -428,45 +454,65 @@ impl SkillRegistry {
 
         let skill = &self.skills[idx];
 
-        // Only allow removing user-dir skills
         match &skill.source {
-            SkillSource::User(path) => {
-                let skill_md = path.join("SKILL.md");
-                if tokio::fs::try_exists(&skill_md).await.unwrap_or(false) {
-                    tokio::fs::remove_file(&skill_md).await.map_err(|e| {
-                        SkillRegistryError::WriteError {
-                            path: skill_md.display().to_string(),
-                            reason: e.to_string(),
-                        }
-                    })?;
-                    // Remove the directory if empty
-                    let _ = tokio::fs::remove_dir(path).await;
-                }
-            }
-            SkillSource::Workspace(_) => {
-                return Err(SkillRegistryError::CannotRemove {
-                    name: name.to_string(),
-                    reason: "workspace skills cannot be removed via this interface".to_string(),
-                });
-            }
-            SkillSource::Bundled(_) => {
-                return Err(SkillRegistryError::CannotRemove {
-                    name: name.to_string(),
-                    reason: "bundled skills cannot be removed".to_string(),
-                });
-            }
-            SkillSource::Registry { .. } => {
-                return Err(SkillRegistryError::CannotRemove {
-                    name: name.to_string(),
-                    reason: "registry skills should be uninstalled, not removed".to_string(),
-                });
-            }
+            SkillSource::User(path) => Ok(path.clone()),
+            SkillSource::Workspace(_) => Err(SkillRegistryError::CannotRemove {
+                name: name.to_string(),
+                reason: "workspace skills cannot be removed via this interface".to_string(),
+            }),
+            SkillSource::Bundled(_) => Err(SkillRegistryError::CannotRemove {
+                name: name.to_string(),
+                reason: "bundled skills cannot be removed".to_string(),
+            }),
+            SkillSource::Registry { .. } => Err(SkillRegistryError::CannotRemove {
+                name: name.to_string(),
+                reason: "registry skills should be uninstalled, not removed".to_string(),
+            }),
         }
+    }
+
+    /// Remove a skill's files from disk (async I/O).
+    ///
+    /// Call after `validate_remove` and before `commit_remove`.
+    pub async fn delete_skill_files(path: &Path) -> Result<(), SkillRegistryError> {
+        let skill_md = path.join("SKILL.md");
+        if tokio::fs::try_exists(&skill_md).await.unwrap_or(false) {
+            tokio::fs::remove_file(&skill_md).await.map_err(|e| {
+                SkillRegistryError::WriteError {
+                    path: skill_md.display().to_string(),
+                    reason: e.to_string(),
+                }
+            })?;
+            // Remove the directory if empty
+            let _ = tokio::fs::remove_dir(path).await;
+        }
+        Ok(())
+    }
+
+    /// Remove a skill from the in-memory registry.
+    ///
+    /// Fast synchronous operation. Call after filesystem cleanup.
+    pub fn commit_remove(&mut self, name: &str) -> Result<(), SkillRegistryError> {
+        let idx = self
+            .skills
+            .iter()
+            .position(|s| s.manifest.name == name)
+            .ok_or_else(|| SkillRegistryError::NotFound(name.to_string()))?;
 
         self.skills.remove(idx);
         tracing::info!("Removed skill: {}", name);
-
         Ok(())
+    }
+
+    /// Remove a skill by name.
+    ///
+    /// Convenience method that combines validation, file deletion, and in-memory
+    /// removal. When called through tool execution, prefer using the split
+    /// validate/delete/commit methods to minimize lock hold time.
+    pub async fn remove_skill(&mut self, name: &str) -> Result<(), SkillRegistryError> {
+        let path = self.validate_remove(name)?;
+        Self::delete_skill_files(&path).await?;
+        self.commit_remove(name)
     }
 
     /// Clear all loaded skills and re-discover from disk.
@@ -479,6 +525,104 @@ impl SkillRegistry {
     pub fn user_dir(&self) -> &Path {
         &self.user_dir
     }
+}
+
+/// Load a single SKILL.md file without requiring a SkillRegistry instance.
+///
+/// This is used by `prepare_install_to_disk` to avoid borrowing the registry
+/// across async boundaries.
+async fn load_skill_md_standalone(
+    path: &Path,
+    trust: SkillTrust,
+    source: SkillSource,
+) -> Result<(String, LoadedSkill), SkillRegistryError> {
+    // Check for symlink at the file level
+    let file_meta =
+        tokio::fs::symlink_metadata(path)
+            .await
+            .map_err(|e| SkillRegistryError::ReadError {
+                path: path.display().to_string(),
+                reason: e.to_string(),
+            })?;
+
+    if file_meta.is_symlink() {
+        return Err(SkillRegistryError::SymlinkDetected {
+            path: path.display().to_string(),
+        });
+    }
+
+    let raw_bytes = tokio::fs::read(path)
+        .await
+        .map_err(|e| SkillRegistryError::ReadError {
+            path: path.display().to_string(),
+            reason: e.to_string(),
+        })?;
+
+    if raw_bytes.len() as u64 > MAX_PROMPT_FILE_SIZE {
+        return Err(SkillRegistryError::FileTooLarge {
+            name: path.display().to_string(),
+            size: raw_bytes.len() as u64,
+            max: MAX_PROMPT_FILE_SIZE,
+        });
+    }
+
+    let raw_content = String::from_utf8(raw_bytes).map_err(|e| SkillRegistryError::ReadError {
+        path: path.display().to_string(),
+        reason: format!("Invalid UTF-8: {}", e),
+    })?;
+
+    let normalized_content = normalize_line_endings(&raw_content);
+
+    let parsed = parse_skill_md(&normalized_content).map_err(|e: SkillParseError| match e {
+        SkillParseError::InvalidName { ref name } => SkillRegistryError::ParseError {
+            name: name.clone(),
+            reason: e.to_string(),
+        },
+        _ => SkillRegistryError::ParseError {
+            name: path.display().to_string(),
+            reason: e.to_string(),
+        },
+    })?;
+
+    let manifest = parsed.manifest;
+    let prompt_content = parsed.prompt_content;
+
+    if let Some(ref meta) = manifest.metadata
+        && let Some(ref openclaw) = meta.openclaw
+    {
+        let gating = check_requirements(&openclaw.requires);
+        if !gating.passed {
+            return Err(SkillRegistryError::GatingFailed {
+                name: manifest.name.clone(),
+                reason: gating.failures.join("; "),
+            });
+        }
+    }
+
+    let approx_tokens = (prompt_content.len() as f64 * 0.25) as usize;
+    let declared = manifest.activation.max_context_tokens;
+    if declared > 0 && approx_tokens > declared * 2 {
+        return Err(SkillRegistryError::TokenBudgetExceeded {
+            name: manifest.name.clone(),
+            approx_tokens,
+            declared,
+        });
+    }
+
+    let content_hash = compute_hash(&prompt_content);
+    let compiled_patterns = LoadedSkill::compile_patterns(&manifest.activation.patterns);
+
+    let name = manifest.name.clone();
+    let skill = LoadedSkill {
+        manifest,
+        prompt_content,
+        trust,
+        source,
+        content_hash,
+        compiled_patterns,
+    };
+
+    Ok((name, skill))
 }
 
 /// Compute SHA-256 hash of content in the format "sha256:hex...".
