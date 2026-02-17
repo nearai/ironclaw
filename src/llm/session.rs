@@ -432,9 +432,9 @@ impl SessionManager {
             .get_setting(&user_id, "nearai.session_token")
             .await
             .map_err(|e| LlmError::SessionRenewalFailed {
-                provider: "nearai".to_string(),
-                reason: format!("DB query failed: {}", e),
-            })? {
+            provider: "nearai".to_string(),
+            reason: format!("DB query failed: {}", e),
+        })? {
             value
         } else {
             tracing::warn!(
