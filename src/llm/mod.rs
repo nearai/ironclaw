@@ -276,6 +276,7 @@ mod tests {
             anthropic: None,
             ollama: None,
             openai_compatible: None,
+            tinfoil: None,
         }
     }
 
