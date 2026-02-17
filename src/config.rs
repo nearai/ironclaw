@@ -319,6 +319,7 @@ impl std::fmt::Display for LlmBackend {
 /// Configuration for direct OpenAI API access.
 #[derive(Debug, Clone)]
 pub struct OpenAiDirectConfig {
+    /// OpenAI credential (API key or Codex OAuth access token).
     pub api_key: SecretString,
     pub model: String,
 }
@@ -326,6 +327,7 @@ pub struct OpenAiDirectConfig {
 /// Configuration for direct Anthropic API access.
 #[derive(Debug, Clone)]
 pub struct AnthropicDirectConfig {
+    /// Anthropic credential (API key or Claude setup-token).
     pub api_key: SecretString,
     pub model: String,
 }
@@ -492,10 +494,13 @@ impl LlmConfig {
         // Resolve provider-specific configs based on backend
         let openai = if backend == LlmBackend::OpenAi {
             let api_key = optional_env("OPENAI_API_KEY")?
+                .or(optional_env("OPENAI_CODEX_OAUTH_TOKEN")?)
                 .map(SecretString::from)
                 .ok_or_else(|| ConfigError::MissingRequired {
                     key: "OPENAI_API_KEY".to_string(),
-                    hint: "Set OPENAI_API_KEY when LLM_BACKEND=openai".to_string(),
+                    hint:
+                        "Set OPENAI_API_KEY (or OPENAI_CODEX_OAUTH_TOKEN) when LLM_BACKEND=openai"
+                            .to_string(),
                 })?;
             let model = optional_env("OPENAI_MODEL")?.unwrap_or_else(|| "gpt-4o".to_string());
             Some(OpenAiDirectConfig { api_key, model })
@@ -505,10 +510,11 @@ impl LlmConfig {
 
         let anthropic = if backend == LlmBackend::Anthropic {
             let api_key = optional_env("ANTHROPIC_API_KEY")?
+                .or(optional_env("ANTHROPIC_OAUTH_TOKEN")?)
                 .map(SecretString::from)
                 .ok_or_else(|| ConfigError::MissingRequired {
                     key: "ANTHROPIC_API_KEY".to_string(),
-                    hint: "Set ANTHROPIC_API_KEY when LLM_BACKEND=anthropic".to_string(),
+                    hint: "Set ANTHROPIC_API_KEY (or ANTHROPIC_OAUTH_TOKEN) when LLM_BACKEND=anthropic".to_string(),
                 })?;
             let model = optional_env("ANTHROPIC_MODEL")?
                 .unwrap_or_else(|| "claude-sonnet-4-20250514".to_string());
@@ -1400,7 +1406,9 @@ pub async fn inject_llm_keys_from_secrets(
 ) {
     let mappings = [
         ("llm_openai_api_key", "OPENAI_API_KEY"),
+        ("llm_openai_codex_oauth_token", "OPENAI_CODEX_OAUTH_TOKEN"),
         ("llm_anthropic_api_key", "ANTHROPIC_API_KEY"),
+        ("llm_anthropic_oauth_token", "ANTHROPIC_OAUTH_TOKEN"),
         ("llm_compatible_api_key", "LLM_API_KEY"),
     ];
 

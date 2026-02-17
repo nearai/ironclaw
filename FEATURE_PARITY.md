@@ -159,8 +159,8 @@ This document tracks feature parity between IronClaw (Rust implementation) and O
 | Provider | OpenClaw | IronClaw | Priority | Notes |
 |----------|----------|----------|----------|-------|
 | NEAR AI | ✅ | ✅ | - | Primary provider |
-| Anthropic (Claude) | ✅ | 🚧 | - | Via NEAR AI proxy |
-| OpenAI | ✅ | 🚧 | - | Via NEAR AI proxy |
+| Anthropic (Claude) | ✅ | 🚧 | - | Direct provider + API key/setup-token; no multi-profile auth routing |
+| OpenAI | ✅ | 🚧 | - | Direct provider + API key/Codex OAuth token; no dedicated openai-codex provider |
 | AWS Bedrock | ✅ | ❌ | P3 | |
 | Google Gemini | ✅ | ❌ | P3 | |
 | OpenRouter | ✅ | ❌ | P3 | |
@@ -349,7 +349,7 @@ This document tracks feature parity between IronClaw (Rust implementation) and O
 | Gateway token auth | ✅ | ✅ | Bearer token auth on web gateway |
 | Device pairing | ✅ | ❌ | |
 | Tailscale identity | ✅ | ❌ | |
-| OAuth flows | ✅ | 🚧 | NEAR AI OAuth |
+| OAuth flows | ✅ | 🚧 | NEAR AI OAuth + MCP/WASM OAuth + Anthropic setup-token + Codex token import |
 | DM pairing verification | ✅ | ✅ | ironclaw pairing approve, host APIs |
 | Allowlist/blocklist | ✅ | 🚧 | allow_from + pairing store |
 | Per-group tool policies | ✅ | ❌ | |

@@ -166,8 +166,8 @@ env-var mode or skipped secrets.
 | Provider | Auth Method | Secret Name | Env Var |
 |----------|-------------|-------------|---------|
 | NEAR AI | Browser OAuth | (session token) | `NEARAI_SESSION_TOKEN` |
-| Anthropic | API key | `anthropic_api_key` | `ANTHROPIC_API_KEY` |
-| OpenAI | API key | `openai_api_key` | `OPENAI_API_KEY` |
+| Anthropic | API key or setup-token | `llm_anthropic_api_key` / `llm_anthropic_oauth_token` | `ANTHROPIC_API_KEY` / `ANTHROPIC_OAUTH_TOKEN` |
+| OpenAI | API key or Codex OAuth token | `llm_openai_api_key` / `llm_openai_codex_oauth_token` | `OPENAI_API_KEY` / `OPENAI_CODEX_OAUTH_TOKEN` |
 | Ollama | None | - | - |
 | OpenAI-compatible | Optional API key | `llm_compatible_api_key` | `LLM_API_KEY` |
 
@@ -176,6 +176,16 @@ env-var mode or skipped secrets.
 2. Otherwise prompt for key entry via `secret_input()`
 3. Store encrypted in secrets via `init_secrets_context()`
 4. **Cache key in `self.llm_api_key`** for model fetching in Step 4
+
+**Anthropic setup-token flow**:
+1. User runs `claude setup-token`
+2. Wizard validates token format (`sk-ant-oat01-` prefix + minimum length)
+3. Token stored as `llm_anthropic_oauth_token`
+
+**OpenAI Codex OAuth token flow**:
+1. Reuse `OPENAI_CODEX_OAUTH_TOKEN` if set, otherwise auto-import from `$CODEX_HOME/auth.json` (`~/.codex/auth.json` fallback)
+2. Optional manual paste fallback
+3. Token stored as `llm_openai_codex_oauth_token`
 
 **NEAR AI** (`setup_nearai`):
 - Calls `session_manager.ensure_authenticated()` which opens browser
