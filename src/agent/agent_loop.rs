@@ -23,7 +23,7 @@ use crate::db::Database;
 use crate::error::Error;
 use crate::extensions::ExtensionManager;
 use crate::hooks::HookRegistry;
-use crate::llm::{ChatMessage, LlmProvider, Reasoning, ReasoningContext, RespondResult};
+use crate::llm::{ChatMessage, LlmProvider, Reasoning, ReasoningContext, RespondResult, ToolCall};
 use crate::safety::SafetyLayer;
 use crate::tools::ToolRegistry;
 use crate::workspace::Workspace;
@@ -49,6 +49,22 @@ pub(crate) fn truncate_for_preview(output: &str, max_chars: usize) -> String {
     } else {
         collapsed
     }
+}
+
+fn parse_force_tool_retry_decision(raw: &str) -> Option<bool> {
+    let parse_json = |candidate: &str| -> Option<bool> {
+        let value: serde_json::Value = serde_json::from_str(candidate).ok()?;
+        value.get("force_retry").and_then(|v| v.as_bool())
+    };
+
+    parse_json(raw).or_else(|| {
+        let start = raw.find('{')?;
+        let end = raw.rfind('}')?;
+        if end <= start {
+            return None;
+        }
+        parse_json(&raw[start..=end])
+    })
 }
 
 /// Result of the agentic loop execution.
@@ -1087,6 +1103,33 @@ impl Agent {
         });
     }
 
+    async fn decide_force_tool_retry(
+        &self,
+        initial_messages: &[ChatMessage],
+        user_input: &str,
+    ) -> bool {
+        let mut decision_messages = initial_messages.to_vec();
+        decision_messages.push(ChatMessage::assistant(
+            "No tools were used in this first response.",
+        ));
+        decision_messages.push(ChatMessage::user(format!(
+            "Decide if the assistant should force another tool-use attempt when the model just returned plain text without tool calls.\nReturn strict JSON only: {{\"force_retry\": true|false}}.\nUse true only when the user explicitly requested external actions/data retrieval (web fetch, search, file/system operations, booking, execution).\nUse false for meta/config/how-to questions, clarifications, or likely topic shifts away from the previous task.\n\nLatest user input:\n{}\n\nShould we force a tool-use retry?",
+            user_input
+        )));
+
+        let request = crate::llm::CompletionRequest::new(decision_messages)
+            .with_temperature(0.0)
+            .with_max_tokens(64);
+
+        match self.llm().complete(request).await {
+            Ok(resp) => parse_force_tool_retry_decision(&resp.content).unwrap_or(false),
+            Err(e) => {
+                tracing::debug!("Failed to decide force-tool retry: {}", e);
+                false
+            }
+        }
+    }
+
     /// Run the agentic loop: call LLM, execute tools, repeat until text response.
     ///
     /// Returns `AgenticLoopResult::Response` on completion, or
@@ -1122,7 +1165,10 @@ impl Agent {
             reasoning = reasoning.with_system_prompt(prompt);
         }
 
-        // Build context with messages that we'll mutate during the loop
+        // Keep the original turn context for force-retry decisioning.
+        let decision_seed_messages = initial_messages.clone();
+
+        // Build context with messages that we'll mutate during the loop.
         let mut context_messages = initial_messages;
 
         // Create a JobContext for tool execution (chat doesn't have a real job)
@@ -1131,6 +1177,8 @@ impl Agent {
         const MAX_TOOL_ITERATIONS: usize = 10;
         let mut iteration = 0;
         let mut tools_executed = resume_after_tool;
+        let mut force_tool_retry_allowed = false;
+        let mut force_tool_retry_decided = resume_after_tool;
 
         loop {
             iteration += 1;
@@ -1180,22 +1228,28 @@ impl Agent {
 
             match output.result {
                 RespondResult::Text(text) => {
-                    // If no tools have been executed yet, prompt the LLM to use tools
-                    // This handles the case where the model explains what it will do
-                    // instead of actually calling tools
-                    if !tools_executed && iteration < 3 {
-                        tracing::debug!(
-                            "No tools executed yet (iteration {}), prompting for tool use",
-                            iteration
-                        );
-                        context_messages.push(ChatMessage::assistant(&text));
-                        context_messages.push(ChatMessage::user(
-                            "Please proceed and use the available tools to complete this task.",
-                        ));
-                        continue;
+                    if !tools_executed {
+                        if !force_tool_retry_decided {
+                            force_tool_retry_allowed = self
+                                .decide_force_tool_retry(&decision_seed_messages, &message.content)
+                                .await;
+                            force_tool_retry_decided = true;
+                        }
+
+                        if force_tool_retry_allowed && iteration < 3 {
+                            tracing::debug!(
+                                "No tools executed yet (iteration {}), prompting for tool use",
+                                iteration
+                            );
+                            context_messages.push(ChatMessage::assistant(&text));
+                            context_messages.push(ChatMessage::user(
+                                "Please proceed and use the available tools to complete this task.",
+                            ));
+                            continue;
+                        }
                     }
 
-                    // Tools have been executed or we've tried multiple times, return response
+                    // Tools have been executed, retries are exhausted, or forcing tools is disabled.
                     return Ok(AgenticLoopResult::Response(text));
                 }
                 RespondResult::ToolCalls {
@@ -1237,40 +1291,18 @@ impl Agent {
                     }
 
                     // Execute each tool (with approval checking and hook interception)
-                    for mut tc in tool_calls {
+                    for (idx, mut tc) in tool_calls.clone().into_iter().enumerate() {
                         // Check if tool requires approval
-                        if let Some(tool) = self.tools().get(&tc.name).await
-                            && tool.requires_approval()
+                        if let Some(pending) = self
+                            .maybe_pending_for_tool_call(
+                                session.clone(),
+                                &tc,
+                                context_messages.clone(),
+                                tool_calls[idx + 1..].to_vec(),
+                            )
+                            .await
                         {
-                            // Check if auto-approved for this session
-                            let mut is_auto_approved = {
-                                let sess = session.lock().await;
-                                sess.is_tool_auto_approved(&tc.name)
-                            };
-
-                            // Let the tool inspect the specific parameters and
-                            // override auto-approval (e.g. destructive shell commands).
-                            if is_auto_approved && tool.requires_approval_for(&tc.arguments) {
-                                tracing::info!(
-                                    tool = %tc.name,
-                                    "Tool requires explicit approval for these parameters despite auto-approve"
-                                );
-                                is_auto_approved = false;
-                            }
-
-                            if !is_auto_approved {
-                                // Need approval - store pending request and return
-                                let pending = PendingApproval {
-                                    request_id: Uuid::new_v4(),
-                                    tool_name: tc.name.clone(),
-                                    parameters: tc.arguments.clone(),
-                                    description: tool.description().to_string(),
-                                    tool_call_id: tc.id.clone(),
-                                    context_messages: context_messages.clone(),
-                                };
-
-                                return Ok(AgenticLoopResult::NeedApproval { pending });
-                            }
+                            return Ok(AgenticLoopResult::NeedApproval { pending });
                         }
 
                         // Hook: BeforeToolCall — allow hooks to modify or reject tool calls
@@ -1314,115 +1346,19 @@ impl Agent {
                             }
                         }
 
-                        let _ = self
-                            .channels
-                            .send_status(
-                                &message.channel,
-                                StatusUpdate::ToolStarted {
-                                    name: tc.name.clone(),
-                                },
-                                &message.metadata,
+                        if let Some(instructions) = self
+                            .execute_tool_and_update_context(
+                                message,
+                                session.clone(),
+                                thread_id,
+                                &job_ctx,
+                                &tc,
+                                &mut context_messages,
                             )
-                            .await;
-
-                        let tool_result = self
-                            .execute_chat_tool(&tc.name, &tc.arguments, &job_ctx)
-                            .await;
-
-                        let _ = self
-                            .channels
-                            .send_status(
-                                &message.channel,
-                                StatusUpdate::ToolCompleted {
-                                    name: tc.name.clone(),
-                                    success: tool_result.is_ok(),
-                                },
-                                &message.metadata,
-                            )
-                            .await;
-
-                        if let Ok(ref output) = tool_result
-                            && !output.is_empty()
+                            .await?
                         {
-                            let _ = self
-                                .channels
-                                .send_status(
-                                    &message.channel,
-                                    StatusUpdate::ToolResult {
-                                        name: tc.name.clone(),
-                                        preview: output.clone(),
-                                    },
-                                    &message.metadata,
-                                )
-                                .await;
-                        }
-
-                        // Record result in thread
-                        {
-                            let mut sess = session.lock().await;
-                            if let Some(thread) = sess.threads.get_mut(&thread_id)
-                                && let Some(turn) = thread.last_turn_mut()
-                            {
-                                match &tool_result {
-                                    Ok(output) => {
-                                        turn.record_tool_result(serde_json::json!(output));
-                                    }
-                                    Err(e) => {
-                                        turn.record_tool_error(e.to_string());
-                                    }
-                                }
-                            }
-                        }
-
-                        // If tool_auth returned awaiting_token, enter auth mode
-                        // and short-circuit: return the instructions directly so
-                        // the LLM doesn't get a chance to hallucinate tool calls.
-                        if let Some((ext_name, instructions)) =
-                            detect_auth_awaiting(&tc.name, &tool_result)
-                        {
-                            let auth_data = parse_auth_result(&tool_result);
-                            {
-                                let mut sess = session.lock().await;
-                                if let Some(thread) = sess.threads.get_mut(&thread_id) {
-                                    thread.enter_auth_mode(ext_name.clone());
-                                }
-                            }
-                            let _ = self
-                                .channels
-                                .send_status(
-                                    &message.channel,
-                                    StatusUpdate::AuthRequired {
-                                        extension_name: ext_name,
-                                        instructions: Some(instructions.clone()),
-                                        auth_url: auth_data.auth_url,
-                                        setup_url: auth_data.setup_url,
-                                    },
-                                    &message.metadata,
-                                )
-                                .await;
                             return Ok(AgenticLoopResult::Response(instructions));
                         }
-
-                        // Add tool result to context for next LLM call
-                        let result_content = match tool_result {
-                            Ok(output) => {
-                                // Sanitize output before showing to LLM
-                                let sanitized =
-                                    self.safety().sanitize_tool_output(&tc.name, &output);
-                                self.safety().wrap_for_llm(
-                                    &tc.name,
-                                    &sanitized.content,
-                                    sanitized.was_modified,
-                                )
-                            }
-                            Err(e) => format!("Error: {}", e),
-                        };
-
-                        context_messages.push(ChatMessage::tool_result(
-                            &tc.id,
-                            &tc.name,
-                            result_content,
-                        ));
                     }
                 }
             }
@@ -1725,6 +1661,199 @@ impl Agent {
         Ok(SubmissionResult::ok_with_message("Thread cleared."))
     }
 
+    fn is_tool_call_auto_approved(&self, session: &Session, tool_call: &ToolCall) -> bool {
+        let mut is_auto_approved = session.is_tool_auto_approved(&tool_call.name);
+
+        if is_auto_approved
+            && tool_call.name == "shell"
+            && let Some(cmd) = tool_call
+                .arguments
+                .get("command")
+                .and_then(|c| c.as_str().map(String::from))
+                .or_else(|| {
+                    tool_call
+                        .arguments
+                        .as_str()
+                        .and_then(|s| serde_json::from_str::<serde_json::Value>(s).ok())
+                        .and_then(|v| v.get("command").and_then(|c| c.as_str().map(String::from)))
+                })
+            && crate::tools::builtin::shell::requires_explicit_approval(&cmd)
+        {
+            tracing::info!(
+                "Shell command '{}' requires explicit approval despite auto-approve",
+                cmd.chars().take(80).collect::<String>()
+            );
+            is_auto_approved = false;
+        }
+
+        is_auto_approved
+    }
+
+    async fn maybe_pending_for_tool_call(
+        &self,
+        session: Arc<Mutex<Session>>,
+        tc: &ToolCall,
+        context_messages: Vec<ChatMessage>,
+        deferred_tool_calls: Vec<ToolCall>,
+    ) -> Option<PendingApproval> {
+        let tool = self.tools().get(&tc.name).await?;
+        if !tool.requires_approval() {
+            return None;
+        }
+
+        let is_auto_approved = {
+            let sess = session.lock().await;
+            self.is_tool_call_auto_approved(&sess, tc)
+        };
+
+        if is_auto_approved {
+            return None;
+        }
+
+        Some(PendingApproval {
+            request_id: Uuid::new_v4(),
+            tool_name: tc.name.clone(),
+            parameters: tc.arguments.clone(),
+            description: tool.description().to_string(),
+            tool_call_id: tc.id.clone(),
+            context_messages,
+            deferred_tool_calls,
+        })
+    }
+
+    async fn execute_tool_and_update_context(
+        &self,
+        message: &IncomingMessage,
+        session: Arc<Mutex<Session>>,
+        thread_id: Uuid,
+        job_ctx: &JobContext,
+        tc: &ToolCall,
+        context_messages: &mut Vec<ChatMessage>,
+    ) -> Result<Option<String>, Error> {
+        let _ = self
+            .channels
+            .send_status(
+                &message.channel,
+                StatusUpdate::ToolStarted {
+                    name: tc.name.clone(),
+                },
+                &message.metadata,
+            )
+            .await;
+
+        let tool_result = self
+            .execute_chat_tool(&tc.name, &tc.arguments, job_ctx)
+            .await;
+
+        let _ = self
+            .channels
+            .send_status(
+                &message.channel,
+                StatusUpdate::ToolCompleted {
+                    name: tc.name.clone(),
+                    success: tool_result.is_ok(),
+                },
+                &message.metadata,
+            )
+            .await;
+
+        if let Ok(ref output) = tool_result
+            && !output.is_empty()
+        {
+            let _ = self
+                .channels
+                .send_status(
+                    &message.channel,
+                    StatusUpdate::ToolResult {
+                        name: tc.name.clone(),
+                        preview: output.clone(),
+                    },
+                    &message.metadata,
+                )
+                .await;
+        }
+
+        {
+            let mut sess = session.lock().await;
+            if let Some(thread) = sess.threads.get_mut(&thread_id)
+                && let Some(turn) = thread.last_turn_mut()
+            {
+                match &tool_result {
+                    Ok(output) => {
+                        turn.record_tool_result(serde_json::json!(output));
+                    }
+                    Err(e) => {
+                        turn.record_tool_error(e.to_string());
+                    }
+                }
+            }
+        }
+
+        if let Some((ext_name, instructions)) = detect_auth_awaiting(&tc.name, &tool_result) {
+            let auth_data = parse_auth_result(&tool_result);
+            self.return_auth_required_response(
+                message,
+                session,
+                thread_id,
+                ext_name,
+                instructions.clone(),
+                auth_data,
+            )
+            .await?;
+            return Ok(Some(instructions));
+        }
+
+        let result_content = match tool_result {
+            Ok(output) => {
+                let sanitized = self.safety().sanitize_tool_output(&tc.name, &output);
+                self.safety()
+                    .wrap_for_llm(&tc.name, &sanitized.content, sanitized.was_modified)
+            }
+            Err(e) => format!("Error: {}", e),
+        };
+
+        context_messages.push(ChatMessage::tool_result(&tc.id, &tc.name, result_content));
+        Ok(None)
+    }
+
+    async fn return_auth_required_response(
+        &self,
+        message: &IncomingMessage,
+        session: Arc<Mutex<Session>>,
+        thread_id: Uuid,
+        extension_name: String,
+        instructions: String,
+        auth_data: ParsedAuthData,
+    ) -> Result<SubmissionResult, Error> {
+        {
+            let mut sess = session.lock().await;
+            if let Some(thread) = sess.threads.get_mut(&thread_id) {
+                let user_input = thread.last_turn().map(|t| t.user_input.clone());
+                thread.enter_auth_mode(extension_name.clone());
+                thread.complete_turn(&instructions);
+                if let Some(input) = user_input {
+                    self.persist_turn(thread_id, &message.user_id, &input, Some(&instructions));
+                }
+            }
+        }
+
+        let _ = self
+            .channels
+            .send_status(
+                &message.channel,
+                StatusUpdate::AuthRequired {
+                    extension_name,
+                    instructions: Some(instructions.clone()),
+                    auth_url: auth_data.auth_url,
+                    setup_url: auth_data.setup_url,
+                },
+                &message.metadata,
+            )
+            .await;
+
+        Ok(SubmissionResult::response(instructions))
+    }
+
     /// Process an approval or rejection of a pending tool execution.
     async fn process_approval(
         &self,
@@ -1735,8 +1864,8 @@ impl Agent {
         approved: bool,
         always: bool,
     ) -> Result<SubmissionResult, Error> {
-        // Get thread state and pending approval
-        let (_thread_state, pending) = {
+        // Get pending approval for this thread
+        let pending = {
             let mut sess = session.lock().await;
             let thread = sess
                 .threads
@@ -1747,8 +1876,7 @@ impl Agent {
                 return Ok(SubmissionResult::error("No pending approval request."));
             }
 
-            let pending = thread.take_pending_approval();
-            (thread.state, pending)
+            thread.take_pending_approval()
         };
 
         let pending = match pending {
@@ -1794,118 +1922,101 @@ impl Agent {
             let job_ctx =
                 JobContext::with_user(&message.user_id, "chat", "Interactive chat session");
 
-            let _ = self
-                .channels
-                .send_status(
-                    &message.channel,
-                    StatusUpdate::ToolStarted {
-                        name: pending.tool_name.clone(),
-                    },
-                    &message.metadata,
-                )
-                .await;
-
-            let tool_result = self
-                .execute_chat_tool(&pending.tool_name, &pending.parameters, &job_ctx)
-                .await;
-
-            let _ = self
-                .channels
-                .send_status(
-                    &message.channel,
-                    StatusUpdate::ToolCompleted {
-                        name: pending.tool_name.clone(),
-                        success: tool_result.is_ok(),
-                    },
-                    &message.metadata,
-                )
-                .await;
-
-            if let Ok(ref output) = tool_result
-                && !output.is_empty()
-            {
-                let _ = self
-                    .channels
-                    .send_status(
-                        &message.channel,
-                        StatusUpdate::ToolResult {
-                            name: pending.tool_name.clone(),
-                            preview: output.clone(),
-                        },
-                        &message.metadata,
-                    )
-                    .await;
-            }
-
             // Build context including the tool result
             let mut context_messages = pending.context_messages;
+            let deferred_tool_calls = pending.deferred_tool_calls;
 
-            // Record result in thread
-            {
-                let mut sess = session.lock().await;
-                if let Some(thread) = sess.threads.get_mut(&thread_id)
-                    && let Some(turn) = thread.last_turn_mut()
-                {
-                    match &tool_result {
-                        Ok(output) => {
-                            turn.record_tool_result(serde_json::json!(output));
-                        }
-                        Err(e) => {
-                            turn.record_tool_error(e.to_string());
-                        }
-                    }
-                }
-            }
+            let approved_tc = ToolCall {
+                id: pending.tool_call_id.clone(),
+                name: pending.tool_name.clone(),
+                arguments: pending.parameters.clone(),
+            };
 
-            // If tool_auth returned awaiting_token, enter auth mode and
-            // return instructions directly (skip agentic loop continuation).
-            if let Some((ext_name, instructions)) =
-                detect_auth_awaiting(&pending.tool_name, &tool_result)
+            if let Some(instructions) = self
+                .execute_tool_and_update_context(
+                    message,
+                    session.clone(),
+                    thread_id,
+                    &job_ctx,
+                    &approved_tc,
+                    &mut context_messages,
+                )
+                .await?
             {
-                let auth_data = parse_auth_result(&tool_result);
-                {
-                    let mut sess = session.lock().await;
-                    if let Some(thread) = sess.threads.get_mut(&thread_id) {
-                        thread.enter_auth_mode(ext_name.clone());
-                        thread.complete_turn(&instructions);
-                    }
-                }
-                let _ = self
-                    .channels
-                    .send_status(
-                        &message.channel,
-                        StatusUpdate::AuthRequired {
-                            extension_name: ext_name,
-                            instructions: Some(instructions.clone()),
-                            auth_url: auth_data.auth_url,
-                            setup_url: auth_data.setup_url,
-                        },
-                        &message.metadata,
-                    )
-                    .await;
                 return Ok(SubmissionResult::response(instructions));
             }
 
-            // Add tool result to context
-            let result_content = match tool_result {
-                Ok(output) => {
-                    let sanitized = self
-                        .safety()
-                        .sanitize_tool_output(&pending.tool_name, &output);
-                    self.safety().wrap_for_llm(
-                        &pending.tool_name,
-                        &sanitized.content,
-                        sanitized.was_modified,
+            // If the original assistant message had additional tool calls after the
+            // approved one, execute them now so every prior tool_use gets a matching
+            // tool_result before the next LLM call.
+            if !deferred_tool_calls.is_empty() {
+                let _ = self
+                    .channels
+                    .send_status(
+                        &message.channel,
+                        StatusUpdate::Thinking(format!(
+                            "Executing {} deferred tool(s)...",
+                            deferred_tool_calls.len()
+                        )),
+                        &message.metadata,
                     )
-                }
-                Err(e) => format!("Error: {}", e),
-            };
+                    .await;
+            }
 
-            context_messages.push(ChatMessage::tool_result(
-                &pending.tool_call_id,
-                &pending.tool_name,
-                result_content,
-            ));
+            let mut deferred_queue = std::collections::VecDeque::from(deferred_tool_calls);
+            while let Some(tc) = deferred_queue.pop_front() {
+                if let Some(pending) = self
+                    .maybe_pending_for_tool_call(
+                        session.clone(),
+                        &tc,
+                        context_messages.clone(),
+                        deferred_queue.iter().cloned().collect(),
+                    )
+                    .await
+                {
+                    let request_id = pending.request_id;
+                    let tool_name = pending.tool_name.clone();
+                    let description = pending.description.clone();
+                    let parameters = pending.parameters.clone();
+
+                    {
+                        let mut sess = session.lock().await;
+                        if let Some(thread) = sess.threads.get_mut(&thread_id) {
+                            thread.await_approval(pending);
+                        }
+                    }
+
+                    let _ = self
+                        .channels
+                        .send_status(
+                            &message.channel,
+                            StatusUpdate::Status("Awaiting approval".into()),
+                            &message.metadata,
+                        )
+                        .await;
+
+                    return Ok(SubmissionResult::NeedApproval {
+                        request_id,
+                        tool_name,
+                        description,
+                        parameters,
+                    });
+                }
+
+                if let Some(instructions) = self
+                    .execute_tool_and_update_context(
+                        message,
+                        session.clone(),
+                        thread_id,
+                        &job_ctx,
+                        &tc,
+                        &mut context_messages,
+                    )
+                    .await?
+                {
+                    return Ok(SubmissionResult::response(instructions));
+                }
+            }
 
             // Continue the agentic loop (a tool was already executed this turn)
             let result = self
@@ -1921,8 +2032,12 @@ impl Agent {
 
             match result {
                 Ok(AgenticLoopResult::Response(response)) => {
+                    let user_input = thread.last_turn().map(|t| t.user_input.clone());
                     thread.complete_turn(&response);
                     self.persist_response_chain(thread);
+                    if let Some(input) = user_input {
+                        self.persist_turn(thread_id, &message.user_id, &input, Some(&response));
+                    }
                     let _ = self
                         .channels
                         .send_status(
@@ -1957,7 +2072,11 @@ impl Agent {
                     })
                 }
                 Err(e) => {
+                    let user_input = thread.last_turn().map(|t| t.user_input.clone());
                     thread.fail_turn(e.to_string());
+                    if let Some(input) = user_input {
+                        self.persist_turn(thread_id, &message.user_id, &input, None);
+                    }
                     Ok(SubmissionResult::error(e.to_string()))
                 }
             }
@@ -2658,9 +2777,233 @@ fn detect_auth_awaiting(
 
 #[cfg(test)]
 mod tests {
-    use crate::error::Error;
+    use std::sync::Arc;
+    use std::time::Duration;
 
-    use super::detect_auth_awaiting;
+    use async_trait::async_trait;
+    use rust_decimal::Decimal;
+    use tokio::sync::Mutex;
+
+    use crate::agent::session::Session;
+    use crate::channels::IncomingMessage;
+    use crate::config::{AgentConfig, SafetyConfig};
+    use crate::context::ContextManager;
+    use crate::error::Error;
+    use crate::hooks::HookRegistry;
+    use crate::llm::{
+        CompletionRequest, CompletionResponse, FinishReason, LlmProvider, ToolCall,
+        ToolCompletionRequest, ToolCompletionResponse,
+    };
+    use crate::safety::SafetyLayer;
+    use crate::tools::ToolRegistry;
+
+    use crate::agent::agent_loop::{
+        Agent, AgentDeps, ParsedAuthData, detect_auth_awaiting, parse_force_tool_retry_decision,
+        truncate_for_preview,
+    };
+
+    struct StaticLlmProvider;
+
+    #[async_trait]
+    impl LlmProvider for StaticLlmProvider {
+        fn model_name(&self) -> &str {
+            "static-mock"
+        }
+
+        fn cost_per_token(&self) -> (Decimal, Decimal) {
+            (Decimal::ZERO, Decimal::ZERO)
+        }
+
+        async fn complete(
+            &self,
+            _request: CompletionRequest,
+        ) -> Result<CompletionResponse, crate::error::LlmError> {
+            Ok(CompletionResponse {
+                content: "ok".to_string(),
+                input_tokens: 0,
+                output_tokens: 0,
+                finish_reason: FinishReason::Stop,
+                response_id: None,
+            })
+        }
+
+        async fn complete_with_tools(
+            &self,
+            _request: ToolCompletionRequest,
+        ) -> Result<ToolCompletionResponse, crate::error::LlmError> {
+            Ok(ToolCompletionResponse {
+                content: Some("ok".to_string()),
+                tool_calls: Vec::new(),
+                input_tokens: 0,
+                output_tokens: 0,
+                finish_reason: FinishReason::Stop,
+                response_id: None,
+            })
+        }
+    }
+
+    fn make_test_agent() -> Agent {
+        let deps = AgentDeps {
+            store: None,
+            llm: Arc::new(StaticLlmProvider),
+            cheap_llm: None,
+            safety: Arc::new(SafetyLayer::new(&SafetyConfig {
+                max_output_length: 100_000,
+                injection_check_enabled: true,
+            })),
+            tools: Arc::new(ToolRegistry::new()),
+            workspace: None,
+            extension_manager: None,
+            hooks: Arc::new(HookRegistry::new()),
+        };
+
+        Agent::new(
+            AgentConfig {
+                name: "test-agent".to_string(),
+                max_parallel_jobs: 1,
+                job_timeout: Duration::from_secs(60),
+                stuck_threshold: Duration::from_secs(60),
+                repair_check_interval: Duration::from_secs(30),
+                max_repair_attempts: 1,
+                use_planning: false,
+                session_idle_timeout: Duration::from_secs(300),
+                allow_local_tools: false,
+            },
+            deps,
+            crate::channels::ChannelManager::new(),
+            None,
+            None,
+            Some(Arc::new(ContextManager::new(1))),
+            None,
+        )
+    }
+
+    #[test]
+    fn test_is_tool_call_auto_approved_regular_tool() {
+        let agent = make_test_agent();
+        let mut session = Session::new("user-1");
+        session.auto_approve_tool("http");
+
+        let call = ToolCall {
+            id: "call_1".to_string(),
+            name: "http".to_string(),
+            arguments: serde_json::json!({"url": "https://example.com", "method": "GET"}),
+        };
+
+        assert!(agent.is_tool_call_auto_approved(&session, &call));
+    }
+
+    #[test]
+    fn test_is_tool_call_auto_approved_shell_destructive_object_args_denied() {
+        let agent = make_test_agent();
+        let mut session = Session::new("user-1");
+        session.auto_approve_tool("shell");
+
+        let call = ToolCall {
+            id: "call_2".to_string(),
+            name: "shell".to_string(),
+            arguments: serde_json::json!({"command": "rm -rf /tmp/test"}),
+        };
+
+        assert!(!agent.is_tool_call_auto_approved(&session, &call));
+    }
+
+    #[test]
+    fn test_is_tool_call_auto_approved_shell_destructive_string_args_denied() {
+        let agent = make_test_agent();
+        let mut session = Session::new("user-1");
+        session.auto_approve_tool("shell");
+
+        let args = serde_json::json!({"command": "git push --force origin main"}).to_string();
+        let call = ToolCall {
+            id: "call_3".to_string(),
+            name: "shell".to_string(),
+            arguments: serde_json::Value::String(args),
+        };
+
+        assert!(!agent.is_tool_call_auto_approved(&session, &call));
+    }
+
+    #[test]
+    fn test_is_tool_call_auto_approved_shell_safe_args_allowed() {
+        let agent = make_test_agent();
+        let mut session = Session::new("user-1");
+        session.auto_approve_tool("shell");
+
+        let call = ToolCall {
+            id: "call_4".to_string(),
+            name: "shell".to_string(),
+            arguments: serde_json::json!({"command": "git status"}),
+        };
+
+        assert!(agent.is_tool_call_auto_approved(&session, &call));
+    }
+
+    #[tokio::test]
+    async fn test_return_auth_required_response_completes_turn_and_persists_response() {
+        let agent = make_test_agent();
+        let session = Arc::new(Mutex::new(Session::new("user-1")));
+        let thread_id = {
+            let mut sess = session.lock().await;
+            let thread = sess.create_thread();
+            thread.start_turn("Authenticate extension");
+            thread.id
+        };
+
+        let message = IncomingMessage::new("repl", "user-1", "approve");
+
+        let result = agent
+            .return_auth_required_response(
+                &message,
+                session.clone(),
+                thread_id,
+                "notion".to_string(),
+                "Please provide your API token/key.".to_string(),
+                ParsedAuthData {
+                    auth_url: None,
+                    setup_url: Some("https://notion.so/my-integrations".to_string()),
+                },
+            )
+            .await
+            .expect("auth-required response should succeed");
+
+        match result {
+            crate::agent::submission::SubmissionResult::Response { content } => {
+                assert_eq!(content, "Please provide your API token/key.");
+            }
+            other => panic!("unexpected submission result: {other:?}"),
+        }
+
+        let sess = session.lock().await;
+        let thread = sess
+            .threads
+            .get(&thread_id)
+            .expect("thread should still exist");
+        assert!(thread.pending_auth.is_some());
+        assert_eq!(
+            thread.last_turn().and_then(|t| t.response.clone()),
+            Some("Please provide your API token/key.".to_string())
+        );
+    }
+
+    #[test]
+    fn test_parse_force_tool_retry_decision_strict_json_true() {
+        assert_eq!(
+            parse_force_tool_retry_decision("{\"force_retry\":true}"),
+            Some(true)
+        );
+    }
+
+    #[test]
+    fn test_parse_force_tool_retry_decision_embedded_json_false() {
+        let raw = "Decision:\n{\"force_retry\":false}";
+        assert_eq!(parse_force_tool_retry_decision(raw), Some(false));
+    }
+
+    #[test]
+    fn test_parse_force_tool_retry_decision_invalid() {
+        assert_eq!(parse_force_tool_retry_decision("not json"), None);
+    }
 
     #[test]
     fn test_detect_auth_awaiting_positive() {
@@ -2754,9 +3097,25 @@ mod tests {
         assert!(detect_auth_awaiting("tool_activate", &result).is_none());
     }
 
-    // --- truncate_for_preview tests ---
+    #[test]
+    fn test_pending_approval_serialization_backcompat_without_deferred_calls() {
+        let json = serde_json::json!({
+            "request_id": uuid::Uuid::new_v4(),
+            "tool_name": "http",
+            "parameters": {"url": "https://example.com", "method": "GET"},
+            "description": "Make HTTP request",
+            "tool_call_id": "call_123",
+            "context_messages": [{"role": "user", "content": "go"}]
+        })
+        .to_string();
 
-    use super::truncate_for_preview;
+        let parsed: crate::agent::session::PendingApproval =
+            serde_json::from_str(&json).expect("pending approval should deserialize");
+
+        assert!(parsed.deferred_tool_calls.is_empty());
+    }
+
+    // --- truncate_for_preview tests ---
 
     #[test]
     fn test_truncate_short_input() {

@@ -16,7 +16,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use crate::llm::ChatMessage;
+use crate::llm::{ChatMessage, ToolCall};
 
 /// A session containing one or more threads.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -148,6 +148,10 @@ pub struct PendingApproval {
     pub tool_call_id: String,
     /// Context messages at the time of the request (to resume from).
     pub context_messages: Vec<ChatMessage>,
+    /// Remaining tool calls from the same assistant message that were not
+    /// executed yet when approval was requested.
+    #[serde(default)]
+    pub deferred_tool_calls: Vec<ToolCall>,
 }
 
 /// A conversation thread within a session.
@@ -946,6 +950,7 @@ mod tests {
             description: "dangerous command".to_string(),
             tool_call_id: "call_123".to_string(),
             context_messages: vec![ChatMessage::user("do it")],
+            deferred_tool_calls: vec![],
         };
 
         thread.await_approval(approval);
@@ -969,6 +974,7 @@ mod tests {
             description: "test".to_string(),
             tool_call_id: "call_456".to_string(),
             context_messages: vec![],
+            deferred_tool_calls: vec![],
         };
 
         thread.await_approval(approval);

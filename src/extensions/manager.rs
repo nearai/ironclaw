@@ -50,7 +50,7 @@ pub struct ExtensionManager {
     wasm_channels_dir: PathBuf,
 
     // Shared
-    secrets: Arc<dyn SecretsStore + Send + Sync>,
+    secrets: Option<Arc<dyn SecretsStore + Send + Sync>>,
     tool_registry: Arc<ToolRegistry>,
     pending_auth: RwLock<HashMap<String, PendingAuth>>,
     /// Tunnel URL for remote OAuth callbacks (used in future iterations).
@@ -64,7 +64,7 @@ impl ExtensionManager {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         mcp_session_manager: Arc<McpSessionManager>,
-        secrets: Arc<dyn SecretsStore + Send + Sync>,
+        secrets: Option<Arc<dyn SecretsStore + Send + Sync>>,
         tool_registry: Arc<ToolRegistry>,
         wasm_tool_runtime: Option<Arc<WasmToolRuntime>>,
         wasm_tools_dir: PathBuf,
@@ -196,8 +196,11 @@ impl ExtensionManager {
             match self.load_mcp_servers().await {
                 Ok(servers) => {
                     for server in &servers.servers {
-                        let authenticated =
-                            is_authenticated(server, &self.secrets, &self.user_id).await;
+                        let authenticated = if let Some(ref secrets) = self.secrets {
+                            is_authenticated(server, secrets, &self.user_id).await
+                        } else {
+                            false
+                        };
                         let clients = self.mcp_clients.read().await;
                         let active = clients.contains_key(&server.name);
 
@@ -557,12 +560,30 @@ impl ExtensionManager {
             .await
             .map_err(|e| ExtensionError::NotInstalled(e.to_string()))?;
 
+        let Some(secrets) = self.secrets.as_ref() else {
+            return Ok(AuthResult {
+                name: name.to_string(),
+                kind: ExtensionKind::McpServer,
+                auth_url: None,
+                callback_type: None,
+                instructions: Some(
+                    "Secrets are not configured, so OAuth/token auth cannot be stored in IronClaw. \
+                     This server may still work without auth. Try tool_activate first; \
+                     if it returns 401/unauthorized, configure secrets and retry tool_auth."
+                        .to_string(),
+                ),
+                setup_url: None,
+                awaiting_token: false,
+                status: "auth_unavailable_missing_secrets".to_string(),
+            });
+        };
+
         // If a token was provided directly, store it and we're done.
         if let Some(token_value) = token {
             let secret_name = server.token_secret_name();
             let params =
                 CreateSecretParams::new(&secret_name, token_value).with_provider(name.to_string());
-            self.secrets
+            secrets
                 .create(&self.user_id, params)
                 .await
                 .map_err(|e| ExtensionError::AuthFailed(e.to_string()))?;
@@ -581,7 +602,7 @@ impl ExtensionManager {
         }
 
         // Check if already authenticated
-        if is_authenticated(&server, &self.secrets, &self.user_id).await {
+        if is_authenticated(&server, secrets, &self.user_id).await {
             return Ok(AuthResult {
                 name: name.to_string(),
                 kind: ExtensionKind::McpServer,
@@ -595,7 +616,7 @@ impl ExtensionManager {
         }
 
         // Run the full OAuth flow (opens browser, waits for callback)
-        match authorize_mcp_server(&server, &self.secrets, &self.user_id).await {
+        match authorize_mcp_server(&server, secrets, &self.user_id).await {
             Ok(_token) => {
                 tracing::info!("MCP server '{}' authenticated via OAuth", name);
                 Ok(AuthResult {
@@ -767,6 +788,23 @@ impl ExtensionManager {
             }
         };
 
+        let Some(secrets) = self.secrets.as_ref() else {
+            return Ok(AuthResult {
+                name: name.to_string(),
+                kind: ExtensionKind::WasmTool,
+                auth_url: None,
+                callback_type: None,
+                instructions: Some(
+                    "Secrets are not configured, so this token cannot be stored. \
+                     Configure secrets (onboarding Step 2 or SECRETS_MASTER_KEY) to enable auth for this tool."
+                        .to_string(),
+                ),
+                setup_url: auth.setup_url.clone(),
+                awaiting_token: false,
+                status: "auth_unavailable_missing_secrets".to_string(),
+            });
+        };
+
         // Check env var first
         if let Some(ref env_var) = auth.env_var
             && let Ok(value) = std::env::var(env_var)
@@ -774,7 +812,7 @@ impl ExtensionManager {
             // Store the env var value as a secret
             let params =
                 CreateSecretParams::new(&auth.secret_name, &value).with_provider(name.to_string());
-            self.secrets
+            secrets
                 .create(&self.user_id, params)
                 .await
                 .map_err(|e| ExtensionError::AuthFailed(e.to_string()))?;
@@ -792,8 +830,7 @@ impl ExtensionManager {
         }
 
         // Check if already authenticated
-        if self
-            .secrets
+        if secrets
             .exists(&self.user_id, &auth.secret_name)
             .await
             .unwrap_or(false)
@@ -814,7 +851,7 @@ impl ExtensionManager {
         if let Some(token_value) = token {
             let params = CreateSecretParams::new(&auth.secret_name, token_value)
                 .with_provider(name.to_string());
-            self.secrets
+            secrets
                 .create(&self.user_id, params)
                 .await
                 .map_err(|e| ExtensionError::AuthFailed(e.to_string()))?;
@@ -877,15 +914,23 @@ impl ExtensionManager {
             .await
             .map_err(|e| ExtensionError::NotInstalled(e.to_string()))?;
 
-        let has_tokens = is_authenticated(&server, &self.secrets, &self.user_id).await;
+        let has_tokens = if let Some(ref secrets) = self.secrets {
+            is_authenticated(&server, secrets, &self.user_id).await
+        } else {
+            false
+        };
 
-        let client = if has_tokens || server.requires_auth() {
-            McpClient::new_authenticated(
-                server.clone(),
-                Arc::clone(&self.mcp_session_manager),
-                Arc::clone(&self.secrets),
-                &self.user_id,
-            )
+        let client = if let Some(ref secrets) = self.secrets {
+            if has_tokens || server.requires_auth() {
+                McpClient::new_authenticated(
+                    server.clone(),
+                    Arc::clone(&self.mcp_session_manager),
+                    Arc::clone(secrets),
+                    &self.user_id,
+                )
+            } else {
+                McpClient::new_with_name(&server.name, &server.url)
+            }
         } else {
             McpClient::new_with_name(&server.name, &server.url)
         };

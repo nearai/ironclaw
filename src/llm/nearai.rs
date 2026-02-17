@@ -451,7 +451,9 @@ fn split_messages(
 impl LlmProvider for NearAiProvider {
     async fn complete(&self, req: CompletionRequest) -> Result<CompletionResponse, LlmError> {
         let thread_id = req.metadata.get("thread_id").cloned();
-        let (instructions, input) = split_messages(req.messages, false);
+        let mut messages = req.messages;
+        crate::llm::provider::sanitize_tool_messages(&mut messages);
+        let (instructions, input) = split_messages(messages, false);
 
         let request = NearAiRequest {
             model: self.active_model_name(),
@@ -568,6 +570,8 @@ impl LlmProvider for NearAiProvider {
         req: ToolCompletionRequest,
     ) -> Result<ToolCompletionResponse, LlmError> {
         let thread_id = req.metadata.get("thread_id").cloned();
+        let mut messages = req.messages;
+        crate::llm::provider::sanitize_tool_messages(&mut messages);
 
         // Look up chaining state for this thread
         let chain_state = thread_id.as_ref().and_then(|tid| {
@@ -587,7 +591,7 @@ impl LlmProvider for NearAiProvider {
 
         // When chaining, only send new messages (the delta since last call).
         // Tool results are converted to function_call_output items.
-        let (instructions, all_input) = split_messages(req.messages, chaining);
+        let (instructions, all_input) = split_messages(messages, chaining);
         let input = if chaining && all_input.len() > prev_input_count {
             all_input[prev_input_count..].to_vec()
         } else {
