@@ -39,6 +39,7 @@ pub struct Config {
     pub routines: RoutineConfig,
     pub sandbox: SandboxModeConfig,
     pub claude_code: ClaudeCodeConfig,
+    pub observability: crate::observability::ObservabilityConfig,
 }
 
 impl Config {
@@ -97,6 +98,9 @@ impl Config {
             routines: RoutineConfig::resolve()?,
             sandbox: SandboxModeConfig::resolve()?,
             claude_code: ClaudeCodeConfig::resolve()?,
+            observability: crate::observability::ObservabilityConfig {
+                backend: std::env::var("OBSERVABILITY_BACKEND").unwrap_or_else(|_| "none".into()),
+            },
         })
     }
 }

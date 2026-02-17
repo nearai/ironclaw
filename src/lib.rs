@@ -53,6 +53,7 @@ pub mod extensions;
 pub mod history;
 pub mod hooks;
 pub mod llm;
+pub mod observability;
 pub mod orchestrator;
 pub mod pairing;
 pub mod safety;
