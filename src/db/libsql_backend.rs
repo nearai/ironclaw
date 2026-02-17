@@ -739,7 +739,7 @@ impl Database for LibSqlBackend {
                     completed_at: get_opt_ts(&row, 16),
                     transitions: Vec::new(),
                     metadata: serde_json::Value::Null,
-                    extra_env: std::collections::HashMap::new(),
+                    extra_env: std::sync::Arc::new(std::collections::HashMap::new()),
                 }))
             }
             None => Ok(None),

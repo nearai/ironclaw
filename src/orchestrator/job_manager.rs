@@ -135,6 +135,14 @@ pub struct CompletionResult {
 ///
 /// Returns the canonicalized path if valid. Creates the base directory if
 /// it doesn't exist (so the prefix check always runs).
+///
+/// # TOCTOU note
+///
+/// There is a time-of-check/time-of-use gap between `canonicalize()` here
+/// and the actual Docker `binds.push()` in the caller. In a multi-tenant
+/// system a malicious actor could swap a symlink after validation. This is
+/// acceptable in IronClaw's single-tenant design where the user controls
+/// the filesystem.
 fn validate_bind_mount_path(
     dir: &std::path::Path,
     job_id: Uuid,

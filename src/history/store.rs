@@ -239,7 +239,7 @@ impl Store {
                     metadata: serde_json::Value::Null,
                     total_tokens_used: 0,
                     max_tokens: 0,
-                    extra_env: std::collections::HashMap::new(),
+                    extra_env: std::sync::Arc::new(std::collections::HashMap::new()),
                 }))
             }
             None => Ok(None),

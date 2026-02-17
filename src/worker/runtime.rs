@@ -54,7 +54,9 @@ pub struct WorkerRuntime {
     tools: Arc<ToolRegistry>,
     /// Credentials fetched from the orchestrator, injected into child processes
     /// via `Command::envs()` rather than mutating the global process environment.
-    extra_env: HashMap<String, String>,
+    ///
+    /// Wrapped in `Arc` to avoid deep-cloning the map on every tool invocation.
+    extra_env: Arc<HashMap<String, String>>,
 }
 
 impl WorkerRuntime {
@@ -87,7 +89,7 @@ impl WorkerRuntime {
             llm,
             safety,
             tools,
-            extra_env: HashMap::new(),
+            extra_env: Arc::new(HashMap::new()),
         })
     }
 
@@ -107,9 +109,12 @@ impl WorkerRuntime {
         // Fetch credentials and store them for injection into child processes
         // via Command::envs() (avoids unsafe std::env::set_var in multi-threaded runtime).
         let credentials = self.client.fetch_credentials().await?;
-        for cred in &credentials {
-            self.extra_env
-                .insert(cred.env_var.clone(), cred.value.clone());
+        {
+            let mut env_map = HashMap::new();
+            for cred in &credentials {
+                env_map.insert(cred.env_var.clone(), cred.value.clone());
+            }
+            self.extra_env = Arc::new(env_map);
         }
         if !credentials.is_empty() {
             tracing::info!(

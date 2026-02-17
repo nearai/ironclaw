@@ -1297,7 +1297,15 @@ async fn jobs_restart_handler(
     // Restore credential grants from the original job so the restarted container
     // has access to the same secrets.
     let credential_grants: Vec<crate::orchestrator::auth::CredentialGrant> =
-        serde_json::from_str(&old_job.credential_grants_json).unwrap_or_default();
+        serde_json::from_str(&old_job.credential_grants_json).unwrap_or_else(|e| {
+            tracing::warn!(
+                job_id = %old_job.id,
+                "Failed to deserialize credential grants from stored job: {}. \
+                 Restarted job will have no credentials.",
+                e
+            );
+            vec![]
+        });
 
     let project_dir = std::path::PathBuf::from(&old_job.project_dir);
     let _token = jm

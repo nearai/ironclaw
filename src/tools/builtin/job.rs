@@ -271,7 +271,18 @@ impl CreateJobTool {
         let project_dir_str = project_dir.display().to_string();
 
         // Serialize credential grants so restarts can reload them.
-        let credential_grants_json = serde_json::to_string(&credential_grants).unwrap_or_default();
+        let credential_grants_json = match serde_json::to_string(&credential_grants) {
+            Ok(json) => json,
+            Err(e) => {
+                tracing::warn!(
+                    "Failed to serialize credential grants for job {}: {}. \
+                     Grants will not survive a restart.",
+                    job_id,
+                    e
+                );
+                String::from("[]")
+            }
+        };
 
         // Persist the job to DB before creating the container.
         self.persist_job(SandboxJobRecord {
@@ -979,6 +990,11 @@ impl Tool for CancelJobTool {
 ///
 /// Lets the main agent inspect what a running (or completed) container job has
 /// been doing: messages, tool calls, results, status changes, etc.
+///
+/// Events are streamed from the sandbox worker into the database via the
+/// orchestrator's event pipeline. This tool queries them with a DB-level
+/// `LIMIT` (default 50, configurable via the `limit` parameter) so the
+/// agent sees the most recent activity without loading the full history.
 pub struct JobEventsTool {
     store: Arc<dyn Database>,
     context_manager: Arc<ContextManager>,
@@ -1092,8 +1108,11 @@ impl Tool for JobEventsTool {
 
 /// Tool for sending follow-up prompts to a running Claude Code sandbox job.
 ///
-/// The prompt is queued and picked up by the Claude Code bridge on its next
-/// poll cycle (via `--resume`).
+/// The prompt is queued in an in-memory `PromptQueue` (a broadcast channel
+/// shared with the web gateway). The Claude Code bridge inside the container
+/// polls for queued prompts between turns and feeds them into the next
+/// `claude --resume` invocation, enabling interactive multi-turn sessions
+/// with long-running sandbox jobs.
 pub struct JobPromptTool {
     prompt_queue: PromptQueue,
     context_manager: Arc<ContextManager>,

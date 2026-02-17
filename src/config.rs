@@ -1316,19 +1316,19 @@ pub struct ClaudeCodeConfig {
 /// silently auto-approved.
 fn default_claude_code_allowed_tools() -> Vec<String> {
     [
-        // File system
-        "Read",
-        "Write",
-        "Edit",
-        "Glob",
-        "Grep",
-        "NotebookEdit",
+        // File system -- glob patterns match Claude Code's settings.json format
+        "Read(*)",
+        "Write(*)",
+        "Edit(*)",
+        "Glob(*)",
+        "Grep(*)",
+        "NotebookEdit(*)",
         // Execution
-        "Bash",
-        "Task",
+        "Bash(*)",
+        "Task(*)",
         // Network
-        "WebFetch",
-        "WebSearch",
+        "WebFetch(*)",
+        "WebSearch(*)",
     ]
     .into_iter()
     .map(String::from)

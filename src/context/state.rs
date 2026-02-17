@@ -1,6 +1,7 @@
 //! Job state machine.
 
 use std::collections::HashMap;
+use std::sync::Arc;
 use std::time::Duration;
 
 use chrono::{DateTime, Utc};
@@ -141,8 +142,10 @@ pub struct JobContext {
     /// Used by the worker runtime to pass fetched credentials to tools
     /// (e.g., shell commands) without mutating the global process environment
     /// via `std::env::set_var`, which is unsafe in multi-threaded programs.
+    ///
+    /// Wrapped in `Arc` for cheap cloning on every tool invocation.
     #[serde(skip)]
-    pub extra_env: HashMap<String, String>,
+    pub extra_env: Arc<HashMap<String, String>>,
 }
 
 impl JobContext {
@@ -178,7 +181,7 @@ impl JobContext {
             completed_at: None,
             repair_attempts: 0,
             transitions: Vec::new(),
-            extra_env: HashMap::new(),
+            extra_env: Arc::new(HashMap::new()),
             metadata: serde_json::Value::Null,
         }
     }

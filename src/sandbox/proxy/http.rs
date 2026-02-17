@@ -365,6 +365,12 @@ async fn forward_request(
                     builder.header(name, value)
                 }
                 CredentialLocation::QueryParam { name } => builder.query(&[(name, credential)]),
+                // Known limitation: AuthorizationBasic requires the proxy to
+                // construct a Base64 username:password pair from a single secret,
+                // and UrlPath requires rewriting the request URI. Neither is
+                // implemented yet. Containers needing these auth styles should
+                // fetch credentials via the orchestrator's GET /worker/{id}/credentials
+                // endpoint and set them directly.
                 CredentialLocation::AuthorizationBasic { .. }
                 | CredentialLocation::UrlPath { .. } => {
                     tracing::warn!(
