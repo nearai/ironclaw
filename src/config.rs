@@ -511,6 +511,7 @@ impl LlmConfig {
                     hint: "Set OPENROUTER_API_KEY when LLM_BACKEND=openrouter".to_string(),
                 })?;
             let model = optional_env("OPENROUTER_MODEL")?
+                .or_else(|| settings.selected_model.clone())
                 .unwrap_or_else(|| crate::llm::OPENROUTER_DEFAULT_MODEL.to_string());
             Some(OpenRouterConfig { api_key, model })
         } else {
@@ -1429,6 +1430,7 @@ pub async fn inject_llm_keys_from_secrets(
     let mappings = [
         ("llm_openai_api_key", "OPENAI_API_KEY"),
         ("llm_anthropic_api_key", "ANTHROPIC_API_KEY"),
+        ("llm_openrouter_api_key", "OPENROUTER_API_KEY"),
         ("llm_compatible_api_key", "LLM_API_KEY"),
     ];
 
