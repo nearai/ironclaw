@@ -163,6 +163,15 @@ async fn main() -> anyhow::Result<()> {
 
             return run_service_command(service_cmd);
         }
+        Some(Command::Doctor) => {
+            tracing_subscriber::fmt()
+                .with_env_filter(
+                    EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("warn")),
+                )
+                .init();
+
+            return ironclaw::cli::run_doctor_command().await;
+        }
         Some(Command::Status) => {
             tracing_subscriber::fmt()
                 .with_env_filter(
