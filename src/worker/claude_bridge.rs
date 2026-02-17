@@ -221,25 +221,27 @@ impl ClaudeBridgeRuntime {
             truncate(&job.description, 100)
         );
 
-        // Fetch and set credentials before spawning Claude.
-        // The spawned `claude` Command inherits env vars from this process.
+        // Fetch credentials for injection into the spawned Command via .envs()
+        // (avoids unsafe std::env::set_var in multi-threaded runtime).
         let credentials = self.client.fetch_credentials().await?;
+        let mut extra_env = std::collections::HashMap::new();
         for cred in &credentials {
-            // SAFETY: bridge is single-threaded at this point (no child processes yet)
-            unsafe { std::env::set_var(&cred.env_var, &cred.value) };
+            extra_env.insert(cred.env_var.clone(), cred.value.clone());
         }
-        if !credentials.is_empty() {
+        if !extra_env.is_empty() {
             tracing::info!(
                 job_id = %self.config.job_id,
-                "Injected {} credential(s) into environment",
-                credentials.len()
+                "Fetched {} credential(s) for child process injection",
+                extra_env.len()
             );
         }
 
-        // Warn if no auth method is available.
-        if std::env::var("ANTHROPIC_API_KEY").is_err()
-            && std::env::var("CLAUDE_CODE_OAUTH_TOKEN").is_err()
-        {
+        // Warn if no auth method is available (check both process env and fetched credentials).
+        let has_api_key = extra_env.contains_key("ANTHROPIC_API_KEY")
+            || std::env::var("ANTHROPIC_API_KEY").is_ok();
+        let has_oauth = extra_env.contains_key("CLAUDE_CODE_OAUTH_TOKEN")
+            || std::env::var("CLAUDE_CODE_OAUTH_TOKEN").is_ok();
+        if !has_api_key && !has_oauth {
             tracing::warn!(
                 job_id = %self.config.job_id,
                 "No Claude Code auth available. Set ANTHROPIC_API_KEY or run \
@@ -257,7 +259,10 @@ impl ClaudeBridgeRuntime {
             .await?;
 
         // Run the initial Claude session
-        let session_id = match self.run_claude_session(&job.description, None).await {
+        let session_id = match self
+            .run_claude_session(&job.description, None, &extra_env)
+            .await
+        {
             Ok(sid) => sid,
             Err(e) => {
                 tracing::error!(job_id = %self.config.job_id, "Claude session failed: {}", e);
@@ -288,7 +293,7 @@ impl ClaudeBridgeRuntime {
                         "Got follow-up prompt, resuming session"
                     );
                     if let Err(e) = self
-                        .run_claude_session(&prompt.content, session_id.as_deref())
+                        .run_claude_session(&prompt.content, session_id.as_deref(), &extra_env)
                         .await
                     {
                         tracing::error!(
@@ -337,6 +342,7 @@ impl ClaudeBridgeRuntime {
         &self,
         prompt: &str,
         resume_session_id: Option<&str>,
+        extra_env: &std::collections::HashMap<String, String>,
     ) -> Result<Option<String>, WorkerError> {
         let mut cmd = Command::new("claude");
         cmd.arg("-p")
@@ -352,6 +358,10 @@ impl ClaudeBridgeRuntime {
         if let Some(sid) = resume_session_id {
             cmd.arg("--resume").arg(sid);
         }
+
+        // Inject credentials into the child process environment without
+        // mutating the global process env (which is unsafe in multi-threaded programs).
+        cmd.envs(extra_env);
 
         cmd.current_dir("/workspace")
             .stdout(std::process::Stdio::piped())

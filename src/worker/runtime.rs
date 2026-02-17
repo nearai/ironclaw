@@ -5,6 +5,7 @@
 //! Streams real-time events (message, tool_use, tool_result, result) through
 //! the orchestrator's job event pipeline for UI visibility.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -51,6 +52,9 @@ pub struct WorkerRuntime {
     llm: Arc<dyn LlmProvider>,
     safety: Arc<SafetyLayer>,
     tools: Arc<ToolRegistry>,
+    /// Credentials fetched from the orchestrator, injected into child processes
+    /// via `Command::envs()` rather than mutating the global process environment.
+    extra_env: HashMap<String, String>,
 }
 
 impl WorkerRuntime {
@@ -83,11 +87,12 @@ impl WorkerRuntime {
             llm,
             safety,
             tools,
+            extra_env: HashMap::new(),
         })
     }
 
     /// Run the worker until the job is complete or an error occurs.
-    pub async fn run(self) -> Result<(), WorkerError> {
+    pub async fn run(mut self) -> Result<(), WorkerError> {
         tracing::info!("Worker starting for job {}", self.config.job_id);
 
         // Fetch job description from orchestrator
@@ -99,17 +104,16 @@ impl WorkerRuntime {
             truncate(&job.description, 100)
         );
 
-        // Fetch and set credentials before execution begins.
-        // Worker is a single-threaded entry point so set_var is safe here;
-        // the spawned tool commands inherit the process environment.
+        // Fetch credentials and store them for injection into child processes
+        // via Command::envs() (avoids unsafe std::env::set_var in multi-threaded runtime).
         let credentials = self.client.fetch_credentials().await?;
         for cred in &credentials {
-            // SAFETY: worker is single-threaded at this point (no tools running yet)
-            unsafe { std::env::set_var(&cred.env_var, &cred.value) };
+            self.extra_env
+                .insert(cred.env_var.clone(), cred.value.clone());
         }
         if !credentials.is_empty() {
             tracing::info!(
-                "Injected {} credential(s) into environment",
+                "Fetched {} credential(s) for child process injection",
                 credentials.len()
             );
         }
@@ -393,7 +397,10 @@ Work independently to complete this job. Report when done."#,
             None => return Err(format!("tool '{}' not found", tool_name)),
         };
 
-        let ctx = JobContext::default();
+        let ctx = JobContext {
+            extra_env: self.extra_env.clone(),
+            ..Default::default()
+        };
 
         // Validate params
         let validation = self.safety.validator().validate_tool_params(params);

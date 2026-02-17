@@ -278,7 +278,9 @@ async fn handle_connect(
 
     tracing::debug!("Proxy: allowing CONNECT to {}", target_addr);
 
-    // Spawn a task to establish the tunnel after the upgrade completes
+    // Spawn a task to establish the tunnel after the upgrade completes.
+    // A 30-minute timeout prevents stuck connections from leaking tasks
+    // (matches the default sandbox timeout).
     let target = target_addr.clone();
     tokio::spawn(async move {
         match hyper::upgrade::on(req).await {
@@ -286,11 +288,23 @@ async fn handle_connect(
                 let mut client_stream = TokioIo::new(upgraded);
                 match TcpStream::connect(&target).await {
                     Ok(mut server_stream) => {
-                        if let Err(e) =
-                            tokio::io::copy_bidirectional(&mut client_stream, &mut server_stream)
-                                .await
+                        let tunnel_timeout = std::time::Duration::from_secs(30 * 60);
+                        match tokio::time::timeout(
+                            tunnel_timeout,
+                            tokio::io::copy_bidirectional(&mut client_stream, &mut server_stream),
+                        )
+                        .await
                         {
-                            tracing::debug!("Proxy: tunnel to {} closed: {}", target, e);
+                            Ok(Ok(_)) => {}
+                            Ok(Err(e)) => {
+                                tracing::debug!("Proxy: tunnel to {} closed: {}", target, e);
+                            }
+                            Err(_) => {
+                                tracing::info!(
+                                    "Proxy: tunnel to {} timed out after 30m, closing",
+                                    target
+                                );
+                            }
                         }
                     }
                     Err(e) => {

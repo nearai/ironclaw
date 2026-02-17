@@ -270,6 +270,9 @@ impl CreateJobTool {
         let (project_dir, browse_id) = resolve_project_dir(explicit_dir, job_id)?;
         let project_dir_str = project_dir.display().to_string();
 
+        // Serialize credential grants so restarts can reload them.
+        let credential_grants_json = serde_json::to_string(&credential_grants).unwrap_or_default();
+
         // Persist the job to DB before creating the container.
         self.persist_job(SandboxJobRecord {
             id: job_id,
@@ -282,6 +285,7 @@ impl CreateJobTool {
             created_at: Utc::now(),
             started_at: None,
             completed_at: None,
+            credential_grants_json,
         });
 
         // Persist the job mode to DB

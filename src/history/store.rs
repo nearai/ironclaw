@@ -239,6 +239,7 @@ impl Store {
                     metadata: serde_json::Value::Null,
                     total_tokens_used: 0,
                     max_tokens: 0,
+                    extra_env: std::collections::HashMap::new(),
                 }))
             }
             None => Ok(None),
@@ -470,6 +471,9 @@ pub struct SandboxJobRecord {
     pub created_at: DateTime<Utc>,
     pub started_at: Option<DateTime<Utc>>,
     pub completed_at: Option<DateTime<Utc>>,
+    /// Serialized JSON of `Vec<CredentialGrant>` for restart support.
+    /// Stored in the `description` column of `agent_jobs` (unused for sandbox jobs).
+    pub credential_grants_json: String,
 }
 
 /// Summary of sandbox job counts grouped by status.
@@ -493,7 +497,7 @@ impl Store {
             INSERT INTO agent_jobs (
                 id, title, description, status, source, user_id, project_dir,
                 success, failure_reason, created_at, started_at, completed_at
-            ) VALUES ($1, $2, '', $3, 'sandbox', $4, $5, $6, $7, $8, $9, $10)
+            ) VALUES ($1, $2, $3, $4, 'sandbox', $5, $6, $7, $8, $9, $10, $11)
             ON CONFLICT (id) DO UPDATE SET
                 status = EXCLUDED.status,
                 success = EXCLUDED.success,
@@ -504,6 +508,7 @@ impl Store {
             &[
                 &job.id,
                 &job.task,
+                &job.credential_grants_json,
                 &job.status,
                 &job.user_id,
                 &job.project_dir,
@@ -527,7 +532,7 @@ impl Store {
         let row = conn
             .query_opt(
                 r#"
-                SELECT id, title, status, user_id, project_dir,
+                SELECT id, title, description, status, user_id, project_dir,
                        success, failure_reason, created_at, started_at, completed_at
                 FROM agent_jobs WHERE id = $1 AND source = 'sandbox'
                 "#,
@@ -548,6 +553,7 @@ impl Store {
             created_at: r.get("created_at"),
             started_at: r.get("started_at"),
             completed_at: r.get("completed_at"),
+            credential_grants_json: r.get::<_, String>("description"),
         }))
     }
 
@@ -557,7 +563,7 @@ impl Store {
         let rows = conn
             .query(
                 r#"
-                SELECT id, title, status, user_id, project_dir,
+                SELECT id, title, description, status, user_id, project_dir,
                        success, failure_reason, created_at, started_at, completed_at
                 FROM agent_jobs WHERE source = 'sandbox'
                 ORDER BY created_at DESC
@@ -581,6 +587,7 @@ impl Store {
                 created_at: r.get("created_at"),
                 started_at: r.get("started_at"),
                 completed_at: r.get("completed_at"),
+                credential_grants_json: r.get::<_, String>("description"),
             })
             .collect())
     }
@@ -594,7 +601,7 @@ impl Store {
         let rows = conn
             .query(
                 r#"
-                SELECT id, title, status, user_id, project_dir,
+                SELECT id, title, description, status, user_id, project_dir,
                        success, failure_reason, created_at, started_at, completed_at
                 FROM agent_jobs WHERE source = 'sandbox' AND user_id = $1
                 ORDER BY created_at DESC
@@ -618,6 +625,7 @@ impl Store {
                 created_at: r.get("created_at"),
                 started_at: r.get("started_at"),
                 completed_at: r.get("completed_at"),
+                credential_grants_json: r.get::<_, String>("description"),
             })
             .collect())
     }

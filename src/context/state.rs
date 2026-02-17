@@ -1,5 +1,6 @@
 //! Job state machine.
 
+use std::collections::HashMap;
 use std::time::Duration;
 
 use chrono::{DateTime, Utc};
@@ -135,6 +136,13 @@ pub struct JobContext {
     pub transitions: Vec<StateTransition>,
     /// Metadata.
     pub metadata: serde_json::Value,
+    /// Extra environment variables to inject into spawned child processes.
+    ///
+    /// Used by the worker runtime to pass fetched credentials to tools
+    /// (e.g., shell commands) without mutating the global process environment
+    /// via `std::env::set_var`, which is unsafe in multi-threaded programs.
+    #[serde(skip)]
+    pub extra_env: HashMap<String, String>,
 }
 
 impl JobContext {
@@ -170,6 +178,7 @@ impl JobContext {
             completed_at: None,
             repair_attempts: 0,
             transitions: Vec::new(),
+            extra_env: HashMap::new(),
             metadata: serde_json::Value::Null,
         }
     }
