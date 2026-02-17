@@ -20,7 +20,7 @@ use crate::agent::routine::{
 use crate::agent::routine_engine::RoutineEngine;
 use crate::context::JobContext;
 use crate::db::Database;
-use crate::tools::tool::{Tool, ToolError, ToolOutput, require_str};
+use crate::tools::tool::{Tool, ToolError, ToolOutput};
 
 // ==================== routine_create ====================
 
@@ -106,16 +106,25 @@ impl Tool for RoutineCreateTool {
     ) -> Result<ToolOutput, ToolError> {
         let start = std::time::Instant::now();
 
-        let name = require_str(&params, "name")?;
+        let name = params
+            .get("name")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| ToolError::InvalidParameters("missing 'name'".to_string()))?;
 
         let description = params
             .get("description")
             .and_then(|v| v.as_str())
             .unwrap_or("");
 
-        let trigger_type = require_str(&params, "trigger_type")?;
+        let trigger_type = params
+            .get("trigger_type")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| ToolError::InvalidParameters("missing 'trigger_type'".to_string()))?;
 
-        let prompt = require_str(&params, "prompt")?;
+        let prompt = params
+            .get("prompt")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| ToolError::InvalidParameters("missing 'prompt'".to_string()))?;
 
         // Build trigger
         let trigger = match trigger_type {
@@ -399,7 +408,10 @@ impl Tool for RoutineUpdateTool {
     ) -> Result<ToolOutput, ToolError> {
         let start = std::time::Instant::now();
 
-        let name = require_str(&params, "name")?;
+        let name = params
+            .get("name")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| ToolError::InvalidParameters("missing 'name'".to_string()))?;
 
         let mut routine = self
             .store
@@ -502,7 +514,10 @@ impl Tool for RoutineDeleteTool {
     ) -> Result<ToolOutput, ToolError> {
         let start = std::time::Instant::now();
 
-        let name = require_str(&params, "name")?;
+        let name = params
+            .get("name")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| ToolError::InvalidParameters("missing 'name'".to_string()))?;
 
         let routine = self
             .store
@@ -580,7 +595,10 @@ impl Tool for RoutineHistoryTool {
     ) -> Result<ToolOutput, ToolError> {
         let start = std::time::Instant::now();
 
-        let name = require_str(&params, "name")?;
+        let name = params
+            .get("name")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| ToolError::InvalidParameters("missing 'name'".to_string()))?;
 
         let limit = params
             .get("limit")

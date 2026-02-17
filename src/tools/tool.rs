@@ -172,21 +172,6 @@ pub trait Tool: Send + Sync {
         false
     }
 
-    /// Whether this specific invocation should override auto-approval.
-    ///
-    /// This method is called after checking `requires_approval()` and finding that
-    /// the tool is auto-approved for this session. Return `true` to force approval
-    /// for this specific invocation despite auto-approval (for example, for
-    /// destructive operations like `rm -rf` or `git push --force`).
-    ///
-    /// Return `false` to allow auto-approval to proceed normally.
-    ///
-    /// The default returns `false`. Override only if you need parameter-aware
-    /// approval gating.
-    fn requires_approval_for(&self, _params: &serde_json::Value) -> bool {
-        false
-    }
-
     /// Maximum time this tool is allowed to run before the caller kills it.
     /// Override for long-running tools like sandbox execution.
     /// Default: 60 seconds.
@@ -212,28 +197,6 @@ pub trait Tool: Send + Sync {
             parameters: self.parameters_schema(),
         }
     }
-}
-
-/// Extract a required string parameter from a JSON object.
-///
-/// Returns `ToolError::InvalidParameters` if the key is missing or not a string.
-pub fn require_str<'a>(params: &'a serde_json::Value, name: &str) -> Result<&'a str, ToolError> {
-    params
-        .get(name)
-        .and_then(|v| v.as_str())
-        .ok_or_else(|| ToolError::InvalidParameters(format!("missing '{}' parameter", name)))
-}
-
-/// Extract a required parameter of any type from a JSON object.
-///
-/// Returns `ToolError::InvalidParameters` if the key is missing.
-pub fn require_param<'a>(
-    params: &'a serde_json::Value,
-    name: &str,
-) -> Result<&'a serde_json::Value, ToolError> {
-    params
-        .get(name)
-        .ok_or_else(|| ToolError::InvalidParameters(format!("missing '{}' parameter", name)))
 }
 
 #[cfg(test)]
@@ -272,7 +235,12 @@ mod tests {
             params: serde_json::Value,
             _ctx: &JobContext,
         ) -> Result<ToolOutput, ToolError> {
-            let message = require_str(&params, "message")?;
+            let message = params
+                .get("message")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| {
+                    ToolError::InvalidParameters("missing 'message' parameter".to_string())
+                })?;
 
             Ok(ToolOutput::text(message, Duration::from_millis(1)))
         }
@@ -308,48 +276,5 @@ mod tests {
     fn test_execution_timeout_default() {
         let tool = EchoTool;
         assert_eq!(tool.execution_timeout(), Duration::from_secs(60));
-    }
-
-    #[test]
-    fn test_require_str_present() {
-        let params = serde_json::json!({"name": "alice"});
-        assert_eq!(require_str(&params, "name").unwrap(), "alice");
-    }
-
-    #[test]
-    fn test_require_str_missing() {
-        let params = serde_json::json!({});
-        let err = require_str(&params, "name").unwrap_err();
-        assert!(err.to_string().contains("missing 'name'"));
-    }
-
-    #[test]
-    fn test_require_str_wrong_type() {
-        let params = serde_json::json!({"name": 42});
-        let err = require_str(&params, "name").unwrap_err();
-        assert!(err.to_string().contains("missing 'name'"));
-    }
-
-    #[test]
-    fn test_require_param_present() {
-        let params = serde_json::json!({"data": [1, 2, 3]});
-        assert_eq!(
-            require_param(&params, "data").unwrap(),
-            &serde_json::json!([1, 2, 3])
-        );
-    }
-
-    #[test]
-    fn test_require_param_missing() {
-        let params = serde_json::json!({});
-        let err = require_param(&params, "data").unwrap_err();
-        assert!(err.to_string().contains("missing 'data'"));
-    }
-
-    #[test]
-    fn test_requires_approval_for_default() {
-        let tool = EchoTool;
-        // Default requires_approval_for() returns false, allowing auto-approval.
-        assert!(!tool.requires_approval_for(&serde_json::json!({"message": "hi"})));
     }
 }

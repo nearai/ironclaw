@@ -133,7 +133,7 @@ This document tracks feature parity between IronClaw (Rust implementation) and O
 |---------|----------|----------|-------|
 | Pi agent runtime | ✅ | ➖ | IronClaw uses custom runtime |
 | RPC-based execution | ✅ | ✅ | Orchestrator/worker pattern |
-| Multi-provider failover | ✅ | ✅ | `FailoverProvider` tries providers sequentially on retryable errors |
+| Multi-provider failover | ✅ | ❌ | Provider fallback chains |
 | Per-sender sessions | ✅ | ✅ | |
 | Global sessions | ✅ | ❌ | Optional shared context |
 | Session pruning | ✅ | ❌ | Auto cleanup old sessions |
@@ -164,7 +164,7 @@ This document tracks feature parity between IronClaw (Rust implementation) and O
 | AWS Bedrock | ✅ | ❌ | P3 | |
 | Google Gemini | ✅ | ❌ | P3 | |
 | OpenRouter | ✅ | ❌ | P3 | |
-| Ollama (local) | ✅ | ✅ | - | via `rig::providers::ollama` (full support) |
+| Ollama (local) | ✅ | ❌ | P2 | Local models |
 | node-llama-cpp | ✅ | ➖ | - | N/A for Rust |
 | llama.cpp (native) | ❌ | 🔮 | P3 | Rust bindings |
 
@@ -173,8 +173,8 @@ This document tracks feature parity between IronClaw (Rust implementation) and O
 | Feature | OpenClaw | IronClaw | Notes |
 |---------|----------|----------|-------|
 | Auto-discovery | ✅ | ❌ | |
-| Failover chains | ✅ | ✅ | `FailoverProvider` with configurable `fallback_model` |
-| Cooldown management | ✅ | ✅ | Lock-free per-provider cooldown in `FailoverProvider` |
+| Failover chains | ✅ | ❌ | Provider fallback |
+| Cooldown management | ✅ | ❌ | Skip failed providers |
 | Per-session model override | ✅ | ✅ | Model selector in TUI |
 | Model selection UI | ✅ | ✅ | TUI keyboard shortcut |
 
@@ -213,7 +213,7 @@ This document tracks feature parity between IronClaw (Rust implementation) and O
 | Auth plugins | ✅ | ❌ | |
 | Memory plugins | ✅ | ❌ | Custom backends |
 | Tool plugins | ✅ | ✅ | WASM tools |
-| Hook plugins | ✅ | ❌ | |
+| Hook plugins | ✅ | ✅ | WASM hooks via capabilities.json |
 | Provider plugins | ✅ | ❌ | |
 | Plugin CLI (`install`, `list`) | ✅ | ✅ | `tool` subcommand |
 | ClawHub registry | ✅ | ❌ | Discovery |
@@ -331,10 +331,10 @@ This document tracks feature parity between IronClaw (Rust implementation) and O
 | `onSessionEnd` hook | ✅ | ✅ | P2 | |
 | `transcribeAudio` hook | ✅ | ❌ | P3 | |
 | `transformResponse` hook | ✅ | ✅ | P2 | |
-| Bundled hooks | ✅ | ❌ | P2 | |
-| Plugin hooks | ✅ | ❌ | P3 | |
-| Workspace hooks | ✅ | ❌ | P2 | Inline code |
-| Outbound webhooks | ✅ | ❌ | P2 | |
+| Bundled hooks | ✅ | ✅ | P2 | ContentFilter, LeakDetection, RateLimiting, AuditLogging |
+| Plugin hooks | ✅ | ✅ | P3 | WASM tools declare hooks in capabilities.json |
+| Workspace hooks | ✅ | ✅ | P2 | Declarative JSON via `hooks/*.hook.json` in workspace |
+| Outbound webhooks | ✅ | ✅ | P2 | Fire-and-forget HTTP POST with HMAC signing |
 | Heartbeat system | ✅ | ✅ | - | Periodic execution |
 | Gmail pub/sub | ✅ | ❌ | P3 | |
 
@@ -419,11 +419,15 @@ This document tracks feature parity between IronClaw (Rust implementation) and O
 - ❌ Slack channel (real implementation)
 - ✅ Telegram channel (WASM, DM pairing, caption, /start)
 - ❌ WhatsApp channel
-- ✅ Multi-provider failover (`FailoverProvider` with retryable error classification)
-- ✅ Hooks system (beforeInbound, beforeToolCall, beforeOutbound, onSessionStart, onSessionEnd, transformResponse)
+- ❌ Multi-provider failover
+- ✅ Hooks system (11 hook points, bundled safety hooks, WASM plugin hooks, outbound webhooks)
 
 ### P2 - Medium Priority
-- ❌ Media handling (images, PDFs)
+- ❌ Cron job scheduling
+- ❌ Web Control UI
+- ❌ WebChat channel
+- 🚧 Media handling (caption support; no image/PDF processing)
+- ❌ CLI subcommands (config, status, memory, doctor)
 - ❌ Ollama/local model support
 - ❌ Configuration hot-reload
 - ❌ Webhook trigger endpoint in web gateway

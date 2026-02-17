@@ -87,7 +87,6 @@ impl Scheduler {
         // TOCTOU races where two concurrent calls both pass the checks.
         {
             let mut jobs = self.jobs.write().await;
-
             if jobs.contains_key(&job_id) {
                 return Ok(());
             }

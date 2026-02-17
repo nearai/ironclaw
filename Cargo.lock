@@ -2210,11 +2210,11 @@ dependencies = [
  "hyper 1.8.1",
  "hyper-util",
  "rustls",
- "rustls-native-certs",
  "rustls-pki-types",
  "tokio",
  "tokio-rustls",
  "tower-service",
+ "webpki-roots",
 ]
 
 [[package]]
@@ -2490,7 +2490,7 @@ dependencies = [
 
 [[package]]
 name = "ironclaw"
-version = "0.5.0"
+version = "0.1.3"
 dependencies = [
  "aes-gcm",
  "aho-corasick",
@@ -2510,7 +2510,9 @@ dependencies = [
  "dotenvy",
  "fs4",
  "futures",
+ "hex",
  "hkdf",
+ "hmac",
  "http-body-util",
  "hyper 1.8.1",
  "hyper-util",
@@ -4034,7 +4036,6 @@ dependencies = [
  "pin-project-lite",
  "quinn",
  "rustls",
- "rustls-native-certs",
  "rustls-pki-types",
  "serde",
  "serde_json",
@@ -4052,6 +4053,7 @@ dependencies = [
  "wasm-bindgen-futures",
  "wasm-streams",
  "web-sys",
+ "webpki-roots",
 ]
 
 [[package]]
@@ -6236,6 +6238,15 @@ checksum = "5a6580f308b1fad9207618087a65c04e7a10bc77e02c8e84e9b00dd4b12fa0bb"
 dependencies = [
  "js-sys",
  "wasm-bindgen",
+]
+
+[[package]]
+name = "webpki-roots"
+version = "1.0.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "12bed680863276c63889429bfd6cab3b99943659923822de1c8a39c49e4d722c"
+dependencies = [
+ "rustls-pki-types",
 ]
 
 [[package]]

@@ -32,10 +32,11 @@ use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 
+use crate::hooks::hook::{HookFailureMode, HookPoint};
 use crate::secrets::{CredentialLocation, CredentialMapping};
 use crate::tools::wasm::{
-    Capabilities, EndpointPattern, HttpCapability, RateLimitConfig, SecretsCapability,
-    ToolInvokeCapability, WorkspaceCapability,
+    Capabilities, EndpointPattern, HookCapabilities, HttpCapability, RateLimitConfig,
+    SecretsCapability, ToolInvokeCapability, WorkspaceCapability,
 };
 
 /// Root schema for a capabilities JSON file.
@@ -61,6 +62,11 @@ pub struct CapabilitiesFile {
     /// Used by `ironclaw config` to guide users through auth setup.
     #[serde(default)]
     pub auth: Option<AuthCapabilitySchema>,
+
+    /// Lifecycle hook declarations.
+    /// WASM tools can intercept agent lifecycle events by declaring hook points.
+    #[serde(default)]
+    pub hooks: Option<HookDeclarationsSchema>,
 }
 
 impl CapabilitiesFile {
@@ -104,6 +110,28 @@ impl CapabilitiesFile {
                 allowed_prefixes: workspace.allowed_prefixes.clone(),
                 reader: None, // Injected at runtime
             });
+        }
+
+        if let Some(hooks) = &self.hooks {
+            let points: Vec<HookPoint> = hooks
+                .points
+                .iter()
+                .filter_map(|s| parse_hook_point(s))
+                .collect();
+
+            if !points.is_empty() {
+                let failure_mode = match hooks.failure_mode.as_str() {
+                    "fail_closed" | "failClosed" => HookFailureMode::FailClosed,
+                    _ => HookFailureMode::FailOpen,
+                };
+
+                caps.hooks = Some(HookCapabilities {
+                    points,
+                    failure_mode,
+                    timeout: std::time::Duration::from_millis(hooks.timeout_ms),
+                    priority: hooks.priority,
+                });
+            }
         }
 
         caps
@@ -490,6 +518,81 @@ fn default_success_status() -> u16 {
     200
 }
 
+/// Hook declarations schema for WASM tools.
+///
+/// Allows WASM tools to register lifecycle hooks via their capabilities file.
+///
+/// # Example
+///
+/// ```json
+/// {
+///   "hooks": {
+///     "points": ["beforeInbound", "beforeOutbound"],
+///     "failure_mode": "fail_open",
+///     "timeout_ms": 5000,
+///     "priority": 100
+///   }
+/// }
+/// ```
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct HookDeclarationsSchema {
+    /// Hook points this WASM module wants to intercept.
+    ///
+    /// Supported values (case-insensitive, snake_case or camelCase):
+    /// `beforeInbound`, `beforeToolCall`, `beforeOutbound`, `onSessionStart`,
+    /// `onSessionEnd`, `transformResponse`, `afterParse`, `beforeAgenticLoop`,
+    /// `beforeLlmCall`, `afterToolCall`, `beforeApproval`.
+    pub points: Vec<String>,
+
+    /// How to handle failures (`fail_open` or `fail_closed`).
+    /// Default: `fail_open`.
+    #[serde(default = "default_fail_open")]
+    pub failure_mode: String,
+
+    /// Timeout in milliseconds for the hook execution.
+    /// Default: 5000.
+    #[serde(default = "default_hook_timeout")]
+    pub timeout_ms: u64,
+
+    /// Execution priority (lower = runs first).
+    /// Default: 100.
+    #[serde(default = "default_hook_priority")]
+    pub priority: u32,
+}
+
+fn default_fail_open() -> String {
+    "fail_open".to_string()
+}
+
+fn default_hook_timeout() -> u64 {
+    5000
+}
+
+fn default_hook_priority() -> u32 {
+    100
+}
+
+/// Parse a hook point name from a string (case-insensitive, supports snake_case and camelCase).
+fn parse_hook_point(s: &str) -> Option<HookPoint> {
+    match s.to_lowercase().replace('_', "").as_str() {
+        "beforeinbound" => Some(HookPoint::BeforeInbound),
+        "beforetoolcall" => Some(HookPoint::BeforeToolCall),
+        "beforeoutbound" => Some(HookPoint::BeforeOutbound),
+        "onsessionstart" => Some(HookPoint::OnSessionStart),
+        "onsessionend" => Some(HookPoint::OnSessionEnd),
+        "transformresponse" => Some(HookPoint::TransformResponse),
+        "afterparse" => Some(HookPoint::AfterParse),
+        "beforeagenticloop" => Some(HookPoint::BeforeAgenticLoop),
+        "beforellmcall" => Some(HookPoint::BeforeLlmCall),
+        "aftertoolcall" => Some(HookPoint::AfterToolCall),
+        "beforeapproval" => Some(HookPoint::BeforeApproval),
+        other => {
+            tracing::warn!("Unknown hook point in capabilities: {:?}", other);
+            None
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use crate::tools::wasm::capabilities_schema::{CapabilitiesFile, CredentialLocationSchema};
@@ -753,5 +856,67 @@ mod tests {
         assert_eq!(auth.secret_name, "my_api_key");
         assert!(auth.display_name.is_none());
         assert!(auth.setup_url.is_none());
+    }
+
+    #[test]
+    fn test_parse_hooks_declaration() {
+        let json = r#"{
+            "hooks": {
+                "points": ["beforeInbound", "afterToolCall"],
+                "failure_mode": "fail_closed",
+                "timeout_ms": 3000,
+                "priority": 50
+            }
+        }"#;
+
+        let file = CapabilitiesFile::from_json(json).unwrap();
+        let hooks = file.hooks.as_ref().unwrap();
+        assert_eq!(hooks.points, vec!["beforeInbound", "afterToolCall"]);
+        assert_eq!(hooks.failure_mode, "fail_closed");
+        assert_eq!(hooks.timeout_ms, 3000);
+        assert_eq!(hooks.priority, 50);
+
+        // Convert to runtime capabilities
+        let caps = file.to_capabilities();
+        let hook_caps = caps.hooks.unwrap();
+        assert_eq!(hook_caps.points.len(), 2);
+        assert_eq!(hook_caps.points[0], crate::hooks::HookPoint::BeforeInbound);
+        assert_eq!(hook_caps.points[1], crate::hooks::HookPoint::AfterToolCall);
+        assert_eq!(
+            hook_caps.failure_mode,
+            crate::hooks::HookFailureMode::FailClosed
+        );
+        assert_eq!(hook_caps.timeout.as_millis(), 3000);
+        assert_eq!(hook_caps.priority, 50);
+    }
+
+    #[test]
+    fn test_parse_hooks_defaults() {
+        let json = r#"{
+            "hooks": {
+                "points": ["beforeOutbound"]
+            }
+        }"#;
+
+        let file = CapabilitiesFile::from_json(json).unwrap();
+        let hooks = file.hooks.unwrap();
+        assert_eq!(hooks.failure_mode, "fail_open");
+        assert_eq!(hooks.timeout_ms, 5000);
+        assert_eq!(hooks.priority, 100);
+    }
+
+    #[test]
+    fn test_parse_hooks_unknown_points_filtered() {
+        let json = r#"{
+            "hooks": {
+                "points": ["beforeInbound", "unknownPoint", "afterParse"]
+            }
+        }"#;
+
+        let file = CapabilitiesFile::from_json(json).unwrap();
+        let caps = file.to_capabilities();
+        let hook_caps = caps.hooks.unwrap();
+        // Only the 2 known points should be included
+        assert_eq!(hook_caps.points.len(), 2);
     }
 }

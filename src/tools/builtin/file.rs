@@ -11,7 +11,7 @@ use async_trait::async_trait;
 use tokio::fs;
 
 use crate::context::JobContext;
-use crate::tools::tool::{Tool, ToolDomain, ToolError, ToolOutput, require_str};
+use crate::tools::tool::{Tool, ToolDomain, ToolError, ToolOutput};
 use crate::workspace::paths as ws_paths;
 
 /// Well-known workspace filenames that must go through memory_write, not write_file.
@@ -203,7 +203,10 @@ impl Tool for ReadFileTool {
         params: serde_json::Value,
         _ctx: &JobContext,
     ) -> Result<ToolOutput, ToolError> {
-        let path_str = require_str(&params, "path")?;
+        let path_str = params
+            .get("path")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| ToolError::InvalidParameters("missing 'path' parameter".into()))?;
 
         let offset = params.get("offset").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
         let limit = params.get("limit").and_then(|v| v.as_u64());
@@ -325,7 +328,10 @@ impl Tool for WriteFileTool {
         params: serde_json::Value,
         _ctx: &JobContext,
     ) -> Result<ToolOutput, ToolError> {
-        let path_str = require_str(&params, "path")?;
+        let path_str = params
+            .get("path")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| ToolError::InvalidParameters("missing 'path' parameter".into()))?;
 
         // Reject workspace paths: these live in the database, not on disk.
         if is_workspace_path(path_str) {
@@ -336,7 +342,10 @@ impl Tool for WriteFileTool {
             )));
         }
 
-        let content = require_str(&params, "content")?;
+        let content = params
+            .get("content")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| ToolError::InvalidParameters("missing 'content' parameter".into()))?;
 
         let start = std::time::Instant::now();
 
@@ -641,11 +650,20 @@ impl Tool for ApplyPatchTool {
         params: serde_json::Value,
         _ctx: &JobContext,
     ) -> Result<ToolOutput, ToolError> {
-        let path_str = require_str(&params, "path")?;
+        let path_str = params
+            .get("path")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| ToolError::InvalidParameters("missing 'path' parameter".into()))?;
 
-        let old_string = require_str(&params, "old_string")?;
+        let old_string = params
+            .get("old_string")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| ToolError::InvalidParameters("missing 'old_string' parameter".into()))?;
 
-        let new_string = require_str(&params, "new_string")?;
+        let new_string = params
+            .get("new_string")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| ToolError::InvalidParameters("missing 'new_string' parameter".into()))?;
 
         let replace_all = params
             .get("replace_all")

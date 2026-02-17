@@ -16,6 +16,7 @@ use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 
+use crate::hooks::hook::{HookFailureMode, HookPoint};
 use crate::secrets::CredentialMapping;
 
 /// All capabilities that can be granted to a WASM tool.
@@ -32,6 +33,21 @@ pub struct Capabilities {
     pub tool_invoke: Option<ToolInvokeCapability>,
     /// Check if secrets exist.
     pub secrets: Option<SecretsCapability>,
+    /// Lifecycle hook declarations.
+    pub hooks: Option<HookCapabilities>,
+}
+
+/// Lifecycle hook capabilities for a WASM tool.
+#[derive(Debug, Clone)]
+pub struct HookCapabilities {
+    /// Hook points this tool intercepts.
+    pub points: Vec<HookPoint>,
+    /// How to handle hook execution failures.
+    pub failure_mode: HookFailureMode,
+    /// Maximum execution time for the hook.
+    pub timeout: Duration,
+    /// Priority (lower = runs first).
+    pub priority: u32,
 }
 
 impl Capabilities {

@@ -16,6 +16,7 @@ use crate::extensions::{
     ActivateResult, AuthResult, ExtensionError, ExtensionKind, ExtensionSource, InstallResult,
     InstalledExtension, RegistryEntry, ResultSource, SearchResult,
 };
+use crate::hooks::HookRegistry;
 use crate::secrets::{CreateSecretParams, SecretsStore};
 use crate::tools::ToolRegistry;
 use crate::tools::mcp::McpClient;
@@ -52,6 +53,7 @@ pub struct ExtensionManager {
     // Shared
     secrets: Arc<dyn SecretsStore + Send + Sync>,
     tool_registry: Arc<ToolRegistry>,
+    hook_registry: Option<Arc<HookRegistry>>,
     pending_auth: RwLock<HashMap<String, PendingAuth>>,
     /// Tunnel URL for remote OAuth callbacks (used in future iterations).
     _tunnel_url: Option<String>,
@@ -72,6 +74,7 @@ impl ExtensionManager {
         tunnel_url: Option<String>,
         user_id: String,
         store: Option<Arc<dyn crate::db::Database>>,
+        hook_registry: Option<Arc<HookRegistry>>,
     ) -> Self {
         Self {
             registry: ExtensionRegistry::new(),
@@ -83,6 +86,7 @@ impl ExtensionManager {
             wasm_channels_dir,
             secrets,
             tool_registry,
+            hook_registry,
             pending_auth: RwLock::new(HashMap::new()),
             _tunnel_url: tunnel_url,
             user_id,
@@ -963,7 +967,12 @@ impl ExtensionManager {
             None
         };
 
-        let loader = WasmToolLoader::new(Arc::clone(runtime), Arc::clone(&self.tool_registry));
+        let loader = if let Some(ref hooks) = self.hook_registry {
+            WasmToolLoader::new(Arc::clone(runtime), Arc::clone(&self.tool_registry))
+                .with_hooks(Arc::clone(hooks))
+        } else {
+            WasmToolLoader::new(Arc::clone(runtime), Arc::clone(&self.tool_registry))
+        };
         loader
             .load_from_files(name, &wasm_path, cap_path_option)
             .await

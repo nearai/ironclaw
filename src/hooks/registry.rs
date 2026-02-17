@@ -36,9 +36,12 @@ impl HookRegistry {
 
     /// Register a hook with a specific priority.
     ///
-    /// Lower priority number = runs first.
+    /// Lower priority number = runs first. If a hook with the same name
+    /// already exists, it is replaced.
     pub async fn register_with_priority(&self, hook: Arc<dyn Hook>, priority: u32) {
         let mut hooks = self.hooks.write().await;
+        let name = hook.name();
+        hooks.retain(|e| e.hook.name() != name);
         hooks.push(HookEntry { hook, priority });
         hooks.sort_by_key(|e| e.priority);
     }
@@ -157,13 +160,18 @@ impl Default for HookRegistry {
 fn extract_content(event: &HookEvent) -> String {
     match event {
         HookEvent::Inbound { content, .. } | HookEvent::Outbound { content, .. } => content.clone(),
-        HookEvent::ToolCall { parameters, .. } => {
+        HookEvent::ToolCall { parameters, .. } | HookEvent::ApprovalRequest { parameters, .. } => {
             serde_json::to_string(parameters).unwrap_or_default()
         }
         HookEvent::ResponseTransform { response, .. } => response.clone(),
         HookEvent::SessionStart { session_id, .. } | HookEvent::SessionEnd { session_id, .. } => {
             session_id.clone()
         }
+        HookEvent::Parse { parsed_intent, .. } => parsed_intent.clone(),
+        HookEvent::AgenticLoopStart { thread_id, .. } | HookEvent::LlmCall { thread_id, .. } => {
+            thread_id.clone()
+        }
+        HookEvent::ToolResult { result, .. } => result.clone(),
     }
 }
 
@@ -551,5 +559,125 @@ mod tests {
         // Inbound event should not be affected by outbound-only hook
         let result = registry.run(&test_event()).await;
         assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_new_hook_points_routing() {
+        let registry = HookRegistry::new();
+
+        // Register a reject hook on AfterToolCall only
+        registry
+            .register(Arc::new(RejectHook {
+                name: "tool-result-blocker".into(),
+                reason: "blocked".into(),
+                points: vec![HookPoint::AfterToolCall],
+            }))
+            .await;
+
+        // ToolResult event should be rejected
+        let event = HookEvent::ToolResult {
+            tool_name: "shell".into(),
+            user_id: "user-1".into(),
+            result: "some output".into(),
+            success: true,
+            elapsed_ms: 42,
+        };
+        assert!(registry.run(&event).await.is_err());
+
+        // Parse event should NOT match AfterToolCall hook
+        let parse_event = HookEvent::Parse {
+            user_id: "user-1".into(),
+            channel: "test".into(),
+            raw_input: "hello".into(),
+            parsed_intent: "hello".into(),
+        };
+        assert!(registry.run(&parse_event).await.is_ok());
+
+        // Verify all new points route correctly
+        let events_and_points = vec![
+            (
+                HookEvent::Parse {
+                    user_id: "u".into(),
+                    channel: "c".into(),
+                    raw_input: "r".into(),
+                    parsed_intent: "p".into(),
+                },
+                HookPoint::AfterParse,
+            ),
+            (
+                HookEvent::AgenticLoopStart {
+                    user_id: "u".into(),
+                    thread_id: "t".into(),
+                    message_count: 1,
+                },
+                HookPoint::BeforeAgenticLoop,
+            ),
+            (
+                HookEvent::LlmCall {
+                    user_id: "u".into(),
+                    thread_id: "t".into(),
+                    message_count: 5,
+                    tool_count: 3,
+                },
+                HookPoint::BeforeLlmCall,
+            ),
+            (
+                HookEvent::ToolResult {
+                    tool_name: "echo".into(),
+                    user_id: "u".into(),
+                    result: "ok".into(),
+                    success: true,
+                    elapsed_ms: 10,
+                },
+                HookPoint::AfterToolCall,
+            ),
+            (
+                HookEvent::ApprovalRequest {
+                    tool_name: "shell".into(),
+                    user_id: "u".into(),
+                    parameters: serde_json::json!({"cmd": "rm -rf /"}),
+                    description: "dangerous".into(),
+                },
+                HookPoint::BeforeApproval,
+            ),
+        ];
+
+        for (event, expected_point) in events_and_points {
+            assert_eq!(
+                event.hook_point(),
+                expected_point,
+                "Wrong point for {:?}",
+                event
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn test_after_tool_call_modification() {
+        let registry = HookRegistry::new();
+
+        registry
+            .register(Arc::new(ModifyHook {
+                name: "result-modifier".into(),
+                suffix: " [audited]".into(),
+                points: vec![HookPoint::AfterToolCall],
+            }))
+            .await;
+
+        let event = HookEvent::ToolResult {
+            tool_name: "echo".into(),
+            user_id: "user-1".into(),
+            result: "hello world".into(),
+            success: true,
+            elapsed_ms: 5,
+        };
+
+        let result = registry.run(&event).await.unwrap();
+        match result {
+            HookOutcome::Continue { modified: Some(m) } => {
+                assert_eq!(m, "hello world [audited]");
+            }
+            other => panic!("Expected modification, got: {:?}", other),
+        }
     }
 }

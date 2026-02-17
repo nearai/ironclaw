@@ -9,7 +9,7 @@ use async_trait::async_trait;
 
 use crate::context::JobContext;
 use crate::extensions::{ExtensionKind, ExtensionManager};
-use crate::tools::tool::{Tool, ToolError, ToolOutput, require_str};
+use crate::tools::tool::{Tool, ToolError, ToolOutput};
 
 // ── tool_search ──────────────────────────────────────────────────────────
 
@@ -133,7 +133,10 @@ impl Tool for ToolInstallTool {
     ) -> Result<ToolOutput, ToolError> {
         let start = std::time::Instant::now();
 
-        let name = require_str(&params, "name")?;
+        let name = params
+            .get("name")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| ToolError::InvalidParameters("name is required".to_string()))?;
 
         let url = params.get("url").and_then(|v| v.as_str());
 
@@ -207,7 +210,10 @@ impl Tool for ToolAuthTool {
     ) -> Result<ToolOutput, ToolError> {
         let start = std::time::Instant::now();
 
-        let name = require_str(&params, "name")?;
+        let name = params
+            .get("name")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| ToolError::InvalidParameters("name is required".to_string()))?;
 
         let result = self
             .manager
@@ -300,7 +306,10 @@ impl Tool for ToolActivateTool {
     ) -> Result<ToolOutput, ToolError> {
         let start = std::time::Instant::now();
 
-        let name = require_str(&params, "name")?;
+        let name = params
+            .get("name")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| ToolError::InvalidParameters("name is required".to_string()))?;
 
         match self.manager.activate(name).await {
             Ok(result) => {
@@ -462,7 +471,10 @@ impl Tool for ToolRemoveTool {
     ) -> Result<ToolOutput, ToolError> {
         let start = std::time::Instant::now();
 
-        let name = require_str(&params, "name")?;
+        let name = params
+            .get("name")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| ToolError::InvalidParameters("name is required".to_string()))?;
 
         let message = self
             .manager
@@ -574,6 +586,7 @@ mod tests {
             std::path::PathBuf::from("/tmp/ironclaw-test-channels"),
             None,
             "test".to_string(),
+            None,
             None,
         ))
     }

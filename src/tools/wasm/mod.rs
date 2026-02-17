@@ -94,12 +94,12 @@ pub use limits::{
     WasmResourceLimiter,
 };
 pub use runtime::{PreparedModule, WasmRuntimeConfig, WasmToolRuntime};
-pub use wrapper::{OAuthRefreshConfig, WasmToolWrapper};
+pub use wrapper::WasmToolWrapper;
 
 // Capabilities (V2)
 pub use capabilities::{
-    Capabilities, EndpointPattern, HttpCapability, RateLimitConfig, SecretsCapability,
-    ToolInvokeCapability, WorkspaceCapability, WorkspaceReader,
+    Capabilities, EndpointPattern, HookCapabilities, HttpCapability, RateLimitConfig,
+    SecretsCapability, ToolInvokeCapability, WorkspaceCapability, WorkspaceReader,
 };
 
 // Security components (V2)
@@ -125,6 +125,6 @@ pub use loader::{
 
 // Capabilities schema (for parsing *.capabilities.json files)
 pub use capabilities_schema::{
-    AuthCapabilitySchema, CapabilitiesFile, OAuthConfigSchema, RateLimitSchema,
-    ValidationEndpointSchema,
+    AuthCapabilitySchema, CapabilitiesFile, HookDeclarationsSchema, OAuthConfigSchema,
+    RateLimitSchema, ValidationEndpointSchema,
 };

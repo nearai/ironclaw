@@ -30,7 +30,7 @@ use tokio::process::Command;
 
 use crate::context::JobContext;
 use crate::sandbox::{SandboxManager, SandboxPolicy};
-use crate::tools::tool::{Tool, ToolDomain, ToolError, ToolOutput, require_str};
+use crate::tools::tool::{Tool, ToolDomain, ToolError, ToolOutput};
 
 /// Maximum output size before truncation (64KB).
 const MAX_OUTPUT_SIZE: usize = 64 * 1024;
@@ -401,7 +401,10 @@ impl Tool for ShellTool {
         params: serde_json::Value,
         _ctx: &JobContext,
     ) -> Result<ToolOutput, ToolError> {
-        let command = require_str(&params, "command")?;
+        let command = params
+            .get("command")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| ToolError::InvalidParameters("missing 'command' parameter".into()))?;
 
         let workdir = params.get("workdir").and_then(|v| v.as_str());
         let timeout = params.get("timeout").and_then(|v| v.as_u64());
@@ -424,26 +427,6 @@ impl Tool for ShellTool {
 
     fn requires_approval(&self) -> bool {
         true // Shell commands should require approval
-    }
-
-    fn requires_approval_for(&self, params: &serde_json::Value) -> bool {
-        let cmd = params
-            .get("command")
-            .and_then(|c| c.as_str().map(String::from))
-            .or_else(|| {
-                params
-                    .as_str()
-                    .and_then(|s| serde_json::from_str::<serde_json::Value>(s).ok())
-                    .and_then(|v| v.get("command").and_then(|c| c.as_str().map(String::from)))
-            });
-
-        if let Some(ref cmd) = cmd
-            && requires_explicit_approval(cmd)
-        {
-            return true;
-        }
-
-        false
     }
 
     fn requires_sanitization(&self) -> bool {
@@ -542,76 +525,6 @@ mod tests {
         assert!(!requires_explicit_approval(
             "git push origin feature-branch"
         ));
-    }
-
-    /// Replicate the extraction logic from agent_loop.rs to prove it works
-    /// when `arguments` is a `serde_json::Value::Object` (the common case
-    /// that was previously broken because `Value::Object.as_str()` returns None).
-    #[test]
-    fn test_destructive_command_extraction_from_object_args() {
-        let arguments = serde_json::json!({"command": "rm -rf /tmp/stuff"});
-
-        let cmd = arguments
-            .get("command")
-            .and_then(|c| c.as_str().map(String::from))
-            .or_else(|| {
-                arguments
-                    .as_str()
-                    .and_then(|s| serde_json::from_str::<serde_json::Value>(s).ok())
-                    .and_then(|v| v.get("command").and_then(|c| c.as_str().map(String::from)))
-            });
-
-        assert_eq!(cmd.as_deref(), Some("rm -rf /tmp/stuff"));
-        assert!(requires_explicit_approval(cmd.as_deref().unwrap()));
-    }
-
-    /// Verify extraction still works when `arguments` is a JSON string
-    /// (rare, but possible if the LLM provider returns string-encoded JSON).
-    #[test]
-    fn test_destructive_command_extraction_from_string_args() {
-        let arguments =
-            serde_json::Value::String(r#"{"command": "git push --force origin main"}"#.to_string());
-
-        let cmd = arguments
-            .get("command")
-            .and_then(|c| c.as_str().map(String::from))
-            .or_else(|| {
-                arguments
-                    .as_str()
-                    .and_then(|s| serde_json::from_str::<serde_json::Value>(s).ok())
-                    .and_then(|v| v.get("command").and_then(|c| c.as_str().map(String::from)))
-            });
-
-        assert_eq!(cmd.as_deref(), Some("git push --force origin main"));
-        assert!(requires_explicit_approval(cmd.as_deref().unwrap()));
-    }
-
-    #[test]
-    fn test_requires_approval_for_destructive_command() {
-        let tool = ShellTool::new();
-        // Destructive commands must return true even though shell already
-        // requires base approval -- the distinction matters for auto-approve override.
-        assert!(tool.requires_approval_for(&serde_json::json!({"command": "rm -rf /tmp"})));
-        assert!(tool.requires_approval_for(
-            &serde_json::json!({"command": "git push --force origin main"})
-        ));
-        assert!(tool.requires_approval_for(&serde_json::json!({"command": "DROP TABLE users;"})));
-    }
-
-    #[test]
-    fn test_requires_approval_for_safe_command() {
-        let tool = ShellTool::new();
-        // Safe commands should not override auto-approval; only destructive ones do.
-        assert!(!tool.requires_approval_for(&serde_json::json!({"command": "cargo build"})));
-        assert!(!tool.requires_approval_for(&serde_json::json!({"command": "echo hello"})));
-    }
-
-    #[test]
-    fn test_requires_approval_for_string_encoded_args() {
-        let tool = ShellTool::new();
-        // When arguments are string-encoded JSON (rare LLM behavior).
-        let args = serde_json::Value::String(r#"{"command": "rm -rf /tmp/stuff"}"#.to_string());
-        assert!(tool.requires_approval_for(&args));
     }
 
     #[test]

@@ -3,9 +3,10 @@
 use std::time::Duration;
 
 use async_trait::async_trait;
+use serde::Serialize;
 
 /// Points in the agent lifecycle where hooks can be attached.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize)]
 pub enum HookPoint {
     /// Before processing an inbound user message.
     BeforeInbound,
@@ -19,10 +20,20 @@ pub enum HookPoint {
     OnSessionEnd,
     /// Transform the final response before completing a turn.
     TransformResponse,
+    /// After parsing the user submission, before routing.
+    AfterParse,
+    /// Before entering the agentic tool-execution loop.
+    BeforeAgenticLoop,
+    /// Before each LLM call inside the agentic loop.
+    BeforeLlmCall,
+    /// After a tool call completes (result available).
+    AfterToolCall,
+    /// Before presenting a tool-approval request to the user.
+    BeforeApproval,
 }
 
 /// Contextual data carried with each hook invocation.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub enum HookEvent {
     /// An inbound user message about to be processed.
     Inbound {
@@ -56,6 +67,41 @@ pub enum HookEvent {
         thread_id: String,
         response: String,
     },
+    /// After parsing the user submission, before routing.
+    Parse {
+        user_id: String,
+        channel: String,
+        raw_input: String,
+        parsed_intent: String,
+    },
+    /// Before entering the agentic tool-execution loop.
+    AgenticLoopStart {
+        user_id: String,
+        thread_id: String,
+        message_count: usize,
+    },
+    /// Before each LLM call inside the agentic loop.
+    LlmCall {
+        user_id: String,
+        thread_id: String,
+        message_count: usize,
+        tool_count: usize,
+    },
+    /// After a tool call completes with its result.
+    ToolResult {
+        tool_name: String,
+        user_id: String,
+        result: String,
+        success: bool,
+        elapsed_ms: u64,
+    },
+    /// Before presenting a tool-approval request to the user.
+    ApprovalRequest {
+        tool_name: String,
+        user_id: String,
+        parameters: serde_json::Value,
+        description: String,
+    },
 }
 
 impl HookEvent {
@@ -68,6 +114,11 @@ impl HookEvent {
             HookEvent::SessionStart { .. } => HookPoint::OnSessionStart,
             HookEvent::SessionEnd { .. } => HookPoint::OnSessionEnd,
             HookEvent::ResponseTransform { .. } => HookPoint::TransformResponse,
+            HookEvent::Parse { .. } => HookPoint::AfterParse,
+            HookEvent::AgenticLoopStart { .. } => HookPoint::BeforeAgenticLoop,
+            HookEvent::LlmCall { .. } => HookPoint::BeforeLlmCall,
+            HookEvent::ToolResult { .. } => HookPoint::AfterToolCall,
+            HookEvent::ApprovalRequest { .. } => HookPoint::BeforeApproval,
         }
     }
 
@@ -77,11 +128,13 @@ impl HookEvent {
             HookEvent::Inbound { content, .. } | HookEvent::Outbound { content, .. } => {
                 *content = modified.to_string();
             }
-            HookEvent::ToolCall { parameters, .. } => match serde_json::from_str(modified) {
+            HookEvent::ToolCall { parameters, .. }
+            | HookEvent::ApprovalRequest { parameters, .. } => match serde_json::from_str(modified)
+            {
                 Ok(parsed) => *parameters = parsed,
                 Err(e) => {
                     tracing::warn!(
-                        "Hook returned non-JSON modification for ToolCall, ignoring: {}",
+                        "Hook returned non-JSON modification for ToolCall/ApprovalRequest, ignoring: {}",
                         e
                     );
                 }
@@ -89,8 +142,17 @@ impl HookEvent {
             HookEvent::ResponseTransform { response, .. } => {
                 *response = modified.to_string();
             }
-            HookEvent::SessionStart { .. } | HookEvent::SessionEnd { .. } => {
-                // Session events don't have modifiable content
+            HookEvent::Parse { parsed_intent, .. } => {
+                *parsed_intent = modified.to_string();
+            }
+            HookEvent::ToolResult { result, .. } => {
+                *result = modified.to_string();
+            }
+            HookEvent::SessionStart { .. }
+            | HookEvent::SessionEnd { .. }
+            | HookEvent::AgenticLoopStart { .. }
+            | HookEvent::LlmCall { .. } => {
+                // These events don't have modifiable content
             }
         }
     }

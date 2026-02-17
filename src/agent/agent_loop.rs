@@ -68,9 +68,6 @@ enum AgenticLoopResult {
 pub struct AgentDeps {
     pub store: Option<Arc<dyn Database>>,
     pub llm: Arc<dyn LlmProvider>,
-    /// Cheap/fast LLM for lightweight tasks (heartbeat, routing, evaluation).
-    /// Falls back to the main `llm` if None.
-    pub cheap_llm: Option<Arc<dyn LlmProvider>>,
     pub safety: Arc<SafetyLayer>,
     pub tools: Arc<ToolRegistry>,
     pub workspace: Option<Arc<Workspace>>,
@@ -142,11 +139,6 @@ impl Agent {
 
     fn llm(&self) -> &Arc<dyn LlmProvider> {
         &self.deps.llm
-    }
-
-    /// Get the cheap/fast LLM provider, falling back to the main one.
-    fn cheap_llm(&self) -> &Arc<dyn LlmProvider> {
-        self.deps.cheap_llm.as_ref().unwrap_or(&self.deps.llm)
     }
 
     fn safety(&self) -> &Arc<SafetyLayer> {
@@ -316,7 +308,7 @@ impl Agent {
                     Some(spawn_heartbeat(
                         config,
                         workspace.clone(),
-                        self.cheap_llm().clone(),
+                        self.llm().clone(),
                         Some(notify_tx),
                     ))
                 } else {
@@ -528,6 +520,32 @@ impl Agent {
                     };
                 }
                 _ => {} // Continue, fail-open errors already logged in registry
+            }
+        }
+
+        // Hook: AfterParse — allow hooks to inspect/modify the parsed submission
+        if let Submission::UserInput { ref content } = submission {
+            let event = crate::hooks::HookEvent::Parse {
+                user_id: message.user_id.clone(),
+                channel: message.channel.clone(),
+                raw_input: message.content.clone(),
+                parsed_intent: content.clone(),
+            };
+            match self.hooks().run(&event).await {
+                Err(crate::hooks::HookError::Rejected { reason }) => {
+                    return Ok(Some(format!("[Message rejected after parse: {}]", reason)));
+                }
+                Err(err) => {
+                    tracing::warn!("AfterParse hook error (fail-open): {}", err);
+                }
+                Ok(crate::hooks::HookOutcome::Continue {
+                    modified: Some(new_intent),
+                }) => {
+                    submission = Submission::UserInput {
+                        content: new_intent,
+                    };
+                }
+                _ => {}
             }
         }
 
@@ -911,6 +929,27 @@ impl Agent {
             )
             .await;
 
+        // Hook: BeforeAgenticLoop — allow hooks to inspect or reject before entering the loop
+        {
+            let event = crate::hooks::HookEvent::AgenticLoopStart {
+                user_id: message.user_id.clone(),
+                thread_id: thread_id.to_string(),
+                message_count: turn_messages.len(),
+            };
+            match self.hooks().run(&event).await {
+                Err(crate::hooks::HookError::Rejected { reason }) => {
+                    return Ok(SubmissionResult::response(format!(
+                        "[Agentic loop rejected: {}]",
+                        reason
+                    )));
+                }
+                Err(err) => {
+                    tracing::warn!("BeforeAgenticLoop hook error (fail-open): {}", err);
+                }
+                _ => {} // Informational — no modification supported
+            }
+        }
+
         // Run the agentic tool execution loop
         let result = self
             .run_agentic_loop(message, session.clone(), thread_id, turn_messages, false)
@@ -1159,6 +1198,29 @@ impl Agent {
             // Refresh tool definitions each iteration so newly built tools become visible
             let tool_defs = self.tools().tool_definitions().await;
 
+            // Hook: BeforeLlmCall — allow hooks to inspect or reject before calling the LLM
+            {
+                let event = crate::hooks::HookEvent::LlmCall {
+                    user_id: message.user_id.clone(),
+                    thread_id: thread_id.to_string(),
+                    message_count: context_messages.len(),
+                    tool_count: tool_defs.len(),
+                };
+                match self.hooks().run(&event).await {
+                    Err(crate::hooks::HookError::Rejected { reason }) => {
+                        return Err(crate::error::LlmError::InvalidResponse {
+                            provider: "agent".to_string(),
+                            reason: format!("LLM call rejected by hook: {}", reason),
+                        }
+                        .into());
+                    }
+                    Err(err) => {
+                        tracing::warn!("BeforeLlmCall hook error (fail-open): {}", err);
+                    }
+                    _ => {} // Informational — no modification supported
+                }
+            }
+
             // Call LLM with current context
             let context = ReasoningContext::new()
                 .with_messages(context_messages.clone())
@@ -1248,22 +1310,78 @@ impl Agent {
                                 sess.is_tool_auto_approved(&tc.name)
                             };
 
-                            // Let the tool inspect the specific parameters and
-                            // override auto-approval (e.g. destructive shell commands).
-                            if is_auto_approved && tool.requires_approval_for(&tc.arguments) {
+                            // For shell commands, override auto-approval for
+                            // destructive patterns that should always require
+                            // explicit per-invocation approval.
+                            if is_auto_approved
+                                && tc.name == "shell"
+                                && let Some(cmd) = tc
+                                    .arguments
+                                    .as_str()
+                                    .and_then(|s| serde_json::from_str::<serde_json::Value>(s).ok())
+                                    .and_then(|v| {
+                                        v.get("command").and_then(|c| c.as_str().map(String::from))
+                                    })
+                                && crate::tools::builtin::shell::requires_explicit_approval(&cmd)
+                            {
                                 tracing::info!(
-                                    tool = %tc.name,
-                                    "Tool requires explicit approval for these parameters despite auto-approve"
+                                    "Shell command '{}' requires explicit approval despite auto-approve",
+                                    cmd.chars().take(80).collect::<String>()
                                 );
                                 is_auto_approved = false;
                             }
 
                             if !is_auto_approved {
+                                // Hook: BeforeApproval — allow hooks to skip or modify approval
+                                let mut approval_params = tc.arguments.clone();
+                                let approval_skipped = {
+                                    let event = crate::hooks::HookEvent::ApprovalRequest {
+                                        tool_name: tc.name.clone(),
+                                        user_id: message.user_id.clone(),
+                                        parameters: tc.arguments.clone(),
+                                        description: tool.description().to_string(),
+                                    };
+                                    match self.hooks().run(&event).await {
+                                        Err(crate::hooks::HookError::Rejected { reason }) => {
+                                            // Rejection means skip approval, push rejection into context
+                                            context_messages.push(ChatMessage::tool_result(
+                                                &tc.id,
+                                                &tc.name,
+                                                format!(
+                                                    "Tool approval rejected by hook: {}",
+                                                    reason
+                                                ),
+                                            ));
+                                            true // skip this tool call entirely
+                                        }
+                                        Ok(crate::hooks::HookOutcome::Continue {
+                                            modified: Some(new_params),
+                                        }) => {
+                                            if let Ok(parsed) = serde_json::from_str(&new_params) {
+                                                approval_params = parsed;
+                                            }
+                                            false
+                                        }
+                                        Err(err) => {
+                                            tracing::warn!(
+                                                "BeforeApproval hook error (fail-open): {}",
+                                                err
+                                            );
+                                            false
+                                        }
+                                        _ => false,
+                                    }
+                                };
+
+                                if approval_skipped {
+                                    continue;
+                                }
+
                                 // Need approval - store pending request and return
                                 let pending = PendingApproval {
                                     request_id: Uuid::new_v4(),
                                     tool_name: tc.name.clone(),
-                                    parameters: tc.arguments.clone(),
+                                    parameters: approval_params,
                                     description: tool.description().to_string(),
                                     tool_call_id: tc.id.clone(),
                                     context_messages: context_messages.clone(),
@@ -1325,9 +1443,11 @@ impl Agent {
                             )
                             .await;
 
+                        let tool_start = std::time::Instant::now();
                         let tool_result = self
                             .execute_chat_tool(&tc.name, &tc.arguments, &job_ctx)
                             .await;
+                        let tool_elapsed = tool_start.elapsed();
 
                         let _ = self
                             .channels
@@ -1350,7 +1470,7 @@ impl Agent {
                                     &message.channel,
                                     StatusUpdate::ToolResult {
                                         name: tc.name.clone(),
-                                        preview: output.clone(),
+                                        preview: truncate_for_preview(output, 200),
                                     },
                                     &message.metadata,
                                 )
@@ -1373,6 +1493,34 @@ impl Agent {
                                 }
                             }
                         }
+
+                        // Hook: AfterToolCall — allow hooks to inspect/modify the tool result
+                        let tool_result = {
+                            let (result_str, success) = match &tool_result {
+                                Ok(output) => (output.clone(), true),
+                                Err(e) => (e.to_string(), false),
+                            };
+                            let event = crate::hooks::HookEvent::ToolResult {
+                                tool_name: tc.name.clone(),
+                                user_id: message.user_id.clone(),
+                                result: result_str,
+                                success,
+                                elapsed_ms: tool_elapsed.as_millis() as u64,
+                            };
+                            match self.hooks().run(&event).await {
+                                Ok(crate::hooks::HookOutcome::Continue {
+                                    modified: Some(new_result),
+                                }) => {
+                                    // Replace the result with the modified content
+                                    Ok(new_result)
+                                }
+                                Err(err) => {
+                                    tracing::warn!("AfterToolCall hook error (fail-open): {}", err);
+                                    tool_result
+                                }
+                                _ => tool_result,
+                            }
+                        };
 
                         // If tool_auth returned awaiting_token, enter auth mode
                         // and short-circuit: return the instructions directly so
@@ -1579,9 +1727,6 @@ impl Agent {
         session: Arc<Mutex<Session>>,
         thread_id: Uuid,
     ) -> Result<SubmissionResult, Error> {
-        // Lock session first, then undo manager -- consistent with process_user_input
-        // to avoid potential deadlocks.
-        let mut sess = session.lock().await;
         let undo_mgr = self.session_manager.get_undo_manager(thread_id).await;
         let mut mgr = undo_mgr.lock().await;
 
@@ -1589,6 +1734,7 @@ impl Agent {
             return Ok(SubmissionResult::ok_with_message("Nothing to undo."));
         }
 
+        let mut sess = session.lock().await;
         let thread = sess
             .threads
             .get_mut(&thread_id)
@@ -1599,10 +1745,12 @@ impl Agent {
         let current_turn = thread.turn_number();
 
         if let Some(checkpoint) = mgr.undo(current_turn, current_messages) {
+            // Extract values before consuming the reference
             let turn_number = checkpoint.turn_number;
+            let messages = checkpoint.messages.clone();
             let undo_count = mgr.undo_count();
             // Restore thread from checkpoint
-            thread.restore_from_messages(checkpoint.messages);
+            thread.restore_from_messages(messages);
             Ok(SubmissionResult::ok_with_message(format!(
                 "Undone to turn {}. {} undo(s) remaining.",
                 turn_number, undo_count
@@ -1617,9 +1765,6 @@ impl Agent {
         session: Arc<Mutex<Session>>,
         thread_id: Uuid,
     ) -> Result<SubmissionResult, Error> {
-        // Lock session first, then undo manager -- consistent with process_user_input
-        // to avoid potential deadlocks.
-        let mut sess = session.lock().await;
         let undo_mgr = self.session_manager.get_undo_manager(thread_id).await;
         let mut mgr = undo_mgr.lock().await;
 
@@ -1627,15 +1772,12 @@ impl Agent {
             return Ok(SubmissionResult::ok_with_message("Nothing to redo."));
         }
 
-        let thread = sess
-            .threads
-            .get_mut(&thread_id)
-            .ok_or_else(|| Error::from(crate::error::JobError::NotFound { id: thread_id }))?;
-
-        let current_messages = thread.messages();
-        let current_turn = thread.turn_number();
-
-        if let Some(checkpoint) = mgr.redo(current_turn, current_messages) {
+        if let Some(checkpoint) = mgr.redo() {
+            let mut sess = session.lock().await;
+            let thread = sess
+                .threads
+                .get_mut(&thread_id)
+                .ok_or_else(|| Error::from(crate::error::JobError::NotFound { id: thread_id }))?;
             thread.restore_from_messages(checkpoint.messages);
             Ok(SubmissionResult::ok_with_message(format!(
                 "Redone to turn {}.",
@@ -1830,7 +1972,7 @@ impl Agent {
                         &message.channel,
                         StatusUpdate::ToolResult {
                             name: pending.tool_name.clone(),
-                            preview: output.clone(),
+                            preview: truncate_for_preview(output, 200),
                         },
                         &message.metadata,
                     )

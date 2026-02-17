@@ -156,6 +156,11 @@ impl SafetyLayer {
     pub fn policy(&self) -> &Policy {
         &self.policy
     }
+
+    /// Get the leak detector for direct access.
+    pub fn leak_detector(&self) -> &LeakDetector {
+        &self.leak_detector
+    }
 }
 
 /// Escape XML attribute value.

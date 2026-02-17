@@ -5,18 +5,13 @@ use std::net::{IpAddr, ToSocketAddrs};
 use std::time::Duration;
 
 use async_trait::async_trait;
-use futures::StreamExt;
 use reqwest::Client;
 
 use crate::context::JobContext;
 use crate::safety::LeakDetector;
-use crate::tools::tool::{Tool, ToolError, ToolOutput, require_str};
+use crate::tools::tool::{Tool, ToolError, ToolOutput};
 
-/// Maximum response body size (5 MB).
-///
-/// 5 MB is large enough for typical JSON API responses and moderate HTML pages,
-/// but small enough to prevent OOM from malicious or runaway servers.  The WASM
-/// HTTP wrapper uses the same limit for consistency.
+/// Maximum response body size (5 MB). Prevents OOM from unbounded responses.
 const MAX_RESPONSE_SIZE: usize = 5 * 1024 * 1024;
 
 /// Tool for making HTTP requests.
@@ -159,9 +154,17 @@ impl Tool for HttpTool {
     ) -> Result<ToolOutput, ToolError> {
         let start = std::time::Instant::now();
 
-        let method = require_str(&params, "method")?;
+        let method = params
+            .get("method")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| {
+                ToolError::InvalidParameters("missing 'method' parameter".to_string())
+            })?;
 
-        let url = require_str(&params, "url")?;
+        let url = params
+            .get("url")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| ToolError::InvalidParameters("missing 'url' parameter".to_string()))?;
         let parsed_url = validate_url(url)?;
 
         // Parse headers
@@ -235,42 +238,18 @@ impl Tool for HttpTool {
             .filter_map(|(k, v)| v.to_str().ok().map(|v| (k.to_string(), v.to_string())))
             .collect();
 
-        // Pre-check Content-Length header to reject obviously oversized responses
-        // before downloading anything, preventing OOM from malicious servers.
-        if let Some(content_length) = response.headers().get(reqwest::header::CONTENT_LENGTH)
-            && let Ok(s) = content_length.to_str()
-            && let Ok(len) = s.parse::<usize>()
-            && len > MAX_RESPONSE_SIZE
-        {
-            tracing::warn!(
-                url = %parsed_url,
-                content_length = len,
-                max = MAX_RESPONSE_SIZE,
-                "Rejected HTTP response: Content-Length exceeds limit"
-            );
+        // Get response body with size cap to prevent OOM
+        let body_bytes = response.bytes().await.map_err(|e| {
+            ToolError::ExternalService(format!("failed to read response body: {}", e))
+        })?;
+
+        if body_bytes.len() > MAX_RESPONSE_SIZE {
             return Err(ToolError::ExecutionFailed(format!(
-                "Response Content-Length ({} bytes) exceeds maximum allowed size ({} bytes)",
-                len, MAX_RESPONSE_SIZE
+                "Response body too large ({} bytes, max {})",
+                body_bytes.len(),
+                MAX_RESPONSE_SIZE
             )));
         }
-
-        // Stream the response body with a hard size cap. Even if Content-Length was
-        // absent or lied about the size, we stop reading once we exceed the limit.
-        let mut body = Vec::new();
-        let mut stream = response.bytes_stream();
-        while let Some(chunk) = StreamExt::next(&mut stream).await {
-            let chunk = chunk.map_err(|e| {
-                ToolError::ExternalService(format!("failed to read response body: {}", e))
-            })?;
-            if body.len() + chunk.len() > MAX_RESPONSE_SIZE {
-                return Err(ToolError::ExecutionFailed(format!(
-                    "Response body exceeds maximum allowed size ({} bytes)",
-                    MAX_RESPONSE_SIZE
-                )));
-            }
-            body.extend_from_slice(&chunk);
-        }
-        let body_bytes = bytes::Bytes::from(body);
 
         let body_text = String::from_utf8_lossy(&body_bytes).into_owned();
 
@@ -356,11 +335,5 @@ mod tests {
         ))));
         // Public
         assert!(!is_disallowed_ip(&IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8))));
-    }
-
-    #[test]
-    fn test_max_response_size_is_reasonable() {
-        // MAX_RESPONSE_SIZE should be 5 MB to prevent OOM while allowing typical API responses.
-        assert_eq!(MAX_RESPONSE_SIZE, 5 * 1024 * 1024);
     }
 }

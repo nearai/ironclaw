@@ -3,7 +3,7 @@
 use async_trait::async_trait;
 
 use crate::context::JobContext;
-use crate::tools::tool::{Tool, ToolError, ToolOutput, require_str};
+use crate::tools::tool::{Tool, ToolError, ToolOutput};
 
 /// Simple echo tool for testing.
 pub struct EchoTool;
@@ -38,7 +38,12 @@ impl Tool for EchoTool {
     ) -> Result<ToolOutput, ToolError> {
         let start = std::time::Instant::now();
 
-        let message = require_str(&params, "message")?;
+        let message = params
+            .get("message")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| {
+                ToolError::InvalidParameters("missing 'message' parameter".to_string())
+            })?;
 
         Ok(ToolOutput::text(message, start.elapsed()))
     }

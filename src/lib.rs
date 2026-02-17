@@ -39,7 +39,6 @@
 //! - **Continuous learning** - Improve estimates from historical data
 
 pub mod agent;
-pub mod boot_screen;
 pub mod bootstrap;
 pub mod channels;
 pub mod cli;
