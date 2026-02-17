@@ -337,7 +337,10 @@ async fn main() -> anyhow::Result<()> {
     let repl_channel = if let Some(ref msg) = cli.message {
         Some(ReplChannel::with_message(msg.clone()))
     } else if config.channels.cli.enabled {
-        Some(ReplChannel::new())
+        let repl = ReplChannel::new();
+        // Suppress the one-liner banner; boot screen will be shown instead.
+        repl.suppress_banner();
+        Some(repl)
     } else {
         None
     };
@@ -885,12 +888,14 @@ async fn main() -> anyhow::Result<()> {
 
     // Initialize channel manager
     let mut channels = ChannelManager::new();
+    let mut channel_names: Vec<String> = Vec::new();
 
     if let Some(repl) = repl_channel {
         channels.add(Box::new(repl));
         if cli.message.is_some() {
             tracing::info!("Single message mode");
         } else {
+            channel_names.push("repl".to_string());
             tracing::info!("REPL mode enabled");
         }
     }
@@ -1026,6 +1031,7 @@ async fn main() -> anyhow::Result<()> {
                                 }
                             }
 
+                            channel_names.push(channel_name.clone());
                             channels.add(Box::new(SharedWasmChannel::new(channel_arc)));
                         }
 
@@ -1070,6 +1076,7 @@ async fn main() -> anyhow::Result<()> {
                 .parse()
                 .expect("HttpConfig host:port must be a valid SocketAddr"),
         );
+        channel_names.push("http".to_string());
         channels.add(Box::new(http_channel));
         tracing::info!(
             "HTTP channel enabled on {}:{}",
@@ -1143,6 +1150,7 @@ async fn main() -> anyhow::Result<()> {
     );
 
     // Add web gateway channel if configured
+    let mut gateway_url: Option<String> = None;
     if let Some(ref gw_config) = config.channels.gateway {
         let mut gw = GatewayChannel::new(gw_config.clone());
         if let Some(ref ws) = workspace {
@@ -1175,20 +1183,28 @@ async fn main() -> anyhow::Result<()> {
             }
         }
 
+        gateway_url = Some(format!(
+            "http://{}:{}/?token={}",
+            gw_config.host,
+            gw_config.port,
+            gw.auth_token()
+        ));
+
         tracing::info!(
             "Web gateway enabled on {}:{}",
             gw_config.host,
             gw_config.port
         );
-        tracing::info!(
-            "Web UI: http://{}:{}/?token={}",
-            gw_config.host,
-            gw_config.port,
-            gw.auth_token()
-        );
+        tracing::info!("Web UI: {}", gateway_url.as_deref().unwrap_or(""));
 
+        channel_names.push("gateway".to_string());
         channels.add(Box::new(gw));
     }
+
+    // Capture boot screen info before moving Arcs into AgentDeps.
+    let boot_tool_count = tools.count();
+    let boot_llm_model = llm.model_name().to_string();
+    let boot_cheap_model = cheap_llm.as_ref().map(|c| c.model_name().to_string());
 
     // Create and run the agent
     let deps = AgentDeps {
@@ -1211,6 +1227,41 @@ async fn main() -> anyhow::Result<()> {
     );
 
     tracing::info!("Agent initialized, starting main loop...");
+
+    // Print boot screen for interactive CLI mode (not single-message mode).
+    if config.channels.cli.enabled && cli.message.is_none() {
+        let boot_info = ironclaw::boot_screen::BootInfo {
+            version: env!("CARGO_PKG_VERSION").to_string(),
+            agent_name: config.agent.name.clone(),
+            llm_backend: config.llm.backend.to_string(),
+            llm_model: boot_llm_model,
+            cheap_model: boot_cheap_model,
+            db_backend: if cli.no_db {
+                "none".to_string()
+            } else {
+                match config.database.backend {
+                    ironclaw::config::DatabaseBackend::Postgres => "postgres".to_string(),
+                    ironclaw::config::DatabaseBackend::LibSql => "libsql".to_string(),
+                }
+            },
+            db_connected: !cli.no_db,
+            tool_count: boot_tool_count,
+            gateway_url,
+            embeddings_enabled: config.embeddings.enabled,
+            embeddings_provider: if config.embeddings.enabled {
+                Some(config.embeddings.provider.clone())
+            } else {
+                None
+            },
+            heartbeat_enabled: config.heartbeat.enabled,
+            heartbeat_interval_secs: config.heartbeat.interval_secs,
+            sandbox_enabled: config.sandbox.enabled,
+            claude_code_enabled: config.claude_code.enabled,
+            routines_enabled: config.routines.enabled,
+            channels: channel_names,
+        };
+        ironclaw::boot_screen::print_boot_screen(&boot_info);
+    }
 
     // Run the agent (blocks until shutdown)
     agent.run().await?;
