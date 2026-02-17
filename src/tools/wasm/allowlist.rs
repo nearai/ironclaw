@@ -240,7 +240,6 @@ fn parse_url(url: &str) -> Result<ParsedUrl, String> {
     })
 }
 
-/// Resolve `.` and `..` segments in a URL path to prevent traversal bypasses.
 fn normalize_path(path: &str) -> String {
     let mut segments: Vec<&str> = Vec::new();
     for seg in path.split('/') {
