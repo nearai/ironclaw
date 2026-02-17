@@ -1298,10 +1298,30 @@ impl Database for LibSqlBackend {
         Ok(())
     }
 
-    async fn list_job_events(&self, job_id: Uuid) -> Result<Vec<JobEventRecord>, DatabaseError> {
+    async fn list_job_events(
+        &self,
+        job_id: Uuid,
+        limit: Option<i64>,
+    ) -> Result<Vec<JobEventRecord>, DatabaseError> {
         let conn = self.connect().await?;
-        let mut rows = conn
-            .query(
+        let mut rows = if let Some(n) = limit {
+            conn.query(
+                r#"
+                SELECT id, job_id, event_type, data, created_at
+                FROM (
+                    SELECT id, job_id, event_type, data, created_at
+                    FROM job_events WHERE job_id = ?1
+                    ORDER BY id DESC
+                    LIMIT ?2
+                )
+                ORDER BY id ASC
+                "#,
+                params![job_id.to_string(), n],
+            )
+            .await
+            .map_err(|e| DatabaseError::Query(e.to_string()))?
+        } else {
+            conn.query(
                 r#"
                 SELECT id, job_id, event_type, data, created_at
                 FROM job_events WHERE job_id = ?1 ORDER BY id ASC
@@ -1309,7 +1329,8 @@ impl Database for LibSqlBackend {
                 params![job_id.to_string()],
             )
             .await
-            .map_err(|e| DatabaseError::Query(e.to_string()))?;
+            .map_err(|e| DatabaseError::Query(e.to_string()))?
+        };
 
         let mut events = Vec::new();
         while let Some(row) = rows

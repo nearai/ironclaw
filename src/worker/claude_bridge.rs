@@ -170,13 +170,16 @@ impl ClaudeBridgeRuntime {
         Ok(())
     }
 
-    /// Copy auth files from the read-only host mount into the writable home dir.
+    /// Copy auth files from a read-only source into the writable home dir.
     ///
-    /// When the orchestrator mounts the host's `~/.claude` at
+    /// If the orchestrator bind-mounts the host's `~/.claude` at
     /// `/home/sandbox/.claude-host:ro`, this copies everything into the
     /// container's own `/home/sandbox/.claude` so Claude Code can read auth
     /// credentials AND write its state (todos, debug files, etc.) without
     /// touching the host filesystem.
+    ///
+    /// When no host mount is present (the default orchestrator injects
+    /// credentials via environment variables), this is a no-op.
     fn copy_auth_from_mount(&self) -> Result<(), WorkerError> {
         let mount = std::path::Path::new("/home/sandbox/.claude-host");
         if !mount.exists() {
@@ -655,7 +658,25 @@ fn copy_dir_recursive(src: &std::path::Path, dst: &std::path::Path) -> std::io::
         let src_path = entry.path();
         let dst_path = dst.join(entry.file_name());
 
-        if src_path.is_dir() {
+        let file_type = match entry.file_type() {
+            Ok(ft) => ft,
+            Err(e) => {
+                tracing::debug!(
+                    "Skipping entry with unreadable type {}: {}",
+                    src_path.display(),
+                    e
+                );
+                continue;
+            }
+        };
+
+        // Skip symlinks to avoid following links outside the mount.
+        if file_type.is_symlink() {
+            tracing::debug!("Skipping symlink {}", src_path.display());
+            continue;
+        }
+
+        if file_type.is_dir() {
             if std::fs::create_dir_all(&dst_path).is_ok() {
                 copied += copy_dir_recursive(&src_path, &dst_path)?;
             }

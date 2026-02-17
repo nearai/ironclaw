@@ -457,11 +457,13 @@ fn make_response(
         .status(status)
         .body(body)
         .unwrap_or_else(|_| {
-            Response::new(
+            let mut resp = Response::new(
                 Full::new(Bytes::from("Internal error"))
                     .map_err(|_| unreachable!())
                     .boxed(),
-            )
+            );
+            *resp.status_mut() = StatusCode::INTERNAL_SERVER_ERROR;
+            resp
         })
 }
 

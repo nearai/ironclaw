@@ -544,7 +544,7 @@ fn resolve_project_dir(
         ToolError::ExecutionFailed(format!("failed to canonicalize projects base: {}", e))
     })?;
 
-    let (canonical_dir, was_explicit) = match explicit {
+    let (canonical_dir, _was_explicit) = match explicit {
         Some(d) => {
             // Explicit paths: validate BEFORE creating anything.
             // The path must already exist (it comes from a previous job run).
@@ -582,8 +582,6 @@ fn resolve_project_dir(
             (canonical, false)
         }
     };
-
-    let _ = was_explicit;
 
     let browse_id = canonical_dir
         .file_name()
@@ -1058,16 +1056,15 @@ impl Tool for JobEventsTool {
             )));
         }
 
-        let limit = params.get("limit").and_then(|v| v.as_u64()).unwrap_or(50) as usize;
+        let limit = params.get("limit").and_then(|v| v.as_i64()).unwrap_or(50);
 
-        let events =
-            self.store.list_job_events(job_id).await.map_err(|e| {
-                ToolError::ExecutionFailed(format!("failed to load job events: {}", e))
-            })?;
+        let events = self
+            .store
+            .list_job_events(job_id, Some(limit))
+            .await
+            .map_err(|e| ToolError::ExecutionFailed(format!("failed to load job events: {}", e)))?;
 
-        // Take the last `limit` events (most recent)
-        let start_idx = events.len().saturating_sub(limit);
-        let recent: Vec<serde_json::Value> = events[start_idx..]
+        let recent: Vec<serde_json::Value> = events
             .iter()
             .map(|ev| {
                 serde_json::json!({

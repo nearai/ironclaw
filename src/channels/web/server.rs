@@ -1403,7 +1403,7 @@ async fn jobs_events_handler(
     }
 
     let events = store
-        .list_job_events(job_id)
+        .list_job_events(job_id, None)
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 

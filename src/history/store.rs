@@ -789,14 +789,35 @@ impl Store {
         Ok(())
     }
 
-    /// Load all job events for a job, ordered by id.
+    /// Load job events for a job, ordered by id.
+    ///
+    /// When `limit` is `Some(n)`, returns the **most recent** `n` events
+    /// (ordered ascending by id). When `None`, returns all events.
     pub async fn list_job_events(
         &self,
         job_id: Uuid,
+        limit: Option<i64>,
     ) -> Result<Vec<JobEventRecord>, DatabaseError> {
         let conn = self.conn().await?;
-        let rows = conn
-            .query(
+        let rows = if let Some(n) = limit {
+            // Sub-select the last N rows by id DESC, then re-sort ASC.
+            conn.query(
+                r#"
+                SELECT id, job_id, event_type, data, created_at
+                FROM (
+                    SELECT id, job_id, event_type, data, created_at
+                    FROM job_events
+                    WHERE job_id = $1
+                    ORDER BY id DESC
+                    LIMIT $2
+                ) sub
+                ORDER BY id ASC
+                "#,
+                &[&job_id, &n],
+            )
+            .await?
+        } else {
+            conn.query(
                 r#"
                 SELECT id, job_id, event_type, data, created_at
                 FROM job_events
@@ -805,7 +826,8 @@ impl Store {
                 "#,
                 &[&job_id],
             )
-            .await?;
+            .await?
+        };
         Ok(rows
             .iter()
             .map(|r| JobEventRecord {

@@ -132,12 +132,13 @@ impl NetworkPolicyDecider for DefaultPolicyDecider {
 
 /// Check if a host matches a pattern (supports `*.example.com` wildcards).
 fn host_matches_pattern(host: &str, pattern: &str) -> bool {
-    if pattern == host {
+    let pattern_lower = pattern.to_lowercase();
+    if pattern_lower == host {
         return true;
     }
 
     // Support wildcard: *.example.com matches sub.example.com
-    if let Some(suffix) = pattern.strip_prefix("*.")
+    if let Some(suffix) = pattern_lower.strip_prefix("*.")
         && host.ends_with(suffix)
         && host.len() > suffix.len()
     {
