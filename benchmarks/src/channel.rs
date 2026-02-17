@@ -167,8 +167,9 @@ impl Channel for BenchChannel {
                 success,
                 ..
             } => {
-                cap.status_log
-                    .push(format!("auth_completed: {extension_name} success={success}"));
+                cap.status_log.push(format!(
+                    "auth_completed: {extension_name} success={success}"
+                ));
             }
         }
         Ok(())
