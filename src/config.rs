@@ -105,10 +105,21 @@ impl Config {
 ///
 /// Used by channels and tools that need public webhook endpoints.
 /// The tunnel URL is shared across all channels (Telegram, Slack, etc.).
+///
+/// Two modes:
+/// - **Static URL** (`TUNNEL_URL`): set the public URL directly (manual tunnel)
+/// - **Managed provider** (`TUNNEL_PROVIDER`): lifecycle-managed tunnel process
+///
+/// When a managed provider is configured _and_ no static URL is set,
+/// the gateway starts the tunnel on boot and populates `public_url`.
 #[derive(Debug, Clone, Default)]
 pub struct TunnelConfig {
     /// Public URL from tunnel provider (e.g., "https://abc123.ngrok.io").
+    /// Set statically via `TUNNEL_URL` or populated at runtime by a managed tunnel.
     pub public_url: Option<String>,
+    /// Provider configuration for lifecycle-managed tunnels.
+    /// `None` when using a static URL or no tunnel at all.
+    pub provider: Option<crate::tunnel::TunnelProviderConfig>,
 }
 
 impl TunnelConfig {
@@ -125,12 +136,48 @@ impl TunnelConfig {
             });
         }
 
-        Ok(Self { public_url })
+        // Resolve managed tunnel provider config
+        let provider_name = optional_env("TUNNEL_PROVIDER")?.unwrap_or_default();
+        let provider = if provider_name.is_empty() || provider_name == "none" {
+            None
+        } else {
+            Some(crate::tunnel::TunnelProviderConfig {
+                provider: provider_name.clone(),
+                cloudflare: optional_env("TUNNEL_CF_TOKEN")?
+                    .map(|token| crate::tunnel::CloudflareTunnelConfig { token }),
+                tailscale: Some(crate::tunnel::TailscaleTunnelConfig {
+                    funnel: optional_env("TUNNEL_TS_FUNNEL")
+                        .ok()
+                        .flatten()
+                        .map(|s| s == "true" || s == "1")
+                        .unwrap_or(false),
+                    hostname: optional_env("TUNNEL_TS_HOSTNAME").ok().flatten(),
+                }),
+                ngrok: optional_env("TUNNEL_NGROK_TOKEN")?.map(|auth_token| {
+                    crate::tunnel::NgrokTunnelConfig {
+                        auth_token,
+                        domain: optional_env("TUNNEL_NGROK_DOMAIN").ok().flatten(),
+                    }
+                }),
+                custom: optional_env("TUNNEL_CUSTOM_COMMAND")?.map(|start_command| {
+                    crate::tunnel::CustomTunnelConfig {
+                        start_command,
+                        health_url: optional_env("TUNNEL_CUSTOM_HEALTH_URL").ok().flatten(),
+                        url_pattern: optional_env("TUNNEL_CUSTOM_URL_PATTERN").ok().flatten(),
+                    }
+                }),
+            })
+        };
+
+        Ok(Self {
+            public_url,
+            provider,
+        })
     }
 
-    /// Check if a tunnel is configured.
+    /// Check if a tunnel is configured (static URL or managed provider).
     pub fn is_enabled(&self) -> bool {
-        self.public_url.is_some()
+        self.public_url.is_some() || self.provider.is_some()
     }
 
     /// Get the webhook URL for a given path.
