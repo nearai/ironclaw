@@ -1,20 +1,44 @@
 //! Security integration tests.
 //!
 //! Tests path traversal prevention, input sanitization, and other security features.
+//!
+//! These tests require a running PostgreSQL instance. They will be skipped
+//! if the database is unavailable.
 
 use ironclaw::workspace::Workspace;
 
-fn get_pool() -> deadpool_postgres::Pool {
+fn get_pool() -> Option<deadpool_postgres::Pool> {
     let database_url = std::env::var("DATABASE_URL")
         .unwrap_or_else(|_| "postgres://localhost/ironclaw_test".to_string());
 
-    let config: tokio_postgres::Config = database_url.parse().expect("Invalid DATABASE_URL");
+    let config: tokio_postgres::Config = match database_url.parse() {
+        Ok(c) => c,
+        Err(_) => return None,
+    };
 
     let mgr = deadpool_postgres::Manager::new(config, tokio_postgres::NoTls);
     deadpool_postgres::Pool::builder(mgr)
         .max_size(4)
         .build()
-        .expect("Failed to create pool")
+        .ok()
+}
+
+/// Check if we can actually connect to the database.
+async fn check_connection(pool: &deadpool_postgres::Pool) -> bool {
+    match pool.get().await {
+        Ok(conn) => conn.query_one("SELECT 1", &[]).await.is_ok(),
+        Err(_) => false,
+    }
+}
+
+/// Get pool and verify connection, returning None if database is unavailable.
+async fn get_verified_pool() -> Option<deadpool_postgres::Pool> {
+    let pool = get_pool()?;
+    if check_connection(&pool).await {
+        Some(pool)
+    } else {
+        None
+    }
 }
 
 async fn cleanup_user(pool: &deadpool_postgres::Pool, user_id: &str) {
@@ -29,7 +53,10 @@ async fn cleanup_user(pool: &deadpool_postgres::Pool, user_id: &str) {
 
 #[tokio::test]
 async fn test_path_traversal_read_blocked() {
-    let pool = get_pool();
+    let Some(pool) = get_verified_pool().await else {
+        eprintln!("Skipping test_path_traversal_read_blocked: database unavailable");
+        return;
+    };
     let user_id = "test_traversal_read";
     cleanup_user(&pool, user_id).await;
 
@@ -50,7 +77,10 @@ async fn test_path_traversal_read_blocked() {
 
 #[tokio::test]
 async fn test_path_traversal_write_blocked() {
-    let pool = get_pool();
+    let Some(pool) = get_verified_pool().await else {
+        eprintln!("Skipping test_path_traversal_write_blocked: database unavailable");
+        return;
+    };
     let user_id = "test_traversal_write";
     cleanup_user(&pool, user_id).await;
 
@@ -76,7 +106,10 @@ async fn test_path_traversal_write_blocked() {
 
 #[tokio::test]
 async fn test_path_traversal_delete_blocked() {
-    let pool = get_pool();
+    let Some(pool) = get_verified_pool().await else {
+        eprintln!("Skipping test_path_traversal_delete_blocked: database unavailable");
+        return;
+    };
     let user_id = "test_traversal_delete";
     cleanup_user(&pool, user_id).await;
 
@@ -97,7 +130,10 @@ async fn test_path_traversal_delete_blocked() {
 
 #[tokio::test]
 async fn test_path_traversal_list_blocked() {
-    let pool = get_pool();
+    let Some(pool) = get_verified_pool().await else {
+        eprintln!("Skipping test_path_traversal_list_blocked: database unavailable");
+        return;
+    };
     let user_id = "test_traversal_list";
     cleanup_user(&pool, user_id).await;
 
@@ -115,7 +151,10 @@ async fn test_path_traversal_list_blocked() {
 
 #[tokio::test]
 async fn test_null_byte_injection_blocked() {
-    let pool = get_pool();
+    let Some(pool) = get_verified_pool().await else {
+        eprintln!("Skipping test_null_byte_injection_blocked: database unavailable");
+        return;
+    };
     let user_id = "test_null_byte";
     cleanup_user(&pool, user_id).await;
 
@@ -133,7 +172,10 @@ async fn test_null_byte_injection_blocked() {
 
 #[tokio::test]
 async fn test_valid_paths_still_work() {
-    let pool = get_pool();
+    let Some(pool) = get_verified_pool().await else {
+        eprintln!("Skipping test_valid_paths_still_work: database unavailable");
+        return;
+    };
     let user_id = "test_valid_paths";
     cleanup_user(&pool, user_id).await;
 
@@ -181,7 +223,10 @@ async fn test_valid_paths_still_work() {
 
 #[tokio::test]
 async fn test_path_normalization() {
-    let pool = get_pool();
+    let Some(pool) = get_verified_pool().await else {
+        eprintln!("Skipping test_path_normalization: database unavailable");
+        return;
+    };
     let user_id = "test_normalization";
     cleanup_user(&pool, user_id).await;
 

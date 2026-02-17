@@ -273,11 +273,16 @@ AGENT_NAME=ironclaw
 MAX_PARALLEL_JOBS=5
 
 # Embeddings (for semantic memory search)
+# Provider options: openai (default), nearai, gemini
 OPENAI_API_KEY=sk-...                   # For OpenAI embeddings
 # Or use NEAR AI embeddings:
 # EMBEDDING_PROVIDER=nearai
 # EMBEDDING_ENABLED=true
-EMBEDDING_MODEL=text-embedding-3-small  # or text-embedding-3-large
+# Or use Gemini embeddings:
+# EMBEDDING_PROVIDER=gemini
+# GEMINI_API_KEY=...
+EMBEDDING_MODEL=text-embedding-3-small  # or text-embedding-3-large (OpenAI)
+                                        # or text-embedding-004 (Gemini)
 
 # Heartbeat (proactive periodic execution)
 HEARTBEAT_ENABLED=true
@@ -457,7 +462,7 @@ Key test patterns:
 - ✅ **WASM sandboxing** - Full implementation in `tools/wasm/` with fuel metering, memory limits, capabilities
 - ✅ **Dynamic tool building** - `tools/builder/` has LlmSoftwareBuilder with iterative build loop
 - ✅ **HTTP webhook security** - Secret validation implemented, proper error handling (no panics)
-- ✅ **Embeddings integration** - OpenAI and NEAR AI providers wired to workspace for semantic search
+- ✅ **Embeddings integration** - OpenAI, NEAR AI, and Gemini providers wired to workspace for semantic search
 - ✅ **Workspace system prompt** - Identity files (AGENTS.md, SOUL.md, USER.md, IDENTITY.md) injected into LLM context
 - ✅ **Heartbeat notifications** - Route through channel manager (broadcast API) instead of logging-only
 - ✅ **Auto-context compaction** - Triggers automatically when context exceeds threshold
