@@ -41,6 +41,53 @@ pub struct Config {
     pub claude_code: ClaudeCodeConfig,
 }
 
+/// Options controlling how configuration is loaded.
+#[derive(Debug, Clone, Copy)]
+pub struct ConfigLoadOptions {
+    /// Whether keychain probing is allowed when resolving secrets.
+    ///
+    /// Set this to `false` for read-only diagnostics paths to avoid triggering
+    /// OS keychain unlock dialogs.
+    pub probe_keychain: bool,
+    /// Whether missing DATABASE_URL should be tolerated for postgres backend.
+    ///
+    /// Used by diagnostics commands that should still run and report
+    /// "not configured" instead of failing config resolution.
+    pub allow_missing_database_url: bool,
+    /// Whether missing backend-specific LLM credentials should be tolerated.
+    ///
+    /// Used by diagnostics/config inspection paths that should continue to work
+    /// even if runtime LLM credentials are not configured.
+    pub allow_incomplete_llm: bool,
+}
+
+impl Default for ConfigLoadOptions {
+    fn default() -> Self {
+        Self {
+            probe_keychain: true,
+            allow_missing_database_url: false,
+            allow_incomplete_llm: false,
+        }
+    }
+}
+
+impl ConfigLoadOptions {
+    pub const fn with_keychain_probe(mut self, probe_keychain: bool) -> Self {
+        self.probe_keychain = probe_keychain;
+        self
+    }
+
+    pub const fn allow_missing_database_url(mut self, allow: bool) -> Self {
+        self.allow_missing_database_url = allow;
+        self
+    }
+
+    pub const fn allow_incomplete_llm(mut self, allow: bool) -> Self {
+        self.allow_incomplete_llm = allow;
+        self
+    }
+}
+
 impl Config {
     /// Load configuration from environment variables and the database.
     ///
@@ -49,6 +96,16 @@ impl Config {
     pub async fn from_db(
         store: &dyn crate::db::Database,
         user_id: &str,
+    ) -> Result<Self, ConfigError> {
+        Self::from_db_with_options(store, user_id, ConfigLoadOptions::default()).await
+    }
+
+    /// Load configuration from environment variables and database settings with
+    /// explicit loading options.
+    pub async fn from_db_with_options(
+        store: &dyn crate::db::Database,
+        user_id: &str,
+        options: ConfigLoadOptions,
     ) -> Result<Self, ConfigError> {
         let _ = dotenvy::dotenv();
         crate::bootstrap::load_ironclaw_env();
@@ -62,7 +119,7 @@ impl Config {
             }
         };
 
-        Self::build(&db_settings).await
+        Self::build(&db_settings, options).await
     }
 
     /// Load configuration from environment variables only (no database).
@@ -74,24 +131,30 @@ impl Config {
     /// Loads both `./.env` (standard, higher priority) and `~/.ironclaw/.env`
     /// (lower priority) via dotenvy, which never overwrites existing vars.
     pub async fn from_env() -> Result<Self, ConfigError> {
+        Self::from_env_with_options(ConfigLoadOptions::default()).await
+    }
+
+    /// Load configuration from environment variables only with explicit loading
+    /// options.
+    pub async fn from_env_with_options(options: ConfigLoadOptions) -> Result<Self, ConfigError> {
         let _ = dotenvy::dotenv();
         crate::bootstrap::load_ironclaw_env();
         let settings = Settings::load();
-        Self::build(&settings).await
+        Self::build(&settings, options).await
     }
 
     /// Build config from settings (shared by from_env and from_db).
-    async fn build(settings: &Settings) -> Result<Self, ConfigError> {
+    async fn build(settings: &Settings, options: ConfigLoadOptions) -> Result<Self, ConfigError> {
         Ok(Self {
-            database: DatabaseConfig::resolve()?,
-            llm: LlmConfig::resolve(settings)?,
+            database: DatabaseConfig::resolve(options)?,
+            llm: LlmConfig::resolve(settings, options)?,
             embeddings: EmbeddingsConfig::resolve(settings)?,
             tunnel: TunnelConfig::resolve(settings)?,
             channels: ChannelsConfig::resolve(settings)?,
             agent: AgentConfig::resolve(settings)?,
             safety: SafetyConfig::resolve()?,
             wasm: WasmConfig::resolve()?,
-            secrets: SecretsConfig::resolve().await?,
+            secrets: SecretsConfig::resolve(options).await?,
             builder: BuilderModeConfig::resolve()?,
             heartbeat: HeartbeatConfig::resolve(settings)?,
             routines: RoutineConfig::resolve()?,
@@ -197,7 +260,7 @@ pub struct DatabaseConfig {
 }
 
 impl DatabaseConfig {
-    fn resolve() -> Result<Self, ConfigError> {
+    fn resolve(options: ConfigLoadOptions) -> Result<Self, ConfigError> {
         let backend: DatabaseBackend = if let Some(b) = optional_env("DATABASE_BACKEND")? {
             b.parse().map_err(|e| ConfigError::InvalidValue {
                 key: "DATABASE_BACKEND".to_string(),
@@ -214,6 +277,8 @@ impl DatabaseConfig {
             .or_else(|| {
                 if backend == DatabaseBackend::LibSql {
                     Some("unused://libsql".to_string())
+                } else if options.allow_missing_database_url {
+                    Some("unused://postgres".to_string())
                 } else {
                     None
                 }
@@ -433,7 +498,7 @@ pub struct NearAiConfig {
 }
 
 impl LlmConfig {
-    fn resolve(settings: &Settings) -> Result<Self, ConfigError> {
+    fn resolve(settings: &Settings, options: ConfigLoadOptions) -> Result<Self, ConfigError> {
         // Determine backend: env var > settings > default (NearAi)
         let backend: LlmBackend = if let Some(b) = optional_env("LLM_BACKEND")? {
             b.parse().map_err(|e| ConfigError::InvalidValue {
@@ -495,38 +560,49 @@ impl LlmConfig {
 
         // Resolve provider-specific configs based on backend
         let openai = if backend == LlmBackend::OpenAi {
-            let api_key = optional_env("OPENAI_API_KEY")?
-                .map(SecretString::from)
-                .ok_or_else(|| ConfigError::MissingRequired {
-                    key: "OPENAI_API_KEY".to_string(),
-                    hint: "Set OPENAI_API_KEY when LLM_BACKEND=openai".to_string(),
-                })?;
-            let model = optional_env("OPENAI_MODEL")?.unwrap_or_else(|| "gpt-4o".to_string());
-            let base_url = optional_env("OPENAI_BASE_URL")?;
-            Some(OpenAiDirectConfig {
-                api_key,
-                model,
-                base_url,
-            })
+            match optional_env("OPENAI_API_KEY")?.map(SecretString::from) {
+                Some(api_key) => {
+                    let model =
+                        optional_env("OPENAI_MODEL")?.unwrap_or_else(|| "gpt-4o".to_string());
+                    let base_url = optional_env("OPENAI_BASE_URL")?;
+                    Some(OpenAiDirectConfig {
+                        api_key,
+                        model,
+                        base_url,
+                    })
+                }
+                None if options.allow_incomplete_llm => None,
+                None => {
+                    return Err(ConfigError::MissingRequired {
+                        key: "OPENAI_API_KEY".to_string(),
+                        hint: "Set OPENAI_API_KEY when LLM_BACKEND=openai".to_string(),
+                    });
+                }
+            }
         } else {
             None
         };
 
         let anthropic = if backend == LlmBackend::Anthropic {
-            let api_key = optional_env("ANTHROPIC_API_KEY")?
-                .map(SecretString::from)
-                .ok_or_else(|| ConfigError::MissingRequired {
-                    key: "ANTHROPIC_API_KEY".to_string(),
-                    hint: "Set ANTHROPIC_API_KEY when LLM_BACKEND=anthropic".to_string(),
-                })?;
-            let model = optional_env("ANTHROPIC_MODEL")?
-                .unwrap_or_else(|| "claude-sonnet-4-20250514".to_string());
-            let base_url = optional_env("ANTHROPIC_BASE_URL")?;
-            Some(AnthropicDirectConfig {
-                api_key,
-                model,
-                base_url,
-            })
+            match optional_env("ANTHROPIC_API_KEY")?.map(SecretString::from) {
+                Some(api_key) => {
+                    let model = optional_env("ANTHROPIC_MODEL")?
+                        .unwrap_or_else(|| "claude-sonnet-4-20250514".to_string());
+                    let base_url = optional_env("ANTHROPIC_BASE_URL")?;
+                    Some(AnthropicDirectConfig {
+                        api_key,
+                        model,
+                        base_url,
+                    })
+                }
+                None if options.allow_incomplete_llm => None,
+                None => {
+                    return Err(ConfigError::MissingRequired {
+                        key: "ANTHROPIC_API_KEY".to_string(),
+                        hint: "Set ANTHROPIC_API_KEY when LLM_BACKEND=anthropic".to_string(),
+                    });
+                }
+            }
         } else {
             None
         };
@@ -543,20 +619,27 @@ impl LlmConfig {
 
         let openai_compatible = if backend == LlmBackend::OpenAiCompatible {
             let base_url = optional_env("LLM_BASE_URL")?
-                .or_else(|| settings.openai_compatible_base_url.clone())
-                .ok_or_else(|| ConfigError::MissingRequired {
-                    key: "LLM_BASE_URL".to_string(),
-                    hint: "Set LLM_BASE_URL when LLM_BACKEND=openai_compatible".to_string(),
-                })?;
-            let api_key = optional_env("LLM_API_KEY")?.map(SecretString::from);
-            let model = optional_env("LLM_MODEL")?
-                .or_else(|| settings.selected_model.clone())
-                .unwrap_or_else(|| "default".to_string());
-            Some(OpenAiCompatibleConfig {
-                base_url,
-                api_key,
-                model,
-            })
+                .or_else(|| settings.openai_compatible_base_url.clone());
+            match base_url {
+                Some(base_url) => {
+                    let api_key = optional_env("LLM_API_KEY")?.map(SecretString::from);
+                    let model = optional_env("LLM_MODEL")?
+                        .or_else(|| settings.selected_model.clone())
+                        .unwrap_or_else(|| "default".to_string());
+                    Some(OpenAiCompatibleConfig {
+                        base_url,
+                        api_key,
+                        model,
+                    })
+                }
+                None if options.allow_incomplete_llm => None,
+                None => {
+                    return Err(ConfigError::MissingRequired {
+                        key: "LLM_BASE_URL".to_string(),
+                        hint: "Set LLM_BASE_URL when LLM_BACKEND=openai_compatible".to_string(),
+                    });
+                }
+            }
         } else {
             None
         };
@@ -968,12 +1051,12 @@ impl SecretsConfig {
     ///
     /// Sequential probe: SECRETS_MASTER_KEY env var first, then OS keychain.
     /// No saved "source" needed; just try each source in order.
-    async fn resolve() -> Result<Self, ConfigError> {
+    async fn resolve(options: ConfigLoadOptions) -> Result<Self, ConfigError> {
         use crate::settings::KeySource;
 
         let (master_key, source) = if let Some(env_key) = optional_env("SECRETS_MASTER_KEY")? {
             (Some(SecretString::from(env_key)), KeySource::Env)
-        } else {
+        } else if options.probe_keychain {
             // Probe the OS keychain; if a key is stored, use it
             match crate::secrets::keychain::get_master_key().await {
                 Ok(key_bytes) => {
@@ -982,6 +1065,8 @@ impl SecretsConfig {
                 }
                 Err(_) => (None, KeySource::None),
             }
+        } else {
+            (None, KeySource::None)
         };
 
         let enabled = master_key.is_some();

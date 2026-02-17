@@ -3,13 +3,17 @@
 //! Checks database connectivity, session validity, embeddings,
 //! WASM runtime, tool count, and channel availability.
 
-use std::path::PathBuf;
-
-use crate::settings::Settings;
+use crate::config::{Config, ConfigLoadOptions, DatabaseBackend};
 
 /// Run the status command, printing system health info.
 pub async fn run_status_command() -> anyhow::Result<()> {
-    let settings = Settings::default();
+    let config = Config::from_env_with_options(
+        ConfigLoadOptions::default()
+            .with_keychain_probe(false)
+            .allow_missing_database_url(true)
+            .allow_incomplete_llm(true),
+    )
+    .await?;
 
     println!("IronClaw Status");
     println!("===============\n");
@@ -23,16 +27,15 @@ pub async fn run_status_command() -> anyhow::Result<()> {
 
     // Database
     print!("  Database:    ");
-    let db_backend = std::env::var("DATABASE_BACKEND")
-        .ok()
-        .unwrap_or_else(|| "postgres".to_string());
-    match db_backend.as_str() {
-        "libsql" | "turso" | "sqlite" => {
-            let path = std::env::var("LIBSQL_PATH")
-                .map(std::path::PathBuf::from)
-                .unwrap_or_else(|_| crate::config::default_libsql_path());
+    match config.database.backend {
+        DatabaseBackend::LibSql => {
+            let path = config
+                .database
+                .libsql_path
+                .clone()
+                .unwrap_or_else(crate::config::default_libsql_path);
             if path.exists() {
-                let turso = if std::env::var("LIBSQL_URL").is_ok() {
+                let turso = if config.database.libsql_url.is_some() {
                     " + Turso sync"
                 } else {
                     ""
@@ -42,14 +45,14 @@ pub async fn run_status_command() -> anyhow::Result<()> {
                 println!("libSQL (file missing: {})", path.display());
             }
         }
-        _ => {
-            if std::env::var("DATABASE_URL").is_ok() {
+        DatabaseBackend::Postgres => {
+            if config.database.url() == "unused://postgres" {
+                println!("not configured");
+            } else {
                 match check_database().await {
                     Ok(()) => println!("connected (PostgreSQL)"),
                     Err(e) => println!("error ({})", e),
                 }
-            } else {
-                println!("not configured");
             }
         }
     }
@@ -63,30 +66,24 @@ pub async fn run_status_command() -> anyhow::Result<()> {
         println!("not found (run `ironclaw onboard`)");
     }
 
-    // Secrets (auto-detect from env only; skip keychain probe to avoid
-    // triggering macOS system password dialogs on a simple status check)
+    // Secrets (load config with keychain probing disabled for status UX)
     print!("  Secrets:     ");
-    if std::env::var("SECRETS_MASTER_KEY").is_ok() {
-        println!("configured (env)");
+    if config.secrets.enabled {
+        match config.secrets.source {
+            crate::settings::KeySource::Env => println!("configured (env)"),
+            crate::settings::KeySource::Keychain => println!("configured (keychain)"),
+            crate::settings::KeySource::None => println!("configured"),
+        }
     } else {
-        // We don't probe the keychain here because get_generic_password()
-        // triggers macOS unlock+authorization dialogs, which is bad UX for
-        // a read-only status command. If onboarding completed with keychain
-        // storage, the key is there; we just can't cheaply verify it.
         println!("env not set (keychain may be configured)");
     }
 
     // Embeddings
     print!("  Embeddings:  ");
-    let emb_enabled = settings.embeddings.enabled
-        || std::env::var("OPENAI_API_KEY").is_ok()
-        || std::env::var("EMBEDDING_ENABLED")
-            .map(|v| v == "true")
-            .unwrap_or(false);
-    if emb_enabled {
+    if config.embeddings.enabled {
         println!(
             "enabled (provider: {}, model: {})",
-            settings.embeddings.provider, settings.embeddings.model
+            config.embeddings.provider, config.embeddings.model
         );
     } else {
         println!("disabled");
@@ -94,11 +91,7 @@ pub async fn run_status_command() -> anyhow::Result<()> {
 
     // WASM tools
     print!("  WASM Tools:  ");
-    let tools_dir = settings
-        .wasm
-        .tools_dir
-        .clone()
-        .unwrap_or_else(default_tools_dir);
+    let tools_dir = config.wasm.tools_dir.clone();
     if tools_dir.exists() {
         let count = count_wasm_files(&tools_dir);
         println!("{} installed ({})", count, tools_dir.display());
@@ -106,36 +99,34 @@ pub async fn run_status_command() -> anyhow::Result<()> {
         println!("directory not found ({})", tools_dir.display());
     }
 
-    // WASM channels
+    // Channels
     print!("  Channels:    ");
-    let channels_dir = settings
-        .channels
-        .wasm_channels_dir
-        .clone()
-        .unwrap_or_else(default_channels_dir);
-    let mut channel_info = vec!["cli".to_string()];
-    if settings.channels.http_enabled {
-        channel_info.push(format!(
-            "http:{}",
-            settings.channels.http_port.unwrap_or(3000)
-        ));
+    let channels_dir = config.channels.wasm_channels_dir.clone();
+    let mut channel_info = Vec::new();
+    if config.channels.cli.enabled {
+        channel_info.push("cli".to_string());
     }
-    if channels_dir.exists() {
+    if let Some(ref http) = config.channels.http {
+        channel_info.push(format!("http:{}", http.port));
+    }
+    if config.channels.gateway.is_some() {
+        channel_info.push("gateway".to_string());
+    }
+    if config.channels.wasm_channels_enabled && channels_dir.exists() {
         let wasm_count = count_wasm_files(&channels_dir);
         if wasm_count > 0 {
             channel_info.push(format!("{} wasm", wasm_count));
         }
     }
+    if channel_info.is_empty() {
+        channel_info.push("none".to_string());
+    }
     println!("{}", channel_info.join(", "));
 
     // Heartbeat
     print!("  Heartbeat:   ");
-    let hb_enabled = settings.heartbeat.enabled
-        || std::env::var("HEARTBEAT_ENABLED")
-            .map(|v| v == "true")
-            .unwrap_or(false);
-    if hb_enabled {
-        println!("enabled (interval: {}s)", settings.heartbeat.interval_secs);
+    if config.heartbeat.enabled {
+        println!("enabled (interval: {}s)", config.heartbeat.interval_secs);
     } else {
         println!("disabled");
     }
@@ -203,18 +194,4 @@ fn count_wasm_files(dir: &std::path::Path) -> usize {
                 .count()
         })
         .unwrap_or(0)
-}
-
-fn default_tools_dir() -> PathBuf {
-    dirs::home_dir()
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join(".ironclaw")
-        .join("tools")
-}
-
-fn default_channels_dir() -> PathBuf {
-    dirs::home_dir()
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join(".ironclaw")
-        .join("channels")
 }
