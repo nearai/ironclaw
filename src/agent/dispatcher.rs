@@ -96,6 +96,15 @@ impl Agent {
                 }
             }
 
+            // Enforce cost guardrails before the LLM call
+            if let Err(limit) = self.cost_guard().check_allowed().await {
+                return Err(crate::error::LlmError::InvalidResponse {
+                    provider: "agent".to_string(),
+                    reason: limit.to_string(),
+                }
+                .into());
+            }
+
             // Refresh tool definitions each iteration so newly built tools become visible
             let tool_defs = self.tools().tool_definitions().await;
 
@@ -111,11 +120,21 @@ impl Agent {
 
             let output = reasoning.respond_with_tools(&context).await?;
 
-            // Track token usage for budget enforcement
+            // Record cost and track token usage
+            let model_name = self.llm().active_model_name();
+            let call_cost = self
+                .cost_guard()
+                .record_llm_call(
+                    &model_name,
+                    output.usage.input_tokens,
+                    output.usage.output_tokens,
+                )
+                .await;
             tracing::debug!(
-                "LLM call used {} input + {} output tokens",
+                "LLM call used {} input + {} output tokens (${:.6})",
                 output.usage.input_tokens,
-                output.usage.output_tokens
+                output.usage.output_tokens,
+                call_cost,
             );
 
             match output.result {

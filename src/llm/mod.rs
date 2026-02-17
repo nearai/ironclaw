@@ -7,7 +7,7 @@
 //! - **Ollama**: Local model inference
 //! - **OpenAI-compatible**: Any endpoint that speaks the OpenAI API
 
-mod costs;
+pub mod costs;
 pub mod failover;
 mod nearai;
 mod nearai_chat;

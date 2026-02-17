@@ -67,6 +67,8 @@ pub struct AgentDeps {
     pub workspace: Option<Arc<Workspace>>,
     pub extension_manager: Option<Arc<ExtensionManager>>,
     pub hooks: Arc<HookRegistry>,
+    /// Cost enforcement guardrails (daily budget, hourly rate limits).
+    pub cost_guard: Arc<crate::agent::cost_guard::CostGuard>,
 }
 
 /// The main agent that coordinates all components.
@@ -155,6 +157,10 @@ impl Agent {
 
     pub(super) fn hooks(&self) -> &Arc<HookRegistry> {
         &self.deps.hooks
+    }
+
+    pub(super) fn cost_guard(&self) -> &Arc<crate::agent::cost_guard::CostGuard> {
+        &self.deps.cost_guard
     }
 
     /// Run the agent main loop.

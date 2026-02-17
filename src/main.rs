@@ -1211,6 +1211,12 @@ async fn main() -> anyhow::Result<()> {
     let boot_cheap_model = cheap_llm.as_ref().map(|c| c.model_name().to_string());
 
     // Create and run the agent
+    let cost_guard = Arc::new(ironclaw::agent::cost_guard::CostGuard::new(
+        ironclaw::agent::cost_guard::CostGuardConfig {
+            max_cost_per_day_cents: config.agent.max_cost_per_day_cents,
+            max_actions_per_hour: config.agent.max_actions_per_hour,
+        },
+    ));
     let deps = AgentDeps {
         store: db,
         llm,
@@ -1220,6 +1226,7 @@ async fn main() -> anyhow::Result<()> {
         workspace,
         extension_manager,
         hooks,
+        cost_guard,
     };
     let agent = Agent::new(
         config.agent.clone(),

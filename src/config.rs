@@ -746,6 +746,10 @@ pub struct AgentConfig {
     pub session_idle_timeout: Duration,
     /// Allow chat to use filesystem/shell tools directly (bypass sandbox).
     pub allow_local_tools: bool,
+    /// Maximum daily LLM spend in cents (e.g. 10000 = $100). None = unlimited.
+    pub max_cost_per_day_cents: Option<u64>,
+    /// Maximum LLM/tool actions per hour. None = unlimited.
+    pub max_actions_per_hour: Option<u64>,
 }
 
 impl AgentConfig {
@@ -824,6 +828,20 @@ impl AgentConfig {
                     message: format!("must be 'true' or 'false': {e}"),
                 })?
                 .unwrap_or(false),
+            max_cost_per_day_cents: optional_env("MAX_COST_PER_DAY_CENTS")?
+                .map(|s| s.parse())
+                .transpose()
+                .map_err(|e| ConfigError::InvalidValue {
+                    key: "MAX_COST_PER_DAY_CENTS".to_string(),
+                    message: format!("must be a positive integer: {e}"),
+                })?,
+            max_actions_per_hour: optional_env("MAX_ACTIONS_PER_HOUR")?
+                .map(|s| s.parse())
+                .transpose()
+                .map_err(|e| ConfigError::InvalidValue {
+                    key: "MAX_ACTIONS_PER_HOUR".to_string(),
+                    message: format!("must be a positive integer: {e}"),
+                })?,
         })
     }
 }
