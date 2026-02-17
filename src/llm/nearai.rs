@@ -127,7 +127,20 @@ impl NearAiProvider {
     }
 
     /// Fetch available models from the NEAR AI API.
+    ///
+    /// Handles session renewal on 401 (same pattern as `send_request`).
     pub async fn list_models(&self) -> Result<Vec<ModelInfo>, LlmError> {
+        match self.list_models_inner().await {
+            Ok(models) => Ok(models),
+            Err(LlmError::SessionExpired { .. }) => {
+                self.session.handle_auth_failure().await?;
+                self.list_models_inner().await
+            }
+            Err(e) => Err(e),
+        }
+    }
+
+    async fn list_models_inner(&self) -> Result<Vec<ModelInfo>, LlmError> {
         use secrecy::ExposeSecret;
 
         let token = self.session.get_token().await?;
@@ -150,7 +163,6 @@ impl NearAiProvider {
         let response_text = response.text().await.unwrap_or_default();
 
         if !status.is_success() {
-            // Check for session expiration
             if status.as_u16() == 401 {
                 return Err(LlmError::SessionExpired {
                     provider: "nearai".to_string(),

@@ -24,6 +24,40 @@ use crate::orchestrator::job_manager::{ContainerJobManager, JobMode};
 use crate::secrets::SecretsStore;
 use crate::tools::tool::{Tool, ToolError, ToolOutput, require_str};
 
+/// Resolve a job ID from a full UUID or a short prefix (like git short SHAs).
+///
+/// Tries full UUID parse first. If that fails, treats the input as a hex prefix
+/// and searches the context manager for a unique match.
+async fn resolve_job_id(input: &str, context_manager: &ContextManager) -> Result<Uuid, ToolError> {
+    // Fast path: full UUID
+    if let Ok(id) = Uuid::parse_str(input) {
+        return Ok(id);
+    }
+
+    // Prefix match against known jobs
+    let input_lower = input.to_lowercase();
+    let all_ids = context_manager.all_jobs().await;
+    let matches: Vec<Uuid> = all_ids
+        .into_iter()
+        .filter(|id| {
+            let hex = id.to_string().replace('-', "");
+            hex.starts_with(&input_lower)
+        })
+        .collect();
+
+    match matches.len() {
+        1 => Ok(matches[0]),
+        0 => Err(ToolError::InvalidParameters(format!(
+            "no job found matching prefix '{}'",
+            input
+        ))),
+        n => Err(ToolError::InvalidParameters(format!(
+            "ambiguous prefix '{}' matches {} jobs, provide more characters",
+            input, n
+        ))),
+    }
+}
+
 /// Tool for creating a new job.
 ///
 /// When sandbox deps are injected (via `with_sandbox`), the tool automatically
@@ -799,7 +833,7 @@ impl Tool for JobStatusTool {
             "properties": {
                 "job_id": {
                     "type": "string",
-                    "description": "The UUID of the job to check"
+                    "description": "The job ID (full UUID or short prefix, e.g. 'f2854dd8')"
                 }
             },
             "required": ["job_id"]
@@ -815,10 +849,7 @@ impl Tool for JobStatusTool {
         let requester_id = ctx.user_id.clone();
 
         let job_id_str = require_str(&params, "job_id")?;
-
-        let job_id = Uuid::parse_str(job_id_str).map_err(|_| {
-            ToolError::InvalidParameters(format!("invalid job ID format: {}", job_id_str))
-        })?;
+        let job_id = resolve_job_id(job_id_str, &self.context_manager).await?;
 
         match self.context_manager.get_context(job_id).await {
             Ok(job_ctx) => {
@@ -881,7 +912,7 @@ impl Tool for CancelJobTool {
             "properties": {
                 "job_id": {
                     "type": "string",
-                    "description": "The UUID of the job to cancel"
+                    "description": "The job ID (full UUID or short prefix, e.g. 'f2854dd8')"
                 }
             },
             "required": ["job_id"]
@@ -897,10 +928,7 @@ impl Tool for CancelJobTool {
         let requester_id = ctx.user_id.clone();
 
         let job_id_str = require_str(&params, "job_id")?;
-
-        let job_id = Uuid::parse_str(job_id_str).map_err(|_| {
-            ToolError::InvalidParameters(format!("invalid job ID format: {}", job_id_str))
-        })?;
+        let job_id = resolve_job_id(job_id_str, &self.context_manager).await?;
 
         // Transition to cancelled state
         match self
@@ -981,7 +1009,7 @@ impl Tool for JobEventsTool {
             "properties": {
                 "job_id": {
                     "type": "string",
-                    "description": "The UUID of the sandbox job"
+                    "description": "The job ID (full UUID or short prefix, e.g. 'f2854dd8')"
                 },
                 "limit": {
                     "type": "integer",
@@ -1004,9 +1032,7 @@ impl Tool for JobEventsTool {
             .and_then(|v| v.as_str())
             .ok_or_else(|| ToolError::InvalidParameters("missing 'job_id' parameter".into()))?;
 
-        let job_id = Uuid::parse_str(job_id_str).map_err(|_| {
-            ToolError::InvalidParameters(format!("invalid job ID format: {}", job_id_str))
-        })?;
+        let job_id = resolve_job_id(job_id_str, &self.context_manager).await?;
 
         // Verify the caller owns this job. A missing context is treated as
         // unauthorized to prevent leaking events after process restarts.
@@ -1017,14 +1043,14 @@ impl Tool for JobEventsTool {
             .map_err(|_| {
                 ToolError::ExecutionFailed(format!(
                     "job {} not found or context unavailable",
-                    &job_id_str[..8]
+                    job_id
                 ))
             })?;
 
         if job_ctx.user_id != ctx.user_id {
             return Err(ToolError::ExecutionFailed(format!(
                 "job {} does not belong to current user",
-                &job_id_str[..8]
+                job_id
             )));
         }
 
@@ -1049,7 +1075,7 @@ impl Tool for JobEventsTool {
             .collect();
 
         let result = serde_json::json!({
-            "job_id": job_id_str,
+            "job_id": job_id.to_string(),
             "total_events": events.len(),
             "returned": recent.len(),
             "events": recent,
@@ -1109,7 +1135,7 @@ impl Tool for JobPromptTool {
             "properties": {
                 "job_id": {
                     "type": "string",
-                    "description": "The UUID of the running sandbox job"
+                    "description": "The job ID (full UUID or short prefix, e.g. 'f2854dd8')"
                 },
                 "content": {
                     "type": "string",
@@ -1137,9 +1163,7 @@ impl Tool for JobPromptTool {
             .and_then(|v| v.as_str())
             .ok_or_else(|| ToolError::InvalidParameters("missing 'job_id' parameter".into()))?;
 
-        let job_id = Uuid::parse_str(job_id_str).map_err(|_| {
-            ToolError::InvalidParameters(format!("invalid job ID format: {}", job_id_str))
-        })?;
+        let job_id = resolve_job_id(job_id_str, &self.context_manager).await?;
 
         // Verify the caller owns this job. A missing context is treated as
         // unauthorized to prevent sending prompts to jobs after process restarts.
@@ -1150,14 +1174,14 @@ impl Tool for JobPromptTool {
             .map_err(|_| {
                 ToolError::ExecutionFailed(format!(
                     "job {} not found or context unavailable",
-                    &job_id_str[..8]
+                    job_id
                 ))
             })?;
 
         if job_ctx.user_id != ctx.user_id {
             return Err(ToolError::ExecutionFailed(format!(
                 "job {} does not belong to current user",
-                &job_id_str[..8]
+                job_id
             )));
         }
 
@@ -1182,9 +1206,9 @@ impl Tool for JobPromptTool {
         }
 
         let result = serde_json::json!({
-            "job_id": job_id_str,
+            "job_id": job_id.to_string(),
             "status": "queued",
-            "message": format!("Prompt queued for job {}", &job_id_str[..8]),
+            "message": "Prompt queued",
             "done": done,
         });
 
@@ -1606,7 +1630,7 @@ mod tests {
             "properties": {
                 "job_id": {
                     "type": "string",
-                    "description": "The UUID of the sandbox job"
+                    "description": "The job ID (full UUID or short prefix, e.g. 'f2854dd8')"
                 },
                 "limit": {
                     "type": "integer",
@@ -1655,5 +1679,48 @@ mod tests {
             "expected ownership error, got: {}",
             err
         );
+    }
+
+    #[tokio::test]
+    async fn test_resolve_job_id_full_uuid() {
+        let cm = ContextManager::new(5);
+        let job_id = cm.create_job("Test", "Desc").await.unwrap();
+
+        let resolved = resolve_job_id(&job_id.to_string(), &cm).await.unwrap();
+        assert_eq!(resolved, job_id);
+    }
+
+    #[tokio::test]
+    async fn test_resolve_job_id_short_prefix() {
+        let cm = ContextManager::new(5);
+        let job_id = cm.create_job("Test", "Desc").await.unwrap();
+
+        // Use first 8 hex chars (without dashes)
+        let hex = job_id.to_string().replace('-', "");
+        let prefix = &hex[..8];
+        let resolved = resolve_job_id(prefix, &cm).await.unwrap();
+        assert_eq!(resolved, job_id);
+    }
+
+    #[tokio::test]
+    async fn test_resolve_job_id_no_match() {
+        let cm = ContextManager::new(5);
+        cm.create_job("Test", "Desc").await.unwrap();
+
+        let result = resolve_job_id("00000000", &cm).await;
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("no job found"),
+            "expected 'no job found', got: {}",
+            err
+        );
+    }
+
+    #[tokio::test]
+    async fn test_resolve_job_id_invalid_input() {
+        let cm = ContextManager::new(5);
+        let result = resolve_job_id("not-hex-at-all!", &cm).await;
+        assert!(result.is_err());
     }
 }
