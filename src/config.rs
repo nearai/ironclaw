@@ -388,7 +388,8 @@ impl std::str::FromStr for NearAiApiMode {
 pub struct NearAiConfig {
     /// Model to use (e.g., "claude-3-5-sonnet-20241022", "gpt-4o")
     pub model: String,
-    /// Base URL for the NEAR AI API (default: https://api.near.ai)
+    /// Base URL for the NEAR AI API.
+    /// Defaults to https://private.near.ai (Responses) or https://cloud-api.near.ai (ChatCompletions).
     pub base_url: String,
     /// Base URL for auth/refresh endpoints (default: https://private.near.ai)
     pub auth_base_url: String,
@@ -447,6 +448,13 @@ impl LlmConfig {
             NearAiApiMode::Responses
         };
 
+        // Responses API (session token) lives on private.near.ai;
+        // ChatCompletions API (API key) lives on cloud-api.near.ai.
+        let default_base_url = match api_mode {
+            NearAiApiMode::ChatCompletions => "https://cloud-api.near.ai",
+            NearAiApiMode::Responses => "https://private.near.ai",
+        };
+
         let nearai = NearAiConfig {
             model: optional_env("NEARAI_MODEL")?
                 .or_else(|| settings.selected_model.clone())
@@ -455,7 +463,7 @@ impl LlmConfig {
                         .to_string()
                 }),
             base_url: optional_env("NEARAI_BASE_URL")?
-                .unwrap_or_else(|| "https://cloud-api.near.ai".to_string()),
+                .unwrap_or_else(|| default_base_url.to_string()),
             auth_base_url: optional_env("NEARAI_AUTH_URL")?
                 .unwrap_or_else(|| "https://private.near.ai".to_string()),
             session_path: optional_env("NEARAI_SESSION_PATH")?
