@@ -210,6 +210,7 @@ mod tests {
             response: "I found your order.".to_string(),
             conversation: vec![],
             tool_calls: vec!["lookup_order".to_string()],
+            error: None,
         };
         let score = suite.score(&tasks[0], &submission).await.unwrap();
         assert_eq!(score.value, 0.5);
@@ -220,6 +221,7 @@ mod tests {
             response: "Return processed.".to_string(),
             conversation: vec![],
             tool_calls: vec!["lookup_order".to_string(), "process_return".to_string()],
+            error: None,
         };
         let score = suite.score(&tasks[0], &submission).await.unwrap();
         assert_eq!(score.value, 1.0);

@@ -220,6 +220,7 @@ impl BenchRunner {
                         .iter()
                         .map(|tc| tc.name.clone())
                         .collect(),
+                    error: result.error.clone(),
                 };
                 match self.suite.score(&task, &submission).await {
                     Ok(score) => {

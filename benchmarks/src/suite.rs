@@ -48,6 +48,7 @@ pub struct TaskSubmission {
     pub response: String,
     pub conversation: Vec<ConversationTurn>,
     pub tool_calls: Vec<String>,
+    pub error: Option<String>,
 }
 
 /// A single turn in a multi-turn conversation.

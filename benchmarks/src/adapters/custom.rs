@@ -206,6 +206,7 @@ mod tests {
             response: "4".to_string(),
             conversation: vec![],
             tool_calls: vec![],
+            error: None,
         };
         let score = suite.score(&tasks[0], &submission).await.unwrap();
         assert_eq!(score.value, 1.0);
@@ -230,6 +231,7 @@ mod tests {
             response: "Hello there!".to_string(),
             conversation: vec![],
             tool_calls: vec![],
+            error: None,
         };
         let score = suite.score(&tasks[0], &submission).await.unwrap();
         assert_eq!(score.value, 1.0);

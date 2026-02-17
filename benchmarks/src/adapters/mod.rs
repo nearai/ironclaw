@@ -1,5 +1,6 @@
 pub mod custom;
 pub mod gaia;
+pub mod spot;
 pub mod swe_bench;
 pub mod tau_bench;
 
@@ -11,6 +12,7 @@ use crate::suite::BenchSuite;
 pub const KNOWN_SUITES: &[(&str, &str)] = &[
     ("custom", "Custom JSONL tasks"),
     ("gaia", "GAIA benchmark (knowledge & reasoning)"),
+    ("spot", "Spot checks (end-to-end user workflows)"),
     ("tau_bench", "Tau-bench (multi-turn tool use)"),
     ("swe_bench", "SWE-bench Pro (software engineering)"),
 ];
@@ -69,6 +71,18 @@ pub fn create_suite(name: &str, config: &BenchConfig) -> Result<Box<dyn BenchSui
                 dataset_path,
                 domain,
             )))
+        }
+        "spot" => {
+            let dataset_path = suite_map
+                .get("dataset_path")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string())
+                .ok_or_else(|| {
+                    BenchError::Config(
+                        "suite_config.dataset_path is required for 'spot' suite".to_string(),
+                    )
+                })?;
+            Ok(Box::new(spot::SpotSuite::new(dataset_path)))
         }
         "swe_bench" => {
             let dataset_path = suite_map
