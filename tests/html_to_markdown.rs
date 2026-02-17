@@ -39,13 +39,8 @@ fn convert_test_pages_to_markdown() {
         .join("tests")
         .join("test-pages");
 
-    let Ok(entries) = std::fs::read_dir(&test_pages) else {
-        eprintln!(
-            "test-pages directory not found or not readable: {}",
-            test_pages.display()
-        );
-        return;
-    };
+    let entries =
+        std::fs::read_dir(&test_pages).expect("test-pages directory not found or not readable");
 
     let mut converted = 0u32;
     for entry in entries.flatten() {
@@ -112,7 +107,8 @@ fn convert_test_pages_to_markdown() {
         converted += 1;
     }
 
-    if converted == 0 {
-        println!("No test pages found (no directories with source.html in test-pages/)");
-    }
+    assert!(
+        converted > 0,
+        "No test pages found (no directories with source.html in tests/test-pages/)"
+    );
 }

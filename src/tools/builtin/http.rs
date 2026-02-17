@@ -105,7 +105,7 @@ fn is_disallowed_ip(ip: &IpAddr) -> bool {
 }
 
 #[cfg(feature = "html-to-markdown")]
-/// Heuristic: treat as HTML if Content-Type suggests it or body looks like HTML.
+/// Heuristic: treat as HTML if the `Content-Type` header contains `text/html`.
 fn is_html_response(headers: &HashMap<String, String>) -> bool {
     headers
         .iter()
@@ -260,7 +260,13 @@ impl Tool for HttpTool {
 
         #[cfg(feature = "html-to-markdown")]
         let body_text = if is_html_response(&headers) {
-            convert_html_to_markdown(&body_text, parsed_url.as_str())?
+            match convert_html_to_markdown(&body_text, parsed_url.as_str()) {
+                Ok(md) => md,
+                Err(e) => {
+                    tracing::warn!(url = %parsed_url, error = %e, "HTML-to-markdown conversion failed, returning raw HTML");
+                    body_text
+                }
+            }
         } else {
             body_text
         };

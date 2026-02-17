@@ -38,9 +38,9 @@ pub fn convert_html_to_markdown(html: &str, url: &str) -> Result<String, ToolErr
 mod tests {
     use super::*;
 
+    #[cfg(not(feature = "html-to-markdown"))]
     #[test]
     fn passthrough_returns_input_unchanged_when_feature_disabled() {
-        #[cfg(not(feature = "html-to-markdown"))]
         {
             let html = "<html><body>raw</body></html>";
             let out = convert_html_to_markdown(html, "https://example.com/").unwrap();
@@ -48,9 +48,9 @@ mod tests {
         }
     }
 
+    #[cfg(not(feature = "html-to-markdown"))]
     #[test]
     fn passthrough_ignores_url_when_feature_disabled() {
-        #[cfg(not(feature = "html-to-markdown"))]
         {
             let html = "anything";
             let _ = convert_html_to_markdown(html, "").unwrap();
