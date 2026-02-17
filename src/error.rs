@@ -40,6 +40,9 @@ pub enum Error {
     #[error("Workspace error: {0}")]
     Workspace(#[from] WorkspaceError),
 
+    #[error("Hook error: {0}")]
+    Hook(#[from] crate::hooks::HookError),
+
     #[error("Orchestrator error: {0}")]
     Orchestrator(#[from] OrchestratorError),
 

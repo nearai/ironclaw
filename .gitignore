@@ -2,6 +2,10 @@
 .env
 .env.local
 .env.*
+!.env.example
+
+# Claude Code worktrees
+.claude/worktrees/
 
 target/
 
