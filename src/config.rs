@@ -432,6 +432,13 @@ pub struct NearAiConfig {
     /// With the default of 3, the provider makes up to 4 total attempts
     /// (1 initial + 3 retries) before giving up.
     pub max_retries: u32,
+    /// Cooldown duration in seconds for the failover provider (default: 300).
+    /// When a provider accumulates enough consecutive failures it is skipped
+    /// for this many seconds.
+    pub failover_cooldown_secs: u64,
+    /// Number of consecutive retryable failures before a provider enters
+    /// cooldown (default: 3).
+    pub failover_cooldown_threshold: u32,
 }
 
 impl LlmConfig {
@@ -491,6 +498,8 @@ impl LlmConfig {
             api_key: nearai_api_key,
             fallback_model: optional_env("NEARAI_FALLBACK_MODEL")?,
             max_retries: parse_optional_env("NEARAI_MAX_RETRIES", 3)?,
+            failover_cooldown_secs: parse_optional_env("LLM_FAILOVER_COOLDOWN_SECS", 300)?,
+            failover_cooldown_threshold: parse_optional_env("LLM_FAILOVER_THRESHOLD", 3)?,
         };
 
         // Resolve provider-specific configs based on backend
