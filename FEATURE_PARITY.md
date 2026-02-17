@@ -131,7 +131,7 @@ This document tracks feature parity between IronClaw (Rust implementation) and O
 
 | Feature | OpenClaw | IronClaw | Notes |
 |---------|----------|----------|-------|
-| Pi agent runtime | ✅ | ➖ | IronClaw uses custom runtime |
+| Pi agent runtime | ✅ | ✅ | ARM64 builds + MCP GPIO support |
 | RPC-based execution | ✅ | ✅ | Orchestrator/worker pattern |
 | Multi-provider failover | ✅ | ✅ | `FailoverProvider` tries providers sequentially on retryable errors |
 | Per-sender sessions | ✅ | ✅ | |
@@ -392,6 +392,17 @@ This document tracks feature parity between IronClaw (Rust implementation) and O
 
 ---
 
+## 17. Edge & IoT System
+
+| Feature | OpenClaw | IronClaw | Notes |
+|---------|----------|----------|-------|
+| GPIO Control | ✅ | ✅ | via `mcp-gpio` (MCP server) |
+| Hardware Daemon | ✅ | ✅ | Systemd service with allowlists |
+| I2C/SPI Support | ✅ | ❌ | Planned for future MCPs |
+| Camera Feed | ✅ | ❌ | Planned |
+
+---
+
 ## Implementation Priorities
 
 ### P0 - Core (Already Done)
@@ -421,6 +432,7 @@ This document tracks feature parity between IronClaw (Rust implementation) and O
 - ❌ WhatsApp channel
 - ✅ Multi-provider failover (`FailoverProvider` with retryable error classification)
 - ✅ Hooks system (beforeInbound, beforeToolCall, beforeOutbound, onSessionStart, onSessionEnd, transformResponse)
+- ✅ Edge/IoT Support (ARM64, GPIO MCP, Hardware Daemon)
 
 ### P2 - Medium Priority
 - ❌ Media handling (images, PDFs)

@@ -1,0 +1,21 @@
+[Unit]
+Description=IronClaw GPIO MCP Server
+After=network.target
+
+[Service]
+Type=simple
+User=root
+Group=gpio
+# Create the socket directory if it doesn't exist (though /tmp is strict). 
+# Better to use /run/ironclaw/ or similar, but /tmp is simplest for now.
+# Use socat to listen on a Unix socket and fork the MCP server.
+# Set permission to 660 (User/Group RW) so 'gpio' group members can access it.
+ExecStart=/usr/bin/socat UNIX-LISTEN:/var/run/ironclaw-gpio.sock,fork,mode=660,user=root,group=gpio EXEC:/usr/local/bin/ironclaw-mcp-gpio
+Restart=always
+RestartSec=5
+
+# Clean up socket on stop
+ExecStopPost=/bin/rm -f /var/run/ironclaw-gpio.sock
+
+[Install]
+WantedBy=multi-user.target
