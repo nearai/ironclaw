@@ -19,10 +19,6 @@ pub struct BenchConfig {
     )]
     pub task_timeout: Duration,
 
-    /// Max agent iterations per task. Default: 15.
-    #[serde(default = "default_max_iterations")]
-    pub max_iterations: usize,
-
     /// How many tasks to run in parallel. Default: 1.
     #[serde(default = "default_parallelism")]
     pub parallelism: usize,
@@ -45,10 +41,6 @@ pub struct MatrixEntry {
     /// Model identifier.
     #[serde(default)]
     pub model: Option<String>,
-
-    /// Optional tool allowlist. If set, only these tools are available.
-    #[serde(default)]
-    pub tools: Option<Vec<String>>,
 }
 
 impl BenchConfig {
@@ -71,13 +63,8 @@ impl BenchConfig {
         Self {
             results_dir: default_results_dir(),
             task_timeout: default_task_timeout(),
-            max_iterations: default_max_iterations(),
             parallelism: default_parallelism(),
-            matrix: vec![MatrixEntry {
-                label,
-                model,
-                tools: None,
-            }],
+            matrix: vec![MatrixEntry { label, model }],
             suite_config: toml::Value::Table(toml::map::Map::new()),
         }
     }
@@ -109,10 +96,6 @@ fn default_results_dir() -> PathBuf {
 
 fn default_task_timeout() -> Duration {
     Duration::from_secs(300)
-}
-
-fn default_max_iterations() -> usize {
-    15
 }
 
 fn default_parallelism() -> usize {
@@ -164,7 +147,6 @@ mod tests {
         let config = BenchConfig::minimal(Some("test-model".to_string()));
         assert_eq!(config.matrix.len(), 1);
         assert_eq!(config.matrix[0].label, "test-model");
-        assert_eq!(config.max_iterations, 15);
         assert_eq!(config.parallelism, 1);
     }
 
@@ -173,7 +155,6 @@ mod tests {
         let toml_str = r#"
 results_dir = "./my-results"
 task_timeout = "60s"
-max_iterations = 10
 parallelism = 2
 
 [[matrix]]
@@ -183,7 +164,6 @@ model = "gpt-4o-mini"
 [[matrix]]
 label = "full"
 model = "claude-3-5-sonnet"
-tools = ["echo", "time"]
 
 [suite_config]
 dataset_path = "./data/test.jsonl"
@@ -191,10 +171,8 @@ dataset_path = "./data/test.jsonl"
         let config: BenchConfig = toml::from_str(toml_str).unwrap();
         assert_eq!(config.results_dir, PathBuf::from("./my-results"));
         assert_eq!(config.task_timeout, Duration::from_secs(60));
-        assert_eq!(config.max_iterations, 10);
         assert_eq!(config.parallelism, 2);
         assert_eq!(config.matrix.len(), 2);
-        assert_eq!(config.matrix[1].tools.as_ref().unwrap().len(), 2);
         assert_eq!(
             config.suite_config_str("dataset_path").unwrap(),
             "./data/test.jsonl"

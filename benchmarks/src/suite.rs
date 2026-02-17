@@ -140,11 +140,6 @@ pub trait BenchSuite: Send + Sync {
         vec![]
     }
 
-    /// Optional: restrict which tools the agent can use (allowlist).
-    fn tool_whitelist(&self) -> Option<Vec<String>> {
-        None
-    }
-
     /// Multi-turn: generate next simulated user message based on conversation so far.
     /// Return `None` to end the conversation.
     async fn next_user_message(

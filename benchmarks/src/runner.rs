@@ -92,8 +92,15 @@ impl BenchRunner {
             );
         }
 
-        // Load and filter tasks
-        let mut tasks = self.suite.load_tasks().await?;
+        // Load all tasks once (used for both execution and scoring)
+        let all_tasks = self.suite.load_tasks().await?;
+        let task_index: HashMap<String, BenchTask> = all_tasks
+            .iter()
+            .map(|t| (t.id.clone(), t.clone()))
+            .collect();
+
+        // Filter tasks for execution
+        let mut tasks = all_tasks;
 
         if let Some(ids) = task_filter {
             let id_set: HashSet<&str> = ids.iter().map(|s| s.as_str()).collect();
@@ -170,7 +177,6 @@ impl BenchRunner {
                 let safety = Arc::clone(&self.safety);
                 let timeout = task.timeout.unwrap_or(self.config.task_timeout);
                 let results_ref = Arc::clone(&all_results);
-                let jsonl = jsonl_path.clone();
                 let completed_count = completed.len();
                 let total = total_tasks;
                 let additional_tools = self.suite.additional_tools();
@@ -200,9 +206,6 @@ impl BenchRunner {
                     if let Err(e) = suite.teardown_task(&task).await {
                         tracing::warn!("teardown_task failed for {}: {}", task.id, e);
                     }
-                    if let Err(e) = append_task_result(&jsonl, &result) {
-                        tracing::error!("Failed to write result for {}: {}", task.id, e);
-                    }
                     results_ref.lock().await.push(result);
                 }));
             }
@@ -212,18 +215,17 @@ impl BenchRunner {
                     tracing::error!("Task panicked: {}", e);
                 }
             }
+
+            // Write all results to JSONL after parallel execution completes.
+            // This avoids the race condition of concurrent file appends.
+            let results = all_results.lock().await;
+            for result in results.iter() {
+                append_task_result(&jsonl_path, result)?;
+            }
         }
 
-        // Score all results (load tasks once, index by ID)
+        // Score all results using the cached task index
         let results = all_results.lock().await;
-        let task_index: HashMap<String, BenchTask> = self
-            .suite
-            .load_tasks()
-            .await?
-            .into_iter()
-            .map(|t| (t.id.clone(), t))
-            .collect();
-
         let mut scored: Vec<TaskResult> = Vec::with_capacity(results.len());
         for result in results.iter() {
             if let Some(task) = task_index.get(&result.task_id) {

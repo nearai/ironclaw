@@ -247,7 +247,8 @@ pub fn print_results_table(tasks: &[TaskResult], run: &RunResult) {
     for task in tasks {
         let total_tokens = task.trace.input_tokens + task.trace.output_tokens;
         let task_id_display = if task.task_id.len() > 28 {
-            format!("{}...", &task.task_id[..25])
+            let truncated: String = task.task_id.chars().take(25).collect();
+            format!("{truncated}...")
         } else {
             task.task_id.clone()
         };
