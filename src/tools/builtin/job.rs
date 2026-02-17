@@ -34,6 +34,13 @@ async fn resolve_job_id(input: &str, context_manager: &ContextManager) -> Result
         return Ok(id);
     }
 
+    // Require a minimum prefix length to limit brute-force enumeration.
+    if input.len() < 4 {
+        return Err(ToolError::InvalidParameters(
+            "job ID prefix must be at least 4 hex characters".to_string(),
+        ));
+    }
+
     // Prefix match against known jobs
     let input_lower = input.to_lowercase();
     let all_ids = context_manager.all_jobs().await;
@@ -134,6 +141,15 @@ impl CreateJobTool {
             Some(obj) if !obj.is_empty() => obj,
             _ => return Ok(vec![]),
         };
+
+        const MAX_CREDENTIAL_GRANTS: usize = 20;
+        if creds_obj.len() > MAX_CREDENTIAL_GRANTS {
+            return Err(ToolError::InvalidParameters(format!(
+                "too many credential grants ({}, max {})",
+                creds_obj.len(),
+                MAX_CREDENTIAL_GRANTS
+            )));
+        }
 
         let secrets = match &self.secrets_store {
             Some(s) => s,
@@ -1084,7 +1100,12 @@ impl Tool for JobEventsTool {
             )));
         }
 
-        let limit = params.get("limit").and_then(|v| v.as_i64()).unwrap_or(50);
+        const MAX_EVENT_LIMIT: i64 = 1000;
+        let limit = params
+            .get("limit")
+            .and_then(|v| v.as_i64())
+            .unwrap_or(50)
+            .clamp(1, MAX_EVENT_LIMIT);
 
         let events = self
             .store

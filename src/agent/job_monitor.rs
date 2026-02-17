@@ -39,7 +39,7 @@ pub fn spawn_job_monitor(
     let short_id = job_id.to_string()[..8].to_string();
 
     tokio::spawn(async move {
-        tracing::debug!(job_id = %short_id, "Job monitor started");
+        tracing::info!(job_id = %short_id, "Job monitor started successfully");
 
         loop {
             match event_rx.recv().await {
