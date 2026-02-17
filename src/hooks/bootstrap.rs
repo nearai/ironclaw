@@ -42,6 +42,7 @@ pub async fn bootstrap_hooks(
     wasm_channels_dir: &Path,
     active_tool_names: &[String],
     active_channel_names: &[String],
+    dev_loaded_tool_names: &[String],
 ) -> HookBootstrapSummary {
     let mut summary = HookBootstrapSummary::default();
 
@@ -56,6 +57,7 @@ pub async fn bootstrap_hooks(
         wasm_channels_dir,
         active_tool_names,
         active_channel_names,
+        dev_loaded_tool_names,
     )
     .await;
     summary.plugin_hooks += plugin.hooks;
@@ -78,6 +80,7 @@ async fn register_plugin_bundles(
     wasm_channels_dir: &Path,
     active_tool_names: &[String],
     active_channel_names: &[String],
+    dev_loaded_tool_names: &[String],
 ) -> HookRegistrationSummary {
     let mut summary = HookRegistrationSummary::default();
     let files = collect_plugin_capability_files(
@@ -85,6 +88,7 @@ async fn register_plugin_bundles(
         wasm_channels_dir,
         active_tool_names,
         active_channel_names,
+        dev_loaded_tool_names,
     )
     .await;
 
@@ -129,11 +133,14 @@ async fn collect_plugin_capability_files(
     wasm_channels_dir: &Path,
     active_tool_names: &[String],
     active_channel_names: &[String],
+    dev_loaded_tool_names: &[String],
 ) -> Vec<(String, PathBuf)> {
     let mut files: Vec<(String, PathBuf)> = Vec::new();
     let mut seen: HashSet<String> = HashSet::new();
     let active_tools: HashSet<&str> = active_tool_names.iter().map(String::as_str).collect();
     let active_channels: HashSet<&str> = active_channel_names.iter().map(String::as_str).collect();
+    let dev_loaded_tools: HashSet<&str> =
+        dev_loaded_tool_names.iter().map(String::as_str).collect();
 
     if wasm_tools_dir.exists() {
         match discover_tools(wasm_tools_dir).await {
@@ -141,6 +148,7 @@ async fn collect_plugin_capability_files(
                 for (name, tool) in tools {
                     if let Some(path) = tool.capabilities_path
                         && active_tools.contains(name.as_str())
+                        && !dev_loaded_tools.contains(name.as_str())
                     {
                         insert_unique(&mut files, &mut seen, format!("plugin.tool:{}", name), path);
                     }
@@ -161,6 +169,7 @@ async fn collect_plugin_capability_files(
             for (name, tool) in dev_tools {
                 if let Some(path) = tool.capabilities_path
                     && active_tools.contains(name.as_str())
+                    && dev_loaded_tools.contains(name.as_str())
                 {
                     insert_unique(
                         &mut files,

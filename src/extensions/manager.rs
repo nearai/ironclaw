@@ -327,7 +327,10 @@ impl ExtensionManager {
                 // Unregister hooks registered from this plugin source.
                 let removed_hooks = self
                     .unregister_hook_prefix(&format!("plugin.tool:{}::", name))
-                    .await;
+                    .await
+                    + self
+                        .unregister_hook_prefix(&format!("plugin.dev_tool:{}::", name))
+                        .await;
                 if removed_hooks > 0 {
                     tracing::info!(
                         extension = name,

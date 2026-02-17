@@ -651,6 +651,8 @@ async fn main() -> anyhow::Result<()> {
     // Load WASM tools and MCP servers concurrently.
     // Both register into the shared ToolRegistry (RwLock-based) so concurrent writes are safe.
     let wasm_tools_future = async {
+        let mut dev_loaded_tool_names: Vec<String> = Vec::new();
+
         if let Some(ref runtime) = wasm_tool_runtime {
             let mut loader = WasmToolLoader::new(Arc::clone(runtime), Arc::clone(&tools));
             if let Some(ref secrets) = secrets_store {
@@ -679,6 +681,7 @@ async fn main() -> anyhow::Result<()> {
             // Load dev tools from build artifacts (overrides installed if newer)
             match load_dev_tools(&loader, &config.wasm.tools_dir).await {
                 Ok(results) => {
+                    dev_loaded_tool_names.extend(results.loaded.iter().cloned());
                     if !results.loaded.is_empty() {
                         tracing::info!(
                             "Loaded {} dev WASM tools from build artifacts",
@@ -691,6 +694,8 @@ async fn main() -> anyhow::Result<()> {
                 }
             }
         }
+
+        dev_loaded_tool_names
     };
 
     let mcp_servers_future = async {
@@ -796,7 +801,7 @@ async fn main() -> anyhow::Result<()> {
         }
     };
 
-    tokio::join!(wasm_tools_future, mcp_servers_future);
+    let (dev_loaded_tool_names, _) = tokio::join!(wasm_tools_future, mcp_servers_future);
 
     // Create extension manager for in-chat discovery/install/auth/activate
     let extension_manager = if let Some(ref secrets) = secrets_store {
@@ -1165,6 +1170,7 @@ async fn main() -> anyhow::Result<()> {
         &config.channels.wasm_channels_dir,
         &active_tool_names,
         &loaded_wasm_channel_names,
+        &dev_loaded_tool_names,
     )
     .await;
     tracing::info!(
