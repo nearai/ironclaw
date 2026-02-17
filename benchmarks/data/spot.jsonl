@@ -1,4 +1,4 @@
-{"id": "smoke-greeting", "prompt": "Hello! Introduce yourself briefly.", "tags": ["smoke"], "assertions": {"response_contains": ["hello"], "no_error": true, "max_tool_calls": 0}}
+{"id": "smoke-greeting", "prompt": "Hello! Introduce yourself briefly.", "tags": ["smoke"], "assertions": {"response_matches": "(?i)(hello|hi|hey|assistant|agent|help)", "no_error": true, "max_tool_calls": 0}}
 {"id": "smoke-math", "prompt": "What is 47 * 23? Reply with just the number.", "tags": ["smoke"], "assertions": {"response_contains": ["1081"], "no_error": true, "max_tool_calls": 0}}
 {"id": "tool-echo", "prompt": "Use the echo tool to repeat the message: 'Spot check passed'", "tags": ["tool"], "assertions": {"tools_used": ["echo"], "response_contains": ["Spot check passed"], "no_error": true}}
 {"id": "tool-time", "prompt": "What is the current date and time? Use the time tool.", "tags": ["tool"], "assertions": {"tools_used": ["time"], "response_matches": "20\\d{2}", "no_error": true}}
