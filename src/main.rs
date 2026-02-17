@@ -25,9 +25,9 @@ use ironclaw::{
     extensions::ExtensionManager,
     hooks::HookRegistry,
     llm::{
-        CircuitBreakerConfig, CircuitBreakerProvider, FailoverProvider, LlmProvider, SessionConfig,
-        create_cheap_llm_provider, create_llm_provider, create_llm_provider_with_config,
-        create_session_manager,
+        CachedProvider, CircuitBreakerConfig, CircuitBreakerProvider, FailoverProvider,
+        LlmProvider, ResponseCacheConfig, SessionConfig, create_cheap_llm_provider,
+        create_llm_provider, create_llm_provider_with_config, create_session_manager,
     },
     orchestrator::{
         ContainerJobConfig, ContainerJobManager, OrchestratorApi, TokenStore,
@@ -571,6 +571,22 @@ async fn main() -> anyhow::Result<()> {
         } else {
             llm
         };
+
+    // Wrap in response cache if configured
+    let llm: Arc<dyn LlmProvider> = if config.llm.nearai.response_cache_enabled {
+        let rc_config = ResponseCacheConfig {
+            ttl: std::time::Duration::from_secs(config.llm.nearai.response_cache_ttl_secs),
+            max_entries: config.llm.nearai.response_cache_max_entries,
+        };
+        tracing::info!(
+            ttl_secs = config.llm.nearai.response_cache_ttl_secs,
+            max_entries = config.llm.nearai.response_cache_max_entries,
+            "LLM response cache enabled"
+        );
+        Arc::new(CachedProvider::new(llm, rc_config))
+    } else {
+        llm
+    };
 
     // Initialize cheap LLM provider for lightweight tasks (heartbeat, evaluation)
     let cheap_llm = create_cheap_llm_provider(&config.llm, session.clone())?;

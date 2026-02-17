@@ -476,6 +476,13 @@ pub struct NearAiConfig {
     pub circuit_breaker_threshold: Option<u32>,
     /// How long (seconds) the circuit stays open before allowing a probe (default: 30).
     pub circuit_breaker_recovery_secs: u64,
+    /// Enable in-memory response caching for `complete()` calls.
+    /// Saves tokens on repeated prompts within a session. Default: false.
+    pub response_cache_enabled: bool,
+    /// TTL in seconds for cached responses (default: 3600 = 1 hour).
+    pub response_cache_ttl_secs: u64,
+    /// Max cached responses before LRU eviction (default: 1000).
+    pub response_cache_max_entries: usize,
 }
 
 impl LlmConfig {
@@ -543,6 +550,9 @@ impl LlmConfig {
                     message: format!("must be a positive integer: {e}"),
                 })?,
             circuit_breaker_recovery_secs: parse_optional_env("CIRCUIT_BREAKER_RECOVERY_SECS", 30)?,
+            response_cache_enabled: parse_optional_env("RESPONSE_CACHE_ENABLED", false)?,
+            response_cache_ttl_secs: parse_optional_env("RESPONSE_CACHE_TTL_SECS", 3600)?,
+            response_cache_max_entries: parse_optional_env("RESPONSE_CACHE_MAX_ENTRIES", 1000)?,
         };
 
         // Resolve provider-specific configs based on backend
