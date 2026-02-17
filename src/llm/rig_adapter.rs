@@ -81,10 +81,13 @@ fn convert_messages(messages: &[ChatMessage]) -> (Option<String>, Vec<RigMessage
                         contents.push(AssistantContent::text(&msg.content));
                     }
                     for tc in tool_calls {
-                        contents.push(AssistantContent::ToolCall(rig::message::ToolCall::new(
-                            tc.id.clone(),
-                            ToolFunction::new(tc.name.clone(), tc.arguments.clone()),
-                        )));
+                        contents.push(AssistantContent::ToolCall(
+                            rig::message::ToolCall::new(
+                                tc.id.clone(),
+                                ToolFunction::new(tc.name.clone(), tc.arguments.clone()),
+                            )
+                            .with_call_id(tc.id.clone()),
+                        ));
                     }
                     if let Ok(many) = OneOrMany::many(contents) {
                         history.push(RigMessage::Assistant {
@@ -104,8 +107,8 @@ fn convert_messages(messages: &[ChatMessage]) -> (Option<String>, Vec<RigMessage
                 let tool_id = msg.tool_call_id.clone().unwrap_or_default();
                 history.push(RigMessage::User {
                     content: OneOrMany::one(UserContent::ToolResult(RigToolResult {
-                        id: tool_id,
-                        call_id: None,
+                        id: tool_id.clone(),
+                        call_id: Some(tool_id),
                         content: OneOrMany::one(ToolResultContent::text(&msg.content)),
                     })),
                 });
