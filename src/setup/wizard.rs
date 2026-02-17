@@ -777,18 +777,7 @@ impl SetupWizard {
                 mask_api_key(&existing)
             ));
             if confirm("Use this setup-token?", true).map_err(SetupError::Io)? {
-                if let Err(msg) = validate_anthropic_setup_token(existing.trim()) {
-                    return Err(SetupError::Config(msg));
-                }
-
-                if let Ok(ctx) = self.init_secrets_context().await {
-                    let token = SecretString::from(existing.clone());
-                    if let Err(e) = ctx.save_secret("llm_anthropic_oauth_token", &token).await {
-                        tracing::warn!("Failed to persist setup-token to secrets: {}", e);
-                    }
-                }
-
-                self.llm_api_key = Some(SecretString::from(existing));
+                self.persist_anthropic_setup_token(existing.trim()).await?;
                 print_success("Anthropic configured (setup-token from env)");
                 return Ok(());
             }
@@ -796,22 +785,8 @@ impl SetupWizard {
 
         print_info("Run `claude setup-token`, then paste the generated token.");
         let token = secret_input("Anthropic setup-token").map_err(SetupError::Io)?;
-        let trimmed = token.expose_secret().trim().to_string();
-        if let Err(msg) = validate_anthropic_setup_token(&trimmed) {
-            return Err(SetupError::Config(msg));
-        }
-
-        let token = SecretString::from(trimmed.clone());
-        if let Ok(ctx) = self.init_secrets_context().await {
-            ctx.save_secret("llm_anthropic_oauth_token", &token)
-                .await
-                .map_err(|e| SetupError::Config(format!("Failed to save setup-token: {e}")))?;
-            print_success("Setup-token encrypted and saved");
-        } else {
-            print_info("Secrets not available. Set ANTHROPIC_OAUTH_TOKEN in your environment.");
-        }
-
-        self.llm_api_key = Some(token);
+        self.persist_anthropic_setup_token(token.expose_secret())
+            .await?;
         print_success("Anthropic configured (setup-token)");
         Ok(())
     }
@@ -880,6 +855,26 @@ impl SetupWizard {
         } else {
             print_info("Secrets not available. Set OPENAI_CODEX_OAUTH_TOKEN in your environment.");
         }
+        self.llm_api_key = Some(token);
+        Ok(())
+    }
+
+    async fn persist_anthropic_setup_token(&mut self, token: &str) -> Result<(), SetupError> {
+        let trimmed = token.trim();
+        if let Err(msg) = validate_anthropic_setup_token(trimmed) {
+            return Err(SetupError::Config(msg));
+        }
+
+        let token = SecretString::from(trimmed.to_string());
+        if let Ok(ctx) = self.init_secrets_context().await {
+            ctx.save_secret("llm_anthropic_oauth_token", &token)
+                .await
+                .map_err(|e| SetupError::Config(format!("Failed to save setup-token: {e}")))?;
+            print_success("Setup-token encrypted and saved");
+        } else {
+            print_info("Secrets not available. Set ANTHROPIC_OAUTH_TOKEN in your environment.");
+        }
+        self.llm_api_key = Some(token);
         Ok(())
     }
 
@@ -2450,31 +2445,55 @@ mod tests {
     }
 
     /// RAII guard that sets/clears an env var for the duration of a test.
+    static ENV_LOCK: std::sync::LazyLock<std::sync::Mutex<()>> =
+        std::sync::LazyLock::new(|| std::sync::Mutex::new(()));
+
     struct EnvGuard {
         key: &'static str,
         original: Option<String>,
+        _lock: std::sync::MutexGuard<'static, ()>,
     }
 
     impl EnvGuard {
         fn set(key: &'static str, value: &str) -> Self {
+            let lock = ENV_LOCK
+                .lock()
+                .expect("env lock should not be poisoned in tests");
             let original = std::env::var(key).ok();
+            // SAFETY: Tests that mutate process env hold ENV_LOCK for the entire
+            // EnvGuard lifetime, serializing env writes and restoration.
             unsafe {
                 std::env::set_var(key, value);
             }
-            Self { key, original }
+            Self {
+                key,
+                original,
+                _lock: lock,
+            }
         }
 
         fn clear(key: &'static str) -> Self {
+            let lock = ENV_LOCK
+                .lock()
+                .expect("env lock should not be poisoned in tests");
             let original = std::env::var(key).ok();
+            // SAFETY: Tests that mutate process env hold ENV_LOCK for the entire
+            // EnvGuard lifetime, serializing env writes and restoration.
             unsafe {
                 std::env::remove_var(key);
             }
-            Self { key, original }
+            Self {
+                key,
+                original,
+                _lock: lock,
+            }
         }
     }
 
     impl Drop for EnvGuard {
         fn drop(&mut self) {
+            // SAFETY: Restoration happens while ENV_LOCK is still held by this
+            // guard, so no concurrent env mutation can race with this write.
             unsafe {
                 if let Some(ref val) = self.original {
                     std::env::set_var(self.key, val);
