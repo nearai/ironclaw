@@ -4,6 +4,13 @@
 .env.*
 !.env.example
 
+# Claude Code worktrees
+.claude/worktrees/
+
+# Sidecar tool data
+.sidecar/
+.todos/
+
 target/
 
 # WASM build artifacts (loaded from disk, not bundled)
