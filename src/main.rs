@@ -1133,6 +1133,24 @@ async fn main() -> anyhow::Result<()> {
         db.clone(),
     );
 
+    // Initialize skills system (before gateway so we can wire into GatewayState)
+    let (skill_registry, skill_catalog) = if config.skills.enabled {
+        let mut registry = ironclaw::skills::SkillRegistry::new(config.skills.local_dir.clone());
+        let loaded = registry.discover_all().await;
+        if !loaded.is_empty() {
+            tracing::info!("Loaded {} skill(s): {}", loaded.len(), loaded.join(", "));
+        }
+        let registry = Arc::new(std::sync::RwLock::new(registry));
+
+        // Register skill management tools
+        let catalog = ironclaw::skills::catalog::shared_catalog();
+        tools.register_skill_tools(Arc::clone(&registry), Arc::clone(&catalog));
+
+        (Some(registry), Some(catalog))
+    } else {
+        (None, None)
+    };
+
     // Add web gateway channel if configured
     if let Some(ref gw_config) = config.channels.gateway {
         let mut gw = GatewayChannel::new(gw_config.clone());
@@ -1150,6 +1168,12 @@ async fn main() -> anyhow::Result<()> {
         }
         if let Some(ref jm) = container_job_manager {
             gw = gw.with_job_manager(Arc::clone(jm));
+        }
+        if let Some(ref sr) = skill_registry {
+            gw = gw.with_skill_registry(Arc::clone(sr));
+        }
+        if let Some(ref sc) = skill_catalog {
+            gw = gw.with_skill_catalog(Arc::clone(sc));
         }
         if config.sandbox.enabled {
             gw = gw.with_prompt_queue(Arc::clone(&prompt_queue));
@@ -1180,18 +1204,6 @@ async fn main() -> anyhow::Result<()> {
 
         channels.add(Box::new(gw));
     }
-
-    // Initialize skills system
-    let skill_registry = if config.skills.enabled {
-        let mut registry = ironclaw::skills::SkillRegistry::new(config.skills.local_dir.clone());
-        let loaded = registry.discover_all().await;
-        if !loaded.is_empty() {
-            tracing::info!("Loaded {} skill(s): {}", loaded.len(), loaded.join(", "));
-        }
-        Some(Arc::new(registry))
-    } else {
-        None
-    };
 
     // Create and run the agent
     let deps = AgentDeps {

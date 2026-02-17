@@ -53,6 +53,15 @@ pub enum SkillRegistryError {
         approx_tokens: usize,
         declared: usize,
     },
+
+    #[error("Skill '{name}' already exists")]
+    AlreadyExists { name: String },
+
+    #[error("Cannot remove skill '{name}': {reason}")]
+    CannotRemove { name: String, reason: String },
+
+    #[error("Failed to write skill file {path}: {reason}")]
+    WriteError { path: String, reason: String },
 }
 
 /// Registry of available skills.
@@ -93,7 +102,7 @@ impl SkillRegistry {
         // 1. Workspace skills (highest priority)
         if let Some(ref ws_dir) = self.workspace_dir.clone() {
             let ws_skills = self
-                .discover_from_dir(ws_dir, SkillTrust::Trusted, |p| SkillSource::Workspace(p))
+                .discover_from_dir(ws_dir, SkillTrust::Trusted, SkillSource::Workspace)
                 .await;
             for (name, skill) in ws_skills {
                 if seen.contains_key(&name) {
@@ -339,6 +348,137 @@ impl SkillRegistry {
     pub fn count(&self) -> usize {
         self.skills.len()
     }
+
+    /// Check if a skill with the given name is loaded.
+    pub fn has(&self, name: &str) -> bool {
+        self.skills.iter().any(|s| s.manifest.name == name)
+    }
+
+    /// Find a skill by name.
+    pub fn find_by_name(&self, name: &str) -> Option<&LoadedSkill> {
+        self.skills.iter().find(|s| s.manifest.name == name)
+    }
+
+    /// Install a skill at runtime from SKILL.md content.
+    ///
+    /// Parses the content, validates it, writes it to `user_dir/<name>/SKILL.md`,
+    /// and loads it into the registry. Installed skills get `SkillTrust::Installed`
+    /// since they come from external sources.
+    pub async fn install_skill(&mut self, content: &str) -> Result<String, SkillRegistryError> {
+        let normalized = normalize_line_endings(content);
+
+        // Parse and validate before writing to disk
+        let parsed = parse_skill_md(&normalized).map_err(|e: SkillParseError| match e {
+            SkillParseError::InvalidName { ref name } => SkillRegistryError::ParseError {
+                name: name.clone(),
+                reason: e.to_string(),
+            },
+            _ => SkillRegistryError::ParseError {
+                name: "(install)".to_string(),
+                reason: e.to_string(),
+            },
+        })?;
+
+        let skill_name = parsed.manifest.name.clone();
+
+        // Reject duplicates
+        if self.has(&skill_name) {
+            return Err(SkillRegistryError::AlreadyExists { name: skill_name });
+        }
+
+        // Write to user_dir/<name>/SKILL.md
+        let skill_dir = self.user_dir.join(&skill_name);
+        tokio::fs::create_dir_all(&skill_dir).await.map_err(|e| {
+            SkillRegistryError::WriteError {
+                path: skill_dir.display().to_string(),
+                reason: e.to_string(),
+            }
+        })?;
+
+        let skill_path = skill_dir.join("SKILL.md");
+        tokio::fs::write(&skill_path, content).await.map_err(|e| {
+            SkillRegistryError::WriteError {
+                path: skill_path.display().to_string(),
+                reason: e.to_string(),
+            }
+        })?;
+
+        // Load with Installed trust (external source)
+        let source = SkillSource::User(skill_dir);
+        let (name, skill) = self
+            .load_skill_md(&skill_path, SkillTrust::Installed, source)
+            .await?;
+
+        self.skills.push(skill);
+        tracing::info!("Installed skill: {}", name);
+
+        Ok(name)
+    }
+
+    /// Remove a skill by name.
+    ///
+    /// Only allows removing skills from the user directory. Workspace and bundled
+    /// skills cannot be removed through this interface.
+    pub async fn remove_skill(&mut self, name: &str) -> Result<(), SkillRegistryError> {
+        let idx = self
+            .skills
+            .iter()
+            .position(|s| s.manifest.name == name)
+            .ok_or_else(|| SkillRegistryError::NotFound(name.to_string()))?;
+
+        let skill = &self.skills[idx];
+
+        // Only allow removing user-dir skills
+        match &skill.source {
+            SkillSource::User(path) => {
+                let skill_md = path.join("SKILL.md");
+                if tokio::fs::try_exists(&skill_md).await.unwrap_or(false) {
+                    tokio::fs::remove_file(&skill_md).await.map_err(|e| {
+                        SkillRegistryError::WriteError {
+                            path: skill_md.display().to_string(),
+                            reason: e.to_string(),
+                        }
+                    })?;
+                    // Remove the directory if empty
+                    let _ = tokio::fs::remove_dir(path).await;
+                }
+            }
+            SkillSource::Workspace(_) => {
+                return Err(SkillRegistryError::CannotRemove {
+                    name: name.to_string(),
+                    reason: "workspace skills cannot be removed via this interface".to_string(),
+                });
+            }
+            SkillSource::Bundled(_) => {
+                return Err(SkillRegistryError::CannotRemove {
+                    name: name.to_string(),
+                    reason: "bundled skills cannot be removed".to_string(),
+                });
+            }
+            SkillSource::Registry { .. } => {
+                return Err(SkillRegistryError::CannotRemove {
+                    name: name.to_string(),
+                    reason: "registry skills should be uninstalled, not removed".to_string(),
+                });
+            }
+        }
+
+        self.skills.remove(idx);
+        tracing::info!("Removed skill: {}", name);
+
+        Ok(())
+    }
+
+    /// Clear all loaded skills and re-discover from disk.
+    pub async fn reload(&mut self) -> Vec<String> {
+        self.skills.clear();
+        self.discover_all().await
+    }
+
+    /// Get the user skills directory path.
+    pub fn user_dir(&self) -> &Path {
+        &self.user_dir
+    }
 }
 
 /// Compute SHA-256 hash of content in the format "sha256:hex...".
@@ -533,6 +673,126 @@ mod tests {
         let mut registry = SkillRegistry::new(dir.path().to_path_buf());
         let loaded = registry.discover_all().await;
         assert!(loaded.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_has_and_find_by_name() {
+        let dir = tempfile::tempdir().unwrap();
+        let skill_dir = dir.path().join("my-skill");
+        fs::create_dir(&skill_dir).unwrap();
+        fs::write(
+            skill_dir.join("SKILL.md"),
+            "---\nname: my-skill\n---\n\nPrompt.\n",
+        )
+        .unwrap();
+
+        let mut registry = SkillRegistry::new(dir.path().to_path_buf());
+        registry.discover_all().await;
+
+        assert!(registry.has("my-skill"));
+        assert!(!registry.has("nonexistent"));
+        assert!(registry.find_by_name("my-skill").is_some());
+        assert!(registry.find_by_name("nonexistent").is_none());
+    }
+
+    #[tokio::test]
+    async fn test_install_skill_from_content() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut registry = SkillRegistry::new(dir.path().to_path_buf());
+
+        let content =
+            "---\nname: test-install\ndescription: Installed skill\n---\n\nInstalled prompt.\n";
+        let name = registry.install_skill(content).await.unwrap();
+
+        assert_eq!(name, "test-install");
+        assert!(registry.has("test-install"));
+        assert_eq!(registry.count(), 1);
+
+        // Verify file was written to disk
+        let skill_path = dir.path().join("test-install").join("SKILL.md");
+        assert!(skill_path.exists());
+    }
+
+    #[tokio::test]
+    async fn test_install_duplicate_rejected() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut registry = SkillRegistry::new(dir.path().to_path_buf());
+
+        let content = "---\nname: dup-skill\n---\n\nPrompt.\n";
+        registry.install_skill(content).await.unwrap();
+
+        let result = registry.install_skill(content).await;
+        assert!(matches!(
+            result,
+            Err(SkillRegistryError::AlreadyExists { .. })
+        ));
+    }
+
+    #[tokio::test]
+    async fn test_remove_user_skill() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut registry = SkillRegistry::new(dir.path().to_path_buf());
+
+        let content = "---\nname: removable\n---\n\nPrompt.\n";
+        registry.install_skill(content).await.unwrap();
+        assert!(registry.has("removable"));
+
+        registry.remove_skill("removable").await.unwrap();
+        assert!(!registry.has("removable"));
+        assert_eq!(registry.count(), 0);
+    }
+
+    #[tokio::test]
+    async fn test_remove_workspace_skill_rejected() {
+        let user_dir = tempfile::tempdir().unwrap();
+        let ws_dir = tempfile::tempdir().unwrap();
+
+        let ws_skill = ws_dir.path().join("ws-skill");
+        fs::create_dir(&ws_skill).unwrap();
+        fs::write(
+            ws_skill.join("SKILL.md"),
+            "---\nname: ws-skill\n---\n\nWorkspace prompt.\n",
+        )
+        .unwrap();
+
+        let mut registry = SkillRegistry::new(user_dir.path().to_path_buf())
+            .with_workspace_dir(ws_dir.path().to_path_buf());
+        registry.discover_all().await;
+
+        let result = registry.remove_skill("ws-skill").await;
+        assert!(matches!(
+            result,
+            Err(SkillRegistryError::CannotRemove { .. })
+        ));
+    }
+
+    #[tokio::test]
+    async fn test_remove_nonexistent_fails() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut registry = SkillRegistry::new(dir.path().to_path_buf());
+
+        let result = registry.remove_skill("nonexistent").await;
+        assert!(matches!(result, Err(SkillRegistryError::NotFound(_))));
+    }
+
+    #[tokio::test]
+    async fn test_reload_clears_and_rediscovers() {
+        let dir = tempfile::tempdir().unwrap();
+        let skill_dir = dir.path().join("persist-skill");
+        fs::create_dir(&skill_dir).unwrap();
+        fs::write(
+            skill_dir.join("SKILL.md"),
+            "---\nname: persist-skill\n---\n\nPrompt.\n",
+        )
+        .unwrap();
+
+        let mut registry = SkillRegistry::new(dir.path().to_path_buf());
+        registry.discover_all().await;
+        assert_eq!(registry.count(), 1);
+
+        let loaded = registry.reload().await;
+        assert_eq!(loaded, vec!["persist-skill"]);
+        assert_eq!(registry.count(), 1);
     }
 
     #[test]

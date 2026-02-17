@@ -139,6 +139,10 @@ pub struct GatewayState {
     pub ws_tracker: Option<Arc<crate::channels::web::ws::WsConnectionTracker>>,
     /// LLM provider for OpenAI-compatible API proxy.
     pub llm_provider: Option<Arc<dyn crate::llm::LlmProvider>>,
+    /// Skill registry for skill management API.
+    pub skill_registry: Option<Arc<std::sync::RwLock<crate::skills::SkillRegistry>>>,
+    /// Skill catalog for searching the ClawHub registry.
+    pub skill_catalog: Option<Arc<crate::skills::catalog::SkillCatalog>>,
     /// Rate limiter for chat endpoints (30 messages per 60 seconds).
     pub chat_rate_limiter: RateLimiter,
 }
@@ -222,6 +226,14 @@ pub async fn start_server(
             axum::routing::delete(routines_delete_handler),
         )
         .route("/api/routines/{id}/runs", get(routines_runs_handler))
+        // Skills
+        .route("/api/skills", get(skills_list_handler))
+        .route("/api/skills/search", post(skills_search_handler))
+        .route("/api/skills/install", post(skills_install_handler))
+        .route(
+            "/api/skills/{name}",
+            axum::routing::delete(skills_remove_handler),
+        )
         // Settings
         .route("/api/settings", get(settings_list_handler))
         .route("/api/settings/export", get(settings_export_handler))
@@ -1782,6 +1794,220 @@ async fn extensions_remove_handler(
 
     match ext_mgr.remove(&name).await {
         Ok(message) => Ok(Json(ActionResponse::ok(message))),
+        Err(e) => Ok(Json(ActionResponse::fail(e.to_string()))),
+    }
+}
+
+// --- Skills handlers ---
+
+async fn skills_list_handler(
+    State(state): State<Arc<GatewayState>>,
+) -> Result<Json<super::types::SkillListResponse>, (StatusCode, String)> {
+    let registry = state.skill_registry.as_ref().ok_or((
+        StatusCode::NOT_IMPLEMENTED,
+        "Skills system not enabled".to_string(),
+    ))?;
+
+    let guard = registry.read().map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Skill registry lock poisoned: {}", e),
+        )
+    })?;
+
+    let skills: Vec<super::types::SkillInfo> = guard
+        .skills()
+        .iter()
+        .map(|s| super::types::SkillInfo {
+            name: s.manifest.name.clone(),
+            description: s.manifest.description.clone(),
+            version: s.manifest.version.clone(),
+            trust: s.trust.to_string(),
+            source: format!("{:?}", s.source),
+            keywords: s.manifest.activation.keywords.clone(),
+        })
+        .collect();
+
+    let count = skills.len();
+    Ok(Json(super::types::SkillListResponse { skills, count }))
+}
+
+async fn skills_search_handler(
+    State(state): State<Arc<GatewayState>>,
+    Json(req): Json<super::types::SkillSearchRequest>,
+) -> Result<Json<super::types::SkillSearchResponse>, (StatusCode, String)> {
+    let registry = state.skill_registry.as_ref().ok_or((
+        StatusCode::NOT_IMPLEMENTED,
+        "Skills system not enabled".to_string(),
+    ))?;
+
+    let catalog = state.skill_catalog.as_ref().ok_or((
+        StatusCode::NOT_IMPLEMENTED,
+        "Skill catalog not available".to_string(),
+    ))?;
+
+    // Search ClawHub catalog
+    let catalog_results = catalog.search(&req.query).await;
+    let catalog_json: Vec<serde_json::Value> = catalog_results
+        .into_iter()
+        .map(|e| {
+            serde_json::json!({
+                "slug": e.slug,
+                "name": e.name,
+                "description": e.description,
+                "version": e.version,
+                "score": e.score,
+            })
+        })
+        .collect();
+
+    // Search local skills
+    let query_lower = req.query.to_lowercase();
+    let installed: Vec<super::types::SkillInfo> = {
+        let guard = registry.read().map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Skill registry lock poisoned: {}", e),
+            )
+        })?;
+        guard
+            .skills()
+            .iter()
+            .filter(|s| {
+                s.manifest.name.to_lowercase().contains(&query_lower)
+                    || s.manifest.description.to_lowercase().contains(&query_lower)
+            })
+            .map(|s| super::types::SkillInfo {
+                name: s.manifest.name.clone(),
+                description: s.manifest.description.clone(),
+                version: s.manifest.version.clone(),
+                trust: s.trust.to_string(),
+                source: format!("{:?}", s.source),
+                keywords: s.manifest.activation.keywords.clone(),
+            })
+            .collect()
+    };
+
+    Ok(Json(super::types::SkillSearchResponse {
+        catalog: catalog_json,
+        installed,
+        registry_url: catalog.registry_url().to_string(),
+    }))
+}
+
+async fn skills_install_handler(
+    State(state): State<Arc<GatewayState>>,
+    Json(req): Json<super::types::SkillInstallRequest>,
+) -> Result<Json<ActionResponse>, (StatusCode, String)> {
+    let registry = state.skill_registry.as_ref().ok_or((
+        StatusCode::NOT_IMPLEMENTED,
+        "Skills system not enabled".to_string(),
+    ))?;
+
+    let content = if let Some(ref raw) = req.content {
+        raw.clone()
+    } else if let Some(ref url) = req.url {
+        // Fetch from URL
+        let client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(15))
+            .user_agent("ironclaw/0.1")
+            .build()
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+        let resp = client
+            .get(url.as_str())
+            .send()
+            .await
+            .map_err(|e| (StatusCode::BAD_GATEWAY, format!("Fetch failed: {}", e)))?;
+
+        if !resp.status().is_success() {
+            return Ok(Json(ActionResponse::fail(format!(
+                "Fetch returned HTTP {}",
+                resp.status()
+            ))));
+        }
+
+        resp.text()
+            .await
+            .map_err(|e| (StatusCode::BAD_GATEWAY, format!("Read body failed: {}", e)))?
+    } else if let Some(ref catalog) = state.skill_catalog {
+        let url = crate::skills::catalog::skill_download_url(catalog.registry_url(), &req.name);
+        let client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(15))
+            .user_agent("ironclaw/0.1")
+            .build()
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+        let resp = client
+            .get(&url)
+            .send()
+            .await
+            .map_err(|e| (StatusCode::BAD_GATEWAY, format!("Fetch failed: {}", e)))?;
+
+        if !resp.status().is_success() {
+            return Ok(Json(ActionResponse::fail(format!(
+                "Catalog fetch returned HTTP {}",
+                resp.status()
+            ))));
+        }
+
+        resp.text()
+            .await
+            .map_err(|e| (StatusCode::BAD_GATEWAY, format!("Read body failed: {}", e)))?
+    } else {
+        return Ok(Json(ActionResponse::fail(
+            "Provide 'content' or 'url' to install a skill".to_string(),
+        )));
+    };
+
+    let result = {
+        let mut guard = registry.write().map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Skill registry lock poisoned: {}", e),
+            )
+        })?;
+        // Bridge sync lock with async install
+        tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current().block_on(guard.install_skill(&content))
+        })
+    };
+
+    match result {
+        Ok(name) => Ok(Json(ActionResponse::ok(format!(
+            "Skill '{}' installed",
+            name
+        )))),
+        Err(e) => Ok(Json(ActionResponse::fail(e.to_string()))),
+    }
+}
+
+async fn skills_remove_handler(
+    State(state): State<Arc<GatewayState>>,
+    Path(name): Path<String>,
+) -> Result<Json<ActionResponse>, (StatusCode, String)> {
+    let registry = state.skill_registry.as_ref().ok_or((
+        StatusCode::NOT_IMPLEMENTED,
+        "Skills system not enabled".to_string(),
+    ))?;
+
+    let result = {
+        let mut guard = registry.write().map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Skill registry lock poisoned: {}", e),
+            )
+        })?;
+        tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current().block_on(guard.remove_skill(&name))
+        })
+    };
+
+    match result {
+        Ok(()) => Ok(Json(ActionResponse::ok(format!(
+            "Skill '{}' removed",
+            name
+        )))),
         Err(e) => Ok(Json(ActionResponse::fail(e.to_string()))),
     }
 }

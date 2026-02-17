@@ -30,6 +30,8 @@ const READ_ONLY_TOOLS: &[&str] = &[
     "time",
     "echo",
     "json",
+    "skill_list",
+    "skill_search",
 ];
 
 /// Result of tool attenuation, including transparency information.

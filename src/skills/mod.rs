@@ -15,6 +15,7 @@
 //! preventing privilege escalation through skill mixing.
 
 pub mod attenuation;
+pub mod catalog;
 pub mod gating;
 pub mod parser;
 pub mod registry;

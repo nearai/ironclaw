@@ -72,7 +72,7 @@ pub struct AgentDeps {
     pub tools: Arc<ToolRegistry>,
     pub workspace: Option<Arc<Workspace>>,
     pub extension_manager: Option<Arc<ExtensionManager>>,
-    pub skill_registry: Option<Arc<SkillRegistry>>,
+    pub skill_registry: Option<Arc<std::sync::RwLock<SkillRegistry>>>,
     pub skills_config: SkillsConfig,
 }
 
@@ -153,14 +153,21 @@ impl Agent {
         self.deps.workspace.as_ref()
     }
 
-    fn skill_registry(&self) -> Option<&Arc<SkillRegistry>> {
+    fn skill_registry(&self) -> Option<&Arc<std::sync::RwLock<SkillRegistry>>> {
         self.deps.skill_registry.as_ref()
     }
 
     /// Select active skills for a message using deterministic prefiltering.
     fn select_active_skills(&self, message_content: &str) -> Vec<crate::skills::LoadedSkill> {
         if let Some(registry) = self.skill_registry() {
-            let available = registry.skills();
+            let guard = match registry.read() {
+                Ok(g) => g,
+                Err(e) => {
+                    tracing::error!("Skill registry lock poisoned: {}", e);
+                    return vec![];
+                }
+            };
+            let available = guard.skills();
             let skills_cfg = &self.deps.skills_config;
             let selected = crate::skills::prefilter_skills(
                 message_content,
