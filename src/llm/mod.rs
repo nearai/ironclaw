@@ -172,6 +172,8 @@ fn create_tinfoil_provider(config: &LlmConfig) -> Result<Arc<dyn LlmProvider>, L
             reason: format!("Failed to create Tinfoil client: {}", e),
         })?;
 
+    // Tinfoil currently only supports the Chat Completions API and not the newer Responses API,
+    // so we must explicitly select the completions API here (unlike other OpenAI-compatible providers).
     let client = client.completions_api();
     let model = client.completion_model(&tf.model);
     tracing::info!("Using Tinfoil private inference (model: {})", tf.model);
