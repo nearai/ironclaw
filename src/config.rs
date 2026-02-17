@@ -1266,7 +1266,8 @@ impl SandboxModeConfig {
 pub struct ClaudeCodeConfig {
     /// Whether Claude Code sandbox mode is available.
     pub enabled: bool,
-    /// Host directory containing Claude auth session (mounted read-only).
+    /// Host directory containing Claude auth config (not mounted into containers;
+    /// auth is handled via ANTHROPIC_API_KEY env var instead).
     pub config_dir: std::path::PathBuf,
     /// Claude model to use (e.g. "sonnet", "opus").
     pub model: String,
@@ -1293,13 +1294,19 @@ pub struct ClaudeCodeConfig {
 /// silently auto-approved.
 fn default_claude_code_allowed_tools() -> Vec<String> {
     [
-        "Bash(*)",
+        // File system
         "Read",
-        "Edit(*)",
+        "Write",
+        "Edit",
         "Glob",
         "Grep",
-        "WebFetch(*)",
-        "Task(*)",
+        "NotebookEdit",
+        // Execution
+        "Bash",
+        "Task",
+        // Network
+        "WebFetch",
+        "WebSearch",
     ]
     .into_iter()
     .map(String::from)
@@ -1334,6 +1341,50 @@ impl ClaudeCodeConfig {
         }
     }
 
+    /// Extract the OAuth access token from the host's credential store.
+    ///
+    /// On macOS: reads from Keychain (`Claude Code-credentials` service).
+    /// On Linux: reads from `~/.claude/.credentials.json`.
+    ///
+    /// Returns the access token if found. The token typically expires in
+    /// 8-12 hours, which is sufficient for any single container job.
+    pub fn extract_oauth_token() -> Option<String> {
+        // macOS: extract from Keychain
+        if cfg!(target_os = "macos") {
+            match std::process::Command::new("security")
+                .args([
+                    "find-generic-password",
+                    "-s",
+                    "Claude Code-credentials",
+                    "-w",
+                ])
+                .output()
+            {
+                Ok(output) if output.status.success() => {
+                    if let Ok(json) = String::from_utf8(output.stdout) {
+                        return parse_oauth_access_token(json.trim());
+                    }
+                }
+                Ok(_) => {
+                    tracing::debug!("No Claude Code credentials in macOS Keychain");
+                }
+                Err(e) => {
+                    tracing::debug!("Failed to query macOS Keychain: {e}");
+                }
+            }
+        }
+
+        // Linux / fallback: read from ~/.claude/.credentials.json
+        if let Some(home) = dirs::home_dir() {
+            let creds_path = home.join(".claude").join(".credentials.json");
+            if let Ok(json) = std::fs::read_to_string(&creds_path) {
+                return parse_oauth_access_token(&json);
+            }
+        }
+
+        None
+    }
+
     fn resolve() -> Result<Self, ConfigError> {
         let defaults = Self::default();
         Ok(Self {
@@ -1364,6 +1415,16 @@ impl ClaudeCodeConfig {
                 .unwrap_or(defaults.allowed_tools),
         })
     }
+}
+
+/// Parse the OAuth access token from a Claude Code credentials JSON blob.
+///
+/// Expected shape: `{"claudeAiOauth": {"accessToken": "sk-ant-oat01-..."}}`
+fn parse_oauth_access_token(json: &str) -> Option<String> {
+    let creds: serde_json::Value = serde_json::from_str(json).ok()?;
+    creds["claudeAiOauth"]["accessToken"]
+        .as_str()
+        .map(String::from)
 }
 
 /// Load API keys from the encrypted secrets store into a thread-safe overlay.

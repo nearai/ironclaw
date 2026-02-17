@@ -50,8 +50,13 @@ pub struct ContainerJobConfig {
     pub cpu_shares: u32,
     /// Port the orchestrator internal API listens on.
     pub orchestrator_port: u16,
-    /// Host directory containing Claude auth config (mounted read-only for ClaudeCode mode).
-    pub claude_config_dir: Option<PathBuf>,
+    /// Anthropic API key for Claude Code containers (read from ANTHROPIC_API_KEY).
+    /// Takes priority over OAuth token.
+    pub claude_code_api_key: Option<String>,
+    /// OAuth access token extracted from the host's `claude login` session.
+    /// Passed as CLAUDE_CODE_OAUTH_TOKEN to containers. Falls back to this
+    /// when no ANTHROPIC_API_KEY is available.
+    pub claude_code_oauth_token: Option<String>,
     /// Claude model to use in ClaudeCode mode.
     pub claude_code_model: String,
     /// Maximum turns for Claude Code.
@@ -69,7 +74,8 @@ impl Default for ContainerJobConfig {
             memory_limit_mb: 2048,
             cpu_shares: 1024,
             orchestrator_port: 50051,
-            claude_config_dir: None,
+            claude_code_api_key: None,
+            claude_code_oauth_token: None,
             claude_code_model: "sonnet".to_string(),
             claude_code_max_turns: 50,
             claude_code_memory_limit_mb: 4096,
@@ -313,11 +319,17 @@ impl ContainerJobManager {
             env_vec.push("IRONCLAW_WORKSPACE=/workspace".to_string());
         }
 
-        // Claude Code mode: mount host ~/.claude read-only for auth,
-        // and pass the tool allowlist so the bridge can write settings.json.
+        // Claude Code mode: auth + tool allowlist.
+        //
+        // Auth strategies (first match wins):
+        //   1. ANTHROPIC_API_KEY: direct API key (pay-as-you-go billing).
+        //   2. CLAUDE_CODE_OAUTH_TOKEN: OAuth access token from `claude login`
+        //      session, extracted from the host's credential store.
         if mode == JobMode::ClaudeCode {
-            if let Some(ref claude_dir) = self.config.claude_config_dir {
-                binds.push(format!("{}:/home/sandbox/.claude:ro", claude_dir.display()));
+            if let Some(ref api_key) = self.config.claude_code_api_key {
+                env_vec.push(format!("ANTHROPIC_API_KEY={}", api_key));
+            } else if let Some(ref oauth_token) = self.config.claude_code_oauth_token {
+                env_vec.push(format!("CLAUDE_CODE_OAUTH_TOKEN={}", oauth_token));
             }
             if !self.config.claude_code_allowed_tools.is_empty() {
                 env_vec.push(format!(

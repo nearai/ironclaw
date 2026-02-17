@@ -225,7 +225,7 @@ async fn main() -> anyhow::Result<()> {
                 max_turns: *max_turns,
                 model: model.clone(),
                 timeout: std::time::Duration::from_secs(1800),
-                allowed_tools: Vec::new(),
+                allowed_tools: ironclaw::config::ClaudeCodeConfig::from_env().allowed_tools,
             };
 
             let runtime = ironclaw::worker::ClaudeBridgeRuntime::new(config)
@@ -828,11 +828,8 @@ async fn main() -> anyhow::Result<()> {
             memory_limit_mb: config.sandbox.memory_limit_mb,
             cpu_shares: config.sandbox.cpu_shares,
             orchestrator_port: 50051,
-            claude_config_dir: if config.claude_code.enabled {
-                Some(config.claude_code.config_dir.clone())
-            } else {
-                None
-            },
+            claude_code_api_key: std::env::var("ANTHROPIC_API_KEY").ok(),
+            claude_code_oauth_token: ironclaw::config::ClaudeCodeConfig::extract_oauth_token(),
             claude_code_model: config.claude_code.model.clone(),
             claude_code_max_turns: config.claude_code.max_turns,
             claude_code_memory_limit_mb: config.claude_code.memory_limit_mb,

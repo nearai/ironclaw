@@ -131,7 +131,7 @@ impl NearAiProvider {
         use secrecy::ExposeSecret;
 
         let token = self.session.get_token().await?;
-        let url = self.api_url("model/list");
+        let url = self.api_url("models");
 
         tracing::debug!("Fetching models from: {}", url);
 

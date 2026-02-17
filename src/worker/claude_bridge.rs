@@ -153,8 +153,43 @@ impl ClaudeBridgeRuntime {
         Ok(())
     }
 
+    /// Copy auth files from the read-only host mount into the writable home dir.
+    ///
+    /// When the orchestrator mounts the host's `~/.claude` at
+    /// `/home/sandbox/.claude-host:ro`, this copies everything into the
+    /// container's own `/home/sandbox/.claude` so Claude Code can read auth
+    /// credentials AND write its state (todos, debug files, etc.) without
+    /// touching the host filesystem.
+    fn copy_auth_from_mount(&self) -> Result<(), WorkerError> {
+        let mount = std::path::Path::new("/home/sandbox/.claude-host");
+        if !mount.exists() {
+            return Ok(());
+        }
+
+        let target = std::path::Path::new("/home/sandbox/.claude");
+        std::fs::create_dir_all(target).map_err(|e| WorkerError::ExecutionFailed {
+            reason: format!("failed to create ~/.claude: {e}"),
+        })?;
+
+        let copied =
+            copy_dir_recursive(mount, target).map_err(|e| WorkerError::ExecutionFailed {
+                reason: format!("failed to copy auth from host mount: {e}"),
+            })?;
+
+        tracing::info!(
+            job_id = %self.config.job_id,
+            files_copied = copied,
+            "Copied auth config from host mount into container"
+        );
+        Ok(())
+    }
+
     /// Run the bridge: fetch job, spawn claude, stream events, handle follow-ups.
     pub async fn run(&self) -> Result<(), WorkerError> {
+        // Copy auth files from read-only host mount (if present) into the
+        // writable home directory before Claude Code needs them.
+        self.copy_auth_from_mount()?;
+
         // Write project-level settings with explicit tool allowlist.
         // This replaces --dangerously-skip-permissions with defense-in-depth:
         // only the listed tools are auto-approved, unknown tools fail safely.
@@ -181,6 +216,17 @@ impl ClaudeBridgeRuntime {
                 job_id = %self.config.job_id,
                 "Injected {} credential(s) into environment",
                 credentials.len()
+            );
+        }
+
+        // Warn if no auth method is available.
+        if std::env::var("ANTHROPIC_API_KEY").is_err()
+            && std::env::var("CLAUDE_CODE_OAUTH_TOKEN").is_err()
+        {
+            tracing::warn!(
+                job_id = %self.config.job_id,
+                "No Claude Code auth available. Set ANTHROPIC_API_KEY or run \
+                 `claude login` on the host to authenticate."
             );
         }
 
@@ -280,6 +326,7 @@ impl ClaudeBridgeRuntime {
             .arg(prompt)
             .arg("--output-format")
             .arg("stream-json")
+            .arg("--verbose")
             .arg("--max-turns")
             .arg(self.config.max_turns.to_string())
             .arg("--model")
@@ -530,6 +577,48 @@ fn stream_event_to_payloads(event: &ClaudeStreamEvent) -> Vec<JobEventPayload> {
     payloads
 }
 
+/// Recursively copy files and directories from `src` to `dst`, skipping
+/// entries that can't be read (e.g. permission-restricted files owned by a
+/// different uid on a read-only bind mount). Returns the number of files
+/// successfully copied.
+fn copy_dir_recursive(src: &std::path::Path, dst: &std::path::Path) -> std::io::Result<usize> {
+    let entries = match std::fs::read_dir(src) {
+        Ok(e) => e,
+        Err(e) => {
+            tracing::debug!("Skipping unreadable directory {}: {}", src.display(), e);
+            return Ok(0);
+        }
+    };
+
+    let mut copied = 0;
+    for entry in entries {
+        let entry = match entry {
+            Ok(e) => e,
+            Err(e) => {
+                tracing::debug!("Skipping unreadable entry in {}: {}", src.display(), e);
+                continue;
+            }
+        };
+
+        let src_path = entry.path();
+        let dst_path = dst.join(entry.file_name());
+
+        if src_path.is_dir() {
+            if std::fs::create_dir_all(&dst_path).is_ok() {
+                copied += copy_dir_recursive(&src_path, &dst_path)?;
+            }
+        } else {
+            match std::fs::copy(&src_path, &dst_path) {
+                Ok(_) => copied += 1,
+                Err(e) => {
+                    tracing::debug!("Skipping unreadable file {}: {}", src_path.display(), e);
+                }
+            }
+        }
+    }
+    Ok(copied)
+}
+
 fn truncate(s: &str, max_len: usize) -> &str {
     if s.len() <= max_len {
         s
@@ -749,5 +838,48 @@ mod tests {
         // Must have the expected structure
         assert!(parsed["permissions"].is_object());
         assert!(parsed["permissions"]["allow"].is_array());
+    }
+
+    #[test]
+    fn test_copy_dir_recursive() {
+        let src = tempfile::tempdir().unwrap();
+        let dst = tempfile::tempdir().unwrap();
+
+        // Create a nested structure in src
+        std::fs::write(src.path().join("auth.json"), r#"{"token":"abc"}"#).unwrap();
+        std::fs::create_dir_all(src.path().join("subdir")).unwrap();
+        std::fs::write(src.path().join("subdir").join("nested.txt"), "nested").unwrap();
+
+        let copied = copy_dir_recursive(src.path(), dst.path()).unwrap();
+        assert_eq!(copied, 2);
+
+        // Verify files were copied
+        assert_eq!(
+            std::fs::read_to_string(dst.path().join("auth.json")).unwrap(),
+            r#"{"token":"abc"}"#
+        );
+        assert_eq!(
+            std::fs::read_to_string(dst.path().join("subdir").join("nested.txt")).unwrap(),
+            "nested"
+        );
+    }
+
+    #[test]
+    fn test_copy_dir_recursive_empty_source() {
+        let src = tempfile::tempdir().unwrap();
+        let dst = tempfile::tempdir().unwrap();
+
+        let copied = copy_dir_recursive(src.path(), dst.path()).unwrap();
+        assert_eq!(copied, 0);
+    }
+
+    #[test]
+    fn test_copy_dir_recursive_skips_nonexistent_source() {
+        let dst = tempfile::tempdir().unwrap();
+        let nonexistent = std::path::Path::new("/no/such/path");
+
+        // Should gracefully return 0 instead of failing
+        let copied = copy_dir_recursive(nonexistent, dst.path()).unwrap();
+        assert_eq!(copied, 0);
     }
 }
