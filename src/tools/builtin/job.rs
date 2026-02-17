@@ -479,16 +479,28 @@ impl CreateJobTool {
 /// The base directory where all project directories must live.
 /// Env var names that could be abused to hijack process behavior.
 const DANGEROUS_ENV_VARS: &[&str] = &[
+    // Dynamic linker hijacking
     "LD_PRELOAD",
     "LD_LIBRARY_PATH",
+    "LD_AUDIT",
     "DYLD_INSERT_LIBRARIES",
     "DYLD_LIBRARY_PATH",
+    // Shell behavior
     "BASH_ENV",
     "ENV",
     "CDPATH",
     "IFS",
     "PATH",
     "HOME",
+    // Language runtime library path hijacking
+    "PYTHONPATH",
+    "NODE_PATH",
+    "PERL5LIB",
+    "RUBYLIB",
+    "CLASSPATH",
+    // JVM injection
+    "JAVA_TOOL_OPTIONS",
+    "MAVEN_OPTS",
     "USER",
     "SHELL",
     "RUST_LOG",

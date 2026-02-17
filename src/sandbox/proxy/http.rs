@@ -278,9 +278,10 @@ async fn handle_connect(
 
     tracing::debug!("Proxy: allowing CONNECT to {}", target_addr);
 
-    // Spawn a task to establish the tunnel after the upgrade completes.
-    // A 30-minute timeout prevents stuck connections from leaking tasks
-    // (matches the default sandbox timeout).
+    // Spawn a fire-and-forget task to establish the tunnel after the upgrade
+    // completes.  The 30-minute timeout guarantees every tunnel task terminates
+    // even if the remote peer hangs, so no `JoinSet` tracking is needed.
+    // On process exit these tasks are dropped by the runtime.
     let target = target_addr.clone();
     tokio::spawn(async move {
         match hyper::upgrade::on(req).await {

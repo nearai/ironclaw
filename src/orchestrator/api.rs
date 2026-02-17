@@ -397,7 +397,6 @@ async fn get_credentials_handler(
             .map_err(|e| {
                 tracing::error!(
                     job_id = %job_id,
-                    secret = %grant.secret_name,
                     "Failed to decrypt secret for credential grant: {}", e
                 );
                 StatusCode::INTERNAL_SERVER_ERROR
@@ -408,7 +407,7 @@ async fn get_credentials_handler(
             && let Err(e) = secrets.record_usage(secret.id).await
         {
             tracing::warn!(
-                secret = %grant.secret_name,
+                job_id = %job_id,
                 "Failed to record credential usage: {}", e
             );
         }
