@@ -122,10 +122,11 @@ impl BenchRunner {
 
         let total_tasks = tasks.len() + completed.len();
         let model_label = matrix.model.as_deref().unwrap_or(self.llm.model_name());
+        let commit_hash = git_short_hash();
         tracing::info!(
             "[{} @ {}] Running {} tasks for suite '{}' (run: {})",
             model_label,
-            git_short_hash(),
+            commit_hash,
             tasks.len(),
             self.suite.id(),
             run_id
@@ -147,6 +148,16 @@ impl BenchRunner {
                 );
                 if let Err(e) = self.suite.setup_task(task).await {
                     tracing::warn!("setup_task failed for {}: {}", task.id, e);
+                    let result = make_error_result(
+                        task,
+                        self.suite.id(),
+                        &matrix.label,
+                        Utc::now(),
+                        &format!("setup_task failed: {e}"),
+                    );
+                    append_task_result(&jsonl_path, &result)?;
+                    all_results.lock().await.push(result);
+                    continue;
                 }
                 let params = TaskRunParams {
                     task,
@@ -199,6 +210,15 @@ impl BenchRunner {
                     );
                     if let Err(e) = suite.setup_task(&task).await {
                         tracing::warn!("setup_task failed for {}: {}", task.id, e);
+                        let result = make_error_result(
+                            &task,
+                            suite.id(),
+                            &config_label,
+                            Utc::now(),
+                            &format!("setup_task failed: {e}"),
+                        );
+                        results_ref.lock().await.push(result);
+                        return;
                     }
                     let suite_id = suite.id().to_string();
                     let params = TaskRunParams {
@@ -275,7 +295,6 @@ impl BenchRunner {
         write_task_results(&jsonl_path, &all_for_aggregate)?;
 
         let model_name = matrix.model.as_deref().unwrap_or(self.llm.model_name());
-        let commit_hash = git_short_hash();
 
         let run_result = RunResult::from_tasks(
             run_id,
