@@ -1,63 +1,90 @@
-# Multi-stage Dockerfile for the IronClaw worker container.
-#
-# This image runs the ironclaw binary in worker mode inside Docker containers.
-# The orchestrator creates instances of this image for sandboxed job execution.
-#
-# Build:
-#   docker build -f Dockerfile.worker -t ironclaw-worker .
-#
-# The image includes common development tools so workers can build software,
-# run tests, and execute shell commands.
+# IronClaw worker image for compose-api deployment.
+# Build: docker build -f ironclaw/Dockerfile.worker -t ironclaw-nearai-worker:local ironclaw/
 
-FROM rust:1.92-bookworm AS builder
+# ── Stage 1: Build IronClaw with libSQL ──────────────────────────────
+FROM rust:1.92-slim-bookworm AS builder
 
-WORKDIR /build
-COPY . .
-
-# Build only the ironclaw binary (release mode)
-RUN cargo build --release --bin ironclaw
-
-# ---
-
-FROM debian:bookworm-slim
-
-# Install common development tools
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    ca-certificates \
-    curl \
-    git \
-    build-essential \
-    pkg-config \
-    libssl-dev \
-    nodejs \
-    npm \
-    python3 \
-    python3-pip \
-    python3-venv \
+    pkg-config libssl-dev cmake gcc g++ make \
     && rm -rf /var/lib/apt/lists/*
 
-# Install Rust toolchain for the sandbox user
-ENV RUSTUP_HOME=/usr/local/rustup \
-    CARGO_HOME=/usr/local/cargo \
-    PATH=/usr/local/cargo/bin:$PATH
-RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain 1.92.0 \
-    && chmod -R a+r /usr/local/rustup /usr/local/cargo
+WORKDIR /app
 
-# Install Claude Code CLI (for claude-bridge mode)
-RUN npm install -g @anthropic-ai/claude-code@latest
+# Copy manifests and build script for dependency caching
+COPY Cargo.toml Cargo.lock* build.rs ./
 
-# Copy the binary
-COPY --from=builder /build/target/release/ironclaw /usr/local/bin/ironclaw
+# Dummy main.rs and examples to cache dependencies
+RUN mkdir -p src examples && \
+    echo "fn main() {}" > src/main.rs && \
+    echo "fn main() {}" > examples/test_heartbeat.rs
+RUN cargo build --release --no-default-features --features libsql --bin ironclaw 2>/dev/null || true
+RUN rm -rf src examples
 
-# Create non-root user (UID 1000 matches the orchestrator's container config)
-RUN useradd -m -u 1000 -s /bin/bash sandbox \
-    && mkdir -p /workspace \
-    && chown sandbox:sandbox /workspace \
-    && mkdir -p /home/sandbox/.claude \
-    && chown sandbox:sandbox /home/sandbox/.claude
+# Bust cache for fresh code
+ARG CACHEBUST=0
+RUN echo "cachebust=$CACHEBUST"
 
-USER sandbox
-WORKDIR /workspace
+# Copy actual source and WIT files (needed by wasmtime::component::bindgen!)
+COPY src ./src
+COPY wit ./wit
 
-# The orchestrator passes the full command via Docker cmd.
-ENTRYPOINT ["ironclaw"]
+# Cargo.toml references examples/ which aren't in the Docker context; stub them out
+RUN mkdir -p examples && echo "fn main() {}" > examples/test_heartbeat.rs
+
+# Build the real binary
+RUN touch src/main.rs && \
+    cargo build --release --no-default-features --features libsql --bin ironclaw
+
+# ── Stage 2: Runtime ─────────────────────────────────────────────────
+FROM debian:bookworm-slim
+
+RUN apt-get update && \
+    DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+      openssh-server \
+      ca-certificates \
+      libssl3 \
+      curl \
+      git \
+      build-essential \
+      python3 \
+      jq \
+      procps \
+      vim \
+      less \
+      nano \
+      sudo \
+      login \
+      && apt-get clean \
+      && rm -rf /var/lib/apt/lists/*
+
+# Copy IronClaw binary
+COPY --from=builder /app/target/release/ironclaw /usr/local/bin/ironclaw
+
+# Create non-root user (UID 1001, matching OpenClaw worker pattern)
+RUN useradd -m -u 1001 -s /bin/bash agent && \
+    echo "agent ALL=(ALL) NOPASSWD:ALL" > /etc/sudoers.d/agent
+
+# Install Rust toolchain for agent user (available via SSH)
+USER agent
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable
+USER root
+
+# Configure SSH, directories, and agent environment
+RUN mkdir -p /home/agent/.ssh /home/agent/ssh /home/agent/.ironclaw /home/agent/workspace && \
+    ssh-keygen -t ed25519 -f /home/agent/ssh/ssh_host_ed25519_key -N "" && \
+    chmod 700 /home/agent/.ssh && \
+    printf '%s\n' '[ -n "$BASH_VERSION" ] && [ -f "$HOME/.bashrc" ] && . "$HOME/.bashrc"' > /home/agent/.profile && \
+    echo 'source "$HOME/.cargo/env"' >> /home/agent/.bashrc && \
+    chown -R agent:agent /home/agent
+
+# Copy entrypoint and workspace bootstrap files
+COPY worker/entrypoint.sh /app/entrypoint.sh
+COPY worker/workspace/ /app/workspace/
+RUN chmod +x /app/entrypoint.sh
+
+WORKDIR /home/agent
+
+# Expose gateway and SSH ports
+EXPOSE 18789 2222
+
+ENTRYPOINT ["/app/entrypoint.sh"]
