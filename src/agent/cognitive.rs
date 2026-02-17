@@ -278,8 +278,10 @@ impl CheckpointTracker {
     /// we detect the agent following checkpoint pressure — it doesn't need to
     /// call a special API, it just writes to its daily notes like normal.
     pub fn is_checkpoint_write(tool_name: &str, target: &str) -> bool {
-        matches!(tool_name, "write" | "edit" | "append" | "memory_write" | "memory_append")
-            && target.contains("daily/")
+        matches!(
+            tool_name,
+            "write" | "edit" | "append" | "memory_write" | "memory_append"
+        ) && target.contains("daily/")
             && target.ends_with(".md")
     }
 
@@ -486,13 +488,7 @@ pub fn checkpoint_gate_message(
     let [gentle, firm, urgent] = thresholds;
 
     if calls >= urgent {
-        let recent: Vec<_> = tracker
-            .recent_tools
-            .iter()
-            .rev()
-            .take(5)
-            .cloned()
-            .collect();
+        let recent: Vec<_> = tracker.recent_tools.iter().rev().take(5).cloned().collect();
         Some(format!(
             "🚨 CHECKPOINT OVERDUE ({calls} tool calls without writing to memory):\n\
              STOP. Before doing ANYTHING else, write a checkpoint to daily notes.\n\
@@ -519,10 +515,7 @@ pub fn checkpoint_gate_message(
 ///
 /// Returns `None` if turns are below the threshold, or a reminder to search
 /// before answering questions about past work.
-pub fn memory_search_reminder(
-    tracker: &CheckpointTracker,
-    threshold: u32,
-) -> Option<String> {
+pub fn memory_search_reminder(tracker: &CheckpointTracker, threshold: u32) -> Option<String> {
     if threshold == 0 {
         return None;
     }
@@ -748,18 +741,33 @@ mod tests {
 
     #[test]
     fn test_is_checkpoint_write() {
-        assert!(CheckpointTracker::is_checkpoint_write("write", "daily/2026-02-15.md"));
-        assert!(CheckpointTracker::is_checkpoint_write("edit", "daily/2026-02-15.md"));
-        assert!(CheckpointTracker::is_checkpoint_write("append", "daily/2026-01-01.md"));
+        assert!(CheckpointTracker::is_checkpoint_write(
+            "write",
+            "daily/2026-02-15.md"
+        ));
+        assert!(CheckpointTracker::is_checkpoint_write(
+            "edit",
+            "daily/2026-02-15.md"
+        ));
+        assert!(CheckpointTracker::is_checkpoint_write(
+            "append",
+            "daily/2026-01-01.md"
+        ));
         assert!(CheckpointTracker::is_checkpoint_write(
             "memory_write",
             "daily/2026-02-15.md"
         ));
 
         // Should NOT match non-daily paths
-        assert!(!CheckpointTracker::is_checkpoint_write("write", "MEMORY.md"));
+        assert!(!CheckpointTracker::is_checkpoint_write(
+            "write",
+            "MEMORY.md"
+        ));
         assert!(!CheckpointTracker::is_checkpoint_write("write", "notes.md"));
-        assert!(!CheckpointTracker::is_checkpoint_write("read", "daily/2026-02-15.md"));
+        assert!(!CheckpointTracker::is_checkpoint_write(
+            "read",
+            "daily/2026-02-15.md"
+        ));
     }
 
     #[test]
@@ -880,7 +888,10 @@ mod tests {
         // Headers should be escaped
         assert!(!content.contains("\n#"), "Headers should be escaped");
         // Code blocks should be neutralized
-        assert!(!content.contains("```"), "Code blocks should be neutralized");
+        assert!(
+            !content.contains("```"),
+            "Code blocks should be neutralized"
+        );
     }
 
     #[test]

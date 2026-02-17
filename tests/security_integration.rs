@@ -60,8 +60,16 @@ async fn test_path_traversal_write_blocked() {
     let result = workspace.write("../malicious.md", "evil content").await;
     assert!(result.is_err(), "Path traversal write should be blocked");
 
-    let result = workspace.write("docs/../../etc/cron.d/evil", "* * * * * root /bin/bash -c 'malicious'").await;
-    assert!(result.is_err(), "Deep path traversal write should be blocked");
+    let result = workspace
+        .write(
+            "docs/../../etc/cron.d/evil",
+            "* * * * * root /bin/bash -c 'malicious'",
+        )
+        .await;
+    assert!(
+        result.is_err(),
+        "Deep path traversal write should be blocked"
+    );
 
     cleanup_user(&pool, user_id).await;
 }
@@ -75,7 +83,10 @@ async fn test_path_traversal_delete_blocked() {
     let workspace = Workspace::new(user_id, pool.clone());
 
     // First create a legitimate file
-    workspace.write("safe.md", "legitimate").await.expect("write failed");
+    workspace
+        .write("safe.md", "legitimate")
+        .await
+        .expect("write failed");
 
     // Attempt to delete with path traversal
     let result = workspace.delete("../safe.md").await;
@@ -129,20 +140,41 @@ async fn test_valid_paths_still_work() {
     let workspace = Workspace::new(user_id, pool.clone());
 
     // These should all work fine
-    workspace.write("simple.md", "content").await.expect("simple write");
-    workspace.write("nested/path/file.md", "content").await.expect("nested write");
-    workspace.write("dots.in.name.md", "content").await.expect("dots in name");
-    workspace.write("path-with-dashes/file.md", "content").await.expect("dashes");
-    workspace.write("path_with_underscores/file.md", "content").await.expect("underscores");
+    workspace
+        .write("simple.md", "content")
+        .await
+        .expect("simple write");
+    workspace
+        .write("nested/path/file.md", "content")
+        .await
+        .expect("nested write");
+    workspace
+        .write("dots.in.name.md", "content")
+        .await
+        .expect("dots in name");
+    workspace
+        .write("path-with-dashes/file.md", "content")
+        .await
+        .expect("dashes");
+    workspace
+        .write("path_with_underscores/file.md", "content")
+        .await
+        .expect("underscores");
 
     // Read them back
     workspace.read("simple.md").await.expect("simple read");
-    workspace.read("nested/path/file.md").await.expect("nested read");
+    workspace
+        .read("nested/path/file.md")
+        .await
+        .expect("nested read");
 
     // List directories
     workspace.list("").await.expect("list root");
     workspace.list("nested").await.expect("list nested");
-    workspace.list("nested/path").await.expect("list deep nested");
+    workspace
+        .list("nested/path")
+        .await
+        .expect("list deep nested");
 
     cleanup_user(&pool, user_id).await;
 }
@@ -156,15 +188,27 @@ async fn test_path_normalization() {
     let workspace = Workspace::new(user_id, pool.clone());
 
     // Write with various path formats
-    workspace.write("/leading/slash.md", "content").await.expect("leading slash");
-    
+    workspace
+        .write("/leading/slash.md", "content")
+        .await
+        .expect("leading slash");
+
     // Should be accessible without leading slash
-    let doc = workspace.read("leading/slash.md").await.expect("read normalized");
+    let doc = workspace
+        .read("leading/slash.md")
+        .await
+        .expect("read normalized");
     assert_eq!(doc.content, "content");
 
     // Double slashes should be collapsed
-    workspace.write("double//slash.md", "content2").await.expect("double slash");
-    let doc = workspace.read("double/slash.md").await.expect("read collapsed");
+    workspace
+        .write("double//slash.md", "content2")
+        .await
+        .expect("double slash");
+    let doc = workspace
+        .read("double/slash.md")
+        .await
+        .expect("read collapsed");
     assert_eq!(doc.content, "content2");
 
     cleanup_user(&pool, user_id).await;

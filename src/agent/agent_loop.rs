@@ -7,8 +7,8 @@ use tokio::sync::Mutex;
 use uuid::Uuid;
 
 use crate::agent::cognitive::{
-    CheckpointTracker, checkpoint_gate_message, memory_search_reminder,
-    pre_compaction_breadcrumb, pre_reset_breadcrumb, auto_breadcrumb, write_breadcrumb,
+    CheckpointTracker, auto_breadcrumb, checkpoint_gate_message, memory_search_reminder,
+    pre_compaction_breadcrumb, pre_reset_breadcrumb, write_breadcrumb,
 };
 use crate::agent::compaction::ContextCompactor;
 use crate::agent::context_monitor::ContextMonitor;
@@ -1078,7 +1078,11 @@ impl Agent {
                     prompt.push_str(&search_msg);
                 }
             }
-            if prompt.is_empty() { None } else { Some(prompt) }
+            if prompt.is_empty() {
+                None
+            } else {
+                Some(prompt)
+            }
         };
 
         let mut reasoning = Reasoning::new(self.llm().clone(), self.safety().clone());
@@ -1341,14 +1345,11 @@ impl Agent {
                                 let mut sess = session.lock().await;
                                 if let Some(thread) = sess.threads.get_mut(&thread_id) {
                                     // TODO: make breadcrumb_interval configurable via CognitiveConfig
-                                    needs_breadcrumb = thread
-                                        .checkpoint_tracker
-                                        .record_tool_call(&tc.name, 10);
+                                    needs_breadcrumb =
+                                        thread.checkpoint_tracker.record_tool_call(&tc.name, 10);
 
-                                    if CheckpointTracker::is_checkpoint_write(
-                                        &tc.name,
-                                        target_path,
-                                    ) {
+                                    if CheckpointTracker::is_checkpoint_write(&tc.name, target_path)
+                                    {
                                         thread.checkpoint_tracker.on_agent_checkpoint();
                                         is_checkpoint = true;
                                         tracing::debug!(
@@ -2163,8 +2164,7 @@ impl Agent {
             if let Some(active_id) = sess.active_thread {
                 if let Some(old_thread) = sess.threads.get(&active_id) {
                     if old_thread.checkpoint_tracker.tool_calls_since_checkpoint > 0 {
-                        let breadcrumb =
-                            pre_reset_breadcrumb(&old_thread.checkpoint_tracker);
+                        let breadcrumb = pre_reset_breadcrumb(&old_thread.checkpoint_tracker);
                         if let Err(e) = write_breadcrumb(ws.as_ref(), &breadcrumb).await {
                             tracing::warn!("Failed to write pre-reset breadcrumb: {}", e);
                         }

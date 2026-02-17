@@ -21,7 +21,9 @@ pub async fn run_memory_command_with_db(
     }
 
     match cmd {
-        MemoryCommand::Search { query, limit, full } => search(&workspace, &query, limit, full).await,
+        MemoryCommand::Search { query, limit, full } => {
+            search(&workspace, &query, limit, full).await
+        }
         MemoryCommand::Read { path, from, lines } => read(&workspace, &path, from, lines).await,
         MemoryCommand::Write {
             path,
@@ -108,7 +110,9 @@ pub async fn run_memory_command(
     }
 
     match cmd {
-        MemoryCommand::Search { query, limit, full } => search(&workspace, &query, limit, full).await,
+        MemoryCommand::Search { query, limit, full } => {
+            search(&workspace, &query, limit, full).await
+        }
         MemoryCommand::Read { path, from, lines } => read(&workspace, &path, from, lines).await,
         MemoryCommand::Write {
             path,
@@ -121,7 +125,12 @@ pub async fn run_memory_command(
     }
 }
 
-async fn search(workspace: &Workspace, query: &str, limit: usize, full: bool) -> anyhow::Result<()> {
+async fn search(
+    workspace: &Workspace,
+    query: &str,
+    limit: usize,
+    full: bool,
+) -> anyhow::Result<()> {
     let config = SearchConfig::default().with_limit(limit.min(50));
     let results = workspace.search_with_config(query, config).await?;
 
@@ -134,7 +143,7 @@ async fn search(workspace: &Workspace, query: &str, limit: usize, full: bool) ->
 
     for (i, result) in results.iter().enumerate() {
         let score_bar = score_indicator(result.score);
-        
+
         println!("{}. [{}] (score: {:.3})", i + 1, score_bar, result.score);
         println!("   Source: {}", result.citation());
 
@@ -153,18 +162,28 @@ async fn search(workspace: &Workspace, query: &str, limit: usize, full: bool) ->
     Ok(())
 }
 
-async fn read(workspace: &Workspace, path: &str, from: Option<u32>, lines: Option<u32>) -> anyhow::Result<()> {
+async fn read(
+    workspace: &Workspace,
+    path: &str,
+    from: Option<u32>,
+    lines: Option<u32>,
+) -> anyhow::Result<()> {
     match workspace.read(path).await {
         Ok(doc) => {
             let content_lines: Vec<&str> = doc.content.lines().collect();
-            
+
             // Apply line range if specified
             let start_idx = from.map_or(0, |f| f.saturating_sub(1) as usize);
             let lines_to_take = lines.map_or(content_lines.len(), |l| l as usize);
-            
+
             // Print with line numbers if range was specified
             if from.is_some() || lines.is_some() {
-                for (i, line) in content_lines.iter().skip(start_idx).take(lines_to_take).enumerate() {
+                for (i, line) in content_lines
+                    .iter()
+                    .skip(start_idx)
+                    .take(lines_to_take)
+                    .enumerate()
+                {
                     println!("{:4} | {}", start_idx + i + 1, line);
                 }
             } else {
@@ -288,20 +307,22 @@ async fn status(workspace: &Workspace) -> anyhow::Result<()> {
 
 async fn index(workspace: &Workspace) -> anyhow::Result<()> {
     if !workspace.has_embeddings() {
-        anyhow::bail!("No embedding provider configured. Set OPENAI_API_KEY or configure embeddings.");
+        anyhow::bail!(
+            "No embedding provider configured. Set OPENAI_API_KEY or configure embeddings."
+        );
     }
 
     println!("Backfilling missing embeddings...");
-    
+
     // Backfill missing embeddings
     let count = workspace.backfill_embeddings().await?;
-    
+
     if count > 0 {
         println!("  Indexed {} chunk(s) with embeddings.", count);
     } else {
         println!("  All chunks already have embeddings.");
     }
-    
+
     println!("Done.");
     Ok(())
 }

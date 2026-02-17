@@ -49,7 +49,10 @@ mod search;
 
 pub use chunker::{ChunkConfig, ChunkWithPosition, chunk_document, chunk_document_with_positions};
 pub use document::{MemoryChunk, MemoryDocument, WorkspaceEntry, paths};
-pub use embeddings::{EmbeddingProvider, GeminiEmbeddings, MockEmbeddings, NearAiEmbeddings, OpenAiEmbeddings};
+pub use embeddings::{
+    EmbeddingProvider, GeminiEmbeddings, MockEmbeddings, NearAiEmbeddings, OpenAiEmbeddings,
+};
+#[cfg(feature = "postgres")]
 pub use repository::Repository;
 pub use search::{RankedResult, SearchConfig, SearchResult, reciprocal_rank_fusion};
 
@@ -370,8 +373,10 @@ impl Workspace {
     /// println!("{}", doc.content);
     /// ```
     pub async fn read(&self, path: &str) -> Result<MemoryDocument, WorkspaceError> {
-        let path = normalize_path(path)
-            .ok_or_else(|| WorkspaceError::InvalidPath { path: path.to_string(), reason: "path traversal or invalid characters".to_string() })?;
+        let path = normalize_path(path).ok_or_else(|| WorkspaceError::InvalidPath {
+            path: path.to_string(),
+            reason: "path traversal or invalid characters".to_string(),
+        })?;
         self.storage
             .get_document_by_path(&self.user_id, self.agent_id, &path)
             .await
@@ -443,8 +448,10 @@ impl Workspace {
     /// Also deletes associated chunks.
     /// Rejects paths with traversal attempts (../).
     pub async fn delete(&self, path: &str) -> Result<(), WorkspaceError> {
-        let path = normalize_path(path)
-            .ok_or_else(|| WorkspaceError::InvalidPath { path: path.to_string(), reason: "path traversal or invalid characters".to_string() })?;
+        let path = normalize_path(path).ok_or_else(|| WorkspaceError::InvalidPath {
+            path: path.to_string(),
+            reason: "path traversal or invalid characters".to_string(),
+        })?;
         self.storage
             .delete_document_by_path(&self.user_id, self.agent_id, &path)
             .await
@@ -468,8 +475,10 @@ impl Workspace {
     /// }
     /// ```
     pub async fn list(&self, directory: &str) -> Result<Vec<WorkspaceEntry>, WorkspaceError> {
-        let directory = normalize_path(directory)
-            .ok_or_else(|| WorkspaceError::InvalidPath { path: directory.to_string(), reason: "path traversal or invalid characters".to_string() })?;
+        let directory = normalize_path(directory).ok_or_else(|| WorkspaceError::InvalidPath {
+            path: directory.to_string(),
+            reason: "path traversal or invalid characters".to_string(),
+        })?;
         self.storage
             .list_directory(&self.user_id, self.agent_id, &directory)
             .await
@@ -631,7 +640,8 @@ Before executing any non-trivial task:
 During long conversations, periodically write state to daily notes:
 - Current topic and key decisions
 - Work done and next steps
-This is not optional — if you did work, log it."#.to_string()
+This is not optional — if you did work, log it."#
+            .to_string()
     }
 
     // ==================== Search ====================
@@ -851,17 +861,17 @@ This is not optional — if you did work, log it."#.to_string()
 /// Returns None if the path attempts directory traversal (../).
 fn normalize_path(path: &str) -> Option<String> {
     let path = path.trim().trim_matches('/');
-    
+
     // Check for path traversal attempts
     if path.contains("..") {
         return None;
     }
-    
+
     // Reject null bytes (path injection)
     if path.contains('\0') {
         return None;
     }
-    
+
     // Collapse multiple slashes
     let mut result = String::new();
     let mut last_was_slash = false;

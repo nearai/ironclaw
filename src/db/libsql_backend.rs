@@ -209,6 +209,11 @@ fn get_i64(row: &libsql::Row, idx: i32) -> i64 {
     row.get::<i64>(idx).unwrap_or(0)
 }
 
+/// Extract an optional i64 column.
+fn get_opt_i64(row: &libsql::Row, idx: i32) -> Option<i64> {
+    row.get::<i64>(idx).ok()
+}
+
 /// Extract an optional bool from an integer column.
 fn get_opt_bool(row: &libsql::Row, idx: i32) -> Option<bool> {
     row.get::<i64>(idx).ok().map(|v| v != 0)
@@ -2406,6 +2411,8 @@ impl Database for LibSqlBackend {
                 chunk_index: get_i64(&row, 2) as i32,
                 content: get_text(&row, 3),
                 embedding: None,
+                line_start: None,
+                line_end: None,
                 created_at: get_ts(&row, 4),
             });
         }
@@ -2433,7 +2440,7 @@ impl Database for LibSqlBackend {
             let mut rows = conn
                 .query(
                     r#"
-                    SELECT c.id, c.document_id, c.content
+                    SELECT c.id, c.document_id, c.content, d.path, c.line_start, c.line_end
                     FROM memory_chunks_fts fts
                     JOIN memory_chunks c ON c._rowid = fts.rowid
                     JOIN memory_documents d ON d.id = c.document_id
@@ -2461,6 +2468,9 @@ impl Database for LibSqlBackend {
                     chunk_id: get_text(&row, 0).parse().unwrap_or_default(),
                     document_id: get_text(&row, 1).parse().unwrap_or_default(),
                     content: get_text(&row, 2),
+                    path: get_text(&row, 3),
+                    line_start: get_opt_i64(&row, 4).map(|v| v as u32),
+                    line_end: get_opt_i64(&row, 5).map(|v| v as u32),
                     rank: results.len() as u32 + 1,
                 });
             }
@@ -2485,7 +2495,7 @@ impl Database for LibSqlBackend {
             let mut rows = conn
                 .query(
                     r#"
-                    SELECT c.id, c.document_id, c.content
+                    SELECT c.id, c.document_id, c.content, d.path, c.line_start, c.line_end
                     FROM vector_top_k('idx_memory_chunks_embedding', vector(?1), ?2) AS top_k
                     JOIN memory_chunks c ON c._rowid = top_k.id
                     JOIN memory_documents d ON d.id = c.document_id
@@ -2510,6 +2520,9 @@ impl Database for LibSqlBackend {
                     chunk_id: get_text(&row, 0).parse().unwrap_or_default(),
                     document_id: get_text(&row, 1).parse().unwrap_or_default(),
                     content: get_text(&row, 2),
+                    path: get_text(&row, 3),
+                    line_start: get_opt_i64(&row, 4).map(|v| v as u32),
+                    line_end: get_opt_i64(&row, 5).map(|v| v as u32),
                     rank: results.len() as u32 + 1,
                 });
             }
