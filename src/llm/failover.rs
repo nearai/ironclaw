@@ -2,10 +2,15 @@
 //!
 //! Wraps multiple LlmProvider instances and tries each in sequence
 //! until one succeeds. Transparent to callers --- same LlmProvider trait.
+//!
+//! Providers that fail repeatedly are temporarily placed in cooldown
+//! so subsequent requests skip them, reducing latency when a provider
+//! is known to be down. Cooldown state is lock-free (atomics only).
 
 use std::future::Future;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU32, AtomicU64, AtomicUsize, Ordering};
+use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use rust_decimal::Decimal;
@@ -41,61 +46,217 @@ fn is_retryable(err: &LlmError) -> bool {
     )
 }
 
+/// Configuration for per-provider cooldown behavior.
+///
+/// When a provider accumulates `failure_threshold` consecutive retryable
+/// failures, it enters cooldown for `cooldown_duration`. During cooldown
+/// the provider is skipped (unless *all* providers are in cooldown, in
+/// which case the oldest-cooled one is tried).
+#[derive(Debug, Clone)]
+pub struct CooldownConfig {
+    /// How long a provider stays in cooldown after exceeding the threshold.
+    pub cooldown_duration: Duration,
+    /// Number of consecutive retryable failures before cooldown activates.
+    pub failure_threshold: u32,
+}
+
+impl Default for CooldownConfig {
+    fn default() -> Self {
+        Self {
+            cooldown_duration: Duration::from_secs(300),
+            failure_threshold: 3,
+        }
+    }
+}
+
+/// Per-provider cooldown state, entirely lock-free.
+///
+/// All atomic operations use `Relaxed` ordering — consistent with the
+/// existing `last_used` field. Stale reads are harmless: the worst case
+/// is one extra attempt against a provider that just entered cooldown.
+struct ProviderCooldown {
+    /// Consecutive retryable failures. Reset to 0 on success.
+    failure_count: AtomicU32,
+    /// Nanoseconds since `epoch` when cooldown was activated.
+    /// 0 means the provider is NOT in cooldown.
+    cooldown_activated_nanos: AtomicU64,
+}
+
+impl ProviderCooldown {
+    fn new() -> Self {
+        Self {
+            failure_count: AtomicU32::new(0),
+            cooldown_activated_nanos: AtomicU64::new(0),
+        }
+    }
+
+    /// Check whether the provider is currently in cooldown.
+    fn is_in_cooldown(&self, now_nanos: u64, cooldown_nanos: u64) -> bool {
+        let activated = self.cooldown_activated_nanos.load(Ordering::Relaxed);
+        activated != 0 && now_nanos.saturating_sub(activated) < cooldown_nanos
+    }
+
+    /// Record a retryable failure. Returns `true` if the threshold was
+    /// just reached (caller should activate cooldown).
+    fn record_failure(&self, threshold: u32) -> bool {
+        let prev = self.failure_count.fetch_add(1, Ordering::Relaxed);
+        prev + 1 >= threshold
+    }
+
+    /// Activate cooldown at the given timestamp.
+    fn activate_cooldown(&self, now_nanos: u64) {
+        self.cooldown_activated_nanos
+            .store(now_nanos, Ordering::Relaxed);
+    }
+
+    /// Reset failure count and clear cooldown (called on success).
+    fn reset(&self) {
+        self.failure_count.store(0, Ordering::Relaxed);
+        self.cooldown_activated_nanos.store(0, Ordering::Relaxed);
+    }
+}
+
 /// An LLM provider that wraps multiple providers and tries each in sequence
 /// on transient failures.
 ///
 /// The first provider in the list is the primary. If it fails with a retryable
 /// error, the next provider is tried, and so on. Non-retryable errors
 /// (e.g. `AuthFailed`, `ContextLengthExceeded`) propagate immediately.
+///
+/// Providers that repeatedly fail with retryable errors are temporarily
+/// placed in cooldown and skipped, reducing latency.
 pub struct FailoverProvider {
     providers: Vec<Arc<dyn LlmProvider>>,
     /// Index of the provider that last handled a request successfully.
     /// Used by `model_name()` and `cost_per_token()` so downstream cost
     /// tracking reflects the provider that actually served the request.
     last_used: AtomicUsize,
+    /// Per-provider cooldown tracking (same length as `providers`).
+    cooldowns: Vec<ProviderCooldown>,
+    /// Reference instant for computing elapsed nanos. Shared across all
+    /// cooldown timestamps so they are comparable.
+    epoch: Instant,
+    /// Cooldown configuration.
+    cooldown_config: CooldownConfig,
 }
 
 impl FailoverProvider {
-    /// Create a new failover provider.
+    /// Create a new failover provider with default cooldown settings.
     ///
     /// Returns an error if `providers` is empty.
     pub fn new(providers: Vec<Arc<dyn LlmProvider>>) -> Result<Self, LlmError> {
+        Self::with_cooldown(providers, CooldownConfig::default())
+    }
+
+    /// Create a new failover provider with explicit cooldown configuration.
+    ///
+    /// Returns an error if `providers` is empty.
+    pub fn with_cooldown(
+        providers: Vec<Arc<dyn LlmProvider>>,
+        cooldown_config: CooldownConfig,
+    ) -> Result<Self, LlmError> {
         if providers.is_empty() {
             return Err(LlmError::RequestFailed {
                 provider: "failover".to_string(),
                 reason: "FailoverProvider requires at least one provider".to_string(),
             });
         }
+        let cooldowns = (0..providers.len())
+            .map(|_| ProviderCooldown::new())
+            .collect();
         Ok(Self {
             providers,
             last_used: AtomicUsize::new(0),
+            cooldowns,
+            epoch: Instant::now(),
+            cooldown_config,
         })
     }
 
+    /// Nanoseconds elapsed since `self.epoch`.
+    ///
+    /// Truncates `u128` → `u64` (wraps after ~584 years of continuous
+    /// uptime). Acceptable because `epoch` is set at construction time.
+    fn now_nanos(&self) -> u64 {
+        self.epoch.elapsed().as_nanos() as u64
+    }
+
     /// Try each provider in sequence until one succeeds or all fail.
+    ///
+    /// Providers in cooldown are skipped unless *all* providers are in
+    /// cooldown, in which case the one with the oldest cooldown timestamp
+    /// (most likely to have recovered) is tried.
     async fn try_providers<T, F, Fut>(&self, mut call: F) -> Result<T, LlmError>
     where
         F: FnMut(Arc<dyn LlmProvider>) -> Fut,
         Fut: Future<Output = Result<T, LlmError>>,
     {
+        let now_nanos = self.now_nanos();
+        let cooldown_nanos = self.cooldown_config.cooldown_duration.as_nanos() as u64;
+
+        // Partition providers into available and cooled-down.
+        let (mut available, cooled_down): (Vec<usize>, Vec<usize>) = (0..self.providers.len())
+            .partition(|&i| !self.cooldowns[i].is_in_cooldown(now_nanos, cooldown_nanos));
+
+        // Log skipped providers.
+        for &i in &cooled_down {
+            tracing::info!(
+                provider = %self.providers[i].model_name(),
+                "Skipping provider (in cooldown)"
+            );
+        }
+
+        // Never skip ALL providers: if every provider is in cooldown, pick
+        // the one with the oldest cooldown activation (most likely recovered).
+        if available.is_empty() {
+            let oldest = (0..self.providers.len())
+                .min_by_key(|&i| {
+                    self.cooldowns[i]
+                        .cooldown_activated_nanos
+                        .load(Ordering::Relaxed)
+                })
+                .expect("providers list is non-empty");
+            tracing::info!(
+                provider = %self.providers[oldest].model_name(),
+                "All providers in cooldown, trying oldest-cooled provider"
+            );
+            available.push(oldest);
+        }
+
         let mut last_error: Option<LlmError> = None;
 
-        for (i, provider) in self.providers.iter().enumerate() {
+        for (pos, &i) in available.iter().enumerate() {
+            let provider = &self.providers[i];
             let result = call(Arc::clone(provider)).await;
             match result {
                 Ok(response) => {
                     self.last_used.store(i, Ordering::Relaxed);
+                    self.cooldowns[i].reset();
                     return Ok(response);
                 }
                 Err(err) => {
                     if !is_retryable(&err) {
                         return Err(err);
                     }
-                    if i + 1 < self.providers.len() {
+
+                    // Increment failure count; activate cooldown if threshold reached.
+                    if self.cooldowns[i].record_failure(self.cooldown_config.failure_threshold) {
+                        let nanos = self.now_nanos();
+                        self.cooldowns[i].activate_cooldown(nanos);
+                        tracing::warn!(
+                            provider = %provider.model_name(),
+                            threshold = self.cooldown_config.failure_threshold,
+                            cooldown_secs = self.cooldown_config.cooldown_duration.as_secs(),
+                            "Provider entered cooldown after repeated failures"
+                        );
+                    }
+
+                    if pos + 1 < available.len() {
+                        let next_i = available[pos + 1];
                         tracing::warn!(
                             provider = %provider.model_name(),
                             error = %err,
-                            next_provider = %self.providers[i + 1].model_name(),
+                            next_provider = %self.providers[next_i].model_name(),
                             "Provider failed with retryable error, trying next provider"
                         );
                     }
@@ -104,9 +265,9 @@ impl FailoverProvider {
             }
         }
 
-        // SAFETY: providers is non-empty (checked in `new`), so at least one
+        // SAFETY: `available` is non-empty (guaranteed above), so at least one
         // iteration ran and `last_error` is `Some`.
-        Err(last_error.expect("providers list is non-empty"))
+        Err(last_error.expect("available providers list is non-empty"))
     }
 }
 
@@ -166,7 +327,6 @@ mod tests {
     use super::*;
 
     use std::sync::Mutex;
-    use std::time::Duration;
 
     use crate::llm::provider::{CompletionResponse, FinishReason, ToolCompletionResponse};
 
@@ -430,6 +590,380 @@ mod tests {
         let models = failover.list_models().await.unwrap();
         assert!(models.contains(&"model-a".to_string()));
         assert!(models.contains(&"model-b".to_string()));
+    }
+
+    // --- MultiCallMockProvider for cooldown tests ---
+    //
+    // Unlike `MockProvider` which uses `.take()` (single-use), this mock
+    // tracks a call counter and returns errors for the first N calls,
+    // then succeeds.
+
+    struct MultiCallMockProvider {
+        name: String,
+        /// How many calls should fail before succeeding. 0 = always succeed.
+        fail_count: u32,
+        /// Atomically tracks how many times `complete` has been called.
+        calls: AtomicU32,
+        /// If true, failures are non-retryable (AuthFailed).
+        non_retryable: bool,
+    }
+
+    impl MultiCallMockProvider {
+        /// Always succeeds.
+        fn always_ok(name: &str) -> Self {
+            Self {
+                name: name.to_string(),
+                fail_count: 0,
+                calls: AtomicU32::new(0),
+                non_retryable: false,
+            }
+        }
+
+        /// Fails with retryable error for the first `n` calls, then succeeds.
+        fn fail_then_ok(name: &str, n: u32) -> Self {
+            Self {
+                name: name.to_string(),
+                fail_count: n,
+                calls: AtomicU32::new(0),
+                non_retryable: false,
+            }
+        }
+
+        /// Always fails with retryable error.
+        fn always_fail(name: &str) -> Self {
+            Self {
+                name: name.to_string(),
+                fail_count: u32::MAX,
+                calls: AtomicU32::new(0),
+                non_retryable: false,
+            }
+        }
+
+        /// Always fails with non-retryable error.
+        fn always_fail_non_retryable(name: &str) -> Self {
+            Self {
+                name: name.to_string(),
+                fail_count: u32::MAX,
+                calls: AtomicU32::new(0),
+                non_retryable: true,
+            }
+        }
+
+        fn call_count(&self) -> u32 {
+            self.calls.load(Ordering::Relaxed)
+        }
+    }
+
+    #[async_trait]
+    impl LlmProvider for MultiCallMockProvider {
+        fn model_name(&self) -> &str {
+            &self.name
+        }
+
+        fn cost_per_token(&self) -> (Decimal, Decimal) {
+            (Decimal::ZERO, Decimal::ZERO)
+        }
+
+        async fn complete(
+            &self,
+            _request: CompletionRequest,
+        ) -> Result<CompletionResponse, LlmError> {
+            let n = self.calls.fetch_add(1, Ordering::Relaxed);
+            if n < self.fail_count {
+                if self.non_retryable {
+                    return Err(LlmError::AuthFailed {
+                        provider: self.name.clone(),
+                    });
+                }
+                return Err(LlmError::RequestFailed {
+                    provider: self.name.clone(),
+                    reason: format!("call {} failed", n),
+                });
+            }
+            Ok(CompletionResponse {
+                content: format!("{} ok", self.name),
+                input_tokens: 10,
+                output_tokens: 5,
+                finish_reason: FinishReason::Stop,
+                response_id: None,
+            })
+        }
+
+        async fn complete_with_tools(
+            &self,
+            _request: ToolCompletionRequest,
+        ) -> Result<ToolCompletionResponse, LlmError> {
+            let n = self.calls.fetch_add(1, Ordering::Relaxed);
+            if n < self.fail_count {
+                if self.non_retryable {
+                    return Err(LlmError::AuthFailed {
+                        provider: self.name.clone(),
+                    });
+                }
+                return Err(LlmError::RequestFailed {
+                    provider: self.name.clone(),
+                    reason: format!("call {} failed", n),
+                });
+            }
+            Ok(ToolCompletionResponse {
+                content: Some(format!("{} ok", self.name)),
+                tool_calls: vec![],
+                input_tokens: 10,
+                output_tokens: 5,
+                finish_reason: FinishReason::Stop,
+                response_id: None,
+            })
+        }
+
+        async fn list_models(&self) -> Result<Vec<String>, LlmError> {
+            Ok(vec![self.name.clone()])
+        }
+    }
+
+    // --- Cooldown tests ---
+
+    // Cooldown test 1: Provider enters cooldown after `threshold` consecutive failures.
+    #[tokio::test]
+    async fn cooldown_activates_after_threshold() {
+        let config = CooldownConfig {
+            cooldown_duration: Duration::from_secs(300),
+            failure_threshold: 2,
+        };
+        let p1 = Arc::new(MultiCallMockProvider::always_fail("p1"));
+        let p2 = Arc::new(MultiCallMockProvider::always_ok("p2"));
+
+        let failover =
+            FailoverProvider::with_cooldown(vec![p1.clone(), p2.clone()], config).unwrap();
+
+        // Request 1: p1 fails (count=1, below threshold), p2 succeeds.
+        let r = failover.complete(make_request()).await.unwrap();
+        assert_eq!(r.content, "p2 ok");
+        assert_eq!(p1.call_count(), 1);
+
+        // Request 2: p1 fails again (count=2, reaches threshold → cooldown), p2 succeeds.
+        let r = failover.complete(make_request()).await.unwrap();
+        assert_eq!(r.content, "p2 ok");
+        assert_eq!(p1.call_count(), 2);
+
+        // Request 3: p1 should be skipped (in cooldown), only p2 called.
+        let prev_p1_calls = p1.call_count();
+        let r = failover.complete(make_request()).await.unwrap();
+        assert_eq!(r.content, "p2 ok");
+        // p1 was NOT called again.
+        assert_eq!(p1.call_count(), prev_p1_calls);
+    }
+
+    // Cooldown test 2: Cooldown expires after duration, provider is retried.
+    #[tokio::test]
+    async fn cooldown_expires_after_duration() {
+        let config = CooldownConfig {
+            cooldown_duration: Duration::from_millis(1),
+            failure_threshold: 1,
+        };
+        // p1 fails once then succeeds (fail_then_ok with n=1 would work,
+        // but we use always_fail to prove it's skipped, then swap).
+        let p1 = Arc::new(MultiCallMockProvider::fail_then_ok("p1", 2));
+        let p2 = Arc::new(MultiCallMockProvider::always_ok("p2"));
+
+        let failover =
+            FailoverProvider::with_cooldown(vec![p1.clone(), p2.clone()], config).unwrap();
+
+        // Request 1: p1 fails (threshold=1, enters cooldown immediately), p2 succeeds.
+        let r = failover.complete(make_request()).await.unwrap();
+        assert_eq!(r.content, "p2 ok");
+        assert_eq!(p1.call_count(), 1);
+
+        // Request 2: p1 in cooldown, skipped. Only p2 called.
+        // (But cooldown is 1ms, so wait a bit to let it expire.)
+        tokio::time::sleep(Duration::from_millis(5)).await;
+
+        // After sleep, cooldown should have expired. p1 gets tried again.
+        // p1 is set to fail 2 times total, so call #2 (index 1) still fails.
+        // But it proves p1 was attempted again after cooldown expired.
+        let r = failover.complete(make_request()).await.unwrap();
+        assert_eq!(p1.call_count(), 2); // p1 was retried
+        assert_eq!(r.content, "p2 ok"); // p2 handled it
+
+        // Wait again for cooldown to expire, p1 call #3 (index 2) succeeds.
+        tokio::time::sleep(Duration::from_millis(5)).await;
+        let r = failover.complete(make_request()).await.unwrap();
+        assert_eq!(r.content, "p1 ok");
+        assert_eq!(p1.call_count(), 3);
+    }
+
+    // Cooldown test 3: Never skip all providers — oldest-cooled one is tried.
+    #[tokio::test]
+    async fn never_skip_all_providers() {
+        let config = CooldownConfig {
+            cooldown_duration: Duration::from_secs(300),
+            failure_threshold: 1,
+        };
+        // Both providers always fail.
+        let p1 = Arc::new(MultiCallMockProvider::always_fail("p1"));
+        let p2 = Arc::new(MultiCallMockProvider::always_fail("p2"));
+
+        let failover =
+            FailoverProvider::with_cooldown(vec![p1.clone(), p2.clone()], config).unwrap();
+
+        // Request 1: both tried, both fail, both enter cooldown.
+        let _ = failover.complete(make_request()).await;
+        assert_eq!(p1.call_count(), 1);
+        assert_eq!(p2.call_count(), 1);
+
+        // Request 2: all in cooldown, but the oldest-cooled one (p1, activated
+        // first) should be tried.
+        let prev_total = p1.call_count() + p2.call_count();
+        let _ = failover.complete(make_request()).await;
+        let new_total = p1.call_count() + p2.call_count();
+        // Exactly one more call was made (to the oldest-cooled provider).
+        assert_eq!(new_total, prev_total + 1);
+    }
+
+    // Cooldown test 4: Success resets failure count so it never reaches threshold.
+    //
+    // With threshold=3, accumulate 2 failures then succeed. Verify the
+    // atomic counter is back to 0 and no cooldown was activated. Then
+    // use a second provider pair to show that without the reset, 3
+    // consecutive failures DO trigger cooldown (control case).
+    #[tokio::test]
+    async fn reset_on_success() {
+        let config = CooldownConfig {
+            cooldown_duration: Duration::from_secs(300),
+            failure_threshold: 3,
+        };
+        // p1 fails for calls 0,1 then succeeds on call 2+.
+        let p1 = Arc::new(MultiCallMockProvider::fail_then_ok("p1", 2));
+        let p2 = Arc::new(MultiCallMockProvider::always_ok("p2"));
+
+        let failover =
+            FailoverProvider::with_cooldown(vec![p1.clone(), p2.clone()], config.clone()).unwrap();
+
+        // Request 1: p1 fails (failure_count=1), p2 succeeds.
+        let r = failover.complete(make_request()).await.unwrap();
+        assert_eq!(r.content, "p2 ok");
+
+        // Request 2: p1 fails (failure_count=2, still below threshold=3), p2 succeeds.
+        let r = failover.complete(make_request()).await.unwrap();
+        assert_eq!(r.content, "p2 ok");
+        assert_eq!(p1.call_count(), 2);
+
+        // Request 3: p1 succeeds (call index 2) → counter resets to 0.
+        let r = failover.complete(make_request()).await.unwrap();
+        assert_eq!(r.content, "p1 ok");
+        assert_eq!(p1.call_count(), 3);
+
+        // Verify counter was reset to 0 and no cooldown activated.
+        let nanos = failover.now_nanos();
+        let cooldown_nanos = failover.cooldown_config.cooldown_duration.as_nanos() as u64;
+        assert!(!failover.cooldowns[0].is_in_cooldown(nanos, cooldown_nanos));
+        assert_eq!(
+            failover.cooldowns[0].failure_count.load(Ordering::Relaxed),
+            0
+        );
+
+        // Control: without a success in the middle, 3 failures DO trigger cooldown.
+        let p3 = Arc::new(MultiCallMockProvider::always_fail("p3"));
+        let p4 = Arc::new(MultiCallMockProvider::always_ok("p4"));
+        let control =
+            FailoverProvider::with_cooldown(vec![p3.clone(), p4.clone()], config).unwrap();
+        for _ in 0..3 {
+            let _ = control.complete(make_request()).await.unwrap();
+        }
+        let nanos = control.now_nanos();
+        assert!(control.cooldowns[0].is_in_cooldown(nanos, cooldown_nanos));
+    }
+
+    // Cooldown test 5: threshold-1 failures don't trigger cooldown, threshold does.
+    #[tokio::test]
+    async fn threshold_boundary() {
+        let config = CooldownConfig {
+            cooldown_duration: Duration::from_secs(300),
+            failure_threshold: 3,
+        };
+        let p1 = Arc::new(MultiCallMockProvider::always_fail("p1"));
+        let p2 = Arc::new(MultiCallMockProvider::always_ok("p2"));
+
+        let failover =
+            FailoverProvider::with_cooldown(vec![p1.clone(), p2.clone()], config).unwrap();
+
+        // 2 requests: p1 fails twice (below threshold of 3), not in cooldown.
+        for _ in 0..2 {
+            let r = failover.complete(make_request()).await.unwrap();
+            assert_eq!(r.content, "p2 ok");
+        }
+        assert_eq!(p1.call_count(), 2);
+
+        // p1 should still be available (not in cooldown).
+        let nanos = failover.now_nanos();
+        let cooldown_nanos = failover.cooldown_config.cooldown_duration.as_nanos() as u64;
+        assert!(!failover.cooldowns[0].is_in_cooldown(nanos, cooldown_nanos));
+
+        // 3rd request: p1 fails → reaches threshold → enters cooldown.
+        let r = failover.complete(make_request()).await.unwrap();
+        assert_eq!(r.content, "p2 ok");
+        assert_eq!(p1.call_count(), 3);
+
+        let nanos = failover.now_nanos();
+        assert!(failover.cooldowns[0].is_in_cooldown(nanos, cooldown_nanos));
+
+        // 4th request: p1 should be skipped.
+        let prev = p1.call_count();
+        let r = failover.complete(make_request()).await.unwrap();
+        assert_eq!(r.content, "p2 ok");
+        assert_eq!(p1.call_count(), prev); // not called
+    }
+
+    // Cooldown test 6: Non-retryable error returns immediately, no failure bump.
+    #[tokio::test]
+    async fn non_retryable_does_not_increment_cooldown() {
+        let config = CooldownConfig {
+            cooldown_duration: Duration::from_secs(300),
+            failure_threshold: 1,
+        };
+        let p1 = Arc::new(MultiCallMockProvider::always_fail_non_retryable("p1"));
+        let p2 = Arc::new(MultiCallMockProvider::always_ok("p2"));
+
+        let failover =
+            FailoverProvider::with_cooldown(vec![p1.clone(), p2.clone()], config).unwrap();
+
+        // Non-retryable error should return immediately.
+        let err = failover.complete(make_request()).await.unwrap_err();
+        assert!(matches!(err, LlmError::AuthFailed { .. }));
+        assert_eq!(p1.call_count(), 1);
+        // p2 should NOT have been called (non-retryable = no failover).
+        assert_eq!(p2.call_count(), 0);
+
+        // p1 should NOT be in cooldown (non-retryable doesn't bump count).
+        let nanos = failover.now_nanos();
+        let cooldown_nanos = failover.cooldown_config.cooldown_duration.as_nanos() as u64;
+        assert!(!failover.cooldowns[0].is_in_cooldown(nanos, cooldown_nanos));
+    }
+
+    // Cooldown test 7: Three providers, first in cooldown, second/third available.
+    #[tokio::test]
+    async fn three_providers_mixed_cooldown() {
+        let config = CooldownConfig {
+            cooldown_duration: Duration::from_secs(300),
+            failure_threshold: 1,
+        };
+        let p1 = Arc::new(MultiCallMockProvider::always_fail("p1"));
+        let p2 = Arc::new(MultiCallMockProvider::always_ok("p2"));
+        let p3 = Arc::new(MultiCallMockProvider::always_ok("p3"));
+
+        let failover =
+            FailoverProvider::with_cooldown(vec![p1.clone(), p2.clone(), p3.clone()], config)
+                .unwrap();
+
+        // Request 1: p1 fails → enters cooldown (threshold=1), p2 succeeds.
+        let r = failover.complete(make_request()).await.unwrap();
+        assert_eq!(r.content, "p2 ok");
+        assert_eq!(p1.call_count(), 1);
+
+        // Request 2: p1 skipped (cooldown), p2 and p3 available.
+        let prev = p1.call_count();
+        let r = failover.complete(make_request()).await.unwrap();
+        assert_eq!(r.content, "p2 ok");
+        assert_eq!(p1.call_count(), prev); // p1 skipped
     }
 
     // Test: is_retryable correctly classifies errors.

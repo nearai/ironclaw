@@ -174,7 +174,7 @@ This document tracks feature parity between IronClaw (Rust implementation) and O
 |---------|----------|----------|-------|
 | Auto-discovery | ✅ | ❌ | |
 | Failover chains | ✅ | ✅ | `FailoverProvider` with configurable `fallback_model` |
-| Cooldown management | ✅ | ❌ | Skip failed providers |
+| Cooldown management | ✅ | ✅ | Lock-free per-provider cooldown in `FailoverProvider` |
 | Per-session model override | ✅ | ✅ | Model selector in TUI |
 | Model selection UI | ✅ | ✅ | TUI keyboard shortcut |
 

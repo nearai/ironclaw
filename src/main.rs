@@ -24,7 +24,7 @@ use ironclaw::{
     extensions::ExtensionManager,
     hooks::HookRegistry,
     llm::{
-        FailoverProvider, LlmProvider, SessionConfig, create_cheap_llm_provider,
+        CooldownConfig, FailoverProvider, LlmProvider, SessionConfig, create_cheap_llm_provider,
         create_llm_provider, create_llm_provider_with_config, create_session_manager,
     },
     orchestrator::{
@@ -536,7 +536,16 @@ async fn main() -> anyhow::Result<()> {
                 fallback = %fallback.model_name(),
                 "LLM failover enabled"
             );
-            Arc::new(FailoverProvider::new(vec![llm, fallback])?)
+            let cooldown_config = CooldownConfig {
+                cooldown_duration: std::time::Duration::from_secs(
+                    config.llm.nearai.failover_cooldown_secs,
+                ),
+                failure_threshold: config.llm.nearai.failover_cooldown_threshold,
+            };
+            Arc::new(FailoverProvider::with_cooldown(
+                vec![llm, fallback],
+                cooldown_config,
+            )?)
         } else {
             llm
         };
