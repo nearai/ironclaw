@@ -688,77 +688,87 @@ async fn main() -> anyhow::Result<()> {
     };
 
     let mcp_servers_future = async {
-        if let Some(ref secrets) = secrets_store {
-            let servers_result = if let Some(ref d) = db {
-                load_mcp_servers_from_db(d.as_ref(), "default").await
-            } else {
-                ironclaw::tools::mcp::config::load_mcp_servers().await
-            };
-            match servers_result {
-                Ok(servers) => {
-                    let enabled: Vec<_> = servers.enabled_servers().cloned().collect();
-                    if !enabled.is_empty() {
-                        tracing::info!("Loading {} configured MCP server(s)...", enabled.len());
-                    }
+        let servers_result = if let Some(ref d) = db {
+            load_mcp_servers_from_db(d.as_ref(), "default").await
+        } else {
+            ironclaw::tools::mcp::config::load_mcp_servers().await
+        };
+        match servers_result {
+            Ok(servers) => {
+                let enabled: Vec<_> = servers.enabled_servers().cloned().collect();
+                if !enabled.is_empty() {
+                    tracing::info!("Loading {} configured MCP server(s)...", enabled.len());
+                }
 
-                    let mut join_set = tokio::task::JoinSet::new();
-                    for server in enabled {
-                        let mcp_sm = Arc::clone(&mcp_session_manager);
-                        let secrets = Arc::clone(secrets);
-                        let tools = Arc::clone(&tools);
+                let mut join_set = tokio::task::JoinSet::new();
+                for server in enabled {
+                    let mcp_sm = Arc::clone(&mcp_session_manager);
+                    let secrets = secrets_store.as_ref().map(Arc::clone);
+                    let tools = Arc::clone(&tools);
 
-                        join_set.spawn(async move {
-                            let server_name = server.name.clone();
+                    join_set.spawn(async move {
+                        let server_name = server.name.clone();
+
+                        let has_tokens = if let Some(ref secrets) = secrets {
                             tracing::debug!(
                                 "Checking authentication for MCP server '{}'...",
                                 server_name
                             );
-                            let has_tokens = is_authenticated(&server, &secrets, "default").await;
+                            let has = is_authenticated(&server, secrets, "default").await;
+                            tracing::debug!("MCP server '{}' has_tokens={}", server_name, has);
+                            has
+                        } else {
                             tracing::debug!(
-                                "MCP server '{}' has_tokens={}",
-                                server_name,
-                                has_tokens
+                                "No secrets configured; trying MCP server '{}' without auth first",
+                                server_name
                             );
+                            false
+                        };
 
-                            let client = if has_tokens || server.requires_auth() {
+                        let has_secrets_configured = secrets.is_some();
+                        let client = if let Some(secrets) = secrets.clone() {
+                            if has_tokens || server.requires_auth() {
                                 McpClient::new_authenticated(server, mcp_sm, secrets, "default")
                             } else {
                                 McpClient::new_with_name(&server_name, &server.url)
-                            };
+                            }
+                        } else {
+                            McpClient::new_with_name(&server_name, &server.url)
+                        };
 
-                            tracing::debug!("Fetching tools from MCP server '{}'...", server_name);
-                            match client.list_tools().await {
-                                Ok(mcp_tools) => {
-                                    let tool_count = mcp_tools.len();
-                                    tracing::debug!(
-                                        "Got {} tools from MCP server '{}'",
-                                        tool_count,
-                                        server_name
-                                    );
-                                    match client.create_tools().await {
-                                        Ok(tool_impls) => {
-                                            for tool in tool_impls {
-                                                tools.register(tool).await;
-                                            }
-                                            tracing::info!(
-                                                "Loaded {} tools from MCP server '{}'",
-                                                tool_count,
-                                                server_name
-                                            );
+                        tracing::debug!("Fetching tools from MCP server '{}'...", server_name);
+                        match client.list_tools().await {
+                            Ok(mcp_tools) => {
+                                let tool_count = mcp_tools.len();
+                                tracing::debug!(
+                                    "Got {} tools from MCP server '{}'",
+                                    tool_count,
+                                    server_name
+                                );
+                                match client.create_tools().await {
+                                    Ok(tool_impls) => {
+                                        for tool in tool_impls {
+                                            tools.register(tool).await;
                                         }
-                                        Err(e) => {
-                                            tracing::warn!(
-                                                "Failed to create tools from MCP server '{}': {}",
-                                                server_name,
-                                                e
-                                            );
-                                        }
+                                        tracing::info!(
+                                            "Loaded {} tools from MCP server '{}'",
+                                            tool_count,
+                                            server_name
+                                        );
+                                    }
+                                    Err(e) => {
+                                        tracing::warn!(
+                                            "Failed to create tools from MCP server '{}': {}",
+                                            server_name,
+                                            e
+                                        );
                                     }
                                 }
-                                Err(e) => {
-                                    let err_str = e.to_string();
-                                    if err_str.contains("401") || err_str.contains("authentication")
-                                    {
+                            }
+                            Err(e) => {
+                                let err_str = e.to_string();
+                                if err_str.contains("401") || err_str.contains("authentication") {
+                                    if has_secrets_configured {
                                         tracing::warn!(
                                             "MCP server '{}' requires authentication. \
                                              Run: ironclaw mcp auth {}",
@@ -767,54 +777,61 @@ async fn main() -> anyhow::Result<()> {
                                         );
                                     } else {
                                         tracing::warn!(
-                                            "Failed to connect to MCP server '{}': {}",
-                                            server_name,
-                                            e
+                                            "MCP server '{}' appears to require authentication, but \
+                                             secrets are not configured. Configure SECRETS_MASTER_KEY \
+                                             (or run onboarding Step 2) to enable OAuth/token storage.",
+                                            server_name
                                         );
                                     }
+                                } else {
+                                    tracing::warn!(
+                                        "Failed to connect to MCP server '{}': {}",
+                                        server_name,
+                                        e
+                                    );
                                 }
                             }
-                        });
-                    }
-
-                    while let Some(result) = join_set.join_next().await {
-                        if let Err(e) = result {
-                            tracing::warn!("MCP server loading task panicked: {}", e);
                         }
+                    });
+                }
+
+                while let Some(result) = join_set.join_next().await {
+                    if let Err(e) = result {
+                        tracing::warn!("MCP server loading task panicked: {}", e);
                     }
                 }
-                Err(e) => {
-                    tracing::debug!("No MCP servers configured ({})", e);
-                }
+            }
+            Err(e) => {
+                tracing::debug!("No MCP servers configured ({})", e);
             }
         }
     };
 
     tokio::join!(wasm_tools_future, mcp_servers_future);
 
-    // Create extension manager for in-chat discovery/install/auth/activate
-    let extension_manager = if let Some(ref secrets) = secrets_store {
-        let manager = Arc::new(ExtensionManager::new(
-            Arc::clone(&mcp_session_manager),
-            Arc::clone(secrets),
-            Arc::clone(&tools),
-            wasm_tool_runtime.clone(),
-            config.wasm.tools_dir.clone(),
-            config.channels.wasm_channels_dir.clone(),
-            config.tunnel.public_url.clone(),
-            "default".to_string(),
-            db.clone(),
-        ));
-        tools.register_extension_tools(Arc::clone(&manager));
+    // Create extension manager for in-chat discovery/install/auth/activate.
+    // It always exists so anonymous MCP flows can still work, but auth paths
+    // will provide setup guidance when secrets are missing.
+    let extension_manager = Arc::new(ExtensionManager::new(
+        Arc::clone(&mcp_session_manager),
+        secrets_store.as_ref().map(Arc::clone),
+        Arc::clone(&tools),
+        wasm_tool_runtime.clone(),
+        config.wasm.tools_dir.clone(),
+        config.channels.wasm_channels_dir.clone(),
+        config.tunnel.public_url.clone(),
+        "default".to_string(),
+        db.clone(),
+    ));
+    tools.register_extension_tools(Arc::clone(&extension_manager));
+    if secrets_store.is_some() {
         tracing::info!("Extension manager initialized with in-chat discovery tools");
-        Some(manager)
     } else {
-        tracing::debug!(
-            "Extension manager not available (no secrets store). \
-             Extension tools won't be registered."
+        tracing::warn!(
+            "Secrets are not configured; extension auth flows are limited, but \
+             anonymous MCP install/activate is still enabled."
         );
-        None
-    };
+    }
 
     // Set up orchestrator for sandboxed job execution
     // When allow_local_tools is false (default), the LLM uses create_job for FS/shell work.
@@ -1042,7 +1059,7 @@ async fn main() -> anyhow::Result<()> {
                         if has_webhook_channels {
                             webhook_routes.push(create_wasm_channel_router(
                                 wasm_router,
-                                extension_manager.as_ref().map(Arc::clone),
+                                Some(Arc::clone(&extension_manager)),
                             ));
                         }
 
@@ -1160,10 +1177,8 @@ async fn main() -> anyhow::Result<()> {
         }
         gw = gw.with_session_manager(Arc::clone(&session_manager));
         gw = gw.with_log_broadcaster(Arc::clone(&log_broadcaster));
+        gw = gw.with_extension_manager(Arc::clone(&extension_manager));
         gw = gw.with_tool_registry(Arc::clone(&tools));
-        if let Some(ref ext_mgr) = extension_manager {
-            gw = gw.with_extension_manager(Arc::clone(ext_mgr));
-        }
         if let Some(ref d) = db {
             gw = gw.with_store(Arc::clone(d));
         }
@@ -1207,7 +1222,7 @@ async fn main() -> anyhow::Result<()> {
         safety,
         tools,
         workspace,
-        extension_manager,
+        extension_manager: Some(extension_manager),
     };
     let agent = Agent::new(
         config.agent.clone(),

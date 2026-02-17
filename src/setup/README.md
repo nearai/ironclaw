@@ -111,6 +111,11 @@ in `save_and_summarize()`.
 
 **Goal:** Configure encryption for API tokens and secrets.
 
+**Policy constraint (must not regress):** Runtime startup and agent flows MUST NOT
+silently auto-bootstrap security configuration (no automatic key generation/storage
+outside the explicit onboarding flow). If Step 2 is skipped or incomplete, auth-dependent
+extension operations must return actionable setup guidance.
+
 **Decision tree:**
 
 ```
@@ -433,6 +438,19 @@ telegram_webhook_secret → encrypted webhook HMAC secret
 anthropic_api_key     → encrypted API key
 ```
 
+### Behavior when secrets are missing
+
+If no master key is configured (no env value and no keychain key), extension
+auth operations must not attempt automatic security setup.
+
+Expected behavior:
+- Allow install/search/activate/list for anonymous-capable MCP servers
+- If auth is needed (401/unauthorized), return a clear message that secrets are not configured
+- Instruct user to run `ironclaw onboard` (Step 2) or set `SECRETS_MASTER_KEY`
+- Require restart before retrying auth operations
+
+This keeps security setup explicit and user-controlled while preserving no-auth flows.
+
 ---
 
 ## Prompt Utilities
@@ -467,6 +485,25 @@ Must properly restore terminal state on all exit paths.
 - Cache the result after first access to avoid repeat prompts
 - Never probe keychain in read-only commands (`status`, `--help`)
 - Service name: `"ironclaw"`, account: `"master_key"`
+
+### Quick local secrets setup + verification
+
+1. Run onboarding and complete security step:
+   - `ironclaw onboard`
+2. Choose one:
+   - Keychain mode (recommended local dev), or
+   - Env mode (`SECRETS_MASTER_KEY` in `~/.ironclaw/.env`)
+3. Restart IronClaw.
+4. Validate extension flow:
+   - `ironclaw mcp list`
+   - `ironclaw mcp add exa --url https://mcp.exa.ai/mcp`
+   - `ironclaw mcp auth exa`
+   - `ironclaw mcp test exa`
+5. Missing-secrets regression check:
+   - Temporarily unset/remove `SECRETS_MASTER_KEY` and keychain key
+   - Start IronClaw and run `tool_install` + `tool_activate` for a no-auth server
+   - Confirm no-auth MCP still works when supported by the server
+   - Trigger auth (`tool_auth` or 401 path) and confirm setup guidance is shown (no auto-bootstrap)
 
 ### Linux Secret Service
 

@@ -567,7 +567,7 @@ mod tests {
 
         Arc::new(ExtensionManager::new(
             Arc::new(McpSessionManager::new()),
-            Arc::new(InMemorySecretsStore::new(crypto)),
+            Some(Arc::new(InMemorySecretsStore::new(crypto))),
             Arc::new(ToolRegistry::new()),
             None,
             std::path::PathBuf::from("/tmp/ironclaw-test-tools"),
