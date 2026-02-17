@@ -153,6 +153,15 @@ pub enum DatabaseBackend {
     LibSql,
 }
 
+impl std::fmt::Display for DatabaseBackend {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Postgres => write!(f, "postgres"),
+            Self::LibSql => write!(f, "libsql"),
+        }
+    }
+}
+
 impl std::str::FromStr for DatabaseBackend {
     type Err = String;
 
@@ -401,6 +410,9 @@ impl std::str::FromStr for NearAiApiMode {
 pub struct NearAiConfig {
     /// Model to use (e.g., "claude-3-5-sonnet-20241022", "gpt-4o")
     pub model: String,
+    /// Cheap/fast model for lightweight tasks (heartbeat, routing, evaluation).
+    /// Falls back to the main model if not set.
+    pub cheap_model: Option<String>,
     /// Base URL for the NEAR AI API (default: https://api.near.ai)
     pub base_url: String,
     /// Base URL for auth/refresh endpoints (default: https://private.near.ai)
@@ -467,6 +479,7 @@ impl LlmConfig {
                     "fireworks::accounts/fireworks/models/llama4-maverick-instruct-basic"
                         .to_string()
                 }),
+            cheap_model: optional_env("NEARAI_CHEAP_MODEL")?,
             base_url: optional_env("NEARAI_BASE_URL")?
                 .unwrap_or_else(|| "https://cloud-api.near.ai".to_string()),
             auth_base_url: optional_env("NEARAI_AUTH_URL")?

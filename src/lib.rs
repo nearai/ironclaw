@@ -39,6 +39,7 @@
 //! - **Continuous learning** - Improve estimates from historical data
 
 pub mod agent;
+pub mod boot_screen;
 pub mod bootstrap;
 pub mod channels;
 pub mod cli;
@@ -50,6 +51,7 @@ pub mod estimation;
 pub mod evaluation;
 pub mod extensions;
 pub mod history;
+pub mod hooks;
 pub mod llm;
 pub mod orchestrator;
 pub mod pairing;
