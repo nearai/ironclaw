@@ -211,12 +211,78 @@ pub fn create_cheap_llm_provider(
     tracing::info!("Cheap LLM provider: {}", cheap_model);
 
     match cheap_config.api_mode {
-        NearAiApiMode::Responses => Ok(Some(Arc::new(NearAiProvider::new(
-            cheap_config,
-            session,
-        )))),
+        NearAiApiMode::Responses => Ok(Some(Arc::new(NearAiProvider::new(cheap_config, session)))),
         NearAiApiMode::ChatCompletions => {
             Ok(Some(Arc::new(NearAiChatProvider::new(cheap_config)?)))
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::{LlmBackend, NearAiApiMode, NearAiConfig};
+    use std::path::PathBuf;
+
+    fn test_nearai_config() -> NearAiConfig {
+        NearAiConfig {
+            model: "test-model".to_string(),
+            cheap_model: None,
+            base_url: "https://api.near.ai".to_string(),
+            auth_base_url: "https://private.near.ai".to_string(),
+            session_path: PathBuf::from("/tmp/test-session.json"),
+            api_mode: NearAiApiMode::Responses,
+            api_key: None,
+            fallback_model: None,
+            max_retries: 3,
+        }
+    }
+
+    fn test_llm_config() -> LlmConfig {
+        LlmConfig {
+            backend: LlmBackend::NearAi,
+            nearai: test_nearai_config(),
+            openai: None,
+            anthropic: None,
+            ollama: None,
+            openai_compatible: None,
+        }
+    }
+
+    #[test]
+    fn test_create_cheap_llm_provider_returns_none_when_not_configured() {
+        let config = test_llm_config();
+        let session = Arc::new(SessionManager::new(SessionConfig::default()));
+
+        let result = create_cheap_llm_provider(&config, session);
+        assert!(result.is_ok());
+        assert!(result.unwrap().is_none());
+    }
+
+    #[test]
+    fn test_create_cheap_llm_provider_creates_provider_when_configured() {
+        let mut config = test_llm_config();
+        config.nearai.cheap_model = Some("cheap-test-model".to_string());
+
+        let session = Arc::new(SessionManager::new(SessionConfig::default()));
+        let result = create_cheap_llm_provider(&config, session);
+
+        assert!(result.is_ok());
+        let provider = result.unwrap();
+        assert!(provider.is_some());
+        assert_eq!(provider.unwrap().model_name(), "cheap-test-model");
+    }
+
+    #[test]
+    fn test_create_cheap_llm_provider_ignored_for_non_nearai_backend() {
+        let mut config = test_llm_config();
+        config.backend = LlmBackend::OpenAi;
+        config.nearai.cheap_model = Some("cheap-test-model".to_string());
+
+        let session = Arc::new(SessionManager::new(SessionConfig::default()));
+        let result = create_cheap_llm_provider(&config, session);
+
+        assert!(result.is_ok());
+        assert!(result.unwrap().is_none());
     }
 }

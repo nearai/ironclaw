@@ -1244,6 +1244,7 @@ fn check_onboard_needed() -> Option<&'static str> {
     // before Config is loaded -- Config::from_env() may fail without a
     // database URL, which is what triggers onboarding in the first place.
     if std::env::var("NEARAI_API_KEY").is_err() {
+        let settings = ironclaw::settings::Settings::load();
         let session_path = ironclaw::llm::session::default_session_path();
         if !settings.onboard_completed && !session_path.exists() {
             return Some("First run");
