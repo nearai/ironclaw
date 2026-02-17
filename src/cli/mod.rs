@@ -7,6 +7,7 @@
 //! - Managing WASM tools (`tool install`, `tool list`, `tool remove`)
 //! - Managing MCP servers (`mcp add`, `mcp auth`, `mcp list`, `mcp test`)
 //! - Querying workspace memory (`memory search`, `memory read`, `memory write`)
+//! - Managing OS service (`service install`, `service start`, `service stop`)
 //! - Checking system health (`status`)
 
 mod config;
@@ -14,6 +15,7 @@ mod mcp;
 pub mod memory;
 pub mod oauth_defaults;
 mod pairing;
+mod service;
 pub mod status;
 mod tool;
 
@@ -24,6 +26,7 @@ pub use memory::MemoryCommand;
 pub use memory::run_memory_command;
 pub use memory::run_memory_command_with_db;
 pub use pairing::{PairingCommand, run_pairing_command, run_pairing_command_with_store};
+pub use service::{ServiceCommand, run_service_command};
 pub use status::run_status_command;
 pub use tool::{ToolCommand, run_tool_command};
 
@@ -95,6 +98,10 @@ pub enum Command {
     /// DM pairing (approve inbound requests from unknown senders)
     #[command(subcommand)]
     Pairing(PairingCommand),
+
+    /// Manage OS service (launchd / systemd)
+    #[command(subcommand)]
+    Service(ServiceCommand),
 
     /// Show system health and diagnostics
     Status,

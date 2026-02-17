@@ -70,11 +70,9 @@ impl Tunnel for CustomTunnel {
             let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_secs(15);
 
             while tokio::time::Instant::now() < deadline {
-                let line = tokio::time::timeout(
-                    tokio::time::Duration::from_secs(3),
-                    reader.next_line(),
-                )
-                .await;
+                let line =
+                    tokio::time::timeout(tokio::time::Duration::from_secs(3), reader.next_line())
+                        .await;
 
                 match line {
                     Ok(Ok(Some(l))) => {
