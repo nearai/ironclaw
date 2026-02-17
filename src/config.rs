@@ -1468,9 +1468,11 @@ where
 mod tests {
     use super::*;
     use crate::settings::{EmbeddingsSettings, Settings};
+    use std::sync::Mutex;
 
-    /// Helper to safely set/remove env vars in tests.
-    unsafe fn clear_embedding_env() {
+    static ENV_MUTEX: Mutex<()> = Mutex::new(());
+
+    fn clear_embedding_env() {
         unsafe {
             std::env::remove_var("EMBEDDING_ENABLED");
             std::env::remove_var("EMBEDDING_PROVIDER");
@@ -1483,8 +1485,10 @@ mod tests {
     /// the presence of OPENAI_API_KEY in the environment must not re-enable them.
     #[test]
     fn embeddings_disabled_not_overridden_by_openai_key() {
+        let _guard = ENV_MUTEX.lock().expect("env mutex poisoned");
+
+        clear_embedding_env();
         unsafe {
-            clear_embedding_env();
             std::env::set_var("OPENAI_API_KEY", "sk-test-key-for-issue-129");
         }
 
@@ -1509,7 +1513,8 @@ mod tests {
     /// When the user enables embeddings in settings, it should be enabled.
     #[test]
     fn embeddings_enabled_from_settings() {
-        unsafe { clear_embedding_env(); }
+        let _guard = ENV_MUTEX.lock().expect("env mutex poisoned");
+        clear_embedding_env();
 
         let settings = Settings {
             embeddings: EmbeddingsSettings {
@@ -1526,8 +1531,10 @@ mod tests {
     /// EMBEDDING_ENABLED env var should override settings (explicit user override).
     #[test]
     fn embeddings_env_override_takes_precedence() {
+        let _guard = ENV_MUTEX.lock().expect("env mutex poisoned");
+
+        clear_embedding_env();
         unsafe {
-            clear_embedding_env();
             std::env::set_var("EMBEDDING_ENABLED", "true");
         }
 
