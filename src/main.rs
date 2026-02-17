@@ -662,15 +662,6 @@ async fn main() -> anyhow::Result<()> {
 
     // Register memory tools if database is available
     if let Some(ref db) = db {
-        if let Some(ref emb) = embeddings
-            && !embedding_dimension_supported_for_backend(&config, emb.dimension())
-        {
-            anyhow::bail!(
-                "libSQL currently supports EMBEDDING_DIMENSION=1536 only; got {}",
-                emb.dimension()
-            );
-        }
-
         let mut workspace = Workspace::new_with_db("default", Arc::clone(db));
         if let Some(ref emb) = embeddings {
             workspace = workspace.with_embeddings(emb.clone());

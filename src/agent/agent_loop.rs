@@ -1346,115 +1346,19 @@ impl Agent {
                             }
                         }
 
-                        let _ = self
-                            .channels
-                            .send_status(
-                                &message.channel,
-                                StatusUpdate::ToolStarted {
-                                    name: tc.name.clone(),
-                                },
-                                &message.metadata,
+                        if let Some(instructions) = self
+                            .execute_tool_and_update_context(
+                                message,
+                                session.clone(),
+                                thread_id,
+                                &job_ctx,
+                                &tc,
+                                &mut context_messages,
                             )
-                            .await;
-
-                        let tool_result = self
-                            .execute_chat_tool(&tc.name, &tc.arguments, &job_ctx)
-                            .await;
-
-                        let _ = self
-                            .channels
-                            .send_status(
-                                &message.channel,
-                                StatusUpdate::ToolCompleted {
-                                    name: tc.name.clone(),
-                                    success: tool_result.is_ok(),
-                                },
-                                &message.metadata,
-                            )
-                            .await;
-
-                        if let Ok(ref output) = tool_result
-                            && !output.is_empty()
+                            .await?
                         {
-                            let _ = self
-                                .channels
-                                .send_status(
-                                    &message.channel,
-                                    StatusUpdate::ToolResult {
-                                        name: tc.name.clone(),
-                                        preview: output.clone(),
-                                    },
-                                    &message.metadata,
-                                )
-                                .await;
-                        }
-
-                        // Record result in thread
-                        {
-                            let mut sess = session.lock().await;
-                            if let Some(thread) = sess.threads.get_mut(&thread_id)
-                                && let Some(turn) = thread.last_turn_mut()
-                            {
-                                match &tool_result {
-                                    Ok(output) => {
-                                        turn.record_tool_result(serde_json::json!(output));
-                                    }
-                                    Err(e) => {
-                                        turn.record_tool_error(e.to_string());
-                                    }
-                                }
-                            }
-                        }
-
-                        // If tool_auth returned awaiting_token, enter auth mode
-                        // and short-circuit: return the instructions directly so
-                        // the LLM doesn't get a chance to hallucinate tool calls.
-                        if let Some((ext_name, instructions)) =
-                            detect_auth_awaiting(&tc.name, &tool_result)
-                        {
-                            let auth_data = parse_auth_result(&tool_result);
-                            {
-                                let mut sess = session.lock().await;
-                                if let Some(thread) = sess.threads.get_mut(&thread_id) {
-                                    thread.enter_auth_mode(ext_name.clone());
-                                }
-                            }
-                            let _ = self
-                                .channels
-                                .send_status(
-                                    &message.channel,
-                                    StatusUpdate::AuthRequired {
-                                        extension_name: ext_name,
-                                        instructions: Some(instructions.clone()),
-                                        auth_url: auth_data.auth_url,
-                                        setup_url: auth_data.setup_url,
-                                    },
-                                    &message.metadata,
-                                )
-                                .await;
                             return Ok(AgenticLoopResult::Response(instructions));
                         }
-
-                        // Add tool result to context for next LLM call
-                        let result_content = match tool_result {
-                            Ok(output) => {
-                                // Sanitize output before showing to LLM
-                                let sanitized =
-                                    self.safety().sanitize_tool_output(&tc.name, &output);
-                                self.safety().wrap_for_llm(
-                                    &tc.name,
-                                    &sanitized.content,
-                                    sanitized.was_modified,
-                                )
-                            }
-                            Err(e) => format!("Error: {}", e),
-                        };
-
-                        context_messages.push(ChatMessage::tool_result(
-                            &tc.id,
-                            &tc.name,
-                            result_content,
-                        ));
                     }
                 }
             }
@@ -1811,6 +1715,101 @@ impl Agent {
         })
     }
 
+    async fn execute_tool_and_update_context(
+        &self,
+        message: &IncomingMessage,
+        session: Arc<Mutex<Session>>,
+        thread_id: Uuid,
+        job_ctx: &JobContext,
+        tc: &ToolCall,
+        context_messages: &mut Vec<ChatMessage>,
+    ) -> Result<Option<String>, Error> {
+        let _ = self
+            .channels
+            .send_status(
+                &message.channel,
+                StatusUpdate::ToolStarted {
+                    name: tc.name.clone(),
+                },
+                &message.metadata,
+            )
+            .await;
+
+        let tool_result = self
+            .execute_chat_tool(&tc.name, &tc.arguments, job_ctx)
+            .await;
+
+        let _ = self
+            .channels
+            .send_status(
+                &message.channel,
+                StatusUpdate::ToolCompleted {
+                    name: tc.name.clone(),
+                    success: tool_result.is_ok(),
+                },
+                &message.metadata,
+            )
+            .await;
+
+        if let Ok(ref output) = tool_result
+            && !output.is_empty()
+        {
+            let _ = self
+                .channels
+                .send_status(
+                    &message.channel,
+                    StatusUpdate::ToolResult {
+                        name: tc.name.clone(),
+                        preview: output.clone(),
+                    },
+                    &message.metadata,
+                )
+                .await;
+        }
+
+        {
+            let mut sess = session.lock().await;
+            if let Some(thread) = sess.threads.get_mut(&thread_id)
+                && let Some(turn) = thread.last_turn_mut()
+            {
+                match &tool_result {
+                    Ok(output) => {
+                        turn.record_tool_result(serde_json::json!(output));
+                    }
+                    Err(e) => {
+                        turn.record_tool_error(e.to_string());
+                    }
+                }
+            }
+        }
+
+        if let Some((ext_name, instructions)) = detect_auth_awaiting(&tc.name, &tool_result) {
+            let auth_data = parse_auth_result(&tool_result);
+            self.return_auth_required_response(
+                message,
+                session,
+                thread_id,
+                ext_name,
+                instructions.clone(),
+                auth_data,
+            )
+            .await?;
+            return Ok(Some(instructions));
+        }
+
+        let result_content = match tool_result {
+            Ok(output) => {
+                let sanitized = self.safety().sanitize_tool_output(&tc.name, &output);
+                self.safety()
+                    .wrap_for_llm(&tc.name, &sanitized.content, sanitized.was_modified)
+            }
+            Err(e) => format!("Error: {}", e),
+        };
+
+        context_messages.push(ChatMessage::tool_result(&tc.id, &tc.name, result_content));
+        Ok(None)
+    }
+
     async fn return_auth_required_response(
         &self,
         message: &IncomingMessage,
@@ -1917,108 +1916,29 @@ impl Agent {
             let job_ctx =
                 JobContext::with_user(&message.user_id, "chat", "Interactive chat session");
 
-            let _ = self
-                .channels
-                .send_status(
-                    &message.channel,
-                    StatusUpdate::ToolStarted {
-                        name: pending.tool_name.clone(),
-                    },
-                    &message.metadata,
-                )
-                .await;
-
-            let tool_result = self
-                .execute_chat_tool(&pending.tool_name, &pending.parameters, &job_ctx)
-                .await;
-
-            let _ = self
-                .channels
-                .send_status(
-                    &message.channel,
-                    StatusUpdate::ToolCompleted {
-                        name: pending.tool_name.clone(),
-                        success: tool_result.is_ok(),
-                    },
-                    &message.metadata,
-                )
-                .await;
-
-            if let Ok(ref output) = tool_result
-                && !output.is_empty()
-            {
-                let _ = self
-                    .channels
-                    .send_status(
-                        &message.channel,
-                        StatusUpdate::ToolResult {
-                            name: pending.tool_name.clone(),
-                            preview: output.clone(),
-                        },
-                        &message.metadata,
-                    )
-                    .await;
-            }
-
             // Build context including the tool result
             let mut context_messages = pending.context_messages;
             let deferred_tool_calls = pending.deferred_tool_calls;
 
-            // Record result in thread
-            {
-                let mut sess = session.lock().await;
-                if let Some(thread) = sess.threads.get_mut(&thread_id)
-                    && let Some(turn) = thread.last_turn_mut()
-                {
-                    match &tool_result {
-                        Ok(output) => {
-                            turn.record_tool_result(serde_json::json!(output));
-                        }
-                        Err(e) => {
-                            turn.record_tool_error(e.to_string());
-                        }
-                    }
-                }
-            }
-
-            // If tool_auth returned awaiting_token, enter auth mode and
-            // return instructions directly (skip agentic loop continuation).
-            if let Some((ext_name, instructions)) =
-                detect_auth_awaiting(&pending.tool_name, &tool_result)
-            {
-                let auth_data = parse_auth_result(&tool_result);
-                return self
-                    .return_auth_required_response(
-                        message,
-                        session.clone(),
-                        thread_id,
-                        ext_name,
-                        instructions,
-                        auth_data,
-                    )
-                    .await;
-            }
-
-            // Add tool result to context
-            let result_content = match tool_result {
-                Ok(output) => {
-                    let sanitized = self
-                        .safety()
-                        .sanitize_tool_output(&pending.tool_name, &output);
-                    self.safety().wrap_for_llm(
-                        &pending.tool_name,
-                        &sanitized.content,
-                        sanitized.was_modified,
-                    )
-                }
-                Err(e) => format!("Error: {}", e),
+            let approved_tc = ToolCall {
+                id: pending.tool_call_id.clone(),
+                name: pending.tool_name.clone(),
+                arguments: pending.parameters.clone(),
             };
 
-            context_messages.push(ChatMessage::tool_result(
-                &pending.tool_call_id,
-                &pending.tool_name,
-                result_content,
-            ));
+            if let Some(instructions) = self
+                .execute_tool_and_update_context(
+                    message,
+                    session.clone(),
+                    thread_id,
+                    &job_ctx,
+                    &approved_tc,
+                    &mut context_messages,
+                )
+                .await?
+            {
+                return Ok(SubmissionResult::response(instructions));
+            }
 
             // If the original assistant message had additional tool calls after the
             // approved one, execute them now so every prior tool_use gets a matching
@@ -2077,96 +1997,19 @@ impl Agent {
                     });
                 }
 
-                let _ = self
-                    .channels
-                    .send_status(
-                        &message.channel,
-                        StatusUpdate::ToolStarted {
-                            name: tc.name.clone(),
-                        },
-                        &message.metadata,
+                if let Some(instructions) = self
+                    .execute_tool_and_update_context(
+                        message,
+                        session.clone(),
+                        thread_id,
+                        &job_ctx,
+                        &tc,
+                        &mut context_messages,
                     )
-                    .await;
-
-                let tool_result = self
-                    .execute_chat_tool(&tc.name, &tc.arguments, &job_ctx)
-                    .await;
-
-                let _ = self
-                    .channels
-                    .send_status(
-                        &message.channel,
-                        StatusUpdate::ToolCompleted {
-                            name: tc.name.clone(),
-                            success: tool_result.is_ok(),
-                        },
-                        &message.metadata,
-                    )
-                    .await;
-
-                if let Ok(ref output) = tool_result
-                    && !output.is_empty()
+                    .await?
                 {
-                    let _ = self
-                        .channels
-                        .send_status(
-                            &message.channel,
-                            StatusUpdate::ToolResult {
-                                name: tc.name.clone(),
-                                preview: output.clone(),
-                            },
-                            &message.metadata,
-                        )
-                        .await;
+                    return Ok(SubmissionResult::response(instructions));
                 }
-
-                // Record result in thread
-                {
-                    let mut sess = session.lock().await;
-                    if let Some(thread) = sess.threads.get_mut(&thread_id)
-                        && let Some(turn) = thread.last_turn_mut()
-                    {
-                        match &tool_result {
-                            Ok(output) => {
-                                turn.record_tool_result(serde_json::json!(output));
-                            }
-                            Err(e) => {
-                                turn.record_tool_error(e.to_string());
-                            }
-                        }
-                    }
-                }
-
-                // If auth flow is triggered while replaying deferred calls,
-                // switch to auth mode and stop the turn immediately.
-                if let Some((ext_name, instructions)) = detect_auth_awaiting(&tc.name, &tool_result)
-                {
-                    let auth_data = parse_auth_result(&tool_result);
-                    return self
-                        .return_auth_required_response(
-                            message,
-                            session.clone(),
-                            thread_id,
-                            ext_name,
-                            instructions,
-                            auth_data,
-                        )
-                        .await;
-                }
-
-                let result_content = match tool_result {
-                    Ok(output) => {
-                        let sanitized = self.safety().sanitize_tool_output(&tc.name, &output);
-                        self.safety().wrap_for_llm(
-                            &tc.name,
-                            &sanitized.content,
-                            sanitized.was_modified,
-                        )
-                    }
-                    Err(e) => format!("Error: {}", e),
-                };
-
-                context_messages.push(ChatMessage::tool_result(&tc.id, &tc.name, result_content));
             }
 
             // Continue the agentic loop (a tool was already executed this turn)
