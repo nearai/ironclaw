@@ -286,11 +286,13 @@ impl SandboxManager {
         let mut truncated = false;
 
         if stdout.len() > half_max {
-            stdout.truncate(half_max);
+            let end = crate::util::floor_char_boundary(&stdout, half_max);
+            stdout.truncate(end);
             truncated = true;
         }
         if stderr.len() > half_max {
-            stderr.truncate(half_max);
+            let end = crate::util::floor_char_boundary(&stderr, half_max);
+            stderr.truncate(end);
             truncated = true;
         }
 
