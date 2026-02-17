@@ -2425,13 +2425,33 @@ impl Agent {
             }
 
             "model" => {
+                let current = self.llm().active_model_name();
+
                 if args.is_empty() {
-                    // Show current model
-                    let name = self.llm().active_model_name();
-                    Ok(SubmissionResult::response(format!(
-                        "Active model: {}",
-                        name
-                    )))
+                    // Show current model and list available models
+                    let mut out = format!("Active model: {}\n", current);
+                    match self.llm().list_models().await {
+                        Ok(models) if !models.is_empty() => {
+                            out.push_str("\nAvailable models:\n");
+                            for m in &models {
+                                let marker = if *m == current { " (active)" } else { "" };
+                                out.push_str(&format!("  {}{}\n", m, marker));
+                            }
+                            out.push_str("\nUse /model <name> to switch.");
+                        }
+                        Ok(_) => {
+                            out.push_str(
+                                "\nCould not fetch model list. Use /model <name> to switch.",
+                            );
+                        }
+                        Err(e) => {
+                            out.push_str(&format!(
+                                "\nCould not fetch models: {}. Use /model <name> to switch.",
+                                e
+                            ));
+                        }
+                    }
+                    Ok(SubmissionResult::response(out))
                 } else {
                     let requested = &args[0];
 
@@ -2451,7 +2471,6 @@ impl Agent {
                         }
                         Err(e) => {
                             tracing::warn!("Could not fetch model list for validation: {}", e);
-                            // Proceed anyway, the provider will error on the next call if invalid
                         }
                     }
 
