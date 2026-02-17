@@ -28,6 +28,7 @@ impl Tool for JsonTool {
                     "description": "The JSON operation to perform"
                 },
                 "data": {
+                    "type": "object",
                     "description": "The JSON data to operate on (string for parse, object otherwise)"
                 },
                 "path": {
