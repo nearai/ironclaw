@@ -24,8 +24,18 @@ pub struct NetworkRequest {
 impl NetworkRequest {
     /// Create from a URL string.
     pub fn from_url(method: &str, url: &str) -> Option<Self> {
-        let host = crate::sandbox::proxy::allowlist::extract_host(url)?;
-        let path = extract_path(url);
+        let parsed = url::Url::parse(url).ok()?;
+        if !matches!(parsed.scheme(), "http" | "https") {
+            return None;
+        }
+
+        let host = parsed.host_str()?;
+        let host = host
+            .strip_prefix('[')
+            .and_then(|v| v.strip_suffix(']'))
+            .unwrap_or(host)
+            .to_lowercase();
+        let path = parsed.path().to_string();
 
         Some(Self {
             method: method.to_uppercase(),
@@ -37,15 +47,15 @@ impl NetworkRequest {
 }
 
 /// Extract path from a URL.
+#[cfg(test)]
 fn extract_path(url: &str) -> String {
-    // Find the start of the path (after ://)
-    if let Some(idx) = url.find("://") {
-        let rest = &url[idx + 3..];
-        if let Some(path_start) = rest.find('/') {
-            return rest[path_start..].to_string();
-        }
+    let Ok(parsed) = url::Url::parse(url) else {
+        return "/".to_string();
+    };
+    if !matches!(parsed.scheme(), "http" | "https") {
+        return "/".to_string();
     }
-    "/".to_string()
+    parsed.path().to_string()
 }
 
 /// Decision for a network request.
@@ -180,6 +190,11 @@ mod tests {
         );
         assert_eq!(extract_path("https://example.com"), "/".to_string());
         assert_eq!(extract_path("https://example.com/"), "/".to_string());
+        assert_eq!(
+            extract_path("https://example.com/path?q=1#frag"),
+            "/path".to_string()
+        );
+        assert_eq!(extract_path("ftp://example.com/path"), "/".to_string());
     }
 
     #[tokio::test]
