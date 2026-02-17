@@ -1472,18 +1472,20 @@ mod tests {
 
     static ENV_MUTEX: Mutex<()> = Mutex::new(());
 
-    unsafe fn clear_embedding_env() {
+    fn clear_embedding_env() {
+        unsafe {
             std::env::remove_var("EMBEDDING_ENABLED");
             std::env::remove_var("EMBEDDING_PROVIDER");
             std::env::remove_var("EMBEDDING_MODEL");
             std::env::remove_var("OPENAI_API_KEY");
+        }
     }
 
     #[test]
     fn embeddings_disabled_not_overridden_by_openai_key() {
         let _guard = ENV_MUTEX.lock().expect("env mutex poisoned");
 
-        unsafe { clear_embedding_env(); }
+        clear_embedding_env();
         unsafe {
             std::env::set_var("OPENAI_API_KEY", "sk-test-key-for-issue-129");
         }
@@ -1509,7 +1511,7 @@ mod tests {
     #[test]
     fn embeddings_enabled_from_settings() {
         let _guard = ENV_MUTEX.lock().expect("env mutex poisoned");
-        unsafe { clear_embedding_env(); }
+        clear_embedding_env();
 
         let settings = Settings {
             embeddings: EmbeddingsSettings {
@@ -1527,7 +1529,7 @@ mod tests {
     fn embeddings_env_override_takes_precedence() {
         let _guard = ENV_MUTEX.lock().expect("env mutex poisoned");
 
-        unsafe { clear_embedding_env(); }
+        clear_embedding_env();
         unsafe {
             std::env::set_var("EMBEDDING_ENABLED", "true");
         }
