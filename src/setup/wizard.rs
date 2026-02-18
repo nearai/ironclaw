@@ -750,17 +750,24 @@ impl SetupWizard {
                 mask_api_key(&existing)
             ));
             if confirm("Use this token?", true).map_err(SetupError::Io)? {
+                let mut persisted = false;
                 if let Ok(ctx) = self.init_secrets_context().await {
                     let key = SecretString::from(existing.clone());
                     if let Err(e) = ctx.save_secret("llm_claude_oauth_token", &key).await {
-                        print_error(&format!(
-                            "Failed to persist OAuth token to secrets: {}. \
-                             Please ensure CLAUDE_CODE_OAUTH_TOKEN is set in your environment.",
-                            e,
-                        ));
+                        print_error(&format!("Failed to persist OAuth token to secrets: {}", e,));
+                    } else {
+                        persisted = true;
                     }
                 }
-                print_success("Anthropic (Max) configured (from env)");
+                if persisted {
+                    print_success("Anthropic (Max) configured (from env)");
+                } else {
+                    print_success("Anthropic (Max) configured (from env, not persisted)");
+                    print_info(
+                        "The token is usable for this session from the environment variable.",
+                    );
+                    print_info("Ensure CLAUDE_CODE_OAUTH_TOKEN is set each time you run IronClaw.");
+                }
                 return Ok(());
             }
         }
@@ -782,11 +789,11 @@ impl SetupWizard {
         }
 
         if !token_str.starts_with("sk-ant-") {
-            print_info("Note: this doesn't look like an Anthropic OAuth token (expected prefix 'sk-ant-').");
+            print_info(
+                "Note: this doesn't look like an Anthropic OAuth token (expected prefix 'sk-ant-').",
+            );
             if !confirm("Use anyway?", false).map_err(SetupError::Io)? {
-                return Err(SetupError::Config(
-                    "Token entry cancelled".to_string(),
-                ));
+                return Err(SetupError::Config("Token entry cancelled".to_string()));
             }
         }
 

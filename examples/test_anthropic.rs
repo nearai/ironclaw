@@ -31,8 +31,8 @@ async fn main() {
         std::process::exit(1);
     };
 
-    let model = std::env::var("ANTHROPIC_MODEL")
-        .unwrap_or_else(|_| "claude-sonnet-4-20250514".to_string());
+    let model =
+        std::env::var("ANTHROPIC_MODEL").unwrap_or_else(|_| "claude-sonnet-4-20250514".to_string());
 
     println!("Model: {}", model);
 

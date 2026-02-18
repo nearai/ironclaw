@@ -72,13 +72,15 @@ impl AnthropicProvider {
                     .oauth_access_token
                     .read()
                     .expect("oauth_access_token lock poisoned");
-                let token_str = token
-                    .as_ref()
-                    .map(|t| t.expose_secret().to_string())
-                    .unwrap_or_default();
-                builder
-                    .header("Authorization", format!("Bearer {}", token_str))
-                    .header("anthropic-beta", OAUTH_BETA_HEADER)
+                let builder = if let Some(t) = token.as_ref() {
+                    builder.header("Authorization", format!("Bearer {}", t.expose_secret()))
+                } else {
+                    tracing::warn!(
+                        "OAuth token is None; sending request without Authorization header"
+                    );
+                    builder
+                };
+                builder.header("anthropic-beta", OAUTH_BETA_HEADER)
             }
         }
     }
@@ -119,7 +121,10 @@ impl AnthropicProvider {
 
         if !resp.status().is_success() {
             let status = resp.status();
-            let body = resp.text().await.unwrap_or_default();
+            let body = resp
+                .text()
+                .await
+                .unwrap_or_else(|e| format!("<failed to read body: {}>", e));
             return Err(LlmError::SessionRenewalFailed {
                 provider: PROVIDER_NAME.to_string(),
                 reason: format!("HTTP {}: {}", status, body),
@@ -213,49 +218,64 @@ impl AnthropicProvider {
                 }
             }
 
-            let response_text = response.text().await.unwrap_or_default();
-
             tracing::debug!("Anthropic response status: {}", status);
-            if tracing::enabled!(tracing::Level::TRACE) {
-                tracing::trace!("Anthropic response body: {}", response_text);
+
+            // Retry on retryable status before reading body (avoids turning
+            // a body-read failure on a retryable status into a hard error).
+            if !status.is_success() && is_retryable_status(status_code) && attempt < max_retries {
+                let delay = retry_backoff_delay(attempt);
+                tracing::warn!(
+                    "Anthropic returned HTTP {} (attempt {}/{}), retrying in {:?}",
+                    status_code,
+                    attempt + 1,
+                    max_retries + 1,
+                    delay,
+                );
+                tokio::time::sleep(delay).await;
+                continue;
             }
 
-            if !status.is_success() {
-                if status_code == 401 {
-                    return Err(LlmError::AuthFailed {
-                        provider: PROVIDER_NAME.to_string(),
-                    });
-                }
-
-                if is_retryable_status(status_code) && attempt < max_retries {
-                    let delay = retry_backoff_delay(attempt);
-                    tracing::warn!(
-                        "Anthropic returned HTTP {} (attempt {}/{}), retrying in {:?}",
-                        status_code,
-                        attempt + 1,
-                        max_retries + 1,
-                        delay,
-                    );
-                    tokio::time::sleep(delay).await;
-                    continue;
-                }
-
-                if status_code == 429 {
-                    return Err(LlmError::RateLimited {
-                        provider: PROVIDER_NAME.to_string(),
-                        retry_after: None,
-                    });
-                }
-
-                return Err(LlmError::RequestFailed {
+            if status.is_success() {
+                // Success path: propagate body-read errors (we need valid text to parse JSON).
+                let response_text = response.text().await.map_err(|e| LlmError::RequestFailed {
                     provider: PROVIDER_NAME.to_string(),
-                    reason: format!("HTTP {}: {}", status, response_text),
+                    reason: format!("Failed to read response body: {}", e),
+                })?;
+
+                if tracing::enabled!(tracing::Level::TRACE) {
+                    tracing::trace!("Anthropic response body: {}", response_text);
+                }
+
+                return serde_json::from_str(&response_text).map_err(|e| {
+                    LlmError::InvalidResponse {
+                        provider: PROVIDER_NAME.to_string(),
+                        reason: format!("JSON parse error: {}. Raw: {}", e, response_text),
+                    }
                 });
             }
 
-            return serde_json::from_str(&response_text).map_err(|e| LlmError::InvalidResponse {
+            // Error path: body is only for diagnostics, use fallback on read failure.
+            let body = response
+                .text()
+                .await
+                .unwrap_or_else(|e| format!("<failed to read body: {}>", e));
+
+            if status_code == 401 {
+                return Err(LlmError::AuthFailed {
+                    provider: PROVIDER_NAME.to_string(),
+                });
+            }
+
+            if status_code == 429 {
+                return Err(LlmError::RateLimited {
+                    provider: PROVIDER_NAME.to_string(),
+                    retry_after: None,
+                });
+            }
+
+            return Err(LlmError::RequestFailed {
                 provider: PROVIDER_NAME.to_string(),
-                reason: format!("JSON parse error: {}. Raw: {}", e, response_text),
+                reason: format!("HTTP {}: {}", status, body),
             });
         }
 
@@ -344,11 +364,15 @@ struct ApiUsage {
 
 /// Convert our ChatMessage list to Anthropic API format.
 ///
+/// Returns `Err` if a `Role::Tool` message is missing its `tool_call_id`.
+///
 /// Anthropic requires:
 /// - System messages extracted to top-level `system` field
 /// - Tool results as `tool_result` content blocks inside `user` messages
 /// - Tool calls as `tool_use` content blocks inside `assistant` messages
-fn convert_messages(messages: Vec<ChatMessage>) -> (Option<String>, Vec<ApiMessage>) {
+fn convert_messages(
+    messages: Vec<ChatMessage>,
+) -> Result<(Option<String>, Vec<ApiMessage>), LlmError> {
     let mut system_text: Option<String> = None;
     let mut api_messages: Vec<ApiMessage> = Vec::new();
 
@@ -399,8 +423,12 @@ fn convert_messages(messages: Vec<ChatMessage>) -> (Option<String>, Vec<ApiMessa
             Role::Tool => {
                 // Tool results go as content blocks in a user message.
                 // Anthropic expects tool_result blocks to be in the user role.
+                let tool_use_id = msg.tool_call_id.ok_or_else(|| LlmError::InvalidResponse {
+                    provider: PROVIDER_NAME.to_string(),
+                    reason: "Tool message is missing tool_call_id".to_string(),
+                })?;
                 let block = ContentBlock::ToolResult {
-                    tool_use_id: msg.tool_call_id.unwrap_or_default(),
+                    tool_use_id,
                     content: msg.content,
                 };
                 // If the last message is already a user message with blocks,
@@ -424,7 +452,7 @@ fn convert_messages(messages: Vec<ChatMessage>) -> (Option<String>, Vec<ApiMessa
         }
     }
 
-    (system_text, api_messages)
+    Ok((system_text, api_messages))
 }
 
 fn convert_tools(tools: Vec<ToolDefinition>) -> Vec<ApiTool> {
@@ -493,7 +521,7 @@ impl LlmProvider for AnthropicProvider {
     }
 
     async fn complete(&self, req: CompletionRequest) -> Result<CompletionResponse, LlmError> {
-        let (system, messages) = convert_messages(req.messages);
+        let (system, messages) = convert_messages(req.messages)?;
 
         let request = MessagesRequest {
             model: self.active_model_name(),
@@ -522,7 +550,7 @@ impl LlmProvider for AnthropicProvider {
         &self,
         req: ToolCompletionRequest,
     ) -> Result<ToolCompletionResponse, LlmError> {
-        let (system, messages) = convert_messages(req.messages);
+        let (system, messages) = convert_messages(req.messages)?;
         let tools = convert_tools(req.tools);
 
         let tool_choice = req.tool_choice.map(|choice| {
@@ -577,7 +605,10 @@ impl LlmProvider for AnthropicProvider {
 
         if !resp.status().is_success() {
             let status = resp.status();
-            let body = resp.text().await.unwrap_or_default();
+            let body = resp
+                .text()
+                .await
+                .unwrap_or_else(|e| format!("<failed to read body: {}>", e));
             return Err(LlmError::RequestFailed {
                 provider: PROVIDER_NAME.to_string(),
                 reason: format!("HTTP {}: {}", status, body),
@@ -637,7 +668,7 @@ mod tests {
             ChatMessage::user("Hello"),
         ];
 
-        let (system, api_msgs) = convert_messages(messages);
+        let (system, api_msgs) = convert_messages(messages).unwrap();
         assert_eq!(system, Some("You are helpful.".to_string()));
         assert_eq!(api_msgs.len(), 1);
         assert_eq!(api_msgs[0].role, "user");
@@ -651,7 +682,7 @@ mod tests {
             ChatMessage::user("Hello"),
         ];
 
-        let (system, api_msgs) = convert_messages(messages);
+        let (system, api_msgs) = convert_messages(messages).unwrap();
         assert_eq!(system, Some("First system.\n\nSecond system.".to_string()));
         assert_eq!(api_msgs.len(), 1);
     }
@@ -670,7 +701,7 @@ mod tests {
             ChatMessage::tool_result("call_1", "echo", "hi"),
         ];
 
-        let (_, api_msgs) = convert_messages(messages);
+        let (_, api_msgs) = convert_messages(messages).unwrap();
         assert_eq!(api_msgs.len(), 3);
 
         // Assistant message should have content blocks
@@ -705,7 +736,7 @@ mod tests {
             ChatMessage::tool_result("call_2", "tool_b", "result B"),
         ];
 
-        let (_, api_msgs) = convert_messages(messages);
+        let (_, api_msgs) = convert_messages(messages).unwrap();
         // Both tool results should be merged into a single user message
         assert_eq!(api_msgs.len(), 1);
         assert_eq!(api_msgs[0].role, "user");
@@ -714,6 +745,26 @@ mod tests {
                 assert_eq!(blocks.len(), 2);
             }
             _ => panic!("Expected blocks"),
+        }
+    }
+
+    #[test]
+    fn test_convert_messages_missing_tool_call_id() {
+        let messages = vec![ChatMessage {
+            role: Role::Tool,
+            content: "some result".to_string(),
+            tool_calls: None,
+            tool_call_id: None,
+            name: Some("echo".to_string()),
+        }];
+
+        let result = convert_messages(messages);
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            LlmError::InvalidResponse { reason, .. } => {
+                assert!(reason.contains("tool_call_id"));
+            }
+            other => panic!("Expected InvalidResponse, got: {:?}", other),
         }
     }
 

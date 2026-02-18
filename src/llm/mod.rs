@@ -18,8 +18,8 @@ mod retry;
 mod rig_adapter;
 pub mod session;
 
-pub use failover::FailoverProvider;
 pub use anthropic::AnthropicProvider;
+pub use failover::FailoverProvider;
 pub use nearai::{ModelInfo, NearAiProvider};
 pub use nearai_chat::NearAiChatProvider;
 pub use provider::{
