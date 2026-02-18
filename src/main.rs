@@ -386,7 +386,7 @@ async fn main() -> anyhow::Result<()> {
             #[cfg(feature = "libsql")]
             ironclaw::config::DatabaseBackend::LibSql => {
                 use ironclaw::db::Database as _;
-                use ironclaw::db::libsql_backend::LibSqlBackend;
+                use ironclaw::db::libsql::LibSqlBackend;
                 use secrecy::ExposeSecret as _;
 
                 let default_path = ironclaw::config::default_libsql_path();

@@ -737,7 +737,7 @@ async fn auth_tool(name: String, dir: Option<PathBuf>, user_id: String) -> anyho
         #[cfg(all(feature = "libsql", not(feature = "postgres")))]
         {
             use crate::db::Database as _;
-            use crate::db::libsql_backend::LibSqlBackend;
+            use crate::db::libsql::LibSqlBackend;
             use secrecy::ExposeSecret as _;
 
             let default_path = crate::config::default_libsql_path();
