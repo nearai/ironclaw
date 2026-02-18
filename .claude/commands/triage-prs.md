@@ -17,7 +17,7 @@ Fetch every open PR with metadata:
 gh pr list --state open --limit 100 --json number,title,author,labels,additions,deletions,headRefName,createdAt,isDraft,reviewRequests,reviews,files
 ```
 
-If `$ARGUMENTS` contains `--label=<X>` or `--author=<X>`, filter the results accordingly.
+If `$ARGUMENTS` contains `--label=<X>` or `--author=<X>`, add the corresponding flags to the `gh pr list` command.
 
 Also fetch recently merged PRs (last 7 days) to detect superseded/conflicting work:
 
