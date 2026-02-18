@@ -334,8 +334,12 @@ impl Database for PgBackend {
         self.store.save_job_event(job_id, event_type, data).await
     }
 
-    async fn list_job_events(&self, job_id: Uuid) -> Result<Vec<JobEventRecord>, DatabaseError> {
-        self.store.list_job_events(job_id).await
+    async fn list_job_events(
+        &self,
+        job_id: Uuid,
+        limit: Option<i64>,
+    ) -> Result<Vec<JobEventRecord>, DatabaseError> {
+        self.store.list_job_events(job_id, limit).await
     }
 
     // ==================== Routines ====================

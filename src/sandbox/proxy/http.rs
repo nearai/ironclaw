@@ -21,12 +21,12 @@ use hyper::server::conn::http1;
 use hyper::service::service_fn;
 use hyper::{Method, Request, Response, StatusCode};
 use hyper_util::rt::TokioIo;
-use tokio::net::TcpListener;
+use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::RwLock;
 
-use crate::sandbox::config::CredentialLocation;
 use crate::sandbox::error::{Result, SandboxError};
 use crate::sandbox::proxy::policy::{NetworkDecision, NetworkPolicyDecider, NetworkRequest};
+use crate::secrets::CredentialLocation;
 
 /// State shared across proxy connections.
 struct ProxyState {
@@ -34,6 +34,8 @@ struct ProxyState {
     decider: Arc<dyn NetworkPolicyDecider>,
     /// Credential resolver (maps secret names to values).
     credential_resolver: Arc<dyn CredentialResolver>,
+    /// Shared HTTP client for forwarding requests.
+    http_client: reqwest::Client,
     /// Request counter for logging.
     request_count: std::sync::atomic::AtomicU64,
     /// Whether the proxy is running.
@@ -84,6 +86,7 @@ impl HttpProxy {
             state: Arc::new(ProxyState {
                 decider,
                 credential_resolver,
+                http_client: reqwest::Client::new(),
                 request_count: std::sync::atomic::AtomicU64::new(0),
                 running: std::sync::atomic::AtomicBool::new(false),
             }),
@@ -235,19 +238,28 @@ async fn handle_request(
 }
 
 /// Handle CONNECT method for HTTPS tunneling.
+///
+/// Establishes a bidirectional TCP tunnel between the client and the target host.
+/// Returns 200 OK to signal the client to begin TLS over the upgraded connection.
+///
+/// NOTE: Credential injection is not possible through CONNECT tunnels since the proxy
+/// cannot inspect or modify TLS-encrypted traffic without MITM. Containers that need
+/// authenticated HTTPS should fetch credentials via the orchestrator's
+/// `GET /worker/{id}/credentials` endpoint and set them as environment variables.
 async fn handle_connect(
     req: Request<hyper::body::Incoming>,
     state: Arc<ProxyState>,
 ) -> Response<BoxBody<Bytes, Infallible>> {
-    // Extract host from CONNECT target
-    let host = req.uri().authority().map(|a| a.host().to_string());
-
-    let host = match host {
-        Some(h) => h,
+    // Extract host:port from CONNECT target (e.g. "api.github.com:443")
+    let authority = match req.uri().authority() {
+        Some(a) => a.clone(),
         None => {
             return error_response(StatusCode::BAD_REQUEST, "Missing host".to_string());
         }
     };
+
+    let host = authority.host().to_string();
+    let target_addr = authority.as_str().to_string();
 
     // Check if host is allowed
     let network_req = NetworkRequest {
@@ -259,21 +271,56 @@ async fn handle_connect(
 
     let decision = state.decider.decide(&network_req).await;
 
-    if !decision.is_allowed()
-        && let NetworkDecision::Deny { reason } = decision
-    {
+    if let NetworkDecision::Deny { reason } = decision {
         tracing::info!("Proxy: blocked CONNECT {} - {}", host, reason);
         return error_response(StatusCode::FORBIDDEN, reason);
     }
 
-    tracing::debug!("Proxy: allowing CONNECT to {}", host);
+    tracing::debug!("Proxy: allowing CONNECT to {}", target_addr);
 
-    // For CONNECT, we return 200 OK and the client will upgrade to TLS
-    // The actual TLS connection goes directly to the target, we just act as a tunnel
-    Response::builder()
-        .status(StatusCode::OK)
-        .body(empty_body())
-        .unwrap()
+    // Spawn a fire-and-forget task to establish the tunnel after the upgrade
+    // completes.  The 30-minute timeout guarantees every tunnel task terminates
+    // even if the remote peer hangs, so no `JoinSet` tracking is needed.
+    // On process exit these tasks are dropped by the runtime.
+    let target = target_addr.clone();
+    tokio::spawn(async move {
+        match hyper::upgrade::on(req).await {
+            Ok(upgraded) => {
+                let mut client_stream = TokioIo::new(upgraded);
+                match TcpStream::connect(&target).await {
+                    Ok(mut server_stream) => {
+                        let tunnel_timeout = std::time::Duration::from_secs(30 * 60);
+                        match tokio::time::timeout(
+                            tunnel_timeout,
+                            tokio::io::copy_bidirectional(&mut client_stream, &mut server_stream),
+                        )
+                        .await
+                        {
+                            Ok(Ok(_)) => {}
+                            Ok(Err(e)) => {
+                                tracing::debug!("Proxy: tunnel to {} closed: {}", target, e);
+                            }
+                            Err(_) => {
+                                tracing::info!(
+                                    "Proxy: tunnel to {} timed out after 30m, closing",
+                                    target
+                                );
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        tracing::error!("Proxy: failed to connect to {}: {}", target, e);
+                    }
+                }
+            }
+            Err(e) => {
+                tracing::error!("Proxy: upgrade failed for {}: {}", target, e);
+            }
+        }
+    });
+
+    // Return 200 OK so the client begins the TLS handshake over the upgraded connection
+    make_response(StatusCode::OK, empty_body())
 }
 
 /// Forward a request to the target server.
@@ -286,8 +333,7 @@ async fn forward_request(
     let uri = req.uri().clone();
 
     // Build the forwarded request
-    let client = reqwest::Client::new();
-    let mut builder = client.request(
+    let mut builder = state.http_client.request(
         reqwest::Method::from_bytes(method.as_str().as_bytes()).unwrap_or(reqwest::Method::GET),
         uri.to_string(),
     );
@@ -312,9 +358,27 @@ async fn forward_request(
                 CredentialLocation::AuthorizationBearer => {
                     builder.header("Authorization", format!("Bearer {}", credential))
                 }
-                CredentialLocation::Header(header_name) => builder.header(header_name, credential),
-                CredentialLocation::QueryParam(param_name) => {
-                    builder.query(&[(param_name, credential)])
+                CredentialLocation::Header { name, prefix } => {
+                    let value = match prefix {
+                        Some(p) => format!("{}{}", p, credential),
+                        None => credential.clone(),
+                    };
+                    builder.header(name, value)
+                }
+                CredentialLocation::QueryParam { name } => builder.query(&[(name, credential)]),
+                // Known limitation: AuthorizationBasic requires the proxy to
+                // construct a Base64 username:password pair from a single secret,
+                // and UrlPath requires rewriting the request URI. Neither is
+                // implemented yet. Containers needing these auth styles should
+                // fetch credentials via the orchestrator's GET /worker/{id}/credentials
+                // endpoint and set them directly.
+                CredentialLocation::AuthorizationBasic { .. }
+                | CredentialLocation::UrlPath { .. } => {
+                    tracing::warn!(
+                        "Proxy: credential location {:?} not supported for forward proxy, skipping",
+                        location
+                    );
+                    builder
                 }
             };
             tracing::debug!("Proxy: injected credential for {}", secret_name);
@@ -347,15 +411,15 @@ async fn forward_request(
 
             match response.bytes().await {
                 Ok(body) => {
-                    let mut builder = Response::builder().status(status.as_u16());
+                    let mut resp_builder = Response::builder().status(status.as_u16());
 
                     for (name, value) in headers.iter() {
                         if !is_hop_by_hop_header(name.as_str()) {
-                            builder = builder.header(name.as_str(), value.as_bytes());
+                            resp_builder = resp_builder.header(name.as_str(), value.as_bytes());
                         }
                     }
 
-                    Ok(builder.body(full_body(body)).unwrap())
+                    Ok(make_response_from_builder(resp_builder, full_body(body)))
                 }
                 Err(e) => {
                     tracing::error!("Proxy: failed to read response body: {}", e);
@@ -391,13 +455,52 @@ fn is_hop_by_hop_header(name: &str) -> bool {
     )
 }
 
-/// Create an error response.
-fn error_response(status: StatusCode, message: String) -> Response<BoxBody<Bytes, Infallible>> {
+/// Build a response with guaranteed success (valid status + simple body cannot fail).
+fn make_response(
+    status: StatusCode,
+    body: BoxBody<Bytes, Infallible>,
+) -> Response<BoxBody<Bytes, Infallible>> {
     Response::builder()
         .status(status)
-        .header("Content-Type", "text/plain")
-        .body(full_body(Bytes::from(message)))
-        .unwrap()
+        .body(body)
+        .unwrap_or_else(|_| {
+            let mut resp = Response::new(
+                Full::new(Bytes::from("Internal error"))
+                    .map_err(|_| unreachable!())
+                    .boxed(),
+            );
+            *resp.status_mut() = StatusCode::INTERNAL_SERVER_ERROR;
+            resp
+        })
+}
+
+/// Finalize a partially-built response, falling back to 500 on builder error.
+fn make_response_from_builder(
+    builder: hyper::http::response::Builder,
+    body: BoxBody<Bytes, Infallible>,
+) -> Response<BoxBody<Bytes, Infallible>> {
+    builder.body(body).unwrap_or_else(|_| {
+        Response::builder()
+            .status(StatusCode::INTERNAL_SERVER_ERROR)
+            .body(full_body(Bytes::from("Response build error")))
+            .unwrap_or_else(|_| {
+                Response::new(
+                    Full::new(Bytes::from("Internal error"))
+                        .map_err(|_| unreachable!())
+                        .boxed(),
+                )
+            })
+    })
+}
+
+/// Create an error response.
+fn error_response(status: StatusCode, message: String) -> Response<BoxBody<Bytes, Infallible>> {
+    make_response_from_builder(
+        Response::builder()
+            .status(status)
+            .header("Content-Type", "text/plain"),
+        full_body(Bytes::from(message)),
+    )
 }
 
 /// Create an empty body.
@@ -440,5 +543,14 @@ mod tests {
         assert!(is_hop_by_hop_header("transfer-encoding"));
         assert!(!is_hop_by_hop_header("content-type"));
         assert!(!is_hop_by_hop_header("authorization"));
+    }
+
+    #[test]
+    fn test_make_response_does_not_panic() {
+        let resp = make_response(StatusCode::OK, empty_body());
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let resp = error_response(StatusCode::FORBIDDEN, "denied".to_string());
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
     }
 }

@@ -18,7 +18,7 @@
 //! - Commands run directly on host with basic protections
 //! - Blocked command patterns are still enforced
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::{Arc, LazyLock};
@@ -246,6 +246,7 @@ impl ShellTool {
         cmd: &str,
         workdir: &PathBuf,
         timeout: Duration,
+        extra_env: &HashMap<String, String>,
     ) -> Result<(String, i32), ToolError> {
         // Build command
         let mut command = if cfg!(target_os = "windows") {
@@ -257,6 +258,10 @@ impl ShellTool {
             c.args(["-c", cmd]);
             c
         };
+
+        // Inject extra environment variables (e.g., credentials fetched by the
+        // worker runtime) into the child process without mutating the global env.
+        command.envs(extra_env);
 
         command
             .current_dir(workdir)
@@ -322,6 +327,7 @@ impl ShellTool {
         cmd: &str,
         workdir: Option<&str>,
         timeout: Option<u64>,
+        extra_env: &HashMap<String, String>,
     ) -> Result<(String, i64), ToolError> {
         // Check for blocked commands
         if let Some(reason) = self.is_blocked(cmd) {
@@ -352,7 +358,9 @@ impl ShellTool {
         }
 
         // Only execute directly when no sandbox was configured at all.
-        let (output, code) = self.execute_direct(cmd, &cwd, timeout_duration).await?;
+        let (output, code) = self
+            .execute_direct(cmd, &cwd, timeout_duration, extra_env)
+            .await?;
         Ok((output, code as i64))
     }
 }
@@ -399,7 +407,7 @@ impl Tool for ShellTool {
     async fn execute(
         &self,
         params: serde_json::Value,
-        _ctx: &JobContext,
+        ctx: &JobContext,
     ) -> Result<ToolOutput, ToolError> {
         let command = require_str(&params, "command")?;
 
@@ -407,7 +415,9 @@ impl Tool for ShellTool {
         let timeout = params.get("timeout").and_then(|v| v.as_u64());
 
         let start = std::time::Instant::now();
-        let (output, exit_code) = self.execute_command(command, workdir, timeout).await?;
+        let (output, exit_code) = self
+            .execute_command(command, workdir, timeout, &ctx.extra_env)
+            .await?;
         let duration = start.elapsed();
 
         let sandboxed = self.sandbox.is_some();
@@ -424,6 +434,26 @@ impl Tool for ShellTool {
 
     fn requires_approval(&self) -> bool {
         true // Shell commands should require approval
+    }
+
+    fn requires_approval_for(&self, params: &serde_json::Value) -> bool {
+        let cmd = params
+            .get("command")
+            .and_then(|c| c.as_str().map(String::from))
+            .or_else(|| {
+                params
+                    .as_str()
+                    .and_then(|s| serde_json::from_str::<serde_json::Value>(s).ok())
+                    .and_then(|v| v.get("command").and_then(|c| c.as_str().map(String::from)))
+            });
+
+        if let Some(ref cmd) = cmd
+            && requires_explicit_approval(cmd)
+        {
+            return true;
+        }
+
+        false
     }
 
     fn requires_sanitization(&self) -> bool {
@@ -564,6 +594,34 @@ mod tests {
 
         assert_eq!(cmd.as_deref(), Some("git push --force origin main"));
         assert!(requires_explicit_approval(cmd.as_deref().unwrap()));
+    }
+
+    #[test]
+    fn test_requires_approval_for_destructive_command() {
+        let tool = ShellTool::new();
+        // Destructive commands must return true even though shell already
+        // requires base approval -- the distinction matters for auto-approve override.
+        assert!(tool.requires_approval_for(&serde_json::json!({"command": "rm -rf /tmp"})));
+        assert!(tool.requires_approval_for(
+            &serde_json::json!({"command": "git push --force origin main"})
+        ));
+        assert!(tool.requires_approval_for(&serde_json::json!({"command": "DROP TABLE users;"})));
+    }
+
+    #[test]
+    fn test_requires_approval_for_safe_command() {
+        let tool = ShellTool::new();
+        // Safe commands should not override auto-approval; only destructive ones do.
+        assert!(!tool.requires_approval_for(&serde_json::json!({"command": "cargo build"})));
+        assert!(!tool.requires_approval_for(&serde_json::json!({"command": "echo hello"})));
+    }
+
+    #[test]
+    fn test_requires_approval_for_string_encoded_args() {
+        let tool = ShellTool::new();
+        // When arguments are string-encoded JSON (rare LLM behavior).
+        let args = serde_json::Value::String(r#"{"command": "rm -rf /tmp/stuff"}"#.to_string());
+        assert!(tool.requires_approval_for(&args));
     }
 
     #[test]

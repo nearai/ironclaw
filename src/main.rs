@@ -17,14 +17,18 @@ use ironclaw::{
         web::log_layer::{LogBroadcaster, WebLogLayer},
     },
     cli::{
-        Cli, Command, run_mcp_command, run_pairing_command, run_status_command, run_tool_command,
+        Cli, Command, run_mcp_command, run_pairing_command, run_service_command,
+        run_status_command, run_tool_command,
     },
     config::Config,
     context::ContextManager,
     extensions::ExtensionManager,
+    hooks::HookRegistry,
     llm::{
-        FailoverProvider, LlmProvider, SessionConfig, create_llm_provider,
-        create_llm_provider_with_config, create_session_manager,
+        CachedProvider, CircuitBreakerConfig, CircuitBreakerProvider, CooldownConfig,
+        FailoverProvider, LlmProvider, ResponseCacheConfig, SessionConfig,
+        create_cheap_llm_provider, create_llm_provider, create_llm_provider_with_config,
+        create_session_manager,
     },
     orchestrator::{
         ContainerJobConfig, ContainerJobManager, OrchestratorApi, TokenStore,
@@ -151,6 +155,24 @@ async fn main() -> anyhow::Result<()> {
 
             return run_pairing_command(pairing_cmd.clone()).map_err(|e| anyhow::anyhow!("{}", e));
         }
+        Some(Command::Service(service_cmd)) => {
+            tracing_subscriber::fmt()
+                .with_env_filter(
+                    EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("warn")),
+                )
+                .init();
+
+            return run_service_command(service_cmd);
+        }
+        Some(Command::Doctor) => {
+            tracing_subscriber::fmt()
+                .with_env_filter(
+                    EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("warn")),
+                )
+                .init();
+
+            return ironclaw::cli::run_doctor_command().await;
+        }
         Some(Command::Status) => {
             tracing_subscriber::fmt()
                 .with_env_filter(
@@ -225,7 +247,7 @@ async fn main() -> anyhow::Result<()> {
                 max_turns: *max_turns,
                 model: model.clone(),
                 timeout: std::time::Duration::from_secs(1800),
-                allowed_tools: Vec::new(),
+                allowed_tools: ironclaw::config::ClaudeCodeConfig::from_env().allowed_tools,
             };
 
             let runtime = ironclaw::worker::ClaudeBridgeRuntime::new(config)
@@ -285,8 +307,9 @@ async fn main() -> anyhow::Result<()> {
         wizard.run().await?;
     }
 
-    // Load initial config from env + disk (before DB is available)
-    let mut config = match Config::from_env().await {
+    // Load initial config from env + disk + optional TOML (before DB is available)
+    let toml_path = cli.config.as_deref();
+    let mut config = match Config::from_env_with_toml(toml_path).await {
         Ok(c) => c,
         Err(ironclaw::error::ConfigError::MissingRequired { key, hint }) => {
             eprintln!("Configuration error: Missing required setting '{}'", key);
@@ -307,8 +330,11 @@ async fn main() -> anyhow::Result<()> {
     };
     let session = create_session_manager(session_config).await;
 
-    // Ensure we're authenticated before proceeding (only needed for NEAR AI backend)
-    if config.llm.backend == ironclaw::config::LlmBackend::NearAi {
+    // Session-based auth is only needed for NEAR AI backend without an API key.
+    // ChatCompletions mode with an API key skips session auth entirely.
+    if config.llm.backend == ironclaw::config::LlmBackend::NearAi
+        && config.llm.nearai.api_key.is_none()
+    {
         session.ensure_authenticated().await?;
     }
 
@@ -334,7 +360,10 @@ async fn main() -> anyhow::Result<()> {
     let repl_channel = if let Some(ref msg) = cli.message {
         Some(ReplChannel::with_message(msg.clone()))
     } else if config.channels.cli.enabled {
-        Some(ReplChannel::new())
+        let repl = ReplChannel::new();
+        // Suppress the one-liner banner; boot screen will be shown instead.
+        repl.suppress_banner();
+        Some(repl)
     } else {
         None
     };
@@ -422,7 +451,7 @@ async fn main() -> anyhow::Result<()> {
         }
 
         // Reload config from DB now that we have a connection.
-        match Config::from_db(db.as_ref(), "default").await {
+        match Config::from_db_with_toml(db.as_ref(), "default", toml_path).await {
             Ok(db_config) => {
                 config = db_config;
                 tracing::info!("Configuration reloaded from database");
@@ -497,7 +526,7 @@ async fn main() -> anyhow::Result<()> {
 
         // Re-resolve LlmConfig now that secrets overlay has been populated
         if let Some(ref db_ref) = db {
-            match Config::from_db(db_ref.as_ref(), "default").await {
+            match Config::from_db_with_toml(db_ref.as_ref(), "default", toml_path).await {
                 Ok(refreshed) => {
                     config = refreshed;
                     tracing::debug!("LlmConfig re-resolved after secret injection");
@@ -508,6 +537,62 @@ async fn main() -> anyhow::Result<()> {
             }
         }
     }
+
+    // Start managed tunnel if configured and no static URL is already set.
+    //
+    // The tunnel process runs in the background, exposing the local gateway
+    // port to the internet. The resulting public URL is injected into
+    // config.tunnel.public_url so channels and extensions pick it up.
+    let active_tunnel: Option<Box<dyn ironclaw::tunnel::Tunnel>> =
+        if config.tunnel.public_url.is_some() {
+            tracing::info!(
+                "Static tunnel URL in use: {}",
+                config.tunnel.public_url.as_deref().unwrap_or("?")
+            );
+            None
+        } else if let Some(ref provider_config) = config.tunnel.provider {
+            let gateway_port = config
+                .channels
+                .gateway
+                .as_ref()
+                .map(|g| g.port)
+                .unwrap_or(3000);
+            let gateway_host = config
+                .channels
+                .gateway
+                .as_ref()
+                .map(|g| g.host.as_str())
+                .unwrap_or("127.0.0.1");
+
+            match ironclaw::tunnel::create_tunnel(provider_config) {
+                Ok(Some(tunnel)) => {
+                    tracing::info!(
+                        "Starting {} tunnel on {}:{}...",
+                        tunnel.name(),
+                        gateway_host,
+                        gateway_port
+                    );
+                    match tunnel.start(gateway_host, gateway_port).await {
+                        Ok(url) => {
+                            tracing::info!("Tunnel started: {}", url);
+                            config.tunnel.public_url = Some(url);
+                            Some(tunnel)
+                        }
+                        Err(e) => {
+                            tracing::error!("Failed to start tunnel: {}", e);
+                            None
+                        }
+                    }
+                }
+                Ok(None) => None,
+                Err(e) => {
+                    tracing::error!("Failed to create tunnel: {}", e);
+                    None
+                }
+            }
+        } else {
+            None
+        };
 
     // Initialize LLM provider (clone session so we can reuse it for embeddings)
     let llm = create_llm_provider(&config.llm, session.clone())?;
@@ -529,10 +614,61 @@ async fn main() -> anyhow::Result<()> {
                 fallback = %fallback.model_name(),
                 "LLM failover enabled"
             );
-            Arc::new(FailoverProvider::new(vec![llm, fallback])?)
+            let cooldown_config = CooldownConfig {
+                cooldown_duration: std::time::Duration::from_secs(
+                    config.llm.nearai.failover_cooldown_secs,
+                ),
+                failure_threshold: config.llm.nearai.failover_cooldown_threshold,
+            };
+            Arc::new(FailoverProvider::with_cooldown(
+                vec![llm, fallback],
+                cooldown_config,
+            )?)
         } else {
             llm
         };
+
+    // Wrap in circuit breaker if configured
+    let llm: Arc<dyn LlmProvider> =
+        if let Some(threshold) = config.llm.nearai.circuit_breaker_threshold {
+            let cb_config = CircuitBreakerConfig {
+                failure_threshold: threshold,
+                recovery_timeout: std::time::Duration::from_secs(
+                    config.llm.nearai.circuit_breaker_recovery_secs,
+                ),
+                ..CircuitBreakerConfig::default()
+            };
+            tracing::info!(
+                threshold,
+                recovery_secs = config.llm.nearai.circuit_breaker_recovery_secs,
+                "LLM circuit breaker enabled"
+            );
+            Arc::new(CircuitBreakerProvider::new(llm, cb_config))
+        } else {
+            llm
+        };
+
+    // Wrap in response cache if configured
+    let llm: Arc<dyn LlmProvider> = if config.llm.nearai.response_cache_enabled {
+        let rc_config = ResponseCacheConfig {
+            ttl: std::time::Duration::from_secs(config.llm.nearai.response_cache_ttl_secs),
+            max_entries: config.llm.nearai.response_cache_max_entries,
+        };
+        tracing::info!(
+            ttl_secs = config.llm.nearai.response_cache_ttl_secs,
+            max_entries = config.llm.nearai.response_cache_max_entries,
+            "LLM response cache enabled"
+        );
+        Arc::new(CachedProvider::new(llm, rc_config))
+    } else {
+        llm
+    };
+
+    // Initialize cheap LLM provider for lightweight tasks (heartbeat, evaluation)
+    let cheap_llm = create_cheap_llm_provider(&config.llm, session.clone())?;
+    if let Some(ref cheap) = cheap_llm {
+        tracing::info!("Cheap LLM provider initialized: {}", cheap.model_name());
+    }
 
     // Initialize safety layer
     let safety = Arc::new(SafetyLayer::new(&config.safety));
@@ -828,11 +964,8 @@ async fn main() -> anyhow::Result<()> {
             memory_limit_mb: config.sandbox.memory_limit_mb,
             cpu_shares: config.sandbox.cpu_shares,
             orchestrator_port: 50051,
-            claude_config_dir: if config.claude_code.enabled {
-                Some(config.claude_code.config_dir.clone())
-            } else {
-                None
-            },
+            claude_code_api_key: std::env::var("ANTHROPIC_API_KEY").ok(),
+            claude_code_oauth_token: ironclaw::config::ClaudeCodeConfig::extract_oauth_token(),
             claude_code_model: config.claude_code.model.clone(),
             claude_code_max_turns: config.claude_code.max_turns,
             claude_code_memory_limit_mb: config.claude_code.memory_limit_mb,
@@ -848,6 +981,8 @@ async fn main() -> anyhow::Result<()> {
             job_event_tx: job_event_tx.clone(),
             prompt_queue: Arc::clone(&prompt_queue),
             store: db.clone(),
+            secrets_store: secrets_store.clone(),
+            user_id: "default".to_string(),
         };
 
         tokio::spawn(async move {
@@ -876,12 +1011,14 @@ async fn main() -> anyhow::Result<()> {
 
     // Initialize channel manager
     let mut channels = ChannelManager::new();
+    let mut channel_names: Vec<String> = Vec::new();
 
     if let Some(repl) = repl_channel {
         channels.add(Box::new(repl));
         if cli.message.is_some() {
             tracing::info!("Single message mode");
         } else {
+            channel_names.push("repl".to_string());
             tracing::info!("REPL mode enabled");
         }
     }
@@ -1017,6 +1154,7 @@ async fn main() -> anyhow::Result<()> {
                                 }
                             }
 
+                            channel_names.push(channel_name.clone());
                             channels.add(Box::new(SharedWasmChannel::new(channel_arc)));
                         }
 
@@ -1061,6 +1199,7 @@ async fn main() -> anyhow::Result<()> {
                 .parse()
                 .expect("HttpConfig host:port must be a valid SocketAddr"),
         );
+        channel_names.push("http".to_string());
         channels.add(Box::new(http_channel));
         tracing::info!(
             "HTTP channel enabled on {}:{}",
@@ -1123,17 +1262,47 @@ async fn main() -> anyhow::Result<()> {
     // Create context manager (shared between job tools and agent)
     let context_manager = Arc::new(ContextManager::new(config.agent.max_parallel_jobs));
 
+    // Create hook registry
+    let hooks = Arc::new(HookRegistry::new());
+
     // Create session manager (shared between agent and web gateway)
-    let session_manager = Arc::new(SessionManager::new());
+    let session_manager = Arc::new(SessionManager::new().with_hooks(hooks.clone()));
 
     // Register job tools (sandbox deps auto-injected when container_job_manager is available)
     tools.register_job_tools(
         Arc::clone(&context_manager),
         container_job_manager.clone(),
         db.clone(),
+        job_event_tx.clone(),
+        Some(channels.inject_sender()),
+        if config.sandbox.enabled {
+            Some(Arc::clone(&prompt_queue))
+        } else {
+            None
+        },
+        secrets_store.clone(),
     );
 
+    // Initialize skills system (before gateway so we can wire into GatewayState)
+    let (skill_registry, skill_catalog) = if config.skills.enabled {
+        let mut registry = ironclaw::skills::SkillRegistry::new(config.skills.local_dir.clone());
+        let loaded = registry.discover_all().await;
+        if !loaded.is_empty() {
+            tracing::info!("Loaded {} skill(s): {}", loaded.len(), loaded.join(", "));
+        }
+        let registry = Arc::new(std::sync::RwLock::new(registry));
+
+        // Register skill management tools
+        let catalog = ironclaw::skills::catalog::shared_catalog();
+        tools.register_skill_tools(Arc::clone(&registry), Arc::clone(&catalog));
+
+        (Some(registry), Some(catalog))
+    } else {
+        (None, None)
+    };
+
     // Add web gateway channel if configured
+    let mut gateway_url: Option<String> = None;
     if let Some(ref gw_config) = config.channels.gateway {
         let mut gw = GatewayChannel::new(gw_config.clone()).with_llm_provider(Arc::clone(&llm));
         if let Some(ref ws) = workspace {
@@ -1151,6 +1320,12 @@ async fn main() -> anyhow::Result<()> {
         if let Some(ref jm) = container_job_manager {
             gw = gw.with_job_manager(Arc::clone(jm));
         }
+        if let Some(ref sr) = skill_registry {
+            gw = gw.with_skill_registry(Arc::clone(sr));
+        }
+        if let Some(ref sc) = skill_catalog {
+            gw = gw.with_skill_catalog(Arc::clone(sc));
+        }
         if config.sandbox.enabled {
             gw = gw.with_prompt_queue(Arc::clone(&prompt_queue));
 
@@ -1166,29 +1341,48 @@ async fn main() -> anyhow::Result<()> {
             }
         }
 
+        gateway_url = Some(format!(
+            "http://{}:{}/?token={}",
+            gw_config.host,
+            gw_config.port,
+            gw.auth_token()
+        ));
+
         tracing::info!(
             "Web gateway enabled on {}:{}",
             gw_config.host,
             gw_config.port
         );
-        tracing::info!(
-            "Web UI: http://{}:{}/?token={}",
-            gw_config.host,
-            gw_config.port,
-            gw.auth_token()
-        );
+        tracing::info!("Web UI: http://{}:{}/", gw_config.host, gw_config.port);
 
+        channel_names.push("gateway".to_string());
         channels.add(Box::new(gw));
     }
 
+    // Capture boot screen info before moving Arcs into AgentDeps.
+    let boot_tool_count = tools.count();
+    let boot_llm_model = llm.model_name().to_string();
+    let boot_cheap_model = cheap_llm.as_ref().map(|c| c.model_name().to_string());
+
     // Create and run the agent
+    let cost_guard = Arc::new(ironclaw::agent::cost_guard::CostGuard::new(
+        ironclaw::agent::cost_guard::CostGuardConfig {
+            max_cost_per_day_cents: config.agent.max_cost_per_day_cents,
+            max_actions_per_hour: config.agent.max_actions_per_hour,
+        },
+    ));
     let deps = AgentDeps {
         store: db,
         llm,
+        cheap_llm,
         safety,
         tools,
         workspace,
         extension_manager,
+        skill_registry,
+        skills_config: config.skills.clone(),
+        hooks,
+        cost_guard,
     };
     let agent = Agent::new(
         config.agent.clone(),
@@ -1202,12 +1396,57 @@ async fn main() -> anyhow::Result<()> {
 
     tracing::info!("Agent initialized, starting main loop...");
 
+    // Print boot screen for interactive CLI mode (not single-message mode).
+    if config.channels.cli.enabled && cli.message.is_none() {
+        let boot_info = ironclaw::boot_screen::BootInfo {
+            version: env!("CARGO_PKG_VERSION").to_string(),
+            agent_name: config.agent.name.clone(),
+            llm_backend: config.llm.backend.to_string(),
+            llm_model: boot_llm_model,
+            cheap_model: boot_cheap_model,
+            db_backend: if cli.no_db {
+                "none".to_string()
+            } else {
+                config.database.backend.to_string()
+            },
+            db_connected: !cli.no_db,
+            tool_count: boot_tool_count,
+            gateway_url,
+            embeddings_enabled: config.embeddings.enabled,
+            embeddings_provider: if config.embeddings.enabled {
+                Some(config.embeddings.provider.clone())
+            } else {
+                None
+            },
+            heartbeat_enabled: config.heartbeat.enabled,
+            heartbeat_interval_secs: config.heartbeat.interval_secs,
+            sandbox_enabled: config.sandbox.enabled,
+            claude_code_enabled: config.claude_code.enabled,
+            routines_enabled: config.routines.enabled,
+            channels: channel_names,
+            tunnel_url: active_tunnel
+                .as_ref()
+                .and_then(|t| t.public_url())
+                .or_else(|| config.tunnel.public_url.clone()),
+            tunnel_provider: active_tunnel.as_ref().map(|t| t.name().to_string()),
+        };
+        ironclaw::boot_screen::print_boot_screen(&boot_info);
+    }
+
     // Run the agent (blocks until shutdown)
     agent.run().await?;
 
     // Shut down the webhook server if one was started
     if let Some(ref mut server) = webhook_server {
         server.shutdown().await;
+    }
+
+    // Stop managed tunnel if one was started
+    if let Some(tunnel) = active_tunnel {
+        tracing::info!("Stopping {} tunnel...", tunnel.name());
+        if let Err(e) = tunnel.stop().await {
+            tracing::warn!("Failed to stop tunnel cleanly: {}", e);
+        }
     }
 
     tracing::info!("Agent shutdown complete");
@@ -1227,6 +1466,18 @@ fn check_onboard_needed() -> Option<&'static str> {
 
     if !has_db {
         return Some("Database not configured");
+    }
+
+    // First run (onboarding never completed and no session).
+    // Reads NEARAI_API_KEY env var directly because this function runs
+    // before Config is loaded -- Config::from_env() may fail without a
+    // database URL, which is what triggers onboarding in the first place.
+    if std::env::var("NEARAI_API_KEY").is_err() {
+        let settings = ironclaw::settings::Settings::load();
+        let session_path = ironclaw::llm::session::default_session_path();
+        if !settings.onboard_completed && !session_path.exists() {
+            return Some("First run");
+        }
     }
 
     None
