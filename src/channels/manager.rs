@@ -4,22 +4,39 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use futures::stream;
-use tokio::sync::RwLock;
+use tokio::sync::{RwLock, mpsc};
 
 use crate::channels::{Channel, IncomingMessage, MessageStream, OutgoingResponse, StatusUpdate};
 use crate::error::ChannelError;
 
 /// Manages multiple input channels and merges their message streams.
+///
+/// Includes an injection channel so background tasks (e.g., job monitors) can
+/// push messages into the agent loop without being a full `Channel` impl.
 pub struct ChannelManager {
     channels: Arc<RwLock<HashMap<String, Box<dyn Channel>>>>,
+    inject_tx: mpsc::Sender<IncomingMessage>,
+    /// Taken once in `start_all()` and merged into the stream.
+    inject_rx: tokio::sync::Mutex<Option<mpsc::Receiver<IncomingMessage>>>,
 }
 
 impl ChannelManager {
     /// Create a new channel manager.
     pub fn new() -> Self {
+        let (inject_tx, inject_rx) = mpsc::channel(64);
         Self {
             channels: Arc::new(RwLock::new(HashMap::new())),
+            inject_tx,
+            inject_rx: tokio::sync::Mutex::new(Some(inject_rx)),
         }
+    }
+
+    /// Get a clone of the injection sender.
+    ///
+    /// Background tasks (like job monitors) use this to push messages into the
+    /// agent loop without being a full `Channel` implementation.
+    pub fn inject_sender(&self) -> mpsc::Sender<IncomingMessage> {
+        self.inject_tx.clone()
     }
 
     /// Add a channel to the manager.
@@ -36,9 +53,12 @@ impl ChannelManager {
     }
 
     /// Start all channels and return a merged stream of messages.
+    ///
+    /// Also merges the injection channel so background tasks can push messages
+    /// into the same stream.
     pub async fn start_all(&self) -> Result<MessageStream, ChannelError> {
         let channels = self.channels.read().await;
-        let mut streams = Vec::new();
+        let mut streams: Vec<MessageStream> = Vec::new();
 
         for (name, channel) in channels.iter() {
             match channel.start().await {
@@ -58,6 +78,13 @@ impl ChannelManager {
                 name: "all".to_string(),
                 reason: "No channels started successfully".to_string(),
             });
+        }
+
+        // Take the injection receiver (can only be taken once)
+        if let Some(inject_rx) = self.inject_rx.lock().await.take() {
+            let inject_stream = tokio_stream::wrappers::ReceiverStream::new(inject_rx);
+            streams.push(Box::pin(inject_stream));
+            tracing::debug!("Injection channel merged into message stream");
         }
 
         // Merge all streams into one
