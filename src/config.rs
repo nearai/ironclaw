@@ -419,6 +419,8 @@ pub enum LlmBackend {
     Ollama,
     /// Any OpenAI-compatible endpoint (e.g. vLLM, LiteLLM, Together)
     OpenAiCompatible,
+    /// Tinfoil private inference
+    Tinfoil,
 }
 
 impl std::str::FromStr for LlmBackend {
@@ -432,8 +434,9 @@ impl std::str::FromStr for LlmBackend {
             "anthropic" | "claude" => Ok(Self::Anthropic),
             "ollama" => Ok(Self::Ollama),
             "openai_compatible" | "openai-compatible" | "compatible" => Ok(Self::OpenAiCompatible),
+            "tinfoil" => Ok(Self::Tinfoil),
             _ => Err(format!(
-                "invalid LLM backend '{}', expected one of: openrouter, nearai, openai, anthropic, ollama, openai_compatible",
+                "invalid LLM backend '{}', expected one of: openrouter, nearai, openai, anthropic, ollama, openai_compatible, tinfoil",
                 s
             )),
         }
@@ -449,6 +452,7 @@ impl std::fmt::Display for LlmBackend {
             Self::Anthropic => write!(f, "anthropic"),
             Self::Ollama => write!(f, "ollama"),
             Self::OpenAiCompatible => write!(f, "openai_compatible"),
+            Self::Tinfoil => write!(f, "tinfoil"),
         }
     }
 }
@@ -489,6 +493,13 @@ pub struct OpenAiCompatibleConfig {
     pub model: String,
 }
 
+/// Configuration for Tinfoil private inference.
+#[derive(Debug, Clone)]
+pub struct TinfoilConfig {
+    pub api_key: SecretString,
+    pub model: String,
+}
+
 /// LLM provider configuration.
 ///
 /// NEAR AI is the default backend. Users can switch to other providers
@@ -509,6 +520,8 @@ pub struct LlmConfig {
     pub ollama: Option<OllamaConfig>,
     /// OpenAI-compatible config (populated when backend=openai_compatible)
     pub openai_compatible: Option<OpenAiCompatibleConfig>,
+    /// Tinfoil config (populated when backend=tinfoil)
+    pub tinfoil: Option<TinfoilConfig>,
 }
 
 /// API mode for NEAR AI.
@@ -730,6 +743,19 @@ impl LlmConfig {
             None
         };
 
+        let tinfoil = if backend == LlmBackend::Tinfoil {
+            let api_key = optional_env("TINFOIL_API_KEY")?
+                .map(SecretString::from)
+                .ok_or_else(|| ConfigError::MissingRequired {
+                    key: "TINFOIL_API_KEY".to_string(),
+                    hint: "Set TINFOIL_API_KEY when LLM_BACKEND=tinfoil".to_string(),
+                })?;
+            let model = optional_env("TINFOIL_MODEL")?.unwrap_or_else(|| "kimi-k2-5".to_string());
+            Some(TinfoilConfig { api_key, model })
+        } else {
+            None
+        };
+
         Ok(Self {
             backend,
             nearai,
@@ -738,6 +764,7 @@ impl LlmConfig {
             anthropic,
             ollama,
             openai_compatible,
+            tinfoil,
         })
     }
 }

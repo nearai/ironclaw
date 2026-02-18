@@ -8,12 +8,12 @@
 //! layouts are supported. Earlier locations win on name collision (workspace
 //! overrides user). Uses async I/O throughout to avoid blocking the tokio runtime.
 
-use std::collections::HashMap;
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 use sha2::{Digest, Sha256};
 
-use crate::skills::gating::check_requirements;
+use crate::skills::gating;
 use crate::skills::parser::{SkillParseError, parse_skill_md};
 use crate::skills::{
     GatingRequirements, LoadedSkill, MAX_PROMPT_FILE_SIZE, SkillSource, SkillTrust,
@@ -66,7 +66,7 @@ pub enum SkillRegistryError {
 
 /// Registry of available skills.
 pub struct SkillRegistry {
-    /// Loaded skills keyed by name.
+    /// All loaded skills.
     skills: Vec<LoadedSkill>,
     /// User skills directory (~/.ironclaw/skills/).
     user_dir: PathBuf,
@@ -97,18 +97,18 @@ impl SkillRegistry {
     /// 2. User skills directory -- Trusted
     pub async fn discover_all(&mut self) -> Vec<String> {
         let mut loaded_names: Vec<String> = Vec::new();
-        let mut seen: HashMap<String, ()> = HashMap::new();
+        let mut seen: HashSet<String> = HashSet::new();
 
         // 1. Workspace skills (highest priority)
-        if let Some(ref ws_dir) = self.workspace_dir.clone() {
+        if let Some(ws_dir) = self.workspace_dir.clone() {
             let ws_skills = self
-                .discover_from_dir(ws_dir, SkillTrust::Trusted, SkillSource::Workspace)
+                .discover_from_dir(&ws_dir, SkillTrust::Trusted, SkillSource::Workspace)
                 .await;
             for (name, skill) in ws_skills {
-                if seen.contains_key(&name) {
+                if seen.contains(&name) {
                     continue;
                 }
-                seen.insert(name.clone(), ());
+                seen.insert(name.clone());
                 loaded_names.push(name);
                 self.skills.push(skill);
             }
@@ -120,11 +120,11 @@ impl SkillRegistry {
             .discover_from_dir(&user_dir, SkillTrust::Trusted, SkillSource::User)
             .await;
         for (name, skill) in user_skills {
-            if seen.contains_key(&name) {
+            if seen.contains(&name) {
                 tracing::debug!("Skipping user skill '{}' (overridden by workspace)", name);
                 continue;
             }
-            seen.insert(name.clone(), ());
+            seen.insert(name.clone());
             loaded_names.push(name);
             self.skills.push(skill);
         }
@@ -241,103 +241,7 @@ impl SkillRegistry {
         trust: SkillTrust,
         source: SkillSource,
     ) -> Result<(String, LoadedSkill), SkillRegistryError> {
-        // Check for symlink at the file level
-        let file_meta =
-            tokio::fs::symlink_metadata(path)
-                .await
-                .map_err(|e| SkillRegistryError::ReadError {
-                    path: path.display().to_string(),
-                    reason: e.to_string(),
-                })?;
-
-        if file_meta.is_symlink() {
-            return Err(SkillRegistryError::SymlinkDetected {
-                path: path.display().to_string(),
-            });
-        }
-
-        // Read and check size
-        let raw_bytes = tokio::fs::read(path)
-            .await
-            .map_err(|e| SkillRegistryError::ReadError {
-                path: path.display().to_string(),
-                reason: e.to_string(),
-            })?;
-
-        if raw_bytes.len() as u64 > MAX_PROMPT_FILE_SIZE {
-            return Err(SkillRegistryError::FileTooLarge {
-                name: path.display().to_string(),
-                size: raw_bytes.len() as u64,
-                max: MAX_PROMPT_FILE_SIZE,
-            });
-        }
-
-        let raw_content =
-            String::from_utf8(raw_bytes).map_err(|e| SkillRegistryError::ReadError {
-                path: path.display().to_string(),
-                reason: format!("Invalid UTF-8: {}", e),
-            })?;
-
-        // Normalize line endings before parsing to handle CRLF
-        let normalized_content = normalize_line_endings(&raw_content);
-
-        // Parse SKILL.md
-        let parsed = parse_skill_md(&normalized_content).map_err(|e: SkillParseError| match e {
-            SkillParseError::InvalidName { ref name } => SkillRegistryError::ParseError {
-                name: name.clone(),
-                reason: e.to_string(),
-            },
-            _ => SkillRegistryError::ParseError {
-                name: path.display().to_string(),
-                reason: e.to_string(),
-            },
-        })?;
-
-        let manifest = parsed.manifest;
-        let prompt_content = parsed.prompt_content;
-
-        // Check gating requirements
-        if let Some(ref meta) = manifest.metadata
-            && let Some(ref openclaw) = meta.openclaw
-        {
-            let gating = check_requirements(&openclaw.requires);
-            if !gating.passed {
-                return Err(SkillRegistryError::GatingFailed {
-                    name: manifest.name.clone(),
-                    reason: gating.failures.join("; "),
-                });
-            }
-        }
-
-        // Check token budget (reject if prompt is > 2x declared budget)
-        // ~4 bytes per token for English prose = ~0.25 tokens per byte
-        let approx_tokens = (prompt_content.len() as f64 * 0.25) as usize;
-        let declared = manifest.activation.max_context_tokens;
-        if declared > 0 && approx_tokens > declared * 2 {
-            return Err(SkillRegistryError::TokenBudgetExceeded {
-                name: manifest.name.clone(),
-                approx_tokens,
-                declared,
-            });
-        }
-
-        // Compute content hash
-        let content_hash = compute_hash(&prompt_content);
-
-        // Compile regex patterns
-        let compiled_patterns = LoadedSkill::compile_patterns(&manifest.activation.patterns);
-
-        let name = manifest.name.clone();
-        let skill = LoadedSkill {
-            manifest,
-            prompt_content,
-            trust,
-            source,
-            content_hash,
-            compiled_patterns,
-        };
-
-        Ok((name, skill))
+        load_and_validate_skill(path, trust, source).await
     }
 
     /// Get all loaded skills.
@@ -387,8 +291,7 @@ impl SkillRegistry {
 
         // Load by re-reading from disk (validates round-trip)
         let source = SkillSource::User(skill_dir);
-        // Use a temporary registry-less load (load_skill_md_standalone)
-        load_skill_md_standalone(&skill_path, SkillTrust::Installed, source).await
+        load_and_validate_skill(&skill_path, SkillTrust::Installed, source).await
     }
 
     /// Commit a prepared skill into the in-memory registry.
@@ -464,10 +367,6 @@ impl SkillRegistry {
                 name: name.to_string(),
                 reason: "bundled skills cannot be removed".to_string(),
             }),
-            SkillSource::Registry { .. } => Err(SkillRegistryError::CannotRemove {
-                name: name.to_string(),
-                reason: "registry skills should be uninstalled, not removed".to_string(),
-            }),
         }
     }
 
@@ -527,11 +426,12 @@ impl SkillRegistry {
     }
 }
 
-/// Load a single SKILL.md file without requiring a SkillRegistry instance.
+/// Load and validate a single SKILL.md file from disk.
 ///
-/// This is used by `prepare_install_to_disk` to avoid borrowing the registry
-/// across async boundaries.
-async fn load_skill_md_standalone(
+/// Shared implementation used by both `SkillRegistry::load_skill_md` (discovery)
+/// and `SkillRegistry::prepare_install_to_disk` (installation). This avoids
+/// duplicating the read/parse/validate/hash pipeline.
+async fn load_and_validate_skill(
     path: &Path,
     trust: SkillTrust,
     source: SkillSource,
@@ -551,6 +451,7 @@ async fn load_skill_md_standalone(
         });
     }
 
+    // Read and check size
     let raw_bytes = tokio::fs::read(path)
         .await
         .map_err(|e| SkillRegistryError::ReadError {
@@ -571,8 +472,10 @@ async fn load_skill_md_standalone(
         reason: format!("Invalid UTF-8: {}", e),
     })?;
 
+    // Normalize line endings before parsing to handle CRLF
     let normalized_content = normalize_line_endings(&raw_content);
 
+    // Parse SKILL.md
     let parsed = parse_skill_md(&normalized_content).map_err(|e: SkillParseError| match e {
         SkillParseError::InvalidName { ref name } => SkillRegistryError::ParseError {
             name: name.clone(),
@@ -587,18 +490,21 @@ async fn load_skill_md_standalone(
     let manifest = parsed.manifest;
     let prompt_content = parsed.prompt_content;
 
+    // Check gating requirements
     if let Some(ref meta) = manifest.metadata
         && let Some(ref openclaw) = meta.openclaw
     {
-        let gating = check_requirements(&openclaw.requires);
-        if !gating.passed {
+        let result = gating::check_requirements(&openclaw.requires).await;
+        if !result.passed {
             return Err(SkillRegistryError::GatingFailed {
                 name: manifest.name.clone(),
-                reason: gating.failures.join("; "),
+                reason: result.failures.join("; "),
             });
         }
     }
 
+    // Check token budget (reject if prompt is > 2x declared budget)
+    // ~4 bytes per token for English prose = ~0.25 tokens per byte
     let approx_tokens = (prompt_content.len() as f64 * 0.25) as usize;
     let declared = manifest.activation.max_context_tokens;
     if declared > 0 && approx_tokens > declared * 2 {
@@ -609,8 +515,25 @@ async fn load_skill_md_standalone(
         });
     }
 
+    // Compute content hash
     let content_hash = compute_hash(&prompt_content);
+
+    // Compile regex patterns
     let compiled_patterns = LoadedSkill::compile_patterns(&manifest.activation.patterns);
+
+    // Pre-compute lowercased keywords and tags for efficient scoring
+    let lowercased_keywords = manifest
+        .activation
+        .keywords
+        .iter()
+        .map(|k| k.to_lowercase())
+        .collect();
+    let lowercased_tags = manifest
+        .activation
+        .tags
+        .iter()
+        .map(|t| t.to_lowercase())
+        .collect();
 
     let name = manifest.name.clone();
     let skill = LoadedSkill {
@@ -620,6 +543,8 @@ async fn load_skill_md_standalone(
         source,
         content_hash,
         compiled_patterns,
+        lowercased_keywords,
+        lowercased_tags,
     };
 
     Ok((name, skill))
@@ -635,8 +560,10 @@ pub fn compute_hash(content: &str) -> String {
 
 /// Helper to check gating for a `GatingRequirements`. Useful for callers that
 /// don't have the full skill loaded yet.
-pub fn check_gating(requirements: &GatingRequirements) -> crate::skills::gating::GatingResult {
-    check_requirements(requirements)
+pub async fn check_gating(
+    requirements: &GatingRequirements,
+) -> crate::skills::gating::GatingResult {
+    gating::check_requirements(requirements).await
 }
 
 #[cfg(test)]
@@ -937,6 +864,74 @@ mod tests {
         let loaded = registry.reload().await;
         assert_eq!(loaded, vec!["persist-skill"]);
         assert_eq!(registry.count(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_load_flat_layout() {
+        let dir = tempfile::tempdir().unwrap();
+
+        // Place a SKILL.md directly in the skills directory (flat layout)
+        fs::write(
+            dir.path().join("SKILL.md"),
+            "---\nname: flat-skill\ndescription: A flat layout skill\nactivation:\n  keywords: [\"flat\"]\n---\n\nYou are a flat layout test skill.\n",
+        ).unwrap();
+
+        let mut registry = SkillRegistry::new(dir.path().to_path_buf());
+        let loaded = registry.discover_all().await;
+
+        assert_eq!(loaded, vec!["flat-skill"]);
+        assert_eq!(registry.count(), 1);
+
+        let skill = &registry.skills()[0];
+        assert_eq!(skill.trust, SkillTrust::Trusted);
+        assert!(skill.prompt_content.contains("flat layout test skill"));
+    }
+
+    #[tokio::test]
+    async fn test_mixed_flat_and_subdirectory_layout() {
+        let dir = tempfile::tempdir().unwrap();
+
+        // Flat layout: SKILL.md directly in the skills directory
+        fs::write(
+            dir.path().join("SKILL.md"),
+            "---\nname: flat-skill\n---\n\nFlat prompt.\n",
+        )
+        .unwrap();
+
+        // Subdirectory layout: <name>/SKILL.md
+        let sub_dir = dir.path().join("sub-skill");
+        fs::create_dir(&sub_dir).unwrap();
+        fs::write(
+            sub_dir.join("SKILL.md"),
+            "---\nname: sub-skill\n---\n\nSub prompt.\n",
+        )
+        .unwrap();
+
+        let mut registry = SkillRegistry::new(dir.path().to_path_buf());
+        let loaded = registry.discover_all().await;
+
+        assert_eq!(registry.count(), 2);
+        assert!(loaded.contains(&"flat-skill".to_string()));
+        assert!(loaded.contains(&"sub-skill".to_string()));
+    }
+
+    #[tokio::test]
+    async fn test_lowercased_fields_populated() {
+        let dir = tempfile::tempdir().unwrap();
+        let skill_dir = dir.path().join("case-skill");
+        fs::create_dir(&skill_dir).unwrap();
+
+        fs::write(
+            skill_dir.join("SKILL.md"),
+            "---\nname: case-skill\nactivation:\n  keywords: [\"Write\", \"EDIT\"]\n  tags: [\"Email\", \"PROSE\"]\n---\n\nTest prompt.\n",
+        ).unwrap();
+
+        let mut registry = SkillRegistry::new(dir.path().to_path_buf());
+        registry.discover_all().await;
+
+        let skill = registry.find_by_name("case-skill").unwrap();
+        assert_eq!(skill.lowercased_keywords, vec!["write", "edit"]);
+        assert_eq!(skill.lowercased_tags, vec!["email", "prose"]);
     }
 
     #[test]

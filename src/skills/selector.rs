@@ -100,19 +100,17 @@ pub fn prefilter_skills<'a>(
 /// Score a skill against a user message.
 fn score_skill(skill: &LoadedSkill, message_lower: &str, message_original: &str) -> u32 {
     let mut score: u32 = 0;
-    let criteria = &skill.manifest.activation;
 
     // Keyword scoring with cap to prevent gaming via keyword stuffing
     let mut keyword_score: u32 = 0;
-    for keyword in &criteria.keywords {
-        let kw_lower = keyword.to_lowercase();
+    for kw_lower in &skill.lowercased_keywords {
         // Exact word match (surrounded by word boundaries)
         if message_lower
             .split_whitespace()
-            .any(|word| word.trim_matches(|c: char| !c.is_alphanumeric()) == kw_lower)
+            .any(|word| word.trim_matches(|c: char| !c.is_alphanumeric()) == kw_lower.as_str())
         {
             keyword_score += 10;
-        } else if message_lower.contains(&kw_lower) {
+        } else if message_lower.contains(kw_lower.as_str()) {
             // Substring match
             keyword_score += 5;
         }
@@ -121,9 +119,8 @@ fn score_skill(skill: &LoadedSkill, message_lower: &str, message_original: &str)
 
     // Tag scoring from activation.tags
     let mut tag_score: u32 = 0;
-    for tag in &criteria.tags {
-        let tag_lower = tag.to_lowercase();
-        if message_lower.contains(&tag_lower) {
+    for tag_lower in &skill.lowercased_tags {
+        if message_lower.contains(tag_lower.as_str()) {
             tag_score += 3;
         }
     }
@@ -150,15 +147,19 @@ mod tests {
     fn make_skill(name: &str, keywords: &[&str], tags: &[&str], patterns: &[&str]) -> LoadedSkill {
         let pattern_strings: Vec<String> = patterns.iter().map(|s| s.to_string()).collect();
         let compiled = LoadedSkill::compile_patterns(&pattern_strings);
+        let kw_vec: Vec<String> = keywords.iter().map(|s| s.to_string()).collect();
+        let tag_vec: Vec<String> = tags.iter().map(|s| s.to_string()).collect();
+        let lowercased_keywords = kw_vec.iter().map(|k| k.to_lowercase()).collect();
+        let lowercased_tags = tag_vec.iter().map(|t| t.to_lowercase()).collect();
         LoadedSkill {
             manifest: SkillManifest {
                 name: name.to_string(),
                 version: "1.0.0".to_string(),
                 description: format!("{} skill", name),
                 activation: ActivationCriteria {
-                    keywords: keywords.iter().map(|s| s.to_string()).collect(),
+                    keywords: kw_vec,
                     patterns: pattern_strings,
-                    tags: tags.iter().map(|s| s.to_string()).collect(),
+                    tags: tag_vec,
                     max_context_tokens: 1000,
                 },
                 metadata: None,
@@ -168,6 +169,8 @@ mod tests {
             source: SkillSource::User(PathBuf::from("/tmp/test")),
             content_hash: "sha256:000".to_string(),
             compiled_patterns: compiled,
+            lowercased_keywords,
+            lowercased_tags,
         }
     }
 
