@@ -164,10 +164,6 @@ postgres = [
 libsql = ["dep:libsql"]
 integration = []
 
-[[example]]
-name = "test_heartbeat"
-required-features = ["postgres"]
-
 # The profile that 'cargo dist' will build with
 [profile.dist]
 inherits = "release"
