@@ -30,9 +30,7 @@ async fn test_heartbeat_end_to_end() {
     println!("=== Heartbeat Integration Test ===\n");
 
     // 1. Load config
-    let config = Config::from_env()
-        .await
-        .expect("Failed to load config");
+    let config = Config::from_env().await.expect("Failed to load config");
     println!("[1/6] Config loaded");
     println!("  heartbeat.enabled = {}", config.heartbeat.enabled);
     println!(
@@ -49,8 +47,13 @@ async fn test_heartbeat_end_to_end() {
     );
 
     // 2. Connect to database
-    let store = Store::new(&config.database).await.expect("Failed to connect to database");
-    store.run_migrations().await.expect("Failed to run migrations");
+    let store = Store::new(&config.database)
+        .await
+        .expect("Failed to connect to database");
+    store
+        .run_migrations()
+        .await
+        .expect("Failed to run migrations");
     println!("[2/6] Database connected");
 
     // 3. Create workspace
@@ -118,5 +121,4 @@ async fn test_heartbeat_end_to_end() {
             println!("  Error: {}", err);
         }
     }
-
 }
