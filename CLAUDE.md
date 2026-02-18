@@ -496,14 +496,17 @@ Skills are SKILL.md files that extend the agent's prompt with domain-specific in
 name: my-skill
 version: 0.1.0
 description: Does something useful
-triggers:
-  - pattern: "deploy to.*production"
-  - intent: deployment
-requires:
-  bins: [docker, kubectl]
-  env: [KUBECONFIG]
-trust: installed
-max_tokens: 2000
+activation:
+  patterns:
+    - "deploy to.*production"
+  keywords:
+    - "deployment"
+  max_context_tokens: 2000
+metadata:
+  openclaw:
+    requires:
+      bins: [docker, kubectl]
+      env: [KUBECONFIG]
 ---
 
 # Deployment Skill
@@ -514,7 +517,7 @@ Instructions for the agent when this skill activates...
 ### Selection Pipeline
 
 1. **Gating** -- Check binary/env/config requirements; skip skills whose prerequisites are missing
-2. **Scoring** -- Deterministic scoring against message content using trigger patterns and intent matching
+2. **Scoring** -- Deterministic scoring against message content using keywords, tags, and regex patterns
 3. **Budget** -- Select top-scoring skills that fit within `SKILLS_MAX_TOKENS` prompt budget
 4. **Attenuation** -- Apply trust-based tool ceiling; installed skills lose access to dangerous tools
 
