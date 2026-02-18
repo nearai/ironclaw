@@ -28,7 +28,8 @@ impl Tool for JsonTool {
                     "description": "The JSON operation to perform"
                 },
                 "data": {
-                    "description": "The JSON data to operate on (string for parse, object otherwise)"
+                    "type": "string",
+                    "description": "JSON input string. For query/stringify/validate, pass serialized JSON."
                 },
                 "path": {
                     "type": "string",
@@ -64,7 +65,8 @@ impl Tool for JsonTool {
                 parsed
             }
             "stringify" => {
-                let json_str = serde_json::to_string_pretty(data).map_err(|e| {
+                let value = parse_json_input(data)?;
+                let json_str = serde_json::to_string_pretty(&value).map_err(|e| {
                     ToolError::ExecutionFailed(format!("failed to stringify: {}", e))
                 })?;
 
@@ -75,14 +77,14 @@ impl Tool for JsonTool {
                     ToolError::InvalidParameters("missing 'path' parameter for query".to_string())
                 })?;
 
-                query_json(data, path)?
+                let value = parse_json_input(data)?;
+                query_json(&value, path)?
             }
             "validate" => {
-                let is_valid = if let Some(s) = data.as_str() {
-                    serde_json::from_str::<serde_json::Value>(s).is_ok()
-                } else {
-                    true // Already a valid JSON value
-                };
+                let is_valid = data
+                    .as_str()
+                    .map(|s| serde_json::from_str::<serde_json::Value>(s).is_ok())
+                    .unwrap_or(false);
 
                 serde_json::json!({ "valid": is_valid })
             }
@@ -100,6 +102,14 @@ impl Tool for JsonTool {
     fn requires_sanitization(&self) -> bool {
         false // Internal tool, no external data
     }
+}
+
+fn parse_json_input(data: &serde_json::Value) -> Result<serde_json::Value, ToolError> {
+    let json_str = data
+        .as_str()
+        .ok_or_else(|| ToolError::InvalidParameters("'data' must be a JSON string".to_string()))?;
+    serde_json::from_str(json_str)
+        .map_err(|e| ToolError::InvalidParameters(format!("invalid JSON input: {}", e)))
 }
 
 /// Simple JSONPath-like query implementation.
@@ -145,6 +155,13 @@ mod tests {
     use super::*;
 
     #[test]
+    fn test_json_tool_schema_data_has_type() {
+        let tool = JsonTool;
+        let schema = tool.parameters_schema();
+        assert_eq!(schema["properties"]["data"]["type"], "string");
+    }
+
+    #[test]
     fn test_query_json() {
         let data = serde_json::json!({
             "foo": {
@@ -165,5 +182,19 @@ mod tests {
             query_json(&data, "foo.bar[2]").unwrap(),
             serde_json::json!(3)
         );
+    }
+
+    #[test]
+    fn test_parse_json_input_accepts_valid_json_string() {
+        let input = serde_json::json!("{\"ok\":true}");
+        let parsed = parse_json_input(&input).unwrap();
+        assert_eq!(parsed, serde_json::json!({"ok": true}));
+    }
+
+    #[test]
+    fn test_parse_json_input_rejects_invalid_json_string() {
+        let input = serde_json::json!("{not valid json}");
+        let err = parse_json_input(&input).unwrap_err();
+        assert!(err.to_string().contains("invalid JSON input"));
     }
 }
