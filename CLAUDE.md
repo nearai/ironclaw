@@ -401,6 +401,12 @@ LIBSQL_PATH=~/.ironclaw/ironclaw.db    # Default path
 # libSQL (Turso cloud sync)
 LIBSQL_URL=libsql://your-db.turso.io
 LIBSQL_AUTH_TOKEN=your-token            # Required when LIBSQL_URL is set
+
+# Vector store for workspace semantic search (optional)
+# When lancedb: uses LanceDB instead of pgvector/libsql for vector search
+VECTOR_BACKEND=builtin                   # default: use database built-in
+# VECTOR_BACKEND=lancedb                 # requires: cargo build --features lancedb
+# LANCEDB_PATH=~/.ironclaw/lancedb      # default when VECTOR_BACKEND=lancedb
 ```
 
 ### Current Limitations (libSQL backend)

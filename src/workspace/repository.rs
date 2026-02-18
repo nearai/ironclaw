@@ -347,6 +347,36 @@ impl Repository {
         Ok(())
     }
 
+    /// Get a chunk by ID.
+    pub async fn get_chunk_by_id(
+        &self,
+        chunk_id: Uuid,
+    ) -> Result<Option<MemoryChunk>, WorkspaceError> {
+        let conn = self.conn().await?;
+
+        let row = conn
+            .query_opt(
+                r#"
+                SELECT id, document_id, chunk_index, content, created_at
+                FROM memory_chunks WHERE id = $1
+                "#,
+                &[&chunk_id],
+            )
+            .await
+            .map_err(|e| WorkspaceError::SearchFailed {
+                reason: format!("Query failed: {}", e),
+            })?;
+
+        Ok(row.map(|r| MemoryChunk {
+            id: r.get("id"),
+            document_id: r.get("document_id"),
+            chunk_index: r.get("chunk_index"),
+            content: r.get("content"),
+            embedding: None,
+            created_at: r.get("created_at"),
+        }))
+    }
+
     /// Get chunks without embeddings for backfilling.
     pub async fn get_chunks_without_embeddings(
         &self,

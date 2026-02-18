@@ -108,6 +108,9 @@ open = "5"
 # The postgres feature provides ToSql/FromSql for postgres-types (shared by tokio-postgres)
 pgvector = { version = "0.4", features = ["postgres"], optional = true }
 
+# LanceDB vector store (optional alternative to pgvector/libsql for workspace search)
+lancedb = { version = "0.26", optional = true }
+
 # WASM sandbox for untrusted tool execution
 wasmtime = { version = "28", features = ["component-model"] }
 wasmtime-wasi = "28"  # WASI support for component model
@@ -153,6 +156,7 @@ tempfile = "3"
 
 [features]
 default = ["postgres", "libsql"]
+lancedb = ["dep:lancedb"]
 postgres = [
     "dep:deadpool-postgres",
     "dep:tokio-postgres",

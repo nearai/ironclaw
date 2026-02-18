@@ -251,7 +251,7 @@ This document tracks feature parity between IronClaw (Rust implementation) and O
 | Gemini embeddings | ✅ | ❌ | |
 | Local embeddings | ✅ | ❌ | |
 | SQLite-vec backend | ✅ | ❌ | IronClaw uses PostgreSQL |
-| LanceDB backend | ✅ | ❌ | |
+| LanceDB backend | ✅ | ✅ | VectorStore + LanceDbVectorStore, DbWithLanceVectorStore wrapper, VECTOR_BACKEND=lancedb |
 | QMD backend | ✅ | ❌ | |
 | Atomic reindexing | ✅ | ✅ | |
 | Embeddings batching | ✅ | ❌ | |

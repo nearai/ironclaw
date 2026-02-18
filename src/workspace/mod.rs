@@ -44,6 +44,8 @@ mod chunker;
 mod document;
 mod embeddings;
 pub mod hygiene;
+#[cfg(feature = "lancedb")]
+pub mod lancedb_store;
 #[cfg(feature = "postgres")]
 mod repository;
 mod search;
@@ -53,6 +55,8 @@ pub use document::{MemoryChunk, MemoryDocument, WorkspaceEntry, paths};
 pub use embeddings::{EmbeddingProvider, MockEmbeddings, NearAiEmbeddings, OpenAiEmbeddings};
 #[cfg(feature = "postgres")]
 pub use repository::Repository;
+#[cfg(feature = "lancedb")]
+pub use lancedb_store::{LanceDbVectorStore, VectorStore, DEFAULT_EMBEDDING_DIM};
 pub use search::{RankedResult, SearchConfig, SearchResult, reciprocal_rank_fusion};
 
 use std::sync::Arc;

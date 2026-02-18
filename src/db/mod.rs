@@ -18,6 +18,9 @@ pub mod libsql_backend;
 #[cfg(feature = "libsql")]
 pub mod libsql_migrations;
 
+#[cfg(all(feature = "lancedb", any(feature = "postgres", feature = "libsql")))]
+pub mod lancedb_wrapper;
+
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -48,7 +51,7 @@ use crate::workspace::{SearchConfig, SearchResult};
 pub async fn connect_from_config(
     config: &crate::config::DatabaseConfig,
 ) -> Result<Arc<dyn Database>, DatabaseError> {
-    match config.backend {
+    let inner: Arc<dyn Database> = match config.backend {
         #[cfg(feature = "libsql")]
         crate::config::DatabaseBackend::LibSql => {
             use secrecy::ExposeSecret as _;
@@ -75,7 +78,7 @@ pub async fn connect_from_config(
                     .map_err(|e| DatabaseError::Pool(e.to_string()))?
             };
             backend.run_migrations().await?;
-            Ok(Arc::new(backend))
+            Arc::new(backend)
         }
         #[cfg(feature = "postgres")]
         _ => {
@@ -83,13 +86,33 @@ pub async fn connect_from_config(
                 .await
                 .map_err(|e| DatabaseError::Pool(e.to_string()))?;
             pg.run_migrations().await?;
-            Ok(Arc::new(pg))
+            Arc::new(pg)
         }
         #[cfg(not(feature = "postgres"))]
-        _ => Err(DatabaseError::Pool(
-            "No database backend available. Enable 'postgres' or 'libsql' feature.".to_string(),
-        )),
+        _ => {
+            return Err(DatabaseError::Pool(
+                "No database backend available. Enable 'postgres' or 'libsql' feature."
+                    .to_string(),
+            ));
+        }
+    };
+
+    #[cfg(feature = "lancedb")]
+    if config.vector_backend == crate::config::VectorBackend::LanceDb {
+        let path = config
+            .lancedb_path
+            .clone()
+            .unwrap_or_else(crate::config::default_lancedb_path);
+        let store = crate::workspace::LanceDbVectorStore::new(path)
+            .await
+            .map_err(|e| DatabaseError::Pool(format!("LanceDB: {}", e)))?;
+        return Ok(Arc::new(lancedb_wrapper::DbWithLanceVectorStore::new(
+            inner,
+            Arc::new(store),
+        )) as Arc<dyn Database>);
     }
+
+    Ok(inner)
 }
 
 /// Backend-agnostic database trait.
@@ -527,6 +550,9 @@ pub trait Database: Send + Sync {
         agent_id: Option<Uuid>,
         limit: usize,
     ) -> Result<Vec<MemoryChunk>, WorkspaceError>;
+
+    /// Get a chunk by ID (for LanceDB update flow).
+    async fn get_chunk_by_id(&self, chunk_id: Uuid) -> Result<Option<MemoryChunk>, WorkspaceError>;
 
     // ==================== Workspace: Search ====================
 

@@ -386,7 +386,7 @@ async fn main() -> anyhow::Result<()> {
     #[cfg(feature = "libsql")]
     let mut libsql_db: Option<std::sync::Arc<libsql::Database>> = None;
 
-    let db: Option<Arc<dyn ironclaw::db::Database>> = if cli.no_db {
+    let mut inner_db: Option<Arc<dyn ironclaw::db::Database>> = if cli.no_db {
         tracing::warn!("Running without database connection");
         None
     } else {
@@ -441,6 +441,42 @@ async fn main() -> anyhow::Result<()> {
                 );
             }
         }
+    };
+
+    // Optionally wrap with LanceDB vector store for workspace semantic search
+    let db: Option<Arc<dyn ironclaw::db::Database>> = if let Some(inner) = inner_db.take() {
+        #[cfg(feature = "lancedb")]
+        {
+            if config.database.vector_backend == ironclaw::config::VectorBackend::LanceDb {
+                let path = config
+                    .database
+                    .lancedb_path
+                    .clone()
+                    .unwrap_or_else(ironclaw::config::default_lancedb_path);
+                let store = ironclaw::workspace::LanceDbVectorStore::new(path)
+                    .await
+                    .map_err(|e| anyhow::anyhow!("LanceDB: {}", e))?;
+                tracing::info!("LanceDB vector store connected for workspace search");
+                Some(Arc::new(ironclaw::db::lancedb_wrapper::DbWithLanceVectorStore::new(
+                    inner,
+                    Arc::new(store),
+                )) as Arc<dyn ironclaw::db::Database>)
+            } else {
+                Some(inner)
+            }
+        }
+        #[cfg(not(feature = "lancedb"))]
+        {
+            if config.database.vector_backend == ironclaw::config::VectorBackend::LanceDb {
+                anyhow::bail!(
+                    "VECTOR_BACKEND=lancedb requires the 'lancedb' feature. Build with: cargo build --features lancedb"
+                );
+            } else {
+                Some(inner)
+            }
+        }
+    } else {
+        None
     };
 
     // Post-init operations using the database
