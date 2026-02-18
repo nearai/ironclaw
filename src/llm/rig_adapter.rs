@@ -80,11 +80,16 @@ fn convert_messages(messages: &[ChatMessage]) -> (Option<String>, Vec<RigMessage
                     if !msg.content.is_empty() {
                         contents.push(AssistantContent::text(&msg.content));
                     }
-                    for tc in tool_calls {
-                        contents.push(AssistantContent::ToolCall(rig::message::ToolCall::new(
-                            tc.id.clone(),
-                            ToolFunction::new(tc.name.clone(), tc.arguments.clone()),
-                        )));
+                    for (idx, tc) in tool_calls.iter().enumerate() {
+                        let tool_call_id =
+                            normalized_tool_call_id(Some(tc.id.as_str()), history.len() + idx);
+                        contents.push(AssistantContent::ToolCall(
+                            rig::message::ToolCall::new(
+                                tool_call_id.clone(),
+                                ToolFunction::new(tc.name.clone(), tc.arguments.clone()),
+                            )
+                            .with_call_id(tool_call_id),
+                        ));
                     }
                     if let Ok(many) = OneOrMany::many(contents) {
                         history.push(RigMessage::Assistant {
@@ -101,11 +106,12 @@ fn convert_messages(messages: &[ChatMessage]) -> (Option<String>, Vec<RigMessage
             }
             crate::llm::Role::Tool => {
                 // Tool result message: wrap as User { ToolResult }
-                let tool_id = msg.tool_call_id.clone().unwrap_or_default();
+                let tool_id =
+                    normalized_tool_call_id(msg.tool_call_id.as_deref(), history.len());
                 history.push(RigMessage::User {
                     content: OneOrMany::one(UserContent::ToolResult(RigToolResult {
-                        id: tool_id,
-                        call_id: None,
+                        id: tool_id.clone(),
+                        call_id: Some(tool_id),
                         content: OneOrMany::one(ToolResultContent::text(&msg.content)),
                     })),
                 });
@@ -114,6 +120,14 @@ fn convert_messages(messages: &[ChatMessage]) -> (Option<String>, Vec<RigMessage
     }
 
     (preamble, history)
+}
+
+/// Responses-style providers require a non-empty tool call ID.
+fn normalized_tool_call_id(raw: Option<&str>, seed: usize) -> String {
+    match raw.map(str::trim).filter(|id| !id.is_empty()) {
+        Some(id) => id.to_string(),
+        None => format!("generated_tool_call_{seed}"),
+    }
 }
 
 /// Convert IronClaw tool definitions to rig-core format.
@@ -355,7 +369,13 @@ mod tests {
         assert_eq!(history.len(), 1);
         // Tool results become User messages in rig-core
         match &history[0] {
-            RigMessage::User { .. } => {}
+            RigMessage::User { content } => match content.first() {
+                UserContent::ToolResult(r) => {
+                    assert_eq!(r.id, "call_123");
+                    assert_eq!(r.call_id.as_deref(), Some("call_123"));
+                }
+                other => panic!("Expected tool result content, got: {:?}", other),
+            },
             other => panic!("Expected User message, got: {:?}", other),
         }
     }
@@ -375,8 +395,35 @@ mod tests {
             RigMessage::Assistant { content, .. } => {
                 // Should have both text and tool call
                 assert!(content.iter().count() >= 2);
+                for item in content.iter() {
+                    if let AssistantContent::ToolCall(tc) = item {
+                        assert_eq!(tc.call_id.as_deref(), Some("call_1"));
+                    }
+                }
             }
             other => panic!("Expected Assistant message, got: {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_convert_messages_tool_result_without_id_gets_fallback() {
+        let messages = vec![ChatMessage {
+            role: crate::llm::Role::Tool,
+            content: "result text".to_string(),
+            tool_call_id: None,
+            name: Some("search".to_string()),
+            tool_calls: None,
+        }];
+        let (_preamble, history) = convert_messages(&messages);
+        match &history[0] {
+            RigMessage::User { content } => match content.first() {
+                UserContent::ToolResult(r) => {
+                    assert!(r.id.starts_with("generated_tool_call_"));
+                    assert_eq!(r.call_id.as_deref(), Some(r.id.as_str()));
+                }
+                other => panic!("Expected tool result content, got: {:?}", other),
+            },
+            other => panic!("Expected User message, got: {:?}", other),
         }
     }
 
