@@ -105,8 +105,9 @@ impl ProviderCooldown {
 
     /// Activate cooldown at the given timestamp.
     fn activate_cooldown(&self, now_nanos: u64) {
+        // Ensure 0 remains a safe "not in cooldown" sentinel.
         self.cooldown_activated_nanos
-            .store(now_nanos, Ordering::Relaxed);
+            .store(now_nanos.max(1), Ordering::Relaxed);
     }
 
     /// Reset failure count and clear cooldown (called on success).
@@ -1039,6 +1040,15 @@ mod tests {
     fn empty_providers_returns_error() {
         let result = FailoverProvider::new(vec![]);
         assert!(result.is_err());
+    }
+
+    // Test: activate_cooldown(0) still activates cooldown (sentinel collision fix).
+    #[test]
+    fn cooldown_at_nanos_zero_still_activates() {
+        let cd = ProviderCooldown::new();
+        cd.activate_cooldown(0);
+        assert!(cd.is_in_cooldown(0, 1000));
+        assert_eq!(cd.cooldown_activated_nanos.load(Ordering::Relaxed), 1);
     }
 
     // Test: set_model propagates to all providers and active_model_name reflects change.
