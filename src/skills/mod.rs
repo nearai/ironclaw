@@ -198,10 +198,10 @@ pub struct LoadedSkill {
     pub compiled_patterns: Vec<Regex>,
     /// Pre-computed lowercased keywords for scoring (avoids per-message allocation).
     /// Derived from `manifest.activation.keywords` at load time — do not mutate independently.
-    pub(crate) lowercased_keywords: Vec<String>,
+    pub lowercased_keywords: Vec<String>,
     /// Pre-computed lowercased tags for scoring (avoids per-message allocation).
     /// Derived from `manifest.activation.tags` at load time — do not mutate independently.
-    pub(crate) lowercased_tags: Vec<String>,
+    pub lowercased_tags: Vec<String>,
 }
 
 impl LoadedSkill {

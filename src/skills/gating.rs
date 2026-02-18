@@ -22,10 +22,17 @@ pub async fn check_requirements(requirements: &GatingRequirements) -> GatingResu
     tokio::task::spawn_blocking(move || check_requirements_sync(&requirements))
         .await
         .unwrap_or_else(|e| {
-            tracing::error!("Gating check failed in spawn_blocking: {}", e);
+            let message = if e.is_panic() {
+                format!("gating check panicked: {}", e)
+            } else if e.is_cancelled() {
+                format!("gating check task was cancelled: {}", e)
+            } else {
+                format!("gating check failed to join: {}", e)
+            };
+            tracing::error!("{}", message);
             GatingResult {
                 passed: false,
-                failures: vec!["gating check panicked".to_string()],
+                failures: vec![message],
             }
         })
 }
