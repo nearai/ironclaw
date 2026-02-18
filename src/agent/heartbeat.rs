@@ -149,18 +149,23 @@ impl HeartbeatRunner {
         loop {
             interval.tick().await;
 
-            // Run memory hygiene (best-effort; never blocks the heartbeat loop).
-            let report = crate::workspace::hygiene::run_if_due(
-                &self.workspace,
-                &self.hygiene_config,
-            )
-            .await;
-            if report.had_work() {
-                tracing::info!(
-                    daily_logs_deleted = report.daily_logs_deleted,
-                    "heartbeat: memory hygiene deleted stale documents"
-                );
-            }
+            // Run memory hygiene in the background so it never delays the
+            // heartbeat checklist. Failures are logged inside run_if_due.
+            let hygiene_workspace = Arc::clone(&self.workspace);
+            let hygiene_config = self.hygiene_config.clone();
+            tokio::spawn(async move {
+                let report = crate::workspace::hygiene::run_if_due(
+                    &hygiene_workspace,
+                    &hygiene_config,
+                )
+                .await;
+                if report.had_work() {
+                    tracing::info!(
+                        daily_logs_deleted = report.daily_logs_deleted,
+                        "heartbeat: memory hygiene deleted stale documents"
+                    );
+                }
+            });
 
             match self.check_heartbeat().await {
                 HeartbeatResult::Ok => {

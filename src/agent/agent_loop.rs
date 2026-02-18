@@ -364,14 +364,7 @@ impl Agent {
                     let hygiene = self
                         .hygiene_config
                         .as_ref()
-                        .map(|h| crate::workspace::hygiene::HygieneConfig {
-                            enabled: h.enabled,
-                            retention_days: h.retention_days,
-                            cadence_hours: h.cadence_hours,
-                            state_dir: dirs::home_dir()
-                                .unwrap_or_else(|| std::path::PathBuf::from("."))
-                                .join(".ironclaw"),
-                        })
+                        .map(|h| h.to_workspace_config())
                         .unwrap_or_default();
 
                     Some(spawn_heartbeat(
