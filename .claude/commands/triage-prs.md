@@ -14,13 +14,16 @@ You are triaging all open PRs on this repository. Your job is to produce a prior
 Fetch every open PR with metadata:
 
 ```
-gh pr list --state open --limit 100 --json number,title,author,labels,additions,deletions,headRefName,createdAt,isDraft,reviewRequests,reviews,files
+gh pr list --state open --limit 100 --json number,title,author,labels,additions,deletions,headRefName,createdAt,updatedAt,isDraft,reviewRequests,reviews,files,body
 ```
 
-If `$ARGUMENTS` contains `--label=<X>` or `--author=<X>`, add the corresponding flags to the `gh pr list` command.
+If `$ARGUMENTS` contains `--label=<X>`, append `--label '<X>'` to the `gh pr list` command. If it contains `--author=<X>`, append `--author '<X>'` to the command.
 
-Also fetch recently merged PRs (last 7 days) to detect superseded/conflicting work. Use the `--search` flag with a date query (e.g., `merged:>=YYYY-MM-DD`).
+Also fetch recently merged PRs (last 7 days) to detect superseded/conflicting work:
 
+```
+gh pr list --state merged --search "merged:>=$(date -v-7d +%Y-%m-%d)" --limit 100 --json number,title,body,mergedAt
+```
 
 ## Step 2: Classify each PR by module
 
@@ -28,14 +31,16 @@ For each open PR, determine the primary module it touches by examining the `file
 
 | Category | Directories |
 |----------|------------|
-| **LLM & Inference** | `src/llm/`, `src/llm/provider.rs`, `src/llm/nearai.rs`, etc. |
+| **LLM & Inference** | `src/llm/` |
 | **Agent Core** | `src/agent/`, `src/skills/` |
 | **Tools** | `src/tools/`, `tools-src/` |
 | **Channels** | `src/channels/`, `channels-src/` |
 | **Storage & Memory** | `src/db/`, `src/workspace/`, `migrations/` |
 | **Security** | `src/safety/`, `src/secrets/` |
-| **Config & Setup** | `src/config.rs`, `src/setup/` |
+| **Config & Setup** | `src/config.rs`, `src/setup/`, `src/cli/` |
 | **Sandbox & Orchestration** | `src/sandbox/`, `src/orchestrator/`, `src/worker/` |
+| **Hooks & Extensions** | `src/hooks/`, `src/extensions/` |
+| **Context & History** | `src/context/`, `src/history/`, `src/estimation/`, `src/evaluation/` |
 | **Web Gateway** | `src/channels/web/` |
 | **CI/CD & Docs** | `.github/`, `README.md`, `CLAUDE.md`, `*.md` (no src) |
 | **Other** | Anything else |
@@ -55,7 +60,7 @@ For each PR, determine its review status:
 Also check:
 - CI status: `gh pr checks {number}` — PASS / FAIL / NONE
 - Draft status: is the PR marked as draft?
-- Staleness: how many days since last push/comment?
+- Staleness: how many days since `updatedAt`?
 
 ## Step 4: Determine scope and risk
 
@@ -63,7 +68,7 @@ Classify each PR by scope:
 
 | Scope | Criteria |
 |-------|----------|
-| **Tiny** | <50 lines changed, 1-2 files |
+| **Tiny** | <50 lines changed (additions + deletions), 1-2 files |
 | **Small** | 50-200 lines, 1-5 files |
 | **Medium** | 200-500 lines, 3-10 files |
 | **Large** | 500-2000 lines, 5-20 files |
