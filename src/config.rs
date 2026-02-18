@@ -692,7 +692,7 @@ impl LlmConfig {
             LlmBackend::NearAi
         };
 
-        // Always resolve NEAR AI config (used as fallback and for embeddings)
+        // Resolve NEAR AI config only when backend is NearAi (or when explicitly configured)
         let nearai_api_key = optional_env("NEARAI_API_KEY")?.map(SecretString::from);
 
         let api_mode = if let Some(mode_str) = optional_env("NEARAI_API_MODE")? {
@@ -786,7 +786,9 @@ impl LlmConfig {
                     hint: "Set LLM_BASE_URL when LLM_BACKEND=openai_compatible".to_string(),
                 })?;
             let api_key = optional_env("LLM_API_KEY")?.map(SecretString::from);
-            let model = optional_env("LLM_MODEL")?.unwrap_or_else(|| "default".to_string());
+            let model = optional_env("LLM_MODEL")?
+                .or_else(|| settings.selected_model.clone())
+                .unwrap_or_else(|| "default".to_string());
             Some(OpenAiCompatibleConfig {
                 base_url,
                 api_key,
@@ -862,7 +864,7 @@ impl EmbeddingsConfig {
                 key: "EMBEDDING_ENABLED".to_string(),
                 message: format!("must be 'true' or 'false': {e}"),
             })?
-            .unwrap_or_else(|| settings.embeddings.enabled || openai_api_key.is_some());
+            .unwrap_or(settings.embeddings.enabled);
 
         Ok(Self {
             enabled,
@@ -1858,4 +1860,166 @@ where
         })
         .transpose()
         .map(|opt| opt.unwrap_or(default))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::settings::{EmbeddingsSettings, Settings};
+    use std::sync::Mutex;
+
+    /// Serializes env-mutating tests to prevent parallel races.
+    static ENV_MUTEX: Mutex<()> = Mutex::new(());
+
+    /// Clear all embedding-related env vars.
+    fn clear_embedding_env() {
+        // SAFETY: Only called under ENV_MUTEX in tests. No other threads
+        // observe these vars while the lock is held.
+        unsafe {
+            std::env::remove_var("EMBEDDING_ENABLED");
+            std::env::remove_var("EMBEDDING_PROVIDER");
+            std::env::remove_var("EMBEDDING_MODEL");
+            std::env::remove_var("OPENAI_API_KEY");
+        }
+    }
+
+    /// Clear all openai-compatible-related env vars.
+    fn clear_openai_compatible_env() {
+        // SAFETY: Only called under ENV_MUTEX in tests.
+        unsafe {
+            std::env::remove_var("LLM_BACKEND");
+            std::env::remove_var("LLM_BASE_URL");
+            std::env::remove_var("LLM_MODEL");
+        }
+    }
+
+    #[test]
+    fn embeddings_disabled_not_overridden_by_openai_key() {
+        let _guard = ENV_MUTEX.lock().expect("env mutex poisoned");
+
+        clear_embedding_env();
+        // SAFETY: Under ENV_MUTEX, no concurrent env access.
+        unsafe {
+            std::env::set_var("OPENAI_API_KEY", "sk-test-key-for-issue-129");
+        }
+
+        let settings = Settings {
+            embeddings: EmbeddingsSettings {
+                enabled: false,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+
+        let config = EmbeddingsConfig::resolve(&settings).expect("resolve should succeed");
+        assert!(
+            !config.enabled,
+            "embeddings should remain disabled when settings.embeddings.enabled=false, \
+             even when OPENAI_API_KEY is set (issue #129)"
+        );
+
+        // SAFETY: Under ENV_MUTEX.
+        unsafe {
+            std::env::remove_var("OPENAI_API_KEY");
+        }
+    }
+
+    #[test]
+    fn embeddings_enabled_from_settings() {
+        let _guard = ENV_MUTEX.lock().expect("env mutex poisoned");
+        clear_embedding_env();
+
+        let settings = Settings {
+            embeddings: EmbeddingsSettings {
+                enabled: true,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+
+        let config = EmbeddingsConfig::resolve(&settings).expect("resolve should succeed");
+        assert!(
+            config.enabled,
+            "embeddings should be enabled when settings say so"
+        );
+    }
+
+    #[test]
+    fn embeddings_env_override_takes_precedence() {
+        let _guard = ENV_MUTEX.lock().expect("env mutex poisoned");
+
+        clear_embedding_env();
+        // SAFETY: Under ENV_MUTEX.
+        unsafe {
+            std::env::set_var("EMBEDDING_ENABLED", "true");
+        }
+
+        let settings = Settings {
+            embeddings: EmbeddingsSettings {
+                enabled: false,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+
+        let config = EmbeddingsConfig::resolve(&settings).expect("resolve should succeed");
+        assert!(
+            config.enabled,
+            "EMBEDDING_ENABLED=true env var should override settings"
+        );
+
+        // SAFETY: Under ENV_MUTEX.
+        unsafe {
+            std::env::remove_var("EMBEDDING_ENABLED");
+        }
+    }
+
+    #[test]
+    fn openai_compatible_uses_selected_model_when_llm_model_unset() {
+        let _guard = ENV_MUTEX.lock().expect("env mutex poisoned");
+        clear_openai_compatible_env();
+
+        let settings = Settings {
+            llm_backend: Some("openai_compatible".to_string()),
+            openai_compatible_base_url: Some("https://openrouter.ai/api/v1".to_string()),
+            selected_model: Some("openai/gpt-5.1-codex".to_string()),
+            ..Default::default()
+        };
+
+        let cfg = LlmConfig::resolve(&settings).expect("resolve should succeed");
+        let compat = cfg
+            .openai_compatible
+            .expect("openai-compatible config should be present");
+
+        assert_eq!(compat.model, "openai/gpt-5.1-codex");
+    }
+
+    #[test]
+    fn openai_compatible_llm_model_env_overrides_selected_model() {
+        let _guard = ENV_MUTEX.lock().expect("env mutex poisoned");
+        clear_openai_compatible_env();
+        // SAFETY: Under ENV_MUTEX.
+        unsafe {
+            std::env::set_var("LLM_MODEL", "openai/gpt-5-codex");
+        }
+
+        let settings = Settings {
+            llm_backend: Some("openai_compatible".to_string()),
+            openai_compatible_base_url: Some("https://openrouter.ai/api/v1".to_string()),
+            selected_model: Some("openai/gpt-5.1-codex".to_string()),
+            ..Default::default()
+        };
+
+        let cfg = LlmConfig::resolve(&settings).expect("resolve should succeed");
+        let compat = cfg
+            .openai_compatible
+            .expect("openai-compatible config should be present");
+
+        assert_eq!(compat.model, "openai/gpt-5-codex");
+
+        // SAFETY: Under ENV_MUTEX.
+        unsafe {
+            std::env::remove_var("LLM_MODEL");
+        }
+    }
 }

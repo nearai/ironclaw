@@ -14,9 +14,6 @@ pub enum BenchError {
     #[error("Task {task_id} failed: {reason}")]
     TaskFailed { task_id: String, reason: String },
 
-    #[error("Timeout after {seconds}s for task {task_id}")]
-    Timeout { task_id: String, seconds: u64 },
-
     #[error("Scoring error for task {task_id}: {reason}")]
     Scoring { task_id: String, reason: String },
 
@@ -31,10 +28,4 @@ pub enum BenchError {
 
     #[error("Agent error: {0}")]
     Agent(#[from] ironclaw::Error),
-
-    #[error("Results directory error: {0}")]
-    ResultsDir(String),
-
-    #[error("Resume failed: no completed tasks found in {path}")]
-    ResumeEmpty { path: PathBuf },
 }

@@ -1,7 +1,6 @@
 use std::collections::HashSet;
 use std::io::{BufRead, Write};
 use std::path::{Path, PathBuf};
-use std::time::Duration;
 
 use chrono::{DateTime, Utc};
 use uuid::Uuid;
@@ -21,12 +20,6 @@ pub struct Trace {
     pub turns: u32,
     pub hit_iteration_limit: bool,
     pub hit_timeout: bool,
-}
-
-impl Trace {
-    pub fn wall_time(&self) -> Duration {
-        Duration::from_millis(self.wall_time_ms)
-    }
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -73,6 +66,7 @@ pub struct RunResult {
 
 impl RunResult {
     /// Build aggregate from individual task results.
+    #[allow(clippy::too_many_arguments)]
     pub fn from_tasks(
         run_id: Uuid,
         suite_id: &str,
@@ -112,10 +106,6 @@ impl RunResult {
             started_at,
             finished_at: Utc::now(),
         }
-    }
-
-    pub fn total_wall_time(&self) -> Duration {
-        Duration::from_millis(self.total_wall_time_ms)
     }
 }
 

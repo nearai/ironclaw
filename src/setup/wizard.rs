@@ -1530,6 +1530,18 @@ impl SetupWizard {
                 env_vars.push(("LIBSQL_URL", url.clone()));
             }
 
+            // LLM bootstrap vars: same chicken-and-egg problem as DATABASE_BACKEND.
+            // Config::from_env() needs the backend before the DB is connected.
+            if let Some(ref backend) = self.settings.llm_backend {
+                env_vars.push(("LLM_BACKEND", backend.clone()));
+            }
+            if let Some(ref url) = self.settings.openai_compatible_base_url {
+                env_vars.push(("LLM_BASE_URL", url.clone()));
+            }
+            if let Some(ref url) = self.settings.ollama_base_url {
+                env_vars.push(("OLLAMA_BASE_URL", url.clone()));
+            }
+
             if !env_vars.is_empty() {
                 let pairs: Vec<(&str, &str)> =
                     env_vars.iter().map(|(k, v)| (*k, v.as_str())).collect();
@@ -1764,8 +1776,10 @@ async fn fetch_anthropic_models(cached_key: Option<&str>) -> Vec<(String, String
 /// Returns `(model_id, display_label)` pairs. Falls back to static defaults on error.
 async fn fetch_openai_models(cached_key: Option<&str>) -> Vec<(String, String)> {
     let static_defaults = vec![
+        ("gpt-5".into(), "GPT-5 (flagship)".into()),
+        ("gpt-5-mini".into(), "GPT-5 Mini (fast)".into()),
+        ("gpt-4.1".into(), "GPT-4.1".into()),
         ("gpt-4o".into(), "GPT-4o".into()),
-        ("gpt-4o-mini".into(), "GPT-4o Mini (fast)".into()),
         ("o3".into(), "o3 (reasoning)".into()),
     ];
 
@@ -1800,19 +1814,12 @@ async fn fetch_openai_models(cached_key: Option<&str>) -> Vec<(String, String)> 
         data: Vec<ModelEntry>,
     }
 
-    // Prefixes that indicate chat-relevant models
-    let chat_prefixes = ["gpt-4", "gpt-3.5", "o1", "o3", "o4", "chatgpt"];
-
     match resp.json::<ModelsResponse>().await {
         Ok(body) => {
             let mut models: Vec<(String, String)> = body
                 .data
                 .into_iter()
-                .filter(|m| {
-                    chat_prefixes.iter().any(|p| m.id.starts_with(p))
-                        && !m.id.contains("realtime")
-                        && !m.id.contains("audio")
-                })
+                .filter(|m| is_openai_chat_model(&m.id))
                 .map(|m| {
                     let label = m.id.clone();
                     (m.id, label)
@@ -1821,11 +1828,72 @@ async fn fetch_openai_models(cached_key: Option<&str>) -> Vec<(String, String)> 
             if models.is_empty() {
                 return static_defaults;
             }
-            models.sort_by(|a, b| a.0.cmp(&b.0));
+            sort_openai_models(&mut models);
             models
         }
         Err(_) => static_defaults,
     }
+}
+
+fn is_openai_chat_model(model_id: &str) -> bool {
+    let id = model_id.to_ascii_lowercase();
+
+    let is_chat_family = id.starts_with("gpt-")
+        || id.starts_with("chatgpt-")
+        || id.starts_with("o1")
+        || id.starts_with("o3")
+        || id.starts_with("o4")
+        || id.starts_with("o5");
+
+    let is_non_chat_variant = id.contains("realtime")
+        || id.contains("audio")
+        || id.contains("transcribe")
+        || id.contains("tts")
+        || id.contains("embedding")
+        || id.contains("moderation")
+        || id.contains("image");
+
+    is_chat_family && !is_non_chat_variant
+}
+
+fn openai_model_priority(model_id: &str) -> usize {
+    let id = model_id.to_ascii_lowercase();
+
+    const EXACT_PRIORITY: &[&str] = &[
+        "gpt-5",
+        "gpt-5-mini",
+        "gpt-5-nano",
+        "o3",
+        "o4-mini",
+        "o1",
+        "gpt-4.1",
+        "gpt-4.1-mini",
+        "gpt-4o",
+        "gpt-4o-mini",
+    ];
+    if let Some(pos) = EXACT_PRIORITY.iter().position(|m| id == *m) {
+        return pos;
+    }
+
+    const PREFIX_PRIORITY: &[&str] = &[
+        "gpt-5-", "o3-", "o4-", "o1-", "gpt-4.1-", "gpt-4o-", "gpt-3.5-", "chatgpt-",
+    ];
+    if let Some(pos) = PREFIX_PRIORITY
+        .iter()
+        .position(|prefix| id.starts_with(prefix))
+    {
+        return EXACT_PRIORITY.len() + pos;
+    }
+
+    EXACT_PRIORITY.len() + PREFIX_PRIORITY.len() + 1
+}
+
+fn sort_openai_models(models: &mut [(String, String)]) {
+    models.sort_by(|a, b| {
+        openai_model_priority(&a.0)
+            .cmp(&openai_model_priority(&b.0))
+            .then_with(|| a.0.cmp(&b.0))
+    });
 }
 
 /// Fetch installed models from a local Ollama instance.
@@ -2158,9 +2226,46 @@ mod tests {
         let _guard = EnvGuard::clear("OPENAI_API_KEY");
         let models = fetch_openai_models(None).await;
         assert!(!models.is_empty());
+        assert_eq!(models[0].0, "gpt-5");
         assert!(
             models.iter().any(|(id, _)| id.contains("gpt")),
             "static defaults should include a GPT model"
+        );
+    }
+
+    #[test]
+    fn test_is_openai_chat_model_includes_gpt5_and_filters_non_chat_variants() {
+        assert!(is_openai_chat_model("gpt-5"));
+        assert!(is_openai_chat_model("gpt-5-mini-2026-01-01"));
+        assert!(is_openai_chat_model("o3-2025-04-16"));
+        assert!(!is_openai_chat_model("chatgpt-image-latest"));
+        assert!(!is_openai_chat_model("gpt-4o-realtime-preview"));
+        assert!(!is_openai_chat_model("gpt-4o-mini-transcribe"));
+        assert!(!is_openai_chat_model("text-embedding-3-large"));
+    }
+
+    #[test]
+    fn test_sort_openai_models_prioritizes_best_models_first() {
+        let mut models = vec![
+            ("gpt-4o-mini".to_string(), "gpt-4o-mini".to_string()),
+            ("gpt-5-mini".to_string(), "gpt-5-mini".to_string()),
+            ("o3".to_string(), "o3".to_string()),
+            ("gpt-4.1".to_string(), "gpt-4.1".to_string()),
+            ("gpt-5".to_string(), "gpt-5".to_string()),
+        ];
+
+        sort_openai_models(&mut models);
+
+        let ordered: Vec<String> = models.into_iter().map(|(id, _)| id).collect();
+        assert_eq!(
+            ordered,
+            vec![
+                "gpt-5".to_string(),
+                "gpt-5-mini".to_string(),
+                "o3".to_string(),
+                "gpt-4.1".to_string(),
+                "gpt-4o-mini".to_string(),
+            ]
         );
     }
 
