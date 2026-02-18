@@ -1,0 +1,11 @@
+task_timeout = "600s"
+parallelism = 1
+max_iterations = 30
+
+[[matrix]]
+label = "default"
+
+[suite_config]
+dataset_path = "benchmarks/data/swe-bench-lite.jsonl"
+workspace_dir = "/tmp/swe-bench-workspace"
+use_docker = true

@@ -6,14 +6,9 @@ use chrono::Utc;
 use tokio::sync::Mutex;
 use uuid::Uuid;
 
-use ironclaw::agent::{Agent, AgentDeps};
-use ironclaw::channels::{ChannelManager, IncomingMessage};
-use ironclaw::config::AgentConfig;
 use ironclaw::llm::LlmProvider;
-use ironclaw::safety::SafetyLayer;
-use ironclaw::tools::ToolRegistry;
 
-use crate::channel::BenchChannel;
+use crate::agentic::AgenticLoop;
 use crate::config::{BenchConfig, MatrixEntry};
 use crate::error::BenchError;
 use crate::instrumented_llm::InstrumentedLlm;
@@ -21,40 +16,39 @@ use crate::results::{
     RunResult, TaskResult, Trace, append_task_result, completed_task_ids, run_dir, run_json_path,
     tasks_jsonl_path, write_run_result, write_task_results,
 };
-use crate::suite::{BenchSuite, BenchTask, ConversationTurn, TaskSubmission, TurnRole};
+use crate::suite::{BenchSuite, BenchTask, TaskSubmission};
 
 /// Parameters for running a single task in isolation.
-struct TaskRunParams<'a> {
-    task: &'a BenchTask,
-    suite_id: &'a str,
-    config_label: &'a str,
+struct TaskRunParams {
+    task_id: String,
+    suite_id: String,
+    config_label: String,
     llm: Arc<dyn LlmProvider>,
-    safety: Arc<SafetyLayer>,
     timeout: std::time::Duration,
-    additional_tools: &'a [Arc<dyn ironclaw::tools::Tool>],
+    max_iterations: usize,
+    task_tools: Vec<Arc<dyn ironclaw::tools::Tool>>,
+    system_prompt: String,
+    user_prompt: String,
 }
 
-/// Orchestrates benchmark execution: loads tasks, runs agent per task,
-/// scores results, writes JSONL output.
+const DEFAULT_SYSTEM_PROMPT: &str = "\
+You are an AI assistant completing a benchmark task. \
+Use the provided tools to accomplish the task described in the user message.";
+
+/// Orchestrates benchmark execution: loads tasks, runs the agentic loop per
+/// task, scores results, writes JSONL output.
 pub struct BenchRunner {
     suite: Arc<dyn BenchSuite>,
     config: BenchConfig,
     llm: Arc<dyn LlmProvider>,
-    safety: Arc<SafetyLayer>,
 }
 
 impl BenchRunner {
-    pub fn new(
-        suite: Box<dyn BenchSuite>,
-        config: BenchConfig,
-        llm: Arc<dyn LlmProvider>,
-        safety: Arc<SafetyLayer>,
-    ) -> Self {
+    pub fn new(suite: Box<dyn BenchSuite>, config: BenchConfig, llm: Arc<dyn LlmProvider>) -> Self {
         Self {
             suite: Arc::from(suite),
             config,
             llm,
-            safety,
         }
     }
 
@@ -123,6 +117,11 @@ impl BenchRunner {
         let total_tasks = tasks.len() + completed.len();
         let model_label = matrix.model.as_deref().unwrap_or(self.llm.model_name());
         let commit_hash = git_short_hash();
+        let system_prompt = self
+            .suite
+            .system_prompt()
+            .unwrap_or_else(|| DEFAULT_SYSTEM_PROMPT.to_string());
+
         tracing::info!(
             "[{} @ {}] Running {} tasks for suite '{}' (run: {})",
             model_label,
@@ -138,7 +137,6 @@ impl BenchRunner {
 
         if self.config.parallelism <= 1 {
             // Sequential execution
-            let additional_tools = self.suite.additional_tools();
             for (i, task) in tasks.iter().enumerate() {
                 tracing::info!(
                     "[{}/{}] Running task: {}",
@@ -159,14 +157,18 @@ impl BenchRunner {
                     all_results.lock().await.push(result);
                     continue;
                 }
+
+                let user_prompt = build_user_prompt(task);
                 let params = TaskRunParams {
-                    task,
-                    suite_id: self.suite.id(),
-                    config_label: &matrix.label,
+                    task_id: task.id.clone(),
+                    suite_id: self.suite.id().to_string(),
+                    config_label: matrix.label.clone(),
                     llm: Arc::clone(&self.llm),
-                    safety: Arc::clone(&self.safety),
                     timeout: task.timeout.unwrap_or(self.config.task_timeout),
-                    additional_tools: &additional_tools,
+                    max_iterations: self.config.max_iterations,
+                    task_tools: self.suite.task_tools(task),
+                    system_prompt: system_prompt.clone(),
+                    user_prompt,
                 };
                 let result = run_task_isolated(params).await;
                 if let Err(e) = self.suite.teardown_task(task).await {
@@ -178,8 +180,6 @@ impl BenchRunner {
         } else {
             // Parallel execution with bounded concurrency
             let semaphore = Arc::new(tokio::sync::Semaphore::new(self.config.parallelism));
-            let shared_tools: Arc<[Arc<dyn ironclaw::tools::Tool>]> =
-                Arc::from(self.suite.additional_tools());
 
             let mut handles = Vec::new();
             for (i, task) in tasks.into_iter().enumerate() {
@@ -187,12 +187,12 @@ impl BenchRunner {
                 let suite = Arc::clone(&self.suite);
                 let config_label = matrix.label.clone();
                 let llm = Arc::clone(&self.llm);
-                let safety = Arc::clone(&self.safety);
                 let timeout = task.timeout.unwrap_or(self.config.task_timeout);
+                let max_iterations = self.config.max_iterations;
                 let results_ref = Arc::clone(&all_results);
                 let completed_count = completed.len();
                 let total = total_tasks;
-                let additional_tools = Arc::clone(&shared_tools);
+                let sys_prompt = system_prompt.clone();
 
                 handles.push(tokio::spawn(async move {
                     let _permit = match sem.acquire().await {
@@ -220,15 +220,20 @@ impl BenchRunner {
                         results_ref.lock().await.push(result);
                         return;
                     }
+
+                    let user_prompt = build_user_prompt(&task);
                     let suite_id = suite.id().to_string();
+                    let task_tools = suite.task_tools(&task);
                     let params = TaskRunParams {
-                        task: &task,
-                        suite_id: &suite_id,
-                        config_label: &config_label,
+                        task_id: task.id.clone(),
+                        suite_id,
+                        config_label,
                         llm,
-                        safety,
                         timeout,
-                        additional_tools: &additional_tools,
+                        max_iterations,
+                        task_tools,
+                        system_prompt: sys_prompt,
+                        user_prompt,
                     };
                     let result = run_task_isolated(params).await;
                     if let Err(e) = suite.teardown_task(&task).await {
@@ -323,28 +328,30 @@ impl BenchRunner {
     }
 }
 
-/// Run a single benchmark task in complete isolation.
+/// Build the user prompt from a task, including context if present.
+fn build_user_prompt(task: &BenchTask) -> String {
+    if let Some(ref ctx) = task.context {
+        format!("{}\n\nContext:\n{}", task.prompt, ctx)
+    } else {
+        task.prompt.clone()
+    }
+}
+
+/// Run a single benchmark task using the direct agentic loop.
 ///
-/// Creates a fresh Agent + BenchChannel + InstrumentedLlm for the task,
-/// injects the prompt, waits for the response, and returns the result.
-///
-/// # Current limitations
-///
-/// - **Single-turn only**: After the first assistant response, `/quit` is sent.
-///   Multi-turn suites (e.g., Tau-bench's `next_user_message()`) are not yet wired.
-/// - **Resources not injected**: `BenchTask.resources` (e.g., GAIA file attachments)
-///   are not included in the prompt or made available via the workspace.
-/// - **Conversation not captured**: `TaskSubmission.conversation` is always empty,
-///   which prevents multi-turn scoring hooks from working.
-async fn run_task_isolated(params: TaskRunParams<'_>) -> TaskResult {
+/// Creates an InstrumentedLlm + AgenticLoop, runs until completion or timeout,
+/// and returns the TaskResult.
+async fn run_task_isolated(params: TaskRunParams) -> TaskResult {
     let TaskRunParams {
-        task,
+        task_id,
         suite_id,
         config_label,
         llm,
-        safety,
         timeout,
-        additional_tools,
+        max_iterations,
+        task_tools,
+        system_prompt,
+        user_prompt,
     } = params;
 
     let started_at = Utc::now();
@@ -353,151 +360,86 @@ async fn run_task_isolated(params: TaskRunParams<'_>) -> TaskResult {
     // Wrap LLM with instrumentation
     let instrumented = Arc::new(InstrumentedLlm::new(llm));
 
-    // Create bench channel
-    let (bench_channel, msg_tx) = BenchChannel::new();
-    let capture = bench_channel.capture();
+    let agentic = AgenticLoop::new(
+        instrumented.clone() as Arc<dyn LlmProvider>,
+        task_tools,
+        max_iterations,
+    );
 
-    // Build tool registry
-    let tools = Arc::new(ToolRegistry::new());
-    tools.register_builtin_tools();
-
-    // Register additional suite-specific tools
-    for tool in additional_tools {
-        tools.register(Arc::clone(tool)).await;
-    }
-
-    // Build agent config (minimal, headless)
-    let agent_config = AgentConfig {
-        name: format!("bench-{}", task.id),
-        max_parallel_jobs: 1,
-        job_timeout: timeout,
-        stuck_threshold: timeout,
-        repair_check_interval: timeout + std::time::Duration::from_secs(999),
-        max_repair_attempts: 0,
-        use_planning: false,
-        session_idle_timeout: timeout,
-        allow_local_tools: true,
-        max_cost_per_day_cents: None,
-        max_actions_per_hour: None,
-    };
-
-    let cost_guard = Arc::new(ironclaw::agent::cost_guard::CostGuard::new(
-        ironclaw::agent::cost_guard::CostGuardConfig::default(),
-    ));
-
-    let deps = AgentDeps {
-        store: None,
-        llm: instrumented.clone() as Arc<dyn LlmProvider>,
-        cheap_llm: None,
-        safety,
-        tools,
-        workspace: None,
-        extension_manager: None,
-        hooks: Arc::new(ironclaw::hooks::HookRegistry::new()),
-        cost_guard,
-    };
-
-    let mut channels = ChannelManager::new();
-    channels.add(Box::new(bench_channel));
-
-    let agent = Agent::new(agent_config, deps, channels, None, None, None, None);
-
-    // Build the full prompt with context
-    let full_prompt = if let Some(ref ctx) = task.context {
-        format!("{}\n\nContext:\n{}", task.prompt, ctx)
-    } else {
-        task.prompt.clone()
-    };
-
-    // Inject the task prompt
-    let incoming = IncomingMessage::new("bench", "bench-user", &full_prompt);
-    if msg_tx.send(incoming).await.is_err() {
-        return make_error_result(
-            task,
-            suite_id,
-            config_label,
-            started_at,
-            "failed to send prompt",
-        );
-    }
-
-    // Record prompt in conversation
-    {
-        let mut cap = capture.lock().await;
-        cap.conversation.push(ConversationTurn {
-            role: TurnRole::User,
-            content: full_prompt,
-        });
-    }
-
-    // Run agent with timeout.
-    // After the first response, send /quit to end the session.
-    let quit_tx = msg_tx.clone();
-    let capture_for_quit = Arc::clone(&capture);
-    let quit_handle = tokio::spawn(async move {
-        // Poll for first response
-        loop {
-            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-            let cap = capture_for_quit.lock().await;
-            if !cap.responses.is_empty() {
-                break;
-            }
-        }
-        // Give a small grace period for any final status events
-        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
-        let quit = IncomingMessage::new("bench", "bench-user", "/quit");
-        let _ = quit_tx.send(quit).await;
-    });
-
-    let agent_result = tokio::time::timeout(timeout, agent.run()).await;
-
-    quit_handle.abort();
+    let agentic_result =
+        tokio::time::timeout(timeout, agentic.run(&system_prompt, &user_prompt)).await;
 
     let wall_time = start.elapsed();
-    let hit_timeout = agent_result.is_err();
 
-    if let Ok(Err(e)) = &agent_result {
-        tracing::warn!("Agent error for task {}: {}", task.id, e);
-    }
+    match agentic_result {
+        Ok(Ok(result)) => {
+            let trace = Trace {
+                wall_time_ms: wall_time.as_millis() as u64,
+                llm_calls: instrumented.call_count(),
+                input_tokens: instrumented.total_input_tokens(),
+                output_tokens: instrumented.total_output_tokens(),
+                estimated_cost_usd: instrumented.estimated_cost(),
+                tool_calls: result.tool_calls,
+                turns: result.iterations as u32,
+                hit_iteration_limit: result.hit_iteration_limit,
+                hit_timeout: false,
+            };
 
-    // Extract results from capture
-    let cap = capture.lock().await;
-    let response = cap.responses.last().cloned().unwrap_or_default();
-
-    let trace = Trace {
-        wall_time_ms: wall_time.as_millis() as u64,
-        llm_calls: instrumented.call_count(),
-        input_tokens: instrumented.total_input_tokens(),
-        output_tokens: instrumented.total_output_tokens(),
-        estimated_cost_usd: instrumented.estimated_cost(),
-        tool_calls: cap.tool_calls.clone(),
-        turns: cap.responses.len() as u32,
-        hit_iteration_limit: false,
-        hit_timeout,
-    };
-
-    let error = if hit_timeout {
-        Some(format!("timeout after {}s", timeout.as_secs()))
-    } else if let Ok(Err(e)) = &agent_result {
-        Some(e.to_string())
-    } else {
-        None
-    };
-
-    TaskResult {
-        task_id: task.id.clone(),
-        suite_id: suite_id.to_string(),
-        score: crate::suite::BenchScore {
-            value: 0.0,
-            label: "pending".to_string(),
-            details: None,
-        },
-        trace,
-        response,
-        started_at,
-        finished_at: Utc::now(),
-        config_label: config_label.to_string(),
-        error,
+            TaskResult {
+                task_id,
+                suite_id,
+                score: crate::suite::BenchScore {
+                    value: 0.0,
+                    label: "pending".to_string(),
+                    details: None,
+                },
+                trace,
+                response: result.response,
+                started_at,
+                finished_at: Utc::now(),
+                config_label,
+                error: None,
+            }
+        }
+        Ok(Err(e)) => {
+            tracing::warn!("Agentic loop error for task {task_id}: {e}");
+            make_error_result_raw(
+                &task_id,
+                &suite_id,
+                &config_label,
+                started_at,
+                &e.to_string(),
+            )
+        }
+        Err(_) => {
+            tracing::warn!("Task {task_id} timed out after {}s", timeout.as_secs());
+            let trace = Trace {
+                wall_time_ms: wall_time.as_millis() as u64,
+                llm_calls: instrumented.call_count(),
+                input_tokens: instrumented.total_input_tokens(),
+                output_tokens: instrumented.total_output_tokens(),
+                estimated_cost_usd: instrumented.estimated_cost(),
+                tool_calls: vec![],
+                turns: 0,
+                hit_iteration_limit: false,
+                hit_timeout: true,
+            };
+            TaskResult {
+                task_id,
+                suite_id,
+                score: crate::suite::BenchScore {
+                    value: 0.0,
+                    label: "pending".to_string(),
+                    details: None,
+                },
+                trace,
+                response: String::new(),
+                started_at,
+                finished_at: Utc::now(),
+                config_label,
+                error: Some(format!("timeout after {}s", timeout.as_secs())),
+            }
+        }
     }
 }
 
@@ -508,8 +450,18 @@ fn make_error_result(
     started_at: chrono::DateTime<Utc>,
     reason: &str,
 ) -> TaskResult {
+    make_error_result_raw(&task.id, suite_id, config_label, started_at, reason)
+}
+
+fn make_error_result_raw(
+    task_id: &str,
+    suite_id: &str,
+    config_label: &str,
+    started_at: chrono::DateTime<Utc>,
+    reason: &str,
+) -> TaskResult {
     TaskResult {
-        task_id: task.id.clone(),
+        task_id: task_id.to_string(),
         suite_id: suite_id.to_string(),
         score: crate::suite::BenchScore::fail(reason),
         trace: Trace {

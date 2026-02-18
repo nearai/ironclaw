@@ -140,6 +140,22 @@ pub trait BenchSuite: Send + Sync {
         vec![]
     }
 
+    /// Tools scoped to a specific task.
+    ///
+    /// Override this to configure per-task working directories, base dirs, etc.
+    /// Default: delegates to `additional_tools()`.
+    fn task_tools(&self, _task: &BenchTask) -> Vec<Arc<dyn ironclaw::tools::Tool>> {
+        self.additional_tools()
+    }
+
+    /// Optional system prompt for the LLM.
+    ///
+    /// Override to provide a suite-specific persona. Default: None (runner
+    /// uses a generic system prompt).
+    fn system_prompt(&self) -> Option<String> {
+        None
+    }
+
     /// Multi-turn: generate next simulated user message based on conversation so far.
     /// Return `None` to end the conversation.
     async fn next_user_message(

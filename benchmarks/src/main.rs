@@ -1,4 +1,5 @@
 mod adapters;
+mod agentic;
 mod channel;
 mod config;
 mod error;
@@ -9,7 +10,6 @@ mod scoring;
 mod suite;
 
 use std::path::PathBuf;
-use std::sync::Arc;
 
 use clap::{Parser, Subcommand};
 use tracing_subscriber::{EnvFilter, layer::SubscriberExt, util::SubscriberInitExt};
@@ -185,9 +185,8 @@ async fn main() -> anyhow::Result<()> {
             session.ensure_authenticated().await?;
 
             let llm = ironclaw::llm::create_llm_provider(&ironclaw_config.llm, session)?;
-            let safety = Arc::new(ironclaw::safety::SafetyLayer::new(&ironclaw_config.safety));
 
-            let runner = runner::BenchRunner::new(bench_suite, bench_config.clone(), llm, safety);
+            let runner = runner::BenchRunner::new(bench_suite, bench_config.clone(), llm);
 
             // Run for each matrix entry
             for matrix_entry in &bench_config.matrix {

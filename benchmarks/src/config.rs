@@ -27,6 +27,10 @@ pub struct BenchConfig {
     #[serde(default)]
     pub matrix: Vec<MatrixEntry>,
 
+    /// Max agentic loop iterations per task. Default: 30.
+    #[serde(default = "default_max_iterations")]
+    pub max_iterations: usize,
+
     /// Suite-specific configuration (passed through to adapter).
     #[serde(default = "default_suite_config")]
     pub suite_config: toml::Value,
@@ -69,6 +73,7 @@ impl BenchConfig {
             results_dir: default_results_dir(),
             task_timeout: default_task_timeout(),
             parallelism: default_parallelism(),
+            max_iterations: default_max_iterations(),
             matrix: vec![MatrixEntry { label, model }],
             suite_config: toml::Value::Table(toml::map::Map::new()),
         }
@@ -105,6 +110,10 @@ fn default_task_timeout() -> Duration {
 
 fn default_parallelism() -> usize {
     1
+}
+
+fn default_max_iterations() -> usize {
+    30
 }
 
 /// Deserialize a duration from a string like "300s", "5m", etc.
