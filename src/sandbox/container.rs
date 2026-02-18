@@ -283,7 +283,7 @@ impl ContainerRunner {
             // Prevent privilege escalation
             security_opt: Some(vec!["no-new-privileges:true".to_string()]),
             // Read-only root filesystem (workspace is still writable if policy allows)
-            readonly_rootfs: Some(policy == SandboxPolicy::ReadOnly),
+            readonly_rootfs: Some(policy != SandboxPolicy::FullAccess),
             // Tmpfs mounts for /tmp and cargo cache
             tmpfs: Some(
                 [
@@ -515,7 +515,8 @@ pub async fn connect_docker() -> Result<Docker> {
     }
 
     Err(SandboxError::DockerNotAvailable {
-        reason: "Socket not found: /var/run/docker.sock".to_string(),
+        reason: "Could not connect to Docker. Tried: default socket, ~/.docker/run/docker.sock"
+            .to_string(),
     })
 }
 
