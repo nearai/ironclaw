@@ -18,7 +18,10 @@ pub use extension_tools::{
 };
 pub use file::{ApplyPatchTool, ListDirTool, ReadFileTool, WriteFileTool};
 pub use http::HttpTool;
-pub use job::{CancelJobTool, CreateJobTool, JobStatusTool, ListJobsTool};
+pub use job::{
+    CancelJobTool, CreateJobTool, JobEventsTool, JobPromptTool, JobStatusTool, ListJobsTool,
+    PromptQueue,
+};
 pub use json::JsonTool;
 pub use memory::{MemoryReadTool, MemorySearchTool, MemoryTreeTool, MemoryWriteTool};
 pub use routine::{

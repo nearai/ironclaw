@@ -1293,6 +1293,7 @@ async fn jobs_restart_handler(
         created_at: now,
         started_at: None,
         completed_at: None,
+        credential_grants_json: old_job.credential_grants_json.clone(),
     };
     store
         .save_sandbox_job(&record)
@@ -1305,9 +1306,28 @@ async fn jobs_restart_handler(
         _ => crate::orchestrator::job_manager::JobMode::Worker,
     };
 
+    // Restore credential grants from the original job so the restarted container
+    // has access to the same secrets.
+    let credential_grants: Vec<crate::orchestrator::auth::CredentialGrant> =
+        serde_json::from_str(&old_job.credential_grants_json).unwrap_or_else(|e| {
+            tracing::warn!(
+                job_id = %old_job.id,
+                "Failed to deserialize credential grants from stored job: {}. \
+                 Restarted job will have no credentials.",
+                e
+            );
+            vec![]
+        });
+
     let project_dir = std::path::PathBuf::from(&old_job.project_dir);
     let _token = jm
-        .create_job(new_job_id, &old_job.task, Some(project_dir), mode)
+        .create_job(
+            new_job_id,
+            &old_job.task,
+            Some(project_dir),
+            mode,
+            credential_grants,
+        )
         .await
         .map_err(|e| {
             (
@@ -1403,7 +1423,7 @@ async fn jobs_events_handler(
     }
 
     let events = store
-        .list_job_events(job_id)
+        .list_job_events(job_id, None)
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 

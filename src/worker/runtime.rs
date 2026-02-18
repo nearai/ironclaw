@@ -5,6 +5,7 @@
 //! Streams real-time events (message, tool_use, tool_result, result) through
 //! the orchestrator's job event pipeline for UI visibility.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -51,6 +52,11 @@ pub struct WorkerRuntime {
     llm: Arc<dyn LlmProvider>,
     safety: Arc<SafetyLayer>,
     tools: Arc<ToolRegistry>,
+    /// Credentials fetched from the orchestrator, injected into child processes
+    /// via `Command::envs()` rather than mutating the global process environment.
+    ///
+    /// Wrapped in `Arc` to avoid deep-cloning the map on every tool invocation.
+    extra_env: Arc<HashMap<String, String>>,
 }
 
 impl WorkerRuntime {
@@ -83,11 +89,12 @@ impl WorkerRuntime {
             llm,
             safety,
             tools,
+            extra_env: Arc::new(HashMap::new()),
         })
     }
 
     /// Run the worker until the job is complete or an error occurs.
-    pub async fn run(self) -> Result<(), WorkerError> {
+    pub async fn run(mut self) -> Result<(), WorkerError> {
         tracing::info!("Worker starting for job {}", self.config.job_id);
 
         // Fetch job description from orchestrator
@@ -98,6 +105,23 @@ impl WorkerRuntime {
             job.title,
             truncate(&job.description, 100)
         );
+
+        // Fetch credentials and store them for injection into child processes
+        // via Command::envs() (avoids unsafe std::env::set_var in multi-threaded runtime).
+        let credentials = self.client.fetch_credentials().await?;
+        {
+            let mut env_map = HashMap::new();
+            for cred in &credentials {
+                env_map.insert(cred.env_var.clone(), cred.value.clone());
+            }
+            self.extra_env = Arc::new(env_map);
+        }
+        if !credentials.is_empty() {
+            tracing::info!(
+                "Fetched {} credential(s) for child process injection",
+                credentials.len()
+            );
+        }
 
         // Report that we're starting
         self.client
@@ -378,7 +402,10 @@ Work independently to complete this job. Report when done."#,
             None => return Err(format!("tool '{}' not found", tool_name)),
         };
 
-        let ctx = JobContext::default();
+        let ctx = JobContext {
+            extra_env: self.extra_env.clone(),
+            ..Default::default()
+        };
 
         // Validate params
         let validation = self.safety.validator().validate_tool_params(params);

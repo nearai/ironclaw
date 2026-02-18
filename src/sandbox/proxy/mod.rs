@@ -41,10 +41,9 @@ pub use policy::{
 
 use std::sync::Arc;
 
-use crate::sandbox::config::{
-    CredentialMapping, SandboxConfig, SandboxPolicy, default_credential_mappings,
-};
+use crate::sandbox::config::{SandboxConfig, SandboxPolicy, default_credential_mappings};
 use crate::sandbox::error::Result;
+use crate::secrets::CredentialMapping;
 
 /// Creates a configured network proxy from sandbox config.
 pub struct NetworkProxyBuilder {

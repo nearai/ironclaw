@@ -309,8 +309,12 @@ pub trait Database: Send + Sync {
         data: &serde_json::Value,
     ) -> Result<(), DatabaseError>;
 
-    /// Load all job events.
-    async fn list_job_events(&self, job_id: Uuid) -> Result<Vec<JobEventRecord>, DatabaseError>;
+    /// Load job events, returning the most recent `limit` entries (or all if `None`).
+    async fn list_job_events(
+        &self,
+        job_id: Uuid,
+        limit: Option<i64>,
+    ) -> Result<Vec<JobEventRecord>, DatabaseError>;
 
     // ==================== Routines ====================
 
