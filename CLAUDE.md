@@ -13,14 +13,17 @@
 ### Features
 - **Multi-channel input**: TUI (Ratatui), HTTP webhooks, WASM channels (Telegram, Slack), web gateway
 - **Parallel job execution** with state machine and self-repair for stuck jobs
-- **Sandbox execution**: Docker container isolation with orchestrator/worker pattern
+- **Sandbox execution**: Docker container isolation with network proxy and credential injection
 - **Claude Code mode**: Delegate jobs to Claude CLI inside containers
+- **Skills system**: SKILL.md prompt extensions with trust model, tool attenuation, and ClawHub registry
 - **Routines**: Scheduled (cron) and reactive (event, webhook) task execution
 - **Web gateway**: Browser UI with SSE/WebSocket real-time streaming
 - **Extension management**: Install, auth, activate MCP/WASM extensions
 - **Extensible tools**: Built-in tools, WASM sandbox, MCP client, dynamic builder
 - **Persistent memory**: Workspace with hybrid search (FTS + vector via RRF)
-- **Prompt injection defense**: Sanitizer, validator, policy rules, leak detection
+- **Prompt injection defense**: Sanitizer, validator, policy rules, leak detection, shell env scrubbing
+- **Multi-provider LLM**: NEAR AI, OpenAI, Anthropic, Ollama, OpenAI-compatible, Tinfoil private inference
+- **Setup wizard**: 7-step interactive onboarding for first-run configuration
 - **Heartbeat system**: Proactive periodic execution with checklist
 
 ## Build & Test
@@ -64,6 +67,7 @@ src/
 │   ├── context_monitor.rs # Memory pressure detection
 │   ├── undo.rs         # Turn-based undo/redo with checkpoints
 │   ├── submission.rs   # Submission parsing (undo, redo, compact, clear, etc.)
+│   ├── dispatcher.rs   # Skill-aware job dispatching
 │   ├── task.rs         # Sub-task execution framework
 │   ├── routine.rs      # Routine types (Trigger, Action, Guardrails)
 │   └── routine_engine.rs # Routine execution (cron ticker, event matcher)
@@ -113,7 +117,7 @@ src/
 │   ├── policy.rs       # PolicyRule system with severity/actions
 │   └── leak_detector.rs # Secret detection (API keys, tokens, etc.)
 │
-├── llm/                # LLM integration (NEAR AI only)
+├── llm/                # LLM integration (multi-provider)
 │   ├── provider.rs     # LlmProvider trait, message types
 │   ├── nearai.rs       # NEAR AI chat-api implementation
 │   ├── reasoning.rs    # Planning, tool selection, evaluation
@@ -131,6 +135,7 @@ src/
 │   │   ├── job.rs      # CreateJob, ListJobs, JobStatus, CancelJob
 │   │   ├── routine.rs  # routine_create/list/update/delete/history
 │   │   ├── extension_tools.rs # Extension install/auth/activate/remove
+│   │   ├── skill_tools.rs # skill_list/search/install/remove tools
 │   │   └── marketplace.rs, ecommerce.rs, taskrabbit.rs, restaurant.rs (stubs)
 │   ├── builder/        # Dynamic tool building
 │   │   ├── core.rs     # BuildRequirement, SoftwareType, Language
@@ -180,10 +185,37 @@ src/
 │   ├── success.rs      # SuccessEvaluator trait, RuleBasedEvaluator, LlmEvaluator
 │   └── metrics.rs      # MetricsCollector, QualityMetrics
 │
+├── sandbox/            # Docker execution sandbox
+│   ├── mod.rs          # Public API, default allowlist
+│   ├── config.rs       # SandboxConfig, SandboxPolicy enum
+│   ├── manager.rs      # SandboxManager orchestration
+│   ├── container.rs    # ContainerRunner, Docker lifecycle
+│   ├── error.rs        # SandboxError types
+│   └── proxy/          # Network proxy for containers
+│       ├── mod.rs      # NetworkProxyBuilder
+│       ├── http.rs     # HttpProxy, CredentialResolver trait
+│       ├── policy.rs   # NetworkPolicyDecider trait
+│       └── allowlist.rs # DomainAllowlist validation
+│
 ├── secrets/            # Secrets management
 │   ├── crypto.rs       # AES-256-GCM encryption
 │   ├── store.rs        # Secret storage
 │   └── types.rs        # Credential types
+│
+├── setup/              # Onboarding wizard (spec: src/setup/README.md)
+│   ├── mod.rs          # Entry point, check_onboard_needed()
+│   ├── wizard.rs       # 7-step interactive wizard
+│   ├── channels.rs     # Channel setup helpers
+│   └── prompts.rs      # Terminal prompts (select, confirm, secret)
+│
+├── skills/             # SKILL.md prompt extension system
+│   ├── mod.rs          # Core types (SkillTrust, LoadedSkill)
+│   ├── registry.rs     # SkillRegistry: discover, install, remove
+│   ├── selector.rs     # Deterministic scoring prefilter
+│   ├── attenuation.rs  # Trust-based tool ceiling
+│   ├── gating.rs       # Requirement checks (bins, env, config)
+│   ├── parser.rs       # SKILL.md frontmatter + markdown parser
+│   └── catalog.rs      # ClawHub registry client
 │
 └── history/            # Persistence
     ├── store.rs        # PostgreSQL repositories
@@ -214,6 +246,7 @@ When designing new features or systems, always prefer generic/extensible archite
 - `LlmProvider` - Add new LLM backends
 - `SuccessEvaluator` - Custom evaluation logic
 - `EmbeddingProvider` - Add embedding backends (workspace search)
+- `NetworkPolicyDecider` - Custom network access policies for sandbox containers
 
 ### Tool Implementation
 ```rust
@@ -297,6 +330,10 @@ SANDBOX_ENABLED=true
 SANDBOX_IMAGE=ironclaw-worker:latest
 SANDBOX_MEMORY_LIMIT_MB=512
 SANDBOX_TIMEOUT_SECS=1800
+SANDBOX_CPU_LIMIT=1.0                  # CPU cores per container
+SANDBOX_NETWORK_PROXY=true             # Enable network proxy for containers
+SANDBOX_PROXY_PORT=8080                # Proxy listener port
+SANDBOX_DEFAULT_POLICY=workspace_write # ReadOnly, WorkspaceWrite, FullAccess
 
 # Claude Code mode (runs inside sandbox containers)
 CLAUDE_CODE_ENABLED=false
@@ -308,16 +345,25 @@ CLAUDE_CODE_CONFIG_DIR=/home/worker/.claude
 ROUTINES_ENABLED=true
 ROUTINES_CRON_INTERVAL=60            # Tick interval in seconds
 ROUTINES_MAX_CONCURRENT=3
+
+# Skills system
+SKILLS_ENABLED=true
+SKILLS_MAX_TOKENS=4000                 # Max prompt budget per turn
+SKILLS_CATALOG_URL=https://clawhub.dev # ClawHub registry URL
+SKILLS_AUTO_DISCOVER=true              # Scan skill directories on startup
+
+# Tinfoil private inference
+TINFOIL_API_KEY=...                    # Required when LLM_BACKEND=tinfoil
+TINFOIL_MODEL=kimi-k2-5               # Default model
 ```
 
-### NEAR AI Provider
+### LLM Providers
 
-Uses the NEAR AI chat-api (`https://api.near.ai/v1/responses`) which provides:
-- Unified access to multiple models (OpenAI, Anthropic, etc.)
-- User authentication via session tokens
-- Usage tracking and billing through NEAR AI
+IronClaw supports multiple LLM backends via the `LLM_BACKEND` env var: `nearai` (default), `openai`, `anthropic`, `ollama`, `openai_compatible`, and `tinfoil`.
 
-Session tokens have the format `sess_xxx` (37 characters). They are authenticated against the NEAR AI auth service.
+**NEAR AI** -- Uses the NEAR AI chat-api (`https://api.near.ai/v1/responses`) which provides unified access to multiple models, user authentication via session tokens (`sess_xxx`, 37 characters), and usage tracking/billing through NEAR AI.
+
+**Tinfoil** -- Private inference via `https://inference.tinfoil.sh/v1`. Runs models inside hardware-attested TEEs so neither Tinfoil nor the cloud provider can see prompts or responses. Uses the OpenAI-compatible Chat Completions API only (not the Responses API, so tool calls are adapted to chat format). Configure with `TINFOIL_API_KEY` and `TINFOIL_MODEL` (default: `kimi-k2-5`).
 
 ## Database
 
@@ -419,12 +465,117 @@ All external tool output passes through `SafetyLayer`:
 1. **Sanitizer** - Detects injection patterns, escapes dangerous content
 2. **Validator** - Checks length, encoding, forbidden patterns
 3. **Policy** - Rules with severity (Critical/High/Medium/Low) and actions (Block/Warn/Review/Sanitize)
+4. **Leak Detector** - Scans for 15+ secret patterns (API keys, tokens, private keys, connection strings) at two points: tool output before it reaches the LLM, and LLM responses before they reach the user. Actions per pattern: Block (reject entirely), Redact (mask the secret), or Warn (flag but allow)
 
 Tool outputs are wrapped before reaching LLM:
 ```xml
 <tool_output name="search" sanitized="true">
 [escaped content]
 </tool_output>
+```
+
+### Shell Environment Scrubbing
+
+The shell tool (`src/tools/builtin/shell.rs`) scrubs sensitive environment variables before executing commands, preventing secrets from leaking through `env`, `printenv`, or `$VAR` expansion. The sanitizer (`src/safety/sanitizer.rs`) also detects command injection patterns (chained commands, subshells, path traversal) and blocks or escapes them based on policy rules.
+
+## Skills System
+
+Skills are SKILL.md files that extend the agent's prompt with domain-specific instructions. Each skill is a YAML frontmatter block (metadata, activation criteria, required tools) followed by a markdown body that gets injected into the LLM context when the skill activates.
+
+### Trust Model
+
+| Trust Level | Source | Tool Access |
+|-------------|--------|-------------|
+| **Trusted** | User-placed in `~/.ironclaw/skills/` or workspace `skills/` | All tools available to the agent |
+| **Installed** | Downloaded from ClawHub registry | Read-only tools only (no shell, file write, HTTP) |
+
+### SKILL.md Format
+
+```yaml
+---
+name: my-skill
+version: 0.1.0
+description: Does something useful
+triggers:
+  - pattern: "deploy to.*production"
+  - intent: deployment
+requires:
+  bins: [docker, kubectl]
+  env: [KUBECONFIG]
+trust: installed
+max_tokens: 2000
+---
+
+# Deployment Skill
+
+Instructions for the agent when this skill activates...
+```
+
+### Selection Pipeline
+
+1. **Gating** -- Check binary/env/config requirements; skip skills whose prerequisites are missing
+2. **Scoring** -- Deterministic scoring against message content using trigger patterns and intent matching
+3. **Budget** -- Select top-scoring skills that fit within `SKILLS_MAX_TOKENS` prompt budget
+4. **Attenuation** -- Apply trust-based tool ceiling; installed skills lose access to dangerous tools
+
+### Skill Tools
+
+Four built-in tools for managing skills at runtime:
+- **`skill_list`** -- List all discovered skills with trust level and status
+- **`skill_search`** -- Search ClawHub registry for available skills
+- **`skill_install`** -- Download and install a skill from ClawHub
+- **`skill_remove`** -- Remove an installed skill
+
+### Skill Directories
+
+- `~/.ironclaw/skills/` -- User's global skills (trusted)
+- `<workspace>/skills/` -- Per-workspace skills (trusted)
+- `~/.ironclaw/installed_skills/` -- Registry-installed skills (installed trust)
+
+### Configuration
+
+```bash
+SKILLS_ENABLED=true
+SKILLS_MAX_TOKENS=4000
+SKILLS_CATALOG_URL=https://clawhub.dev
+SKILLS_AUTO_DISCOVER=true
+```
+
+## Docker Sandbox
+
+The `src/sandbox/` module provides Docker-based isolation for job execution with a network proxy that controls outbound access and injects credentials.
+
+### Sandbox Policies
+
+| Policy | Filesystem | Network | Use Case |
+|--------|-----------|---------|----------|
+| **ReadOnly** | Read-only workspace mount | Allowlisted domains only | Analysis, code review |
+| **WorkspaceWrite** | Read-write workspace mount | Allowlisted domains only | Code generation, file edits |
+| **FullAccess** | Full filesystem | Unrestricted | Trusted admin tasks |
+
+### Network Proxy
+
+Containers route all HTTP/HTTPS traffic through a host-side proxy (`src/sandbox/proxy/`):
+- **Domain allowlist** -- Only allowlisted domains are reachable (default: package registries, docs sites, GitHub, common APIs)
+- **Credential injection** -- The `CredentialResolver` trait injects auth headers into proxied requests so secrets never enter the container environment
+- **CONNECT tunnel** -- HTTPS traffic uses CONNECT method; the proxy validates the target domain against the allowlist before establishing the tunnel
+- **Policy decisions** -- The `NetworkPolicyDecider` trait allows custom logic for allow/deny/inject decisions per request
+
+### Zero-Exposure Credential Model
+
+Secrets (API keys, tokens) are stored encrypted on the host and injected into HTTP requests by the proxy at transit time. Container processes never have access to raw credential values, preventing exfiltration even if container code is compromised.
+
+### Configuration
+
+```bash
+SANDBOX_ENABLED=true
+SANDBOX_IMAGE=ironclaw-worker:latest
+SANDBOX_MEMORY_LIMIT_MB=512
+SANDBOX_TIMEOUT_SECS=1800
+SANDBOX_CPU_LIMIT=1.0
+SANDBOX_NETWORK_PROXY=true
+SANDBOX_PROXY_PORT=8080
+SANDBOX_DEFAULT_POLICY=workspace_write
 ```
 
 ## Testing
@@ -474,6 +625,12 @@ Key test patterns:
 - ✅ **Routines system** - Cron, event, webhook, and manual triggers with guardrails
 - ✅ **Extension management** - Install, auth, activate MCP/WASM extensions via CLI and web UI
 - ✅ **libSQL/Turso backend** - Database trait abstraction (`src/db/`), feature-gated dual backend support (postgres/libsql), embedded SQLite for zero-dependency local mode
+- ✅ **Skills system** - SKILL.md prompt extensions with trust model (trusted/installed), tool attenuation, scoring pipeline, and ClawHub registry client
+- ✅ **Docker sandbox with network proxy** - `src/sandbox/` with container isolation, domain-allowlisted network proxy, and credential injection at transit time
+- ✅ **Leak detector** - 15+ secret patterns (API keys, tokens, private keys, connection strings) with Block/Redact/Warn actions and two-point scanning
+- ✅ **Tinfoil private inference** - TEE-based private inference provider via `https://inference.tinfoil.sh/v1`
+- ✅ **Setup wizard** - 7-step interactive onboarding (`src/setup/`) for first-run configuration
+- ✅ **Shell env scrubbing** - Sensitive environment variable scrubbing and command injection detection in shell tool
 
 ## Adding a New Tool
 
