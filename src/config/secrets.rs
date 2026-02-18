@@ -24,11 +24,6 @@ impl std::fmt::Debug for SecretsConfig {
     }
 }
 
-/// Process-wide cache for the keychain master key.
-///
-/// Avoids re-prompting the OS keychain on every `SecretsConfig::resolve()` call
-/// (e.g. `Config::from_env()` then `Config::from_db()`). Thread-safe alternative
-/// to caching in a process env var.
 impl SecretsConfig {
     /// Auto-detect secrets master key from env var, then OS keychain.
     ///

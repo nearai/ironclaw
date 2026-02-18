@@ -81,7 +81,7 @@ impl DatabaseConfig {
                 }
             })
             .ok_or_else(|| ConfigError::MissingRequired {
-                key: "database_url".to_string(),
+                key: "DATABASE_URL".to_string(),
                 hint: "Run 'ironclaw onboard' or set DATABASE_URL environment variable".to_string(),
             })?;
 

@@ -52,38 +52,35 @@ impl TunnelConfig {
                     .or_else(|| settings.tunnel.cf_token.clone())
                     .map(|token| crate::tunnel::CloudflareTunnelConfig { token }),
                 tailscale: Some(crate::tunnel::TailscaleTunnelConfig {
-                    funnel: optional_env("TUNNEL_TS_FUNNEL")
-                        .ok()
-                        .flatten()
+                    funnel: optional_env("TUNNEL_TS_FUNNEL")?
                         .map(|s| s == "true" || s == "1")
                         .unwrap_or(settings.tunnel.ts_funnel),
-                    hostname: optional_env("TUNNEL_TS_HOSTNAME")
-                        .ok()
-                        .flatten()
+                    hostname: optional_env("TUNNEL_TS_HOSTNAME")?
                         .or_else(|| settings.tunnel.ts_hostname.clone()),
                 }),
-                ngrok: optional_env("TUNNEL_NGROK_TOKEN")?
-                    .or_else(|| settings.tunnel.ngrok_token.clone())
-                    .map(|auth_token| crate::tunnel::NgrokTunnelConfig {
-                        auth_token,
-                        domain: optional_env("TUNNEL_NGROK_DOMAIN")
-                            .ok()
-                            .flatten()
-                            .or_else(|| settings.tunnel.ngrok_domain.clone()),
-                    }),
-                custom: optional_env("TUNNEL_CUSTOM_COMMAND")?
-                    .or_else(|| settings.tunnel.custom_command.clone())
-                    .map(|start_command| crate::tunnel::CustomTunnelConfig {
-                        start_command,
-                        health_url: optional_env("TUNNEL_CUSTOM_HEALTH_URL")
-                            .ok()
-                            .flatten()
-                            .or_else(|| settings.tunnel.custom_health_url.clone()),
-                        url_pattern: optional_env("TUNNEL_CUSTOM_URL_PATTERN")
-                            .ok()
-                            .flatten()
-                            .or_else(|| settings.tunnel.custom_url_pattern.clone()),
-                    }),
+                ngrok: {
+                    let ngrok_domain = optional_env("TUNNEL_NGROK_DOMAIN")?
+                        .or_else(|| settings.tunnel.ngrok_domain.clone());
+                    optional_env("TUNNEL_NGROK_TOKEN")?
+                        .or_else(|| settings.tunnel.ngrok_token.clone())
+                        .map(|auth_token| crate::tunnel::NgrokTunnelConfig {
+                            auth_token,
+                            domain: ngrok_domain,
+                        })
+                },
+                custom: {
+                    let health_url = optional_env("TUNNEL_CUSTOM_HEALTH_URL")?
+                        .or_else(|| settings.tunnel.custom_health_url.clone());
+                    let url_pattern = optional_env("TUNNEL_CUSTOM_URL_PATTERN")?
+                        .or_else(|| settings.tunnel.custom_url_pattern.clone());
+                    optional_env("TUNNEL_CUSTOM_COMMAND")?
+                        .or_else(|| settings.tunnel.custom_command.clone())
+                        .map(|start_command| crate::tunnel::CustomTunnelConfig {
+                            start_command,
+                            health_url,
+                            url_pattern,
+                        })
+                },
             })
         };
 

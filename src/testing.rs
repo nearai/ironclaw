@@ -314,6 +314,7 @@ impl Default for TestHarnessBuilder {
 mod tests {
     use super::*;
 
+    #[cfg(feature = "libsql")]
     #[tokio::test]
     async fn test_harness_builds_with_defaults() {
         let harness = TestHarnessBuilder::new().build().await;
@@ -321,6 +322,7 @@ mod tests {
         assert_eq!(harness.deps.llm.model_name(), "stub-model");
     }
 
+    #[cfg(feature = "libsql")]
     #[tokio::test]
     async fn test_harness_custom_llm() {
         let custom_llm = Arc::new(StubLlm::new("custom response").with_model_name("my-model"));
@@ -328,6 +330,7 @@ mod tests {
         assert_eq!(harness.deps.llm.model_name(), "my-model");
     }
 
+    #[cfg(feature = "libsql")]
     #[tokio::test]
     async fn test_harness_db_works() {
         let harness = TestHarnessBuilder::new().build().await;
