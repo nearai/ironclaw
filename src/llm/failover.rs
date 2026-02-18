@@ -301,6 +301,17 @@ impl LlmProvider for FailoverProvider {
         .await
     }
 
+    fn active_model_name(&self) -> String {
+        self.providers[self.last_used.load(Ordering::Relaxed)].active_model_name()
+    }
+
+    fn set_model(&self, model: &str) -> Result<(), LlmError> {
+        for provider in &self.providers {
+            provider.set_model(model)?;
+        }
+        Ok(())
+    }
+
     async fn list_models(&self) -> Result<Vec<String>, LlmError> {
         let mut all_models = Vec::new();
 
@@ -327,13 +338,15 @@ impl LlmProvider for FailoverProvider {
 mod tests {
     use super::*;
 
-    use std::sync::Mutex;
+    use std::sync::{Mutex, RwLock};
+    use std::time::Duration;
 
     use crate::llm::provider::{CompletionResponse, FinishReason, ToolCompletionResponse};
 
     /// A mock LLM provider that returns a predetermined result.
     struct MockProvider {
         name: String,
+        active_model: RwLock<String>,
         input_cost: Decimal,
         output_cost: Decimal,
         complete_result: Mutex<Option<Result<CompletionResponse, LlmError>>>,
@@ -344,6 +357,7 @@ mod tests {
         fn succeeding(name: &str, content: &str) -> Self {
             Self {
                 name: name.to_string(),
+                active_model: RwLock::new(name.to_string()),
                 input_cost: Decimal::ZERO,
                 output_cost: Decimal::ZERO,
                 complete_result: Mutex::new(Some(Ok(CompletionResponse {
@@ -380,6 +394,7 @@ mod tests {
         fn failing_retryable(name: &str) -> Self {
             Self {
                 name: name.to_string(),
+                active_model: RwLock::new(name.to_string()),
                 input_cost: Decimal::ZERO,
                 output_cost: Decimal::ZERO,
                 complete_result: Mutex::new(Some(Err(LlmError::RequestFailed {
@@ -396,6 +411,7 @@ mod tests {
         fn failing_non_retryable(name: &str) -> Self {
             Self {
                 name: name.to_string(),
+                active_model: RwLock::new(name.to_string()),
                 input_cost: Decimal::ZERO,
                 output_cost: Decimal::ZERO,
                 complete_result: Mutex::new(Some(Err(LlmError::AuthFailed {
@@ -410,6 +426,7 @@ mod tests {
         fn failing_rate_limited(name: &str) -> Self {
             Self {
                 name: name.to_string(),
+                active_model: RwLock::new(name.to_string()),
                 input_cost: Decimal::ZERO,
                 output_cost: Decimal::ZERO,
                 complete_result: Mutex::new(Some(Err(LlmError::RateLimited {
@@ -458,6 +475,15 @@ mod tests {
 
         async fn list_models(&self) -> Result<Vec<String>, LlmError> {
             Ok(vec![self.name.clone()])
+        }
+
+        fn active_model_name(&self) -> String {
+            self.active_model.read().unwrap().clone()
+        }
+
+        fn set_model(&self, model: &str) -> Result<(), LlmError> {
+            *self.active_model.write().unwrap() = model.to_string();
+            Ok(())
         }
     }
 
@@ -1023,5 +1049,31 @@ mod tests {
         cd.activate_cooldown(0);
         assert!(cd.is_in_cooldown(0, 1000));
         assert_eq!(cd.cooldown_activated_nanos.load(Ordering::Relaxed), 1);
+    }
+
+    // Test: set_model propagates to all providers and active_model_name reflects change.
+    #[test]
+    fn set_model_propagates_to_all_providers() {
+        let p1: Arc<MockProvider> = Arc::new(MockProvider::succeeding("model-a", "ok"));
+        let p2: Arc<MockProvider> = Arc::new(MockProvider::succeeding("model-b", "ok"));
+
+        let failover = FailoverProvider::new(vec![
+            Arc::clone(&p1) as Arc<dyn LlmProvider>,
+            Arc::clone(&p2) as Arc<dyn LlmProvider>,
+        ])
+        .unwrap();
+
+        // Before: active_model_name delegates to last_used (index 0 = p1).
+        assert_eq!(failover.active_model_name(), "model-a");
+
+        // Switch model.
+        failover.set_model("new-model").unwrap();
+
+        // Both inner providers should reflect the change.
+        assert_eq!(p1.active_model_name(), "new-model");
+        assert_eq!(p2.active_model_name(), "new-model");
+
+        // FailoverProvider itself should report the new model.
+        assert_eq!(failover.active_model_name(), "new-model");
     }
 }
