@@ -82,6 +82,12 @@ mod impl_lancedb {
 
     const TABLE_NAME: &str = "memory_chunks";
 
+    /// Escapes a string for safe use in LanceDB predicate expressions.
+    /// Uses SQL-style escaping: single quotes are doubled to prevent injection.
+    fn escape_predicate_value(s: &str) -> String {
+        s.replace('\'', "''")
+    }
+
     /// LanceDB-backed vector store.
     pub struct LanceDbVectorStore {
         db: Arc<lancedb::Connection>,
@@ -258,7 +264,10 @@ mod impl_lancedb {
             })?;
 
             table
-                .delete(&format!("chunk_id = '{}'", chunk_id))
+                .delete(&format!(
+                    "chunk_id = '{}'",
+                    escape_predicate_value(&chunk_id.to_string())
+                ))
                 .await
                 .map_err(|e| WorkspaceError::EmbeddingFailed {
                     reason: format!("Failed to delete chunk for update: {}", e),
@@ -276,7 +285,10 @@ mod impl_lancedb {
             })?;
 
             table
-                .delete(&format!("document_id = '{}'", document_id))
+                .delete(&format!(
+                    "document_id = '{}'",
+                    escape_predicate_value(&document_id.to_string())
+                ))
                 .await
                 .map_err(|e| WorkspaceError::ChunkingFailed {
                     reason: format!("Failed to delete chunks: {}", e),
@@ -299,9 +311,16 @@ mod impl_lancedb {
             })?;
 
             let filter = if let Some(aid) = agent_id {
-                format!("user_id = '{}' AND agent_id = '{}'", user_id, aid)
+                format!(
+                    "user_id = '{}' AND agent_id = '{}'",
+                    escape_predicate_value(user_id),
+                    escape_predicate_value(&aid.to_string())
+                )
             } else {
-                format!("user_id = '{}' AND agent_id IS NULL", user_id)
+                format!(
+                    "user_id = '{}' AND agent_id IS NULL",
+                    escape_predicate_value(user_id)
+                )
             };
 
             let mut stream = table
