@@ -19,7 +19,7 @@ use crate::agent::session_manager::SessionManager;
 use crate::agent::submission::{Submission, SubmissionParser, SubmissionResult};
 use crate::agent::{HeartbeatConfig as AgentHeartbeatConfig, Router, Scheduler};
 use crate::channels::{ChannelManager, IncomingMessage, OutgoingResponse, StatusUpdate};
-use crate::config::{AgentConfig, HeartbeatConfig, RoutineConfig};
+use crate::config::{AgentConfig, HeartbeatConfig, RoutineConfig, SkillsConfig};
 use crate::context::ContextManager;
 use crate::db::Database;
 use crate::error::Error;
@@ -27,6 +27,7 @@ use crate::extensions::ExtensionManager;
 use crate::hooks::HookRegistry;
 use crate::llm::LlmProvider;
 use crate::safety::SafetyLayer;
+use crate::skills::SkillRegistry;
 use crate::tools::ToolRegistry;
 use crate::workspace::Workspace;
 
@@ -66,6 +67,8 @@ pub struct AgentDeps {
     pub tools: Arc<ToolRegistry>,
     pub workspace: Option<Arc<Workspace>>,
     pub extension_manager: Option<Arc<ExtensionManager>>,
+    pub skill_registry: Option<Arc<std::sync::RwLock<SkillRegistry>>>,
+    pub skills_config: SkillsConfig,
     pub hooks: Arc<HookRegistry>,
     /// Cost enforcement guardrails (daily budget, hourly rate limits).
     pub cost_guard: Arc<crate::agent::cost_guard::CostGuard>,
@@ -161,6 +164,50 @@ impl Agent {
 
     pub(super) fn cost_guard(&self) -> &Arc<crate::agent::cost_guard::CostGuard> {
         &self.deps.cost_guard
+    }
+
+    pub(super) fn skill_registry(&self) -> Option<&Arc<std::sync::RwLock<SkillRegistry>>> {
+        self.deps.skill_registry.as_ref()
+    }
+
+    /// Select active skills for a message using deterministic prefiltering.
+    pub(super) fn select_active_skills(
+        &self,
+        message_content: &str,
+    ) -> Vec<crate::skills::LoadedSkill> {
+        if let Some(registry) = self.skill_registry() {
+            let guard = match registry.read() {
+                Ok(g) => g,
+                Err(e) => {
+                    tracing::error!("Skill registry lock poisoned: {}", e);
+                    return vec![];
+                }
+            };
+            let available = guard.skills();
+            let skills_cfg = &self.deps.skills_config;
+            let selected = crate::skills::prefilter_skills(
+                message_content,
+                available,
+                skills_cfg.max_active_skills,
+                skills_cfg.max_context_tokens,
+            );
+
+            if !selected.is_empty() {
+                tracing::debug!(
+                    "Selected {} skill(s) for message: {}",
+                    selected.len(),
+                    selected
+                        .iter()
+                        .map(|s| s.name())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                );
+            }
+
+            selected.into_iter().cloned().collect()
+        } else {
+            vec![]
+        }
     }
 
     /// Run the agent main loop.

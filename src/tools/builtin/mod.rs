@@ -9,6 +9,7 @@ mod json;
 mod memory;
 pub mod routine;
 pub(crate) mod shell;
+pub mod skill_tools;
 mod time;
 
 pub use echo::EchoTool;
@@ -24,4 +25,5 @@ pub use routine::{
     RoutineCreateTool, RoutineDeleteTool, RoutineHistoryTool, RoutineListTool, RoutineUpdateTool,
 };
 pub use shell::ShellTool;
+pub use skill_tools::{SkillInstallTool, SkillListTool, SkillRemoveTool, SkillSearchTool};
 pub use time::TimeTool;
