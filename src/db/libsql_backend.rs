@@ -116,10 +116,19 @@ impl LibSqlBackend {
     }
 
     /// Create a new connection to the database.
-    pub fn connect(&self) -> Result<Connection, DatabaseError> {
-        self.db
+    ///
+    /// Sets `PRAGMA busy_timeout = 5000` on every connection so concurrent
+    /// writers wait up to 5 seconds instead of failing instantly with
+    /// "database is locked".
+    pub async fn connect(&self) -> Result<Connection, DatabaseError> {
+        let conn = self
+            .db
             .connect()
-            .map_err(|e| DatabaseError::Pool(format!("Failed to create connection: {}", e)))
+            .map_err(|e| DatabaseError::Pool(format!("Failed to create connection: {}", e)))?;
+        conn.query("PRAGMA busy_timeout = 5000", ())
+            .await
+            .map_err(|e| DatabaseError::Pool(format!("Failed to set busy_timeout: {}", e)))?;
+        Ok(conn)
     }
 }
 
@@ -276,7 +285,12 @@ fn get_opt_ts(row: &libsql::Row, idx: i32) -> Option<DateTime<Utc>> {
 #[async_trait]
 impl Database for LibSqlBackend {
     async fn run_migrations(&self) -> Result<(), DatabaseError> {
-        let conn = self.connect()?;
+        let conn = self.connect().await?;
+        // WAL mode persists in the database file: all future connections benefit.
+        // Readers no longer block writers and vice versa.
+        conn.query("PRAGMA journal_mode=WAL", ())
+            .await
+            .map_err(|e| DatabaseError::Migration(format!("Failed to enable WAL mode: {}", e)))?;
         conn.execute_batch(libsql_migrations::SCHEMA)
             .await
             .map_err(|e| DatabaseError::Migration(format!("libSQL migration failed: {}", e)))?;
@@ -291,7 +305,7 @@ impl Database for LibSqlBackend {
         user_id: &str,
         thread_id: Option<&str>,
     ) -> Result<Uuid, DatabaseError> {
-        let conn = self.connect()?;
+        let conn = self.connect().await?;
         let id = Uuid::new_v4();
         conn.execute(
             "INSERT INTO conversations (id, channel, user_id, thread_id) VALUES (?1, ?2, ?3, ?4)",
@@ -303,7 +317,7 @@ impl Database for LibSqlBackend {
     }
 
     async fn touch_conversation(&self, id: Uuid) -> Result<(), DatabaseError> {
-        let conn = self.connect()?;
+        let conn = self.connect().await?;
         let now = fmt_ts(&Utc::now());
         conn.execute(
             "UPDATE conversations SET last_activity = ?2 WHERE id = ?1",
@@ -320,7 +334,7 @@ impl Database for LibSqlBackend {
         role: &str,
         content: &str,
     ) -> Result<Uuid, DatabaseError> {
-        let conn = self.connect()?;
+        let conn = self.connect().await?;
         let id = Uuid::new_v4();
         conn.execute(
                 "INSERT INTO conversation_messages (id, conversation_id, role, content) VALUES (?1, ?2, ?3, ?4)",
@@ -339,7 +353,7 @@ impl Database for LibSqlBackend {
         user_id: &str,
         thread_id: Option<&str>,
     ) -> Result<(), DatabaseError> {
-        let conn = self.connect()?;
+        let conn = self.connect().await?;
         let now = fmt_ts(&Utc::now());
         conn.execute(
             r#"
@@ -360,7 +374,7 @@ impl Database for LibSqlBackend {
         channel: &str,
         limit: i64,
     ) -> Result<Vec<ConversationSummary>, DatabaseError> {
-        let conn = self.connect()?;
+        let conn = self.connect().await?;
         let mut rows = conn
             .query(
                 r#"
@@ -418,7 +432,7 @@ impl Database for LibSqlBackend {
         user_id: &str,
         channel: &str,
     ) -> Result<Uuid, DatabaseError> {
-        let conn = self.connect()?;
+        let conn = self.connect().await?;
         // Try to find existing
         let mut rows = conn
             .query(
@@ -462,7 +476,7 @@ impl Database for LibSqlBackend {
         user_id: &str,
         metadata: &serde_json::Value,
     ) -> Result<Uuid, DatabaseError> {
-        let conn = self.connect()?;
+        let conn = self.connect().await?;
         let id = Uuid::new_v4();
         conn.execute(
             "INSERT INTO conversations (id, channel, user_id, metadata) VALUES (?1, ?2, ?3, ?4)",
@@ -479,7 +493,7 @@ impl Database for LibSqlBackend {
         before: Option<DateTime<Utc>>,
         limit: i64,
     ) -> Result<(Vec<ConversationMessage>, bool), DatabaseError> {
-        let conn = self.connect()?;
+        let conn = self.connect().await?;
         let fetch_limit = limit + 1;
         let cid = conversation_id.to_string();
 
@@ -536,7 +550,7 @@ impl Database for LibSqlBackend {
         key: &str,
         value: &serde_json::Value,
     ) -> Result<(), DatabaseError> {
-        let conn = self.connect()?;
+        let conn = self.connect().await?;
         // SQLite: use json_patch to merge the key
         let patch = serde_json::json!({ key: value });
         conn.execute(
@@ -552,7 +566,7 @@ impl Database for LibSqlBackend {
         &self,
         id: Uuid,
     ) -> Result<Option<serde_json::Value>, DatabaseError> {
-        let conn = self.connect()?;
+        let conn = self.connect().await?;
         let mut rows = conn
             .query(
                 "SELECT metadata FROM conversations WHERE id = ?1",
@@ -575,7 +589,7 @@ impl Database for LibSqlBackend {
         &self,
         conversation_id: Uuid,
     ) -> Result<Vec<ConversationMessage>, DatabaseError> {
-        let conn = self.connect()?;
+        let conn = self.connect().await?;
         let mut rows = conn
             .query(
                 r#"
@@ -610,7 +624,7 @@ impl Database for LibSqlBackend {
         conversation_id: Uuid,
         user_id: &str,
     ) -> Result<bool, DatabaseError> {
-        let conn = self.connect()?;
+        let conn = self.connect().await?;
         let mut rows = conn
             .query(
                 "SELECT 1 FROM conversations WHERE id = ?1 AND user_id = ?2",
@@ -628,7 +642,7 @@ impl Database for LibSqlBackend {
     // ==================== Jobs ====================
 
     async fn save_job(&self, ctx: &JobContext) -> Result<(), DatabaseError> {
-        let conn = self.connect()?;
+        let conn = self.connect().await?;
         let status = ctx.state.to_string();
         let estimated_time_secs = ctx.estimated_duration.map(|d| d.as_secs() as i64);
 
@@ -678,7 +692,7 @@ impl Database for LibSqlBackend {
     }
 
     async fn get_job(&self, id: Uuid) -> Result<Option<JobContext>, DatabaseError> {
-        let conn = self.connect()?;
+        let conn = self.connect().await?;
         let mut rows = conn
             .query(
                 r#"
@@ -725,6 +739,7 @@ impl Database for LibSqlBackend {
                     completed_at: get_opt_ts(&row, 16),
                     transitions: Vec::new(),
                     metadata: serde_json::Value::Null,
+                    extra_env: std::sync::Arc::new(std::collections::HashMap::new()),
                 }))
             }
             None => Ok(None),
@@ -737,7 +752,7 @@ impl Database for LibSqlBackend {
         status: JobState,
         failure_reason: Option<&str>,
     ) -> Result<(), DatabaseError> {
-        let conn = self.connect()?;
+        let conn = self.connect().await?;
         conn.execute(
             "UPDATE agent_jobs SET status = ?2, failure_reason = ?3 WHERE id = ?1",
             params![id.to_string(), status.to_string(), opt_text(failure_reason)],
@@ -748,7 +763,7 @@ impl Database for LibSqlBackend {
     }
 
     async fn mark_job_stuck(&self, id: Uuid) -> Result<(), DatabaseError> {
-        let conn = self.connect()?;
+        let conn = self.connect().await?;
         let now = fmt_ts(&Utc::now());
         conn.execute(
             "UPDATE agent_jobs SET status = 'stuck', stuck_since = ?2 WHERE id = ?1",
@@ -760,7 +775,7 @@ impl Database for LibSqlBackend {
     }
 
     async fn get_stuck_jobs(&self) -> Result<Vec<Uuid>, DatabaseError> {
-        let conn = self.connect()?;
+        let conn = self.connect().await?;
         let mut rows = conn
             .query("SELECT id FROM agent_jobs WHERE status = 'stuck'", ())
             .await
@@ -784,7 +799,7 @@ impl Database for LibSqlBackend {
     // ==================== Actions ====================
 
     async fn save_action(&self, job_id: Uuid, action: &ActionRecord) -> Result<(), DatabaseError> {
-        let conn = self.connect()?;
+        let conn = self.connect().await?;
         let duration_ms = action.duration.as_millis() as i64;
         let warnings_json = serde_json::to_string(&action.sanitization_warnings)
             .map_err(|e| DatabaseError::Serialization(e.to_string()))?;
@@ -818,7 +833,7 @@ impl Database for LibSqlBackend {
     }
 
     async fn get_job_actions(&self, job_id: Uuid) -> Result<Vec<ActionRecord>, DatabaseError> {
-        let conn = self.connect()?;
+        let conn = self.connect().await?;
         let mut rows = conn
             .query(
                 r#"
@@ -860,7 +875,7 @@ impl Database for LibSqlBackend {
     // ==================== LLM Calls ====================
 
     async fn record_llm_call(&self, record: &LlmCallRecord<'_>) -> Result<Uuid, DatabaseError> {
-        let conn = self.connect()?;
+        let conn = self.connect().await?;
         let id = Uuid::new_v4();
         conn.execute(
                 r#"
@@ -895,7 +910,7 @@ impl Database for LibSqlBackend {
         estimated_time_secs: i32,
         estimated_value: Decimal,
     ) -> Result<Uuid, DatabaseError> {
-        let conn = self.connect()?;
+        let conn = self.connect().await?;
         let id = Uuid::new_v4();
         let tools_json = serde_json::to_string(tool_names)
             .map_err(|e| DatabaseError::Serialization(e.to_string()))?;
@@ -927,7 +942,7 @@ impl Database for LibSqlBackend {
         actual_time_secs: i32,
         actual_value: Option<Decimal>,
     ) -> Result<(), DatabaseError> {
-        let conn = self.connect()?;
+        let conn = self.connect().await?;
         conn.execute(
                 "UPDATE estimation_snapshots SET actual_cost = ?2, actual_time_secs = ?3, actual_value = ?4 WHERE id = ?1",
                 params![
@@ -945,13 +960,13 @@ impl Database for LibSqlBackend {
     // ==================== Sandbox Jobs ====================
 
     async fn save_sandbox_job(&self, job: &SandboxJobRecord) -> Result<(), DatabaseError> {
-        let conn = self.connect()?;
+        let conn = self.connect().await?;
         conn.execute(
             r#"
                 INSERT INTO agent_jobs (
                     id, title, description, status, source, user_id, project_dir,
                     success, failure_reason, created_at, started_at, completed_at
-                ) VALUES (?1, ?2, '', ?3, 'sandbox', ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+                ) VALUES (?1, ?2, ?3, ?4, 'sandbox', ?5, ?6, ?7, ?8, ?9, ?10, ?11)
                 ON CONFLICT (id) DO UPDATE SET
                     status = excluded.status,
                     success = excluded.success,
@@ -962,6 +977,7 @@ impl Database for LibSqlBackend {
             params![
                 job.id.to_string(),
                 job.task.as_str(),
+                job.credential_grants_json.as_str(),
                 job.status.as_str(),
                 job.user_id.as_str(),
                 job.project_dir.as_str(),
@@ -978,11 +994,11 @@ impl Database for LibSqlBackend {
     }
 
     async fn get_sandbox_job(&self, id: Uuid) -> Result<Option<SandboxJobRecord>, DatabaseError> {
-        let conn = self.connect()?;
+        let conn = self.connect().await?;
         let mut rows = conn
             .query(
                 r#"
-                SELECT id, title, status, user_id, project_dir,
+                SELECT id, title, description, status, user_id, project_dir,
                        success, failure_reason, created_at, started_at, completed_at
                 FROM agent_jobs WHERE id = ?1 AND source = 'sandbox'
                 "#,
@@ -999,25 +1015,26 @@ impl Database for LibSqlBackend {
             Some(row) => Ok(Some(SandboxJobRecord {
                 id: get_text(&row, 0).parse().unwrap_or_default(),
                 task: get_text(&row, 1),
-                status: get_text(&row, 2),
-                user_id: get_text(&row, 3),
-                project_dir: get_text(&row, 4),
-                success: get_opt_bool(&row, 5),
-                failure_reason: get_opt_text(&row, 6),
-                created_at: get_ts(&row, 7),
-                started_at: get_opt_ts(&row, 8),
-                completed_at: get_opt_ts(&row, 9),
+                credential_grants_json: get_text(&row, 2),
+                status: get_text(&row, 3),
+                user_id: get_text(&row, 4),
+                project_dir: get_text(&row, 5),
+                success: get_opt_bool(&row, 6),
+                failure_reason: get_opt_text(&row, 7),
+                created_at: get_ts(&row, 8),
+                started_at: get_opt_ts(&row, 9),
+                completed_at: get_opt_ts(&row, 10),
             })),
             None => Ok(None),
         }
     }
 
     async fn list_sandbox_jobs(&self) -> Result<Vec<SandboxJobRecord>, DatabaseError> {
-        let conn = self.connect()?;
+        let conn = self.connect().await?;
         let mut rows = conn
             .query(
                 r#"
-                SELECT id, title, status, user_id, project_dir,
+                SELECT id, title, description, status, user_id, project_dir,
                        success, failure_reason, created_at, started_at, completed_at
                 FROM agent_jobs WHERE source = 'sandbox'
                 ORDER BY created_at DESC
@@ -1036,14 +1053,15 @@ impl Database for LibSqlBackend {
             jobs.push(SandboxJobRecord {
                 id: get_text(&row, 0).parse().unwrap_or_default(),
                 task: get_text(&row, 1),
-                status: get_text(&row, 2),
-                user_id: get_text(&row, 3),
-                project_dir: get_text(&row, 4),
-                success: get_opt_bool(&row, 5),
-                failure_reason: get_opt_text(&row, 6),
-                created_at: get_ts(&row, 7),
-                started_at: get_opt_ts(&row, 8),
-                completed_at: get_opt_ts(&row, 9),
+                credential_grants_json: get_text(&row, 2),
+                status: get_text(&row, 3),
+                user_id: get_text(&row, 4),
+                project_dir: get_text(&row, 5),
+                success: get_opt_bool(&row, 6),
+                failure_reason: get_opt_text(&row, 7),
+                created_at: get_ts(&row, 8),
+                started_at: get_opt_ts(&row, 9),
+                completed_at: get_opt_ts(&row, 10),
             });
         }
         Ok(jobs)
@@ -1058,7 +1076,7 @@ impl Database for LibSqlBackend {
         started_at: Option<DateTime<Utc>>,
         completed_at: Option<DateTime<Utc>>,
     ) -> Result<(), DatabaseError> {
-        let conn = self.connect()?;
+        let conn = self.connect().await?;
         conn.execute(
             r#"
                 UPDATE agent_jobs SET
@@ -1084,7 +1102,7 @@ impl Database for LibSqlBackend {
     }
 
     async fn cleanup_stale_sandbox_jobs(&self) -> Result<u64, DatabaseError> {
-        let conn = self.connect()?;
+        let conn = self.connect().await?;
         let now = fmt_ts(&Utc::now());
         let count = conn
             .execute(
@@ -1106,7 +1124,7 @@ impl Database for LibSqlBackend {
     }
 
     async fn sandbox_job_summary(&self) -> Result<SandboxJobSummary, DatabaseError> {
-        let conn = self.connect()?;
+        let conn = self.connect().await?;
         let mut rows = conn
             .query(
                 "SELECT status, COUNT(*) as cnt FROM agent_jobs WHERE source = 'sandbox' GROUP BY status",
@@ -1140,11 +1158,11 @@ impl Database for LibSqlBackend {
         &self,
         user_id: &str,
     ) -> Result<Vec<SandboxJobRecord>, DatabaseError> {
-        let conn = self.connect()?;
+        let conn = self.connect().await?;
         let mut rows = conn
             .query(
                 r#"
-                SELECT id, title, status, user_id, project_dir,
+                SELECT id, title, description, status, user_id, project_dir,
                        success, failure_reason, created_at, started_at, completed_at
                 FROM agent_jobs WHERE source = 'sandbox' AND user_id = ?1
                 ORDER BY created_at DESC
@@ -1163,14 +1181,15 @@ impl Database for LibSqlBackend {
             jobs.push(SandboxJobRecord {
                 id: get_text(&row, 0).parse().unwrap_or_default(),
                 task: get_text(&row, 1),
-                status: get_text(&row, 2),
-                user_id: get_text(&row, 3),
-                project_dir: get_text(&row, 4),
-                success: get_opt_bool(&row, 5),
-                failure_reason: get_opt_text(&row, 6),
-                created_at: get_ts(&row, 7),
-                started_at: get_opt_ts(&row, 8),
-                completed_at: get_opt_ts(&row, 9),
+                credential_grants_json: get_text(&row, 2),
+                status: get_text(&row, 3),
+                user_id: get_text(&row, 4),
+                project_dir: get_text(&row, 5),
+                success: get_opt_bool(&row, 6),
+                failure_reason: get_opt_text(&row, 7),
+                created_at: get_ts(&row, 8),
+                started_at: get_opt_ts(&row, 9),
+                completed_at: get_opt_ts(&row, 10),
             });
         }
         Ok(jobs)
@@ -1180,7 +1199,7 @@ impl Database for LibSqlBackend {
         &self,
         user_id: &str,
     ) -> Result<SandboxJobSummary, DatabaseError> {
-        let conn = self.connect()?;
+        let conn = self.connect().await?;
         let mut rows = conn
             .query(
                 "SELECT status, COUNT(*) as cnt FROM agent_jobs WHERE source = 'sandbox' AND user_id = ?1 GROUP BY status",
@@ -1215,7 +1234,7 @@ impl Database for LibSqlBackend {
         job_id: Uuid,
         user_id: &str,
     ) -> Result<bool, DatabaseError> {
-        let conn = self.connect()?;
+        let conn = self.connect().await?;
         let mut rows = conn
             .query(
                 "SELECT 1 FROM agent_jobs WHERE id = ?1 AND user_id = ?2 AND source = 'sandbox'",
@@ -1231,7 +1250,7 @@ impl Database for LibSqlBackend {
     }
 
     async fn update_sandbox_job_mode(&self, id: Uuid, mode: &str) -> Result<(), DatabaseError> {
-        let conn = self.connect()?;
+        let conn = self.connect().await?;
         conn.execute(
             "UPDATE agent_jobs SET job_mode = ?2 WHERE id = ?1",
             params![id.to_string(), mode],
@@ -1242,7 +1261,7 @@ impl Database for LibSqlBackend {
     }
 
     async fn get_sandbox_job_mode(&self, id: Uuid) -> Result<Option<String>, DatabaseError> {
-        let conn = self.connect()?;
+        let conn = self.connect().await?;
         let mut rows = conn
             .query(
                 "SELECT job_mode FROM agent_jobs WHERE id = ?1",
@@ -1269,7 +1288,7 @@ impl Database for LibSqlBackend {
         event_type: &str,
         data: &serde_json::Value,
     ) -> Result<(), DatabaseError> {
-        let conn = self.connect()?;
+        let conn = self.connect().await?;
         conn.execute(
             "INSERT INTO job_events (job_id, event_type, data) VALUES (?1, ?2, ?3)",
             params![job_id.to_string(), event_type, data.to_string()],
@@ -1279,10 +1298,30 @@ impl Database for LibSqlBackend {
         Ok(())
     }
 
-    async fn list_job_events(&self, job_id: Uuid) -> Result<Vec<JobEventRecord>, DatabaseError> {
-        let conn = self.connect()?;
-        let mut rows = conn
-            .query(
+    async fn list_job_events(
+        &self,
+        job_id: Uuid,
+        limit: Option<i64>,
+    ) -> Result<Vec<JobEventRecord>, DatabaseError> {
+        let conn = self.connect().await?;
+        let mut rows = if let Some(n) = limit {
+            conn.query(
+                r#"
+                SELECT id, job_id, event_type, data, created_at
+                FROM (
+                    SELECT id, job_id, event_type, data, created_at
+                    FROM job_events WHERE job_id = ?1
+                    ORDER BY id DESC
+                    LIMIT ?2
+                )
+                ORDER BY id ASC
+                "#,
+                params![job_id.to_string(), n],
+            )
+            .await
+            .map_err(|e| DatabaseError::Query(e.to_string()))?
+        } else {
+            conn.query(
                 r#"
                 SELECT id, job_id, event_type, data, created_at
                 FROM job_events WHERE job_id = ?1 ORDER BY id ASC
@@ -1290,7 +1329,8 @@ impl Database for LibSqlBackend {
                 params![job_id.to_string()],
             )
             .await
-            .map_err(|e| DatabaseError::Query(e.to_string()))?;
+            .map_err(|e| DatabaseError::Query(e.to_string()))?
+        };
 
         let mut events = Vec::new();
         while let Some(row) = rows
@@ -1312,7 +1352,7 @@ impl Database for LibSqlBackend {
     // ==================== Routines ====================
 
     async fn create_routine(&self, routine: &Routine) -> Result<(), DatabaseError> {
-        let conn = self.connect()?;
+        let conn = self.connect().await?;
         let trigger_type = routine.trigger.type_tag();
         let trigger_config = routine.trigger.to_config_json();
         let action_type = routine.action.type_tag();
@@ -1367,7 +1407,7 @@ impl Database for LibSqlBackend {
     }
 
     async fn get_routine(&self, id: Uuid) -> Result<Option<Routine>, DatabaseError> {
-        let conn = self.connect()?;
+        let conn = self.connect().await?;
         let mut rows = conn
             .query(
                 &format!("SELECT {} FROM routines WHERE id = ?1", ROUTINE_COLUMNS),
@@ -1391,7 +1431,7 @@ impl Database for LibSqlBackend {
         user_id: &str,
         name: &str,
     ) -> Result<Option<Routine>, DatabaseError> {
-        let conn = self.connect()?;
+        let conn = self.connect().await?;
         let mut rows = conn
             .query(
                 &format!(
@@ -1414,7 +1454,7 @@ impl Database for LibSqlBackend {
     }
 
     async fn list_routines(&self, user_id: &str) -> Result<Vec<Routine>, DatabaseError> {
-        let conn = self.connect()?;
+        let conn = self.connect().await?;
         let mut rows = conn
             .query(
                 &format!(
@@ -1438,7 +1478,7 @@ impl Database for LibSqlBackend {
     }
 
     async fn list_event_routines(&self) -> Result<Vec<Routine>, DatabaseError> {
-        let conn = self.connect()?;
+        let conn = self.connect().await?;
         let mut rows = conn
             .query(
                 &format!(
@@ -1462,7 +1502,7 @@ impl Database for LibSqlBackend {
     }
 
     async fn list_due_cron_routines(&self) -> Result<Vec<Routine>, DatabaseError> {
-        let conn = self.connect()?;
+        let conn = self.connect().await?;
         let now = fmt_ts(&Utc::now());
         let mut rows = conn
             .query(
@@ -1487,7 +1527,7 @@ impl Database for LibSqlBackend {
     }
 
     async fn update_routine(&self, routine: &Routine) -> Result<(), DatabaseError> {
-        let conn = self.connect()?;
+        let conn = self.connect().await?;
         let trigger_type = routine.trigger.type_tag();
         let trigger_config = routine.trigger.to_config_json();
         let action_type = routine.action.type_tag();
@@ -1546,7 +1586,7 @@ impl Database for LibSqlBackend {
         consecutive_failures: u32,
         state: &serde_json::Value,
     ) -> Result<(), DatabaseError> {
-        let conn = self.connect()?;
+        let conn = self.connect().await?;
         let now = fmt_ts(&Utc::now());
         conn.execute(
             r#"
@@ -1572,7 +1612,7 @@ impl Database for LibSqlBackend {
     }
 
     async fn delete_routine(&self, id: Uuid) -> Result<bool, DatabaseError> {
-        let conn = self.connect()?;
+        let conn = self.connect().await?;
         let count = conn
             .execute(
                 "DELETE FROM routines WHERE id = ?1",
@@ -1586,7 +1626,7 @@ impl Database for LibSqlBackend {
     // ==================== Routine Runs ====================
 
     async fn create_routine_run(&self, run: &RoutineRun) -> Result<(), DatabaseError> {
-        let conn = self.connect()?;
+        let conn = self.connect().await?;
         conn.execute(
             r#"
                 INSERT INTO routine_runs (
@@ -1616,7 +1656,7 @@ impl Database for LibSqlBackend {
         result_summary: Option<&str>,
         tokens_used: Option<i32>,
     ) -> Result<(), DatabaseError> {
-        let conn = self.connect()?;
+        let conn = self.connect().await?;
         let now = fmt_ts(&Utc::now());
         conn.execute(
             r#"
@@ -1643,7 +1683,7 @@ impl Database for LibSqlBackend {
         routine_id: Uuid,
         limit: i64,
     ) -> Result<Vec<RoutineRun>, DatabaseError> {
-        let conn = self.connect()?;
+        let conn = self.connect().await?;
         let mut rows = conn
             .query(
                 &format!(
@@ -1667,7 +1707,7 @@ impl Database for LibSqlBackend {
     }
 
     async fn count_running_routine_runs(&self, routine_id: Uuid) -> Result<i64, DatabaseError> {
-        let conn = self.connect()?;
+        let conn = self.connect().await?;
         let mut rows = conn
             .query(
                 "SELECT COUNT(*) as cnt FROM routine_runs WHERE routine_id = ?1 AND status = 'running'",
@@ -1693,7 +1733,7 @@ impl Database for LibSqlBackend {
         tool_name: &str,
         error_message: &str,
     ) -> Result<(), DatabaseError> {
-        let conn = self.connect()?;
+        let conn = self.connect().await?;
         let now = fmt_ts(&Utc::now());
         conn.execute(
             r#"
@@ -1712,7 +1752,7 @@ impl Database for LibSqlBackend {
     }
 
     async fn get_broken_tools(&self, threshold: i32) -> Result<Vec<BrokenTool>, DatabaseError> {
-        let conn = self.connect()?;
+        let conn = self.connect().await?;
         let mut rows = conn
             .query(
                 r#"
@@ -1748,7 +1788,7 @@ impl Database for LibSqlBackend {
     }
 
     async fn mark_tool_repaired(&self, tool_name: &str) -> Result<(), DatabaseError> {
-        let conn = self.connect()?;
+        let conn = self.connect().await?;
         let now = fmt_ts(&Utc::now());
         conn.execute(
             "UPDATE tool_failures SET repaired_at = ?2, error_count = 0 WHERE tool_name = ?1",
@@ -1760,7 +1800,7 @@ impl Database for LibSqlBackend {
     }
 
     async fn increment_repair_attempts(&self, tool_name: &str) -> Result<(), DatabaseError> {
-        let conn = self.connect()?;
+        let conn = self.connect().await?;
         conn.execute(
             "UPDATE tool_failures SET repair_attempts = repair_attempts + 1 WHERE tool_name = ?1",
             params![tool_name],
@@ -1777,7 +1817,7 @@ impl Database for LibSqlBackend {
         user_id: &str,
         key: &str,
     ) -> Result<Option<serde_json::Value>, DatabaseError> {
-        let conn = self.connect()?;
+        let conn = self.connect().await?;
         let mut rows = conn
             .query(
                 "SELECT value FROM settings WHERE user_id = ?1 AND key = ?2",
@@ -1801,7 +1841,7 @@ impl Database for LibSqlBackend {
         user_id: &str,
         key: &str,
     ) -> Result<Option<SettingRow>, DatabaseError> {
-        let conn = self.connect()?;
+        let conn = self.connect().await?;
         let mut rows = conn
             .query(
                 "SELECT key, value, updated_at FROM settings WHERE user_id = ?1 AND key = ?2",
@@ -1830,7 +1870,7 @@ impl Database for LibSqlBackend {
         key: &str,
         value: &serde_json::Value,
     ) -> Result<(), DatabaseError> {
-        let conn = self.connect()?;
+        let conn = self.connect().await?;
         let now = fmt_ts(&Utc::now());
         conn.execute(
             r#"
@@ -1848,7 +1888,7 @@ impl Database for LibSqlBackend {
     }
 
     async fn delete_setting(&self, user_id: &str, key: &str) -> Result<bool, DatabaseError> {
-        let conn = self.connect()?;
+        let conn = self.connect().await?;
         let count = conn
             .execute(
                 "DELETE FROM settings WHERE user_id = ?1 AND key = ?2",
@@ -1860,7 +1900,7 @@ impl Database for LibSqlBackend {
     }
 
     async fn list_settings(&self, user_id: &str) -> Result<Vec<SettingRow>, DatabaseError> {
-        let conn = self.connect()?;
+        let conn = self.connect().await?;
         let mut rows = conn
             .query(
                 "SELECT key, value, updated_at FROM settings WHERE user_id = ?1 ORDER BY key",
@@ -1888,7 +1928,7 @@ impl Database for LibSqlBackend {
         &self,
         user_id: &str,
     ) -> Result<HashMap<String, serde_json::Value>, DatabaseError> {
-        let conn = self.connect()?;
+        let conn = self.connect().await?;
         let mut rows = conn
             .query(
                 "SELECT key, value FROM settings WHERE user_id = ?1",
@@ -1913,7 +1953,7 @@ impl Database for LibSqlBackend {
         user_id: &str,
         settings: &HashMap<String, serde_json::Value>,
     ) -> Result<(), DatabaseError> {
-        let conn = self.connect()?;
+        let conn = self.connect().await?;
         let now = fmt_ts(&Utc::now());
         conn.execute("BEGIN", ())
             .await
@@ -1945,7 +1985,7 @@ impl Database for LibSqlBackend {
     }
 
     async fn has_settings(&self, user_id: &str) -> Result<bool, DatabaseError> {
-        let conn = self.connect()?;
+        let conn = self.connect().await?;
         let mut rows = conn
             .query(
                 "SELECT COUNT(*) as cnt FROM settings WHERE user_id = ?1",
@@ -1972,9 +2012,12 @@ impl Database for LibSqlBackend {
         agent_id: Option<Uuid>,
         path: &str,
     ) -> Result<MemoryDocument, WorkspaceError> {
-        let conn = self.connect().map_err(|e| WorkspaceError::SearchFailed {
-            reason: e.to_string(),
-        })?;
+        let conn = self
+            .connect()
+            .await
+            .map_err(|e| WorkspaceError::SearchFailed {
+                reason: e.to_string(),
+            })?;
         let agent_id_str = agent_id.map(|id| id.to_string());
         let mut rows = conn
             .query(
@@ -2006,9 +2049,12 @@ impl Database for LibSqlBackend {
     }
 
     async fn get_document_by_id(&self, id: Uuid) -> Result<MemoryDocument, WorkspaceError> {
-        let conn = self.connect().map_err(|e| WorkspaceError::SearchFailed {
-            reason: e.to_string(),
-        })?;
+        let conn = self
+            .connect()
+            .await
+            .map_err(|e| WorkspaceError::SearchFailed {
+                reason: e.to_string(),
+            })?;
         let mut rows = conn
             .query(
                 r#"
@@ -2051,9 +2097,12 @@ impl Database for LibSqlBackend {
         }
 
         // Create
-        let conn = self.connect().map_err(|e| WorkspaceError::SearchFailed {
-            reason: e.to_string(),
-        })?;
+        let conn = self
+            .connect()
+            .await
+            .map_err(|e| WorkspaceError::SearchFailed {
+                reason: e.to_string(),
+            })?;
         let id = Uuid::new_v4();
         let agent_id_str = agent_id.map(|id| id.to_string());
         conn.execute(
@@ -2073,9 +2122,12 @@ impl Database for LibSqlBackend {
     }
 
     async fn update_document(&self, id: Uuid, content: &str) -> Result<(), WorkspaceError> {
-        let conn = self.connect().map_err(|e| WorkspaceError::SearchFailed {
-            reason: e.to_string(),
-        })?;
+        let conn = self
+            .connect()
+            .await
+            .map_err(|e| WorkspaceError::SearchFailed {
+                reason: e.to_string(),
+            })?;
         let now = fmt_ts(&Utc::now());
         conn.execute(
             "UPDATE memory_documents SET content = ?2, updated_at = ?3 WHERE id = ?1",
@@ -2097,9 +2149,12 @@ impl Database for LibSqlBackend {
         let doc = self.get_document_by_path(user_id, agent_id, path).await?;
         self.delete_chunks(doc.id).await?;
 
-        let conn = self.connect().map_err(|e| WorkspaceError::SearchFailed {
-            reason: e.to_string(),
-        })?;
+        let conn = self
+            .connect()
+            .await
+            .map_err(|e| WorkspaceError::SearchFailed {
+                reason: e.to_string(),
+            })?;
         let agent_id_str = agent_id.map(|id| id.to_string());
         conn.execute(
             "DELETE FROM memory_documents WHERE user_id = ?1 AND agent_id IS ?2 AND path = ?3",
@@ -2118,9 +2173,12 @@ impl Database for LibSqlBackend {
         agent_id: Option<Uuid>,
         directory: &str,
     ) -> Result<Vec<WorkspaceEntry>, WorkspaceError> {
-        let conn = self.connect().map_err(|e| WorkspaceError::SearchFailed {
-            reason: e.to_string(),
-        })?;
+        let conn = self
+            .connect()
+            .await
+            .map_err(|e| WorkspaceError::SearchFailed {
+                reason: e.to_string(),
+            })?;
         // Implement the list_workspace_files logic in Rust instead of PL/pgSQL.
         let dir = if !directory.is_empty() && !directory.ends_with('/') {
             format!("{}/", directory)
@@ -2223,9 +2281,12 @@ impl Database for LibSqlBackend {
         user_id: &str,
         agent_id: Option<Uuid>,
     ) -> Result<Vec<String>, WorkspaceError> {
-        let conn = self.connect().map_err(|e| WorkspaceError::SearchFailed {
-            reason: e.to_string(),
-        })?;
+        let conn = self
+            .connect()
+            .await
+            .map_err(|e| WorkspaceError::SearchFailed {
+                reason: e.to_string(),
+            })?;
         let agent_id_str = agent_id.map(|id| id.to_string());
         let mut rows = conn
             .query(
@@ -2255,9 +2316,12 @@ impl Database for LibSqlBackend {
         user_id: &str,
         agent_id: Option<Uuid>,
     ) -> Result<Vec<MemoryDocument>, WorkspaceError> {
-        let conn = self.connect().map_err(|e| WorkspaceError::SearchFailed {
-            reason: e.to_string(),
-        })?;
+        let conn = self
+            .connect()
+            .await
+            .map_err(|e| WorkspaceError::SearchFailed {
+                reason: e.to_string(),
+            })?;
         let agent_id_str = agent_id.map(|id| id.to_string());
         let mut rows = conn
             .query(
@@ -2291,9 +2355,12 @@ impl Database for LibSqlBackend {
     // ==================== Workspace: Chunks ====================
 
     async fn delete_chunks(&self, document_id: Uuid) -> Result<(), WorkspaceError> {
-        let conn = self.connect().map_err(|e| WorkspaceError::ChunkingFailed {
-            reason: e.to_string(),
-        })?;
+        let conn = self
+            .connect()
+            .await
+            .map_err(|e| WorkspaceError::ChunkingFailed {
+                reason: e.to_string(),
+            })?;
         conn.execute(
             "DELETE FROM memory_chunks WHERE document_id = ?1",
             params![document_id.to_string()],
@@ -2312,9 +2379,12 @@ impl Database for LibSqlBackend {
         content: &str,
         embedding: Option<&[f32]>,
     ) -> Result<Uuid, WorkspaceError> {
-        let conn = self.connect().map_err(|e| WorkspaceError::ChunkingFailed {
-            reason: e.to_string(),
-        })?;
+        let conn = self
+            .connect()
+            .await
+            .map_err(|e| WorkspaceError::ChunkingFailed {
+                reason: e.to_string(),
+            })?;
         let id = Uuid::new_v4();
         let embedding_blob = embedding.map(|e| {
             // Convert f32 slice to bytes for F32_BLOB
@@ -2349,6 +2419,7 @@ impl Database for LibSqlBackend {
     ) -> Result<(), WorkspaceError> {
         let conn = self
             .connect()
+            .await
             .map_err(|e| WorkspaceError::EmbeddingFailed {
                 reason: e.to_string(),
             })?;
@@ -2371,9 +2442,12 @@ impl Database for LibSqlBackend {
         agent_id: Option<Uuid>,
         limit: usize,
     ) -> Result<Vec<MemoryChunk>, WorkspaceError> {
-        let conn = self.connect().map_err(|e| WorkspaceError::SearchFailed {
-            reason: e.to_string(),
-        })?;
+        let conn = self
+            .connect()
+            .await
+            .map_err(|e| WorkspaceError::SearchFailed {
+                reason: e.to_string(),
+            })?;
         let agent_id_str = agent_id.map(|id| id.to_string());
         let mut rows = conn
             .query(
@@ -2422,9 +2496,12 @@ impl Database for LibSqlBackend {
         embedding: Option<&[f32]>,
         config: &SearchConfig,
     ) -> Result<Vec<SearchResult>, WorkspaceError> {
-        let conn = self.connect().map_err(|e| WorkspaceError::SearchFailed {
-            reason: e.to_string(),
-        })?;
+        let conn = self
+            .connect()
+            .await
+            .map_err(|e| WorkspaceError::SearchFailed {
+                reason: e.to_string(),
+            })?;
         let agent_id_str = agent_id.map(|id| id.to_string());
         let pre_limit = config.pre_fusion_limit as i64;
 
@@ -2606,4 +2683,87 @@ fn row_to_routine_run_libsql(row: &libsql::Row) -> Result<RoutineRun, DatabaseEr
         job_id: get_opt_text(row, 9).and_then(|s| s.parse().ok()),
         created_at: get_ts(row, 10),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::db::Database;
+    use crate::db::libsql_backend::LibSqlBackend;
+
+    #[tokio::test]
+    async fn test_wal_mode_after_migrations() {
+        let backend = LibSqlBackend::new_memory().await.unwrap();
+        backend.run_migrations().await.unwrap();
+
+        let conn = backend.connect().await.unwrap();
+        let mut rows = conn.query("PRAGMA journal_mode", ()).await.unwrap();
+        let row = rows.next().await.unwrap().unwrap();
+        let mode: String = row.get(0).unwrap();
+        // In-memory databases use "memory" journal mode (WAL doesn't apply to :memory:),
+        // but the PRAGMA still executes without error. For file-based databases it returns "wal".
+        assert!(
+            mode == "wal" || mode == "memory",
+            "expected wal or memory, got: {}",
+            mode,
+        );
+    }
+
+    #[tokio::test]
+    async fn test_busy_timeout_set_on_connect() {
+        let backend = LibSqlBackend::new_memory().await.unwrap();
+        backend.run_migrations().await.unwrap();
+
+        let conn = backend.connect().await.unwrap();
+        let mut rows = conn.query("PRAGMA busy_timeout", ()).await.unwrap();
+        let row = rows.next().await.unwrap().unwrap();
+        let timeout: i64 = row.get(0).unwrap();
+        assert_eq!(timeout, 5000);
+    }
+
+    #[tokio::test]
+    async fn test_concurrent_writes_succeed() {
+        // Use a temp file so connections share state (in-memory DBs are connection-local)
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("test_concurrent.db");
+        let backend = LibSqlBackend::new_local(&db_path).await.unwrap();
+        backend.run_migrations().await.unwrap();
+
+        // Spawn 20 concurrent inserts into the conversations table
+        let mut handles = Vec::new();
+        for i in 0..20 {
+            let conn = backend.connect().await.unwrap();
+            let handle = tokio::spawn(async move {
+                let id = uuid::Uuid::new_v4().to_string();
+                let val = format!("ch_{}", i);
+                conn.execute(
+                    "INSERT INTO conversations (id, channel, user_id) VALUES (?1, ?2, ?3)",
+                    libsql::params![id, val, "test_user"],
+                )
+                .await
+            });
+            handles.push(handle);
+        }
+
+        for handle in handles {
+            let result = handle.await.unwrap();
+            assert!(
+                result.is_ok(),
+                "concurrent write failed: {:?}",
+                result.err()
+            );
+        }
+
+        // Verify all 20 rows landed
+        let conn = backend.connect().await.unwrap();
+        let mut rows = conn
+            .query(
+                "SELECT COUNT(*) FROM conversations WHERE user_id = ?1",
+                libsql::params!["test_user"],
+            )
+            .await
+            .unwrap();
+        let row = rows.next().await.unwrap().unwrap();
+        let count: i64 = row.get(0).unwrap();
+        assert_eq!(count, 20);
+    }
 }

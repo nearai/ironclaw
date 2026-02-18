@@ -7,23 +7,29 @@
 //! - Managing WASM tools (`tool install`, `tool list`, `tool remove`)
 //! - Managing MCP servers (`mcp add`, `mcp auth`, `mcp list`, `mcp test`)
 //! - Querying workspace memory (`memory search`, `memory read`, `memory write`)
+//! - Managing OS service (`service install`, `service start`, `service stop`)
+//! - Active health diagnostics (`doctor`)
 //! - Checking system health (`status`)
 
 mod config;
+mod doctor;
 mod mcp;
 pub mod memory;
 pub mod oauth_defaults;
 mod pairing;
+mod service;
 pub mod status;
 mod tool;
 
 pub use config::{ConfigCommand, run_config_command};
+pub use doctor::run_doctor_command;
 pub use mcp::{McpCommand, run_mcp_command};
 pub use memory::MemoryCommand;
 #[cfg(feature = "postgres")]
 pub use memory::run_memory_command;
 pub use memory::run_memory_command_with_db;
 pub use pairing::{PairingCommand, run_pairing_command, run_pairing_command_with_store};
+pub use service::{ServiceCommand, run_service_command};
 pub use status::run_status_command;
 pub use tool::{ToolCommand, run_tool_command};
 
@@ -95,6 +101,13 @@ pub enum Command {
     /// DM pairing (approve inbound requests from unknown senders)
     #[command(subcommand)]
     Pairing(PairingCommand),
+
+    /// Manage OS service (launchd / systemd)
+    #[command(subcommand)]
+    Service(ServiceCommand),
+
+    /// Probe external dependencies and validate configuration
+    Doctor,
 
     /// Show system health and diagnostics
     Status,
