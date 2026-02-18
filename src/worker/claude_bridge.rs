@@ -50,64 +50,81 @@ pub struct ClaudeBridgeConfig {
 
 /// A Claude Code streaming event (NDJSON line from `--output-format stream-json`).
 ///
-/// Claude Code emits one JSON object per line. We capture the key fields
-/// we need and forward the rest as opaque data.
+/// Claude Code emits one JSON object per line with these top-level types:
+///
+///   system    -> session init (session_id, tools, model)
+///   assistant -> LLM response, nested under message.content[] as text/tool_use blocks
+///   user      -> tool results, nested under message.content[] as tool_result blocks
+///   result    -> final summary (is_error, duration_ms, num_turns, result text)
+///
+/// Content blocks live under `message.content`, NOT at the top level.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ClaudeStreamEvent {
     #[serde(rename = "type")]
     pub event_type: String,
 
-    /// For `system` events: the session ID.
     #[serde(default)]
     pub session_id: Option<String>,
 
-    /// For `assistant` events: the text content blocks.
-    #[serde(default)]
-    pub content: Option<Vec<ContentBlock>>,
-
-    /// For `result` events: final status info.
-    #[serde(default)]
-    pub result: Option<ResultInfo>,
-
-    /// For `tool_use`/`tool_result`: the tool name.
-    #[serde(default)]
-    pub tool_name: Option<String>,
-
-    /// For `tool_use`: the input parameters.
-    #[serde(default)]
-    pub input: Option<serde_json::Value>,
-
-    /// For `tool_result`: the output content.
-    #[serde(default)]
-    pub output: Option<String>,
-
-    /// Subtype discriminator (e.g. "text", "tool_use", "tool_result").
     #[serde(default)]
     pub subtype: Option<String>,
+
+    /// For `assistant` and `user` events: the message wrapper containing content blocks.
+    #[serde(default)]
+    pub message: Option<MessageWrapper>,
+
+    /// For `result` events: the final text output.
+    #[serde(default)]
+    pub result: Option<serde_json::Value>,
+
+    /// For `result` events: whether the session ended in error.
+    #[serde(default)]
+    pub is_error: Option<bool>,
+
+    /// For `result` events: total wall-clock duration.
+    #[serde(default)]
+    pub duration_ms: Option<u64>,
+
+    /// For `result` events: number of agentic turns used.
+    #[serde(default)]
+    pub num_turns: Option<u32>,
+}
+
+/// Wrapper around the `message` field in assistant/user events.
+///
+/// ```text
+/// { "type": "assistant", "message": { "content": [ { "type": "text", ... } ] } }
+/// ```
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MessageWrapper {
+    #[serde(default)]
+    pub role: Option<String>,
+    #[serde(default)]
+    pub content: Option<Vec<ContentBlock>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ContentBlock {
     #[serde(rename = "type")]
     pub block_type: String,
+    /// Text block content.
     #[serde(default)]
     pub text: Option<String>,
+    /// Tool name (for tool_use blocks).
     #[serde(default)]
     pub name: Option<String>,
+    /// Tool use ID (for tool_use and tool_result blocks).
+    #[serde(default)]
+    pub id: Option<String>,
+    /// Tool input params (for tool_use blocks).
     #[serde(default)]
     pub input: Option<serde_json::Value>,
+    /// Tool result content (for tool_result blocks), or general content.
     #[serde(default)]
-    pub content: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ResultInfo {
+    pub content: Option<serde_json::Value>,
+    /// Tool use ID reference (for tool_result blocks).
     #[serde(default)]
-    pub is_error: Option<bool>,
-    #[serde(default)]
-    pub duration_ms: Option<u64>,
-    #[serde(default)]
-    pub num_turns: Option<u32>,
+    pub tool_use_id: Option<String>,
 }
 
 /// The Claude Code bridge runtime.
@@ -153,8 +170,46 @@ impl ClaudeBridgeRuntime {
         Ok(())
     }
 
+    /// Copy auth files from a read-only source into the writable home dir.
+    ///
+    /// If the orchestrator bind-mounts the host's `~/.claude` at
+    /// `/home/sandbox/.claude-host:ro`, this copies everything into the
+    /// container's own `/home/sandbox/.claude` so Claude Code can read auth
+    /// credentials AND write its state (todos, debug files, etc.) without
+    /// touching the host filesystem.
+    ///
+    /// When no host mount is present (the default orchestrator injects
+    /// credentials via environment variables), this is a no-op.
+    fn copy_auth_from_mount(&self) -> Result<(), WorkerError> {
+        let mount = std::path::Path::new("/home/sandbox/.claude-host");
+        if !mount.exists() {
+            return Ok(());
+        }
+
+        let target = std::path::Path::new("/home/sandbox/.claude");
+        std::fs::create_dir_all(target).map_err(|e| WorkerError::ExecutionFailed {
+            reason: format!("failed to create ~/.claude: {e}"),
+        })?;
+
+        let copied =
+            copy_dir_recursive(mount, target).map_err(|e| WorkerError::ExecutionFailed {
+                reason: format!("failed to copy auth from host mount: {e}"),
+            })?;
+
+        tracing::info!(
+            job_id = %self.config.job_id,
+            files_copied = copied,
+            "Copied auth config from host mount into container"
+        );
+        Ok(())
+    }
+
     /// Run the bridge: fetch job, spawn claude, stream events, handle follow-ups.
     pub async fn run(&self) -> Result<(), WorkerError> {
+        // Copy auth files from read-only host mount (if present) into the
+        // writable home directory before Claude Code needs them.
+        self.copy_auth_from_mount()?;
+
         // Write project-level settings with explicit tool allowlist.
         // This replaces --dangerously-skip-permissions with defense-in-depth:
         // only the listed tools are auto-approved, unknown tools fail safely.
@@ -169,6 +224,34 @@ impl ClaudeBridgeRuntime {
             truncate(&job.description, 100)
         );
 
+        // Fetch credentials for injection into the spawned Command via .envs()
+        // (avoids unsafe std::env::set_var in multi-threaded runtime).
+        let credentials = self.client.fetch_credentials().await?;
+        let mut extra_env = std::collections::HashMap::new();
+        for cred in &credentials {
+            extra_env.insert(cred.env_var.clone(), cred.value.clone());
+        }
+        if !extra_env.is_empty() {
+            tracing::info!(
+                job_id = %self.config.job_id,
+                "Fetched {} credential(s) for child process injection",
+                extra_env.len()
+            );
+        }
+
+        // Warn if no auth method is available (check both process env and fetched credentials).
+        let has_api_key = extra_env.contains_key("ANTHROPIC_API_KEY")
+            || std::env::var("ANTHROPIC_API_KEY").is_ok();
+        let has_oauth = extra_env.contains_key("CLAUDE_CODE_OAUTH_TOKEN")
+            || std::env::var("CLAUDE_CODE_OAUTH_TOKEN").is_ok();
+        if !has_api_key && !has_oauth {
+            tracing::warn!(
+                job_id = %self.config.job_id,
+                "No Claude Code auth available. Set ANTHROPIC_API_KEY or run \
+                 `claude login` on the host to authenticate."
+            );
+        }
+
         // Report that we're running
         self.client
             .report_status(&crate::worker::api::StatusUpdate {
@@ -179,7 +262,10 @@ impl ClaudeBridgeRuntime {
             .await?;
 
         // Run the initial Claude session
-        let session_id = match self.run_claude_session(&job.description, None).await {
+        let session_id = match self
+            .run_claude_session(&job.description, None, &extra_env)
+            .await
+        {
             Ok(sid) => sid,
             Err(e) => {
                 tracing::error!(job_id = %self.config.job_id, "Claude session failed: {}", e);
@@ -210,7 +296,7 @@ impl ClaudeBridgeRuntime {
                         "Got follow-up prompt, resuming session"
                     );
                     if let Err(e) = self
-                        .run_claude_session(&prompt.content, session_id.as_deref())
+                        .run_claude_session(&prompt.content, session_id.as_deref(), &extra_env)
                         .await
                     {
                         tracing::error!(
@@ -259,12 +345,14 @@ impl ClaudeBridgeRuntime {
         &self,
         prompt: &str,
         resume_session_id: Option<&str>,
+        extra_env: &std::collections::HashMap<String, String>,
     ) -> Result<Option<String>, WorkerError> {
         let mut cmd = Command::new("claude");
         cmd.arg("-p")
             .arg(prompt)
             .arg("--output-format")
             .arg("stream-json")
+            .arg("--verbose")
             .arg("--max-turns")
             .arg(self.config.max_turns.to_string())
             .arg("--model")
@@ -273,6 +361,10 @@ impl ClaudeBridgeRuntime {
         if let Some(sid) = resume_session_id {
             cmd.arg("--resume").arg(sid);
         }
+
+        // Inject credentials into the child process environment without
+        // mutating the global process env (which is unsafe in multi-threaded programs).
+        cmd.envs(extra_env);
 
         cmd.current_dir("/workspace")
             .stdout(std::process::Stdio::piped())
@@ -435,6 +527,9 @@ fn build_permission_settings(allowed_tools: &[String]) -> String {
 fn stream_event_to_payloads(event: &ClaudeStreamEvent) -> Vec<JobEventPayload> {
     let mut payloads = Vec::new();
 
+    // Helper: extract content blocks from message wrapper.
+    let blocks = event.message.as_ref().and_then(|m| m.content.as_ref());
+
     match event.event_type.as_str() {
         "system" => {
             payloads.push(JobEventPayload {
@@ -446,12 +541,13 @@ fn stream_event_to_payloads(event: &ClaudeStreamEvent) -> Vec<JobEventPayload> {
             });
         }
         "assistant" => {
-            // Extract text content and tool_use blocks
-            if let Some(ref blocks) = event.content {
+            // Content blocks are nested under message.content[].
+            if let Some(blocks) = blocks {
                 for block in blocks {
                     match block.block_type.as_str() {
                         "text" => {
-                            if let Some(ref text) = block.text {
+                            if let Some(ref text) = block.text.as_deref().filter(|t| !t.is_empty())
+                            {
                                 payloads.push(JobEventPayload {
                                     event_type: "message".to_string(),
                                     data: serde_json::json!({
@@ -466,16 +562,8 @@ fn stream_event_to_payloads(event: &ClaudeStreamEvent) -> Vec<JobEventPayload> {
                                 event_type: "tool_use".to_string(),
                                 data: serde_json::json!({
                                     "tool_name": block.name,
+                                    "tool_use_id": block.id,
                                     "input": block.input,
-                                }),
-                            });
-                        }
-                        "tool_result" => {
-                            payloads.push(JobEventPayload {
-                                event_type: "tool_result".to_string(),
-                                data: serde_json::json!({
-                                    "tool_name": block.name.as_deref().unwrap_or("unknown"),
-                                    "output": block.content.as_deref().unwrap_or(""),
                                 }),
                             });
                         }
@@ -484,19 +572,48 @@ fn stream_event_to_payloads(event: &ClaudeStreamEvent) -> Vec<JobEventPayload> {
                 }
             }
         }
+        "user" => {
+            // User events carry tool_result blocks under message.content[].
+            if let Some(blocks) = blocks {
+                for block in blocks {
+                    if block.block_type == "tool_result" {
+                        payloads.push(JobEventPayload {
+                            event_type: "tool_result".to_string(),
+                            data: serde_json::json!({
+                                "tool_use_id": block.tool_use_id,
+                                "output": block.content,
+                            }),
+                        });
+                    }
+                }
+            }
+        }
         "result" => {
-            let is_error = event
+            let is_error = event.is_error.unwrap_or(false);
+
+            // Emit the final review text as a message so it appears in activity.
+            if let Some(text) = event
                 .result
                 .as_ref()
-                .and_then(|r| r.is_error)
-                .unwrap_or(false);
+                .and_then(|v| v.as_str())
+                .filter(|t| !t.is_empty())
+            {
+                payloads.push(JobEventPayload {
+                    event_type: "message".to_string(),
+                    data: serde_json::json!({
+                        "role": "assistant",
+                        "content": text,
+                    }),
+                });
+            }
+
             payloads.push(JobEventPayload {
                 event_type: "result".to_string(),
                 data: serde_json::json!({
                     "status": if is_error { "error" } else { "completed" },
                     "session_id": event.session_id,
-                    "duration_ms": event.result.as_ref().and_then(|r| r.duration_ms),
-                    "num_turns": event.result.as_ref().and_then(|r| r.num_turns),
+                    "duration_ms": event.duration_ms,
+                    "num_turns": event.num_turns,
                 }),
             });
         }
@@ -513,6 +630,66 @@ fn stream_event_to_payloads(event: &ClaudeStreamEvent) -> Vec<JobEventPayload> {
     }
 
     payloads
+}
+
+/// Recursively copy files and directories from `src` to `dst`, skipping
+/// entries that can't be read (e.g. permission-restricted files owned by a
+/// different uid on a read-only bind mount). Returns the number of files
+/// successfully copied.
+fn copy_dir_recursive(src: &std::path::Path, dst: &std::path::Path) -> std::io::Result<usize> {
+    let entries = match std::fs::read_dir(src) {
+        Ok(e) => e,
+        Err(e) => {
+            tracing::debug!("Skipping unreadable directory {}: {}", src.display(), e);
+            return Ok(0);
+        }
+    };
+
+    let mut copied = 0;
+    for entry in entries {
+        let entry = match entry {
+            Ok(e) => e,
+            Err(e) => {
+                tracing::debug!("Skipping unreadable entry in {}: {}", src.display(), e);
+                continue;
+            }
+        };
+
+        let src_path = entry.path();
+        let dst_path = dst.join(entry.file_name());
+
+        let file_type = match entry.file_type() {
+            Ok(ft) => ft,
+            Err(e) => {
+                tracing::debug!(
+                    "Skipping entry with unreadable type {}: {}",
+                    src_path.display(),
+                    e
+                );
+                continue;
+            }
+        };
+
+        // Skip symlinks to avoid following links outside the mount.
+        if file_type.is_symlink() {
+            tracing::debug!("Skipping symlink {}", src_path.display());
+            continue;
+        }
+
+        if file_type.is_dir() {
+            if std::fs::create_dir_all(&dst_path).is_ok() {
+                copied += copy_dir_recursive(&src_path, &dst_path)?;
+            }
+        } else {
+            match std::fs::copy(&src_path, &dst_path) {
+                Ok(_) => copied += 1,
+                Err(e) => {
+                    tracing::debug!("Skipping unreadable file {}: {}", src_path.display(), e);
+                }
+            }
+        }
+    }
+    Ok(copied)
 }
 
 fn truncate(s: &str, max_len: usize) -> &str {
@@ -542,10 +719,11 @@ mod tests {
 
     #[test]
     fn test_parse_assistant_text_event() {
-        let json = r#"{"type":"assistant","content":[{"type":"text","text":"Hello world"}]}"#;
+        // Real Claude Code format: content blocks are under message.content
+        let json = r#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"Hello world"}]}}"#;
         let event: ClaudeStreamEvent = serde_json::from_str(json).unwrap();
         assert_eq!(event.event_type, "assistant");
-        let blocks = event.content.unwrap();
+        let blocks = event.message.unwrap().content.unwrap();
         assert_eq!(blocks.len(), 1);
         assert_eq!(blocks[0].block_type, "text");
         assert_eq!(blocks[0].text.as_deref(), Some("Hello world"));
@@ -553,32 +731,42 @@ mod tests {
 
     #[test]
     fn test_parse_assistant_tool_use_event() {
-        let json = r#"{"type":"assistant","content":[{"type":"tool_use","name":"Bash","input":{"command":"ls"}}]}"#;
+        let json = r#"{"type":"assistant","message":{"content":[{"type":"tool_use","id":"toolu_01abc","name":"Bash","input":{"command":"ls"}}]}}"#;
         let event: ClaudeStreamEvent = serde_json::from_str(json).unwrap();
-        let blocks = event.content.unwrap();
+        let blocks = event.message.unwrap().content.unwrap();
         assert_eq!(blocks[0].block_type, "tool_use");
         assert_eq!(blocks[0].name.as_deref(), Some("Bash"));
+        assert_eq!(blocks[0].id.as_deref(), Some("toolu_01abc"));
         assert!(blocks[0].input.is_some());
     }
 
     #[test]
+    fn test_parse_user_tool_result_event() {
+        let json = r#"{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_01abc","content":"/workspace"}]}}"#;
+        let event: ClaudeStreamEvent = serde_json::from_str(json).unwrap();
+        assert_eq!(event.event_type, "user");
+        let blocks = event.message.unwrap().content.unwrap();
+        assert_eq!(blocks[0].block_type, "tool_result");
+        assert_eq!(blocks[0].tool_use_id.as_deref(), Some("toolu_01abc"));
+    }
+
+    #[test]
     fn test_parse_result_event() {
-        let json =
-            r#"{"type":"result","result":{"is_error":false,"duration_ms":5000,"num_turns":3}}"#;
+        let json = r#"{"type":"result","subtype":"success","is_error":false,"duration_ms":5000,"num_turns":3,"result":"Done.","session_id":"sid-1"}"#;
         let event: ClaudeStreamEvent = serde_json::from_str(json).unwrap();
         assert_eq!(event.event_type, "result");
-        let result = event.result.unwrap();
-        assert_eq!(result.is_error, Some(false));
-        assert_eq!(result.duration_ms, Some(5000));
-        assert_eq!(result.num_turns, Some(3));
+        assert_eq!(event.is_error, Some(false));
+        assert_eq!(event.duration_ms, Some(5000));
+        assert_eq!(event.num_turns, Some(3));
+        assert_eq!(event.result.unwrap().as_str().unwrap(), "Done.");
     }
 
     #[test]
     fn test_parse_result_error_event() {
-        let json = r#"{"type":"result","result":{"is_error":true}}"#;
+        let json = r#"{"type":"result","subtype":"error_max_turns","is_error":true,"duration_ms":60000,"num_turns":50}"#;
         let event: ClaudeStreamEvent = serde_json::from_str(json).unwrap();
-        let result = event.result.unwrap();
-        assert_eq!(result.is_error, Some(true));
+        assert_eq!(event.is_error, Some(true));
+        assert_eq!(event.subtype.as_deref(), Some("error_max_turns"));
     }
 
     #[test]
@@ -586,12 +774,12 @@ mod tests {
         let event = ClaudeStreamEvent {
             event_type: "system".to_string(),
             session_id: Some("sid-123".to_string()),
-            content: None,
+            subtype: Some("init".to_string()),
+            message: None,
             result: None,
-            tool_name: None,
-            input: None,
-            output: None,
-            subtype: None,
+            is_error: None,
+            duration_ms: None,
+            num_turns: None,
         };
         let payloads = stream_event_to_payloads(&event);
         assert_eq!(payloads.len(), 1);
@@ -604,18 +792,23 @@ mod tests {
         let event = ClaudeStreamEvent {
             event_type: "assistant".to_string(),
             session_id: None,
-            content: Some(vec![ContentBlock {
-                block_type: "text".to_string(),
-                text: Some("Here's the answer".to_string()),
-                name: None,
-                input: None,
-                content: None,
-            }]),
-            result: None,
-            tool_name: None,
-            input: None,
-            output: None,
             subtype: None,
+            message: Some(MessageWrapper {
+                role: Some("assistant".to_string()),
+                content: Some(vec![ContentBlock {
+                    block_type: "text".to_string(),
+                    text: Some("Here's the answer".to_string()),
+                    name: None,
+                    id: None,
+                    input: None,
+                    content: None,
+                    tool_use_id: None,
+                }]),
+            }),
+            result: None,
+            is_error: None,
+            duration_ms: None,
+            num_turns: None,
         };
         let payloads = stream_event_to_payloads(&event);
         assert_eq!(payloads.len(), 1);
@@ -625,25 +818,84 @@ mod tests {
     }
 
     #[test]
+    fn test_stream_event_to_payloads_assistant_tool_use() {
+        let event = ClaudeStreamEvent {
+            event_type: "assistant".to_string(),
+            session_id: None,
+            subtype: None,
+            message: Some(MessageWrapper {
+                role: Some("assistant".to_string()),
+                content: Some(vec![ContentBlock {
+                    block_type: "tool_use".to_string(),
+                    text: None,
+                    name: Some("Bash".to_string()),
+                    id: Some("toolu_01abc".to_string()),
+                    input: Some(serde_json::json!({"command": "ls"})),
+                    content: None,
+                    tool_use_id: None,
+                }]),
+            }),
+            result: None,
+            is_error: None,
+            duration_ms: None,
+            num_turns: None,
+        };
+        let payloads = stream_event_to_payloads(&event);
+        assert_eq!(payloads.len(), 1);
+        assert_eq!(payloads[0].event_type, "tool_use");
+        assert_eq!(payloads[0].data["tool_name"], "Bash");
+        assert_eq!(payloads[0].data["tool_use_id"], "toolu_01abc");
+    }
+
+    #[test]
+    fn test_stream_event_to_payloads_user_tool_result() {
+        let event = ClaudeStreamEvent {
+            event_type: "user".to_string(),
+            session_id: None,
+            subtype: None,
+            message: Some(MessageWrapper {
+                role: Some("user".to_string()),
+                content: Some(vec![ContentBlock {
+                    block_type: "tool_result".to_string(),
+                    text: None,
+                    name: None,
+                    id: None,
+                    input: None,
+                    content: Some(serde_json::json!("/workspace")),
+                    tool_use_id: Some("toolu_01abc".to_string()),
+                }]),
+            }),
+            result: None,
+            is_error: None,
+            duration_ms: None,
+            num_turns: None,
+        };
+        let payloads = stream_event_to_payloads(&event);
+        assert_eq!(payloads.len(), 1);
+        assert_eq!(payloads[0].event_type, "tool_result");
+        assert_eq!(payloads[0].data["tool_use_id"], "toolu_01abc");
+        assert_eq!(payloads[0].data["output"], "/workspace");
+    }
+
+    #[test]
     fn test_stream_event_to_payloads_result_success() {
         let event = ClaudeStreamEvent {
             event_type: "result".to_string(),
             session_id: Some("s1".to_string()),
-            content: None,
-            result: Some(ResultInfo {
-                is_error: Some(false),
-                duration_ms: Some(12000),
-                num_turns: Some(5),
-            }),
-            tool_name: None,
-            input: None,
-            output: None,
-            subtype: None,
+            subtype: Some("success".to_string()),
+            message: None,
+            result: Some(serde_json::json!("The review is complete.")),
+            is_error: Some(false),
+            duration_ms: Some(12000),
+            num_turns: Some(5),
         };
         let payloads = stream_event_to_payloads(&event);
-        assert_eq!(payloads.len(), 1);
-        assert_eq!(payloads[0].event_type, "result");
-        assert_eq!(payloads[0].data["status"], "completed");
+        // Should emit a message (the result text) + a result event
+        assert_eq!(payloads.len(), 2);
+        assert_eq!(payloads[0].event_type, "message");
+        assert_eq!(payloads[0].data["content"], "The review is complete.");
+        assert_eq!(payloads[1].event_type, "result");
+        assert_eq!(payloads[1].data["status"], "completed");
     }
 
     #[test]
@@ -651,18 +903,15 @@ mod tests {
         let event = ClaudeStreamEvent {
             event_type: "result".to_string(),
             session_id: None,
-            content: None,
-            result: Some(ResultInfo {
-                is_error: Some(true),
-                duration_ms: None,
-                num_turns: None,
-            }),
-            tool_name: None,
-            input: None,
-            output: None,
-            subtype: None,
+            subtype: Some("error_max_turns".to_string()),
+            message: None,
+            result: None,
+            is_error: Some(true),
+            duration_ms: None,
+            num_turns: None,
         };
         let payloads = stream_event_to_payloads(&event);
+        assert_eq!(payloads.len(), 1);
         assert_eq!(payloads[0].data["status"], "error");
     }
 
@@ -671,12 +920,12 @@ mod tests {
         let event = ClaudeStreamEvent {
             event_type: "fancy_new_thing".to_string(),
             session_id: None,
-            content: None,
-            result: None,
-            tool_name: None,
-            input: None,
-            output: None,
             subtype: None,
+            message: None,
+            result: None,
+            is_error: None,
+            duration_ms: None,
+            num_turns: None,
         };
         let payloads = stream_event_to_payloads(&event);
         assert_eq!(payloads.len(), 1);
@@ -734,5 +983,48 @@ mod tests {
         // Must have the expected structure
         assert!(parsed["permissions"].is_object());
         assert!(parsed["permissions"]["allow"].is_array());
+    }
+
+    #[test]
+    fn test_copy_dir_recursive() {
+        let src = tempfile::tempdir().unwrap();
+        let dst = tempfile::tempdir().unwrap();
+
+        // Create a nested structure in src
+        std::fs::write(src.path().join("auth.json"), r#"{"token":"abc"}"#).unwrap();
+        std::fs::create_dir_all(src.path().join("subdir")).unwrap();
+        std::fs::write(src.path().join("subdir").join("nested.txt"), "nested").unwrap();
+
+        let copied = copy_dir_recursive(src.path(), dst.path()).unwrap();
+        assert_eq!(copied, 2);
+
+        // Verify files were copied
+        assert_eq!(
+            std::fs::read_to_string(dst.path().join("auth.json")).unwrap(),
+            r#"{"token":"abc"}"#
+        );
+        assert_eq!(
+            std::fs::read_to_string(dst.path().join("subdir").join("nested.txt")).unwrap(),
+            "nested"
+        );
+    }
+
+    #[test]
+    fn test_copy_dir_recursive_empty_source() {
+        let src = tempfile::tempdir().unwrap();
+        let dst = tempfile::tempdir().unwrap();
+
+        let copied = copy_dir_recursive(src.path(), dst.path()).unwrap();
+        assert_eq!(copied, 0);
+    }
+
+    #[test]
+    fn test_copy_dir_recursive_skips_nonexistent_source() {
+        let dst = tempfile::tempdir().unwrap();
+        let nonexistent = std::path::Path::new("/no/such/path");
+
+        // Should gracefully return 0 instead of failing
+        let copied = copy_dir_recursive(nonexistent, dst.path()).unwrap();
+        assert_eq!(copied, 0);
     }
 }
