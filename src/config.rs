@@ -1674,6 +1674,7 @@ impl SkillsConfig {
             max_context_tokens: parse_optional_env("SKILLS_MAX_CONTEXT_TOKENS", 4000)?,
         })
     }
+}
 
 /// Load API keys from the encrypted secrets store into a thread-safe overlay.
 ///
