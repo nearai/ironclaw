@@ -144,41 +144,16 @@ impl Default for DomainAllowlist {
 
 /// Parse host from a URL string.
 pub fn extract_host(url: &str) -> Option<String> {
-    // Determine scheme and extract the rest
-    let rest = if let Some(stripped) = url.strip_prefix("https://") {
-        stripped
-    } else if let Some(stripped) = url.strip_prefix("http://") {
-        stripped
-    } else {
+    let parsed = url::Url::parse(url).ok()?;
+    if !matches!(parsed.scheme(), "http" | "https") {
         return None;
-    };
-
-    // Find the end of the host (start of path, query, or end of string)
-    let host_end = rest.find('/').unwrap_or(rest.len());
-    let host_and_port = &rest[..host_end];
-
-    // Remove port if present
-    let host = if let Some(bracket_idx) = host_and_port.find('[') {
-        // IPv6 address
-        let close_bracket = host_and_port.find(']')?;
-        &host_and_port[bracket_idx + 1..close_bracket]
-    } else if let Some(colon_idx) = host_and_port.rfind(':') {
-        // Check if this is a port (all digits after colon)
-        let after_colon = &host_and_port[colon_idx + 1..];
-        if after_colon.chars().all(|c| c.is_ascii_digit()) {
-            &host_and_port[..colon_idx]
-        } else {
-            host_and_port
-        }
-    } else {
-        host_and_port
-    };
-
-    if host.is_empty() {
-        None
-    } else {
-        Some(host.to_lowercase())
     }
+    parsed.host_str().map(|h| {
+        h.strip_prefix('[')
+            .and_then(|v| v.strip_suffix(']'))
+            .unwrap_or(h)
+            .to_lowercase()
+    })
 }
 
 #[cfg(test)]
@@ -246,6 +221,15 @@ mod tests {
             extract_host("https://EXAMPLE.COM"),
             Some("example.com".to_string())
         );
+        assert_eq!(
+            extract_host("https://user:pass@api.example.com:443/path"),
+            Some("api.example.com".to_string())
+        );
+        assert_eq!(
+            extract_host("http://[::1]:8080/path"),
+            Some("::1".to_string())
+        );
         assert_eq!(extract_host("not-a-url"), None);
+        assert_eq!(extract_host("ftp://example.com/file"), None);
     }
 }
