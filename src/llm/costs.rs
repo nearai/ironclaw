@@ -30,13 +30,16 @@ pub fn model_cost(model_id: &str) -> Option<(Decimal, Decimal)> {
         "o3-mini" | "o3-mini-2025-01-31" => Some((dec!(0.0000011), dec!(0.0000044))),
 
         // Anthropic models
-        "claude-3-5-sonnet-20241022" | "claude-3-5-sonnet-latest" | "claude-sonnet-4-20250514" => {
+        "claude-3-5-sonnet-20241022" | "claude-3-5-sonnet-latest"
+        | "claude-sonnet-4-20250514" | "claude-sonnet-4-6" => {
             Some((dec!(0.000003), dec!(0.000015)))
         }
-        "claude-3-5-haiku-20241022" | "claude-3-5-haiku-latest" => {
+        "claude-3-5-haiku-20241022" | "claude-3-5-haiku-latest"
+        | "claude-haiku-4-5-20251001" => {
             Some((dec!(0.0000008), dec!(0.000004)))
         }
-        "claude-3-opus-20240229" | "claude-3-opus-latest" | "claude-opus-4-20250514" => {
+        "claude-3-opus-20240229" | "claude-3-opus-latest"
+        | "claude-opus-4-20250514" | "claude-opus-4-6" => {
             Some((dec!(0.000015), dec!(0.000075)))
         }
         "claude-3-haiku-20240307" => Some((dec!(0.00000025), dec!(0.00000125))),

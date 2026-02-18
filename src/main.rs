@@ -300,17 +300,13 @@ async fn main() -> anyhow::Result<()> {
         Err(e) => return Err(e.into()),
     };
 
-    // Initialize session manager and authenticate before channel setup
+    // Initialize session manager (auth check is deferred until after DB config is loaded,
+    // since the wizard may have saved a non-NearAi backend in the database).
     let session_config = SessionConfig {
         auth_base_url: config.llm.nearai.auth_base_url.clone(),
         session_path: config.llm.nearai.session_path.clone(),
     };
     let session = create_session_manager(session_config).await;
-
-    // Ensure we're authenticated before proceeding (only needed for NEAR AI backend)
-    if config.llm.backend == ironclaw::config::LlmBackend::NearAi {
-        session.ensure_authenticated().await?;
-    }
 
     // Initialize tracing
     let env_filter = EnvFilter::try_from_default_env()
@@ -421,19 +417,8 @@ async fn main() -> anyhow::Result<()> {
             tracing::warn!("Disk-to-DB settings migration failed: {}", e);
         }
 
-        // Reload config from DB now that we have a connection.
-        match Config::from_db(db.as_ref(), "default").await {
-            Ok(db_config) => {
-                config = db_config;
-                tracing::info!("Configuration reloaded from database");
-            }
-            Err(e) => {
-                tracing::warn!(
-                    "Failed to reload config from DB, keeping env-based config: {}",
-                    e
-                );
-            }
-        }
+        // NOTE: Config reload from DB is deferred until after secrets injection
+        // (below) so that LLM config can resolve with decrypted API keys.
 
         // Attach DB to session manager so tokens save to DB too
         session.attach_store(Arc::clone(db), "default").await;
@@ -490,23 +475,34 @@ async fn main() -> anyhow::Result<()> {
 
     // Inject LLM API keys from the encrypted secrets store into a thread-safe
     // overlay so that optional_env() (used by LlmConfig::resolve()) picks them
-    // up. Then re-resolve LlmConfig with the newly available keys (backend may
-    // have been set during onboarding but the API key is in the secrets store).
+    // up. This must happen before Config::from_db() so the resolver can see
+    // decrypted credentials (e.g., CLAUDE_CODE_OAUTH_TOKEN from the secrets store).
     if let Some(ref secrets) = secrets_store {
         ironclaw::config::inject_llm_keys_from_secrets(secrets.as_ref(), "default").await;
+    }
 
-        // Re-resolve LlmConfig now that secrets overlay has been populated
-        if let Some(ref db_ref) = db {
-            match Config::from_db(db_ref.as_ref(), "default").await {
-                Ok(refreshed) => {
-                    config = refreshed;
-                    tracing::debug!("LlmConfig re-resolved after secret injection");
-                }
-                Err(e) => {
-                    tracing::warn!("Failed to re-resolve config after secret injection: {}", e);
-                }
+    // Reload full config from DB now that secrets have been injected into the
+    // env overlay. This is the single authoritative config reload — we
+    // intentionally skip reloading before secret injection to avoid spurious
+    // "missing API key" errors for backends whose keys live in the secrets store.
+    if let Some(ref db_ref) = db {
+        match Config::from_db(db_ref.as_ref(), "default").await {
+            Ok(db_config) => {
+                config = db_config;
+                tracing::info!("Configuration reloaded from database");
+            }
+            Err(e) => {
+                tracing::warn!(
+                    "Failed to reload config from DB, keeping env-based config: {}",
+                    e
+                );
             }
         }
+    }
+
+    // Now that config is fully resolved (env + DB + secrets), check NEAR AI auth
+    if config.llm.backend == ironclaw::config::LlmBackend::NearAi {
+        session.ensure_authenticated().await?;
     }
 
     // Initialize LLM provider (clone session so we can reuse it for embeddings)

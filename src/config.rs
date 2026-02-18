@@ -447,6 +447,22 @@ impl LlmConfig {
             LlmBackend::NearAi
         };
 
+        // Only use settings.selected_model when the resolved backend matches the
+        // backend stored in settings. This prevents cross-contamination when someone
+        // overrides LLM_BACKEND via env (e.g., switching to openai while DB has an
+        // anthropic model saved).
+        let settings_backend: Option<LlmBackend> = settings
+            .llm_backend
+            .as_ref()
+            .and_then(|b| b.parse().ok());
+        let model_from_settings = || -> Option<String> {
+            if settings_backend == Some(backend) {
+                settings.selected_model.clone()
+            } else {
+                None
+            }
+        };
+
         // Always resolve NEAR AI config (used as fallback and for embeddings)
         let nearai_api_key = optional_env("NEARAI_API_KEY")?.map(SecretString::from);
 
@@ -463,7 +479,7 @@ impl LlmConfig {
 
         let nearai = NearAiConfig {
             model: optional_env("NEARAI_MODEL")?
-                .or_else(|| settings.selected_model.clone())
+                .or_else(model_from_settings)
                 .unwrap_or_else(|| {
                     "fireworks::accounts/fireworks/models/llama4-maverick-instruct-basic"
                         .to_string()
@@ -489,7 +505,9 @@ impl LlmConfig {
                     key: "OPENAI_API_KEY".to_string(),
                     hint: "Set OPENAI_API_KEY when LLM_BACKEND=openai".to_string(),
                 })?;
-            let model = optional_env("OPENAI_MODEL")?.unwrap_or_else(|| "gpt-4o".to_string());
+            let model = optional_env("OPENAI_MODEL")?
+                .or_else(model_from_settings)
+                .unwrap_or_else(|| "gpt-4o".to_string());
             Some(OpenAiDirectConfig { api_key, model })
         } else {
             None
@@ -514,7 +532,8 @@ impl LlmConfig {
             };
 
             let model = optional_env("ANTHROPIC_MODEL")?
-                .unwrap_or_else(|| "claude-sonnet-4-20250514".to_string());
+                .or_else(model_from_settings)
+                .unwrap_or_else(|| "claude-sonnet-4-6".to_string());
             let max_retries = parse_optional_env("ANTHROPIC_MAX_RETRIES", 3)?;
             Some(AnthropicDirectConfig {
                 auth,
@@ -529,7 +548,9 @@ impl LlmConfig {
             let base_url = optional_env("OLLAMA_BASE_URL")?
                 .or_else(|| settings.ollama_base_url.clone())
                 .unwrap_or_else(|| "http://localhost:11434".to_string());
-            let model = optional_env("OLLAMA_MODEL")?.unwrap_or_else(|| "llama3".to_string());
+            let model = optional_env("OLLAMA_MODEL")?
+                .or_else(model_from_settings)
+                .unwrap_or_else(|| "llama3".to_string());
             Some(OllamaConfig { base_url, model })
         } else {
             None
@@ -543,7 +564,9 @@ impl LlmConfig {
                     hint: "Set LLM_BASE_URL when LLM_BACKEND=openai_compatible".to_string(),
                 })?;
             let api_key = optional_env("LLM_API_KEY")?.map(SecretString::from);
-            let model = optional_env("LLM_MODEL")?.unwrap_or_else(|| "default".to_string());
+            let model = optional_env("LLM_MODEL")?
+                .or_else(model_from_settings)
+                .unwrap_or_else(|| "default".to_string());
             Some(OpenAiCompatibleConfig {
                 base_url,
                 api_key,

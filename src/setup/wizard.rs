@@ -1039,8 +1039,8 @@ impl SetupWizard {
                         "Llama 4 Maverick (default, fast)".into(),
                     ),
                     (
-                        "anthropic::claude-sonnet-4-20250514".into(),
-                        "Claude Sonnet 4 (best quality)".into(),
+                        "anthropic::claude-sonnet-4-6".into(),
+                        "Claude Sonnet 4.6 (best quality)".into(),
                     ),
                     ("openai::gpt-4o".into(), "GPT-4o".into()),
                 ];
@@ -1784,11 +1784,11 @@ fn mask_password_in_url(url: &str) -> String {
 /// Returns `(model_id, display_label)` pairs. Falls back to static defaults on error.
 async fn fetch_anthropic_models(cached_key: Option<&str>) -> Vec<(String, String)> {
     let static_defaults = vec![
-        ("claude-sonnet-4-20250514".into(), "Claude Sonnet 4".into()),
-        ("claude-opus-4-20250514".into(), "Claude Opus 4".into()),
+        ("claude-sonnet-4-6".into(), "Claude Sonnet 4.6".into()),
+        ("claude-opus-4-6".into(), "Claude Opus 4.6".into()),
         (
-            "claude-3-5-haiku-20241022".into(),
-            "Claude 3.5 Haiku (fast)".into(),
+            "claude-haiku-4-5-20251001".into(),
+            "Claude Haiku 4.5 (fast)".into(),
         ),
     ];
 
