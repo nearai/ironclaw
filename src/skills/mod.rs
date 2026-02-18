@@ -89,8 +89,6 @@ pub enum SkillSource {
     User(PathBuf),
     /// Bundled with the application.
     Bundled(PathBuf),
-    /// Downloaded from a registry.
-    Registry { name: String },
 }
 
 /// Activation criteria parsed from SKILL.md frontmatter `activation` section.
@@ -198,6 +196,12 @@ pub struct LoadedSkill {
     pub content_hash: String,
     /// Pre-compiled regex patterns from activation criteria (compiled at load time).
     pub compiled_patterns: Vec<Regex>,
+    /// Pre-computed lowercased keywords for scoring (avoids per-message allocation).
+    /// Derived from `manifest.activation.keywords` at load time — do not mutate independently.
+    pub(crate) lowercased_keywords: Vec<String>,
+    /// Pre-computed lowercased tags for scoring (avoids per-message allocation).
+    /// Derived from `manifest.activation.tags` at load time — do not mutate independently.
+    pub(crate) lowercased_tags: Vec<String>,
 }
 
 impl LoadedSkill {
@@ -440,6 +444,8 @@ metadata:
             source: SkillSource::User(PathBuf::from("/tmp/test")),
             content_hash: "sha256:000".to_string(),
             compiled_patterns: vec![],
+            lowercased_keywords: vec![],
+            lowercased_tags: vec![],
         };
         assert_eq!(skill.name(), "test");
         assert_eq!(skill.version(), "1.0.0");

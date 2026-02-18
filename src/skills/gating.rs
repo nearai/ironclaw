@@ -14,14 +14,33 @@ pub struct GatingResult {
     pub failures: Vec<String>,
 }
 
-/// Check whether gating requirements are satisfied.
+/// Async wrapper around [`check_requirements_sync`] that offloads blocking
+/// subprocess calls (`which`/`where`) to a blocking thread pool via
+/// `tokio::task::spawn_blocking`.
+pub async fn check_requirements(requirements: &GatingRequirements) -> GatingResult {
+    let requirements = requirements.clone();
+    tokio::task::spawn_blocking(move || check_requirements_sync(&requirements))
+        .await
+        .unwrap_or_else(|e| {
+            tracing::error!("Gating check failed in spawn_blocking: {}", e);
+            GatingResult {
+                passed: false,
+                failures: vec!["gating check panicked".to_string()],
+            }
+        })
+}
+
+/// Check whether gating requirements are satisfied (synchronous).
 ///
 /// - `bins`: checks that each binary is findable via `which` (PATH lookup).
 /// - `env`: checks that each environment variable is set.
 /// - `config`: checks that each config file path exists.
 ///
 /// Skills that fail gating should be logged and skipped, not loaded.
-pub fn check_requirements(requirements: &GatingRequirements) -> GatingResult {
+///
+/// This is the synchronous implementation; prefer the async [`check_requirements`]
+/// wrapper when calling from async contexts to avoid blocking the tokio runtime.
+pub fn check_requirements_sync(requirements: &GatingRequirements) -> GatingResult {
     let mut failures = Vec::new();
 
     for bin in &requirements.bins {
@@ -77,7 +96,7 @@ mod tests {
     #[test]
     fn test_empty_requirements_pass() {
         let req = GatingRequirements::default();
-        let result = check_requirements(&req);
+        let result = check_requirements_sync(&req);
         assert!(result.passed);
         assert!(result.failures.is_empty());
     }
@@ -88,7 +107,7 @@ mod tests {
             bins: vec!["__ironclaw_nonexistent_binary_xyz__".to_string()],
             ..Default::default()
         };
-        let result = check_requirements(&req);
+        let result = check_requirements_sync(&req);
         assert!(!result.passed);
         assert_eq!(result.failures.len(), 1);
         assert!(result.failures[0].contains("binary not found"));
@@ -100,7 +119,7 @@ mod tests {
             env: vec!["__IRONCLAW_TEST_NONEXISTENT_VAR__".to_string()],
             ..Default::default()
         };
-        let result = check_requirements(&req);
+        let result = check_requirements_sync(&req);
         assert!(!result.passed);
         assert!(result.failures[0].contains("env var not set"));
     }
@@ -112,7 +131,7 @@ mod tests {
             env: vec!["PATH".to_string()],
             ..Default::default()
         };
-        let result = check_requirements(&req);
+        let result = check_requirements_sync(&req);
         assert!(result.passed);
     }
 
@@ -122,7 +141,7 @@ mod tests {
             config: vec!["/nonexistent/path/ironclaw_test.conf".to_string()],
             ..Default::default()
         };
-        let result = check_requirements(&req);
+        let result = check_requirements_sync(&req);
         assert!(!result.passed);
         assert!(result.failures[0].contains("config not found"));
     }
@@ -134,7 +153,7 @@ mod tests {
             env: vec!["__NO_SUCH_VAR__".to_string()],
             config: vec!["/no/such/file".to_string()],
         };
-        let result = check_requirements(&req);
+        let result = check_requirements_sync(&req);
         assert!(!result.passed);
         assert_eq!(result.failures.len(), 3);
     }
