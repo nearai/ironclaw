@@ -30,6 +30,7 @@ use tokio::sync::mpsc;
 
 use crate::channels::OutgoingResponse;
 use crate::llm::{ChatMessage, CompletionRequest, FinishReason, LlmProvider};
+use crate::workspace::hygiene::HygieneConfig;
 use crate::workspace::Workspace;
 
 /// Configuration for the heartbeat runner.
@@ -96,6 +97,7 @@ pub enum HeartbeatResult {
 /// Heartbeat runner for proactive periodic execution.
 pub struct HeartbeatRunner {
     config: HeartbeatConfig,
+    hygiene_config: HygieneConfig,
     workspace: Arc<Workspace>,
     llm: Arc<dyn LlmProvider>,
     response_tx: Option<mpsc::Sender<OutgoingResponse>>,
@@ -106,11 +108,13 @@ impl HeartbeatRunner {
     /// Create a new heartbeat runner.
     pub fn new(
         config: HeartbeatConfig,
+        hygiene_config: HygieneConfig,
         workspace: Arc<Workspace>,
         llm: Arc<dyn LlmProvider>,
     ) -> Self {
         Self {
             config,
+            hygiene_config,
             workspace,
             llm,
             response_tx: None,
@@ -144,6 +148,19 @@ impl HeartbeatRunner {
 
         loop {
             interval.tick().await;
+
+            // Run memory hygiene (best-effort; never blocks the heartbeat loop).
+            let report = crate::workspace::hygiene::run_if_due(
+                &self.workspace,
+                &self.hygiene_config,
+            )
+            .await;
+            if report.had_work() {
+                tracing::info!(
+                    daily_logs_deleted = report.daily_logs_deleted,
+                    "heartbeat: memory hygiene deleted stale documents"
+                );
+            }
 
             match self.check_heartbeat().await {
                 HeartbeatResult::Ok => {
@@ -332,11 +349,12 @@ fn strip_html_comments(content: &str) -> String {
 /// Returns a handle that can be used to stop the runner.
 pub fn spawn_heartbeat(
     config: HeartbeatConfig,
+    hygiene_config: HygieneConfig,
     workspace: Arc<Workspace>,
     llm: Arc<dyn LlmProvider>,
     response_tx: Option<mpsc::Sender<OutgoingResponse>>,
 ) -> tokio::task::JoinHandle<()> {
-    let mut runner = HeartbeatRunner::new(config, workspace, llm);
+    let mut runner = HeartbeatRunner::new(config, hygiene_config, workspace, llm);
     if let Some(tx) = response_tx {
         runner = runner.with_response_channel(tx);
     }

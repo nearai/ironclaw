@@ -1390,6 +1390,7 @@ async fn main() -> anyhow::Result<()> {
         deps,
         channels,
         Some(config.heartbeat.clone()),
+        Some(config.hygiene.clone()),
         Some(config.routines.clone()),
         Some(context_manager),
         Some(session_manager),

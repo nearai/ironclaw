@@ -85,6 +85,7 @@ pub struct Agent {
     pub(super) session_manager: Arc<SessionManager>,
     pub(super) context_monitor: ContextMonitor,
     pub(super) heartbeat_config: Option<HeartbeatConfig>,
+    pub(super) hygiene_config: Option<crate::config::HygieneConfig>,
     pub(super) routine_config: Option<RoutineConfig>,
 }
 
@@ -98,6 +99,7 @@ impl Agent {
         deps: AgentDeps,
         channels: ChannelManager,
         heartbeat_config: Option<HeartbeatConfig>,
+        hygiene_config: Option<crate::config::HygieneConfig>,
         routine_config: Option<RoutineConfig>,
         context_manager: Option<Arc<ContextManager>>,
         session_manager: Option<Arc<SessionManager>>,
@@ -127,6 +129,7 @@ impl Agent {
             session_manager,
             context_monitor: ContextMonitor::new(),
             heartbeat_config,
+            hygiene_config,
             routine_config,
         }
     }
@@ -358,8 +361,22 @@ impl Agent {
                         "Heartbeat enabled with {}s interval",
                         hb_config.interval_secs
                     );
+                    let hygiene = self
+                        .hygiene_config
+                        .as_ref()
+                        .map(|h| crate::workspace::hygiene::HygieneConfig {
+                            enabled: h.enabled,
+                            retention_days: h.retention_days,
+                            cadence_hours: h.cadence_hours,
+                            state_dir: dirs::home_dir()
+                                .unwrap_or_else(|| std::path::PathBuf::from("."))
+                                .join(".ironclaw"),
+                        })
+                        .unwrap_or_default();
+
                     Some(spawn_heartbeat(
                         config,
+                        hygiene,
                         workspace.clone(),
                         self.cheap_llm().clone(),
                         Some(notify_tx),
