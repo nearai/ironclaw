@@ -98,7 +98,10 @@ pub fn save_bootstrap_env(vars: &[(&str, &str)]) -> std::io::Result<()> {
     }
     let mut content = String::new();
     for (key, value) in vars {
-        content.push_str(&format!("{}=\"{}\"\n", key, value));
+        // Escape backslashes and double quotes to prevent env var injection
+        // (e.g. a value containing `"\nINJECTED="x` would break out of quotes).
+        let escaped = value.replace('\\', "\\\\").replace('"', "\\\"");
+        content.push_str(&format!("{}=\"{}\"\n", key, escaped));
     }
     std::fs::write(&path, content)
 }
@@ -321,6 +324,34 @@ mod tests {
         assert!(env_path.exists());
         let content = std::fs::read_to_string(&env_path).unwrap();
         assert!(content.contains("DATABASE_URL=postgres://test"));
+    }
+
+    #[test]
+    fn test_save_bootstrap_env_escapes_quotes() {
+        let dir = tempdir().unwrap();
+        let env_path = dir.path().join(".env");
+
+        // A malicious URL attempting to inject a second env var
+        let malicious = r#"http://evil.com"
+INJECTED="pwned"#;
+        let mut content = String::new();
+        let escaped = malicious.replace('\\', "\\\\").replace('"', "\\\"");
+        content.push_str(&format!("LLM_BASE_URL=\"{}\"\n", escaped));
+        std::fs::write(&env_path, &content).unwrap();
+
+        let parsed: Vec<(String, String)> = dotenvy::from_path_iter(&env_path)
+            .unwrap()
+            .filter_map(|r| r.ok())
+            .collect();
+
+        // Must parse as exactly one variable, not two
+        assert_eq!(parsed.len(), 1, "injection must not create extra vars");
+        assert_eq!(parsed[0].0, "LLM_BASE_URL");
+        // The value should contain the original malicious content (unescaped by dotenvy)
+        assert!(
+            parsed[0].1.contains("INJECTED"),
+            "value should contain the literal injection attempt, not execute it"
+        );
     }
 
     #[test]
