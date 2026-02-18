@@ -7,7 +7,14 @@
 # Claude Code worktrees
 .claude/worktrees/
 
+# Sidecar tool data
+.sidecar/
+.todos/
+
 target/
+
+# Benchmark results (local runs, not committed)
+bench-results/
 
 # WASM build artifacts (loaded from disk, not bundled)
 *.wasm

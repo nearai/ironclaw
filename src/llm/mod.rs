@@ -7,17 +7,20 @@
 //! - **Ollama**: Local model inference
 //! - **OpenAI-compatible**: Any endpoint that speaks the OpenAI API
 
-mod costs;
+pub mod circuit_breaker;
+pub mod costs;
 pub mod failover;
 mod nearai;
 mod nearai_chat;
 mod provider;
 mod reasoning;
+pub mod response_cache;
 mod retry;
 mod rig_adapter;
 pub mod session;
 
-pub use failover::FailoverProvider;
+pub use circuit_breaker::{CircuitBreakerConfig, CircuitBreakerProvider};
+pub use failover::{CooldownConfig, FailoverProvider};
 pub use nearai::{ModelInfo, NearAiProvider};
 pub use nearai_chat::NearAiChatProvider;
 pub use provider::{
@@ -28,6 +31,7 @@ pub use reasoning::{
     ActionPlan, Reasoning, ReasoningContext, RespondOutput, RespondResult, TokenUsage,
     ToolSelection,
 };
+pub use response_cache::{CachedProvider, ResponseCacheConfig};
 pub use rig_adapter::RigAdapter;
 pub use session::{SessionConfig, SessionManager, create_session_manager};
 
@@ -235,6 +239,13 @@ mod tests {
             api_key: None,
             fallback_model: None,
             max_retries: 3,
+            circuit_breaker_threshold: None,
+            circuit_breaker_recovery_secs: 30,
+            response_cache_enabled: false,
+            response_cache_ttl_secs: 3600,
+            response_cache_max_entries: 1000,
+            failover_cooldown_secs: 300,
+            failover_cooldown_threshold: 3,
         }
     }
 

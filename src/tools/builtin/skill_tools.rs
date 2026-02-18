@@ -385,10 +385,7 @@ pub fn validate_fetch_url(url_str: &str) -> Result<(), ToolError> {
 
     // Check if host is an IP address and reject private ranges
     if let Ok(ip) = host.parse::<std::net::IpAddr>()
-        && (ip.is_loopback()
-            || ip.is_unspecified()
-            || is_private_ip(&ip)
-            || is_link_local_ip(&ip))
+        && (ip.is_loopback() || ip.is_unspecified() || is_private_ip(&ip) || is_link_local_ip(&ip))
     {
         return Err(ToolError::ExecutionFailed(format!(
             "URL points to a private/loopback/link-local address: {}",

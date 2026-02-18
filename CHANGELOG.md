@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.0](https://github.com/nearai/ironclaw/compare/v0.4.0...v0.5.0) - 2026-02-17
+
+### Added
+
+- add cooldown management to FailoverProvider ([#114](https://github.com/nearai/ironclaw/pull/114))
+
+## [0.4.0](https://github.com/nearai/ironclaw/compare/v0.3.0...v0.4.0) - 2026-02-17
+
+### Added
+
+- move per-invocation approval check into Tool trait ([#119](https://github.com/nearai/ironclaw/pull/119))
+- add polished boot screen on CLI startup ([#118](https://github.com/nearai/ironclaw/pull/118))
+- Add lifecycle hooks system with 6 interception points ([#18](https://github.com/nearai/ironclaw/pull/18))
+
+### Other
+
+- remove accidentally committed .sidecar and .todos directories ([#123](https://github.com/nearai/ironclaw/pull/123))
+
 ## [0.3.0](https://github.com/nearai/ironclaw/compare/v0.2.0...v0.3.0) - 2026-02-17
 
 ### Added

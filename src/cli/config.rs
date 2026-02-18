@@ -11,6 +11,17 @@ use crate::settings::Settings;
 
 #[derive(Subcommand, Debug, Clone)]
 pub enum ConfigCommand {
+    /// Generate a default config.toml file
+    Init {
+        /// Output path (default: ~/.ironclaw/config.toml)
+        #[arg(short, long)]
+        output: Option<std::path::PathBuf>,
+
+        /// Overwrite existing file
+        #[arg(long)]
+        force: bool,
+    },
+
     /// List all settings and their current values
     List {
         /// Show only settings matching this prefix (e.g., "agent", "heartbeat")
@@ -62,6 +73,7 @@ pub async fn run_config_command(cmd: ConfigCommand) -> anyhow::Result<()> {
 
     let db_ref = db.as_deref();
     match cmd {
+        ConfigCommand::Init { output, force } => init_toml(db_ref, output, force).await,
         ConfigCommand::List { filter } => list_settings(db_ref, filter).await,
         ConfigCommand::Get { path } => get_setting(db_ref, &path).await,
         ConfigCommand::Set { path, value } => set_setting(db_ref, &path, &value).await,
@@ -188,6 +200,36 @@ async fn reset_setting(store: Option<&dyn crate::db::Database>, path: &str) -> a
     Ok(())
 }
 
+/// Generate a default TOML config file.
+async fn init_toml(
+    store: Option<&dyn crate::db::Database>,
+    output: Option<std::path::PathBuf>,
+    force: bool,
+) -> anyhow::Result<()> {
+    let path = output.unwrap_or_else(Settings::default_toml_path);
+
+    if path.exists() && !force {
+        anyhow::bail!(
+            "Config file already exists: {}\nUse --force to overwrite.",
+            path.display()
+        );
+    }
+
+    // Start from current settings (DB or defaults) so the generated file
+    // reflects the user's existing configuration.
+    let settings = load_settings(store).await;
+
+    settings
+        .save_toml(&path)
+        .map_err(|e| anyhow::anyhow!("{}", e))?;
+
+    println!("Config file written to {}", path.display());
+    println!();
+    println!("Edit the file to customize settings.");
+    println!("Priority: env var > config.toml > database > defaults");
+    Ok(())
+}
+
 /// Show the settings storage info.
 fn show_path(has_db: bool) -> anyhow::Result<()> {
     if has_db {
@@ -198,6 +240,18 @@ fn show_path(has_db: bool) -> anyhow::Result<()> {
     println!(
         "Env config:         {}",
         crate::bootstrap::ironclaw_env_path().display()
+    );
+
+    let toml_path = Settings::default_toml_path();
+    let toml_status = if toml_path.exists() {
+        "found"
+    } else {
+        "not found (run `ironclaw config init` to create)"
+    };
+    println!(
+        "TOML config:        {} ({})",
+        toml_path.display(),
+        toml_status
     );
 
     Ok(())
@@ -229,5 +283,40 @@ mod tests {
         // Reset to default
         settings.reset("agent.name").unwrap();
         assert_eq!(settings.agent.name, "ironclaw");
+    }
+
+    #[tokio::test]
+    async fn init_toml_creates_file() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+
+        init_toml(None, Some(path.clone()), false).await.unwrap();
+        assert!(path.exists());
+
+        let content = std::fs::read_to_string(&path).unwrap();
+        assert!(content.contains("[agent]"));
+    }
+
+    #[tokio::test]
+    async fn init_toml_refuses_overwrite_without_force() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, "existing").unwrap();
+
+        let result = init_toml(None, Some(path.clone()), false).await;
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("already exists"));
+    }
+
+    #[tokio::test]
+    async fn init_toml_force_overwrites() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, "old content").unwrap();
+
+        init_toml(None, Some(path.clone()), true).await.unwrap();
+
+        let content = std::fs::read_to_string(&path).unwrap();
+        assert!(content.contains("[agent]"));
     }
 }

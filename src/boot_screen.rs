@@ -23,6 +23,10 @@ pub struct BootInfo {
     pub claude_code_enabled: bool,
     pub routines_enabled: bool,
     pub channels: Vec<String>,
+    /// Public URL from a managed tunnel (e.g., "https://abc.ngrok.io").
+    pub tunnel_url: Option<String>,
+    /// Provider name for the managed tunnel (e.g., "ngrok").
+    pub tunnel_provider: Option<String>,
 }
 
 /// Print the boot screen to stdout.
@@ -116,6 +120,16 @@ pub fn print_boot_screen(info: &BootInfo) {
         println!("  {dim}gateway{reset}   {yellow_underline}{url}{reset}");
     }
 
+    // Tunnel URL
+    if let Some(ref url) = info.tunnel_url {
+        let provider_tag = info
+            .tunnel_provider
+            .as_deref()
+            .map(|p| format!(" {dim}({p}){reset}"))
+            .unwrap_or_default();
+        println!("  {dim}tunnel{reset}    {yellow_underline}{url}{reset}{provider_tag}");
+    }
+
     println!();
     println!("{border}");
     println!();
@@ -151,6 +165,8 @@ mod tests {
                 "gateway".to_string(),
                 "telegram".to_string(),
             ],
+            tunnel_url: Some("https://abc123.ngrok.io".to_string()),
+            tunnel_provider: Some("ngrok".to_string()),
         };
         // Should not panic
         print_boot_screen(&info);
@@ -176,6 +192,8 @@ mod tests {
             claude_code_enabled: false,
             routines_enabled: false,
             channels: vec![],
+            tunnel_url: None,
+            tunnel_provider: None,
         };
         // Should not panic
         print_boot_screen(&info);
@@ -201,6 +219,8 @@ mod tests {
             claude_code_enabled: false,
             routines_enabled: false,
             channels: vec!["repl".to_string()],
+            tunnel_url: None,
+            tunnel_provider: None,
         };
         // Should not panic
         print_boot_screen(&info);
