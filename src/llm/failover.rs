@@ -217,7 +217,7 @@ impl FailoverProvider {
                 })
                 .ok_or_else(|| LlmError::RequestFailed {
                     provider: "failover".to_string(),
-                    reason: "No providers available".to_string(),
+                    reason: "FailoverProvider requires at least one provider".to_string(),
                 })?;
             tracing::info!(
                 provider = %self.providers[oldest].model_name(),
@@ -270,7 +270,7 @@ impl FailoverProvider {
 
         Err(last_error.unwrap_or_else(|| LlmError::RequestFailed {
             provider: "failover".to_string(),
-            reason: "No available providers to try".to_string(),
+            reason: "Invariant violated in FailoverProvider: providers were exhausted but no last_error was recorded (this branch should be unreachable; possible causes: no provider attempts were made or `available` was unexpectedly empty).".to_string(),
         }))
     }
 }
