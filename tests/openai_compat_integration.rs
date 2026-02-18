@@ -3,7 +3,7 @@
 //! Uses a mock LLM provider so no real API key is needed.
 
 use std::net::SocketAddr;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -26,8 +26,8 @@ const AUTH_TOKEN: &str = "test-openai-token";
 
 #[derive(Default)]
 struct MockLlmState {
-    completion_models: Mutex<Vec<Option<String>>>,
-    tool_completion_models: Mutex<Vec<Option<String>>>,
+    completion_models: tokio::sync::Mutex<Vec<Option<String>>>,
+    tool_completion_models: tokio::sync::Mutex<Vec<Option<String>>>,
 }
 
 struct MockLlmProvider {
@@ -54,7 +54,7 @@ impl LlmProvider for MockLlmProvider {
         self.state
             .completion_models
             .lock()
-            .expect("completion_models lock poisoned")
+            .await
             .push(req.model.clone());
 
         // Echo the last user message back
@@ -82,7 +82,7 @@ impl LlmProvider for MockLlmProvider {
         self.state
             .tool_completion_models
             .lock()
-            .expect("tool_completion_models lock poisoned")
+            .await
             .push(req.model.clone());
 
         // If tools are provided, return a tool call
@@ -258,10 +258,7 @@ async fn test_chat_completions_basic() {
     assert_eq!(body["usage"]["completion_tokens"], 5);
     assert_eq!(body["usage"]["total_tokens"], 15);
 
-    let models = mock_state
-        .completion_models
-        .lock()
-        .expect("completion_models lock poisoned");
+    let models = mock_state.completion_models.lock().await;
     assert_eq!(*models, vec![Some("mock-model-v1".to_string())]);
 }
 
@@ -334,10 +331,7 @@ async fn test_chat_completions_with_tools() {
     assert_eq!(tool_calls[0]["type"], "function");
     assert_eq!(tool_calls[0]["function"]["name"], "get_weather");
 
-    let models = mock_state
-        .tool_completion_models
-        .lock()
-        .expect("tool_completion_models lock poisoned");
+    let models = mock_state.tool_completion_models.lock().await;
     assert_eq!(*models, vec![Some("mock-model-v1".to_string())]);
 }
 
@@ -413,10 +407,7 @@ async fn test_chat_completions_streaming() {
         full_content
     );
 
-    let models = mock_state
-        .completion_models
-        .lock()
-        .expect("completion_models lock poisoned");
+    let models = mock_state.completion_models.lock().await;
     assert_eq!(*models, vec![Some("mock-model-v1".to_string())]);
 }
 
@@ -461,10 +452,7 @@ async fn test_chat_completions_model_override() {
     let body: serde_json::Value = resp.json().await.unwrap();
     assert_eq!(body["model"], "gpt-4");
 
-    let models = mock_state
-        .completion_models
-        .lock()
-        .expect("completion_models lock poisoned");
+    let models = mock_state.completion_models.lock().await;
     assert_eq!(*models, vec![Some("gpt-4".to_string())]);
 }
 
@@ -545,10 +533,7 @@ async fn test_chat_completions_model_too_long() {
     );
 
     // Validation should fail before provider invocation.
-    let models = mock_state
-        .completion_models
-        .lock()
-        .expect("completion_models lock poisoned");
+    let models = mock_state.completion_models.lock().await;
     assert!(
         models.is_empty(),
         "provider should not be called: {:?}",
@@ -584,10 +569,7 @@ async fn test_chat_completions_model_with_control_chars() {
     );
 
     // Validation should fail before provider invocation.
-    let models = mock_state
-        .completion_models
-        .lock()
-        .expect("completion_models lock poisoned");
+    let models = mock_state.completion_models.lock().await;
     assert!(
         models.is_empty(),
         "provider should not be called: {:?}",
