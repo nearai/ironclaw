@@ -106,8 +106,7 @@ fn convert_messages(messages: &[ChatMessage]) -> (Option<String>, Vec<RigMessage
             }
             crate::llm::Role::Tool => {
                 // Tool result message: wrap as User { ToolResult }
-                let tool_id =
-                    normalized_tool_call_id(msg.tool_call_id.as_deref(), history.len());
+                let tool_id = normalized_tool_call_id(msg.tool_call_id.as_deref(), history.len());
                 history.push(RigMessage::User {
                     content: OneOrMany::one(UserContent::ToolResult(RigToolResult {
                         id: tool_id.clone(),
