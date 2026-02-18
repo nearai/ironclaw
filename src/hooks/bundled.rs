@@ -1,7 +1,7 @@
 //! Bundled hook implementations and declarative hook registration.
 
 use std::collections::HashMap;
-use std::net::IpAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -555,27 +555,35 @@ impl Hook for OutboundWebhookHook {
             }
         };
 
-        let client = self.client.clone();
+        let base_client = self.client.clone();
         let url = self.url.clone();
         let headers = self.headers.clone();
         let hook_name = self.name.clone();
+        let timeout = self.timeout;
 
         tokio::spawn(async move {
             let _permit = permit;
 
-            if let Err(err) = validate_webhook_target_runtime(&url).await {
-                tracing::warn!(
-                    hook = %hook_name,
-                    error = %err,
-                    "Outbound webhook target blocked by runtime network policy"
-                );
-                return;
-            }
+            let client = match dispatch_client_for_target(&base_client, &url, timeout).await {
+                Ok(client) => client,
+                Err(err) => {
+                    tracing::warn!(
+                        hook = %hook_name,
+                        error = %err,
+                        "Outbound webhook target blocked by runtime network policy"
+                    );
+                    return;
+                }
+            };
 
             let request = client.post(url).headers(headers).json(&payload);
 
             if let Err(err) = request.send().await {
-                tracing::warn!(hook = %hook_name, error = %err, "Outbound webhook delivery failed");
+                tracing::warn!(
+                    hook = %hook_name,
+                    error = %err,
+                    "Outbound webhook delivery failed"
+                );
             }
         });
 
@@ -670,7 +678,11 @@ fn validate_webhook_url(hook_name: &str, url: &str) -> Result<reqwest::Url, Hook
     Ok(parsed)
 }
 
-async fn validate_webhook_target_runtime(url: &str) -> Result<(), String> {
+async fn dispatch_client_for_target(
+    base_client: &reqwest::Client,
+    url: &str,
+    timeout: Duration,
+) -> Result<reqwest::Client, String> {
     let parsed = reqwest::Url::parse(url).map_err(|e| format!("Invalid URL: {e}"))?;
     let host = parsed
         .host_str()
@@ -680,24 +692,34 @@ async fn validate_webhook_target_runtime(url: &str) -> Result<(), String> {
         if is_forbidden_ip(ip) {
             return Err(format!("Webhook target resolves to blocked IP {ip}"));
         }
-        return Ok(());
+        return Ok(base_client.clone());
     }
 
     let port = parsed
         .port_or_known_default()
         .ok_or_else(|| "Webhook URL has no valid port".to_string())?;
 
-    let addrs = tokio::net::lookup_host((host, port))
+    let addrs: Vec<SocketAddr> = tokio::net::lookup_host((host, port))
         .await
-        .map_err(|e| format!("DNS resolution failed: {e}"))?;
+        .map_err(|e| format!("DNS resolution failed: {e}"))?
+        .collect();
 
-    for addr in addrs {
+    if addrs.is_empty() {
+        return Err("DNS resolution returned no addresses".to_string());
+    }
+
+    for addr in &addrs {
         if is_forbidden_ip(addr.ip()) {
             return Err(format!("Webhook target resolves to blocked IP {}", addr.ip()));
         }
     }
 
-    Ok(())
+    reqwest::Client::builder()
+        .timeout(timeout)
+        .redirect(reqwest::redirect::Policy::none())
+        .resolve_to_addrs(host, &addrs)
+        .build()
+        .map_err(|e| format!("Failed to build resolved webhook client: {e}"))
 }
 
 fn validate_webhook_headers(
@@ -1075,7 +1097,12 @@ mod tests {
 
     #[tokio::test]
     async fn test_runtime_target_validation_blocks_private_ip() {
-        let err = validate_webhook_target_runtime("https://127.0.0.1/hook")
+        let base_client = reqwest::Client::builder().build().unwrap();
+        let err = dispatch_client_for_target(
+            &base_client,
+            "https://127.0.0.1/hook",
+            Duration::from_secs(1),
+        )
             .await
             .unwrap_err();
         assert!(err.contains("blocked IP"));
@@ -1083,7 +1110,10 @@ mod tests {
 
     #[tokio::test]
     async fn test_runtime_target_validation_allows_public_ip() {
-        let result = validate_webhook_target_runtime("https://1.1.1.1/hook").await;
+        let base_client = reqwest::Client::builder().build().unwrap();
+        let result =
+            dispatch_client_for_target(&base_client, "https://1.1.1.1/hook", Duration::from_secs(1))
+                .await;
         assert!(result.is_ok());
     }
 
