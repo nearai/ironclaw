@@ -446,4 +446,13 @@ mod tests {
             )
         );
     }
+
+    #[test]
+    fn test_job_description_deserialization() {
+        let json = r#"{"title":"Test","description":"desc","project_dir":null}"#;
+        let job: JobDescription = serde_json::from_str(json).unwrap();
+        assert_eq!(job.title, "Test");
+        assert_eq!(job.description, "desc");
+        assert!(job.project_dir.is_none());
+    }
 }

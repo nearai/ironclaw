@@ -1,0 +1,15 @@
+{
+  "run_id": "8a48de1f-09ce-4c35-9ad1-dad98fb83a1a",
+  "suite_id": "spot",
+  "config_label": "default",
+  "model": "openai/gpt-5.2",
+  "commit_hash": "2c43b83",
+  "pass_rate": 1.0,
+  "avg_score": 1.0,
+  "total_tasks": 21,
+  "completed_tasks": 21,
+  "total_cost_usd": 0.307053,
+  "total_wall_time_ms": 111009,
+  "started_at": "2026-02-17T22:02:08.206112Z",
+  "finished_at": "2026-02-17T22:03:59.270325Z"
+}

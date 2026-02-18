@@ -39,6 +39,7 @@ pub struct Config {
     pub routines: RoutineConfig,
     pub sandbox: SandboxModeConfig,
     pub claude_code: ClaudeCodeConfig,
+    pub skills: SkillsConfig,
     pub observability: crate::observability::ObservabilityConfig,
 }
 
@@ -161,6 +162,7 @@ impl Config {
             routines: RoutineConfig::resolve()?,
             sandbox: SandboxModeConfig::resolve()?,
             claude_code: ClaudeCodeConfig::resolve()?,
+            skills: SkillsConfig::resolve()?,
             observability: crate::observability::ObservabilityConfig {
                 backend: std::env::var("OBSERVABILITY_BACKEND").unwrap_or_else(|_| "none".into()),
             },
@@ -1621,6 +1623,57 @@ fn parse_oauth_access_token(json: &str) -> Option<String> {
         .as_str()
         .map(String::from)
 }
+
+/// Skills system configuration.
+#[derive(Debug, Clone)]
+pub struct SkillsConfig {
+    /// Whether the skills system is enabled.
+    pub enabled: bool,
+    /// Directory containing local skills (default: ~/.ironclaw/skills/).
+    pub local_dir: PathBuf,
+    /// Maximum number of skills that can be active simultaneously.
+    pub max_active_skills: usize,
+    /// Maximum total context tokens allocated to skill prompts.
+    pub max_context_tokens: usize,
+}
+
+impl Default for SkillsConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            local_dir: default_skills_dir(),
+            max_active_skills: 3,
+            max_context_tokens: 4000,
+        }
+    }
+}
+
+/// Get the default skills directory (~/.ironclaw/skills/).
+fn default_skills_dir() -> PathBuf {
+    dirs::home_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join(".ironclaw")
+        .join("skills")
+}
+
+impl SkillsConfig {
+    fn resolve() -> Result<Self, ConfigError> {
+        Ok(Self {
+            enabled: optional_env("SKILLS_ENABLED")?
+                .map(|s| s.parse())
+                .transpose()
+                .map_err(|e| ConfigError::InvalidValue {
+                    key: "SKILLS_ENABLED".to_string(),
+                    message: format!("must be 'true' or 'false': {e}"),
+                })?
+                .unwrap_or(false),
+            local_dir: optional_env("SKILLS_DIR")?
+                .map(PathBuf::from)
+                .unwrap_or_else(default_skills_dir),
+            max_active_skills: parse_optional_env("SKILLS_MAX_ACTIVE", 3)?,
+            max_context_tokens: parse_optional_env("SKILLS_MAX_CONTEXT_TOKENS", 4000)?,
+        })
+    }
 
 /// Load API keys from the encrypted secrets store into a thread-safe overlay.
 ///

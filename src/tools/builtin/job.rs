@@ -123,7 +123,7 @@ impl CreateJobTool {
         self
     }
 
-    fn sandbox_enabled(&self) -> bool {
+    pub fn sandbox_enabled(&self) -> bool {
         self.job_manager.is_some()
     }
 
