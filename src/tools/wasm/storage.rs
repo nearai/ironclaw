@@ -581,10 +581,17 @@ impl LibSqlWasmToolStore {
         Self { db }
     }
 
-    fn connect(&self) -> Result<libsql::Connection, WasmStorageError> {
-        self.db
+    async fn connect(&self) -> Result<libsql::Connection, WasmStorageError> {
+        let conn = self
+            .db
             .connect()
-            .map_err(|e| WasmStorageError::Database(format!("Connection failed: {}", e)))
+            .map_err(|e| WasmStorageError::Database(format!("Connection failed: {}", e)))?;
+        conn.query("PRAGMA busy_timeout = 5000", ())
+            .await
+            .map_err(|e| {
+                WasmStorageError::Database(format!("Failed to set busy_timeout: {}", e))
+            })?;
+        Ok(conn)
     }
 }
 
@@ -599,7 +606,7 @@ impl WasmToolStore for LibSqlWasmToolStore {
             .map_err(|e| WasmStorageError::InvalidData(e.to_string()))?;
 
         // Wrap INSERT + read-back in a transaction to prevent TOCTOU races
-        let conn = self.connect()?;
+        let conn = self.connect().await?;
         let tx = conn
             .transaction()
             .await
@@ -671,7 +678,7 @@ impl WasmToolStore for LibSqlWasmToolStore {
     }
 
     async fn get(&self, user_id: &str, name: &str) -> Result<StoredWasmTool, WasmStorageError> {
-        let conn = self.connect()?;
+        let conn = self.connect().await?;
         let mut rows = conn
             .query(
                 r#"
@@ -709,7 +716,7 @@ impl WasmToolStore for LibSqlWasmToolStore {
         user_id: &str,
         name: &str,
     ) -> Result<StoredWasmToolWithBinary, WasmStorageError> {
-        let conn = self.connect()?;
+        let conn = self.connect().await?;
         let mut rows = conn
             .query(
                 r#"
@@ -768,7 +775,7 @@ impl WasmToolStore for LibSqlWasmToolStore {
         &self,
         tool_id: Uuid,
     ) -> Result<Option<StoredCapabilities>, WasmStorageError> {
-        let conn = self.connect()?;
+        let conn = self.connect().await?;
         let mut rows = conn
             .query(
                 r#"
@@ -838,7 +845,7 @@ impl WasmToolStore for LibSqlWasmToolStore {
 
     async fn list(&self, user_id: &str) -> Result<Vec<StoredWasmTool>, WasmStorageError> {
         // SQLite doesn't have DISTINCT ON, so we use a subquery to get latest version per name
-        let conn = self.connect()?;
+        let conn = self.connect().await?;
         let mut rows = conn
             .query(
                 r#"
@@ -877,7 +884,7 @@ impl WasmToolStore for LibSqlWasmToolStore {
         status: ToolStatus,
     ) -> Result<(), WasmStorageError> {
         let now = Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
-        let conn = self.connect()?;
+        let conn = self.connect().await?;
 
         let result = conn
             .execute(
@@ -895,7 +902,7 @@ impl WasmToolStore for LibSqlWasmToolStore {
     }
 
     async fn delete(&self, user_id: &str, name: &str) -> Result<bool, WasmStorageError> {
-        let conn = self.connect()?;
+        let conn = self.connect().await?;
         let result = conn
             .execute(
                 "DELETE FROM wasm_tools WHERE user_id = ?1 AND name = ?2",

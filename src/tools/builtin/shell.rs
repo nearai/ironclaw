@@ -43,7 +43,7 @@
 //! - Only safe env vars (PATH, HOME, LANG, etc.) forwarded to child processes
 //! - API keys, session tokens, and credentials are NOT inherited
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::{Arc, LazyLock};
@@ -468,6 +468,7 @@ impl ShellTool {
         cmd: &str,
         workdir: &PathBuf,
         timeout: Duration,
+        extra_env: &HashMap<String, String>,
     ) -> Result<(String, i32), ToolError> {
         // Build command
         let mut command = if cfg!(target_os = "windows") {
@@ -489,6 +490,11 @@ impl ShellTool {
                 command.env(var, val);
             }
         }
+
+        // Inject extra environment variables (e.g., credentials fetched by the
+        // worker runtime) on top of the scrubbed base. These are explicitly
+        // provided by the orchestrator and are safe to forward.
+        command.envs(extra_env);
 
         command
             .current_dir(workdir)
@@ -554,6 +560,7 @@ impl ShellTool {
         cmd: &str,
         workdir: Option<&str>,
         timeout: Option<u64>,
+        extra_env: &HashMap<String, String>,
     ) -> Result<(String, i64), ToolError> {
         // Check for blocked commands
         if let Some(reason) = self.is_blocked(cmd) {
@@ -593,7 +600,9 @@ impl ShellTool {
         }
 
         // Only execute directly when no sandbox was configured at all.
-        let (output, code) = self.execute_direct(cmd, &cwd, timeout_duration).await?;
+        let (output, code) = self
+            .execute_direct(cmd, &cwd, timeout_duration, extra_env)
+            .await?;
         Ok((output, code as i64))
     }
 }
@@ -640,7 +649,7 @@ impl Tool for ShellTool {
     async fn execute(
         &self,
         params: serde_json::Value,
-        _ctx: &JobContext,
+        ctx: &JobContext,
     ) -> Result<ToolOutput, ToolError> {
         let command = require_str(&params, "command")?;
 
@@ -648,7 +657,9 @@ impl Tool for ShellTool {
         let timeout = params.get("timeout").and_then(|v| v.as_u64());
 
         let start = std::time::Instant::now();
-        let (output, exit_code) = self.execute_command(command, workdir, timeout).await?;
+        let (output, exit_code) = self
+            .execute_command(command, workdir, timeout, &ctx.extra_env)
+            .await?;
         let duration = start.elapsed();
 
         let sandboxed = self.sandbox.is_some();

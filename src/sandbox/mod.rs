@@ -91,9 +91,7 @@ pub mod error;
 pub mod manager;
 pub mod proxy;
 
-pub use config::{
-    CredentialLocation, CredentialMapping, ResourceLimits, SandboxConfig, SandboxPolicy,
-};
+pub use config::{ResourceLimits, SandboxConfig, SandboxPolicy};
 pub use container::{ContainerOutput, ContainerRunner, connect_docker};
 pub use error::{Result, SandboxError};
 pub use manager::{ExecOutput, SandboxManager, SandboxManagerBuilder};
@@ -108,6 +106,6 @@ pub fn default_allowlist() -> Vec<String> {
 }
 
 /// Default credential mappings getter (re-export for convenience).
-pub fn default_credential_mappings() -> Vec<CredentialMapping> {
+pub fn default_credential_mappings() -> Vec<crate::secrets::CredentialMapping> {
     config::default_credential_mappings()
 }

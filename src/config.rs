@@ -39,6 +39,7 @@ pub struct Config {
     pub routines: RoutineConfig,
     pub sandbox: SandboxModeConfig,
     pub claude_code: ClaudeCodeConfig,
+    pub skills: SkillsConfig,
     pub observability: crate::observability::ObservabilityConfig,
 }
 
@@ -161,6 +162,7 @@ impl Config {
             routines: RoutineConfig::resolve()?,
             sandbox: SandboxModeConfig::resolve()?,
             claude_code: ClaudeCodeConfig::resolve()?,
+            skills: SkillsConfig::resolve()?,
             observability: crate::observability::ObservabilityConfig {
                 backend: std::env::var("OBSERVABILITY_BACKEND").unwrap_or_else(|_| "none".into()),
             },
@@ -531,7 +533,7 @@ pub struct NearAiConfig {
     /// Cheap/fast model for lightweight tasks (heartbeat, routing, evaluation).
     /// Falls back to the main model if not set.
     pub cheap_model: Option<String>,
-    /// Base URL for the NEAR AI API (default: https://api.near.ai)
+    /// Base URL for the NEAR AI API (default: https://private.near.ai).
     pub base_url: String,
     /// Base URL for auth/refresh endpoints (default: https://private.near.ai)
     pub auth_base_url: String,
@@ -619,7 +621,7 @@ impl LlmConfig {
                 }),
             cheap_model: optional_env("NEARAI_CHEAP_MODEL")?,
             base_url: optional_env("NEARAI_BASE_URL")?
-                .unwrap_or_else(|| "https://cloud-api.near.ai".to_string()),
+                .unwrap_or_else(|| "https://private.near.ai".to_string()),
             auth_base_url: optional_env("NEARAI_AUTH_URL")?
                 .unwrap_or_else(|| "https://private.near.ai".to_string()),
             session_path: optional_env("NEARAI_SESSION_PATH")?
@@ -1461,7 +1463,8 @@ impl SandboxModeConfig {
 pub struct ClaudeCodeConfig {
     /// Whether Claude Code sandbox mode is available.
     pub enabled: bool,
-    /// Host directory containing Claude auth session (mounted read-only).
+    /// Host directory containing Claude auth config (not mounted into containers;
+    /// auth is handled via ANTHROPIC_API_KEY env var instead).
     pub config_dir: std::path::PathBuf,
     /// Claude model to use (e.g. "sonnet", "opus").
     pub model: String,
@@ -1488,13 +1491,19 @@ pub struct ClaudeCodeConfig {
 /// silently auto-approved.
 fn default_claude_code_allowed_tools() -> Vec<String> {
     [
-        "Bash(*)",
-        "Read",
+        // File system -- glob patterns match Claude Code's settings.json format
+        "Read(*)",
+        "Write(*)",
         "Edit(*)",
-        "Glob",
-        "Grep",
-        "WebFetch(*)",
+        "Glob(*)",
+        "Grep(*)",
+        "NotebookEdit(*)",
+        // Execution
+        "Bash(*)",
         "Task(*)",
+        // Network
+        "WebFetch(*)",
+        "WebSearch(*)",
     ]
     .into_iter()
     .map(String::from)
@@ -1529,6 +1538,50 @@ impl ClaudeCodeConfig {
         }
     }
 
+    /// Extract the OAuth access token from the host's credential store.
+    ///
+    /// On macOS: reads from Keychain (`Claude Code-credentials` service).
+    /// On Linux: reads from `~/.claude/.credentials.json`.
+    ///
+    /// Returns the access token if found. The token typically expires in
+    /// 8-12 hours, which is sufficient for any single container job.
+    pub fn extract_oauth_token() -> Option<String> {
+        // macOS: extract from Keychain
+        if cfg!(target_os = "macos") {
+            match std::process::Command::new("security")
+                .args([
+                    "find-generic-password",
+                    "-s",
+                    "Claude Code-credentials",
+                    "-w",
+                ])
+                .output()
+            {
+                Ok(output) if output.status.success() => {
+                    if let Ok(json) = String::from_utf8(output.stdout) {
+                        return parse_oauth_access_token(json.trim());
+                    }
+                }
+                Ok(_) => {
+                    tracing::debug!("No Claude Code credentials in macOS Keychain");
+                }
+                Err(e) => {
+                    tracing::debug!("Failed to query macOS Keychain: {e}");
+                }
+            }
+        }
+
+        // Linux / fallback: read from ~/.claude/.credentials.json
+        if let Some(home) = dirs::home_dir() {
+            let creds_path = home.join(".claude").join(".credentials.json");
+            if let Ok(json) = std::fs::read_to_string(&creds_path) {
+                return parse_oauth_access_token(&json);
+            }
+        }
+
+        None
+    }
+
     fn resolve() -> Result<Self, ConfigError> {
         let defaults = Self::default();
         Ok(Self {
@@ -1557,6 +1610,68 @@ impl ClaudeCodeConfig {
                         .collect()
                 })
                 .unwrap_or(defaults.allowed_tools),
+        })
+    }
+}
+
+/// Parse the OAuth access token from a Claude Code credentials JSON blob.
+///
+/// Expected shape: `{"claudeAiOauth": {"accessToken": "sk-ant-oat01-..."}}`
+fn parse_oauth_access_token(json: &str) -> Option<String> {
+    let creds: serde_json::Value = serde_json::from_str(json).ok()?;
+    creds["claudeAiOauth"]["accessToken"]
+        .as_str()
+        .map(String::from)
+}
+
+/// Skills system configuration.
+#[derive(Debug, Clone)]
+pub struct SkillsConfig {
+    /// Whether the skills system is enabled.
+    pub enabled: bool,
+    /// Directory containing local skills (default: ~/.ironclaw/skills/).
+    pub local_dir: PathBuf,
+    /// Maximum number of skills that can be active simultaneously.
+    pub max_active_skills: usize,
+    /// Maximum total context tokens allocated to skill prompts.
+    pub max_context_tokens: usize,
+}
+
+impl Default for SkillsConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            local_dir: default_skills_dir(),
+            max_active_skills: 3,
+            max_context_tokens: 4000,
+        }
+    }
+}
+
+/// Get the default skills directory (~/.ironclaw/skills/).
+fn default_skills_dir() -> PathBuf {
+    dirs::home_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join(".ironclaw")
+        .join("skills")
+}
+
+impl SkillsConfig {
+    fn resolve() -> Result<Self, ConfigError> {
+        Ok(Self {
+            enabled: optional_env("SKILLS_ENABLED")?
+                .map(|s| s.parse())
+                .transpose()
+                .map_err(|e| ConfigError::InvalidValue {
+                    key: "SKILLS_ENABLED".to_string(),
+                    message: format!("must be 'true' or 'false': {e}"),
+                })?
+                .unwrap_or(false),
+            local_dir: optional_env("SKILLS_DIR")?
+                .map(PathBuf::from)
+                .unwrap_or_else(default_skills_dir),
+            max_active_skills: parse_optional_env("SKILLS_MAX_ACTIVE", 3)?,
+            max_context_tokens: parse_optional_env("SKILLS_MAX_CONTEXT_TOKENS", 4000)?,
         })
     }
 }
