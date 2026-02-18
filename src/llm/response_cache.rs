@@ -235,75 +235,9 @@ impl LlmProvider for CachedProvider {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
-
-    use crate::llm::provider::{ChatMessage, FinishReason};
+    use crate::llm::provider::ChatMessage;
     use crate::llm::response_cache::*;
-
-    /// Controllable stub provider for testing cache behavior.
-    struct StubProvider {
-        call_count: AtomicU32,
-        should_fail: AtomicBool,
-    }
-
-    impl StubProvider {
-        fn new() -> Self {
-            Self {
-                call_count: AtomicU32::new(0),
-                should_fail: AtomicBool::new(false),
-            }
-        }
-
-        fn calls(&self) -> u32 {
-            self.call_count.load(Ordering::Relaxed)
-        }
-    }
-
-    #[async_trait]
-    impl LlmProvider for StubProvider {
-        fn model_name(&self) -> &str {
-            "stub-model"
-        }
-
-        fn cost_per_token(&self) -> (Decimal, Decimal) {
-            (Decimal::ZERO, Decimal::ZERO)
-        }
-
-        async fn complete(
-            &self,
-            _request: CompletionRequest,
-        ) -> Result<CompletionResponse, LlmError> {
-            self.call_count.fetch_add(1, Ordering::Relaxed);
-            if self.should_fail.load(Ordering::Relaxed) {
-                return Err(LlmError::RequestFailed {
-                    provider: "stub".into(),
-                    reason: "forced failure".into(),
-                });
-            }
-            Ok(CompletionResponse {
-                content: "cached response".into(),
-                input_tokens: 10,
-                output_tokens: 5,
-                finish_reason: FinishReason::Stop,
-                response_id: None,
-            })
-        }
-
-        async fn complete_with_tools(
-            &self,
-            _request: ToolCompletionRequest,
-        ) -> Result<ToolCompletionResponse, LlmError> {
-            self.call_count.fetch_add(1, Ordering::Relaxed);
-            Ok(ToolCompletionResponse {
-                content: Some("tool response".into()),
-                tool_calls: vec![],
-                input_tokens: 10,
-                output_tokens: 5,
-                finish_reason: FinishReason::Stop,
-                response_id: None,
-            })
-        }
-    }
+    use crate::testing::StubLlm;
 
     fn simple_request() -> CompletionRequest {
         CompletionRequest {
@@ -369,7 +303,7 @@ mod tests {
 
     #[tokio::test]
     async fn cache_hit_avoids_provider_call() {
-        let stub = Arc::new(StubProvider::new());
+        let stub = Arc::new(StubLlm::new("cached response"));
         let cached = CachedProvider::new(
             stub.clone(),
             ResponseCacheConfig {
@@ -393,7 +327,7 @@ mod tests {
 
     #[tokio::test]
     async fn different_messages_get_different_entries() {
-        let stub = Arc::new(StubProvider::new());
+        let stub = Arc::new(StubLlm::new("cached response"));
         let cached = CachedProvider::new(stub.clone(), ResponseCacheConfig::default());
 
         cached.complete(simple_request()).await.unwrap();
@@ -405,7 +339,7 @@ mod tests {
 
     #[tokio::test]
     async fn expired_entries_are_evicted() {
-        let stub = Arc::new(StubProvider::new());
+        let stub = Arc::new(StubLlm::new("cached response"));
         let cached = CachedProvider::new(
             stub.clone(),
             ResponseCacheConfig {
@@ -427,7 +361,7 @@ mod tests {
 
     #[tokio::test]
     async fn lru_eviction_removes_oldest() {
-        let stub = Arc::new(StubProvider::new());
+        let stub = Arc::new(StubLlm::new("cached response"));
         let cached = CachedProvider::new(
             stub.clone(),
             ResponseCacheConfig {
@@ -456,7 +390,7 @@ mod tests {
 
     #[tokio::test]
     async fn tool_calls_are_never_cached() {
-        let stub = Arc::new(StubProvider::new());
+        let stub = Arc::new(StubLlm::new("cached response"));
         let cached = CachedProvider::new(stub.clone(), ResponseCacheConfig::default());
 
         let req = ToolCompletionRequest {
@@ -478,7 +412,7 @@ mod tests {
 
     #[tokio::test]
     async fn provider_errors_are_not_cached() {
-        let stub = Arc::new(StubProvider::new());
+        let stub = Arc::new(StubLlm::new("cached response"));
         let cached = CachedProvider::new(
             stub.clone(),
             ResponseCacheConfig {
@@ -487,20 +421,20 @@ mod tests {
             },
         );
 
-        stub.should_fail.store(true, Ordering::Relaxed);
+        stub.set_failing(true);
         let result = cached.complete(simple_request()).await;
         assert!(result.is_err());
         assert!(cached.is_empty().await);
 
         // After fixing the provider, should succeed and cache
-        stub.should_fail.store(false, Ordering::Relaxed);
+        stub.set_failing(false);
         cached.complete(simple_request()).await.unwrap();
         assert_eq!(cached.len().await, 1);
     }
 
     #[tokio::test]
     async fn clear_empties_cache() {
-        let stub = Arc::new(StubProvider::new());
+        let stub = Arc::new(StubLlm::new("cached response"));
         let cached = CachedProvider::new(stub.clone(), ResponseCacheConfig::default());
 
         cached.complete(simple_request()).await.unwrap();
@@ -519,7 +453,7 @@ mod tests {
 
     #[tokio::test]
     async fn delegates_model_name() {
-        let stub = Arc::new(StubProvider::new());
+        let stub = Arc::new(StubLlm::new("cached response"));
         let cached = CachedProvider::new(stub.clone(), ResponseCacheConfig::default());
         assert_eq!(cached.model_name(), "stub-model");
     }
