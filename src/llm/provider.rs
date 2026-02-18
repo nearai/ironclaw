@@ -301,6 +301,16 @@ pub trait LlmProvider: Send + Sync {
         })
     }
 
+    /// Resolve which model should be reported for a given request.
+    ///
+    /// Providers that ignore per-request model overrides should override this
+    /// and return `active_model_name()`.
+    fn effective_model_name(&self, requested_model: Option<&str>) -> String {
+        requested_model
+            .map(std::borrow::ToOwned::to_owned)
+            .unwrap_or_else(|| self.active_model_name())
+    }
+
     /// Get the currently active model name.
     ///
     /// May differ from `model_name()` if the model was switched at runtime

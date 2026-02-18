@@ -119,12 +119,71 @@ impl LlmProvider for MockLlmProvider {
     }
 }
 
+struct FixedModelProvider {
+    model: &'static str,
+}
+
+impl FixedModelProvider {
+    fn new(model: &'static str) -> Self {
+        Self { model }
+    }
+}
+
+#[async_trait]
+impl LlmProvider for FixedModelProvider {
+    fn model_name(&self) -> &str {
+        self.model
+    }
+
+    fn cost_per_token(&self) -> (Decimal, Decimal) {
+        (Decimal::ZERO, Decimal::ZERO)
+    }
+
+    async fn complete(&self, _req: CompletionRequest) -> Result<CompletionResponse, LlmError> {
+        Ok(CompletionResponse {
+            content: "fixed response".to_string(),
+            input_tokens: 10,
+            output_tokens: 5,
+            finish_reason: FinishReason::Stop,
+            response_id: None,
+        })
+    }
+
+    async fn complete_with_tools(
+        &self,
+        _req: ToolCompletionRequest,
+    ) -> Result<ToolCompletionResponse, LlmError> {
+        Ok(ToolCompletionResponse {
+            content: Some("fixed response".to_string()),
+            tool_calls: vec![],
+            input_tokens: 10,
+            output_tokens: 5,
+            finish_reason: FinishReason::Stop,
+            response_id: None,
+        })
+    }
+
+    fn effective_model_name(&self, _requested_model: Option<&str>) -> String {
+        self.model.to_string()
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Test helpers
 // ---------------------------------------------------------------------------
 
 async fn start_test_server() -> (SocketAddr, Arc<GatewayState>, Arc<MockLlmState>) {
     let mock_state = Arc::new(MockLlmState::default());
+
+    let llm_provider: Arc<dyn LlmProvider> = Arc::new(MockLlmProvider::new(mock_state.clone()));
+    let (bound_addr, state) = start_test_server_with_provider(llm_provider).await;
+
+    (bound_addr, state, mock_state)
+}
+
+async fn start_test_server_with_provider(
+    llm_provider: Arc<dyn LlmProvider>,
+) -> (SocketAddr, Arc<GatewayState>) {
     let state = Arc::new(GatewayState {
         msg_tx: tokio::sync::RwLock::new(None),
         sse: SseManager::new(),
@@ -139,7 +198,7 @@ async fn start_test_server() -> (SocketAddr, Arc<GatewayState>, Arc<MockLlmState
         user_id: "test-user".to_string(),
         shutdown_tx: tokio::sync::RwLock::new(None),
         ws_tracker: Some(Arc::new(WsConnectionTracker::new())),
-        llm_provider: Some(Arc::new(MockLlmProvider::new(mock_state.clone()))),
+        llm_provider: Some(llm_provider),
         chat_rate_limiter: ironclaw::channels::web::server::RateLimiter::new(30, 60),
     });
 
@@ -148,7 +207,7 @@ async fn start_test_server() -> (SocketAddr, Arc<GatewayState>, Arc<MockLlmState
         .await
         .expect("Failed to start test server");
 
-    (bound_addr, state, mock_state)
+    (bound_addr, state)
 }
 
 fn client() -> reqwest::Client {
@@ -407,6 +466,55 @@ async fn test_chat_completions_model_override() {
         .lock()
         .expect("completion_models lock poisoned");
     assert_eq!(*models, vec![Some("gpt-4".to_string())]);
+}
+
+#[tokio::test]
+async fn test_chat_completions_uses_effective_model_when_override_ignored() {
+    let provider: Arc<dyn LlmProvider> = Arc::new(FixedModelProvider::new("configured-model"));
+    let (addr, _state) = start_test_server_with_provider(provider).await;
+    let url = format!("http://{}/v1/chat/completions", addr);
+
+    let resp = client()
+        .post(&url)
+        .bearer_auth(AUTH_TOKEN)
+        .json(&serde_json::json!({
+            "model": "gpt-4",
+            "messages": [{"role": "user", "content": "Hi"}]
+        }))
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), 200);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(body["model"], "configured-model");
+}
+
+#[tokio::test]
+async fn test_chat_completions_streaming_uses_effective_model_when_override_ignored() {
+    let provider: Arc<dyn LlmProvider> = Arc::new(FixedModelProvider::new("configured-model"));
+    let (addr, _state) = start_test_server_with_provider(provider).await;
+    let url = format!("http://{}/v1/chat/completions", addr);
+
+    let resp = client()
+        .post(&url)
+        .bearer_auth(AUTH_TOKEN)
+        .json(&serde_json::json!({
+            "model": "gpt-4",
+            "messages": [{"role": "user", "content": "Hi"}],
+            "stream": true
+        }))
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), 200);
+    let text = resp.text().await.unwrap();
+    assert!(
+        text.contains("\"model\":\"configured-model\""),
+        "Expected streaming chunks to report configured model, got: {}",
+        text
+    );
 }
 
 #[tokio::test]

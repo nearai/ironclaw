@@ -324,6 +324,10 @@ where
         self.model_name.clone()
     }
 
+    fn effective_model_name(&self, _requested_model: Option<&str>) -> String {
+        self.active_model_name()
+    }
+
     fn set_model(&self, _model: &str) -> Result<(), LlmError> {
         // rig-core models are baked at construction time.
         // Switching requires creating a new adapter.

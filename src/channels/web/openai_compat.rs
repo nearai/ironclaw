@@ -466,7 +466,6 @@ pub async fn chat_completions_handler(
 
     let messages = convert_messages(&req.messages)
         .map_err(|e| openai_error(StatusCode::BAD_REQUEST, e, "invalid_request_error"))?;
-    let model_name = requested_model;
     let id = chat_completion_id();
     let created = unix_timestamp();
 
@@ -489,6 +488,7 @@ pub async fn chat_completions_handler(
             .complete_with_tools(tool_req)
             .await
             .map_err(map_llm_error)?;
+        let model_name = llm.effective_model_name(Some(requested_model.as_str()));
 
         let tool_calls_openai = if resp.tool_calls.is_empty() {
             None
@@ -533,6 +533,7 @@ pub async fn chat_completions_handler(
         }
 
         let resp = llm.complete(comp_req).await.map_err(map_llm_error)?;
+        let model_name = llm.effective_model_name(Some(requested_model.as_str()));
 
         let response = OpenAiChatResponse {
             id,
@@ -576,7 +577,7 @@ async fn handle_streaming(
     let messages = convert_messages(&req.messages)
         .map_err(|e| openai_error(StatusCode::BAD_REQUEST, e, "invalid_request_error"))?;
 
-    let model_name = req.model.clone();
+    let requested_model = req.model.clone();
     let id = chat_completion_id();
     let created = unix_timestamp();
 
@@ -620,6 +621,7 @@ async fn handle_streaming(
         }
         LlmResult::Simple(llm.complete(comp_req).await.map_err(map_llm_error)?)
     };
+    let model_name = llm.effective_model_name(Some(requested_model.as_str()));
 
     // LLM succeeded — emit the response as SSE chunks
     let (tx, rx) = tokio::sync::mpsc::channel::<Result<Event, std::convert::Infallible>>(64);

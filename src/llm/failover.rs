@@ -159,6 +159,10 @@ impl LlmProvider for FailoverProvider {
         all_models.dedup();
         Ok(all_models)
     }
+
+    fn effective_model_name(&self, requested_model: Option<&str>) -> String {
+        self.providers[self.last_used.load(Ordering::Relaxed)].effective_model_name(requested_model)
+    }
 }
 
 #[cfg(test)]
