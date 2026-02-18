@@ -19,9 +19,6 @@ pub enum SkillParseError {
 
     #[error("Invalid skill name '{name}': must match [a-zA-Z0-9][a-zA-Z0-9._-]{{0,63}}")]
     InvalidName { name: String },
-
-    #[error("SKILL.md too large: {size} bytes (max {max} bytes)")]
-    FileTooLarge { size: u64, max: u64 },
 }
 
 /// Result of parsing a SKILL.md file.
