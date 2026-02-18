@@ -336,17 +336,11 @@ pub enum OrchestratorError {
     #[error("Container for job {job_id} is in unexpected state: {state}")]
     InvalidContainerState { job_id: Uuid, state: String },
 
-    #[error("Worker authentication failed: {reason}")]
-    AuthFailed { reason: String },
-
     #[error("Internal API error: {reason}")]
     ApiError { reason: String },
 
     #[error("Docker error: {reason}")]
     Docker { reason: String },
-
-    #[error("Job {job_id} timed out in container")]
-    ContainerTimeout { job_id: Uuid },
 }
 
 /// Worker errors (container-side execution).

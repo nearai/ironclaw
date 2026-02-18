@@ -5,13 +5,18 @@ use std::net::{IpAddr, ToSocketAddrs};
 use std::time::Duration;
 
 use async_trait::async_trait;
+use futures::StreamExt;
 use reqwest::Client;
 
 use crate::context::JobContext;
 use crate::safety::LeakDetector;
 use crate::tools::tool::{Tool, ToolError, ToolOutput, require_str};
 
-/// Maximum response body size (5 MB). Prevents OOM from unbounded responses.
+/// Maximum response body size (5 MB).
+///
+/// 5 MB is large enough for typical JSON API responses and moderate HTML pages,
+/// but small enough to prevent OOM from malicious or runaway servers.  The WASM
+/// HTTP wrapper uses the same limit for consistency.
 const MAX_RESPONSE_SIZE: usize = 5 * 1024 * 1024;
 
 /// Tool for making HTTP requests.
@@ -101,6 +106,46 @@ fn is_disallowed_ip(ip: &IpAddr) -> bool {
     }
 }
 
+fn parse_headers_param(
+    headers: Option<&serde_json::Value>,
+) -> Result<Vec<(String, String)>, ToolError> {
+    match headers {
+        None => Ok(Vec::new()),
+        Some(serde_json::Value::Object(map)) => {
+            let mut out = Vec::with_capacity(map.len());
+            for (k, v) in map {
+                let value = v.as_str().ok_or_else(|| {
+                    ToolError::InvalidParameters(format!("header '{}' must have a string value", k))
+                })?;
+                out.push((k.clone(), value.to_string()));
+            }
+            Ok(out)
+        }
+        Some(serde_json::Value::Array(items)) => {
+            let mut out = Vec::with_capacity(items.len());
+            for (idx, item) in items.iter().enumerate() {
+                let obj = item.as_object().ok_or_else(|| {
+                    ToolError::InvalidParameters(format!(
+                        "headers[{}] must be an object with 'name' and 'value'",
+                        idx
+                    ))
+                })?;
+                let name = obj.get("name").and_then(|v| v.as_str()).ok_or_else(|| {
+                    ToolError::InvalidParameters(format!("headers[{}].name must be a string", idx))
+                })?;
+                let value = obj.get("value").and_then(|v| v.as_str()).ok_or_else(|| {
+                    ToolError::InvalidParameters(format!("headers[{}].value must be a string", idx))
+                })?;
+                out.push((name.to_string(), value.to_string()));
+            }
+            Ok(out)
+        }
+        Some(_) => Err(ToolError::InvalidParameters(
+            "'headers' must be an object or an array of {name, value}".to_string(),
+        )),
+    }
+}
+
 impl Default for HttpTool {
     fn default() -> Self {
         Self::new()
@@ -131,13 +176,21 @@ impl Tool for HttpTool {
                     "description": "The URL to request"
                 },
                 "headers": {
-                    "type": "object",
-                    "additionalProperties": { "type": "string" },
-                    "description": "HTTP headers to include"
+                    "type": "array",
+                    "description": "Optional headers as a list of {name, value} objects",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "name": { "type": "string" },
+                            "value": { "type": "string" }
+                        },
+                        "required": ["name", "value"],
+                        "additionalProperties": false
+                    }
                 },
                 "body": {
-                    "type": "object",
-                    "description": "Request body (for POST/PUT/PATCH)"
+                    "type": "string",
+                    "description": "Request body. Use plain text or serialized JSON."
                 },
                 "timeout_secs": {
                     "type": "integer",
@@ -161,14 +214,7 @@ impl Tool for HttpTool {
         let parsed_url = validate_url(url)?;
 
         // Parse headers
-        let headers: HashMap<String, String> = params
-            .get("headers")
-            .and_then(|v| serde_json::from_value(v.clone()).ok())
-            .unwrap_or_default();
-        let headers_vec: Vec<(String, String)> = headers
-            .iter()
-            .map(|(k, v)| (k.clone(), v.clone()))
-            .collect();
+        let headers_vec = parse_headers_param(params.get("headers"))?;
 
         // Build request
         let mut request = match method.to_uppercase().as_str() {
@@ -186,16 +232,31 @@ impl Tool for HttpTool {
         };
 
         // Add headers
-        for (key, value) in headers {
-            request = request.header(&key, &value);
+        for (key, value) in &headers_vec {
+            request = request.header(key.as_str(), value.as_str());
         }
 
         // Add body if present
         let body_bytes = if let Some(body) = params.get("body") {
-            let bytes = serde_json::to_vec(body)
-                .map_err(|e| ToolError::InvalidParameters(format!("invalid body JSON: {}", e)))?;
-            request = request.json(body);
-            Some(bytes)
+            if let Some(body_str) = body.as_str() {
+                if let Ok(json_body) = serde_json::from_str::<serde_json::Value>(body_str) {
+                    let bytes = serde_json::to_vec(&json_body).map_err(|e| {
+                        ToolError::InvalidParameters(format!("invalid body JSON: {}", e))
+                    })?;
+                    request = request.json(&json_body);
+                    Some(bytes)
+                } else {
+                    let bytes = body_str.as_bytes().to_vec();
+                    request = request.body(body_str.to_string());
+                    Some(bytes)
+                }
+            } else {
+                let bytes = serde_json::to_vec(body).map_err(|e| {
+                    ToolError::InvalidParameters(format!("invalid body JSON: {}", e))
+                })?;
+                request = request.json(body);
+                Some(bytes)
+            }
         } else {
             None
         };
@@ -231,18 +292,42 @@ impl Tool for HttpTool {
             .filter_map(|(k, v)| v.to_str().ok().map(|v| (k.to_string(), v.to_string())))
             .collect();
 
-        // Get response body with size cap to prevent OOM
-        let body_bytes = response.bytes().await.map_err(|e| {
-            ToolError::ExternalService(format!("failed to read response body: {}", e))
-        })?;
-
-        if body_bytes.len() > MAX_RESPONSE_SIZE {
+        // Pre-check Content-Length header to reject obviously oversized responses
+        // before downloading anything, preventing OOM from malicious servers.
+        if let Some(content_length) = response.headers().get(reqwest::header::CONTENT_LENGTH)
+            && let Ok(s) = content_length.to_str()
+            && let Ok(len) = s.parse::<usize>()
+            && len > MAX_RESPONSE_SIZE
+        {
+            tracing::warn!(
+                url = %parsed_url,
+                content_length = len,
+                max = MAX_RESPONSE_SIZE,
+                "Rejected HTTP response: Content-Length exceeds limit"
+            );
             return Err(ToolError::ExecutionFailed(format!(
-                "Response body too large ({} bytes, max {})",
-                body_bytes.len(),
-                MAX_RESPONSE_SIZE
+                "Response Content-Length ({} bytes) exceeds maximum allowed size ({} bytes)",
+                len, MAX_RESPONSE_SIZE
             )));
         }
+
+        // Stream the response body with a hard size cap. Even if Content-Length was
+        // absent or lied about the size, we stop reading once we exceed the limit.
+        let mut body = Vec::new();
+        let mut stream = response.bytes_stream();
+        while let Some(chunk) = StreamExt::next(&mut stream).await {
+            let chunk = chunk.map_err(|e| {
+                ToolError::ExternalService(format!("failed to read response body: {}", e))
+            })?;
+            if body.len() + chunk.len() > MAX_RESPONSE_SIZE {
+                return Err(ToolError::ExecutionFailed(format!(
+                    "Response body exceeds maximum allowed size ({} bytes)",
+                    MAX_RESPONSE_SIZE
+                )));
+            }
+            body.extend_from_slice(&chunk);
+        }
+        let body_bytes = bytes::Bytes::from(body);
 
         let body_text = String::from_utf8_lossy(&body_bytes).into_owned();
 
@@ -275,6 +360,20 @@ impl Tool for HttpTool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_http_tool_schema_body_has_type() {
+        let tool = HttpTool::new();
+        let schema = tool.parameters_schema();
+        assert_eq!(schema["properties"]["body"]["type"], "string");
+    }
+
+    #[test]
+    fn test_http_tool_schema_headers_is_array() {
+        let tool = HttpTool::new();
+        let schema = tool.parameters_schema();
+        assert_eq!(schema["properties"]["headers"]["type"], "array");
+    }
 
     #[test]
     fn test_validate_url_rejects_http() {
@@ -328,5 +427,37 @@ mod tests {
         ))));
         // Public
         assert!(!is_disallowed_ip(&IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8))));
+    }
+
+    #[test]
+    fn test_max_response_size_is_reasonable() {
+        // MAX_RESPONSE_SIZE should be 5 MB to prevent OOM while allowing typical API responses.
+        assert_eq!(MAX_RESPONSE_SIZE, 5 * 1024 * 1024);
+    }
+
+    #[test]
+    fn test_parse_headers_param_accepts_object_legacy_shape() {
+        let headers = serde_json::json!({"Authorization": "Bearer token"});
+        let parsed = parse_headers_param(Some(&headers)).unwrap();
+        assert_eq!(
+            parsed,
+            vec![("Authorization".to_string(), "Bearer token".to_string())]
+        );
+    }
+
+    #[test]
+    fn test_parse_headers_param_accepts_array_shape() {
+        let headers = serde_json::json!([
+            {"name": "Authorization", "value": "Bearer token"},
+            {"name": "X-Test", "value": "1"}
+        ]);
+        let parsed = parse_headers_param(Some(&headers)).unwrap();
+        assert_eq!(
+            parsed,
+            vec![
+                ("Authorization".to_string(), "Bearer token".to_string()),
+                ("X-Test".to_string(), "1".to_string())
+            ]
+        );
     }
 }

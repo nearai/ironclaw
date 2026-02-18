@@ -36,6 +36,8 @@ use crate::db::Database;
 use crate::error::ChannelError;
 use crate::extensions::ExtensionManager;
 use crate::orchestrator::job_manager::ContainerJobManager;
+use crate::skills::catalog::SkillCatalog;
+use crate::skills::registry::SkillRegistry;
 use crate::tools::ToolRegistry;
 use crate::workspace::Workspace;
 
@@ -83,6 +85,8 @@ impl GatewayChannel {
             shutdown_tx: tokio::sync::RwLock::new(None),
             ws_tracker: Some(Arc::new(ws::WsConnectionTracker::new())),
             llm_provider: None,
+            skill_registry: None,
+            skill_catalog: None,
             chat_rate_limiter: server::RateLimiter::new(30, 60),
         });
 
@@ -110,6 +114,8 @@ impl GatewayChannel {
             shutdown_tx: tokio::sync::RwLock::new(None),
             ws_tracker: self.state.ws_tracker.clone(),
             llm_provider: self.state.llm_provider.clone(),
+            skill_registry: self.state.skill_registry.clone(),
+            skill_catalog: self.state.skill_catalog.clone(),
             chat_rate_limiter: server::RateLimiter::new(30, 60),
         };
         mutate(&mut new_state);
@@ -171,6 +177,18 @@ impl GatewayChannel {
         >,
     ) -> Self {
         self.rebuild_state(|s| s.prompt_queue = Some(pq));
+        self
+    }
+
+    /// Inject the skill registry for skill management API.
+    pub fn with_skill_registry(mut self, sr: Arc<std::sync::RwLock<SkillRegistry>>) -> Self {
+        self.rebuild_state(|s| s.skill_registry = Some(sr));
+        self
+    }
+
+    /// Inject the skill catalog for skill search API.
+    pub fn with_skill_catalog(mut self, sc: Arc<SkillCatalog>) -> Self {
+        self.rebuild_state(|s| s.skill_catalog = Some(sc));
         self
     }
 

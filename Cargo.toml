@@ -1,4 +1,5 @@
 [workspace]
+members = [".", "benchmarks"]
 exclude = [
     "channels-src/telegram",
     "channels-src/slack",
@@ -8,7 +9,7 @@ exclude = [
 
 [package]
 name = "ironclaw"
-version = "0.4.0"
+version = "0.5.0"
 edition = "2024"
 rust-version = "1.92"
 description = "Secure personal AI assistant that protects your data and expands its capabilities on the fly"
@@ -55,6 +56,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 
 # Configuration
 dotenvy = "0.15"
+toml = "0.8"
 
 # Core types
 uuid = { version = "1", features = ["v4", "serde"] }
@@ -84,6 +86,9 @@ cron = "0.13"
 # Safety/sanitization
 regex = "1"
 aho-corasick = "1"
+
+# YAML parsing for SKILL.md frontmatter
+serde_yml = "0.0.12"
 
 # Filesystem paths
 dirs = "6"
