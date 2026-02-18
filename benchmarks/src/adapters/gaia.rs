@@ -20,8 +20,6 @@ struct GaiaEntry {
     level: Option<u32>,
     #[serde(alias = "file_name", default)]
     file_name: Option<String>,
-    #[serde(alias = "Annotator Metadata", default)]
-    annotator_metadata: Option<serde_json::Value>,
 }
 
 /// GAIA benchmark suite.
