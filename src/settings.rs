@@ -1055,6 +1055,37 @@ mod tests {
     }
 
     #[test]
+    fn test_openai_compatible_db_map_round_trip() {
+        let settings = Settings {
+            llm_backend: Some("openai_compatible".to_string()),
+            openai_compatible_base_url: Some("http://my-vllm:8000/v1".to_string()),
+            embeddings: EmbeddingsSettings {
+                enabled: false,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+
+        let map = settings.to_db_map();
+        let restored = Settings::from_db_map(&map);
+
+        assert_eq!(
+            restored.llm_backend,
+            Some("openai_compatible".to_string()),
+            "llm_backend must survive DB round-trip"
+        );
+        assert_eq!(
+            restored.openai_compatible_base_url,
+            Some("http://my-vllm:8000/v1".to_string()),
+            "openai_compatible_base_url must survive DB round-trip"
+        );
+        assert!(
+            !restored.embeddings.enabled,
+            "embeddings.enabled=false must survive DB round-trip"
+        );
+    }
+
+    #[test]
     fn toml_round_trip() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.toml");
@@ -1124,8 +1155,6 @@ mod tests {
 
         let mut toml_overlay = Settings::default();
         toml_overlay.agent.name = "from-toml".to_string();
-        // heartbeat.interval_secs stays at default (1800) in the overlay,
-        // so the base value (600) should be preserved.
 
         base.merge_from(&toml_overlay);
 
@@ -1142,7 +1171,6 @@ mod tests {
         let overlay = Settings::default();
         base.merge_from(&overlay);
 
-        // All base values preserved since overlay is entirely default
         assert_eq!(base.agent.name, "custom-name");
         assert!(base.heartbeat.enabled);
     }
