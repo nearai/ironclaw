@@ -179,7 +179,6 @@ async fn main() -> anyhow::Result<()> {
             let session = ironclaw::llm::create_session_manager(ironclaw::llm::SessionConfig {
                 auth_base_url: ironclaw_config.llm.nearai.auth_base_url.clone(),
                 session_path: ironclaw_config.llm.nearai.session_path.clone(),
-                ..Default::default()
             })
             .await;
             session.ensure_authenticated().await?;

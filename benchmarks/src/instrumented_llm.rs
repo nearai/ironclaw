@@ -15,6 +15,7 @@ use ironclaw::llm::{
 
 /// Recorded metrics from a single LLM call.
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct LlmCallRecord {
     pub input_tokens: u32,
     pub output_tokens: u32,
