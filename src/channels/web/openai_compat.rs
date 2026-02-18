@@ -383,7 +383,7 @@ fn unix_timestamp() -> u64 {
 }
 
 fn validate_model_name(model: &str) -> Result<(), String> {
-    if model.is_empty() {
+    if model.trim().is_empty() {
         return Err("model must not be empty".to_string());
     }
     if model.len() > MAX_MODEL_NAME_BYTES {
@@ -391,6 +391,9 @@ fn validate_model_name(model: &str) -> Result<(), String> {
             "model must be at most {} bytes",
             MAX_MODEL_NAME_BYTES
         ));
+    }
+    if model.chars().any(char::is_control) {
+        return Err("model contains control characters".to_string());
     }
     Ok(())
 }

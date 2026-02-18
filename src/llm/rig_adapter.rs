@@ -231,6 +231,16 @@ where
     }
 
     async fn complete(&self, request: CompletionRequest) -> Result<CompletionResponse, LlmError> {
+        if let Some(requested_model) = request.model.as_deref()
+            && requested_model != self.model_name.as_str()
+        {
+            tracing::warn!(
+                requested_model = requested_model,
+                active_model = %self.model_name,
+                "Per-request model override is not supported for this provider; using configured model"
+            );
+        }
+
         let (preamble, history) = convert_messages(&request.messages);
 
         let rig_req = build_rig_request(
@@ -266,6 +276,16 @@ where
         &self,
         request: ToolCompletionRequest,
     ) -> Result<ToolCompletionResponse, LlmError> {
+        if let Some(requested_model) = request.model.as_deref()
+            && requested_model != self.model_name.as_str()
+        {
+            tracing::warn!(
+                requested_model = requested_model,
+                active_model = %self.model_name,
+                "Per-request model override is not supported for this provider; using configured model"
+            );
+        }
+
         let (preamble, history) = convert_messages(&request.messages);
         let tools = convert_tools(&request.tools);
         let tool_choice = convert_tool_choice(request.tool_choice.as_deref());

@@ -1135,14 +1135,13 @@ async fn main() -> anyhow::Result<()> {
 
     // Add web gateway channel if configured
     if let Some(ref gw_config) = config.channels.gateway {
-        let mut gw = GatewayChannel::new(gw_config.clone());
+        let mut gw = GatewayChannel::new(gw_config.clone()).with_llm_provider(Arc::clone(&llm));
         if let Some(ref ws) = workspace {
             gw = gw.with_workspace(Arc::clone(ws));
         }
         gw = gw.with_session_manager(Arc::clone(&session_manager));
         gw = gw.with_log_broadcaster(Arc::clone(&log_broadcaster));
         gw = gw.with_tool_registry(Arc::clone(&tools));
-        gw = gw.with_llm_provider(Arc::clone(&llm));
         if let Some(ref ext_mgr) = extension_manager {
             gw = gw.with_extension_manager(Arc::clone(ext_mgr));
         }
