@@ -1006,7 +1006,7 @@ impl SetupWizard {
         use crate::llm::create_llm_provider;
 
         let base_url = std::env::var("NEARAI_BASE_URL")
-            .unwrap_or_else(|_| "https://cloud-api.near.ai".to_string());
+            .unwrap_or_else(|_| "https://private.near.ai".to_string());
         let auth_base_url = std::env::var("NEARAI_AUTH_URL")
             .unwrap_or_else(|_| "https://private.near.ai".to_string());
 
@@ -1022,6 +1022,11 @@ impl SetupWizard {
                 api_key: None,
                 fallback_model: None,
                 max_retries: 3,
+                circuit_breaker_threshold: None,
+                circuit_breaker_recovery_secs: 30,
+                response_cache_enabled: false,
+                response_cache_ttl_secs: 3600,
+                response_cache_max_entries: 1000,
                 failover_cooldown_secs: 300,
                 failover_cooldown_threshold: 3,
             },
@@ -1255,11 +1260,8 @@ impl SetupWizard {
     async fn step_channels(&mut self) -> Result<(), SetupError> {
         // First, configure tunnel (shared across all channels that need webhooks)
         match setup_tunnel(&self.settings) {
-            Ok(Some(url)) => {
-                self.settings.tunnel.public_url = Some(url);
-            }
-            Ok(None) => {
-                self.settings.tunnel.public_url = None;
+            Ok(tunnel_settings) => {
+                self.settings.tunnel = tunnel_settings;
             }
             Err(e) => {
                 print_info(&format!("Tunnel setup skipped: {}", e));
@@ -1610,8 +1612,13 @@ impl SetupWizard {
         }
 
         if let Some(ref tunnel_url) = self.settings.tunnel.public_url {
-            println!("  Tunnel: {}", tunnel_url);
+            println!("  Tunnel: {} (static)", tunnel_url);
+        } else if let Some(ref provider) = self.settings.tunnel.provider {
+            println!("  Tunnel: {} (managed, starts at boot)", provider);
         }
+
+        let has_tunnel =
+            self.settings.tunnel.public_url.is_some() || self.settings.tunnel.provider.is_some();
 
         println!("  Channels:");
         println!("    - CLI/TUI: enabled");
@@ -1622,11 +1629,7 @@ impl SetupWizard {
         }
 
         for channel_name in &self.settings.channels.wasm_channels {
-            let mode = if self.settings.tunnel.public_url.is_some() {
-                "webhook"
-            } else {
-                "polling"
-            };
+            let mode = if has_tunnel { "webhook" } else { "polling" };
             println!(
                 "    - {}: enabled ({})",
                 capitalize_first(channel_name),
