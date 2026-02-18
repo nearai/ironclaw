@@ -19,11 +19,8 @@ gh pr list --state open --limit 100 --json number,title,author,labels,additions,
 
 If `$ARGUMENTS` contains `--label=<X>` or `--author=<X>`, add the corresponding flags to the `gh pr list` command.
 
-Also fetch recently merged PRs (last 7 days) to detect superseded/conflicting work:
+Also fetch recently merged PRs (last 7 days) to detect superseded/conflicting work. Use the `--search` flag with a date query (e.g., `merged:>=YYYY-MM-DD`).
 
-```
-gh pr list --state merged --limit 20 --json number,title,mergedAt
-```
 
 ## Step 2: Classify each PR by module
 
