@@ -377,14 +377,25 @@ mod impl_lancedb {
                 })?;
 
                 for i in 0..batch.num_rows() {
-                    let chunk_id = chunk_ids
-                        .value(i)
-                        .parse()
-                        .unwrap_or_else(|_| Uuid::nil());
-                    let document_id = document_ids
-                        .value(i)
-                        .parse()
-                        .unwrap_or_else(|_| Uuid::nil());
+                    let raw_chunk_id = chunk_ids.value(i);
+                    let chunk_id = raw_chunk_id
+                        .parse::<Uuid>()
+                        .map_err(|e| WorkspaceError::SearchFailed {
+                            reason: format!(
+                                "Invalid chunk_id UUID '{}': {}",
+                                raw_chunk_id, e
+                            ),
+                        })?;
+
+                    let raw_document_id = document_ids.value(i);
+                    let document_id = raw_document_id
+                        .parse::<Uuid>()
+                        .map_err(|e| WorkspaceError::SearchFailed {
+                            reason: format!(
+                                "Invalid document_id UUID '{}': {}",
+                                raw_document_id, e
+                            ),
+                        })?;
                     let content = contents.value(i).to_string();
 
                     results.push(RankedResult {
