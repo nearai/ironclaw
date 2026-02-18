@@ -308,14 +308,6 @@ async fn main() -> anyhow::Result<()> {
     };
     let session = create_session_manager(session_config).await;
 
-    // Session-based auth is only needed for NEAR AI backend without an API key.
-    // ChatCompletions mode with an API key skips session auth entirely.
-    if config.llm.backend == ironclaw::config::LlmBackend::NearAi
-        && config.llm.nearai.api_key.is_none()
-    {
-        session.ensure_authenticated().await?;
-    }
-
     // Initialize tracing
     let env_filter = EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| EnvFilter::new("ironclaw=info,tower_http=warn"));
@@ -514,6 +506,14 @@ async fn main() -> anyhow::Result<()> {
                 }
             }
         }
+    }
+
+    // Session-based auth is only needed for NEAR AI backend without an API key.
+    // Runs after DB config reload so the user's actual LLM backend choice is used.
+    if config.llm.backend == ironclaw::config::LlmBackend::NearAi
+        && config.llm.nearai.api_key.is_none()
+    {
+        session.ensure_authenticated().await?;
     }
 
     // Initialize LLM provider (clone session so we can reuse it for embeddings)

@@ -1527,6 +1527,18 @@ impl SetupWizard {
                 env_vars.push(("LIBSQL_URL", url.clone()));
             }
 
+            // LLM bootstrap vars: same chicken-and-egg problem as DATABASE_BACKEND.
+            // Config::from_env() needs the backend before the DB is connected.
+            if let Some(ref backend) = self.settings.llm_backend {
+                env_vars.push(("LLM_BACKEND", backend.clone()));
+            }
+            if let Some(ref url) = self.settings.openai_compatible_base_url {
+                env_vars.push(("LLM_BASE_URL", url.clone()));
+            }
+            if let Some(ref url) = self.settings.ollama_base_url {
+                env_vars.push(("OLLAMA_BASE_URL", url.clone()));
+            }
+
             if !env_vars.is_empty() {
                 let pairs: Vec<(&str, &str)> =
                     env_vars.iter().map(|(k, v)| (*k, v.as_str())).collect();

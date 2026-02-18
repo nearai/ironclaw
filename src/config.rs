@@ -597,7 +597,7 @@ impl EmbeddingsConfig {
                 key: "EMBEDDING_ENABLED".to_string(),
                 message: format!("must be 'true' or 'false': {e}"),
             })?
-            .unwrap_or_else(|| settings.embeddings.enabled || openai_api_key.is_some());
+            .unwrap_or(settings.embeddings.enabled);
 
         Ok(Self {
             enabled,
@@ -1462,4 +1462,93 @@ where
         })
         .transpose()
         .map(|opt| opt.unwrap_or(default))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::settings::Settings;
+
+    /// RAII guard that sets/clears an env var for the duration of a test.
+    struct EnvGuard {
+        key: &'static str,
+        original: Option<String>,
+    }
+
+    impl EnvGuard {
+        fn set(key: &'static str, val: &str) -> Self {
+            let original = std::env::var(key).ok();
+            unsafe {
+                std::env::set_var(key, val);
+            }
+            Self { key, original }
+        }
+
+        fn clear(key: &'static str) -> Self {
+            let original = std::env::var(key).ok();
+            unsafe {
+                std::env::remove_var(key);
+            }
+            Self { key, original }
+        }
+    }
+
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            unsafe {
+                if let Some(ref val) = self.original {
+                    std::env::set_var(self.key, val);
+                } else {
+                    std::env::remove_var(self.key);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn embeddings_resolve_respects_disabled_setting() {
+        // Clear env vars so resolve() falls through to settings
+        let _g1 = EnvGuard::clear("EMBEDDING_ENABLED");
+        let _g2 = EnvGuard::clear("EMBEDDING_PROVIDER");
+        let _g3 = EnvGuard::clear("EMBEDDING_MODEL");
+        let _g4 = EnvGuard::set("OPENAI_API_KEY", "sk-test-key-present");
+
+        let settings = Settings {
+            embeddings: crate::settings::EmbeddingsSettings {
+                enabled: false,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+
+        let result = EmbeddingsConfig::resolve(&settings).unwrap();
+        // Must respect the user's explicit enabled=false even though OPENAI_API_KEY is set
+        assert!(
+            !result.enabled,
+            "embeddings should be disabled when settings.enabled=false, regardless of OPENAI_API_KEY"
+        );
+    }
+
+    #[test]
+    fn embeddings_resolve_respects_enabled_setting() {
+        let _g1 = EnvGuard::clear("EMBEDDING_ENABLED");
+        let _g2 = EnvGuard::clear("EMBEDDING_PROVIDER");
+        let _g3 = EnvGuard::clear("EMBEDDING_MODEL");
+        let _g4 = EnvGuard::clear("OPENAI_API_KEY");
+
+        let settings = Settings {
+            embeddings: crate::settings::EmbeddingsSettings {
+                enabled: true,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+
+        let result = EmbeddingsConfig::resolve(&settings).unwrap();
+        assert!(
+            result.enabled,
+            "embeddings should be enabled when settings.enabled=true"
+        );
+    }
+
 }

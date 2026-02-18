@@ -904,4 +904,35 @@ mod tests {
             Some("http://my-vllm:8000/v1".to_string())
         );
     }
+
+    #[test]
+    fn test_openai_compatible_db_map_round_trip() {
+        let settings = Settings {
+            llm_backend: Some("openai_compatible".to_string()),
+            openai_compatible_base_url: Some("http://my-vllm:8000/v1".to_string()),
+            embeddings: EmbeddingsSettings {
+                enabled: false,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+
+        let map = settings.to_db_map();
+        let restored = Settings::from_db_map(&map);
+
+        assert_eq!(
+            restored.llm_backend,
+            Some("openai_compatible".to_string()),
+            "llm_backend must survive DB round-trip"
+        );
+        assert_eq!(
+            restored.openai_compatible_base_url,
+            Some("http://my-vllm:8000/v1".to_string()),
+            "openai_compatible_base_url must survive DB round-trip"
+        );
+        assert!(
+            !restored.embeddings.enabled,
+            "embeddings.enabled=false must survive DB round-trip"
+        );
+    }
 }
