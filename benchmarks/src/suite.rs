@@ -44,6 +44,7 @@ pub enum ResourceType {
 
 /// What the agent produced for scoring.
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct TaskSubmission {
     pub response: String,
     pub conversation: Vec<ConversationTurn>,
@@ -108,6 +109,7 @@ impl BenchScore {
 /// Each suite (GAIA, Tau-bench, custom, etc.) implements this trait
 /// to provide task loading, scoring, and optional lifecycle hooks.
 #[async_trait]
+#[allow(dead_code)]
 pub trait BenchSuite: Send + Sync {
     /// Human-readable name (e.g., "GAIA Validation").
     fn name(&self) -> &str;

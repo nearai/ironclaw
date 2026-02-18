@@ -23,6 +23,8 @@ pub enum LlmBackend {
     Ollama,
     /// Any OpenAI-compatible endpoint (e.g. vLLM, LiteLLM, Together)
     OpenAiCompatible,
+    /// Tinfoil private inference
+    Tinfoil,
 }
 
 impl std::str::FromStr for LlmBackend {
@@ -35,8 +37,9 @@ impl std::str::FromStr for LlmBackend {
             "anthropic" | "claude" => Ok(Self::Anthropic),
             "ollama" => Ok(Self::Ollama),
             "openai_compatible" | "openai-compatible" | "compatible" => Ok(Self::OpenAiCompatible),
+            "tinfoil" => Ok(Self::Tinfoil),
             _ => Err(format!(
-                "invalid LLM backend '{}', expected one of: nearai, openai, anthropic, ollama, openai_compatible",
+                "invalid LLM backend '{}', expected one of: nearai, openai, anthropic, ollama, openai_compatible, tinfoil",
                 s
             )),
         }
@@ -51,6 +54,7 @@ impl std::fmt::Display for LlmBackend {
             Self::Anthropic => write!(f, "anthropic"),
             Self::Ollama => write!(f, "ollama"),
             Self::OpenAiCompatible => write!(f, "openai_compatible"),
+            Self::Tinfoil => write!(f, "tinfoil"),
         }
     }
 }
@@ -84,6 +88,13 @@ pub struct OpenAiCompatibleConfig {
     pub model: String,
 }
 
+/// Configuration for Tinfoil private inference.
+#[derive(Debug, Clone)]
+pub struct TinfoilConfig {
+    pub api_key: SecretString,
+    pub model: String,
+}
+
 /// LLM provider configuration.
 ///
 /// NEAR AI remains the default backend. Users can switch to other providers
@@ -102,6 +113,8 @@ pub struct LlmConfig {
     pub ollama: Option<OllamaConfig>,
     /// OpenAI-compatible config (populated when backend=openai_compatible)
     pub openai_compatible: Option<OpenAiCompatibleConfig>,
+    /// Tinfoil config (populated when backend=tinfoil)
+    pub tinfoil: Option<TinfoilConfig>,
 }
 
 /// API mode for NEAR AI.
@@ -204,7 +217,7 @@ impl LlmConfig {
             LlmBackend::NearAi
         };
 
-        // Always resolve NEAR AI config (used as fallback and for embeddings)
+        // Resolve NEAR AI config only when backend is NearAi (or when explicitly configured)
         let nearai_api_key = optional_env("NEARAI_API_KEY")?.map(SecretString::from);
 
         let api_mode = if let Some(mode_str) = optional_env("NEARAI_API_MODE")? {
@@ -298,12 +311,28 @@ impl LlmConfig {
                     hint: "Set LLM_BASE_URL when LLM_BACKEND=openai_compatible".to_string(),
                 })?;
             let api_key = optional_env("LLM_API_KEY")?.map(SecretString::from);
-            let model = optional_env("LLM_MODEL")?.unwrap_or_else(|| "default".to_string());
+            let model = optional_env("LLM_MODEL")?
+                .or_else(|| settings.selected_model.clone())
+                .unwrap_or_else(|| "default".to_string());
             Some(OpenAiCompatibleConfig {
                 base_url,
                 api_key,
                 model,
             })
+        } else {
+            None
+        };
+
+        let tinfoil = if backend == LlmBackend::Tinfoil {
+            let api_key = optional_env("TINFOIL_API_KEY")?
+                .map(SecretString::from)
+                .ok_or_else(|| ConfigError::MissingRequired {
+                    key: "TINFOIL_API_KEY".to_string(),
+                    hint: "Set TINFOIL_API_KEY when LLM_BACKEND=tinfoil".to_string(),
+                })?;
+            let model =
+                optional_env("TINFOIL_MODEL")?.unwrap_or_else(|| "kimi-k2-5".to_string());
+            Some(TinfoilConfig { api_key, model })
         } else {
             None
         };
@@ -315,6 +344,7 @@ impl LlmConfig {
             anthropic,
             ollama,
             openai_compatible,
+            tinfoil,
         })
     }
 }
@@ -325,4 +355,73 @@ fn default_session_path() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from("."))
         .join(".ironclaw")
         .join("session.json")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::settings::Settings;
+    use std::sync::Mutex;
+
+    /// Serializes env-mutating tests to prevent parallel races.
+    static ENV_MUTEX: Mutex<()> = Mutex::new(());
+
+    /// Clear all openai-compatible-related env vars.
+    fn clear_openai_compatible_env() {
+        // SAFETY: Only called under ENV_MUTEX in tests.
+        unsafe {
+            std::env::remove_var("LLM_BACKEND");
+            std::env::remove_var("LLM_BASE_URL");
+            std::env::remove_var("LLM_MODEL");
+        }
+    }
+
+    #[test]
+    fn openai_compatible_uses_selected_model_when_llm_model_unset() {
+        let _guard = ENV_MUTEX.lock().expect("env mutex poisoned");
+        clear_openai_compatible_env();
+
+        let settings = Settings {
+            llm_backend: Some("openai_compatible".to_string()),
+            openai_compatible_base_url: Some("https://openrouter.ai/api/v1".to_string()),
+            selected_model: Some("openai/gpt-5.1-codex".to_string()),
+            ..Default::default()
+        };
+
+        let cfg = LlmConfig::resolve(&settings).expect("resolve should succeed");
+        let compat = cfg
+            .openai_compatible
+            .expect("openai-compatible config should be present");
+
+        assert_eq!(compat.model, "openai/gpt-5.1-codex");
+    }
+
+    #[test]
+    fn openai_compatible_llm_model_env_overrides_selected_model() {
+        let _guard = ENV_MUTEX.lock().expect("env mutex poisoned");
+        clear_openai_compatible_env();
+        // SAFETY: Under ENV_MUTEX.
+        unsafe {
+            std::env::set_var("LLM_MODEL", "openai/gpt-5-codex");
+        }
+
+        let settings = Settings {
+            llm_backend: Some("openai_compatible".to_string()),
+            openai_compatible_base_url: Some("https://openrouter.ai/api/v1".to_string()),
+            selected_model: Some("openai/gpt-5.1-codex".to_string()),
+            ..Default::default()
+        };
+
+        let cfg = LlmConfig::resolve(&settings).expect("resolve should succeed");
+        let compat = cfg
+            .openai_compatible
+            .expect("openai-compatible config should be present");
+
+        assert_eq!(compat.model, "openai/gpt-5-codex");
+
+        // SAFETY: Under ENV_MUTEX.
+        unsafe {
+            std::env::remove_var("LLM_MODEL");
+        }
+    }
 }

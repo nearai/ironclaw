@@ -64,11 +64,6 @@ impl BenchChannel {
     pub fn capture(&self) -> Arc<Mutex<ChannelCapture>> {
         Arc::clone(&self.capture)
     }
-
-    /// Get a clone of the message sender for injecting follow-up messages.
-    pub fn sender(&self) -> mpsc::Sender<IncomingMessage> {
-        self.msg_tx.clone()
-    }
 }
 
 #[async_trait]

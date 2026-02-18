@@ -141,6 +141,8 @@ mod tests {
             source: SkillSource::User(PathBuf::from("/tmp")),
             content_hash: "sha256:000".to_string(),
             compiled_patterns: vec![],
+            lowercased_keywords: vec![],
+            lowercased_tags: vec![],
         }
     }
 

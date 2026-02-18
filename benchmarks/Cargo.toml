@@ -5,6 +5,7 @@ edition = "2024"
 rust-version = "1.85"
 description = "Benchmarking harness for IronClaw agent"
 license = "MIT OR Apache-2.0"
+publish = false
 
 [[bin]]
 name = "ironclaw-bench"

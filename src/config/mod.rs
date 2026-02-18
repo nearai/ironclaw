@@ -36,7 +36,7 @@ pub use self::embeddings::EmbeddingsConfig;
 pub use self::heartbeat::HeartbeatConfig;
 pub use self::llm::{
     AnthropicDirectConfig, LlmBackend, LlmConfig, NearAiApiMode, NearAiConfig, OllamaConfig,
-    OpenAiCompatibleConfig, OpenAiDirectConfig,
+    OpenAiCompatibleConfig, OpenAiDirectConfig, TinfoilConfig,
 };
 pub use self::routines::RoutineConfig;
 pub use self::safety::SafetyConfig;

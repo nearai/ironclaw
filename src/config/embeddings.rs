@@ -45,7 +45,7 @@ impl EmbeddingsConfig {
                 key: "EMBEDDING_ENABLED".to_string(),
                 message: format!("must be 'true' or 'false': {e}"),
             })?
-            .unwrap_or_else(|| settings.embeddings.enabled || openai_api_key.is_some());
+            .unwrap_or(settings.embeddings.enabled);
 
         Ok(Self {
             enabled,
@@ -58,5 +58,108 @@ impl EmbeddingsConfig {
     /// Get the OpenAI API key if configured.
     pub fn openai_api_key(&self) -> Option<&str> {
         self.openai_api_key.as_ref().map(|s| s.expose_secret())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::settings::{EmbeddingsSettings, Settings};
+    use std::sync::Mutex;
+
+    /// Serializes env-mutating tests to prevent parallel races.
+    static ENV_MUTEX: Mutex<()> = Mutex::new(());
+
+    /// Clear all embedding-related env vars.
+    fn clear_embedding_env() {
+        // SAFETY: Only called under ENV_MUTEX in tests. No other threads
+        // observe these vars while the lock is held.
+        unsafe {
+            std::env::remove_var("EMBEDDING_ENABLED");
+            std::env::remove_var("EMBEDDING_PROVIDER");
+            std::env::remove_var("EMBEDDING_MODEL");
+            std::env::remove_var("OPENAI_API_KEY");
+        }
+    }
+
+    #[test]
+    fn embeddings_disabled_not_overridden_by_openai_key() {
+        let _guard = ENV_MUTEX.lock().expect("env mutex poisoned");
+
+        clear_embedding_env();
+        // SAFETY: Under ENV_MUTEX, no concurrent env access.
+        unsafe {
+            std::env::set_var("OPENAI_API_KEY", "sk-test-key-for-issue-129");
+        }
+
+        let settings = Settings {
+            embeddings: EmbeddingsSettings {
+                enabled: false,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+
+        let config = EmbeddingsConfig::resolve(&settings).expect("resolve should succeed");
+        assert!(
+            !config.enabled,
+            "embeddings should remain disabled when settings.embeddings.enabled=false, \
+             even when OPENAI_API_KEY is set (issue #129)"
+        );
+
+        // SAFETY: Under ENV_MUTEX.
+        unsafe {
+            std::env::remove_var("OPENAI_API_KEY");
+        }
+    }
+
+    #[test]
+    fn embeddings_enabled_from_settings() {
+        let _guard = ENV_MUTEX.lock().expect("env mutex poisoned");
+        clear_embedding_env();
+
+        let settings = Settings {
+            embeddings: EmbeddingsSettings {
+                enabled: true,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+
+        let config = EmbeddingsConfig::resolve(&settings).expect("resolve should succeed");
+        assert!(
+            config.enabled,
+            "embeddings should be enabled when settings say so"
+        );
+    }
+
+    #[test]
+    fn embeddings_env_override_takes_precedence() {
+        let _guard = ENV_MUTEX.lock().expect("env mutex poisoned");
+
+        clear_embedding_env();
+        // SAFETY: Under ENV_MUTEX.
+        unsafe {
+            std::env::set_var("EMBEDDING_ENABLED", "true");
+        }
+
+        let settings = Settings {
+            embeddings: EmbeddingsSettings {
+                enabled: false,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+
+        let config = EmbeddingsConfig::resolve(&settings).expect("resolve should succeed");
+        assert!(
+            config.enabled,
+            "EMBEDDING_ENABLED=true env var should override settings"
+        );
+
+        // SAFETY: Under ENV_MUTEX.
+        unsafe {
+            std::env::remove_var("EMBEDDING_ENABLED");
+        }
     }
 }
