@@ -247,7 +247,7 @@ async fn main() -> anyhow::Result<()> {
                 max_turns: *max_turns,
                 model: model.clone(),
                 timeout: std::time::Duration::from_secs(1800),
-                allowed_tools: Vec::new(),
+                allowed_tools: ironclaw::config::ClaudeCodeConfig::from_env().allowed_tools,
             };
 
             let runtime = ironclaw::worker::ClaudeBridgeRuntime::new(config)
@@ -964,11 +964,8 @@ async fn main() -> anyhow::Result<()> {
             memory_limit_mb: config.sandbox.memory_limit_mb,
             cpu_shares: config.sandbox.cpu_shares,
             orchestrator_port: 50051,
-            claude_config_dir: if config.claude_code.enabled {
-                Some(config.claude_code.config_dir.clone())
-            } else {
-                None
-            },
+            claude_code_api_key: std::env::var("ANTHROPIC_API_KEY").ok(),
+            claude_code_oauth_token: ironclaw::config::ClaudeCodeConfig::extract_oauth_token(),
             claude_code_model: config.claude_code.model.clone(),
             claude_code_max_turns: config.claude_code.max_turns,
             claude_code_memory_limit_mb: config.claude_code.memory_limit_mb,
@@ -984,6 +981,8 @@ async fn main() -> anyhow::Result<()> {
             job_event_tx: job_event_tx.clone(),
             prompt_queue: Arc::clone(&prompt_queue),
             store: db.clone(),
+            secrets_store: secrets_store.clone(),
+            user_id: "default".to_string(),
         };
 
         tokio::spawn(async move {
@@ -1274,7 +1273,33 @@ async fn main() -> anyhow::Result<()> {
         Arc::clone(&context_manager),
         container_job_manager.clone(),
         db.clone(),
+        job_event_tx.clone(),
+        Some(channels.inject_sender()),
+        if config.sandbox.enabled {
+            Some(Arc::clone(&prompt_queue))
+        } else {
+            None
+        },
+        secrets_store.clone(),
     );
+
+    // Initialize skills system (before gateway so we can wire into GatewayState)
+    let (skill_registry, skill_catalog) = if config.skills.enabled {
+        let mut registry = ironclaw::skills::SkillRegistry::new(config.skills.local_dir.clone());
+        let loaded = registry.discover_all().await;
+        if !loaded.is_empty() {
+            tracing::info!("Loaded {} skill(s): {}", loaded.len(), loaded.join(", "));
+        }
+        let registry = Arc::new(std::sync::RwLock::new(registry));
+
+        // Register skill management tools
+        let catalog = ironclaw::skills::catalog::shared_catalog();
+        tools.register_skill_tools(Arc::clone(&registry), Arc::clone(&catalog));
+
+        (Some(registry), Some(catalog))
+    } else {
+        (None, None)
+    };
 
     // Add web gateway channel if configured
     let mut gateway_url: Option<String> = None;
@@ -1294,6 +1319,12 @@ async fn main() -> anyhow::Result<()> {
         }
         if let Some(ref jm) = container_job_manager {
             gw = gw.with_job_manager(Arc::clone(jm));
+        }
+        if let Some(ref sr) = skill_registry {
+            gw = gw.with_skill_registry(Arc::clone(sr));
+        }
+        if let Some(ref sc) = skill_catalog {
+            gw = gw.with_skill_catalog(Arc::clone(sc));
         }
         if config.sandbox.enabled {
             gw = gw.with_prompt_queue(Arc::clone(&prompt_queue));
@@ -1348,6 +1379,8 @@ async fn main() -> anyhow::Result<()> {
         tools,
         workspace,
         extension_manager,
+        skill_registry,
+        skills_config: config.skills.clone(),
         hooks,
         cost_guard,
     };

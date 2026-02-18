@@ -393,6 +393,8 @@ async fn run_task_isolated(params: TaskRunParams<'_>) -> TaskResult {
         tools,
         workspace: None,
         extension_manager: None,
+        skill_registry: None,
+        skills_config: ironclaw::config::SkillsConfig::default(),
         hooks: Arc::new(ironclaw::hooks::HookRegistry::new()),
         cost_guard,
     };

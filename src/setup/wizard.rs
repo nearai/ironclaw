@@ -1006,7 +1006,7 @@ impl SetupWizard {
         use crate::llm::create_llm_provider;
 
         let base_url = std::env::var("NEARAI_BASE_URL")
-            .unwrap_or_else(|_| "https://cloud-api.near.ai".to_string());
+            .unwrap_or_else(|_| "https://private.near.ai".to_string());
         let auth_base_url = std::env::var("NEARAI_AUTH_URL")
             .unwrap_or_else(|_| "https://private.near.ai".to_string());
 
@@ -1034,6 +1034,7 @@ impl SetupWizard {
             anthropic: None,
             ollama: None,
             openai_compatible: None,
+            tinfoil: None,
         };
 
         match create_llm_provider(&config, session) {
