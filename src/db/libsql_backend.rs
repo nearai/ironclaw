@@ -2486,6 +2486,46 @@ impl Database for LibSqlBackend {
         Ok(chunks)
     }
 
+    async fn get_chunk_by_id(
+        &self,
+        chunk_id: Uuid,
+    ) -> Result<Option<MemoryChunk>, WorkspaceError> {
+        let conn = self
+            .connect()
+            .await
+            .map_err(|e| WorkspaceError::SearchFailed {
+                reason: e.to_string(),
+            })?;
+        let mut rows = conn
+            .query(
+                r#"
+                SELECT id, document_id, chunk_index, content, created_at
+                FROM memory_chunks WHERE id = ?1
+                "#,
+                params![chunk_id.to_string()],
+            )
+            .await
+            .map_err(|e| WorkspaceError::SearchFailed {
+                reason: format!("Query failed: {}", e),
+            })?;
+
+        let row = rows
+            .next()
+            .await
+            .map_err(|e| WorkspaceError::SearchFailed {
+                reason: format!("Row fetch failed: {}", e),
+            })?;
+
+        Ok(row.map(|r| MemoryChunk {
+            id: get_text(&r, 0).parse().unwrap_or_default(),
+            document_id: get_text(&r, 1).parse().unwrap_or_default(),
+            chunk_index: get_i64(&r, 2) as i32,
+            content: get_text(&r, 3),
+            embedding: None,
+            created_at: get_ts(&r, 4),
+        }))
+    }
+
     // ==================== Workspace: Search ====================
 
     async fn hybrid_search(

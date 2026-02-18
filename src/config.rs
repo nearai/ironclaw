@@ -310,6 +310,33 @@ impl std::str::FromStr for DatabaseBackend {
     }
 }
 
+/// Which vector store to use for workspace semantic search.
+///
+/// When None, uses the database backend's built-in (pgvector or libsql_vector_idx).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum VectorBackend {
+    /// Use database built-in (pgvector or libsql_vector_idx).
+    #[default]
+    Builtin,
+    /// Use LanceDB for vector search (requires feature "lancedb").
+    LanceDb,
+}
+
+impl std::str::FromStr for VectorBackend {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.to_lowercase().as_str() {
+            "builtin" | "pgvector" | "libsql" | "" => Ok(Self::Builtin),
+            "lancedb" | "lance" => Ok(Self::LanceDb),
+            _ => Err(format!(
+                "invalid vector backend '{}', expected 'builtin' or 'lancedb'",
+                s
+            )),
+        }
+    }
+}
+
 /// Database configuration.
 #[derive(Debug, Clone)]
 pub struct DatabaseConfig {
@@ -327,6 +354,12 @@ pub struct DatabaseConfig {
     pub libsql_url: Option<String>,
     /// Turso auth token (required when libsql_url is set).
     pub libsql_auth_token: Option<SecretString>,
+
+    // -- Vector store (workspace semantic search) --
+    /// Override vector backend (default: use database built-in).
+    pub vector_backend: VectorBackend,
+    /// Path for LanceDB when vector_backend=LanceDb (default: ~/.ironclaw/lancedb).
+    pub lancedb_path: Option<PathBuf>,
 }
 
 impl DatabaseConfig {
@@ -376,6 +409,19 @@ impl DatabaseConfig {
             });
         }
 
+        let vector_backend: VectorBackend =
+            optional_env("VECTOR_BACKEND")?
+                .and_then(|s| s.parse().ok())
+                .unwrap_or_default();
+
+        let lancedb_path = optional_env("LANCEDB_PATH")?.map(PathBuf::from).or_else(|| {
+            if vector_backend == VectorBackend::LanceDb {
+                Some(default_lancedb_path())
+            } else {
+                None
+            }
+        });
+
         Ok(Self {
             backend,
             url: SecretString::from(url),
@@ -383,6 +429,8 @@ impl DatabaseConfig {
             libsql_path,
             libsql_url,
             libsql_auth_token,
+            vector_backend,
+            lancedb_path,
         })
     }
 
@@ -398,6 +446,39 @@ pub fn default_libsql_path() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from("."))
         .join(".ironclaw")
         .join("ironclaw.db")
+}
+
+/// Default LanceDB path (~/.ironclaw/lancedb).
+pub fn default_lancedb_path() -> PathBuf {
+    dirs::home_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join(".ironclaw")
+        .join("lancedb")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::VectorBackend;
+
+    #[test]
+    fn test_vector_backend_parse() {
+        assert_eq!("builtin".parse::<VectorBackend>().unwrap(), VectorBackend::Builtin);
+        assert_eq!("pgvector".parse::<VectorBackend>().unwrap(), VectorBackend::Builtin);
+        assert_eq!("libsql".parse::<VectorBackend>().unwrap(), VectorBackend::Builtin);
+        assert_eq!("".parse::<VectorBackend>().unwrap(), VectorBackend::Builtin);
+
+        assert_eq!("lancedb".parse::<VectorBackend>().unwrap(), VectorBackend::LanceDb);
+        assert_eq!("lance".parse::<VectorBackend>().unwrap(), VectorBackend::LanceDb);
+        assert_eq!("Lancedb".parse::<VectorBackend>().unwrap(), VectorBackend::LanceDb);
+
+        assert!("invalid".parse::<VectorBackend>().is_err());
+    }
+
+    #[test]
+    fn test_default_lancedb_path() {
+        let path = super::default_lancedb_path();
+        assert!(path.to_string_lossy().ends_with(".ironclaw/lancedb"));
+    }
 }
 
 /// Which LLM backend to use.

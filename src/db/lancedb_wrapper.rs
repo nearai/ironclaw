@@ -1,63 +1,48 @@
-//! PostgreSQL backend for the Database trait.
+//! Database wrapper that uses LanceDB for vector search.
 //!
-//! Delegates to the existing `Store` (history) and `Repository` (workspace)
-//! implementations, avoiding SQL duplication.
+//! When `VECTOR_BACKEND=lancedb`, this wraps the main database (Postgres or libSQL)
+//! and delegates vector search to LanceDB while using the inner DB for FTS and all
+//! other operations.
 
-use std::collections::HashMap;
+use std::sync::Arc;
 
 use async_trait::async_trait;
-use chrono::{DateTime, Utc};
-use deadpool_postgres::Pool;
-use rust_decimal::Decimal;
 use uuid::Uuid;
 
 use crate::agent::BrokenTool;
 use crate::agent::routine::{Routine, RoutineRun, RunStatus};
-use crate::config::DatabaseConfig;
 use crate::context::{ActionRecord, JobContext, JobState};
 use crate::db::Database;
 use crate::error::{DatabaseError, WorkspaceError};
 use crate::history::{
     ConversationMessage, ConversationSummary, JobEventRecord, LlmCallRecord, SandboxJobRecord,
-    SandboxJobSummary, SettingRow, Store,
+    SandboxJobSummary, SettingRow,
 };
 use crate::workspace::{
-    MemoryChunk, MemoryDocument, Repository, SearchConfig, SearchResult, WorkspaceEntry,
+    MemoryChunk, MemoryDocument, SearchConfig, SearchResult, WorkspaceEntry,
 };
+use crate::workspace::search::{RankedResult, reciprocal_rank_fusion};
+use crate::workspace::lancedb_store::VectorStore;
 
-/// PostgreSQL database backend.
+/// Wraps a Database with a LanceDB VectorStore for hybrid search.
 ///
-/// Wraps the existing `Store` (for history/conversations/jobs/routines/settings)
-/// and `Repository` (for workspace documents/chunks/search) to implement the
-/// unified `Database` trait.
-pub struct PgBackend {
-    store: Store,
-    repo: Repository,
+/// Documents and chunks stay in the inner DB. Vector search uses LanceDB.
+pub struct DbWithLanceVectorStore {
+    inner: Arc<dyn Database>,
+    vector_store: Arc<dyn VectorStore>,
 }
 
-impl PgBackend {
-    /// Create a new PostgreSQL backend from configuration.
-    pub async fn new(config: &DatabaseConfig) -> Result<Self, DatabaseError> {
-        let store = Store::new(config).await?;
-        let repo = Repository::new(store.pool());
-        Ok(Self { store, repo })
-    }
-
-    /// Get a clone of the connection pool.
-    ///
-    /// Useful for sharing with components that still need raw pool access.
-    pub fn pool(&self) -> Pool {
-        self.store.pool()
+impl DbWithLanceVectorStore {
+    pub fn new(inner: Arc<dyn Database>, vector_store: Arc<dyn VectorStore>) -> Self {
+        Self { inner, vector_store }
     }
 }
 
 #[async_trait]
-impl Database for PgBackend {
+impl Database for DbWithLanceVectorStore {
     async fn run_migrations(&self) -> Result<(), DatabaseError> {
-        self.store.run_migrations().await
+        self.inner.run_migrations().await
     }
-
-    // ==================== Conversations ====================
 
     async fn create_conversation(
         &self,
@@ -65,13 +50,13 @@ impl Database for PgBackend {
         user_id: &str,
         thread_id: Option<&str>,
     ) -> Result<Uuid, DatabaseError> {
-        self.store
+        self.inner
             .create_conversation(channel, user_id, thread_id)
             .await
     }
 
     async fn touch_conversation(&self, id: Uuid) -> Result<(), DatabaseError> {
-        self.store.touch_conversation(id).await
+        self.inner.touch_conversation(id).await
     }
 
     async fn add_conversation_message(
@@ -80,7 +65,7 @@ impl Database for PgBackend {
         role: &str,
         content: &str,
     ) -> Result<Uuid, DatabaseError> {
-        self.store
+        self.inner
             .add_conversation_message(conversation_id, role, content)
             .await
     }
@@ -92,7 +77,7 @@ impl Database for PgBackend {
         user_id: &str,
         thread_id: Option<&str>,
     ) -> Result<(), DatabaseError> {
-        self.store
+        self.inner
             .ensure_conversation(id, channel, user_id, thread_id)
             .await
     }
@@ -103,7 +88,7 @@ impl Database for PgBackend {
         channel: &str,
         limit: i64,
     ) -> Result<Vec<ConversationSummary>, DatabaseError> {
-        self.store
+        self.inner
             .list_conversations_with_preview(user_id, channel, limit)
             .await
     }
@@ -113,29 +98,29 @@ impl Database for PgBackend {
         user_id: &str,
         channel: &str,
     ) -> Result<Uuid, DatabaseError> {
-        self.store
+        self.inner
             .get_or_create_assistant_conversation(user_id, channel)
             .await
     }
 
     async fn create_conversation_with_metadata(
         &self,
-        channel: &str,
         user_id: &str,
+        channel: &str,
         metadata: &serde_json::Value,
     ) -> Result<Uuid, DatabaseError> {
-        self.store
-            .create_conversation_with_metadata(channel, user_id, metadata)
+        self.inner
+            .create_conversation_with_metadata(user_id, channel, metadata)
             .await
     }
 
     async fn list_conversation_messages_paginated(
         &self,
         conversation_id: Uuid,
-        before: Option<DateTime<Utc>>,
+        before: Option<chrono::DateTime<chrono::Utc>>,
         limit: i64,
     ) -> Result<(Vec<ConversationMessage>, bool), DatabaseError> {
-        self.store
+        self.inner
             .list_conversation_messages_paginated(conversation_id, before, limit)
             .await
     }
@@ -146,7 +131,7 @@ impl Database for PgBackend {
         key: &str,
         value: &serde_json::Value,
     ) -> Result<(), DatabaseError> {
-        self.store
+        self.inner
             .update_conversation_metadata_field(id, key, value)
             .await
     }
@@ -155,14 +140,14 @@ impl Database for PgBackend {
         &self,
         id: Uuid,
     ) -> Result<Option<serde_json::Value>, DatabaseError> {
-        self.store.get_conversation_metadata(id).await
+        self.inner.get_conversation_metadata(id).await
     }
 
     async fn list_conversation_messages(
         &self,
         conversation_id: Uuid,
     ) -> Result<Vec<ConversationMessage>, DatabaseError> {
-        self.store.list_conversation_messages(conversation_id).await
+        self.inner.list_conversation_messages(conversation_id).await
     }
 
     async fn conversation_belongs_to_user(
@@ -170,68 +155,58 @@ impl Database for PgBackend {
         conversation_id: Uuid,
         user_id: &str,
     ) -> Result<bool, DatabaseError> {
-        self.store
+        self.inner
             .conversation_belongs_to_user(conversation_id, user_id)
             .await
     }
 
-    // ==================== Jobs ====================
-
     async fn save_job(&self, ctx: &JobContext) -> Result<(), DatabaseError> {
-        self.store.save_job(ctx).await
+        self.inner.save_job(ctx).await
     }
 
     async fn get_job(&self, id: Uuid) -> Result<Option<JobContext>, DatabaseError> {
-        self.store.get_job(id).await
+        self.inner.get_job(id).await
     }
 
     async fn update_job_status(
         &self,
         id: Uuid,
-        status: JobState,
+        status: crate::context::JobState,
         failure_reason: Option<&str>,
     ) -> Result<(), DatabaseError> {
-        self.store
-            .update_job_status(id, status, failure_reason)
-            .await
+        self.inner.update_job_status(id, status, failure_reason).await
     }
 
     async fn mark_job_stuck(&self, id: Uuid) -> Result<(), DatabaseError> {
-        self.store.mark_job_stuck(id).await
+        self.inner.mark_job_stuck(id).await
     }
 
     async fn get_stuck_jobs(&self) -> Result<Vec<Uuid>, DatabaseError> {
-        self.store.get_stuck_jobs().await
+        self.inner.get_stuck_jobs().await
     }
 
-    // ==================== Actions ====================
-
     async fn save_action(&self, job_id: Uuid, action: &ActionRecord) -> Result<(), DatabaseError> {
-        self.store.save_action(job_id, action).await
+        self.inner.save_action(job_id, action).await
     }
 
     async fn get_job_actions(&self, job_id: Uuid) -> Result<Vec<ActionRecord>, DatabaseError> {
-        self.store.get_job_actions(job_id).await
+        self.inner.get_job_actions(job_id).await
     }
-
-    // ==================== LLM Calls ====================
 
     async fn record_llm_call(&self, record: &LlmCallRecord<'_>) -> Result<Uuid, DatabaseError> {
-        self.store.record_llm_call(record).await
+        self.inner.record_llm_call(record).await
     }
-
-    // ==================== Estimation Snapshots ====================
 
     async fn save_estimation_snapshot(
         &self,
         job_id: Uuid,
         category: &str,
         tool_names: &[String],
-        estimated_cost: Decimal,
+        estimated_cost: rust_decimal::Decimal,
         estimated_time_secs: i32,
-        estimated_value: Decimal,
+        estimated_value: rust_decimal::Decimal,
     ) -> Result<Uuid, DatabaseError> {
-        self.store
+        self.inner
             .save_estimation_snapshot(
                 job_id,
                 category,
@@ -246,27 +221,25 @@ impl Database for PgBackend {
     async fn update_estimation_actuals(
         &self,
         id: Uuid,
-        actual_cost: Decimal,
+        actual_cost: rust_decimal::Decimal,
         actual_time_secs: i32,
-        actual_value: Option<Decimal>,
+        actual_value: Option<rust_decimal::Decimal>,
     ) -> Result<(), DatabaseError> {
-        self.store
+        self.inner
             .update_estimation_actuals(id, actual_cost, actual_time_secs, actual_value)
             .await
     }
 
-    // ==================== Sandbox Jobs ====================
-
     async fn save_sandbox_job(&self, job: &SandboxJobRecord) -> Result<(), DatabaseError> {
-        self.store.save_sandbox_job(job).await
+        self.inner.save_sandbox_job(job).await
     }
 
     async fn get_sandbox_job(&self, id: Uuid) -> Result<Option<SandboxJobRecord>, DatabaseError> {
-        self.store.get_sandbox_job(id).await
+        self.inner.get_sandbox_job(id).await
     }
 
     async fn list_sandbox_jobs(&self) -> Result<Vec<SandboxJobRecord>, DatabaseError> {
-        self.store.list_sandbox_jobs().await
+        self.inner.list_sandbox_jobs().await
     }
 
     async fn update_sandbox_job_status(
@@ -275,34 +248,34 @@ impl Database for PgBackend {
         status: &str,
         success: Option<bool>,
         message: Option<&str>,
-        started_at: Option<DateTime<Utc>>,
-        completed_at: Option<DateTime<Utc>>,
+        started_at: Option<chrono::DateTime<chrono::Utc>>,
+        completed_at: Option<chrono::DateTime<chrono::Utc>>,
     ) -> Result<(), DatabaseError> {
-        self.store
+        self.inner
             .update_sandbox_job_status(id, status, success, message, started_at, completed_at)
             .await
     }
 
     async fn cleanup_stale_sandbox_jobs(&self) -> Result<u64, DatabaseError> {
-        self.store.cleanup_stale_sandbox_jobs().await
+        self.inner.cleanup_stale_sandbox_jobs().await
     }
 
     async fn sandbox_job_summary(&self) -> Result<SandboxJobSummary, DatabaseError> {
-        self.store.sandbox_job_summary().await
+        self.inner.sandbox_job_summary().await
     }
 
     async fn list_sandbox_jobs_for_user(
         &self,
         user_id: &str,
     ) -> Result<Vec<SandboxJobRecord>, DatabaseError> {
-        self.store.list_sandbox_jobs_for_user(user_id).await
+        self.inner.list_sandbox_jobs_for_user(user_id).await
     }
 
     async fn sandbox_job_summary_for_user(
         &self,
         user_id: &str,
     ) -> Result<SandboxJobSummary, DatabaseError> {
-        self.store.sandbox_job_summary_for_user(user_id).await
+        self.inner.sandbox_job_summary_for_user(user_id).await
     }
 
     async fn sandbox_job_belongs_to_user(
@@ -310,20 +283,18 @@ impl Database for PgBackend {
         job_id: Uuid,
         user_id: &str,
     ) -> Result<bool, DatabaseError> {
-        self.store
+        self.inner
             .sandbox_job_belongs_to_user(job_id, user_id)
             .await
     }
 
     async fn update_sandbox_job_mode(&self, id: Uuid, mode: &str) -> Result<(), DatabaseError> {
-        self.store.update_sandbox_job_mode(id, mode).await
+        self.inner.update_sandbox_job_mode(id, mode).await
     }
 
     async fn get_sandbox_job_mode(&self, id: Uuid) -> Result<Option<String>, DatabaseError> {
-        self.store.get_sandbox_job_mode(id).await
+        self.inner.get_sandbox_job_mode(id).await
     }
-
-    // ==================== Job Events ====================
 
     async fn save_job_event(
         &self,
@@ -331,61 +302,62 @@ impl Database for PgBackend {
         event_type: &str,
         data: &serde_json::Value,
     ) -> Result<(), DatabaseError> {
-        self.store.save_job_event(job_id, event_type, data).await
+        self.inner.save_job_event(job_id, event_type, data).await
     }
 
     async fn list_job_events(
         &self,
         job_id: Uuid,
         limit: Option<i64>,
-    ) -> Result<Vec<JobEventRecord>, DatabaseError> {
-        self.store.list_job_events(job_id, limit).await
+    ) -> Result<Vec<crate::history::JobEventRecord>, DatabaseError> {
+        self.inner.list_job_events(job_id, limit).await
     }
 
-    // ==================== Routines ====================
-
-    async fn create_routine(&self, routine: &Routine) -> Result<(), DatabaseError> {
-        self.store.create_routine(routine).await
+    async fn create_routine(&self, routine: &crate::agent::routine::Routine) -> Result<(), DatabaseError> {
+        self.inner.create_routine(routine).await
     }
 
-    async fn get_routine(&self, id: Uuid) -> Result<Option<Routine>, DatabaseError> {
-        self.store.get_routine(id).await
+    async fn get_routine(&self, id: Uuid) -> Result<Option<crate::agent::routine::Routine>, DatabaseError> {
+        self.inner.get_routine(id).await
     }
 
     async fn get_routine_by_name(
         &self,
         user_id: &str,
         name: &str,
-    ) -> Result<Option<Routine>, DatabaseError> {
-        self.store.get_routine_by_name(user_id, name).await
+    ) -> Result<Option<crate::agent::routine::Routine>, DatabaseError> {
+        self.inner.get_routine_by_name(user_id, name).await
     }
 
-    async fn list_routines(&self, user_id: &str) -> Result<Vec<Routine>, DatabaseError> {
-        self.store.list_routines(user_id).await
+    async fn list_routines(
+        &self,
+        user_id: &str,
+    ) -> Result<Vec<crate::agent::routine::Routine>, DatabaseError> {
+        self.inner.list_routines(user_id).await
     }
 
-    async fn list_event_routines(&self) -> Result<Vec<Routine>, DatabaseError> {
-        self.store.list_event_routines().await
+    async fn list_event_routines(&self) -> Result<Vec<crate::agent::routine::Routine>, DatabaseError> {
+        self.inner.list_event_routines().await
     }
 
-    async fn list_due_cron_routines(&self) -> Result<Vec<Routine>, DatabaseError> {
-        self.store.list_due_cron_routines().await
+    async fn list_due_cron_routines(&self) -> Result<Vec<crate::agent::routine::Routine>, DatabaseError> {
+        self.inner.list_due_cron_routines().await
     }
 
-    async fn update_routine(&self, routine: &Routine) -> Result<(), DatabaseError> {
-        self.store.update_routine(routine).await
+    async fn update_routine(&self, routine: &crate::agent::routine::Routine) -> Result<(), DatabaseError> {
+        self.inner.update_routine(routine).await
     }
 
     async fn update_routine_runtime(
         &self,
         id: Uuid,
-        last_run_at: DateTime<Utc>,
-        next_fire_at: Option<DateTime<Utc>>,
+        last_run_at: chrono::DateTime<chrono::Utc>,
+        next_fire_at: Option<chrono::DateTime<chrono::Utc>>,
         run_count: u64,
         consecutive_failures: u32,
         state: &serde_json::Value,
     ) -> Result<(), DatabaseError> {
-        self.store
+        self.inner
             .update_routine_runtime(
                 id,
                 last_run_at,
@@ -398,13 +370,11 @@ impl Database for PgBackend {
     }
 
     async fn delete_routine(&self, id: Uuid) -> Result<bool, DatabaseError> {
-        self.store.delete_routine(id).await
+        self.inner.delete_routine(id).await
     }
 
-    // ==================== Routine Runs ====================
-
-    async fn create_routine_run(&self, run: &RoutineRun) -> Result<(), DatabaseError> {
-        self.store.create_routine_run(run).await
+    async fn create_routine_run(&self, run: &RoutineRun) -> Result<Uuid, DatabaseError> {
+        self.inner.create_routine_run(run).await
     }
 
     async fn complete_routine_run(
@@ -414,7 +384,7 @@ impl Database for PgBackend {
         result_summary: Option<&str>,
         tokens_used: Option<i32>,
     ) -> Result<(), DatabaseError> {
-        self.store
+        self.inner
             .complete_routine_run(id, status, result_summary, tokens_used)
             .await
     }
@@ -424,45 +394,39 @@ impl Database for PgBackend {
         routine_id: Uuid,
         limit: i64,
     ) -> Result<Vec<RoutineRun>, DatabaseError> {
-        self.store.list_routine_runs(routine_id, limit).await
+        self.inner.list_routine_runs(routine_id, limit).await
     }
 
     async fn count_running_routine_runs(&self, routine_id: Uuid) -> Result<i64, DatabaseError> {
-        self.store.count_running_routine_runs(routine_id).await
+        self.inner.count_running_routine_runs(routine_id).await
     }
-
-    // ==================== Tool Failures ====================
 
     async fn record_tool_failure(
         &self,
         tool_name: &str,
         error_message: &str,
     ) -> Result<(), DatabaseError> {
-        self.store
-            .record_tool_failure(tool_name, error_message)
-            .await
+        self.inner.record_tool_failure(tool_name, error_message).await
     }
 
     async fn get_broken_tools(&self, threshold: i32) -> Result<Vec<BrokenTool>, DatabaseError> {
-        self.store.get_broken_tools(threshold).await
+        self.inner.get_broken_tools(threshold).await
     }
 
     async fn mark_tool_repaired(&self, tool_name: &str) -> Result<(), DatabaseError> {
-        self.store.mark_tool_repaired(tool_name).await
+        self.inner.mark_tool_repaired(tool_name).await
     }
 
     async fn increment_repair_attempts(&self, tool_name: &str) -> Result<(), DatabaseError> {
-        self.store.increment_repair_attempts(tool_name).await
+        self.inner.increment_repair_attempts(tool_name).await
     }
-
-    // ==================== Settings ====================
 
     async fn get_setting(
         &self,
         user_id: &str,
         key: &str,
     ) -> Result<Option<serde_json::Value>, DatabaseError> {
-        self.store.get_setting(user_id, key).await
+        self.inner.get_setting(user_id, key).await
     }
 
     async fn get_setting_full(
@@ -470,7 +434,7 @@ impl Database for PgBackend {
         user_id: &str,
         key: &str,
     ) -> Result<Option<SettingRow>, DatabaseError> {
-        self.store.get_setting_full(user_id, key).await
+        self.inner.get_setting_full(user_id, key).await
     }
 
     async fn set_setting(
@@ -479,37 +443,35 @@ impl Database for PgBackend {
         key: &str,
         value: &serde_json::Value,
     ) -> Result<(), DatabaseError> {
-        self.store.set_setting(user_id, key, value).await
+        self.inner.set_setting(user_id, key, value).await
     }
 
     async fn delete_setting(&self, user_id: &str, key: &str) -> Result<bool, DatabaseError> {
-        self.store.delete_setting(user_id, key).await
+        self.inner.delete_setting(user_id, key).await
     }
 
     async fn list_settings(&self, user_id: &str) -> Result<Vec<SettingRow>, DatabaseError> {
-        self.store.list_settings(user_id).await
+        self.inner.list_settings(user_id).await
     }
 
     async fn get_all_settings(
         &self,
         user_id: &str,
-    ) -> Result<HashMap<String, serde_json::Value>, DatabaseError> {
-        self.store.get_all_settings(user_id).await
+    ) -> Result<std::collections::HashMap<String, serde_json::Value>, DatabaseError> {
+        self.inner.get_all_settings(user_id).await
     }
 
     async fn set_all_settings(
         &self,
         user_id: &str,
-        settings: &HashMap<String, serde_json::Value>,
+        settings: &std::collections::HashMap<String, serde_json::Value>,
     ) -> Result<(), DatabaseError> {
-        self.store.set_all_settings(user_id, settings).await
+        self.inner.set_all_settings(user_id, settings).await
     }
 
     async fn has_settings(&self, user_id: &str) -> Result<bool, DatabaseError> {
-        self.store.has_settings(user_id).await
+        self.inner.has_settings(user_id).await
     }
-
-    // ==================== Workspace: Documents ====================
 
     async fn get_document_by_path(
         &self,
@@ -517,13 +479,13 @@ impl Database for PgBackend {
         agent_id: Option<Uuid>,
         path: &str,
     ) -> Result<MemoryDocument, WorkspaceError> {
-        self.repo
+        self.inner
             .get_document_by_path(user_id, agent_id, path)
             .await
     }
 
     async fn get_document_by_id(&self, id: Uuid) -> Result<MemoryDocument, WorkspaceError> {
-        self.repo.get_document_by_id(id).await
+        self.inner.get_document_by_id(id).await
     }
 
     async fn get_or_create_document_by_path(
@@ -532,13 +494,13 @@ impl Database for PgBackend {
         agent_id: Option<Uuid>,
         path: &str,
     ) -> Result<MemoryDocument, WorkspaceError> {
-        self.repo
+        self.inner
             .get_or_create_document_by_path(user_id, agent_id, path)
             .await
     }
 
     async fn update_document(&self, id: Uuid, content: &str) -> Result<(), WorkspaceError> {
-        self.repo.update_document(id, content).await
+        self.inner.update_document(id, content).await
     }
 
     async fn delete_document_by_path(
@@ -547,7 +509,7 @@ impl Database for PgBackend {
         agent_id: Option<Uuid>,
         path: &str,
     ) -> Result<(), WorkspaceError> {
-        self.repo
+        self.inner
             .delete_document_by_path(user_id, agent_id, path)
             .await
     }
@@ -558,7 +520,9 @@ impl Database for PgBackend {
         agent_id: Option<Uuid>,
         directory: &str,
     ) -> Result<Vec<WorkspaceEntry>, WorkspaceError> {
-        self.repo.list_directory(user_id, agent_id, directory).await
+        self.inner
+            .list_directory(user_id, agent_id, directory)
+            .await
     }
 
     async fn list_all_paths(
@@ -566,7 +530,7 @@ impl Database for PgBackend {
         user_id: &str,
         agent_id: Option<Uuid>,
     ) -> Result<Vec<String>, WorkspaceError> {
-        self.repo.list_all_paths(user_id, agent_id).await
+        self.inner.list_all_paths(user_id, agent_id).await
     }
 
     async fn list_documents(
@@ -574,13 +538,13 @@ impl Database for PgBackend {
         user_id: &str,
         agent_id: Option<Uuid>,
     ) -> Result<Vec<MemoryDocument>, WorkspaceError> {
-        self.repo.list_documents(user_id, agent_id).await
+        self.inner.list_documents(user_id, agent_id).await
     }
 
-    // ==================== Workspace: Chunks ====================
-
     async fn delete_chunks(&self, document_id: Uuid) -> Result<(), WorkspaceError> {
-        self.repo.delete_chunks(document_id).await
+        self.inner.delete_chunks(document_id).await?;
+        self.vector_store.delete_chunks(document_id).await?;
+        Ok(())
     }
 
     async fn insert_chunk(
@@ -590,9 +554,26 @@ impl Database for PgBackend {
         content: &str,
         embedding: Option<&[f32]>,
     ) -> Result<Uuid, WorkspaceError> {
-        self.repo
+        let chunk_id = self
+            .inner
             .insert_chunk(document_id, chunk_index, content, embedding)
-            .await
+            .await?;
+
+        if let Some(emb) = embedding {
+            let doc = self.inner.get_document_by_id(document_id).await?;
+            self.vector_store
+                .insert_chunk(
+                    chunk_id,
+                    document_id,
+                    &doc.user_id,
+                    doc.agent_id,
+                    content,
+                    emb,
+                )
+                .await?;
+        }
+
+        Ok(chunk_id)
     }
 
     async fn update_chunk_embedding(
@@ -600,7 +581,23 @@ impl Database for PgBackend {
         chunk_id: Uuid,
         embedding: &[f32],
     ) -> Result<(), WorkspaceError> {
-        self.repo.update_chunk_embedding(chunk_id, embedding).await
+        self.inner.update_chunk_embedding(chunk_id, embedding).await?;
+
+        if let Some(chunk) = self.inner.get_chunk_by_id(chunk_id).await? {
+            let doc = self.inner.get_document_by_id(chunk.document_id).await?;
+            self.vector_store
+                .update_chunk_embedding(
+                    chunk_id,
+                    chunk.document_id,
+                    &doc.user_id,
+                    doc.agent_id,
+                    &chunk.content,
+                    embedding,
+                )
+                .await?;
+        }
+
+        Ok(())
     }
 
     async fn get_chunks_without_embeddings(
@@ -609,7 +606,7 @@ impl Database for PgBackend {
         agent_id: Option<Uuid>,
         limit: usize,
     ) -> Result<Vec<MemoryChunk>, WorkspaceError> {
-        self.repo
+        self.inner
             .get_chunks_without_embeddings(user_id, agent_id, limit)
             .await
     }
@@ -618,10 +615,8 @@ impl Database for PgBackend {
         &self,
         chunk_id: Uuid,
     ) -> Result<Option<MemoryChunk>, WorkspaceError> {
-        self.repo.get_chunk_by_id(chunk_id).await
+        self.inner.get_chunk_by_id(chunk_id).await
     }
-
-    // ==================== Workspace: Search ====================
 
     async fn hybrid_search(
         &self,
@@ -631,8 +626,39 @@ impl Database for PgBackend {
         embedding: Option<&[f32]>,
         config: &SearchConfig,
     ) -> Result<Vec<SearchResult>, WorkspaceError> {
-        self.repo
-            .hybrid_search(user_id, agent_id, query, embedding, config)
-            .await
+        let fts_config = SearchConfig {
+            use_fts: true,
+            use_vector: false,
+            ..*config
+        };
+        let fts_search_results = self
+            .inner
+            .hybrid_search(user_id, agent_id, query, None, &fts_config)
+            .await?;
+
+        let fts_results: Vec<RankedResult> = fts_search_results
+            .iter()
+            .enumerate()
+            .map(|(i, r)| RankedResult {
+                chunk_id: r.chunk_id,
+                document_id: r.document_id,
+                content: r.content.clone(),
+                rank: (i + 1) as u32,
+            })
+            .collect();
+
+        let vector_results = if config.use_vector {
+            if let Some(emb) = embedding {
+                self.vector_store
+                    .vector_search(user_id, agent_id, emb, config.pre_fusion_limit)
+                    .await?
+            } else {
+                Vec::new()
+            }
+        } else {
+            Vec::new()
+        };
+
+        Ok(reciprocal_rank_fusion(fts_results, vector_results, config))
     }
 }
