@@ -7,6 +7,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.0](https://github.com/nearai/ironclaw/compare/ironclaw-v0.5.0...ironclaw-v0.6.0) - 2026-02-19
+
+### Added
+
+- add issue triage skill ([#200](https://github.com/nearai/ironclaw/pull/200))
+- add PR triage dashboard skill ([#196](https://github.com/nearai/ironclaw/pull/196))
+- add OpenRouter usage examples ([#189](https://github.com/nearai/ironclaw/pull/189))
+- add Tinfoil private inference provider ([#62](https://github.com/nearai/ironclaw/pull/62))
+- shell env scrubbing and command injection detection ([#164](https://github.com/nearai/ironclaw/pull/164))
+- Add PR review tools, job monitor, and channel injection for E2E sandbox workflows ([#57](https://github.com/nearai/ironclaw/pull/57))
+- Secure prompt-based skills system (Phases 1-4) ([#51](https://github.com/nearai/ironclaw/pull/51))
+- Add benchmarking harness with spot suite ([#10](https://github.com/nearai/ironclaw/pull/10))
+- 10 infrastructure improvements from zeroclaw ([#126](https://github.com/nearai/ironclaw/pull/126))
+
+### Fixed
+
+- *(rig)* prevent OpenAI Responses API panic on tool call IDs ([#182](https://github.com/nearai/ironclaw/pull/182))
+- *(docs)* correct settings storage path in README ([#194](https://github.com/nearai/ironclaw/pull/194))
+- OpenAI tool calling — schema normalization, missing types, and Responses API panic ([#132](https://github.com/nearai/ironclaw/pull/132))
+- *(security)* prevent path traversal bypass in WASM HTTP allowlist ([#137](https://github.com/nearai/ironclaw/pull/137))
+- persist OpenAI-compatible provider and respect embeddings disable ([#177](https://github.com/nearai/ironclaw/pull/177))
+- remove .expect() calls in FailoverProvider::try_providers ([#156](https://github.com/nearai/ironclaw/pull/156))
+- sentinel value collision in FailoverProvider cooldown ([#125](https://github.com/nearai/ironclaw/pull/125)) ([#154](https://github.com/nearai/ironclaw/pull/154))
+- skills module audit cleanup ([#173](https://github.com/nearai/ironclaw/pull/173))
+
+### Other
+
+- Fix division by zero panic in ValueEstimator::is_profitable ([#139](https://github.com/nearai/ironclaw/pull/139))
+- audit feature parity matrix against codebase and recent commits ([#202](https://github.com/nearai/ironclaw/pull/202))
+- architecture improvements for contributor velocity ([#198](https://github.com/nearai/ironclaw/pull/198))
+- fix rustfmt formatting from PR #137
+- add .env.example examples for Ollama and OpenAI-compatible ([#110](https://github.com/nearai/ironclaw/pull/110))
+
 ## [0.5.0](https://github.com/nearai/ironclaw/compare/v0.4.0...v0.5.0) - 2026-02-17
 
 ### Added
