@@ -190,6 +190,16 @@ pub struct ToolCompletionRequest {
     pub tools: Vec<ToolDefinition>,
     pub max_tokens: Option<u32>,
     pub temperature: Option<f32>,
+    /// Nucleus sampling parameter (0.0 to 1.0). Use instead of temperature if both are set.
+    pub top_p: Option<f32>,
+    /// Number of completions to generate.
+    pub n: Option<u32>,
+    /// Penalize new tokens based on whether they appear in the text so far (-2.0 to 2.0).
+    pub presence_penalty: Option<f32>,
+    /// Penalize new tokens based on their frequency in the text so far (-2.0 to 2.0).
+    pub frequency_penalty: Option<f32>,
+    /// Seed for reproducible outputs.
+    pub seed: Option<i64>,
     /// How to handle tool use: "auto", "required", or "none".
     pub tool_choice: Option<String>,
     /// Opaque metadata passed through to the provider (e.g. thread_id for chaining).
@@ -204,6 +214,11 @@ impl ToolCompletionRequest {
             tools,
             max_tokens: None,
             temperature: None,
+            top_p: None,
+            n: None,
+            presence_penalty: None,
+            frequency_penalty: None,
+            seed: None,
             tool_choice: None,
             metadata: std::collections::HashMap::new(),
         }
@@ -218,6 +233,36 @@ impl ToolCompletionRequest {
     /// Set temperature.
     pub fn with_temperature(mut self, temperature: f32) -> Self {
         self.temperature = Some(temperature);
+        self
+    }
+
+    /// Set top_p (nucleus sampling).
+    pub fn with_top_p(mut self, top_p: f32) -> Self {
+        self.top_p = Some(top_p);
+        self
+    }
+
+    /// Set n (number of completions).
+    pub fn with_n(mut self, n: u32) -> Self {
+        self.n = Some(n);
+        self
+    }
+
+    /// Set presence_penalty.
+    pub fn with_presence_penalty(mut self, presence_penalty: f32) -> Self {
+        self.presence_penalty = Some(presence_penalty);
+        self
+    }
+
+    /// Set frequency_penalty.
+    pub fn with_frequency_penalty(mut self, frequency_penalty: f32) -> Self {
+        self.frequency_penalty = Some(frequency_penalty);
+        self
+    }
+
+    /// Set seed for reproducible outputs.
+    pub fn with_seed(mut self, seed: i64) -> Self {
+        self.seed = Some(seed);
         self
     }
 

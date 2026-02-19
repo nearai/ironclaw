@@ -334,6 +334,12 @@ pub struct OpenAiCompatibleConfig {
     pub base_url: String,
     pub api_key: Option<SecretString>,
     pub model: String,
+    /// Request timeout in seconds (default: 120)
+    pub timeout_secs: u64,
+    /// Maximum number of retry attempts for failed requests (default: 3)
+    pub max_retries: u32,
+    /// Initial delay between retries in milliseconds (default: 1000)
+    pub retry_initial_delay_ms: u64,
 }
 
 /// LLM provider configuration.
@@ -514,10 +520,22 @@ impl LlmConfig {
                 })?;
             let api_key = optional_env("LLM_API_KEY")?.map(SecretString::from);
             let model = optional_env("LLM_MODEL")?.unwrap_or_else(|| "default".to_string());
+            let timeout_secs = optional_env("LLM_TIMEOUT_SECS")?
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(120);
+            let max_retries = optional_env("LLM_MAX_RETRIES")?
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(3);
+            let retry_initial_delay_ms = optional_env("LLM_RETRY_DELAY_MS")?
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(1000);
             Some(OpenAiCompatibleConfig {
                 base_url,
                 api_key,
                 model,
+                timeout_secs,
+                max_retries,
+                retry_initial_delay_ms,
             })
         } else {
             None
