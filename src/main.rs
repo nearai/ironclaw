@@ -213,6 +213,16 @@ async fn main() -> anyhow::Result<()> {
 
             return run_status_command().await;
         }
+        Some(Command::Completion(completion)) => {
+            // Simple logging for CLI commands
+            tracing_subscriber::fmt()
+                .with_env_filter(
+                    EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("warn")),
+                )
+                .init();
+
+            return completion.run();
+        }
         Some(Command::Worker {
             job_id,
             orchestrator_url,
