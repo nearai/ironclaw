@@ -12,6 +12,7 @@ use axum::{
 };
 use secrecy::ExposeSecret;
 use serde::{Deserialize, Serialize};
+use subtle::ConstantTimeEq;
 use tokio::sync::{RwLock, mpsc, oneshot};
 use tokio_stream::wrappers::ReceiverStream;
 use uuid::Uuid;
@@ -173,7 +174,7 @@ async fn webhook_handler(
     // Validate secret if configured
     if let Some(ref expected_secret) = state.webhook_secret {
         match &req.secret {
-            Some(provided) if provided == expected_secret => {
+            Some(provided) if bool::from(provided.as_bytes().ct_eq(expected_secret.as_bytes())) => {
                 // Secret matches, continue
             }
             Some(_) => {

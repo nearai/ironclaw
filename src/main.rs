@@ -1207,6 +1207,12 @@ async fn main() -> anyhow::Result<()> {
             http_config.host,
             http_config.port
         );
+        if http_config.host == "0.0.0.0" {
+            tracing::warn!(
+                "HTTP webhook server is binding to 0.0.0.0 — it will be reachable from all network interfaces. \
+                 Set HTTP_HOST=127.0.0.1 to restrict to localhost."
+            );
+        }
     }
 
     // Start the unified webhook server if any routes were registered.

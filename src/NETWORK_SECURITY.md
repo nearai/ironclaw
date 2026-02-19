@@ -90,7 +90,12 @@ The `/projects/{project_id}/*` routes serve files from project directories. Thes
 
 ### Security Headers
 
-No explicit security headers are set (no `X-Frame-Options`, `X-Content-Type-Options`, `Strict-Transport-Security`, `Content-Security-Policy`). This is acceptable for a localhost-only service but would need attention if the gateway is ever exposed publicly.
+The gateway sets the following security headers on all responses (via `SetResponseHeaderLayer::if_not_present`, so handlers can override):
+
+- `X-Content-Type-Options: nosniff` — prevents MIME-sniffing
+- `X-Frame-Options: DENY` — prevents clickjacking via iframes
+
+**Reference:** `src/channels/web/server.rs:305-312`
 
 ---
 
@@ -108,7 +113,7 @@ Configurable via `HTTP_HOST` (default `0.0.0.0`) and `HTTP_PORT` (default `8080`
 
 ### Authentication
 
-Webhook secret is passed **in the JSON request body** (`secret` field), not as a header. The secret is compared with **standard string equality** (`==`), not constant-time comparison.
+Webhook secret is passed **in the JSON request body** (`secret` field), not as a header. The secret is compared using **constant-time** `subtle::ConstantTimeEq` (`ct_eq`).
 
 The secret is required to start the channel — if `HTTP_WEBHOOK_SECRET` is not set, `start()` returns an error.
 
@@ -369,7 +374,7 @@ Sandbox containers route all HTTP traffic through the proxy, which enforces a do
 | Mechanism | Constant-Time | Used By | Reference |
 |-----------|:------------:|---------|-----------|
 | Gateway bearer token | Yes | Web gateway (header + query) | `src/channels/web/auth.rs:31,40` |
-| Webhook shared secret | **No** | HTTP webhook (`==` comparison) | `src/channels/http.rs:176` |
+| Webhook shared secret | Yes | HTTP webhook (`ct_eq` comparison) | `src/channels/http.rs:176` |
 | Per-job bearer token | Yes | Orchestrator worker API | `src/orchestrator/auth.rs:65` |
 | OAuth callback | N/A | CLI OAuth flow (no auth, loopback-only) | `src/cli/oauth_defaults.rs:89` |
 | Sandbox proxy | N/A | No auth (loopback-only, ephemeral) | `src/sandbox/proxy/http.rs:100` |
@@ -378,13 +383,11 @@ Sandbox containers route all HTTP traffic through the proxy, which enforces a do
 
 ## Known Security Findings
 
-### 1. Webhook secret comparison is not constant-time
+### 1. ~~Webhook secret comparison is not constant-time~~ (Resolved)
 
 **Severity:** Low
 **Location:** `src/channels/http.rs:176`
-**Details:** The webhook secret is compared using `==` instead of `subtle::ConstantTimeEq`. This could theoretically allow timing attacks to brute-force the secret, though exploitation requires high-precision network timing.
-**Mitigation:** The webhook server is typically behind a reverse proxy or tunnel. The rate limiter (60 req/min) makes timing attacks impractical.
-**Recommendation:** Use `ct_eq` for consistency with other auth paths.
+**Status:** Resolved — webhook secret now uses `subtle::ConstantTimeEq` (`ct_eq`), consistent with web gateway and orchestrator auth.
 
 ### 2. No TLS at the application layer
 
@@ -401,20 +404,16 @@ Sandbox containers route all HTTP traffic through the proxy, which enforces a do
 **Mitigation:** All `/worker/*` endpoints require per-job bearer tokens (constant-time, cryptographically random). The `/health` endpoint is the only unauthenticated route. Firewall rules should block external access to port 50051.
 **Recommendation:** Document firewall requirements for Linux deployments. Consider binding to the Docker bridge IP (`172.17.0.1`) instead of `0.0.0.0`.
 
-### 4. HTTP webhook server binds to `0.0.0.0` by default
+### 4. ~~HTTP webhook server binds to `0.0.0.0` by default~~ (Resolved)
 
 **Severity:** Low
-**Location:** `src/config.rs:851`
-**Details:** The webhook server's default `HTTP_HOST` is `0.0.0.0`, which is intentional for receiving external webhook deliveries. However, operators may not realize the channel is network-accessible.
-**Mitigation:** A webhook secret is required (channel refuses to start without one). Rate limiting is enforced.
-**Recommendation:** Log a warning at startup when `HTTP_HOST` is `0.0.0.0`.
+**Location:** `src/config.rs:851`, `src/main.rs`
+**Status:** Resolved — a `tracing::warn!` is now emitted at startup when `HTTP_HOST` is `0.0.0.0`, advising operators to set `HTTP_HOST=127.0.0.1` to restrict to localhost.
 
-### 5. Missing security headers on web gateway
+### 5. ~~Missing security headers on web gateway~~ (Resolved)
 
 **Severity:** Low
-**Details:** The web gateway does not set standard security headers: `X-Frame-Options`, `X-Content-Type-Options`, `Strict-Transport-Security`, `Content-Security-Policy`.
-**Mitigation:** The gateway binds to loopback by default and serves only local users. CORS is restricted to localhost origins.
-**Recommendation:** Add `X-Content-Type-Options: nosniff` and `X-Frame-Options: DENY` as low-cost hardening.
+**Status:** Resolved — `X-Content-Type-Options: nosniff` and `X-Frame-Options: DENY` are now set on all responses via `SetResponseHeaderLayer::if_not_present`.
 
 ### 6. WebSocket connection limit
 
