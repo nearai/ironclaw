@@ -1224,6 +1224,13 @@ async fn main() -> anyhow::Result<()> {
     let mut webhook_server = if !webhook_routes.is_empty() {
         let addr =
             webhook_server_addr.unwrap_or_else(|| std::net::SocketAddr::from(([0, 0, 0, 0], 8080)));
+        if addr.ip().is_unspecified() {
+            tracing::warn!(
+                "Webhook server is binding to {} — it will be reachable from all network interfaces. \
+                 Set HTTP_HOST=127.0.0.1 to restrict to localhost.",
+                addr.ip()
+            );
+        }
         let mut server = WebhookServer::new(WebhookServerConfig { addr });
         for routes in webhook_routes {
             server.add_routes(routes);
