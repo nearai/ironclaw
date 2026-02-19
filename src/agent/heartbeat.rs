@@ -30,8 +30,8 @@ use tokio::sync::mpsc;
 
 use crate::channels::OutgoingResponse;
 use crate::llm::{ChatMessage, CompletionRequest, FinishReason, LlmProvider};
-use crate::workspace::hygiene::HygieneConfig;
 use crate::workspace::Workspace;
+use crate::workspace::hygiene::HygieneConfig;
 
 /// Configuration for the heartbeat runner.
 #[derive(Debug, Clone)]
@@ -154,11 +154,9 @@ impl HeartbeatRunner {
             let hygiene_workspace = Arc::clone(&self.workspace);
             let hygiene_config = self.hygiene_config.clone();
             tokio::spawn(async move {
-                let report = crate::workspace::hygiene::run_if_due(
-                    &hygiene_workspace,
-                    &hygiene_config,
-                )
-                .await;
+                let report =
+                    crate::workspace::hygiene::run_if_due(&hygiene_workspace, &hygiene_config)
+                        .await;
                 if report.had_work() {
                     tracing::info!(
                         daily_logs_deleted = report.daily_logs_deleted,

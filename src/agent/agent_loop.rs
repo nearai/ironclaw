@@ -94,6 +94,7 @@ impl Agent {
     ///
     /// Optionally accepts pre-created `ContextManager` and `SessionManager` for sharing
     /// with external components (job tools, web gateway). Creates new ones if not provided.
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         config: AgentConfig,
         deps: AgentDeps,
