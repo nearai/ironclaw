@@ -12,12 +12,15 @@ use crate::llm::{LlmProvider, ToolDefinition};
 use crate::orchestrator::job_manager::ContainerJobManager;
 use crate::safety::SafetyLayer;
 use crate::secrets::SecretsStore;
+use crate::skills::catalog::SkillCatalog;
+use crate::skills::registry::SkillRegistry;
 use crate::tools::builder::{BuildSoftwareTool, BuilderConfig, LlmSoftwareBuilder};
 use crate::tools::builtin::{
-    ApplyPatchTool, CancelJobTool, CreateJobTool, EchoTool, HttpTool, JobStatusTool, JsonTool,
-    ListDirTool, ListJobsTool, MemoryReadTool, MemorySearchTool, MemoryTreeTool, MemoryWriteTool,
-    ReadFileTool, ShellTool, TimeTool, ToolActivateTool, ToolAuthTool, ToolInstallTool,
-    ToolListTool, ToolRemoveTool, ToolSearchTool, WriteFileTool,
+    ApplyPatchTool, CancelJobTool, CreateJobTool, EchoTool, HttpTool, JobEventsTool, JobPromptTool,
+    JobStatusTool, JsonTool, ListDirTool, ListJobsTool, MemoryReadTool, MemorySearchTool,
+    MemoryTreeTool, MemoryWriteTool, PromptQueue, ReadFileTool, ShellTool, SkillInstallTool,
+    SkillListTool, SkillRemoveTool, SkillSearchTool, TimeTool, ToolActivateTool, ToolAuthTool,
+    ToolInstallTool, ToolListTool, ToolRemoveTool, ToolSearchTool, WriteFileTool,
 };
 use crate::tools::tool::{Tool, ToolDomain};
 use crate::tools::wasm::{
@@ -59,6 +62,10 @@ const PROTECTED_TOOL_NAMES: &[&str] = &[
     "routine_update",
     "routine_delete",
     "routine_history",
+    "skill_list",
+    "skill_search",
+    "skill_install",
+    "skill_remove",
 ];
 
 /// Registry of available tools.
@@ -240,22 +247,56 @@ impl ToolRegistry {
     /// Job tools allow the LLM to create, list, check status, and cancel jobs.
     /// When sandbox deps are provided, `create_job` automatically delegates to
     /// Docker containers. Otherwise it creates in-memory jobs via ContextManager.
+    #[allow(clippy::too_many_arguments)]
     pub fn register_job_tools(
         &self,
         context_manager: Arc<ContextManager>,
         job_manager: Option<Arc<ContainerJobManager>>,
         store: Option<Arc<dyn Database>>,
+        job_event_tx: Option<
+            tokio::sync::broadcast::Sender<(uuid::Uuid, crate::channels::web::types::SseEvent)>,
+        >,
+        inject_tx: Option<tokio::sync::mpsc::Sender<crate::channels::IncomingMessage>>,
+        prompt_queue: Option<PromptQueue>,
+        secrets_store: Option<Arc<dyn SecretsStore + Send + Sync>>,
     ) {
         let mut create_tool = CreateJobTool::new(Arc::clone(&context_manager));
         if let Some(jm) = job_manager {
-            create_tool = create_tool.with_sandbox(jm, store);
+            create_tool = create_tool.with_sandbox(jm, store.clone());
+        }
+        if let (Some(etx), Some(itx)) = (job_event_tx, inject_tx) {
+            create_tool = create_tool.with_monitor_deps(etx, itx);
+        }
+        if let Some(secrets) = secrets_store {
+            create_tool = create_tool.with_secrets(secrets);
         }
         self.register_sync(Arc::new(create_tool));
         self.register_sync(Arc::new(ListJobsTool::new(Arc::clone(&context_manager))));
         self.register_sync(Arc::new(JobStatusTool::new(Arc::clone(&context_manager))));
-        self.register_sync(Arc::new(CancelJobTool::new(context_manager)));
+        self.register_sync(Arc::new(CancelJobTool::new(Arc::clone(&context_manager))));
 
-        tracing::info!("Registered 4 job management tools");
+        // Base tools: create, list, status, cancel
+        let mut job_tool_count = 4;
+
+        // Register event reader if store is available
+        if let Some(store) = store {
+            self.register_sync(Arc::new(JobEventsTool::new(
+                store,
+                Arc::clone(&context_manager),
+            )));
+            job_tool_count += 1;
+        }
+
+        // Register prompt tool if queue is available
+        if let Some(pq) = prompt_queue {
+            self.register_sync(Arc::new(JobPromptTool::new(
+                pq,
+                Arc::clone(&context_manager),
+            )));
+            job_tool_count += 1;
+        }
+
+        tracing::info!("Registered {} job management tools", job_tool_count);
     }
 
     /// Register extension management tools (search, install, auth, activate, list, remove).
@@ -269,6 +310,27 @@ impl ToolRegistry {
         self.register_sync(Arc::new(ToolListTool::new(Arc::clone(&manager))));
         self.register_sync(Arc::new(ToolRemoveTool::new(manager)));
         tracing::info!("Registered 6 extension management tools");
+    }
+
+    /// Register skill management tools (list, search, install, remove).
+    ///
+    /// These allow the LLM to manage prompt-level skills through conversation.
+    pub fn register_skill_tools(
+        &self,
+        registry: Arc<std::sync::RwLock<SkillRegistry>>,
+        catalog: Arc<SkillCatalog>,
+    ) {
+        self.register_sync(Arc::new(SkillListTool::new(Arc::clone(&registry))));
+        self.register_sync(Arc::new(SkillSearchTool::new(
+            Arc::clone(&registry),
+            Arc::clone(&catalog),
+        )));
+        self.register_sync(Arc::new(SkillInstallTool::new(
+            Arc::clone(&registry),
+            Arc::clone(&catalog),
+        )));
+        self.register_sync(Arc::new(SkillRemoveTool::new(registry)));
+        tracing::info!("Registered 4 skill management tools");
     }
 
     /// Register routine management tools.

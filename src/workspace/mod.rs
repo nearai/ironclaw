@@ -43,6 +43,7 @@
 mod chunker;
 mod document;
 mod embeddings;
+pub mod hygiene;
 #[cfg(feature = "postgres")]
 mod repository;
 mod search;

@@ -40,6 +40,7 @@ pub struct JobDescription {
 #[derive(Debug, Serialize, Deserialize)]
 pub struct ProxyCompletionRequest {
     pub messages: Vec<ChatMessage>,
+    pub model: Option<String>,
     pub max_tokens: Option<u32>,
     pub temperature: Option<f32>,
     pub stop_sequences: Option<Vec<String>>,
@@ -57,6 +58,7 @@ pub struct ProxyCompletionResponse {
 pub struct ProxyToolCompletionRequest {
     pub messages: Vec<ChatMessage>,
     pub tools: Vec<ToolDefinition>,
+    pub model: Option<String>,
     pub max_tokens: Option<u32>,
     pub temperature: Option<f32>,
     pub tool_choice: Option<String>,
@@ -92,6 +94,15 @@ pub struct PromptResponse {
     pub content: String,
     #[serde(default)]
     pub done: bool,
+}
+
+/// A single credential delivered from the orchestrator to a container worker.
+///
+/// Shared between the orchestrator endpoint and the worker client.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct CredentialResponse {
+    pub env_var: String,
+    pub value: String,
 }
 
 impl WorkerHttpClient {
@@ -201,6 +212,7 @@ impl WorkerHttpClient {
     ) -> Result<CompletionResponse, WorkerError> {
         let proxy_req = ProxyCompletionRequest {
             messages: request.messages.clone(),
+            model: request.model.clone(),
             max_tokens: request.max_tokens,
             temperature: request.temperature,
             stop_sequences: request.stop_sequences.clone(),
@@ -227,6 +239,7 @@ impl WorkerHttpClient {
         let proxy_req = ProxyToolCompletionRequest {
             messages: request.messages.clone(),
             tools: request.tools.clone(),
+            model: request.model.clone(),
             max_tokens: request.max_tokens,
             temperature: request.temperature,
             tool_choice: request.tool_choice.clone(),
@@ -335,6 +348,45 @@ impl WorkerHttpClient {
         Ok(Some(prompt))
     }
 
+    /// Fetch credentials granted to this job from the orchestrator.
+    ///
+    /// Returns an empty vec if no credentials are granted (204 No Content)
+    /// or if the endpoint returns 404. The caller should set each credential
+    /// as an environment variable before starting the execution loop.
+    pub async fn fetch_credentials(&self) -> Result<Vec<CredentialResponse>, WorkerError> {
+        let resp = self
+            .client
+            .get(self.url("credentials"))
+            .bearer_auth(&self.token)
+            .send()
+            .await
+            .map_err(|e| WorkerError::ConnectionFailed {
+                url: self.orchestrator_url.clone(),
+                reason: e.to_string(),
+            })?;
+
+        // 204 or 404 means no credentials granted, not an error
+        if resp.status() == reqwest::StatusCode::NO_CONTENT
+            || resp.status() == reqwest::StatusCode::NOT_FOUND
+        {
+            return Ok(vec![]);
+        }
+
+        if !resp.status().is_success() {
+            return Err(WorkerError::SecretResolveFailed {
+                secret_name: "(all)".to_string(),
+                reason: format!("credentials endpoint returned {}", resp.status()),
+            });
+        }
+
+        resp.json()
+            .await
+            .map_err(|e| WorkerError::SecretResolveFailed {
+                secret_name: "(all)".to_string(),
+                reason: format!("failed to parse credentials response: {}", e),
+            })
+    }
+
     /// Signal job completion to the orchestrator.
     pub async fn report_complete(&self, report: &CompletionReport) -> Result<(), WorkerError> {
         let _: serde_json::Value = self
@@ -380,5 +432,31 @@ mod tests {
         assert_eq!(parse_finish_reason("stop"), FinishReason::Stop);
         assert_eq!(parse_finish_reason("tool_use"), FinishReason::ToolUse);
         assert_eq!(parse_finish_reason("unknown"), FinishReason::Unknown);
+    }
+
+    #[test]
+    fn test_credentials_url_construction() {
+        let client = WorkerHttpClient::new(
+            "http://host.docker.internal:50051".to_string(),
+            Uuid::nil(),
+            "test-token".to_string(),
+        );
+
+        assert_eq!(
+            client.url("credentials"),
+            format!(
+                "http://host.docker.internal:50051/worker/{}/credentials",
+                Uuid::nil()
+            )
+        );
+    }
+
+    #[test]
+    fn test_job_description_deserialization() {
+        let json = r#"{"title":"Test","description":"desc","project_dir":null}"#;
+        let job: JobDescription = serde_json::from_str(json).unwrap();
+        assert_eq!(job.title, "Test");
+        assert_eq!(job.description, "desc");
+        assert!(job.project_dir.is_none());
     }
 }

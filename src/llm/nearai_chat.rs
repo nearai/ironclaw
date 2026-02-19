@@ -227,11 +227,12 @@ struct ApiModelEntry {
 #[async_trait]
 impl LlmProvider for NearAiChatProvider {
     async fn complete(&self, req: CompletionRequest) -> Result<CompletionResponse, LlmError> {
+        let model = req.model.unwrap_or_else(|| self.active_model_name());
         let messages: Vec<ChatCompletionMessage> =
             req.messages.into_iter().map(|m| m.into()).collect();
 
         let request = ChatCompletionRequest {
-            model: self.active_model_name(),
+            model,
             messages,
             temperature: req.temperature,
             max_tokens: req.max_tokens,
@@ -273,6 +274,7 @@ impl LlmProvider for NearAiChatProvider {
         &self,
         req: ToolCompletionRequest,
     ) -> Result<ToolCompletionResponse, LlmError> {
+        let model = req.model.unwrap_or_else(|| self.active_model_name());
         let messages: Vec<ChatCompletionMessage> =
             req.messages.into_iter().map(|m| m.into()).collect();
 
@@ -296,7 +298,7 @@ impl LlmProvider for NearAiChatProvider {
             .collect();
 
         let request = ChatCompletionRequest {
-            model: self.active_model_name(),
+            model,
             messages,
             temperature: req.temperature,
             max_tokens: req.max_tokens,

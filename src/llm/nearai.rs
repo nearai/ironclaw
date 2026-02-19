@@ -127,11 +127,24 @@ impl NearAiProvider {
     }
 
     /// Fetch available models from the NEAR AI API.
+    ///
+    /// Handles session renewal on 401 (same pattern as `send_request`).
     pub async fn list_models(&self) -> Result<Vec<ModelInfo>, LlmError> {
+        match self.list_models_inner().await {
+            Ok(models) => Ok(models),
+            Err(LlmError::SessionExpired { .. }) => {
+                self.session.handle_auth_failure().await?;
+                self.list_models_inner().await
+            }
+            Err(e) => Err(e),
+        }
+    }
+
+    async fn list_models_inner(&self) -> Result<Vec<ModelInfo>, LlmError> {
         use secrecy::ExposeSecret;
 
         let token = self.session.get_token().await?;
-        let url = self.api_url("model/list");
+        let url = self.api_url("models");
 
         tracing::debug!("Fetching models from: {}", url);
 
@@ -150,7 +163,6 @@ impl NearAiProvider {
         let response_text = response.text().await.unwrap_or_default();
 
         if !status.is_success() {
-            // Check for session expiration
             if status.as_u16() == 401 {
                 return Err(LlmError::SessionExpired {
                     provider: "nearai".to_string(),
@@ -450,11 +462,12 @@ fn split_messages(
 #[async_trait]
 impl LlmProvider for NearAiProvider {
     async fn complete(&self, req: CompletionRequest) -> Result<CompletionResponse, LlmError> {
+        let model = req.model.unwrap_or_else(|| self.active_model_name());
         let thread_id = req.metadata.get("thread_id").cloned();
         let (instructions, input) = split_messages(req.messages, false);
 
         let request = NearAiRequest {
-            model: self.active_model_name(),
+            model,
             instructions,
             input,
             previous_response_id: None,
@@ -567,6 +580,7 @@ impl LlmProvider for NearAiProvider {
         &self,
         req: ToolCompletionRequest,
     ) -> Result<ToolCompletionResponse, LlmError> {
+        let model = req.model.unwrap_or_else(|| self.active_model_name());
         let thread_id = req.metadata.get("thread_id").cloned();
 
         // Look up chaining state for this thread
@@ -607,7 +621,7 @@ impl LlmProvider for NearAiProvider {
             .collect();
 
         let request = NearAiRequest {
-            model: self.active_model_name(),
+            model: model.clone(),
             instructions: if chaining { None } else { instructions.clone() },
             input,
             previous_response_id: previous_response_id.clone(),
@@ -648,7 +662,7 @@ impl LlmProvider for NearAiProvider {
                     false,
                 );
                 let retry_request = NearAiRequest {
-                    model: self.active_model_name(),
+                    model,
                     instructions: instructions_full,
                     input: input_full,
                     previous_response_id: None,

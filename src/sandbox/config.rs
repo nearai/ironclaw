@@ -159,56 +159,14 @@ pub fn default_allowlist() -> Vec<String> {
     ]
 }
 
-/// Credential injection configuration.
-#[derive(Debug, Clone)]
-pub struct CredentialMapping {
-    /// Domain this credential applies to.
-    pub domain: String,
-    /// Name of the secret to inject.
-    pub secret_name: String,
-    /// Where to inject the credential.
-    pub location: CredentialLocation,
-}
-
-/// Where to inject a credential in an HTTP request.
-#[derive(Debug, Clone)]
-pub enum CredentialLocation {
-    /// Inject as Authorization: Bearer <token>
-    AuthorizationBearer,
-    /// Inject as a custom header.
-    Header(String),
-    /// Inject as a query parameter.
-    QueryParam(String),
-}
-
-impl Default for CredentialMapping {
-    fn default() -> Self {
-        Self {
-            domain: String::new(),
-            secret_name: String::new(),
-            location: CredentialLocation::AuthorizationBearer,
-        }
-    }
-}
-
 /// Default credential mappings for common APIs.
-pub fn default_credential_mappings() -> Vec<CredentialMapping> {
+pub fn default_credential_mappings() -> Vec<crate::secrets::CredentialMapping> {
+    use crate::secrets::CredentialMapping;
+
     vec![
-        CredentialMapping {
-            domain: "api.openai.com".to_string(),
-            secret_name: "OPENAI_API_KEY".to_string(),
-            location: CredentialLocation::AuthorizationBearer,
-        },
-        CredentialMapping {
-            domain: "api.anthropic.com".to_string(),
-            secret_name: "ANTHROPIC_API_KEY".to_string(),
-            location: CredentialLocation::Header("x-api-key".to_string()),
-        },
-        CredentialMapping {
-            domain: "api.near.ai".to_string(),
-            secret_name: "NEARAI_API_KEY".to_string(),
-            location: CredentialLocation::AuthorizationBearer,
-        },
+        CredentialMapping::bearer("OPENAI_API_KEY", "api.openai.com"),
+        CredentialMapping::header("ANTHROPIC_API_KEY", "x-api-key", "api.anthropic.com"),
+        CredentialMapping::bearer("NEARAI_API_KEY", "api.near.ai"),
     ]
 }
 

@@ -15,7 +15,10 @@ use crate::agent::BrokenTool;
 use crate::agent::routine::{Routine, RoutineRun, RunStatus};
 use crate::config::DatabaseConfig;
 use crate::context::{ActionRecord, JobContext, JobState};
-use crate::db::Database;
+use crate::db::{
+    ConversationStore, Database, JobStore, RoutineStore, SandboxStore, SettingsStore,
+    ToolFailureStore, WorkspaceStore,
+};
 use crate::error::{DatabaseError, WorkspaceError};
 use crate::history::{
     ConversationMessage, ConversationSummary, JobEventRecord, LlmCallRecord, SandboxJobRecord,
@@ -51,14 +54,19 @@ impl PgBackend {
     }
 }
 
+// ==================== Database (supertrait) ====================
+
 #[async_trait]
 impl Database for PgBackend {
     async fn run_migrations(&self) -> Result<(), DatabaseError> {
         self.store.run_migrations().await
     }
+}
 
-    // ==================== Conversations ====================
+// ==================== ConversationStore ====================
 
+#[async_trait]
+impl ConversationStore for PgBackend {
     async fn create_conversation(
         &self,
         channel: &str,
@@ -174,9 +182,12 @@ impl Database for PgBackend {
             .conversation_belongs_to_user(conversation_id, user_id)
             .await
     }
+}
 
-    // ==================== Jobs ====================
+// ==================== JobStore ====================
 
+#[async_trait]
+impl JobStore for PgBackend {
     async fn save_job(&self, ctx: &JobContext) -> Result<(), DatabaseError> {
         self.store.save_job(ctx).await
     }
@@ -204,8 +215,6 @@ impl Database for PgBackend {
         self.store.get_stuck_jobs().await
     }
 
-    // ==================== Actions ====================
-
     async fn save_action(&self, job_id: Uuid, action: &ActionRecord) -> Result<(), DatabaseError> {
         self.store.save_action(job_id, action).await
     }
@@ -214,13 +223,9 @@ impl Database for PgBackend {
         self.store.get_job_actions(job_id).await
     }
 
-    // ==================== LLM Calls ====================
-
     async fn record_llm_call(&self, record: &LlmCallRecord<'_>) -> Result<Uuid, DatabaseError> {
         self.store.record_llm_call(record).await
     }
-
-    // ==================== Estimation Snapshots ====================
 
     async fn save_estimation_snapshot(
         &self,
@@ -254,9 +259,12 @@ impl Database for PgBackend {
             .update_estimation_actuals(id, actual_cost, actual_time_secs, actual_value)
             .await
     }
+}
 
-    // ==================== Sandbox Jobs ====================
+// ==================== SandboxStore ====================
 
+#[async_trait]
+impl SandboxStore for PgBackend {
     async fn save_sandbox_job(&self, job: &SandboxJobRecord) -> Result<(), DatabaseError> {
         self.store.save_sandbox_job(job).await
     }
@@ -323,8 +331,6 @@ impl Database for PgBackend {
         self.store.get_sandbox_job_mode(id).await
     }
 
-    // ==================== Job Events ====================
-
     async fn save_job_event(
         &self,
         job_id: Uuid,
@@ -334,12 +340,19 @@ impl Database for PgBackend {
         self.store.save_job_event(job_id, event_type, data).await
     }
 
-    async fn list_job_events(&self, job_id: Uuid) -> Result<Vec<JobEventRecord>, DatabaseError> {
-        self.store.list_job_events(job_id).await
+    async fn list_job_events(
+        &self,
+        job_id: Uuid,
+        limit: Option<i64>,
+    ) -> Result<Vec<JobEventRecord>, DatabaseError> {
+        self.store.list_job_events(job_id, limit).await
     }
+}
 
-    // ==================== Routines ====================
+// ==================== RoutineStore ====================
 
+#[async_trait]
+impl RoutineStore for PgBackend {
     async fn create_routine(&self, routine: &Routine) -> Result<(), DatabaseError> {
         self.store.create_routine(routine).await
     }
@@ -397,8 +410,6 @@ impl Database for PgBackend {
         self.store.delete_routine(id).await
     }
 
-    // ==================== Routine Runs ====================
-
     async fn create_routine_run(&self, run: &RoutineRun) -> Result<(), DatabaseError> {
         self.store.create_routine_run(run).await
     }
@@ -426,9 +437,12 @@ impl Database for PgBackend {
     async fn count_running_routine_runs(&self, routine_id: Uuid) -> Result<i64, DatabaseError> {
         self.store.count_running_routine_runs(routine_id).await
     }
+}
 
-    // ==================== Tool Failures ====================
+// ==================== ToolFailureStore ====================
 
+#[async_trait]
+impl ToolFailureStore for PgBackend {
     async fn record_tool_failure(
         &self,
         tool_name: &str,
@@ -450,9 +464,12 @@ impl Database for PgBackend {
     async fn increment_repair_attempts(&self, tool_name: &str) -> Result<(), DatabaseError> {
         self.store.increment_repair_attempts(tool_name).await
     }
+}
 
-    // ==================== Settings ====================
+// ==================== SettingsStore ====================
 
+#[async_trait]
+impl SettingsStore for PgBackend {
     async fn get_setting(
         &self,
         user_id: &str,
@@ -504,9 +521,12 @@ impl Database for PgBackend {
     async fn has_settings(&self, user_id: &str) -> Result<bool, DatabaseError> {
         self.store.has_settings(user_id).await
     }
+}
 
-    // ==================== Workspace: Documents ====================
+// ==================== WorkspaceStore ====================
 
+#[async_trait]
+impl WorkspaceStore for PgBackend {
     async fn get_document_by_path(
         &self,
         user_id: &str,
@@ -573,8 +593,6 @@ impl Database for PgBackend {
         self.repo.list_documents(user_id, agent_id).await
     }
 
-    // ==================== Workspace: Chunks ====================
-
     async fn delete_chunks(&self, document_id: Uuid) -> Result<(), WorkspaceError> {
         self.repo.delete_chunks(document_id).await
     }
@@ -609,8 +627,6 @@ impl Database for PgBackend {
             .get_chunks_without_embeddings(user_id, agent_id, limit)
             .await
     }
-
-    // ==================== Workspace: Search ====================
 
     async fn hybrid_search(
         &self,

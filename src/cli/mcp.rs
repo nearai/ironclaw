@@ -519,7 +519,7 @@ async fn get_secrets_store() -> anyhow::Result<Arc<dyn SecretsStore + Send + Syn
     #[cfg(all(feature = "libsql", not(feature = "postgres")))]
     {
         use crate::db::Database as _;
-        use crate::db::libsql_backend::LibSqlBackend;
+        use crate::db::libsql::LibSqlBackend;
         use secrecy::ExposeSecret as _;
 
         let default_path = crate::config::default_libsql_path();

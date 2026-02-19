@@ -11,9 +11,13 @@
 //! - Context compaction for long conversations
 
 mod agent_loop;
+mod commands;
 pub mod compaction;
 pub mod context_monitor;
+pub mod cost_guard;
+mod dispatcher;
 mod heartbeat;
+pub mod job_monitor;
 mod router;
 pub mod routine;
 pub mod routine_engine;
@@ -23,6 +27,7 @@ pub mod session;
 mod session_manager;
 pub mod submission;
 pub mod task;
+mod thread_ops;
 pub mod undo;
 pub mod worker;
 
