@@ -213,11 +213,16 @@ impl WorkspaceStorage {
                 )
                 .await
             }
-            // Generic DB backend doesn't support line tracking yet;
-            // fall back to insert_chunk (line info is lost but chunks still work).
             Self::Db(db) => {
-                db.insert_chunk(document_id, chunk_index, content, embedding)
-                    .await
+                db.insert_chunk_with_lines(
+                    document_id,
+                    chunk_index,
+                    content,
+                    embedding,
+                    line_start,
+                    line_end,
+                )
+                .await
             }
         }
     }

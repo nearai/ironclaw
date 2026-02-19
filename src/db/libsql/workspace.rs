@@ -7,7 +7,7 @@ use libsql::params;
 use uuid::Uuid;
 
 use super::{
-    LibSqlBackend, fmt_ts, get_i64, get_opt_text, get_opt_ts, get_text, get_ts,
+    LibSqlBackend, fmt_ts, get_i64, get_opt_i64, get_opt_text, get_opt_ts, get_text, get_ts,
     row_to_memory_document,
 };
 use crate::db::WorkspaceStore;
@@ -420,6 +420,49 @@ impl WorkspaceStore for LibSqlBackend {
         Ok(id)
     }
 
+    async fn insert_chunk_with_lines(
+        &self,
+        document_id: Uuid,
+        chunk_index: i32,
+        content: &str,
+        embedding: Option<&[f32]>,
+        line_start: Option<u32>,
+        line_end: Option<u32>,
+    ) -> Result<Uuid, WorkspaceError> {
+        let conn = self
+            .connect()
+            .await
+            .map_err(|e| WorkspaceError::ChunkingFailed {
+                reason: e.to_string(),
+            })?;
+        let id = Uuid::new_v4();
+        let embedding_blob = embedding.map(|e| {
+            let bytes: Vec<u8> = e.iter().flat_map(|f| f.to_le_bytes()).collect();
+            bytes
+        });
+
+        conn.execute(
+            r#"
+                INSERT INTO memory_chunks (id, document_id, chunk_index, content, embedding, line_start, line_end)
+                VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+                "#,
+            params![
+                id.to_string(),
+                document_id.to_string(),
+                chunk_index as i64,
+                content,
+                embedding_blob.map(libsql::Value::Blob),
+                line_start.map(|v| v as i64),
+                line_end.map(|v| v as i64),
+            ],
+        )
+        .await
+        .map_err(|e| WorkspaceError::ChunkingFailed {
+            reason: format!("Insert failed: {}", e),
+        })?;
+        Ok(id)
+    }
+
     async fn update_chunk_embedding(
         &self,
         chunk_id: Uuid,
@@ -460,7 +503,8 @@ impl WorkspaceStore for LibSqlBackend {
         let mut rows = conn
             .query(
                 r#"
-                SELECT c.id, c.document_id, c.chunk_index, c.content, c.created_at
+                SELECT c.id, c.document_id, c.chunk_index, c.content, c.created_at,
+                       c.line_start, c.line_end
                 FROM memory_chunks c
                 JOIN memory_documents d ON d.id = c.document_id
                 WHERE d.user_id = ?1 AND d.agent_id IS ?2
@@ -488,6 +532,8 @@ impl WorkspaceStore for LibSqlBackend {
                 chunk_index: get_i64(&row, 2) as i32,
                 content: get_text(&row, 3),
                 embedding: None,
+                line_start: get_opt_i64(&row, 5).map(|v| v as u32),
+                line_end: get_opt_i64(&row, 6).map(|v| v as u32),
                 created_at: get_ts(&row, 4),
             });
         }
@@ -515,7 +561,7 @@ impl WorkspaceStore for LibSqlBackend {
             let mut rows = conn
                 .query(
                     r#"
-                    SELECT c.id, c.document_id, c.content
+                    SELECT c.id, c.document_id, c.content, d.path, c.line_start, c.line_end
                     FROM memory_chunks_fts fts
                     JOIN memory_chunks c ON c._rowid = fts.rowid
                     JOIN memory_documents d ON d.id = c.document_id
@@ -543,6 +589,9 @@ impl WorkspaceStore for LibSqlBackend {
                     chunk_id: get_text(&row, 0).parse().unwrap_or_default(),
                     document_id: get_text(&row, 1).parse().unwrap_or_default(),
                     content: get_text(&row, 2),
+                    path: get_text(&row, 3),
+                    line_start: get_opt_i64(&row, 4).map(|v| v as u32),
+                    line_end: get_opt_i64(&row, 5).map(|v| v as u32),
                     rank: results.len() as u32 + 1,
                 });
             }
@@ -563,7 +612,7 @@ impl WorkspaceStore for LibSqlBackend {
             let mut rows = conn
                 .query(
                     r#"
-                    SELECT c.id, c.document_id, c.content
+                    SELECT c.id, c.document_id, c.content, d.path, c.line_start, c.line_end
                     FROM vector_top_k('idx_memory_chunks_embedding', vector(?1), ?2) AS top_k
                     JOIN memory_chunks c ON c._rowid = top_k.id
                     JOIN memory_documents d ON d.id = c.document_id
@@ -588,6 +637,9 @@ impl WorkspaceStore for LibSqlBackend {
                     chunk_id: get_text(&row, 0).parse().unwrap_or_default(),
                     document_id: get_text(&row, 1).parse().unwrap_or_default(),
                     content: get_text(&row, 2),
+                    path: get_text(&row, 3),
+                    line_start: get_opt_i64(&row, 4).map(|v| v as u32),
+                    line_end: get_opt_i64(&row, 5).map(|v| v as u32),
                     rank: results.len() as u32 + 1,
                 });
             }

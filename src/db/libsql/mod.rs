@@ -216,6 +216,11 @@ pub(crate) fn get_i64(row: &libsql::Row, idx: i32) -> i64 {
     row.get::<i64>(idx).unwrap_or(0)
 }
 
+/// Extract an optional i64 from a nullable integer column.
+pub(crate) fn get_opt_i64(row: &libsql::Row, idx: i32) -> Option<i64> {
+    row.get::<i64>(idx).ok()
+}
+
 /// Extract an optional bool from an integer column.
 pub(crate) fn get_opt_bool(row: &libsql::Row, idx: i32) -> Option<bool> {
     row.get::<i64>(idx).ok().map(|v| v != 0)
