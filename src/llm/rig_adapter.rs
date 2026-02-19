@@ -580,7 +580,10 @@ mod tests {
         // Extract the generated call_id from the tool result
         let tool_result_call_id = match &history[1] {
             RigMessage::User { content } => match content.first() {
-                UserContent::ToolResult(r) => r.call_id.clone().unwrap_or_default(),
+                UserContent::ToolResult(r) => r
+                    .call_id
+                    .clone()
+                    .expect("tool result call_id must be present"),
                 other => panic!("Expected ToolResult, got: {:?}", other),
             },
             other => panic!("Expected User message, got: {:?}", other),
