@@ -85,6 +85,18 @@ impl Database for PgBackend {
             .await
     }
 
+    async fn add_conversation_message_at(
+        &self,
+        conversation_id: Uuid,
+        role: &str,
+        content: &str,
+        created_at: DateTime<Utc>,
+    ) -> Result<Uuid, DatabaseError> {
+        self.store
+            .add_conversation_message_at(conversation_id, role, content, created_at)
+            .await
+    }
+
     async fn ensure_conversation(
         &self,
         id: Uuid,
@@ -127,6 +139,33 @@ impl Database for PgBackend {
         self.store
             .create_conversation_with_metadata(channel, user_id, metadata)
             .await
+    }
+
+    async fn set_conversation_time_bounds(
+        &self,
+        id: Uuid,
+        started_at: Option<DateTime<Utc>>,
+        last_activity: Option<DateTime<Utc>>,
+    ) -> Result<(), DatabaseError> {
+        self.store
+            .set_conversation_time_bounds(id, started_at, last_activity)
+            .await
+    }
+
+    async fn find_conversation_by_import_source(
+        &self,
+        user_id: &str,
+        channel: &str,
+        source: &str,
+        source_id: &str,
+    ) -> Result<Option<Uuid>, DatabaseError> {
+        self.store
+            .find_conversation_by_import_source(user_id, channel, source, source_id)
+            .await
+    }
+
+    async fn delete_conversation(&self, id: Uuid) -> Result<(), DatabaseError> {
+        self.store.delete_conversation(id).await
     }
 
     async fn list_conversation_messages_paginated(

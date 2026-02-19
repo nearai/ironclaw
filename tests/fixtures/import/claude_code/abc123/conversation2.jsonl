@@ -1,0 +1,2 @@
+{"type":"human","text":"Can we add tests for parser edge cases?","timestamp":"2025-05-15T08:00:00.000Z"}
+{"type":"assistant","text":"Yes. Cover malformed lines and empty files.","timestamp":"2025-05-15T08:00:03.000Z"}

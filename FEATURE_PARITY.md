@@ -108,6 +108,7 @@ This document tracks feature parity between IronClaw (Rust implementation) and O
 | `agents` | ✅ | ❌ | P3 | Multi-agent management |
 | `sessions` | ✅ | ❌ | P3 | Session listing |
 | `memory` | ✅ | ✅ | - | Memory search CLI |
+| `import` | ➖ | ✅ | P1 | `import claude-code` + `import claude-web` history migration, default checkpoint/resume for interrupted imports (`--fresh`, `--no-checkpoint`) |
 | `skills` | ✅ | ❌ | P3 | Agent skills |
 | `pairing` | ✅ | ✅ | - | list/approve for channel DM pairing |
 | `nodes` | ✅ | ❌ | P3 | Device management |

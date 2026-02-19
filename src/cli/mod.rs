@@ -6,10 +6,14 @@
 //! - Managing configuration (`config list`, `config get`, `config set`)
 //! - Managing WASM tools (`tool install`, `tool list`, `tool remove`)
 //! - Managing MCP servers (`mcp add`, `mcp auth`, `mcp list`, `mcp test`)
+//! - Importing history (`import claude-code`, `import claude-web`)
 //! - Querying workspace memory (`memory search`, `memory read`, `memory write`)
 //! - Checking system health (`status`)
 
 mod config;
+mod import;
+mod import_claude_code;
+mod import_claude_web;
 mod mcp;
 pub mod memory;
 pub mod oauth_defaults;
@@ -18,6 +22,7 @@ pub mod status;
 mod tool;
 
 pub use config::{ConfigCommand, run_config_command};
+pub use import::{ImportCommand, run_import_command};
 pub use mcp::{McpCommand, run_mcp_command};
 pub use memory::MemoryCommand;
 #[cfg(feature = "postgres")]
@@ -87,6 +92,10 @@ pub enum Command {
     /// Manage MCP servers (hosted tool providers)
     #[command(subcommand)]
     Mcp(McpCommand),
+
+    /// Import conversation history from external sources
+    #[command(subcommand)]
+    Import(ImportCommand),
 
     /// Query and manage workspace memory
     #[command(subcommand)]

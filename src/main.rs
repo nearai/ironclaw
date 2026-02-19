@@ -17,7 +17,8 @@ use ironclaw::{
         web::log_layer::{LogBroadcaster, WebLogLayer},
     },
     cli::{
-        Cli, Command, run_mcp_command, run_pairing_command, run_status_command, run_tool_command,
+        Cli, Command, run_import_command, run_mcp_command, run_pairing_command, run_status_command,
+        run_tool_command,
     },
     config::Config,
     context::ContextManager,
@@ -84,6 +85,15 @@ async fn main() -> anyhow::Result<()> {
                 .init();
 
             return run_mcp_command(mcp_cmd.clone()).await;
+        }
+        Some(Command::Import(import_cmd)) => {
+            tracing_subscriber::fmt()
+                .with_env_filter(
+                    EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("warn")),
+                )
+                .init();
+
+            return run_import_command(import_cmd.clone(), cli.no_db).await;
         }
         Some(Command::Memory(mem_cmd)) => {
             tracing_subscriber::fmt()

@@ -13,6 +13,7 @@
   <a href="#features">Features</a> •
   <a href="#installation">Installation</a> •
   <a href="#configuration">Configuration</a> •
+  <a href="#import-existing-claude-history">Import</a> •
   <a href="#security">Security</a> •
   <a href="#architecture">Architecture</a>
 </p>
@@ -141,6 +142,45 @@ ironclaw onboard
 The wizard handles database connection, NEAR AI authentication (via browser OAuth),
 and secrets encryption (using your system keychain). All settings are saved to
 `~/.ironclaw/settings.toml`.
+
+## Import Existing Claude History
+
+If you are migrating from Claude Code or Claude.ai, import your existing chats into IronClaw:
+
+```bash
+# 1) Preview local Claude Code history (no DB writes)
+ironclaw import claude-code --dry-run
+
+# 2) Import local Claude Code history (~/.claude/projects by default)
+ironclaw import claude-code
+
+# 3) Preview Claude.ai ZIP export (Settings -> Export Data)
+ironclaw import claude-web --path ~/Downloads/claude_export.zip --dry-run
+
+# 4) Import Claude.ai ZIP export
+ironclaw import claude-web --path ~/Downloads/claude_export.zip
+
+# 5) Large imports auto-checkpoint by default (safe to rerun after interruption)
+ironclaw import claude-web --path ~/Downloads/claude_export.zip
+
+# 6) Use an explicit checkpoint file
+ironclaw import claude-web \
+  --path ~/Downloads/claude_export.zip \
+  --checkpoint ~/.ironclaw/import-checkpoints/claude-web-main.json
+
+# 7) Start fresh (ignore/delete prior checkpoint state)
+ironclaw import claude-web --path ~/Downloads/claude_export.zip --fresh
+
+# 8) Disable checkpointing for a one-shot run
+ironclaw import claude-web --path ~/Downloads/claude_export.zip --no-checkpoint
+
+# 9) Delete checkpoint files after successful import
+ironclaw import claude-web --path ~/Downloads/claude_export.zip --cleanup-checkpoint
+```
+
+Imported conversations are stored in your IronClaw database and appear in the existing Web Gateway thread list.
+Re-running the same import is safe: duplicate conversations are skipped.
+IronClaw tracks processed source IDs in a checkpoint by default so interrupted imports can continue safely.
 
 ## Security
 

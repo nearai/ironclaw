@@ -139,6 +139,26 @@ impl Store {
         Ok(id)
     }
 
+    /// Add a message to a conversation with explicit timestamp.
+    pub async fn add_conversation_message_at(
+        &self,
+        conversation_id: Uuid,
+        role: &str,
+        content: &str,
+        created_at: DateTime<Utc>,
+    ) -> Result<Uuid, DatabaseError> {
+        let conn = self.conn().await?;
+        let id = Uuid::new_v4();
+
+        conn.execute(
+            "INSERT INTO conversation_messages (id, conversation_id, role, content, created_at) VALUES ($1, $2, $3, $4, $5)",
+            &[&id, &conversation_id, &role, &content, &created_at],
+        )
+        .await?;
+
+        Ok(id)
+    }
+
     // ==================== Jobs ====================
 
     /// Save a job context to the database.
@@ -1255,7 +1275,11 @@ impl Store {
         Ok(())
     }
 
-    /// List conversations with a title derived from the first user message.
+    /// List conversations with a lightweight title preview.
+    ///
+    /// Prefer the persisted metadata title because older/corrupted rows in
+    /// `conversation_messages.content` can fail UTF-8 decoding during preview
+    /// extraction and break pagination.
     pub async fn list_conversations_with_preview(
         &self,
         user_id: &str,
@@ -1272,15 +1296,17 @@ impl Store {
                     c.last_activity,
                     c.metadata,
                     (SELECT COUNT(*) FROM conversation_messages m WHERE m.conversation_id = c.id) AS message_count,
-                    (SELECT LEFT(m2.content, 100)
-                     FROM conversation_messages m2
-                     WHERE m2.conversation_id = c.id AND m2.role = 'user'
-                     ORDER BY m2.created_at ASC
-                     LIMIT 1
-                    ) AS title
+                    NULLIF(c.metadata->>'title', '') AS title
                 FROM conversations c
                 WHERE c.user_id = $1 AND c.channel = $2
-                ORDER BY c.last_activity DESC
+                ORDER BY COALESCE(
+                    (SELECT MAX(m3.created_at)
+                     FROM conversation_messages m3
+                     WHERE m3.conversation_id = c.id
+                    ),
+                    c.last_activity
+                ) DESC,
+                c.last_activity DESC
                 LIMIT $3
                 "#,
                 &[&user_id, &channel, &limit],
@@ -1366,6 +1392,62 @@ impl Store {
         .await?;
 
         Ok(id)
+    }
+
+    /// Update conversation started and last-activity timestamps.
+    pub async fn set_conversation_time_bounds(
+        &self,
+        id: Uuid,
+        started_at: Option<DateTime<Utc>>,
+        last_activity: Option<DateTime<Utc>>,
+    ) -> Result<(), DatabaseError> {
+        let conn = self.conn().await?;
+        conn.execute(
+            r#"
+            UPDATE conversations
+            SET started_at = COALESCE($2, started_at),
+                last_activity = COALESCE($3, last_activity)
+            WHERE id = $1
+            "#,
+            &[&id, &started_at, &last_activity],
+        )
+        .await?;
+        Ok(())
+    }
+
+    /// Find an imported conversation by import source tuple.
+    pub async fn find_conversation_by_import_source(
+        &self,
+        user_id: &str,
+        channel: &str,
+        source: &str,
+        source_id: &str,
+    ) -> Result<Option<Uuid>, DatabaseError> {
+        let conn = self.conn().await?;
+        let row = conn
+            .query_opt(
+                r#"
+                SELECT id
+                FROM conversations
+                WHERE user_id = $1
+                  AND channel = $2
+                  AND metadata->'import'->>'source' = $3
+                  AND metadata->'import'->>'source_id' = $4
+                LIMIT 1
+                "#,
+                &[&user_id, &channel, &source, &source_id],
+            )
+            .await?;
+
+        Ok(row.map(|r| r.get("id")))
+    }
+
+    /// Delete a conversation and all its messages via FK cascade.
+    pub async fn delete_conversation(&self, id: Uuid) -> Result<(), DatabaseError> {
+        let conn = self.conn().await?;
+        conn.execute("DELETE FROM conversations WHERE id = $1", &[&id])
+            .await?;
+        Ok(())
     }
 
     /// Check whether a conversation belongs to the given user.

@@ -1,0 +1,3 @@
+{"type":"human","text":"valid line","timestamp":"2025-05-17T01:00:00.000Z"}
+{this is not valid json}
+{"type":"assistant","text":"still parsed","timestamp":"2025-05-17T01:00:04.000Z"}

@@ -2174,6 +2174,30 @@ mark {
   color: var(--text-secondary);
 }
 
+.thread-list-loading {
+  padding: 8px 12px 12px;
+  font-size: 11px;
+  color: var(--text-secondary);
+  text-align: center;
+}
+
+.thread-list-load-more {
+  width: calc(100% - 16px);
+  margin: 8px;
+  padding: 7px 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg-secondary);
+  color: var(--text-secondary);
+  font-size: 11px;
+  cursor: pointer;
+}
+
+.thread-list-load-more:hover {
+  color: var(--text);
+  border-color: var(--accent);
+}
+
 /* --- Memory editing --- */
 
 #memory-breadcrumb-path {
