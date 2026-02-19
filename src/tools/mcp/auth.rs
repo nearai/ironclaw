@@ -380,7 +380,11 @@ pub async fn authorize_mcp_server(
 ) -> Result<AccessToken, AuthError> {
     // Find an available port for the callback first (needed for DCR)
     let (listener, port) = find_available_port().await?;
-    let redirect_uri = format!("http://localhost:{}/callback", port);
+    let redirect_uri = format!(
+        "http://{}:{}/callback",
+        oauth_defaults::callback_host(),
+        port
+    );
 
     // Determine client_id and endpoints
     let (client_id, authorization_url, token_url, use_pkce, scopes, extra_params) =

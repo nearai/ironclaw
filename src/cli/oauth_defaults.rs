@@ -66,12 +66,37 @@ pub const OAUTH_CALLBACK_PORT: u16 = 9876;
 ///
 /// Checks `IRONCLAW_OAUTH_CALLBACK_URL` env var first (useful for remote/VPS
 /// deployments where `127.0.0.1` is unreachable from the user's browser),
-/// then falls back to `http://127.0.0.1:{OAUTH_CALLBACK_PORT}`.
+/// then falls back to `http://{callback_host()}:{OAUTH_CALLBACK_PORT}`.
 pub fn callback_url() -> String {
     std::env::var("IRONCLAW_OAUTH_CALLBACK_URL")
         .ok()
         .filter(|v| !v.is_empty())
-        .unwrap_or_else(|| format!("http://127.0.0.1:{}", OAUTH_CALLBACK_PORT))
+        .unwrap_or_else(|| format!("http://{}:{}", callback_host(), OAUTH_CALLBACK_PORT))
+}
+
+/// Returns the hostname used in OAuth callback URLs.
+///
+/// Reads `OAUTH_CALLBACK_HOST` from the environment (default: `127.0.0.1`).
+///
+/// **Remote server usage:** set `OAUTH_CALLBACK_HOST` to the server's public
+/// IP or hostname so the OAuth redirect reaches your local browser.  The
+/// callback listener will then bind to `0.0.0.0` instead of `127.0.0.1` to
+/// accept connections from outside the machine.
+///
+/// # Example
+///
+/// ```bash
+/// export OAUTH_CALLBACK_HOST=203.0.113.10
+/// ironclaw login
+/// # Opens: http://203.0.113.10:9876/auth/callback
+/// ```
+pub fn callback_host() -> String {
+    std::env::var("OAUTH_CALLBACK_HOST").unwrap_or_else(|_| "127.0.0.1".to_string())
+}
+
+/// Returns `true` if `host` is a loopback address that only accepts local connections.
+fn is_loopback_host(host: &str) -> bool {
+    host == "127.0.0.1" || host == "::1" || host.eq_ignore_ascii_case("localhost")
 }
 
 /// Error from the OAuth callback listener.
@@ -92,33 +117,50 @@ pub enum OAuthCallbackError {
 
 /// Bind the OAuth callback listener on the fixed port.
 ///
-/// Binds to IPv4 `127.0.0.1` first because callback URLs use `127.0.0.1`
-/// explicitly (e.g., NEAR AI redirects to `http://127.0.0.1:9876/auth/callback`).
-/// Falls back to IPv6 `[::1]` only if IPv4 binding fails for a reason other
-/// than `AddrInUse`. If the port is already occupied, fails immediately.
+/// When `OAUTH_CALLBACK_HOST` is a loopback address (the default `127.0.0.1`),
+/// binds to `127.0.0.1` first and falls back to `[::1]` so local-only auth
+/// flows remain restricted to the local machine.
+///
+/// When `OAUTH_CALLBACK_HOST` is set to a remote address, binds to `0.0.0.0`
+/// so the callback port is reachable from outside the machine.
 pub async fn bind_callback_listener() -> Result<TcpListener, OAuthCallbackError> {
-    let ipv4_addr = format!("127.0.0.1:{}", OAUTH_CALLBACK_PORT);
-    match TcpListener::bind(&ipv4_addr).await {
-        Ok(listener) => return Ok(listener),
-        Err(e) if e.kind() == std::io::ErrorKind::AddrInUse => {
-            return Err(OAuthCallbackError::PortInUse(
-                OAUTH_CALLBACK_PORT,
-                e.to_string(),
-            ));
+    let host = callback_host();
+
+    if is_loopback_host(&host) {
+        // Local mode: prefer IPv4 loopback, fall back to IPv6.
+        let ipv4_addr = format!("127.0.0.1:{}", OAUTH_CALLBACK_PORT);
+        match TcpListener::bind(&ipv4_addr).await {
+            Ok(listener) => return Ok(listener),
+            Err(e) if e.kind() == std::io::ErrorKind::AddrInUse => {
+                return Err(OAuthCallbackError::PortInUse(
+                    OAUTH_CALLBACK_PORT,
+                    e.to_string(),
+                ));
+            }
+            Err(_) => {
+                // IPv4 not available, fall back to IPv6
+            }
         }
-        Err(_) => {
-            // IPv4 not available, fall back to IPv6
-        }
-    }
-    TcpListener::bind(format!("[::1]:{}", OAUTH_CALLBACK_PORT))
-        .await
-        .map_err(|e| {
+        TcpListener::bind(format!("[::1]:{}", OAUTH_CALLBACK_PORT))
+            .await
+            .map_err(|e| {
+                if e.kind() == std::io::ErrorKind::AddrInUse {
+                    OAuthCallbackError::PortInUse(OAUTH_CALLBACK_PORT, e.to_string())
+                } else {
+                    OAuthCallbackError::Io(e.to_string())
+                }
+            })
+    } else {
+        // Remote mode: bind to all interfaces so the port is reachable from outside.
+        let addr = format!("0.0.0.0:{}", OAUTH_CALLBACK_PORT);
+        TcpListener::bind(&addr).await.map_err(|e| {
             if e.kind() == std::io::ErrorKind::AddrInUse {
                 OAuthCallbackError::PortInUse(OAUTH_CALLBACK_PORT, e.to_string())
             } else {
                 OAuthCallbackError::Io(e.to_string())
             }
         })
+    }
 }
 
 /// Wait for an OAuth callback and extract a query parameter value.
@@ -311,26 +353,44 @@ pub fn landing_html(provider_name: &str, success: bool) -> String {
 mod tests {
     use std::sync::Mutex;
 
-    use crate::cli::oauth_defaults::{builtin_credentials, callback_url, landing_html};
+    use crate::cli::oauth_defaults::{
+        builtin_credentials, callback_url, is_loopback_host, landing_html,
+    };
 
     /// Serializes env-mutating tests to prevent parallel races.
     static ENV_MUTEX: Mutex<()> = Mutex::new(());
 
     #[test]
+    fn test_is_loopback_host() {
+        assert!(is_loopback_host("127.0.0.1"));
+        assert!(is_loopback_host("::1"));
+        assert!(is_loopback_host("localhost"));
+        assert!(is_loopback_host("LOCALHOST"));
+        assert!(!is_loopback_host("203.0.113.10"));
+        assert!(!is_loopback_host("my-server.example.com"));
+        assert!(!is_loopback_host("0.0.0.0"));
+    }
+
+    #[test]
     fn test_callback_url_default() {
         let _guard = ENV_MUTEX.lock().expect("env mutex poisoned");
-        // Clear the env var to test default behavior
-        let original = std::env::var("IRONCLAW_OAUTH_CALLBACK_URL").ok();
+        // Clear both env vars to test default behavior
+        let original_url = std::env::var("IRONCLAW_OAUTH_CALLBACK_URL").ok();
+        let original_host = std::env::var("OAUTH_CALLBACK_HOST").ok();
         // SAFETY: Under ENV_MUTEX, no concurrent env access.
         unsafe {
             std::env::remove_var("IRONCLAW_OAUTH_CALLBACK_URL");
+            std::env::remove_var("OAUTH_CALLBACK_HOST");
         }
         let url = callback_url();
         assert_eq!(url, "http://127.0.0.1:9876");
         // Restore
         unsafe {
-            if let Some(val) = original {
+            if let Some(val) = original_url {
                 std::env::set_var("IRONCLAW_OAUTH_CALLBACK_URL", val);
+            }
+            if let Some(val) = original_host {
+                std::env::set_var("OAUTH_CALLBACK_HOST", val);
             }
         }
     }
