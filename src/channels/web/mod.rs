@@ -87,7 +87,7 @@ impl GatewayChannel {
             llm_provider: None,
             skill_registry: None,
             skill_catalog: None,
-            chat_rate_limiter: server::RateLimiter::new(30, 60),
+            chat_rate_limiter: Arc::new(server::RateLimiter::new(30, 60)),
         });
 
         Self {
@@ -116,7 +116,7 @@ impl GatewayChannel {
             llm_provider: self.state.llm_provider.clone(),
             skill_registry: self.state.skill_registry.clone(),
             skill_catalog: self.state.skill_catalog.clone(),
-            chat_rate_limiter: server::RateLimiter::new(30, 60),
+            chat_rate_limiter: Arc::clone(&self.state.chat_rate_limiter),
         };
         mutate(&mut new_state);
         self.state = Arc::new(new_state);

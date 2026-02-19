@@ -134,6 +134,8 @@ async fn install_tool(
 ) -> anyhow::Result<()> {
     let target_dir = target.unwrap_or_else(default_tools_dir);
 
+    maybe_prepare_browser_use_chromium(&path, name.as_deref()).await?;
+
     // Determine if path is a directory (source) or .wasm file
     let metadata = fs::metadata(&path).await?;
 
@@ -253,6 +255,30 @@ async fn install_tool(
     Ok(())
 }
 
+/// Resolve the cargo target directory, respecting CARGO_TARGET_DIR env,
+/// global ~/.cargo/config.toml, and falling back to `source_dir/target`.
+fn resolve_cargo_target_dir(source_dir: &Path) -> PathBuf {
+    // 1. CARGO_TARGET_DIR env var takes highest priority
+    if let Ok(dir) = std::env::var("CARGO_TARGET_DIR") {
+        return PathBuf::from(dir);
+    }
+
+    // 2. Check global cargo config
+    if let Some(home) = dirs::home_dir() {
+        let config_path = home.join(".cargo").join("config.toml");
+        if let Ok(contents) = std::fs::read_to_string(&config_path)
+            && let Ok(config) = contents.parse::<toml::Table>()
+            && let Some(build) = config.get("build").and_then(|b| b.as_table())
+            && let Some(dir) = build.get("target-dir").and_then(|d| d.as_str())
+        {
+            return PathBuf::from(dir);
+        }
+    }
+
+    // 3. Default to source_dir/target
+    source_dir.join("target")
+}
+
 /// Build a WASM component using cargo-component.
 fn build_wasm_component(source_dir: &Path, release: bool) -> anyhow::Result<PathBuf> {
     println!("Building WASM component in {}...", source_dir.display());
@@ -290,21 +316,13 @@ fn build_wasm_component(source_dir: &Path, release: bool) -> anyhow::Result<Path
     }
 
     // Find the output wasm file
-    // cargo-component may output to wasm32-wasip1 or wasm32-wasip2 depending on version
+    // Respect CARGO_TARGET_DIR env, cargo config, or default to source_dir/target
+    let base_target = resolve_cargo_target_dir(source_dir);
     let profile = if release { "release" } else { "debug" };
     let candidates = [
-        source_dir
-            .join("target")
-            .join("wasm32-wasip1")
-            .join(profile),
-        source_dir
-            .join("target")
-            .join("wasm32-wasip2")
-            .join(profile),
-        source_dir
-            .join("target")
-            .join("wasm32-unknown-unknown")
-            .join(profile),
+        base_target.join("wasm32-wasip1").join(profile),
+        base_target.join("wasm32-wasip2").join(profile),
+        base_target.join("wasm32-unknown-unknown").join(profile),
     ];
 
     let target_dir = candidates.iter().find(|p| p.exists()).ok_or_else(|| {
@@ -353,20 +371,11 @@ fn build_wasm_component(source_dir: &Path, release: bool) -> anyhow::Result<Path
 fn find_wasm_artifact(source_dir: &Path, name: &str, release: bool) -> anyhow::Result<PathBuf> {
     let profile = if release { "release" } else { "debug" };
 
-    // cargo-component may output to wasm32-wasip1 or wasm32-wasip2 depending on version
+    let base_target = resolve_cargo_target_dir(source_dir);
     let target_dirs = [
-        source_dir
-            .join("target")
-            .join("wasm32-wasip1")
-            .join(profile),
-        source_dir
-            .join("target")
-            .join("wasm32-wasip2")
-            .join(profile),
-        source_dir
-            .join("target")
-            .join("wasm32-unknown-unknown")
-            .join(profile),
+        base_target.join("wasm32-wasip1").join(profile),
+        base_target.join("wasm32-wasip2").join(profile),
+        base_target.join("wasm32-unknown-unknown").join(profile),
     ];
 
     let snake_name = name.replace('-', "_");
@@ -1315,6 +1324,17 @@ fn print_success(display_name: &str) {
     println!();
     println!("  The tool can now access the API.");
     println!();
+}
+
+/// Stub for browser-use chromium preparation.
+///
+/// Browser automation is now provided by the Browserless sidecar container,
+/// so no local Chromium download is needed.
+async fn maybe_prepare_browser_use_chromium(
+    _install_path: &Path,
+    _requested_name: Option<&str>,
+) -> anyhow::Result<()> {
+    Ok(())
 }
 
 #[cfg(test)]

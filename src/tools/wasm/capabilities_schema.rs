@@ -33,9 +33,10 @@ use std::time::Duration;
 use serde::{Deserialize, Serialize};
 
 use crate::secrets::{CredentialLocation, CredentialMapping};
+use crate::tools::wasm::capabilities::WorkspaceWriteCapability;
 use crate::tools::wasm::{
     Capabilities, EndpointPattern, HttpCapability, RateLimitConfig, SecretsCapability,
-    ToolInvokeCapability, WorkspaceCapability,
+    ToolInvokeCapability, WebSocketCapability, WebSocketEndpoint, WorkspaceCapability,
 };
 
 /// Root schema for a capabilities JSON file.
@@ -57,10 +58,19 @@ pub struct CapabilitiesFile {
     #[serde(default)]
     pub workspace: Option<WorkspaceCapabilitySchema>,
 
+    /// WebSocket connections.
+    #[serde(default)]
+    pub websocket: Option<WebSocketCapabilitySchema>,
+
     /// Authentication setup instructions.
     /// Used by `ironclaw config` to guide users through auth setup.
     #[serde(default)]
     pub auth: Option<AuthCapabilitySchema>,
+
+    /// Approval policy for tool actions.
+    /// Specifies which actions require explicit user approval before execution.
+    #[serde(default)]
+    pub approval_policy: Option<ApprovalPolicySchema>,
 }
 
 impl CapabilitiesFile {
@@ -103,7 +113,16 @@ impl CapabilitiesFile {
             caps.workspace_read = Some(WorkspaceCapability {
                 allowed_prefixes: workspace.allowed_prefixes.clone(),
                 reader: None, // Injected at runtime
+                writer: None, // Injected at runtime
             });
+            caps.workspace_write = Some(WorkspaceWriteCapability {
+                allowed_prefixes: workspace.allowed_prefixes.clone(),
+                writer: None, // Injected at runtime
+            });
+        }
+
+        if let Some(websocket) = &self.websocket {
+            caps.websocket = Some(websocket.to_websocket_capability());
         }
 
         caps
@@ -179,6 +198,10 @@ pub struct EndpointPatternSchema {
     /// Hostname (e.g., "api.slack.com" or "*.slack.com").
     pub host: String,
 
+    /// Port constraint (optional, None = any port).
+    #[serde(default)]
+    pub port: Option<u16>,
+
     /// Optional path prefix (e.g., "/api/").
     #[serde(default)]
     pub path_prefix: Option<String>,
@@ -192,6 +215,7 @@ impl EndpointPatternSchema {
     fn to_endpoint_pattern(&self) -> EndpointPattern {
         EndpointPattern {
             host: self.host.clone(),
+            port: self.port,
             path_prefix: self.path_prefix.clone(),
             methods: self.methods.clone(),
         }
@@ -324,6 +348,83 @@ pub struct WorkspaceCapabilitySchema {
     /// Allowed path prefixes (e.g., ["context/", "daily/"]).
     #[serde(default)]
     pub allowed_prefixes: Vec<String>,
+}
+
+/// WebSocket capability schema.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct WebSocketCapabilitySchema {
+    /// Allowed WebSocket endpoints.
+    #[serde(default)]
+    pub allowlist: Vec<WebSocketEndpointSchema>,
+
+    /// Rate limiting configuration.
+    #[serde(default)]
+    pub rate_limit: Option<RateLimitSchema>,
+
+    /// Maximum message size in bytes.
+    #[serde(default)]
+    pub max_message_bytes: Option<usize>,
+
+    /// Connection timeout in seconds.
+    #[serde(default)]
+    pub connect_timeout_secs: Option<u64>,
+
+    /// Read timeout in seconds.
+    #[serde(default)]
+    pub read_timeout_secs: Option<u64>,
+}
+
+impl WebSocketCapabilitySchema {
+    fn to_websocket_capability(&self) -> WebSocketCapability {
+        let mut cap = WebSocketCapability {
+            allowlist: self
+                .allowlist
+                .iter()
+                .map(|e| e.to_websocket_endpoint())
+                .collect(),
+            rate_limit: self
+                .rate_limit
+                .as_ref()
+                .map(|r| r.to_rate_limit_config())
+                .unwrap_or_default(),
+            ..Default::default()
+        };
+
+        if let Some(max) = self.max_message_bytes {
+            cap.max_message_bytes = max;
+        }
+        if let Some(secs) = self.connect_timeout_secs {
+            cap.connect_timeout = Duration::from_secs(secs);
+        }
+        if let Some(secs) = self.read_timeout_secs {
+            cap.read_timeout = Duration::from_secs(secs);
+        }
+
+        // Session-based tools (e.g. browser-use) rely on ws-connect-pooled to
+        // persist browser context across invocations. Enable pooling whenever
+        // websocket capability is declared from JSON.
+        cap.with_pool()
+    }
+}
+
+/// WebSocket endpoint schema.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WebSocketEndpointSchema {
+    /// Hostname (e.g., "localhost", "127.0.0.1", "*.example.com").
+    pub host: String,
+
+    /// Port (optional, None = any port).
+    #[serde(default)]
+    pub port: Option<u16>,
+}
+
+impl WebSocketEndpointSchema {
+    fn to_websocket_endpoint(&self) -> WebSocketEndpoint {
+        WebSocketEndpoint {
+            host: self.host.clone(),
+            port: self.port,
+        }
+    }
 }
 
 /// Authentication setup schema.
@@ -488,6 +589,22 @@ fn default_method() -> String {
 
 fn default_success_status() -> u16 {
     200
+}
+
+/// Approval policy schema.
+///
+/// Specifies which tool actions require explicit user approval.
+/// This is read by the WASM wrapper to determine per-invocation approval
+/// instead of hardcoding tool-specific logic in the main agent.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ApprovalPolicySchema {
+    /// Actions that require explicit user approval before execution.
+    #[serde(default)]
+    pub actions_requiring_approval: Vec<String>,
+
+    /// Whether `wait` with `js_condition` parameter requires approval.
+    #[serde(default)]
+    pub js_condition_requires_approval: bool,
 }
 
 #[cfg(test)]
@@ -753,5 +870,82 @@ mod tests {
         assert_eq!(auth.secret_name, "my_api_key");
         assert!(auth.display_name.is_none());
         assert!(auth.setup_url.is_none());
+    }
+
+    #[test]
+    fn test_browser_use_capabilities_file_shape_is_supported() {
+        // Regression for spec Risk B: ensure top-level capability keys parse correctly.
+        let json = r#"{
+            "http": {
+                "allowlist": [
+                    {
+                        "host": "127.0.0.1",
+                        "path_prefix": "/v1/browser/",
+                        "methods": ["GET", "POST"]
+                    }
+                ],
+                "rate_limit": {
+                    "requests_per_minute": 30,
+                    "requests_per_hour": 600
+                },
+                "timeout_secs": 30,
+                "max_request_bytes": 32768,
+                "max_response_bytes": 524288
+            },
+            "websocket": {
+                "allowlist": [
+                    {
+                        "host": "127.0.0.1",
+                        "port": 9222
+                    }
+                ],
+                "rate_limit": {
+                    "requests_per_minute": 10,
+                    "requests_per_hour": 100
+                },
+                "max_message_bytes": 1048576,
+                "connect_timeout_secs": 10,
+                "read_timeout_secs": 30
+            },
+            "secrets": {
+                "allowed_names": []
+            }
+        }"#;
+
+        let caps =
+            CapabilitiesFile::from_json(json).expect("browser-use capabilities should parse");
+        let runtime_caps = caps.to_capabilities();
+
+        let http = runtime_caps
+            .http
+            .expect("http capability should be present");
+        assert_eq!(http.allowlist.len(), 1);
+        assert_eq!(http.allowlist[0].host, "127.0.0.1");
+        assert_eq!(
+            http.allowlist[0].path_prefix.as_deref(),
+            Some("/v1/browser/")
+        );
+        assert_eq!(http.allowlist[0].methods, vec!["GET", "POST"]);
+        assert_eq!(http.max_request_bytes, 32768);
+        assert_eq!(http.max_response_bytes, 524288);
+        assert_eq!(http.timeout.as_secs(), 30);
+        assert_eq!(http.rate_limit.requests_per_minute, 30);
+        assert_eq!(http.rate_limit.requests_per_hour, 600);
+
+        let websocket = runtime_caps
+            .websocket
+            .expect("websocket capability should exist");
+        assert_eq!(websocket.allowlist.len(), 1);
+        assert_eq!(websocket.allowlist[0].host, "127.0.0.1");
+        assert_eq!(websocket.allowlist[0].port, Some(9222));
+        assert!(
+            websocket.connection_pool.is_some(),
+            "websocket capability from JSON should enable pooling"
+        );
+
+        let secrets = runtime_caps
+            .secrets
+            .expect("secrets capability should exist");
+        assert!(!secrets.is_allowed("anything"));
     }
 }

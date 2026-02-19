@@ -153,7 +153,7 @@ This document tracks feature parity between IronClaw (Rust implementation) and O
 | `cron` | ✅ | ❌ | P2 | Scheduled jobs (model/thinking fields in edit) |
 | `webhooks` | ✅ | ❌ | P3 | Webhook config |
 | `message send` | ✅ | ❌ | P2 | Send to channels |
-| `browser` | ✅ | ❌ | P3 | Browser automation |
+| `browser` | ✅ | ✅ | - | WASM browser-use tool via Browserless sidecar (CDP) |
 | `sandbox` | ✅ | ✅ | - | WASM sandbox |
 | `doctor` | ✅ | ❌ | P2 | Diagnostics |
 | `logs` | ✅ | ❌ | P3 | Query logs |
@@ -513,6 +513,7 @@ This document tracks feature parity between IronClaw (Rust implementation) and O
 - ✅ Slack channel (WASM tool)
 - ✅ Telegram channel (WASM tool, MTProto)
 - ✅ Docker sandbox (orchestrator/worker)
+- ✅ Browser automation (WASM browser-use tool via Browserless Docker sidecar)
 - ✅ Cron job scheduling (routines)
 - ✅ CLI subcommands (onboard, config, status, memory)
 - ✅ Gateway token auth

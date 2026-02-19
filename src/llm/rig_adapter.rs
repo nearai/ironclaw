@@ -113,10 +113,7 @@ fn normalize_schema_recursive(schema: &mut JsonValue) {
     }
 
     // Force additionalProperties: false (overwrite any existing value)
-    obj.insert(
-        "additionalProperties".to_string(),
-        JsonValue::Bool(false),
-    );
+    obj.insert("additionalProperties".to_string(), JsonValue::Bool(false));
 
     // Ensure "properties" exists
     if !obj.contains_key("properties") {
@@ -157,19 +154,16 @@ fn normalize_schema_recursive(schema: &mut JsonValue) {
                 normalize_schema_recursive(prop_schema);
             }
             // Then make originally-optional properties nullable
-            if !current_required.contains(key) {
-                if let Some(prop_schema) = props.get_mut(key) {
-                    make_nullable(prop_schema);
-                }
+            if !current_required.contains(key)
+                && let Some(prop_schema) = props.get_mut(key)
+            {
+                make_nullable(prop_schema);
             }
         }
     }
 
     // Set required to ALL property keys
-    let required_value: Vec<JsonValue> = all_keys
-        .into_iter()
-        .map(JsonValue::String)
-        .collect();
+    let required_value: Vec<JsonValue> = all_keys.into_iter().map(JsonValue::String).collect();
     obj.insert("required".to_string(), JsonValue::Array(required_value));
 }
 
@@ -188,10 +182,7 @@ fn make_nullable(schema: &mut JsonValue) {
         match type_val {
             // "type": "string" → "type": ["string", "null"]
             JsonValue::String(ref t) if t != "null" => {
-                obj.insert(
-                    "type".to_string(),
-                    serde_json::json!([t, "null"]),
-                );
+                obj.insert("type".to_string(), serde_json::json!([t, "null"]));
             }
             // "type": ["string", "integer"] → add "null" if missing
             JsonValue::Array(ref arr) => {

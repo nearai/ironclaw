@@ -5,6 +5,7 @@ use std::sync::Arc;
 use clap::Parser;
 use tracing_subscriber::{EnvFilter, layer::SubscriberExt, util::SubscriberInitExt};
 
+use ironclaw::tools::wasm::WasmWorkspaceBridge;
 use ironclaw::{
     agent::{Agent, AgentDeps, SessionManager},
     channels::{
@@ -37,6 +38,7 @@ use ironclaw::{
     pairing::PairingStore,
     safety::SafetyLayer,
     secrets::SecretsStore,
+    sidecar::SidecarManager,
     tools::{
         ToolRegistry,
         mcp::{McpClient, McpSessionManager, config::load_mcp_servers_from_db, is_authenticated},
@@ -720,14 +722,17 @@ async fn main() -> anyhow::Result<()> {
     };
 
     // Register memory tools if database is available
-    if let Some(ref db) = db {
+    let tool_workspace = if let Some(ref db) = db {
         let mut workspace = Workspace::new_with_db("default", Arc::clone(db));
         if let Some(ref emb) = embeddings {
             workspace = workspace.with_embeddings(emb.clone());
         }
         let workspace = Arc::new(workspace);
-        tools.register_memory_tools(workspace);
-    }
+        tools.register_memory_tools(Arc::clone(&workspace));
+        Some(workspace)
+    } else {
+        None
+    };
 
     // Register builder tool if enabled.
     // When sandbox is enabled and allow_local_tools is false, skip builder registration
@@ -762,44 +767,59 @@ async fn main() -> anyhow::Result<()> {
 
     // Load WASM tools and MCP servers concurrently.
     // Both register into the shared ToolRegistry (RwLock-based) so concurrent writes are safe.
-    let wasm_tools_future = async {
-        if let Some(ref runtime) = wasm_tool_runtime {
-            let mut loader = WasmToolLoader::new(Arc::clone(runtime), Arc::clone(&tools));
-            if let Some(ref secrets) = secrets_store {
-                loader = loader.with_secrets_store(Arc::clone(secrets));
-            }
+    let wasm_tools_future = {
+        let tool_workspace = tool_workspace.clone();
+        let wasm_tool_runtime = wasm_tool_runtime.clone();
+        let tools = Arc::clone(&tools);
+        let secrets_store = secrets_store.clone();
+        let tools_dir = config.wasm.tools_dir.clone();
+        async move {
+            if let Some(ref runtime) = wasm_tool_runtime {
+                let mut loader = WasmToolLoader::new(Arc::clone(runtime), Arc::clone(&tools));
+                if let Some(ref secrets) = secrets_store {
+                    loader = loader.with_secrets_store(Arc::clone(secrets));
+                }
+                if let Some(ref ws) = tool_workspace {
+                    let bridge: Arc<WasmWorkspaceBridge> =
+                        Arc::new(WasmWorkspaceBridge::new(Arc::clone(ws)));
+                    loader = loader.with_workspace(
+                        Arc::clone(&bridge) as Arc<dyn ironclaw::tools::wasm::WorkspaceReader>,
+                        Some(bridge as Arc<dyn ironclaw::tools::wasm::WorkspaceWriter>),
+                    );
+                }
 
-            // Load installed tools from ~/.ironclaw/tools/
-            match loader.load_from_dir(&config.wasm.tools_dir).await {
-                Ok(results) => {
-                    if !results.loaded.is_empty() {
-                        tracing::info!(
-                            "Loaded {} WASM tools from {}",
-                            results.loaded.len(),
-                            config.wasm.tools_dir.display()
-                        );
+                // Load installed tools from ~/.ironclaw/tools/
+                match loader.load_from_dir(&tools_dir).await {
+                    Ok(results) => {
+                        if !results.loaded.is_empty() {
+                            tracing::info!(
+                                "Loaded {} WASM tools from {}",
+                                results.loaded.len(),
+                                tools_dir.display()
+                            );
+                        }
+                        for (path, err) in &results.errors {
+                            tracing::warn!("Failed to load WASM tool {}: {}", path.display(), err);
+                        }
                     }
-                    for (path, err) in &results.errors {
-                        tracing::warn!("Failed to load WASM tool {}: {}", path.display(), err);
+                    Err(e) => {
+                        tracing::warn!("Failed to scan WASM tools directory: {}", e);
                     }
                 }
-                Err(e) => {
-                    tracing::warn!("Failed to scan WASM tools directory: {}", e);
-                }
-            }
 
-            // Load dev tools from build artifacts (overrides installed if newer)
-            match load_dev_tools(&loader, &config.wasm.tools_dir).await {
-                Ok(results) => {
-                    if !results.loaded.is_empty() {
-                        tracing::info!(
-                            "Loaded {} dev WASM tools from build artifacts",
-                            results.loaded.len()
-                        );
+                // Load dev tools from build artifacts (overrides installed if newer)
+                match load_dev_tools(&loader, &tools_dir).await {
+                    Ok(results) => {
+                        if !results.loaded.is_empty() {
+                            tracing::info!(
+                                "Loaded {} dev WASM tools from build artifacts",
+                                results.loaded.len()
+                            );
+                        }
                     }
-                }
-                Err(e) => {
-                    tracing::debug!("No dev WASM tools found: {}", e);
+                    Err(e) => {
+                        tracing::debug!("No dev WASM tools found: {}", e);
+                    }
                 }
             }
         }
@@ -922,6 +942,7 @@ async fn main() -> anyhow::Result<()> {
             config.tunnel.public_url.clone(),
             "default".to_string(),
             db.clone(),
+            tool_workspace.clone(),
         ));
         tools.register_extension_tools(Arc::clone(&manager));
         tracing::info!("Extension manager initialized with in-chat discovery tools");
@@ -1365,6 +1386,44 @@ async fn main() -> anyhow::Result<()> {
     let boot_llm_model = llm.model_name().to_string();
     let boot_cheap_model = cheap_llm.as_ref().map(|c| c.model_name().to_string());
 
+    // Initialize sidecar managers for external services (e.g., browserless)
+    let sidecar_managers: Vec<std::sync::Arc<SidecarManager>> = if config.sidecar.any_enabled() {
+        let mut managers = Vec::new();
+
+        if config.sidecar.browserless_enabled {
+            let manager =
+                std::sync::Arc::new(SidecarManager::new(config.sidecar.to_browserless_config()));
+            managers.push(manager);
+            tracing::info!(
+                "Browserless sidecar configured (port {})",
+                config.sidecar.browserless_port
+            );
+        }
+
+        for manager in &managers {
+            match manager.ensure_ready().await {
+                Ok(endpoint) => {
+                    tracing::info!(
+                        sidecar = %manager.config().name,
+                        endpoint = %endpoint,
+                        "Sidecar started and ready"
+                    );
+                }
+                Err(e) => {
+                    tracing::error!(
+                        sidecar = %manager.config().name,
+                        error = %e,
+                        "Failed to start sidecar"
+                    );
+                }
+            }
+        }
+
+        managers
+    } else {
+        Vec::new()
+    };
+
     // Create and run the agent
     let cost_guard = Arc::new(ironclaw::agent::cost_guard::CostGuard::new(
         ironclaw::agent::cost_guard::CostGuardConfig {
@@ -1436,6 +1495,11 @@ async fn main() -> anyhow::Result<()> {
 
     // Run the agent (blocks until shutdown)
     agent.run().await?;
+
+    // Shut down sidecar containers
+    for manager in &sidecar_managers {
+        manager.shutdown().await;
+    }
 
     // Shut down the webhook server if one was started
     if let Some(ref mut server) = webhook_server {

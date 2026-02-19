@@ -15,6 +15,8 @@ use crate::context::JobContext;
 use crate::error::Error;
 use crate::llm::{ChatMessage, Reasoning, ReasoningContext, RespondResult};
 
+const MAX_TOOL_ITERATIONS: usize = 10;
+
 /// Result of the agentic loop execution.
 pub(super) enum AgenticLoopResult {
     /// Completed with a response.
@@ -24,6 +26,20 @@ pub(super) enum AgenticLoopResult {
         /// The pending approval request to store.
         pending: PendingApproval,
     },
+}
+
+fn append_deferred_tool_results(
+    context_messages: &mut Vec<ChatMessage>,
+    pending_tool_name: &str,
+    remaining_calls: &[crate::llm::ToolCall],
+) {
+    for call in remaining_calls {
+        let message = format!(
+            "Deferred because '{}' is awaiting approval; re-run this call after approval if still needed.",
+            pending_tool_name
+        );
+        context_messages.push(ChatMessage::tool_result(&call.id, &call.name, message));
+    }
 }
 
 impl Agent {
@@ -111,7 +127,6 @@ impl Agent {
         // Create a JobContext for tool execution (chat doesn't have a real job)
         let job_ctx = JobContext::with_user(&message.user_id, "chat", "Interactive chat session");
 
-        const MAX_TOOL_ITERATIONS: usize = 10;
         let mut iteration = 0;
         let mut tools_executed = resume_after_tool;
 
@@ -255,7 +270,8 @@ impl Agent {
                     }
 
                     // Execute each tool (with approval checking and hook interception)
-                    for mut tc in tool_calls {
+                    let mut remaining_tool_calls = tool_calls.into_iter();
+                    while let Some(mut tc) = remaining_tool_calls.next() {
                         // Check if tool requires approval
                         if let Some(tool) = self.tools().get(&tc.name).await
                             && tool.requires_approval()
@@ -277,6 +293,14 @@ impl Agent {
                             }
 
                             if !is_auto_approved {
+                                let deferred: Vec<crate::llm::ToolCall> =
+                                    remaining_tool_calls.collect();
+                                append_deferred_tool_results(
+                                    &mut context_messages,
+                                    &tc.name,
+                                    &deferred,
+                                );
+
                                 // Need approval - store pending request and return
                                 let pending = PendingApproval {
                                     request_id: Uuid::new_v4(),
@@ -442,6 +466,16 @@ impl Agent {
                             result_content,
                         ));
                     }
+
+                    if iteration >= MAX_TOOL_ITERATIONS - 1 {
+                        let mut final_prompt = String::from(
+                            "Stop calling tools now and provide the final user-facing answer immediately based on successful results already gathered.",
+                        );
+                        final_prompt.push_str(
+                            " If a specific tool call failed after successful navigation/screenshot, briefly mention it without retrying.",
+                        );
+                        context_messages.push(ChatMessage::user(final_prompt));
+                    }
                 }
             }
         }
@@ -597,8 +631,9 @@ pub(super) fn detect_auth_awaiting(
 #[cfg(test)]
 mod tests {
     use crate::error::Error;
+    use crate::llm::{ChatMessage, RespondResult, ToolCall};
 
-    use super::detect_auth_awaiting;
+    use super::{MAX_TOOL_ITERATIONS, append_deferred_tool_results, detect_auth_awaiting};
 
     #[test]
     fn test_detect_auth_awaiting_positive() {
@@ -690,5 +725,68 @@ mod tests {
         .to_string());
 
         assert!(detect_auth_awaiting("tool_activate", &result).is_none());
+    }
+
+    #[test]
+    fn test_iteration_near_limit_appends_finalize_prompt() {
+        let mut context_messages = Vec::<ChatMessage>::new();
+        let iteration = MAX_TOOL_ITERATIONS - 1;
+        let tool_calls = vec![ToolCall {
+            id: "call-1".to_string(),
+            name: "browser-use-tool".to_string(),
+            arguments: serde_json::json!({"action": "screenshot"}),
+        }];
+
+        let output = RespondResult::ToolCalls {
+            tool_calls,
+            content: None,
+        };
+
+        if let RespondResult::ToolCalls { .. } = output
+            && iteration >= MAX_TOOL_ITERATIONS - 1
+        {
+            let mut final_prompt = String::from(
+                "Stop calling tools now and provide the final user-facing answer immediately based on successful results already gathered.",
+            );
+            final_prompt.push_str(
+                " If a specific tool call failed after successful navigation/screenshot, briefly mention it without retrying.",
+            );
+            context_messages.push(ChatMessage::user(final_prompt));
+        }
+
+        assert_eq!(context_messages.len(), 1);
+        assert!(
+            context_messages[0]
+                .content
+                .contains("Stop calling tools now and provide the final user-facing answer")
+        );
+    }
+
+    #[test]
+    fn test_append_deferred_tool_results_adds_outputs_for_remaining_calls() {
+        let mut context_messages = vec![ChatMessage::assistant("planning")];
+        let remaining = vec![
+            ToolCall {
+                id: "call-2".to_string(),
+                name: "memory_search".to_string(),
+                arguments: serde_json::json!({"query": "x"}),
+            },
+            ToolCall {
+                id: "call-3".to_string(),
+                name: "browser-use-tool".to_string(),
+                arguments: serde_json::json!({"action": "open"}),
+            },
+        ];
+
+        append_deferred_tool_results(&mut context_messages, "browser-use-tool", &remaining);
+
+        let deferred: Vec<&ChatMessage> = context_messages
+            .iter()
+            .filter(|m| m.role == crate::llm::Role::Tool)
+            .collect();
+        assert_eq!(deferred.len(), 2);
+        assert_eq!(deferred[0].tool_call_id.as_deref(), Some("call-2"));
+        assert_eq!(deferred[1].tool_call_id.as_deref(), Some("call-3"));
+        assert!(deferred[0].content.contains("awaiting approval"));
     }
 }

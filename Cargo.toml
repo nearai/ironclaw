@@ -5,6 +5,7 @@ exclude = [
     "channels-src/slack",
     "channels-src/whatsapp",
     "tools-src/gmail",
+    "tools-src/browser-use",
 ]
 
 [package]
@@ -134,6 +135,11 @@ http-body-util = "0.1"
 bytes = "1"
 base64 = "0.22.1"
 mime_guess = "2.0.5"
+tempfile = "3"
+
+# WebSocket client for persistent CDP sessions
+tokio-tungstenite = { version = "0.26", features = ["native-tls"] }
+futures-util = "0.3"
 
 # macOS keychain
 [target.'cfg(target_os = "macos")'.dependencies]
@@ -146,7 +152,6 @@ zbus = "4"
 
 [dev-dependencies]
 tokio-test = "0.4"
-tokio-tungstenite = "0.26"
 testcontainers-modules = { version = "0.11", features = ["postgres"] }
 pretty_assertions = "1"
 tempfile = "3"

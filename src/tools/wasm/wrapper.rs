@@ -12,15 +12,17 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
+use futures_util::{SinkExt, StreamExt};
+use tokio_tungstenite::connect_async;
 use wasmtime::Store;
-use wasmtime::component::{Component, Linker};
+use wasmtime::component::{Linker, Resource};
 use wasmtime_wasi::{ResourceTable, WasiCtx, WasiCtxBuilder, WasiView};
 
 use crate::context::JobContext;
 use crate::safety::LeakDetector;
 use crate::secrets::SecretsStore;
 use crate::tools::tool::{Tool, ToolError, ToolOutput};
-use crate::tools::wasm::capabilities::Capabilities;
+use crate::tools::wasm::capabilities::{Capabilities, PooledWsEntry};
 use crate::tools::wasm::credential_injector::{
     InjectedCredentials, host_matches_pattern, inject_credential,
 };
@@ -35,15 +37,76 @@ use crate::tools::wasm::runtime::{EPOCH_TICK_INTERVAL, PreparedModule, WasmToolR
 // - `near::agent::host::Host` trait + `add_to_linker()` for the import interface
 // - `SandboxedTool` struct with `instantiate()` for the world
 // - `exports::near::agent::tool::*` types for the export interface
+//
+// For WebSocket resources, we use our own WsConnState type.
 wasmtime::component::bindgen!({
     path: "wit/tool.wit",
     world: "sandboxed-tool",
     async: false,
-    with: {},
+    with: {
+        "near:agent/host/ws-connection": WsConnState,
+    },
 });
 
 // Alias the export interface types for convenience.
 use exports::near::agent::tool as wit_tool;
+
+fn map_execute_trap(error_str: String, limits: &ResourceLimits) -> WasmError {
+    if error_str.contains("out of fuel") {
+        WasmError::FuelExhausted { limit: limits.fuel }
+    } else if error_str.contains("unreachable") {
+        WasmError::Trapped("unreachable code executed".to_string())
+    } else {
+        WasmError::Trapped(error_str)
+    }
+}
+
+pub fn extract_tool_metadata_from_component(
+    engine: &wasmtime::Engine,
+    component: &wasmtime::component::Component,
+    limits: &ResourceLimits,
+    fuel_enabled: bool,
+) -> Result<(String, serde_json::Value), WasmError> {
+    let store_data = StoreData::new(
+        limits.memory_bytes,
+        Capabilities::default(),
+        "metadata-extraction".to_string(),
+        HashMap::new(),
+        Vec::new(),
+    );
+    let mut store = Store::new(engine, store_data);
+
+    if fuel_enabled {
+        store
+            .set_fuel(limits.fuel)
+            .map_err(|e| WasmError::ConfigError(format!("Failed to set fuel: {}", e)))?;
+    }
+
+    store.epoch_deadline_trap();
+    let ticks = (limits.timeout.as_millis() / EPOCH_TICK_INTERVAL.as_millis()).max(1) as u64;
+    store.set_epoch_deadline(ticks);
+    store.limiter(|data| &mut data.limiter);
+
+    let mut linker = Linker::new(engine);
+    WasmToolWrapper::add_host_functions(&mut linker)?;
+
+    let instance = SandboxedTool::instantiate(&mut store, component, &linker)
+        .map_err(|e| WasmError::InstantiationFailed(e.to_string()))?;
+    let tool_iface = instance.near_agent_tool();
+
+    let description = tool_iface
+        .call_description(&mut store)
+        .map_err(|e| map_execute_trap(e.to_string(), limits))?;
+
+    let schema_json = tool_iface
+        .call_schema(&mut store)
+        .map_err(|e| map_execute_trap(e.to_string(), limits))?;
+
+    let schema: serde_json::Value = serde_json::from_str(&schema_json)
+        .map_err(|e| WasmError::InvalidResponseJson(e.to_string()))?;
+
+    Ok((description, schema))
+}
 
 /// Configuration needed to refresh an expired OAuth access token.
 ///
@@ -90,6 +153,8 @@ struct StoreData {
     host_state: HostState,
     wasi: WasiCtx,
     table: ResourceTable,
+    /// Tool name for logging/audit context.
+    tool_name: String,
     /// Injected credentials for URL/header placeholder substitution.
     /// Keys are placeholder names like "TELEGRAM_BOT_TOKEN".
     credentials: HashMap<String, String>,
@@ -99,12 +164,47 @@ struct StoreData {
     /// Dedicated tokio runtime for HTTP requests, lazily initialized.
     /// Reused across multiple `http_request` calls within one execution.
     http_runtime: Option<tokio::runtime::Runtime>,
+    /// WebSocket runtime for persistent connections.
+    ws_runtime: Option<tokio::runtime::Runtime>,
+}
+
+/// WebSocket connection state for the ws-connection resource.
+///
+/// Supports two modes:
+/// - **Owned**: Regular `ws-connect` -- connection is dropped with the resource.
+/// - **Pooled**: `ws-connect-pooled` -- connection lives in a shared pool and
+///   survives beyond the WASM invocation. Dropping the resource only releases
+///   the local handle; the underlying connection stays alive in the pool.
+pub enum WsConnState {
+    /// Owned connection: dropped when the resource table entry is dropped.
+    Owned {
+        sink: std::sync::Mutex<
+            futures_util::stream::SplitSink<
+                tokio_tungstenite::WebSocketStream<
+                    tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+                >,
+                tokio_tungstenite::tungstenite::Message,
+            >,
+        >,
+        stream: std::sync::Mutex<
+            futures_util::stream::SplitStream<
+                tokio_tungstenite::WebSocketStream<
+                    tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+                >,
+            >,
+        >,
+    },
+    /// Pooled connection: backed by an `Arc` in the shared pool.
+    /// Dropping this variant decrements the ref count but does not close
+    /// the connection (the pool holds another `Arc`).
+    Pooled(Arc<crate::tools::wasm::capabilities::PooledWsEntry>),
 }
 
 impl StoreData {
     fn new(
         memory_limit: u64,
         capabilities: Capabilities,
+        tool_name: String,
         credentials: HashMap<String, String>,
         host_credentials: Vec<ResolvedHostCredential>,
     ) -> Self {
@@ -116,9 +216,11 @@ impl StoreData {
             host_state: HostState::new(capabilities),
             wasi,
             table: ResourceTable::new(),
+            tool_name,
             credentials,
             host_credentials,
             http_runtime: None,
+            ws_runtime: None,
         }
     }
 
@@ -254,6 +356,10 @@ impl near::agent::host::Host for StoreData {
         self.host_state.workspace_read(&path).ok().flatten()
     }
 
+    fn workspace_write(&mut self, path: String, content: String) -> Result<(), String> {
+        self.host_state.workspace_write(&path, &content)
+    }
+
     fn http_request(
         &mut self,
         method: String,
@@ -317,7 +423,18 @@ impl near::agent::host::Host for StoreData {
             .unwrap_or(10 * 1024 * 1024);
 
         // Resolve hostname and reject private/internal IPs to prevent DNS rebinding.
-        reject_private_ip(&url)?;
+        // Exception: explicitly allow localhost loopback endpoints when the
+        // capabilities allowlist grants that exact host/path/method.
+        let allow_loopback = allow_private_loopback_http(
+            self.host_state.capabilities(),
+            &self.tool_name,
+            &url,
+            &method,
+        );
+
+        if !allow_loopback {
+            reject_private_ip(&url)?;
+        }
 
         // Make HTTP request using a dedicated single-threaded runtime.
         // We're inside spawn_blocking, so we can't rely on the main runtime's
@@ -332,7 +449,10 @@ impl near::agent::host::Host for StoreData {
                     .map_err(|e| format!("Failed to create HTTP runtime: {e}"))?,
             );
         }
-        let rt = self.http_runtime.as_ref().expect("just initialized");
+        let rt = self
+            .http_runtime
+            .as_ref()
+            .ok_or_else(|| "HTTP runtime initialization failed".to_string())?;
         let result = rt.block_on(async {
             let client = reqwest::Client::builder()
                 .connect_timeout(Duration::from_secs(10))
@@ -440,6 +560,350 @@ impl near::agent::host::Host for StoreData {
     fn secret_exists(&mut self, name: String) -> bool {
         self.host_state.secret_exists(&name)
     }
+
+    fn ws_connect(
+        &mut self,
+        url: String,
+    ) -> Result<Resource<near::agent::host::WsConnection>, String> {
+        // Check WebSocket capability
+        let ws_cap = self.host_state.capabilities().websocket.as_ref();
+        let capability = ws_cap.ok_or_else(|| "WebSocket capability not granted".to_string())?;
+
+        // Check if URL is allowed
+        if !capability.is_allowed(&url) {
+            return Err(format!("WebSocket URL not allowed: {}", url));
+        }
+
+        // DNS rebinding / private IP protection (same as HTTP).
+        // Allow loopback only when the URL is explicitly in the WS allowlist.
+        let is_loopback = extract_host_from_url(&url)
+            .map(|h| h.eq_ignore_ascii_case("localhost") || h == "127.0.0.1" || h == "::1")
+            .unwrap_or(false);
+        if !is_loopback {
+            reject_private_ip(&url)?;
+        }
+
+        // Create WebSocket runtime if not exists
+        if self.ws_runtime.is_none() {
+            self.ws_runtime = Some(
+                tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .map_err(|e| format!("Failed to create WebSocket runtime: {e}"))?,
+            );
+        }
+        let rt = self
+            .ws_runtime
+            .as_ref()
+            .ok_or_else(|| "WebSocket runtime initialization failed".to_string())?;
+
+        // Connect to WebSocket
+        // Use the URL string directly (IntoClientRequest is implemented for &str)
+        let (ws_stream, _) = rt.block_on(async {
+            connect_async(&url)
+                .await
+                .map_err(|e| format!("WebSocket connection failed: {}", e))
+        })?;
+
+        // Split into sender/receiver and store directly in resource table.
+        // send/recv will drive these via the StoreData's ws_runtime.
+        let (ws_sink, ws_stream) = ws_stream.split();
+
+        let conn_state = WsConnState::Owned {
+            sink: std::sync::Mutex::new(ws_sink),
+            stream: std::sync::Mutex::new(ws_stream),
+        };
+
+        let resource = self
+            .table
+            .push(conn_state)
+            .map_err(|e| format!("Failed to create WebSocket resource: {}", e))?;
+
+        Ok(resource)
+    }
+
+    fn ws_connect_pooled(
+        &mut self,
+        url: String,
+        pool_key: String,
+    ) -> Result<Resource<near::agent::host::WsConnection>, String> {
+        use crate::tools::wasm::capabilities::PooledWsEntry;
+
+        let ws_cap = self.host_state.capabilities().websocket.as_ref();
+        let capability = ws_cap.ok_or_else(|| "WebSocket capability not granted".to_string())?;
+
+        if !capability.is_allowed(&url) {
+            return Err(format!("WebSocket URL not allowed: {}", url));
+        }
+
+        // DNS rebinding / private IP protection (same as HTTP).
+        // Allow loopback only when the URL is explicitly in the WS allowlist.
+        let is_loopback = extract_host_from_url(&url)
+            .map(|h| h.eq_ignore_ascii_case("localhost") || h == "127.0.0.1" || h == "::1")
+            .unwrap_or(false);
+        if !is_loopback {
+            reject_private_ip(&url)?;
+        }
+
+        let pool = capability
+            .connection_pool
+            .as_ref()
+            .ok_or_else(|| "WebSocket connection pooling not enabled".to_string())?;
+
+        // Ensure ws_runtime exists -- needed for send/recv even on pooled connections.
+        if self.ws_runtime.is_none() {
+            self.ws_runtime = Some(
+                tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .map_err(|e| format!("Failed to create WebSocket runtime: {e}"))?,
+            );
+        }
+
+        // Check for existing live connection
+        if let Some(entry) = pool.get(&pool_key) {
+            tracing::debug!(
+                pool_key = %pool_key,
+                url = %entry.url,
+                "Reusing pooled WebSocket connection"
+            );
+
+            let conn_state = WsConnState::Pooled(entry);
+            let resource = self
+                .table
+                .push(conn_state)
+                .map_err(|e| format!("Failed to create WebSocket resource: {}", e))?;
+            return Ok(resource);
+        }
+
+        // No existing connection -- create a new one with its own dedicated runtime.
+        // The runtime lives inside the PooledWsEntry so the WS I/O resources
+        // remain valid even after the current StoreData (and its ws_runtime) is dropped.
+        let pooled_rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .map_err(|e| format!("Failed to create pooled WebSocket runtime: {e}"))?;
+
+        let (ws_stream, _) = pooled_rt.block_on(async {
+            connect_async(&url)
+                .await
+                .map_err(|e| format!("WebSocket connection failed: {}", e))
+        })?;
+
+        let (ws_sink, ws_stream) = ws_stream.split();
+
+        let entry = Arc::new(PooledWsEntry {
+            sink: std::sync::Mutex::new(ws_sink),
+            stream: std::sync::Mutex::new(ws_stream),
+            runtime: std::sync::Mutex::new(Some(pooled_rt)),
+            url: url.clone(),
+            last_used: std::sync::Mutex::new(Instant::now()),
+        });
+
+        pool.insert(pool_key.clone(), Arc::clone(&entry));
+        tracing::debug!(
+            pool_key = %pool_key,
+            url = %url,
+            "Created new pooled WebSocket connection"
+        );
+
+        let conn_state = WsConnState::Pooled(entry);
+        let resource = self
+            .table
+            .push(conn_state)
+            .map_err(|e| format!("Failed to create WebSocket resource: {}", e))?;
+
+        Ok(resource)
+    }
+}
+
+type WsSink = futures_util::stream::SplitSink<
+    tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>,
+    tokio_tungstenite::tungstenite::Message,
+>;
+
+type WsStream = futures_util::stream::SplitStream<
+    tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>,
+>;
+
+fn is_ws_terminal_error(err: &str) -> bool {
+    let lower = err.to_ascii_lowercase();
+    lower.contains("stream ended")
+        || lower.contains("connection closed")
+        || lower.contains("connection reset")
+        || lower.contains("broken pipe")
+        || lower.contains("already closed")
+        || lower.contains("io error")
+}
+
+fn evict_pooled_connection(capabilities: &Capabilities, entry: &Arc<PooledWsEntry>) {
+    if let Some(pool) = capabilities
+        .websocket
+        .as_ref()
+        .and_then(|cap| cap.connection_pool.as_ref())
+        && let Some(pool_key) = pool.remove_entry(entry)
+    {
+        tracing::debug!(pool_key = %pool_key, "Evicted pooled WebSocket connection after terminal error");
+    }
+}
+
+/// Helper: lock and return the sink mutex from a `WsConnState`.
+fn ws_sink(conn_state: &WsConnState) -> Result<std::sync::MutexGuard<'_, WsSink>, String> {
+    match conn_state {
+        WsConnState::Owned { sink, .. } => sink
+            .lock()
+            .map_err(|_| "Failed to lock WebSocket sink".to_string()),
+        WsConnState::Pooled(entry) => entry
+            .sink
+            .lock()
+            .map_err(|_| "Failed to lock WebSocket sink".to_string()),
+    }
+}
+
+/// Helper: lock and return the stream mutex from a `WsConnState`.
+fn ws_stream(conn_state: &WsConnState) -> Result<std::sync::MutexGuard<'_, WsStream>, String> {
+    match conn_state {
+        WsConnState::Owned { stream, .. } => stream
+            .lock()
+            .map_err(|_| "Failed to lock WebSocket stream".to_string()),
+        WsConnState::Pooled(entry) => entry
+            .stream
+            .lock()
+            .map_err(|_| "Failed to lock WebSocket stream".to_string()),
+    }
+}
+
+/// Execute an async operation on the correct tokio runtime for a connection.
+///
+/// Pooled connections carry their own runtime (because I/O resources are bound
+/// to the reactor that created them). Owned connections use StoreData's runtime.
+fn ws_block_on<T>(
+    conn_state: &WsConnState,
+    store_rt: Option<&tokio::runtime::Runtime>,
+    f: impl std::future::Future<Output = T>,
+) -> Result<T, String> {
+    match conn_state {
+        WsConnState::Owned { .. } => {
+            let rt = store_rt.ok_or_else(|| "WebSocket runtime not initialized".to_string())?;
+            Ok(rt.block_on(f))
+        }
+        WsConnState::Pooled(entry) => entry.with_runtime(|rt| rt.block_on(f)),
+    }
+}
+
+// Implement HostWsConnection trait for managing the ws-connection resource.
+impl near::agent::host::HostWsConnection for StoreData {
+    fn send(
+        &mut self,
+        conn: Resource<near::agent::host::WsConnection>,
+        message: String,
+    ) -> Result<(), String> {
+        let conn_state: &WsConnState = self
+            .table
+            .get(&conn)
+            .map_err(|e| format!("Invalid WebSocket connection: {}", e))?;
+
+        let pooled_entry = match conn_state {
+            WsConnState::Pooled(entry) => Some(Arc::clone(entry)),
+            WsConnState::Owned { .. } => None,
+        };
+
+        let mut sink = ws_sink(conn_state)?;
+
+        let result = ws_block_on(conn_state, self.ws_runtime.as_ref(), async {
+            sink.send(tokio_tungstenite::tungstenite::Message::Text(
+                message.into(),
+            ))
+            .await
+            .map_err(|e| format!("Failed to send WebSocket message: {}", e))
+        })?;
+
+        if let Err(ref err) = result
+            && let Some(entry) = pooled_entry.as_ref()
+            && is_ws_terminal_error(err)
+        {
+            evict_pooled_connection(self.host_state.capabilities(), entry);
+        }
+
+        result
+    }
+
+    fn recv(
+        &mut self,
+        conn: Resource<near::agent::host::WsConnection>,
+        timeout_ms: Option<u32>,
+    ) -> Result<String, String> {
+        let conn_state: &WsConnState = self
+            .table
+            .get(&conn)
+            .map_err(|e| format!("Invalid WebSocket connection: {}", e))?;
+
+        let pooled_entry = match conn_state {
+            WsConnState::Pooled(entry) => Some(Arc::clone(entry)),
+            WsConnState::Owned { .. } => None,
+        };
+
+        let mut stream = ws_stream(conn_state)?;
+        let timeout = Duration::from_millis(timeout_ms.unwrap_or(30_000) as u64);
+
+        let result = ws_block_on(conn_state, self.ws_runtime.as_ref(), async {
+            loop {
+                match tokio::time::timeout(timeout, stream.next()).await {
+                    Ok(Some(Ok(tokio_tungstenite::tungstenite::Message::Text(text)))) => {
+                        return Ok(text.to_string());
+                    }
+                    Ok(Some(Ok(tokio_tungstenite::tungstenite::Message::Binary(data)))) => {
+                        return String::from_utf8(data.to_vec())
+                            .map_err(|_| "WebSocket received non-UTF8 binary".to_string());
+                    }
+                    Ok(Some(Ok(tokio_tungstenite::tungstenite::Message::Close(_)))) => {
+                        return Err("WebSocket connection closed".to_string());
+                    }
+                    Ok(Some(Ok(
+                        tokio_tungstenite::tungstenite::Message::Ping(_)
+                        | tokio_tungstenite::tungstenite::Message::Pong(_)
+                        | tokio_tungstenite::tungstenite::Message::Frame(_),
+                    ))) => continue,
+                    Ok(Some(Err(e))) => {
+                        return Err(format!("WebSocket error: {}", e));
+                    }
+                    Ok(None) => {
+                        return Err("WebSocket stream ended".to_string());
+                    }
+                    Err(_) => {
+                        return Err("WebSocket receive timeout".to_string());
+                    }
+                }
+            }
+        })?;
+
+        if let Err(ref err) = result
+            && let Some(entry) = pooled_entry.as_ref()
+            && is_ws_terminal_error(err)
+        {
+            evict_pooled_connection(self.host_state.capabilities(), entry);
+        }
+
+        result
+    }
+
+    fn close(&mut self, _conn: Resource<near::agent::host::WsConnection>) -> Result<(), String> {
+        // The `close` method receives a borrow, not an owned resource.
+        // For pooled connections, close is a no-op (pool manages lifecycle).
+        // For owned connections, cleanup happens in `drop`.
+        Ok(())
+    }
+
+    fn drop(
+        &mut self,
+        conn: Resource<near::agent::host::WsConnection>,
+    ) -> Result<(), wasmtime::Error> {
+        // Remove from resource table. For Owned connections, this drops
+        // the sink/stream, closing the WebSocket. For Pooled connections,
+        // only the Arc handle is dropped; the pool retains its own Arc.
+        let _ = self.table.delete(conn);
+        Ok(())
+    }
 }
 
 /// A Tool implementation backed by a WASM component.
@@ -522,6 +986,25 @@ impl WasmToolWrapper {
         self
     }
 
+    /// Set workspace reader/writer for file persistence.
+    ///
+    /// Injects the reader and writer into the workspace capability, allowing
+    /// the WASM tool to read and write files through the host.
+    pub fn with_workspace(
+        mut self,
+        reader: Arc<dyn crate::tools::wasm::capabilities::WorkspaceReader>,
+        writer: Option<Arc<dyn crate::tools::wasm::capabilities::WorkspaceWriter>>,
+    ) -> Self {
+        if let Some(ref mut ws_cap) = self.capabilities.workspace_read {
+            ws_cap.reader = Some(Arc::clone(&reader));
+            ws_cap.writer = writer.clone();
+        }
+        if let Some(ref mut ws_write_cap) = self.capabilities.workspace_write {
+            ws_write_cap.writer = writer;
+        }
+        self
+    }
+
     /// Get the resource limits for this tool.
     pub fn limits(&self) -> &ResourceLimits {
         &self.prepared.limits
@@ -558,6 +1041,7 @@ impl WasmToolWrapper {
         let store_data = StoreData::new(
             limits.memory_bytes,
             self.capabilities.clone(),
+            self.prepared.name.clone(),
             self.credentials.clone(),
             host_credentials,
         );
@@ -581,16 +1065,15 @@ impl WasmToolWrapper {
         // Set up resource limiter
         store.limiter(|data| &mut data.limiter);
 
-        // Compile the component (uses cached bytes)
-        let component = Component::new(engine, self.prepared.component_bytes())
-            .map_err(|e| WasmError::CompilationFailed(e.to_string()))?;
+        // Use pre-compiled component (avoids recompilation on each execution)
+        let component = self.prepared.compiled_component();
 
         // Create linker with all host functions properly namespaced
         let mut linker = Linker::new(engine);
         Self::add_host_functions(&mut linker)?;
 
         // Instantiate using the generated bindings
-        let instance = SandboxedTool::instantiate(&mut store, &component, &linker)
+        let instance = SandboxedTool::instantiate(&mut store, component, &linker)
             .map_err(|e| WasmError::InstantiationFailed(e.to_string()))?;
 
         // Prepare the request
@@ -604,16 +1087,9 @@ impl WasmToolWrapper {
 
         // Call execute using the generated typed interface
         let tool_iface = instance.near_agent_tool();
-        let response = tool_iface.call_execute(&mut store, &request).map_err(|e| {
-            let error_str = e.to_string();
-            if error_str.contains("out of fuel") {
-                WasmError::FuelExhausted { limit: limits.fuel }
-            } else if error_str.contains("unreachable") {
-                WasmError::Trapped("unreachable code executed".to_string())
-            } else {
-                WasmError::Trapped(error_str)
-            }
-        })?;
+        let response = tool_iface
+            .call_execute(&mut store, &request)
+            .map_err(|e| map_execute_trap(e.to_string(), limits))?;
 
         // Get logs from host state
         let logs = store.data_mut().host_state.take_logs();
@@ -626,6 +1102,81 @@ impl WasmToolWrapper {
         // Return result (or empty string if none)
         Ok((response.output.unwrap_or_default(), logs))
     }
+}
+
+fn normalize_tool_name_for_policy(name: &str) -> String {
+    name.trim().replace('_', "-").to_ascii_lowercase()
+}
+
+fn is_browser_use_tool_name(name: &str) -> bool {
+    normalize_tool_name_for_policy(name) == "browser-use-tool"
+}
+
+fn parse_browser_action_for_approval(params: &serde_json::Value) -> Option<String> {
+    let decoded = if let Some(raw) = params.as_str() {
+        serde_json::from_str::<serde_json::Value>(raw).ok()?
+    } else {
+        params.clone()
+    };
+
+    let action = decoded
+        .as_object()
+        .and_then(|obj| obj.get("action"))
+        .and_then(serde_json::Value::as_str)?;
+
+    let normalized = action.trim().to_ascii_lowercase();
+    let canonical = match normalized.as_str() {
+        "js_eval" | "javascript" => "eval",
+        "file_upload" => "upload",
+        "cookie_set" => "cookies_set",
+        "cookie_delete" => "cookies_delete",
+        other => other,
+    };
+
+    Some(canonical.to_string())
+}
+
+fn browser_action_requires_explicit_approval(action: &str) -> bool {
+    matches!(
+        action,
+        "eval"
+            | "upload"
+            | "cookies_set"
+            | "cookies_set_batch"
+            | "cookies_delete"
+            | "local_storage_set"
+            | "local_storage_delete"
+            | "session_storage_set"
+            | "session_storage_delete"
+    )
+}
+
+/// Check if a `wait` action with `js_condition` param should require approval.
+/// This is handled separately because the action name is "wait" but the
+/// `js_condition` field enables arbitrary JS execution (like `eval`).
+fn wait_with_js_condition_requires_approval(params: &serde_json::Value) -> bool {
+    let decoded = if let Some(raw) = params.as_str() {
+        serde_json::from_str::<serde_json::Value>(raw).unwrap_or_default()
+    } else {
+        params.clone()
+    };
+
+    let obj = match decoded.as_object() {
+        Some(o) => o,
+        None => return false,
+    };
+
+    let action = obj
+        .get("action")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("");
+    if !action.trim().eq_ignore_ascii_case("wait") {
+        return false;
+    }
+
+    obj.get("js_condition")
+        .and_then(serde_json::Value::as_str)
+        .is_some()
 }
 
 #[async_trait]
@@ -722,6 +1273,25 @@ impl Tool for WasmToolWrapper {
     fn requires_sanitization(&self) -> bool {
         // WASM tools always require sanitization, they're untrusted by definition
         true
+    }
+
+    fn requires_approval(&self) -> bool {
+        is_browser_use_tool_name(&self.prepared.name)
+    }
+
+    fn requires_approval_for(&self, params: &serde_json::Value) -> bool {
+        if !is_browser_use_tool_name(&self.prepared.name) {
+            return false;
+        }
+
+        // Check if `wait` with `js_condition` (equivalent to arbitrary eval)
+        if wait_with_js_condition_requires_approval(params) {
+            return true;
+        }
+
+        parse_browser_action_for_approval(params)
+            .map(|action| browser_action_requires_explicit_approval(&action))
+            .unwrap_or(false)
     }
 
     fn estimated_duration(&self, _params: &serde_json::Value) -> Option<Duration> {
@@ -990,10 +1560,11 @@ async fn resolve_host_credentials(
 ///
 /// Handles `https://host:port/path`, stripping scheme, port, and path.
 /// Also handles IPv6 bracket notation like `http://[::1]:8080/path`.
-/// Returns None for malformed URLs.
+/// Supports http, https, ws, and wss schemes.
+/// Returns None for malformed URLs or unsupported schemes.
 fn extract_host_from_url(url: &str) -> Option<String> {
     let parsed = url::Url::parse(url).ok()?;
-    if !matches!(parsed.scheme(), "http" | "https") {
+    if !matches!(parsed.scheme(), "http" | "https" | "ws" | "wss") {
         return None;
     }
     parsed.host_str().map(|h| {
@@ -1004,12 +1575,53 @@ fn extract_host_from_url(url: &str) -> Option<String> {
     })
 }
 
+/// Whether a URL should be allowed to target loopback/private IPs.
+///
+/// This is only true for explicit localhost allowlist entries in the tool
+/// capabilities and only for matching method/path combinations.
+fn allow_private_loopback_http(
+    capabilities: &crate::tools::wasm::capabilities::Capabilities,
+    tool_name: &str,
+    url: &str,
+    method: &str,
+) -> bool {
+    let Some(http) = capabilities.http.as_ref() else {
+        return false;
+    };
+
+    let Some(host) = extract_host_from_url(url) else {
+        return false;
+    };
+
+    let loopback_host =
+        host.eq_ignore_ascii_case("localhost") || host == "127.0.0.1" || host == "::1";
+    if !loopback_host {
+        return false;
+    }
+
+    use crate::tools::wasm::allowlist::AllowlistValidator;
+    let mut validator = AllowlistValidator::new(http.allowlist.clone());
+    validator = validator.allow_http();
+
+    let allowed = validator.validate(url, method).is_allowed();
+    if allowed {
+        tracing::info!(
+            tool = tool_name,
+            method,
+            url,
+            "Allowing explicit localhost loopback HTTP request for WASM tool"
+        );
+    }
+
+    allowed
+}
+
 /// Resolve the URL's hostname and reject connections to private/internal IP addresses.
 /// This prevents DNS rebinding attacks where an attacker's domain resolves to an
 /// internal IP after passing the allowlist check.
 fn reject_private_ip(url: &str) -> Result<(), String> {
     let parsed = url::Url::parse(url).map_err(|e| format!("Failed to parse URL: {e}"))?;
-    if !matches!(parsed.scheme(), "http" | "https") {
+    if !matches!(parsed.scheme(), "http" | "https" | "ws" | "wss") {
         return Err(format!("Unsupported URL scheme: {}", parsed.scheme()));
     }
     if !parsed.username().is_empty() || parsed.password().is_some() {
@@ -1093,13 +1705,22 @@ mod tests {
 
     #[test]
     fn test_wrapper_creation() {
-        // This test verifies the runtime can be created
-        // Actual execution tests require a valid WASM component
         let config = WasmRuntimeConfig::for_testing();
         let runtime = Arc::new(WasmToolRuntime::new(config).unwrap());
 
-        // Runtime was created successfully
         assert!(runtime.config().fuel_config.enabled);
+    }
+
+    #[test]
+    fn test_extract_tool_metadata_from_invalid_component_fails() {
+        let config = WasmRuntimeConfig::for_testing();
+        let runtime = WasmToolRuntime::new(config).unwrap();
+        let engine = runtime.engine();
+
+        // Minimal valid Wasm core module bytes (not a component).
+        let core_wasm: &[u8] = b"\0asm\x01\0\0\0";
+        let result = wasmtime::component::Component::new(engine, core_wasm);
+        assert!(result.is_err());
     }
 
     #[test]
@@ -1166,6 +1787,7 @@ mod tests {
         let store_data = StoreData::new(
             1024 * 1024,
             Capabilities::default(),
+            "test-tool".to_string(),
             HashMap::new(),
             host_credentials,
         );
@@ -1205,6 +1827,7 @@ mod tests {
         let store_data = StoreData::new(
             1024 * 1024,
             Capabilities::default(),
+            "test-tool".to_string(),
             HashMap::new(),
             host_credentials,
         );
@@ -1231,6 +1854,7 @@ mod tests {
         let store_data = StoreData::new(
             1024 * 1024,
             Capabilities::default(),
+            "test-tool".to_string(),
             HashMap::new(),
             host_credentials,
         );
@@ -1578,6 +2202,56 @@ mod tests {
     }
 
     #[test]
+    fn test_allow_private_loopback_http_enabled_for_localhost_allowlist() {
+        use crate::tools::wasm::capabilities::{Capabilities, EndpointPattern, HttpCapability};
+
+        let caps = Capabilities {
+            http: Some(HttpCapability {
+                allowlist: vec![EndpointPattern {
+                    host: "localhost".to_string(),
+                    port: None,
+                    path_prefix: Some("/v1/browser/".to_string()),
+                    methods: vec!["POST".to_string()],
+                }],
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+
+        assert!(super::allow_private_loopback_http(
+            &caps,
+            "browser-use-tool",
+            "http://localhost:9223/v1/browser/dispatch",
+            "POST"
+        ));
+    }
+
+    #[test]
+    fn test_allow_private_loopback_http_denied_when_not_allowlisted() {
+        use crate::tools::wasm::capabilities::{Capabilities, EndpointPattern, HttpCapability};
+
+        let caps = Capabilities {
+            http: Some(HttpCapability {
+                allowlist: vec![EndpointPattern {
+                    host: "example.com".to_string(),
+                    port: None,
+                    path_prefix: Some("/api/".to_string()),
+                    methods: vec!["POST".to_string()],
+                }],
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+
+        assert!(!super::allow_private_loopback_http(
+            &caps,
+            "browser-use-tool",
+            "http://localhost:9223/v1/browser/dispatch",
+            "POST"
+        ));
+    }
+
+    #[test]
     fn test_reject_private_ip_internal() {
         let result = super::reject_private_ip("https://192.168.1.1/admin");
         assert!(result.is_err());
@@ -1588,5 +2262,128 @@ mod tests {
         // 8.8.8.8 (Google DNS) is public
         let result = super::reject_private_ip("https://8.8.8.8/dns-query");
         assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_browser_use_tool_name_policy_matching() {
+        assert!(super::is_browser_use_tool_name("browser-use-tool"));
+        assert!(super::is_browser_use_tool_name("browser_use_tool"));
+        assert!(!super::is_browser_use_tool_name("other-tool"));
+    }
+
+    #[test]
+    fn test_browser_use_requires_explicit_for_eval_and_upload() {
+        let eval = serde_json::json!({"action": "eval", "script": "1+1"});
+        let upload = serde_json::json!({"action": "upload", "files": ["/tmp/a"]});
+        let safe = serde_json::json!({"action": "get_url"});
+
+        assert!(super::browser_action_requires_explicit_approval("eval"));
+        assert!(super::browser_action_requires_explicit_approval("upload"));
+        assert!(!super::browser_action_requires_explicit_approval("get_url"));
+
+        assert_eq!(
+            super::parse_browser_action_for_approval(&eval).as_deref(),
+            Some("eval")
+        );
+        assert_eq!(
+            super::parse_browser_action_for_approval(&upload).as_deref(),
+            Some("upload")
+        );
+        assert_eq!(
+            super::parse_browser_action_for_approval(&safe).as_deref(),
+            Some("get_url")
+        );
+    }
+
+    #[test]
+    fn test_parse_browser_action_from_stringified_json() {
+        let params = serde_json::Value::String(r#"{"action":"js_eval"}"#.to_string());
+        assert_eq!(
+            super::parse_browser_action_for_approval(&params).as_deref(),
+            Some("eval")
+        );
+    }
+
+    #[test]
+    fn test_cookies_set_batch_requires_approval() {
+        assert!(super::browser_action_requires_explicit_approval(
+            "cookies_set_batch"
+        ));
+    }
+
+    #[test]
+    fn test_all_storage_actions_require_approval() {
+        for action in &[
+            "local_storage_set",
+            "local_storage_delete",
+            "session_storage_set",
+            "session_storage_delete",
+        ] {
+            assert!(
+                super::browser_action_requires_explicit_approval(action),
+                "{} should require approval",
+                action
+            );
+        }
+    }
+
+    #[test]
+    fn test_safe_actions_do_not_require_approval() {
+        for action in &[
+            "open",
+            "click",
+            "snapshot",
+            "get_url",
+            "get_text",
+            "screenshot",
+            "cookies_list",
+            "cookies_get",
+        ] {
+            assert!(
+                !super::browser_action_requires_explicit_approval(action),
+                "{} should NOT require approval",
+                action
+            );
+        }
+    }
+
+    #[test]
+    fn test_wait_with_js_condition_requires_approval() {
+        let with_js = serde_json::json!({
+            "action": "wait",
+            "js_condition": "document.querySelector('.loaded') !== null"
+        });
+        assert!(super::wait_with_js_condition_requires_approval(&with_js));
+
+        // wait without js_condition should NOT require approval
+        let without_js = serde_json::json!({
+            "action": "wait",
+            "selector": ".loaded"
+        });
+        assert!(!super::wait_with_js_condition_requires_approval(
+            &without_js
+        ));
+
+        // wait with ms should NOT require approval
+        let with_ms = serde_json::json!({
+            "action": "wait",
+            "ms": 1000
+        });
+        assert!(!super::wait_with_js_condition_requires_approval(&with_ms));
+
+        // Non-wait action should NOT trigger
+        let non_wait = serde_json::json!({
+            "action": "click",
+            "js_condition": "true"
+        });
+        assert!(!super::wait_with_js_condition_requires_approval(&non_wait));
+    }
+
+    #[test]
+    fn test_wait_with_js_condition_stringified_params() {
+        let params = serde_json::Value::String(
+            r#"{"action":"wait","js_condition":"window.loaded"}"#.to_string(),
+        );
+        assert!(super::wait_with_js_condition_requires_approval(&params));
     }
 }

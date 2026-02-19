@@ -44,6 +44,7 @@ use crate::tools::registry::{ToolRegistry, WasmRegistrationError, WasmToolRegist
 use crate::tools::wasm::capabilities_schema::CapabilitiesFile;
 use crate::tools::wasm::{
     Capabilities, OAuthRefreshConfig, WasmError, WasmStorageError, WasmToolRuntime, WasmToolStore,
+    WorkspaceReader, WorkspaceWriter,
 };
 
 /// Error during WASM tool loading.
@@ -79,6 +80,8 @@ pub struct WasmToolLoader {
     runtime: Arc<WasmToolRuntime>,
     registry: Arc<ToolRegistry>,
     secrets_store: Option<Arc<dyn SecretsStore + Send + Sync>>,
+    workspace_reader: Option<Arc<dyn WorkspaceReader>>,
+    workspace_writer: Option<Arc<dyn WorkspaceWriter>>,
 }
 
 impl WasmToolLoader {
@@ -88,12 +91,25 @@ impl WasmToolLoader {
             runtime,
             registry,
             secrets_store: None,
+            workspace_reader: None,
+            workspace_writer: None,
         }
     }
 
     /// Set the secrets store for credential injection in WASM tools.
     pub fn with_secrets_store(mut self, store: Arc<dyn SecretsStore + Send + Sync>) -> Self {
         self.secrets_store = Some(store);
+        self
+    }
+
+    /// Set workspace reader/writer so tools can persist state under allowed prefixes.
+    pub fn with_workspace(
+        mut self,
+        reader: Arc<dyn WorkspaceReader>,
+        writer: Option<Arc<dyn WorkspaceWriter>>,
+    ) -> Self {
+        self.workspace_reader = Some(reader);
+        self.workspace_writer = writer;
         self
     }
 
@@ -152,6 +168,8 @@ impl WasmToolLoader {
                 schema: None,
                 secrets_store: self.secrets_store.clone(),
                 oauth_refresh,
+                workspace_reader: self.workspace_reader.clone(),
+                workspace_writer: self.workspace_writer.clone(),
             })
             .await?;
 
@@ -676,6 +694,27 @@ mod tests {
                 "WASM should exist: {:?}",
                 discovered.wasm_path
             );
+        }
+    }
+
+    #[tokio::test]
+    async fn test_discover_dev_tools_includes_browser_use_naming_convention() {
+        // Verifies M1.3 discovery convention for tools-src/browser-use.
+        // We only assert expected naming/path conventions so the test is stable
+        // whether or not build artifacts are present.
+        let tools = super::discover_dev_tools().await.unwrap();
+
+        if let Some(discovered) = tools.get("browser-use-tool") {
+            let wasm_path = discovered.wasm_path.to_string_lossy();
+            let cap_path = discovered
+                .capabilities_path
+                .as_ref()
+                .map(|p| p.to_string_lossy().to_string())
+                .unwrap_or_default();
+
+            assert!(wasm_path.contains("tools-src/browser-use/target/wasm32-wasip2/release"));
+            assert!(wasm_path.ends_with("browser_use_tool.wasm"));
+            assert!(cap_path.ends_with("tools-src/browser-use/browser-use-tool.capabilities.json"));
         }
     }
 
