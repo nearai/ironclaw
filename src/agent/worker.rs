@@ -754,9 +754,14 @@ Report when the job is complete or if you encounter issues you cannot resolve."#
     }
 
     async fn mark_failed(&self, reason: &str) -> Result<(), Error> {
+        // Build fallback deliverable from memory before transitioning.
+        let fallback = self.build_fallback(reason).await;
+
         self.context_manager()
             .update_context(self.job_id, |ctx| {
-                ctx.transition_to(JobState::Failed, Some(reason.to_string()))
+                ctx.transition_to(JobState::Failed, Some(reason.to_string()))?;
+                store_fallback_in_metadata(ctx, &fallback);
+                Ok(())
             })
             .await?
             .map_err(|s| crate::error::JobError::ContextError {
@@ -769,8 +774,15 @@ Report when the job is complete or if you encounter issues you cannot resolve."#
     }
 
     async fn mark_stuck(&self, reason: &str) -> Result<(), Error> {
+        // Build fallback deliverable from memory before transitioning.
+        let fallback = self.build_fallback(reason).await;
+
         self.context_manager()
-            .update_context(self.job_id, |ctx| ctx.mark_stuck(reason))
+            .update_context(self.job_id, |ctx| {
+                ctx.mark_stuck(reason)?;
+                store_fallback_in_metadata(ctx, &fallback);
+                Ok(())
+            })
             .await?
             .map_err(|s| crate::error::JobError::ContextError {
                 id: self.job_id,
@@ -779,6 +791,34 @@ Report when the job is complete or if you encounter issues you cannot resolve."#
 
         self.persist_status(JobState::Stuck, Some(reason.to_string()));
         Ok(())
+    }
+
+    /// Build a [`FallbackDeliverable`] from the current job context and memory.
+    async fn build_fallback(&self, reason: &str) -> Option<crate::context::FallbackDeliverable> {
+        let memory = self
+            .context_manager()
+            .get_memory(self.job_id)
+            .await
+            .unwrap_or_else(|_| crate::context::Memory::new(self.job_id));
+        let ctx = self.context_manager().get_context(self.job_id).await.ok()?;
+        Some(crate::context::FallbackDeliverable::build(
+            &ctx, &memory, reason,
+        ))
+    }
+}
+
+/// Store a fallback deliverable in the job context's metadata.
+fn store_fallback_in_metadata(
+    ctx: &mut crate::context::JobContext,
+    fallback: &Option<crate::context::FallbackDeliverable>,
+) {
+    if let Some(fb) = fallback
+        && let Ok(val) = serde_json::to_value(fb)
+    {
+        if ctx.metadata.is_null() {
+            ctx.metadata = serde_json::json!({});
+        }
+        ctx.metadata["fallback_deliverable"] = val;
     }
 }
 

@@ -908,7 +908,8 @@ impl Tool for JobStatusTool {
                     "created_at": job_ctx.created_at.to_rfc3339(),
                     "started_at": job_ctx.started_at.map(|t| t.to_rfc3339()),
                     "completed_at": job_ctx.completed_at.map(|t| t.to_rfc3339()),
-                    "actual_cost": job_ctx.actual_cost.to_string()
+                    "actual_cost": job_ctx.actual_cost.to_string(),
+                    "fallback_deliverable": job_ctx.metadata.get("fallback_deliverable"),
                 });
                 Ok(ToolOutput::success(result, start.elapsed()))
             }

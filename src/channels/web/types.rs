@@ -192,6 +192,8 @@ pub enum SseEvent {
         status: String,
         #[serde(skip_serializing_if = "Option::is_none")]
         session_id: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        fallback: Option<serde_json::Value>,
     },
 }
 

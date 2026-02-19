@@ -328,6 +328,7 @@ async fn job_event_handler(
                 .get("session_id")
                 .and_then(|v| v.as_str())
                 .map(|s| s.to_string()),
+            fallback: payload.data.get("fallback_deliverable").cloned(),
         },
         _ => SseEvent::JobStatus {
             job_id: job_id_str,
