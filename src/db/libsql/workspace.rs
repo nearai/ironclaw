@@ -387,6 +387,7 @@ impl WorkspaceStore for LibSqlBackend {
         chunk_index: i32,
         content: &str,
         embedding: Option<&[f32]>,
+        chunk_version: i32,
     ) -> Result<Uuid, WorkspaceError> {
         let conn = self
             .connect()
@@ -402,8 +403,8 @@ impl WorkspaceStore for LibSqlBackend {
 
         conn.execute(
             r#"
-                INSERT INTO memory_chunks (id, document_id, chunk_index, content, embedding)
-                VALUES (?1, ?2, ?3, ?4, ?5)
+                INSERT INTO memory_chunks (id, document_id, chunk_index, content, embedding, chunk_version)
+                VALUES (?1, ?2, ?3, ?4, ?5, ?6)
                 "#,
             params![
                 id.to_string(),
@@ -411,6 +412,7 @@ impl WorkspaceStore for LibSqlBackend {
                 chunk_index as i64,
                 content,
                 embedding_blob.map(libsql::Value::Blob),
+                chunk_version as i64,
             ],
         )
         .await
@@ -418,6 +420,54 @@ impl WorkspaceStore for LibSqlBackend {
             reason: format!("Insert failed: {}", e),
         })?;
         Ok(id)
+    }
+
+    async fn get_documents_with_stale_chunks(
+        &self,
+        user_id: &str,
+        agent_id: Option<Uuid>,
+        target_version: i32,
+        limit: usize,
+    ) -> Result<Vec<Uuid>, WorkspaceError> {
+        let conn = self
+            .connect()
+            .await
+            .map_err(|e| WorkspaceError::SearchFailed {
+                reason: e.to_string(),
+            })?;
+        let agent_id_str = agent_id.map(|id| id.to_string());
+
+        // Find documents that have at least one chunk with version < target
+        let mut rows = conn
+            .query(
+                r#"
+                SELECT DISTINCT c.document_id
+                FROM memory_chunks c
+                JOIN memory_documents d ON d.id = c.document_id
+                WHERE d.user_id = ?1 AND d.agent_id IS ?2
+                  AND c.chunk_version < ?3
+                LIMIT ?4
+                "#,
+                params![user_id, agent_id_str.as_deref(), target_version as i64, limit as i64],
+            )
+            .await
+            .map_err(|e| WorkspaceError::SearchFailed {
+                reason: format!("Query failed: {}", e),
+            })?;
+
+        let mut doc_ids = Vec::new();
+        while let Some(row) = rows
+            .next()
+            .await
+            .map_err(|e| WorkspaceError::SearchFailed {
+                reason: format!("Row fetch failed: {}", e),
+            })?
+        {
+            if let Ok(id) = get_text(&row, 0).parse() {
+                doc_ids.push(id);
+            }
+        }
+        Ok(doc_ids)
     }
 
     async fn update_chunk_embedding(

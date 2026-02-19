@@ -48,7 +48,7 @@ pub mod hygiene;
 mod repository;
 mod search;
 
-pub use chunker::{ChunkConfig, chunk_document};
+pub use chunker::{CHUNK_VERSION, ChunkConfig, chunk_document};
 pub use document::{MemoryChunk, MemoryDocument, WorkspaceEntry, paths};
 pub use embeddings::{EmbeddingProvider, MockEmbeddings, NearAiEmbeddings, OpenAiEmbeddings};
 #[cfg(feature = "postgres")]
@@ -177,15 +177,36 @@ impl WorkspaceStorage {
         chunk_index: i32,
         content: &str,
         embedding: Option<&[f32]>,
+        chunk_version: i32,
     ) -> Result<Uuid, WorkspaceError> {
         match self {
             #[cfg(feature = "postgres")]
             Self::Repo(repo) => {
-                repo.insert_chunk(document_id, chunk_index, content, embedding)
+                repo.insert_chunk(document_id, chunk_index, content, embedding, chunk_version)
                     .await
             }
             Self::Db(db) => {
-                db.insert_chunk(document_id, chunk_index, content, embedding)
+                db.insert_chunk(document_id, chunk_index, content, embedding, chunk_version)
+                    .await
+            }
+        }
+    }
+
+    async fn get_documents_with_stale_chunks(
+        &self,
+        user_id: &str,
+        agent_id: Option<Uuid>,
+        target_version: i32,
+        limit: usize,
+    ) -> Result<Vec<Uuid>, WorkspaceError> {
+        match self {
+            #[cfg(feature = "postgres")]
+            Self::Repo(repo) => {
+                repo.get_documents_with_stale_chunks(user_id, agent_id, target_version, limit)
+                    .await
+            }
+            Self::Db(db) => {
+                db.get_documents_with_stale_chunks(user_id, agent_id, target_version, limit)
                     .await
             }
         }
@@ -613,13 +634,13 @@ impl Workspace {
         // Get the document
         let doc = self.storage.get_document_by_id(document_id).await?;
 
-        // Chunk the content
+        // Chunk the content with current parameters
         let chunks = chunk_document(&doc.content, ChunkConfig::default());
 
         // Delete old chunks
         self.storage.delete_chunks(document_id).await?;
 
-        // Insert new chunks
+        // Insert new chunks with current CHUNK_VERSION
         for (index, content) in chunks.into_iter().enumerate() {
             // Generate embedding if provider available
             let embedding = if let Some(ref provider) = self.embeddings {
@@ -635,11 +656,82 @@ impl Workspace {
             };
 
             self.storage
-                .insert_chunk(document_id, index as i32, &content, embedding.as_deref())
+                .insert_chunk(
+                    document_id,
+                    index as i32,
+                    &content,
+                    embedding.as_deref(),
+                    CHUNK_VERSION,
+                )
                 .await?;
         }
 
         Ok(())
+    }
+
+    /// Re-index documents with stale chunks (version < current CHUNK_VERSION).
+    ///
+    /// ## Why?
+    /// When chunk parameters change (e.g., size 800→300 words), existing chunks
+    /// have wrong boundaries and embeddings computed on different text. This
+    /// function finds affected documents and re-indexes them with current settings.
+    ///
+    /// ## How?
+    /// 1. Query for documents with any chunk_version < CHUNK_VERSION
+    /// 2. For each document: delete old chunks, re-chunk, insert with new version
+    /// 3. Generate new embeddings if provider is available
+    ///
+    /// ## When to call?
+    /// - On startup (automatic)
+    /// - After upgrading IronClaw to a version with new chunk parameters
+    ///
+    /// Returns (documents_processed, total_found) for progress reporting.
+    pub async fn reindex_stale_chunks(&self, batch_size: usize) -> Result<(usize, usize), WorkspaceError> {
+        // Find documents with stale chunks
+        let stale_doc_ids = self
+            .storage
+            .get_documents_with_stale_chunks(
+                &self.user_id,
+                self.agent_id,
+                CHUNK_VERSION,
+                batch_size,
+            )
+            .await?;
+
+        let total = stale_doc_ids.len();
+        if total == 0 {
+            return Ok((0, 0));
+        }
+
+        tracing::info!(
+            "Found {} documents with stale chunks (version < {}), re-indexing...",
+            total,
+            CHUNK_VERSION
+        );
+
+        let mut processed = 0;
+        for doc_id in stale_doc_ids {
+            match self.reindex_document(doc_id).await {
+                Ok(()) => {
+                    processed += 1;
+                    if processed % 10 == 0 {
+                        tracing::info!("Re-indexed {}/{} documents", processed, total);
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!("Failed to re-index document {}: {}", doc_id, e);
+                    // Continue with other documents
+                }
+            }
+        }
+
+        tracing::info!(
+            "Re-indexing complete: {}/{} documents processed",
+            processed,
+            total
+        );
+
+        Ok((processed, total))
     }
 
     // ==================== Seeding ====================

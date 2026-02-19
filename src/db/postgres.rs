@@ -603,9 +603,22 @@ impl WorkspaceStore for PgBackend {
         chunk_index: i32,
         content: &str,
         embedding: Option<&[f32]>,
+        chunk_version: i32,
     ) -> Result<Uuid, WorkspaceError> {
         self.repo
-            .insert_chunk(document_id, chunk_index, content, embedding)
+            .insert_chunk(document_id, chunk_index, content, embedding, chunk_version)
+            .await
+    }
+
+    async fn get_documents_with_stale_chunks(
+        &self,
+        user_id: &str,
+        agent_id: Option<Uuid>,
+        target_version: i32,
+        limit: usize,
+    ) -> Result<Vec<Uuid>, WorkspaceError> {
+        self.repo
+            .get_documents_with_stale_chunks(user_id, agent_id, target_version, limit)
             .await
     }
 

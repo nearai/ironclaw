@@ -305,6 +305,7 @@ impl Repository {
         chunk_index: i32,
         content: &str,
         embedding: Option<&[f32]>,
+        chunk_version: i32,
     ) -> Result<Uuid, WorkspaceError> {
         let conn = self.conn().await?;
         let id = Uuid::new_v4();
@@ -313,10 +314,10 @@ impl Repository {
 
         conn.execute(
             r#"
-            INSERT INTO memory_chunks (id, document_id, chunk_index, content, embedding)
-            VALUES ($1, $2, $3, $4, $5)
+            INSERT INTO memory_chunks (id, document_id, chunk_index, content, embedding, chunk_version)
+            VALUES ($1, $2, $3, $4, $5, $6)
             "#,
-            &[&id, &document_id, &chunk_index, &content, &embedding_vec],
+            &[&id, &document_id, &chunk_index, &content, &embedding_vec, &chunk_version],
         )
         .await
         .map_err(|e| WorkspaceError::ChunkingFailed {
@@ -324,6 +325,37 @@ impl Repository {
         })?;
 
         Ok(id)
+    }
+
+    /// Get document IDs that have chunks with version less than the target.
+    ///
+    /// Used to find documents needing re-indexing after chunk parameters change.
+    pub async fn get_documents_with_stale_chunks(
+        &self,
+        user_id: &str,
+        agent_id: Option<Uuid>,
+        target_version: i32,
+        limit: usize,
+    ) -> Result<Vec<Uuid>, WorkspaceError> {
+        let conn = self.conn().await?;
+        let rows = conn
+            .query(
+                r#"
+                SELECT DISTINCT c.document_id
+                FROM memory_chunks c
+                JOIN memory_documents d ON d.id = c.document_id
+                WHERE d.user_id = $1 AND d.agent_id IS NOT DISTINCT FROM $2
+                  AND c.chunk_version < $3
+                LIMIT $4
+                "#,
+                &[&user_id, &agent_id, &target_version, &(limit as i64)],
+            )
+            .await
+            .map_err(|e| WorkspaceError::SearchFailed {
+                reason: format!("Query failed: {}", e),
+            })?;
+
+        Ok(rows.iter().map(|row| row.get("document_id")).collect())
     }
 
     /// Update a chunk's embedding.
