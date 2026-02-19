@@ -373,11 +373,8 @@ fn default_session_path() -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::helpers::ENV_MUTEX;
     use crate::settings::Settings;
-    use std::sync::Mutex;
-
-    /// Serializes env-mutating tests to prevent parallel races.
-    static ENV_MUTEX: Mutex<()> = Mutex::new(());
 
     /// Clear all openai-compatible-related env vars.
     fn clear_openai_compatible_env() {
