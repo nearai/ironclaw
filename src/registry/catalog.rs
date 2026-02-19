@@ -20,6 +20,26 @@ pub enum RegistryError {
     #[error("Extension not found: {0}")]
     ExtensionNotFound(String),
 
+    #[error("'{name}' already installed at {path}. Use --force to overwrite.")]
+    AlreadyInstalled {
+        name: String,
+        path: std::path::PathBuf,
+    },
+
+    #[error("Download failed for {url}: {reason}")]
+    DownloadFailed { url: String, reason: String },
+
+    #[error(
+        "Ambiguous name '{name}': exists as both {kind_a} and {kind_b}. Use '{prefix_a}/{name}' or '{prefix_b}/{name}'."
+    )]
+    AmbiguousName {
+        name: String,
+        kind_a: &'static str,
+        prefix_a: &'static str,
+        kind_b: &'static str,
+        prefix_b: &'static str,
+    },
+
     #[error("Bundle not found: {0}")]
     BundleNotFound(String),
 
@@ -110,7 +130,7 @@ impl RegistryCatalog {
             })?;
 
             let path = entry.path();
-            if path.extension().and_then(|e| e.to_str()) != Some("json") {
+            if !path.is_file() || path.extension().and_then(|e| e.to_str()) != Some("json") {
                 continue;
             }
 
@@ -150,8 +170,8 @@ impl RegistryCatalog {
         let mut results: Vec<_> = self
             .manifests
             .values()
-            .filter(|m| kind.map_or(true, |k| m.kind == k))
-            .filter(|m| tag.map_or(true, |t| m.tags.iter().any(|mt| mt == t)))
+            .filter(|m| kind.is_none_or(|k| m.kind == k))
+            .filter(|m| tag.is_none_or(|t| m.tags.iter().any(|mt| mt == t)))
             .collect();
         results.sort_by(|a, b| a.name.cmp(&b.name));
         results
@@ -159,21 +179,50 @@ impl RegistryCatalog {
 
     /// Get a manifest by name. Tries exact key match first ("tools/slack"),
     /// then searches by bare name ("slack").
+    ///
+    /// If a bare name matches both a tool and a channel, returns `None`.
+    /// Use a qualified key ("tools/slack" or "channels/slack") to disambiguate.
     pub fn get(&self, name: &str) -> Option<&ExtensionManifest> {
         // Try exact key first
         if let Some(m) = self.manifests.get(name) {
             return Some(m);
         }
 
-        // Try with kind prefix
-        if let Some(m) = self.manifests.get(&format!("tools/{}", name)) {
-            return Some(m);
+        // Try with kind prefix, detecting collisions
+        let tool = self.manifests.get(&format!("tools/{}", name));
+        let channel = self.manifests.get(&format!("channels/{}", name));
+
+        match (tool, channel) {
+            (Some(_), Some(_)) => None, // ambiguous
+            (Some(m), None) => Some(m),
+            (None, Some(m)) => Some(m),
+            (None, None) => None,
         }
-        if let Some(m) = self.manifests.get(&format!("channels/{}", name)) {
-            return Some(m);
+    }
+
+    /// Get a manifest by name, returning a `Result` with an explicit error for
+    /// ambiguous bare names.
+    pub fn get_strict(&self, name: &str) -> Result<&ExtensionManifest, RegistryError> {
+        // Try exact key first
+        if let Some(m) = self.manifests.get(name) {
+            return Ok(m);
         }
 
-        None
+        let has_tool = self.manifests.contains_key(&format!("tools/{}", name));
+        let has_channel = self.manifests.contains_key(&format!("channels/{}", name));
+
+        match (has_tool, has_channel) {
+            (true, true) => Err(RegistryError::AmbiguousName {
+                name: name.to_string(),
+                kind_a: "tool",
+                prefix_a: "tools",
+                kind_b: "channel",
+                prefix_b: "channels",
+            }),
+            (true, false) => Ok(self.manifests.get(&format!("tools/{}", name)).unwrap()),
+            (false, true) => Ok(self.manifests.get(&format!("channels/{}", name)).unwrap()),
+            (false, false) => Err(RegistryError::ExtensionNotFound(name.to_string())),
+        }
     }
 
     /// Get the full key ("tools/slack" or "channels/telegram") for a manifest.
@@ -182,17 +231,15 @@ impl RegistryCatalog {
             return Some(name.to_string());
         }
 
-        let tools_key = format!("tools/{}", name);
-        if self.manifests.contains_key(&tools_key) {
-            return Some(tools_key);
-        }
+        let has_tool = self.manifests.contains_key(&format!("tools/{}", name));
+        let has_channel = self.manifests.contains_key(&format!("channels/{}", name));
 
-        let channels_key = format!("channels/{}", name);
-        if self.manifests.contains_key(&channels_key) {
-            return Some(channels_key);
+        match (has_tool, has_channel) {
+            (true, true) => None, // ambiguous
+            (true, false) => Some(format!("tools/{}", name)),
+            (false, true) => Some(format!("channels/{}", name)),
+            (false, false) => None,
         }
-
-        None
     }
 
     /// Search manifests by query string (matches name, display_name, description, keywords).
@@ -315,10 +362,8 @@ impl RegistryCatalog {
             return Ok((manifests, Some(bundle)));
         }
 
-        // Single extension
-        let manifest = self
-            .get(name)
-            .ok_or_else(|| RegistryError::ExtensionNotFound(name.to_string()))?;
+        // Single extension (use get_strict to catch ambiguous bare names)
+        let manifest = self.get_strict(name)?;
         Ok((vec![manifest], None))
     }
 }

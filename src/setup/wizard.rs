@@ -188,8 +188,7 @@ impl SetupWizard {
     /// previously saved configuration.
     async fn reconnect_existing_db(&mut self) -> Result<(), SetupError> {
         // Determine backend from env (set by bootstrap .env loaded in main).
-        let backend = std::env::var("DATABASE_BACKEND")
-            .unwrap_or_else(|_| "postgres".to_string());
+        let backend = std::env::var("DATABASE_BACKEND").unwrap_or_else(|_| "postgres".to_string());
 
         // Try libsql first if that's the configured backend.
         #[cfg(feature = "libsql")]
@@ -246,12 +245,8 @@ impl SetupWizard {
         let turso_url = std::env::var("LIBSQL_URL").ok();
         let turso_token = std::env::var("LIBSQL_AUTH_TOKEN").ok();
 
-        self.test_database_connection_libsql(
-            &path,
-            turso_url.as_deref(),
-            turso_token.as_deref(),
-        )
-        .await?;
+        self.test_database_connection_libsql(&path, turso_url.as_deref(), turso_token.as_deref())
+            .await?;
 
         self.settings.database_backend = Some("libsql".to_string());
         self.settings.libsql_path = Some(path);
@@ -1583,7 +1578,7 @@ impl SetupWizard {
         // Build options: show display_name + description, pre-check "default" tagged + already installed
         let mut options: Vec<(String, bool)> = Vec::new();
         for tool in &tools {
-            let is_installed = installed_tools.contains(&tool.source.crate_name);
+            let is_installed = installed_tools.contains(&tool.name);
             let is_default = tool.tags.contains(&"default".to_string());
             let status = if is_installed { " (installed)" } else { "" };
             let auth_hint = tool
@@ -1626,9 +1621,7 @@ impl SetupWizard {
 
         for idx in &selected {
             let tool = &tools[*idx];
-            let crate_name = &tool.source.crate_name;
-
-            if installed_tools.contains(crate_name) {
+            if installed_tools.contains(&tool.name) {
                 continue; // Already installed, skip
             }
 

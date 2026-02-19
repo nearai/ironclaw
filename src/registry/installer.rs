@@ -72,17 +72,18 @@ impl RegistryInstaller {
 
         fs::create_dir_all(target_dir)
             .await
-            .map_err(|e| RegistryError::Io(e))?;
+            .map_err(RegistryError::Io)?;
 
-        let target_wasm = target_dir.join(format!("{}.wasm", manifest.source.crate_name));
+        // Use manifest.name for installed filenames so discovery, auth, and
+        // CLI commands (`ironclaw tool auth <name>`) all agree on the stem.
+        let target_wasm = target_dir.join(format!("{}.wasm", manifest.name));
 
         // Check if already exists
         if target_wasm.exists() && !force {
-            return Err(RegistryError::ExtensionNotFound(format!(
-                "'{}' already installed at {}. Use --force to overwrite.",
-                manifest.name,
-                target_wasm.display()
-            )));
+            return Err(RegistryError::AlreadyInstalled {
+                name: manifest.name.clone(),
+                path: target_wasm,
+            });
         }
 
         // Build the WASM component
@@ -92,8 +93,10 @@ impl RegistryInstaller {
             manifest.display_name,
             source_dir.display()
         );
-        let wasm_path =
-            build_wasm_component(&source_dir).map_err(|e| RegistryError::ManifestRead {
+        let crate_name = &manifest.source.crate_name;
+        let wasm_path = build_wasm_component(&source_dir, crate_name)
+            .await
+            .map_err(|e| RegistryError::ManifestRead {
                 path: source_dir.clone(),
                 reason: format!("build failed: {}", e),
             })?;
@@ -102,16 +105,15 @@ impl RegistryInstaller {
         println!("  Installing to {}", target_wasm.display());
         fs::copy(&wasm_path, &target_wasm)
             .await
-            .map_err(|e| RegistryError::Io(e))?;
+            .map_err(RegistryError::Io)?;
 
         // Copy capabilities file
         let caps_source = source_dir.join(&manifest.source.capabilities);
-        let target_caps =
-            target_dir.join(format!("{}.capabilities.json", manifest.source.crate_name));
+        let target_caps = target_dir.join(format!("{}.capabilities.json", manifest.name));
         let has_capabilities = if caps_source.exists() {
             fs::copy(&caps_source, &target_caps)
                 .await
-                .map_err(|e| RegistryError::Io(e))?;
+                .map_err(RegistryError::Io)?;
             true
         } else {
             false
@@ -168,15 +170,15 @@ impl RegistryInstaller {
 
         fs::create_dir_all(target_dir)
             .await
-            .map_err(|e| RegistryError::Io(e))?;
+            .map_err(RegistryError::Io)?;
 
-        let target_wasm = target_dir.join(format!("{}.wasm", manifest.source.crate_name));
+        let target_wasm = target_dir.join(format!("{}.wasm", manifest.name));
 
         if target_wasm.exists() && !force {
-            return Err(RegistryError::ExtensionNotFound(format!(
-                "'{}' already installed. Use --force to overwrite.",
-                manifest.name
-            )));
+            return Err(RegistryError::AlreadyInstalled {
+                name: manifest.name.clone(),
+                path: target_wasm,
+            });
         }
 
         // Download
@@ -186,17 +188,24 @@ impl RegistryInstaller {
         );
         let response = reqwest::get(url)
             .await
-            .map_err(|e| RegistryError::ManifestRead {
-                path: PathBuf::from(url.as_str()),
-                reason: format!("download failed: {}", e),
+            .map_err(|e| RegistryError::DownloadFailed {
+                url: url.clone(),
+                reason: format!("request failed: {}", e),
+            })?;
+
+        let response = response
+            .error_for_status()
+            .map_err(|e| RegistryError::DownloadFailed {
+                url: url.clone(),
+                reason: e.to_string(),
             })?;
 
         let bytes = response
             .bytes()
             .await
-            .map_err(|e| RegistryError::ManifestRead {
-                path: PathBuf::from(url.as_str()),
-                reason: format!("download failed: {}", e),
+            .map_err(|e| RegistryError::DownloadFailed {
+                url: url.clone(),
+                reason: format!("failed to read body: {}", e),
             })?;
 
         // Verify SHA256
@@ -206,8 +215,8 @@ impl RegistryInstaller {
         let actual_sha = format!("{:x}", hasher.finalize());
 
         if actual_sha != *expected_sha {
-            return Err(RegistryError::ManifestRead {
-                path: PathBuf::from(url.as_str()),
+            return Err(RegistryError::DownloadFailed {
+                url: url.clone(),
                 reason: format!(
                     "SHA256 mismatch: expected {}, got {}",
                     expected_sha, actual_sha
@@ -218,19 +227,21 @@ impl RegistryInstaller {
         // Write file
         fs::write(&target_wasm, &bytes)
             .await
-            .map_err(|e| RegistryError::Io(e))?;
+            .map_err(RegistryError::Io)?;
 
-        // Copy capabilities from source dir (still needed even for pre-built artifacts)
+        // Copy capabilities from source dir (still needed even for pre-built artifacts).
+        // NOTE: This requires the source tree to be present. When pre-built artifact
+        // distribution is implemented, capabilities should be bundled with the artifact
+        // or fetched from a separate URL.
         let caps_source = self
             .repo_root
             .join(&manifest.source.dir)
             .join(&manifest.source.capabilities);
-        let target_caps =
-            target_dir.join(format!("{}.capabilities.json", manifest.source.crate_name));
+        let target_caps = target_dir.join(format!("{}.capabilities.json", manifest.name));
         let has_capabilities = if caps_source.exists() {
             fs::copy(&caps_source, &target_caps)
                 .await
-                .map_err(|e| RegistryError::Io(e))?;
+                .map_err(RegistryError::Io)?;
             true
         } else {
             false
@@ -303,15 +314,15 @@ impl RegistryInstaller {
                     .shared_auth
                     .as_deref()
                     .unwrap_or(manifest.name.as_str());
-                if seen_providers.insert(key.to_string()) {
-                    if let Some(url) = &auth.setup_url {
-                        auth_hints.push(format!(
-                            "  {} ({}): {}",
-                            auth.provider.as_deref().unwrap_or(&manifest.name),
-                            auth.method.as_deref().unwrap_or("manual"),
-                            url
-                        ));
-                    }
+                if seen_providers.insert(key.to_string())
+                    && let Some(url) = &auth.setup_url
+                {
+                    auth_hints.push(format!(
+                        "  {} ({}): {}",
+                        auth.provider.as_deref().unwrap_or(&manifest.name),
+                        auth.method.as_deref().unwrap_or("manual"),
+                        url
+                    ));
                 }
             }
         }
@@ -331,29 +342,38 @@ impl RegistryInstaller {
 }
 
 /// Build a WASM component from a source directory using `cargo component build --release`.
-fn build_wasm_component(source_dir: &Path) -> anyhow::Result<PathBuf> {
-    use std::process::Command;
+///
+/// Uses `tokio::process::Command` with inherited stdio so build progress is visible.
+/// Looks for the specific `{crate_name}.wasm` in the release directory rather than
+/// picking the first `.wasm` file found.
+async fn build_wasm_component(source_dir: &Path, crate_name: &str) -> anyhow::Result<PathBuf> {
+    use tokio::process::Command;
 
     // Check cargo-component availability
     let check = Command::new("cargo")
         .args(["component", "--version"])
-        .output();
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .await;
 
-    if check.is_err() || !check.as_ref().map(|o| o.status.success()).unwrap_or(false) {
+    if check.is_err() || !check.as_ref().map(|s| s.success()).unwrap_or(false) {
         anyhow::bail!("cargo-component not found. Install with: cargo install cargo-component");
     }
 
-    let output = Command::new("cargo")
+    // Use status() with inherited stdio so build output streams to the terminal.
+    let status = Command::new("cargo")
         .current_dir(source_dir)
         .args(["component", "build", "--release"])
-        .output()?;
+        .status()
+        .await?;
 
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        anyhow::bail!("Build failed:\n{}", stderr);
+    if !status.success() {
+        anyhow::bail!("Build failed (exit code: {})", status);
     }
 
-    // Find the output wasm file
+    // Look for the specific crate's WASM file (Cargo uses underscores in artifact names).
+    let wasm_filename = format!("{}.wasm", crate_name.replace('-', "_"));
     let target_base = source_dir.join("target");
     let candidates = [
         "wasm32-wasip1",
@@ -363,21 +383,18 @@ fn build_wasm_component(source_dir: &Path) -> anyhow::Result<PathBuf> {
     ];
 
     for target in &candidates {
-        let release_dir = target_base.join(target).join("release");
-        if release_dir.exists() {
-            if let Ok(entries) = std::fs::read_dir(&release_dir) {
-                for entry in entries.flatten() {
-                    let path = entry.path();
-                    if path.extension().and_then(|e| e.to_str()) == Some("wasm") {
-                        return Ok(path);
-                    }
-                }
-            }
+        let wasm_path = target_base
+            .join(target)
+            .join("release")
+            .join(&wasm_filename);
+        if wasm_path.exists() {
+            return Ok(wasm_path);
         }
     }
 
     anyhow::bail!(
-        "Could not find built WASM file in {}/target/*/release/",
+        "Could not find {} in {}/target/*/release/",
+        wasm_filename,
         source_dir.display()
     )
 }
