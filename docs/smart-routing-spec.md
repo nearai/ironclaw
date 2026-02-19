@@ -120,7 +120,13 @@ llm:
     overrides:
       - pattern: "my-custom-pattern"
         tier: "pro"
+    domain_keywords:  # Custom keywords for your domain
+      - "mycompany"
+      - "myproduct"
+      - "internal-tool"
 ```
+
+If `domain_keywords` is not set, uses `DEFAULT_DOMAIN_KEYWORDS` which covers common web3/infra terms.
 
 **Disable routing (pin model):**
 ```yaml
