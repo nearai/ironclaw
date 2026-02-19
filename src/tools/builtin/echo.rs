@@ -46,4 +46,8 @@ impl Tool for EchoTool {
     fn requires_sanitization(&self) -> bool {
         false // Internal tool, no external data
     }
+
+    fn is_idempotent(&self) -> bool {
+        true // Pure function: same input always produces same output
+    }
 }

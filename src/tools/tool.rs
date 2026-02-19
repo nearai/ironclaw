@@ -194,6 +194,15 @@ pub trait Tool: Send + Sync {
         Duration::from_secs(60)
     }
 
+    /// Whether this tool is idempotent (same args always produce the same result).
+    ///
+    /// When true, successful results are cached per-job so repeated identical
+    /// calls return the cached result without re-executing. Tools that have
+    /// side effects (shell, file write, HTTP POST) should return false (the default).
+    fn is_idempotent(&self) -> bool {
+        false
+    }
+
     /// Where this tool should execute.
     ///
     /// `Orchestrator` tools run in the main agent process (safe, no FS access).

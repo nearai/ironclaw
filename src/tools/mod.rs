@@ -9,6 +9,7 @@
 
 pub mod builder;
 pub mod builtin;
+pub mod idempotency;
 pub mod mcp;
 pub mod wasm;
 
@@ -20,5 +21,6 @@ pub use builder::{
     LlmSoftwareBuilder, SoftwareBuilder, SoftwareType, Template, TemplateEngine, TemplateType,
     TestCase, TestHarness, TestResult, TestSuite, ValidationError, ValidationResult, WasmValidator,
 };
+pub use idempotency::{IdempotencyCacheConfig, ToolIdempotencyCache};
 pub use registry::ToolRegistry;
 pub use tool::{Tool, ToolDomain, ToolError, ToolOutput};

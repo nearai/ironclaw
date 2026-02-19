@@ -845,6 +845,10 @@ impl Tool for ListJobsTool {
     fn requires_sanitization(&self) -> bool {
         false
     }
+
+    fn is_idempotent(&self) -> bool {
+        true // Read-only job listing, safe to cache within TTL
+    }
 }
 
 /// Tool for checking job status.
@@ -923,6 +927,10 @@ impl Tool for JobStatusTool {
 
     fn requires_sanitization(&self) -> bool {
         false
+    }
+
+    fn is_idempotent(&self) -> bool {
+        true // Read-only status check, safe to cache within TTL
     }
 }
 

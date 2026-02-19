@@ -385,6 +385,9 @@ async fn run_task_isolated(params: TaskRunParams<'_>) -> TaskResult {
         ironclaw::agent::cost_guard::CostGuardConfig::default(),
     ));
 
+    let idempotency_cache = Arc::new(ironclaw::tools::ToolIdempotencyCache::new(
+        ironclaw::tools::IdempotencyCacheConfig::default(),
+    ));
     let deps = AgentDeps {
         store: None,
         llm: instrumented.clone() as Arc<dyn LlmProvider>,
@@ -397,6 +400,7 @@ async fn run_task_isolated(params: TaskRunParams<'_>) -> TaskResult {
         skills_config: ironclaw::config::SkillsConfig::default(),
         hooks: Arc::new(ironclaw::hooks::HookRegistry::new()),
         cost_guard,
+        idempotency_cache,
     };
 
     let mut channels = ChannelManager::new();

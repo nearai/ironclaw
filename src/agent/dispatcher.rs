@@ -478,6 +478,24 @@ impl Agent {
             .into());
         }
 
+        // Check idempotency cache before executing.
+        // Chat tools use the job_ctx.job_id (an ephemeral UUID per chat turn).
+        if tool.is_idempotent()
+            && let Some(cached) = self
+                .deps
+                .idempotency_cache
+                .get(job_ctx.job_id, tool_name, params)
+                .await
+        {
+            return serde_json::to_string_pretty(&cached.result).map_err(|e| {
+                crate::error::ToolError::ExecutionFailed {
+                    name: tool_name.to_string(),
+                    reason: format!("Failed to serialize cached result: {}", e),
+                }
+                .into()
+            });
+        }
+
         tracing::debug!(
             tool = %tool_name,
             params = %params,
@@ -495,6 +513,14 @@ impl Agent {
 
         match &result {
             Ok(Ok(output)) => {
+                // Cache successful results for idempotent tools
+                if tool.is_idempotent() {
+                    self.deps
+                        .idempotency_cache
+                        .put(job_ctx.job_id, tool_name, params, output.clone())
+                        .await;
+                }
+
                 let result_str = serde_json::to_string(&output.result)
                     .unwrap_or_else(|_| "<serialize error>".to_string());
                 tracing::debug!(

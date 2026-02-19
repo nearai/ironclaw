@@ -17,7 +17,7 @@ use crate::error::{Error, JobError};
 use crate::hooks::HookRegistry;
 use crate::llm::LlmProvider;
 use crate::safety::SafetyLayer;
-use crate::tools::ToolRegistry;
+use crate::tools::{ToolIdempotencyCache, ToolRegistry};
 
 /// Message to send to a worker.
 #[derive(Debug)]
@@ -51,6 +51,7 @@ pub struct Scheduler {
     tools: Arc<ToolRegistry>,
     store: Option<Arc<dyn Database>>,
     hooks: Arc<HookRegistry>,
+    idempotency_cache: Arc<ToolIdempotencyCache>,
     /// Running jobs (main LLM-driven jobs).
     jobs: Arc<RwLock<HashMap<Uuid, ScheduledJob>>>,
     /// Running sub-tasks (tool executions, background tasks).
@@ -59,6 +60,7 @@ pub struct Scheduler {
 
 impl Scheduler {
     /// Create a new scheduler.
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         config: AgentConfig,
         context_manager: Arc<ContextManager>,
@@ -67,6 +69,7 @@ impl Scheduler {
         tools: Arc<ToolRegistry>,
         store: Option<Arc<dyn Database>>,
         hooks: Arc<HookRegistry>,
+        idempotency_cache: Arc<ToolIdempotencyCache>,
     ) -> Self {
         Self {
             config,
@@ -76,6 +79,7 @@ impl Scheduler {
             tools,
             store,
             hooks,
+            idempotency_cache,
             jobs: Arc::new(RwLock::new(HashMap::new())),
             subtasks: Arc::new(RwLock::new(HashMap::new())),
         }
@@ -123,6 +127,7 @@ impl Scheduler {
                 tools: self.tools.clone(),
                 store: self.store.clone(),
                 hooks: self.hooks.clone(),
+                idempotency_cache: self.idempotency_cache.clone(),
                 timeout: self.config.job_timeout,
                 use_planning: self.config.use_planning,
             };

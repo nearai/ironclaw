@@ -17,7 +17,7 @@ use crate::llm::{
     ActionPlan, ChatMessage, LlmProvider, Reasoning, ReasoningContext, RespondResult, ToolSelection,
 };
 use crate::safety::SafetyLayer;
-use crate::tools::ToolRegistry;
+use crate::tools::{ToolIdempotencyCache, ToolRegistry};
 
 /// Shared dependencies for worker execution.
 ///
@@ -31,6 +31,7 @@ pub struct WorkerDeps {
     pub tools: Arc<ToolRegistry>,
     pub store: Option<Arc<dyn Database>>,
     pub hooks: Arc<HookRegistry>,
+    pub idempotency_cache: Arc<ToolIdempotencyCache>,
     pub timeout: Duration,
     pub use_planning: bool,
 }
@@ -153,6 +154,12 @@ Report when the job is complete or if you encounter issues you cannot resolve."#
                 self.mark_stuck("Execution timeout").await?;
             }
         }
+
+        // Free cached tool results for this job
+        self.deps
+            .idempotency_cache
+            .invalidate_job(self.job_id)
+            .await;
 
         Ok(())
     }
@@ -454,6 +461,32 @@ Report when the job is complete or if you encounter issues you cannot resolve."#
             .into());
         }
 
+        // Check idempotency cache before executing
+        if tool.is_idempotent()
+            && let Some(cached) = deps.idempotency_cache.get(job_id, tool_name, &params).await
+        {
+            // Record the cache hit in memory (fire-and-forget)
+            let _ = deps
+                .context_manager
+                .update_memory(job_id, |mem| {
+                    let rec = mem.create_action(tool_name, params.clone()).succeed(
+                        Some("[idempotency cache hit]".to_string()),
+                        cached.result.clone(),
+                        cached.duration,
+                    );
+                    mem.record_action(rec);
+                })
+                .await;
+
+            return serde_json::to_string_pretty(&cached.result).map_err(|e| {
+                crate::error::ToolError::ExecutionFailed {
+                    name: tool_name.to_string(),
+                    reason: format!("Failed to serialize cached result: {}", e),
+                }
+                .into()
+            });
+        }
+
         tracing::debug!(
             tool = %tool_name,
             params = %params,
@@ -497,6 +530,15 @@ Report when the job is complete or if you encounter issues you cannot resolve."#
                     "Tool call timed out"
                 );
             }
+        }
+
+        // Cache successful results for idempotent tools
+        if let Ok(Ok(output)) = &result
+            && tool.is_idempotent()
+        {
+            deps.idempotency_cache
+                .put(job_id, tool_name, &params, output.clone())
+                .await;
         }
 
         // Record action in memory and get the ActionRecord for persistence

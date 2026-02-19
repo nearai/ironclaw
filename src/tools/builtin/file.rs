@@ -269,6 +269,10 @@ impl Tool for ReadFileTool {
         true // Reading local files should require approval
     }
 
+    fn is_idempotent(&self) -> bool {
+        true // Read-only file access, safe to cache within TTL
+    }
+
     fn domain(&self) -> ToolDomain {
         ToolDomain::Container
     }
@@ -490,6 +494,10 @@ impl Tool for ListDirTool {
 
     fn requires_approval(&self) -> bool {
         true // Directory listings can leak filesystem structure
+    }
+
+    fn is_idempotent(&self) -> bool {
+        true // Read-only directory listing, safe to cache within TTL
     }
 
     fn domain(&self) -> ToolDomain {

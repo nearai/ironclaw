@@ -1372,6 +1372,9 @@ async fn main() -> anyhow::Result<()> {
             max_actions_per_hour: config.agent.max_actions_per_hour,
         },
     ));
+    let idempotency_cache = std::sync::Arc::new(ironclaw::tools::ToolIdempotencyCache::new(
+        ironclaw::tools::IdempotencyCacheConfig::default(),
+    ));
     let deps = AgentDeps {
         store: db,
         llm,
@@ -1384,6 +1387,7 @@ async fn main() -> anyhow::Result<()> {
         skills_config: config.skills.clone(),
         hooks,
         cost_guard,
+        idempotency_cache,
     };
     let agent = Agent::new(
         config.agent.clone(),

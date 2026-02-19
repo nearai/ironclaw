@@ -282,6 +282,9 @@ impl TestHarnessBuilder {
             max_actions_per_hour: None,
         }));
 
+        let idempotency_cache = Arc::new(crate::tools::ToolIdempotencyCache::new(
+            crate::tools::IdempotencyCacheConfig::default(),
+        ));
         let deps = AgentDeps {
             store: Some(Arc::clone(&db)),
             llm,
@@ -294,6 +297,7 @@ impl TestHarnessBuilder {
             skills_config: SkillsConfig::default(),
             hooks,
             cost_guard,
+            idempotency_cache,
         };
 
         TestHarness {
