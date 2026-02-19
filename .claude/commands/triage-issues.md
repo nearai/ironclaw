@@ -14,7 +14,7 @@ You are triaging all open issues on this repository. Your job is to split them i
 Fetch every open issue with metadata:
 
 ```
-gh issue list --state open --limit 200 --json number,title,author,labels,assignees,createdAt,updatedAt,body,comments,milestone
+gh issue list --state open --limit 200 --json number,title,author,labels,assignees,createdAt,updatedAt,body,commentsCount,reactionGroups,milestone
 ```
 
 If `$ARGUMENTS` contains `--label=<X>`, append `--label '<X>'` to the command. If it contains `--milestone=<X>`, append `--milestone '<X>'` to the command.
@@ -25,7 +25,13 @@ Also fetch recently closed issues (last 14 days) to detect duplicates and alread
 gh issue list --state closed --search "closed:>=$(date -v-14d +%Y-%m-%d)" --limit 100 --json number,title,body,labels,closedAt
 ```
 
-**Exclude pull requests** — `gh issue list` may include PRs. Filter out any item whose number matches an open PR, or that has a `pull_request` field.
+**Exclude pull requests** — `gh issue list` may include PRs. Fetch open PR numbers to filter them out:
+
+```
+gh pr list --state open --json number --jq '.[].number'
+```
+
+Remove any issue whose number appears in this list.
 
 ## Step 2: Classify each issue as Bug or Feature
 
@@ -91,9 +97,9 @@ Score each bug on these dimensions and compute an overall severity rank:
 | 2 | **Moderate** | Affects one module or a specific configuration |
 | 1 | **Narrow** | Affects edge case or single obscure path |
 
-**Bug severity score** = Impact × 2 + Urgency + Scope (max 17)
+**Bug severity score** = Impact × 2 + Urgency + Scope (base max 14)
 
-Also boost the score by +2 if the issue:
+Apply a one-time +2 boost if any of the following are true (max 16):
 - Has a linked PR already (someone is working on it — fast-track review)
 - Is labeled `security`
 - Is a regression (worked before, broken now)
@@ -130,9 +136,9 @@ Look for value signals in the issue:
 | 2 | **Almost ready** | Needs minor clarification, but scope is understood |
 | 1 | **Not ready** | Needs design discussion, has open questions, blocked by other work |
 
-**Opportunity score** = Value × 2 + Effort + Readiness (max 17)
+**Opportunity score** = Value × 2 + Effort + Readiness (base max 14)
 
-Also boost by +2 if:
+Apply a one-time +2 boost if any of the following are true (max 16):
 - A community member offered to implement it
 - It has a linked draft PR
 - It closes a gap listed in the project's "Current Limitations / TODOs"
@@ -160,7 +166,7 @@ Unassigned: N | Stale (>30d): N
 
 ---
 
-### Critical Bugs (Severity 13+)
+### Critical Bugs (Severity 12+)
 
 Bugs that need immediate attention. For each:
 
@@ -179,7 +185,7 @@ Compact table, sorted by severity descending.
 
 ---
 
-### Quick Wins (Opportunity 13+ AND Effort = Small)
+### Quick Wins (Opportunity 12+ AND Effort = Small)
 
 Features that are high-value and low-effort — do these first. For each:
 
