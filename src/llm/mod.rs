@@ -17,6 +17,7 @@ mod reasoning;
 pub mod response_cache;
 mod retry;
 mod rig_adapter;
+pub mod routing;
 pub mod session;
 
 pub use circuit_breaker::{CircuitBreakerConfig, CircuitBreakerProvider};
