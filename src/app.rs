@@ -473,6 +473,7 @@ impl AppBuilder {
     pub async fn init_extensions(
         &self,
         tools: &Arc<ToolRegistry>,
+        hooks: &Arc<HookRegistry>,
     ) -> Result<
         (
             Arc<McpSessionManager>,
@@ -661,6 +662,7 @@ impl AppBuilder {
                 Arc::clone(&mcp_session_manager),
                 Arc::clone(secrets),
                 Arc::clone(tools),
+                Some(Arc::clone(hooks)),
                 wasm_tool_runtime.clone(),
                 self.config.wasm.tools_dir.clone(),
                 self.config.channels.wasm_channels_dir.clone(),
@@ -697,8 +699,12 @@ impl AppBuilder {
 
         let (llm, cheap_llm) = self.init_llm()?;
         let (safety, tools, embeddings, workspace) = self.init_tools(&llm).await?;
+
+        // Create hook registry early so runtime extension activation can register hooks.
+        let hooks = Arc::new(HookRegistry::new());
+
         let (mcp_session_manager, wasm_tool_runtime, extension_manager) =
-            self.init_extensions(&tools).await?;
+            self.init_extensions(&tools, &hooks).await?;
 
         // Seed workspace and backfill embeddings
         if let Some(ref ws) = workspace {
@@ -741,7 +747,6 @@ impl AppBuilder {
         };
 
         let context_manager = Arc::new(ContextManager::new(self.config.agent.max_parallel_jobs));
-        let hooks = Arc::new(HookRegistry::new());
         let cost_guard = Arc::new(crate::agent::cost_guard::CostGuard::new(
             crate::agent::cost_guard::CostGuardConfig {
                 max_cost_per_day_cents: self.config.agent.max_cost_per_day_cents,

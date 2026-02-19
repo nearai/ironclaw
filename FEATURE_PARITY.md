@@ -278,7 +278,7 @@ This document tracks feature parity between IronClaw (Rust implementation) and O
 | Auth plugins | ✅ | ❌ | |
 | Memory plugins | ✅ | ❌ | Custom backends |
 | Tool plugins | ✅ | ✅ | WASM tools |
-| Hook plugins | ✅ | ❌ | |
+| Hook plugins | ✅ | ✅ | Declarative hooks from extension capabilities |
 | Provider plugins | ✅ | ❌ | |
 | Plugin CLI (`install`, `list`) | ✅ | ✅ | `tool` subcommand |
 | ClawHub registry | ✅ | ❌ | Discovery |
@@ -421,10 +421,10 @@ This document tracks feature parity between IronClaw (Rust implementation) and O
 | `transcribeAudio` hook | ✅ | ❌ | P3 | |
 | `transformResponse` hook | ✅ | ✅ | P2 | |
 | `llm_input`/`llm_output` hooks | ✅ | ❌ | P3 | LLM payload inspection |
-| Bundled hooks | ✅ | ❌ | P2 | |
-| Plugin hooks | ✅ | ❌ | P3 | |
-| Workspace hooks | ✅ | ❌ | P2 | Inline code |
-| Outbound webhooks | ✅ | ❌ | P2 | |
+| Bundled hooks | ✅ | ✅ | P2 | Audit + declarative rule/webhook hooks |
+| Plugin hooks | ✅ | ✅ | P3 | Registered from WASM `capabilities.json` |
+| Workspace hooks | ✅ | ✅ | P2 | `hooks/hooks.json` and `hooks/*.hook.json` |
+| Outbound webhooks | ✅ | ✅ | P2 | Fire-and-forget lifecycle event delivery |
 | Heartbeat system | ✅ | ✅ | - | Periodic execution |
 | Gmail pub/sub | ✅ | ❌ | P3 | |
 
@@ -528,7 +528,7 @@ This document tracks feature parity between IronClaw (Rust implementation) and O
 - ✅ Telegram channel (WASM, DM pairing, caption, /start)
 - ❌ WhatsApp channel
 - ✅ Multi-provider failover (`FailoverProvider` with retryable error classification)
-- ✅ Hooks system (beforeInbound, beforeToolCall, beforeOutbound, onSessionStart, onSessionEnd, transformResponse)
+- ✅ Hooks system (core lifecycle hooks + bundled/plugin/workspace hooks + outbound webhooks)
 
 ### P2 - Medium Priority
 - ❌ Media handling (images, PDFs)

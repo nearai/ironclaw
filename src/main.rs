@@ -23,7 +23,7 @@ use ironclaw::{
     config::Config,
     context::ContextManager,
     extensions::ExtensionManager,
-    hooks::HookRegistry,
+    hooks::{HookRegistry, bootstrap_hooks},
     llm::{
         CachedProvider, CircuitBreakerConfig, CircuitBreakerProvider, CooldownConfig,
         FailoverProvider, LlmProvider, ResponseCacheConfig, SessionConfig,
@@ -746,6 +746,9 @@ async fn main() -> anyhow::Result<()> {
 
     let mcp_session_manager = Arc::new(McpSessionManager::new());
 
+    // Create hook registry early so runtime extension activation can register hooks.
+    let hooks = Arc::new(HookRegistry::new());
+
     // Create WASM tool runtime (sync, just builds the wasmtime engine)
     let wasm_tool_runtime: Option<Arc<WasmToolRuntime>> =
         if config.wasm.enabled && config.wasm.tools_dir.exists() {
@@ -763,6 +766,8 @@ async fn main() -> anyhow::Result<()> {
     // Load WASM tools and MCP servers concurrently.
     // Both register into the shared ToolRegistry (RwLock-based) so concurrent writes are safe.
     let wasm_tools_future = async {
+        let mut dev_loaded_tool_names: Vec<String> = Vec::new();
+
         if let Some(ref runtime) = wasm_tool_runtime {
             let mut loader = WasmToolLoader::new(Arc::clone(runtime), Arc::clone(&tools));
             if let Some(ref secrets) = secrets_store {
@@ -791,6 +796,7 @@ async fn main() -> anyhow::Result<()> {
             // Load dev tools from build artifacts (overrides installed if newer)
             match load_dev_tools(&loader, &config.wasm.tools_dir).await {
                 Ok(results) => {
+                    dev_loaded_tool_names.extend(results.loaded.iter().cloned());
                     if !results.loaded.is_empty() {
                         tracing::info!(
                             "Loaded {} dev WASM tools from build artifacts",
@@ -803,6 +809,8 @@ async fn main() -> anyhow::Result<()> {
                 }
             }
         }
+
+        dev_loaded_tool_names
     };
 
     let mcp_servers_future = async {
@@ -908,7 +916,7 @@ async fn main() -> anyhow::Result<()> {
         }
     };
 
-    tokio::join!(wasm_tools_future, mcp_servers_future);
+    let (dev_loaded_tool_names, _) = tokio::join!(wasm_tools_future, mcp_servers_future);
 
     // Create extension manager for in-chat discovery/install/auth/activate
     let extension_manager = if let Some(ref secrets) = secrets_store {
@@ -916,6 +924,7 @@ async fn main() -> anyhow::Result<()> {
             Arc::clone(&mcp_session_manager),
             Arc::clone(secrets),
             Arc::clone(&tools),
+            Some(Arc::clone(&hooks)),
             wasm_tool_runtime.clone(),
             config.wasm.tools_dir.clone(),
             config.channels.wasm_channels_dir.clone(),
@@ -1013,6 +1022,7 @@ async fn main() -> anyhow::Result<()> {
     // Initialize channel manager
     let mut channels = ChannelManager::new();
     let mut channel_names: Vec<String> = Vec::new();
+    let mut loaded_wasm_channel_names: Vec<String> = Vec::new();
 
     if let Some(repl) = repl_channel {
         channels.add(Box::new(repl));
@@ -1045,6 +1055,7 @@ async fn main() -> anyhow::Result<()> {
 
                         for loaded in results.loaded {
                             let channel_name = loaded.name().to_string();
+                            loaded_wasm_channel_names.push(channel_name.clone());
                             tracing::info!("Loaded WASM channel: {}", channel_name);
 
                             let secret_name = loaded.webhook_secret_name();
@@ -1270,8 +1281,27 @@ async fn main() -> anyhow::Result<()> {
     // Create context manager (shared between job tools and agent)
     let context_manager = Arc::new(ContextManager::new(config.agent.max_parallel_jobs));
 
-    // Create hook registry
-    let hooks = Arc::new(HookRegistry::new());
+    // Register bundled/plugin/workspace hooks.
+    let active_tool_names = tools.list().await;
+
+    let hook_bootstrap = bootstrap_hooks(
+        &hooks,
+        workspace.as_ref(),
+        &config.wasm.tools_dir,
+        &config.channels.wasm_channels_dir,
+        &active_tool_names,
+        &loaded_wasm_channel_names,
+        &dev_loaded_tool_names,
+    )
+    .await;
+    tracing::info!(
+        bundled = hook_bootstrap.bundled_hooks,
+        plugin = hook_bootstrap.plugin_hooks,
+        workspace = hook_bootstrap.workspace_hooks,
+        outbound_webhooks = hook_bootstrap.outbound_webhooks,
+        errors = hook_bootstrap.errors,
+        "Lifecycle hooks initialized"
+    );
 
     // Create session manager (shared between agent and web gateway)
     let session_manager = Arc::new(SessionManager::new().with_hooks(hooks.clone()));

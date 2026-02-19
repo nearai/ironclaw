@@ -12,8 +12,14 @@
 //! Hooks are executed in priority order (lower number = higher priority).
 //! Each hook can pass through, modify content, or reject the event.
 
+pub mod bootstrap;
+pub mod bundled;
 pub mod hook;
 pub mod registry;
 
+pub use bootstrap::{HookBootstrapSummary, bootstrap_hooks};
+pub use bundled::{
+    HookBundleConfig, HookRegistrationSummary, register_bundle, register_bundled_hooks,
+};
 pub use hook::{Hook, HookContext, HookError, HookEvent, HookFailureMode, HookOutcome, HookPoint};
 pub use registry::HookRegistry;
