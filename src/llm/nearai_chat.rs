@@ -23,11 +23,23 @@ pub struct NearAiChatProvider {
     client: Client,
     config: NearAiConfig,
     active_model: std::sync::RwLock<String>,
+    flatten_tool_messages: bool,
 }
 
 impl NearAiChatProvider {
     /// Create a new NEAR AI chat completions provider with API key auth.
+    ///
+    /// By default this enables tool-message flattening for compatibility with
+    /// providers that reject `role: "tool"` messages (e.g. NEAR cloud-api).
     pub fn new(config: NearAiConfig) -> Result<Self, LlmError> {
+        Self::new_with_flatten(config, true)
+    }
+
+    /// Create a chat completions provider with configurable tool-message flattening.
+    pub fn new_with_flatten(
+        config: NearAiConfig,
+        flatten_tool_messages: bool,
+    ) -> Result<Self, LlmError> {
         if config.api_key.is_none() {
             return Err(LlmError::AuthFailed {
                 provider: "nearai_chat".to_string(),
@@ -44,15 +56,19 @@ impl NearAiChatProvider {
             client,
             config,
             active_model,
+            flatten_tool_messages,
         })
     }
 
     fn api_url(&self, path: &str) -> String {
-        format!(
-            "{}/v1/{}",
-            self.config.base_url,
-            path.trim_start_matches('/')
-        )
+        let base = self.config.base_url.trim_end_matches('/');
+        let path = path.trim_start_matches('/');
+
+        if base.ends_with("/v1") {
+            format!("{}/{}", base, path)
+        } else {
+            format!("{}/v1/{}", base, path)
+        }
     }
 
     fn api_key(&self) -> String {
@@ -227,8 +243,10 @@ struct ApiModelEntry {
 #[async_trait]
 impl LlmProvider for NearAiChatProvider {
     async fn complete(&self, req: CompletionRequest) -> Result<CompletionResponse, LlmError> {
+        let mut raw_messages = req.messages;
+        crate::llm::provider::sanitize_tool_messages(&mut raw_messages);
         let messages: Vec<ChatCompletionMessage> =
-            req.messages.into_iter().map(|m| m.into()).collect();
+            raw_messages.into_iter().map(|m| m.into()).collect();
 
         let request = ChatCompletionRequest {
             model: self.active_model_name(),
@@ -273,14 +291,18 @@ impl LlmProvider for NearAiChatProvider {
         &self,
         req: ToolCompletionRequest,
     ) -> Result<ToolCompletionResponse, LlmError> {
+        let mut raw_messages = req.messages;
+        crate::llm::provider::sanitize_tool_messages(&mut raw_messages);
         let messages: Vec<ChatCompletionMessage> =
-            req.messages.into_iter().map(|m| m.into()).collect();
+            raw_messages.into_iter().map(|m| m.into()).collect();
 
-        // NEAR AI cloud-api does not support multi-turn tool calling (rejects
-        // any request containing role:"tool" messages with HTTP 400). Rewrite
-        // tool-call / tool-result pairs into plain text so the conversation
-        // history is preserved without using unsupported message roles.
-        let messages = flatten_tool_messages(messages);
+        // Some OpenAI-compatible providers reject `role:"tool"` messages.
+        // When enabled, rewrite tool-call / tool-result pairs into plain text.
+        let messages = if self.flatten_tool_messages {
+            flatten_tool_messages(messages)
+        } else {
+            messages
+        };
 
         let tools: Vec<ChatCompletionTool> = req
             .tools

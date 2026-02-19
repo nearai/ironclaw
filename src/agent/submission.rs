@@ -118,19 +118,19 @@ impl SubmissionParser {
         // Approval responses (simple yes/no/always for pending approvals)
         // These are short enough to check explicitly
         match lower.as_str() {
-            "yes" | "y" | "approve" | "ok" => {
+            "yes" | "y" | "approve" | "ok" | "/approve" | "/yes" | "/y" => {
                 return Submission::ApprovalResponse {
                     approved: true,
                     always: false,
                 };
             }
-            "always" | "yes always" | "approve always" => {
+            "always" | "a" | "yes always" | "approve always" | "/always" | "/a" => {
                 return Submission::ApprovalResponse {
                     approved: true,
                     always: true,
                 };
             }
-            "no" | "n" | "deny" | "reject" | "cancel" => {
+            "no" | "n" | "deny" | "reject" | "cancel" | "/deny" | "/no" | "/n" => {
                 return Submission::ApprovalResponse {
                     approved: false,
                     always: false,

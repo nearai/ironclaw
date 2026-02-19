@@ -12,6 +12,7 @@ pub mod costs;
 pub mod failover;
 mod nearai;
 mod nearai_chat;
+mod openai_compatible_chat;
 mod provider;
 mod reasoning;
 pub mod response_cache;
@@ -23,6 +24,7 @@ pub use circuit_breaker::{CircuitBreakerConfig, CircuitBreakerProvider};
 pub use failover::{CooldownConfig, FailoverProvider};
 pub use nearai::{ModelInfo, NearAiProvider};
 pub use nearai_chat::NearAiChatProvider;
+pub use openai_compatible_chat::OpenAiCompatibleChatProvider;
 pub use provider::{
     ChatMessage, CompletionRequest, CompletionResponse, FinishReason, LlmProvider, ModelMetadata,
     Role, ToolCall, ToolCompletionRequest, ToolCompletionResponse, ToolDefinition, ToolResult,
@@ -40,7 +42,7 @@ use std::sync::Arc;
 use rig::client::CompletionClient;
 use secrecy::ExposeSecret;
 
-use crate::config::{LlmBackend, LlmConfig, NearAiApiMode, NearAiConfig};
+use crate::config::{LlmBackend, LlmConfig, NearAiApiMode, NearAiConfig, OpenAiCompatibleConfig};
 use crate::error::LlmError;
 
 /// Create an LLM provider based on configuration.
@@ -93,12 +95,26 @@ fn create_openai_provider(config: &LlmConfig) -> Result<Arc<dyn LlmProvider>, Ll
         provider: "openai".to_string(),
     })?;
 
+    // When a base_url override is set (e.g. for proxies), use our native
+    // OpenAI-compatible chat provider which handles tool calls more robustly.
+    if let Some(base_url) = oai.base_url.as_ref() {
+        tracing::info!(
+            "Using OpenAI direct API via compatible chat provider (model: {}, base_url: {})",
+            oai.model,
+            base_url,
+        );
+
+        let compat = OpenAiCompatibleConfig {
+            base_url: base_url.clone(),
+            api_key: Some(oai.api_key.clone()),
+            model: oai.model.clone(),
+        };
+
+        return Ok(Arc::new(OpenAiCompatibleChatProvider::new(compat)?));
+    }
+
     use rig::providers::openai;
 
-    // Use CompletionsClient (Chat Completions API) instead of the default Client
-    // (Responses API). The Responses API path in rig-core panics when tool results
-    // are sent back because ironclaw doesn't thread `call_id` through its ToolCall
-    // type. The Chat Completions API works correctly with the existing code.
     let client: openai::CompletionsClient =
         openai::Client::new(oai.api_key.expose_secret())
             .map_err(|e| LlmError::RequestFailed {
@@ -108,7 +124,10 @@ fn create_openai_provider(config: &LlmConfig) -> Result<Arc<dyn LlmProvider>, Ll
             .completions_api();
 
     let model = client.completion_model(&oai.model);
-    tracing::info!("Using OpenAI direct API (model: {})", oai.model);
+    tracing::info!(
+        "Using OpenAI direct API (chat completions, model: {}, base_url: default)",
+        oai.model,
+    );
     Ok(Arc::new(RigAdapter::new(model, &oai.model)))
 }
 
@@ -122,16 +141,25 @@ fn create_anthropic_provider(config: &LlmConfig) -> Result<Arc<dyn LlmProvider>,
 
     use rig::providers::anthropic;
 
-    let client: anthropic::Client =
-        anthropic::Client::new(anth.api_key.expose_secret()).map_err(|e| {
-            LlmError::RequestFailed {
-                provider: "anthropic".to_string(),
-                reason: format!("Failed to create Anthropic client: {}", e),
-            }
-        })?;
+    let client: anthropic::Client = if let Some(ref base_url) = anth.base_url {
+        anthropic::Client::builder()
+            .api_key(anth.api_key.expose_secret())
+            .base_url(base_url)
+            .build()
+    } else {
+        anthropic::Client::new(anth.api_key.expose_secret())
+    }
+    .map_err(|e| LlmError::RequestFailed {
+        provider: "anthropic".to_string(),
+        reason: format!("Failed to create Anthropic client: {}", e),
+    })?;
 
     let model = client.completion_model(&anth.model);
-    tracing::info!("Using Anthropic direct API (model: {})", anth.model);
+    tracing::info!(
+        "Using Anthropic direct API (model: {}, base_url: {})",
+        anth.model,
+        anth.base_url.as_deref().unwrap_or("default"),
+    );
     Ok(Arc::new(RigAdapter::new(model, &anth.model)))
 }
 
@@ -198,32 +226,13 @@ fn create_openai_compatible_provider(config: &LlmConfig) -> Result<Arc<dyn LlmPr
             provider: "openai_compatible".to_string(),
         })?;
 
-    use rig::providers::openai;
-
-    let api_key = compat
-        .api_key
-        .as_ref()
-        .map(|k| k.expose_secret().to_string())
-        .unwrap_or_else(|| "no-key".to_string());
-
-    let client: openai::Client = openai::Client::builder()
-        .base_url(&compat.base_url)
-        .api_key(api_key)
-        .build()
-        .map_err(|e| LlmError::RequestFailed {
-            provider: "openai_compatible".to_string(),
-            reason: format!("Failed to create OpenAI-compatible client: {}", e),
-        })?;
-
-    // OpenAI-compatible providers (e.g. OpenRouter) are most reliable on Chat Completions.
-    // This avoids Responses-API-specific assumptions such as required tool call IDs.
-    let model = client.completions_api().completion_model(&compat.model);
     tracing::info!(
-        "Using OpenAI-compatible endpoint via Chat Completions API (base_url: {}, model: {})",
+        "Using OpenAI-compatible endpoint (chat completions, base_url: {}, model: {})",
         compat.base_url,
         compat.model
     );
-    Ok(Arc::new(RigAdapter::new(model, &compat.model)))
+
+    Ok(Arc::new(OpenAiCompatibleChatProvider::new(compat.clone())?))
 }
 
 /// Create a cheap/fast LLM provider for lightweight tasks (heartbeat, routing, evaluation).

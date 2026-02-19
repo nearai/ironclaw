@@ -400,7 +400,9 @@ where
     }
 
     async fn complete(&self, request: CompletionRequest) -> Result<CompletionResponse, LlmError> {
-        let (preamble, history) = convert_messages(&request.messages);
+        let mut messages = request.messages;
+        crate::llm::provider::sanitize_tool_messages(&mut messages);
+        let (preamble, history) = convert_messages(&messages);
 
         let rig_req = build_rig_request(
             preamble,

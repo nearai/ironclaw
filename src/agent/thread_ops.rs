@@ -712,6 +712,7 @@ impl Agent {
 
             // Build context including the tool result
             let mut context_messages = pending.context_messages;
+            let deferred_tool_calls = pending.deferred_tool_calls;
 
             // Record result in thread
             {
@@ -779,6 +780,69 @@ impl Agent {
                 &pending.tool_name,
                 result_content,
             ));
+
+            // Execute deferred tool calls from the same assistant message
+            if !deferred_tool_calls.is_empty() {
+                let _ = self
+                    .channels
+                    .send_status(
+                        &message.channel,
+                        StatusUpdate::Thinking(format!(
+                            "Executing {} deferred tool(s)...",
+                            deferred_tool_calls.len()
+                        )),
+                        &message.metadata,
+                    )
+                    .await;
+            }
+
+            for tc in deferred_tool_calls {
+                let _ = self
+                    .channels
+                    .send_status(
+                        &message.channel,
+                        StatusUpdate::ToolStarted {
+                            name: tc.name.clone(),
+                        },
+                        &message.metadata,
+                    )
+                    .await;
+
+                let deferred_result = self
+                    .execute_chat_tool(&tc.name, &tc.arguments, &job_ctx)
+                    .await;
+
+                let _ = self
+                    .channels
+                    .send_status(
+                        &message.channel,
+                        StatusUpdate::ToolCompleted {
+                            name: tc.name.clone(),
+                            success: deferred_result.is_ok(),
+                        },
+                        &message.metadata,
+                    )
+                    .await;
+
+                let deferred_content = match deferred_result {
+                    Ok(output) => {
+                        let sanitized =
+                            self.safety().sanitize_tool_output(&tc.name, &output);
+                        self.safety().wrap_for_llm(
+                            &tc.name,
+                            &sanitized.content,
+                            sanitized.was_modified,
+                        )
+                    }
+                    Err(e) => format!("Error: {}", e),
+                };
+
+                context_messages.push(ChatMessage::tool_result(
+                    &tc.id,
+                    &tc.name,
+                    deferred_content,
+                ));
+            }
 
             // Continue the agentic loop (a tool was already executed this turn)
             let result = self
