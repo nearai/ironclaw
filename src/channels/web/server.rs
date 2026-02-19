@@ -305,6 +305,7 @@ pub async fn start_server(
         .merge(statics)
         .merge(projects)
         .merge(protected)
+        .layer(DefaultBodyLimit::max(1024 * 1024)) // 1 MB max request body
         .layer(cors)
         .layer(SetResponseHeaderLayer::if_not_present(
             header::X_CONTENT_TYPE_OPTIONS,
@@ -314,7 +315,6 @@ pub async fn start_server(
             header::X_FRAME_OPTIONS,
             header::HeaderValue::from_static("DENY"),
         ))
-        .layer(DefaultBodyLimit::max(1024 * 1024)) // 1 MB max request body
         .with_state(state.clone());
 
     let (shutdown_tx, shutdown_rx) = oneshot::channel();
