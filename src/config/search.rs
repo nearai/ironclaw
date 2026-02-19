@@ -9,9 +9,9 @@ pub struct WorkspaceSearchConfig {
     pub fusion_strategy: FusionStrategy,
     /// RRF constant k (default 60).
     pub rrf_k: u32,
-    /// FTS weight for weighted fusion (default 0.7).
+    /// FTS weight for weighted fusion (default 0.3).
     pub fts_weight: f32,
-    /// Vector weight for weighted fusion (default 0.3).
+    /// Vector weight for weighted fusion (default 0.7).
     pub vector_weight: f32,
 }
 
@@ -20,8 +20,8 @@ impl Default for WorkspaceSearchConfig {
         Self {
             fusion_strategy: FusionStrategy::default(),
             rrf_k: 60,
-            fts_weight: 0.7,
-            vector_weight: 0.3,
+            fts_weight: 0.3,
+            vector_weight: 0.7,
         }
     }
 }
@@ -43,8 +43,8 @@ impl WorkspaceSearchConfig {
         };
 
         let rrf_k = parse_optional_env("SEARCH_RRF_K", 60u32)?;
-        let fts_weight = parse_optional_env("SEARCH_FTS_WEIGHT", 0.7f32)?;
-        let vector_weight = parse_optional_env("SEARCH_VECTOR_WEIGHT", 0.3f32)?;
+        let fts_weight = parse_optional_env("SEARCH_FTS_WEIGHT", 0.3f32)?;
+        let vector_weight = parse_optional_env("SEARCH_VECTOR_WEIGHT", 0.7f32)?;
 
         Ok(Self {
             fusion_strategy,
@@ -80,8 +80,8 @@ mod tests {
         let config = WorkspaceSearchConfig::resolve().expect("should resolve");
         assert_eq!(config.fusion_strategy, FusionStrategy::Rrf);
         assert_eq!(config.rrf_k, 60);
-        assert!((config.fts_weight - 0.7).abs() < 0.001);
-        assert!((config.vector_weight - 0.3).abs() < 0.001);
+        assert!((config.fts_weight - 0.3).abs() < 0.001);
+        assert!((config.vector_weight - 0.7).abs() < 0.001);
     }
 
     #[test]
