@@ -157,10 +157,10 @@ fn normalize_schema_recursive(schema: &mut JsonValue) {
                 normalize_schema_recursive(prop_schema);
             }
             // Then make originally-optional properties nullable
-            if !current_required.contains(key) {
-                if let Some(prop_schema) = props.get_mut(key) {
-                    make_nullable(prop_schema);
-                }
+            if !current_required.contains(key)
+                && let Some(prop_schema) = props.get_mut(key)
+            {
+                make_nullable(prop_schema);
             }
         }
     }
@@ -400,7 +400,9 @@ where
     }
 
     async fn complete(&self, request: CompletionRequest) -> Result<CompletionResponse, LlmError> {
-        let (preamble, history) = convert_messages(&request.messages);
+        let mut messages = request.messages;
+        crate::llm::provider::sanitize_tool_messages(&mut messages);
+        let (preamble, history) = convert_messages(&messages);
 
         let rig_req = build_rig_request(
             preamble,
@@ -435,7 +437,9 @@ where
         &self,
         request: ToolCompletionRequest,
     ) -> Result<ToolCompletionResponse, LlmError> {
-        let (preamble, history) = convert_messages(&request.messages);
+        let mut messages = request.messages;
+        crate::llm::provider::sanitize_tool_messages(&mut messages);
+        let (preamble, history) = convert_messages(&messages);
         let tools = convert_tools(&request.tools);
         let tool_choice = convert_tool_choice(request.tool_choice.as_deref());
 

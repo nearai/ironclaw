@@ -1080,28 +1080,28 @@ impl SetupWizard {
             return Ok(());
         }
 
-        // If no NEAR AI session and no OpenAI key, only OpenAI is viable
-        if !has_nearai && !has_openai_key {
-            print_info("No NEAR AI session or OpenAI key found for embeddings.");
-            print_info("Set OPENAI_API_KEY in your environment to enable embeddings.");
+        // Build list of available providers
+        let mut options: Vec<&str> = Vec::new();
+        let mut provider_keys: Vec<&str> = Vec::new();
+
+        if has_nearai {
+            options.push("NEAR AI (uses same auth, no extra cost)");
+            provider_keys.push("nearai");
+        }
+        options.push("OpenAI (requires API key)");
+        provider_keys.push("openai");
+        options.push("Ollama (local, no API key needed)");
+        provider_keys.push("ollama");
+
+        if options.is_empty() {
+            print_info("No embedding providers available.");
+            print_info("Install Ollama locally, or set OPENAI_API_KEY to enable embeddings.");
             self.settings.embeddings.enabled = false;
             return Ok(());
         }
 
-        let mut options = Vec::new();
-        if has_nearai {
-            options.push("NEAR AI (uses same auth, no extra cost)");
-        }
-        options.push("OpenAI (requires API key)");
-
         let choice = select_one("Select embeddings provider:", &options).map_err(SetupError::Io)?;
-
-        // Map choice back to provider name
-        let provider = if has_nearai && choice == 0 {
-            "nearai"
-        } else {
-            "openai"
-        };
+        let provider = provider_keys[choice];
 
         match provider {
             "nearai" => {
@@ -1109,6 +1109,20 @@ impl SetupWizard {
                 self.settings.embeddings.provider = "nearai".to_string();
                 self.settings.embeddings.model = "text-embedding-3-small".to_string();
                 print_success("Embeddings enabled via NEAR AI");
+            }
+            "ollama" => {
+                let base_url = std::env::var("OLLAMA_BASE_URL")
+                    .unwrap_or_else(|_| "http://localhost:11434".to_string());
+                self.settings.ollama_base_url = Some(base_url.clone());
+                self.settings.embeddings.enabled = true;
+                self.settings.embeddings.provider = "ollama".to_string();
+                self.settings.embeddings.model = "nomic-embed-text".to_string();
+                print_success(&format!(
+                    "Embeddings enabled via Ollama at {base_url} (model: nomic-embed-text)"
+                ));
+                print_info(
+                    "Run `ollama pull nomic-embed-text` if you haven't already.",
+                );
             }
             _ => {
                 if !has_openai_key {

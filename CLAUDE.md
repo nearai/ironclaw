@@ -113,11 +113,19 @@ src/
 │   ├── policy.rs       # PolicyRule system with severity/actions
 │   └── leak_detector.rs # Secret detection (API keys, tokens, etc.)
 │
-├── llm/                # LLM integration (NEAR AI only)
-│   ├── provider.rs     # LlmProvider trait, message types
-│   ├── nearai.rs       # NEAR AI chat-api implementation
+├── llm/                # LLM integration (multi-provider)
+│   ├── provider.rs     # LlmProvider trait, message types, sanitize_tool_messages
+│   ├── nearai.rs       # NEAR AI Responses API implementation
+│   ├── nearai_chat.rs  # NEAR AI Chat Completions API provider
+│   ├── openai_compatible_chat.rs # OpenAI-compatible Chat Completions (vLLM, LiteLLM, etc.)
+│   ├── rig_adapter.rs  # Rig framework adapter (OpenAI/Anthropic direct)
 │   ├── reasoning.rs    # Planning, tool selection, evaluation
-│   └── session.rs      # Session token management with auto-renewal
+│   ├── session.rs      # Session token management with auto-renewal
+│   ├── retry.rs        # Retry logic with exponential backoff
+│   ├── failover.rs     # Provider failover chain
+│   ├── circuit_breaker.rs # Circuit breaker for provider health
+│   ├── response_cache.rs # Response caching
+│   └── costs.rs        # Per-model cost tables
 │
 ├── tools/              # Extensible tool system
 │   ├── tool.rs         # Tool trait, ToolOutput, ToolError
@@ -161,7 +169,7 @@ src/
 │   ├── mod.rs          # Workspace struct, memory operations
 │   ├── document.rs     # MemoryDocument, MemoryChunk, WorkspaceEntry
 │   ├── chunker.rs      # Document chunking (800 tokens, 15% overlap)
-│   ├── embeddings.rs   # EmbeddingProvider trait, OpenAI implementation
+│   ├── embeddings.rs   # EmbeddingProvider trait (OpenAI, NEAR AI, Ollama)
 │   ├── search.rs       # Hybrid search with RRF algorithm
 │   └── repository.rs   # PostgreSQL CRUD and search operations
 │
@@ -276,8 +284,16 @@ MAX_PARALLEL_JOBS=5
 OPENAI_API_KEY=sk-...                   # For OpenAI embeddings
 # Or use NEAR AI embeddings:
 # EMBEDDING_PROVIDER=nearai
+# Or use Ollama embeddings:
+# EMBEDDING_PROVIDER=ollama
+# OLLAMA_BASE_URL=http://localhost:11434
 # EMBEDDING_ENABLED=true
-EMBEDDING_MODEL=text-embedding-3-small  # or text-embedding-3-large
+EMBEDDING_MODEL=text-embedding-3-small  # or text-embedding-3-large, nomic-embed-text
+# EMBEDDING_DIMENSION=1536             # Auto-detected from model; override if needed
+
+# OpenAI/Anthropic direct (override base URL for proxies)
+# OPENAI_BASE_URL=http://localhost:8318
+# ANTHROPIC_BASE_URL=http://localhost:8318
 
 # Heartbeat (proactive periodic execution)
 HEARTBEAT_ENABLED=true
@@ -310,12 +326,14 @@ ROUTINES_CRON_INTERVAL=60            # Tick interval in seconds
 ROUTINES_MAX_CONCURRENT=3
 ```
 
-### NEAR AI Provider
+### LLM Providers
 
-Uses the NEAR AI chat-api (`https://api.near.ai/v1/responses`) which provides:
-- Unified access to multiple models (OpenAI, Anthropic, etc.)
-- User authentication via session tokens
-- Usage tracking and billing through NEAR AI
+IronClaw supports multiple LLM providers:
+
+- **NEAR AI** (`nearai`, `nearai_chat`) — Uses the NEAR AI chat-api (`https://api.near.ai/v1/responses`) with session token auth. Unified access to multiple models (OpenAI, Anthropic, etc.) with usage tracking.
+- **OpenAI Direct** (`rig_adapter`) — Direct OpenAI API via `OPENAI_API_KEY`. Supports `OPENAI_BASE_URL` for proxies.
+- **Anthropic Direct** (`rig_adapter`) — Direct Anthropic API via `ANTHROPIC_API_KEY`. Supports `ANTHROPIC_BASE_URL` for proxies.
+- **OpenAI-Compatible** (`openai_compatible_chat`) — Any `/v1/chat/completions` endpoint (vLLM, LiteLLM, local proxies). Robust tool-call name reconciliation, retry with backoff.
 
 Session tokens have the format `sess_xxx` (37 characters). They are authenticated against the NEAR AI auth service.
 
@@ -457,7 +475,7 @@ Key test patterns:
 - ✅ **WASM sandboxing** - Full implementation in `tools/wasm/` with fuel metering, memory limits, capabilities
 - ✅ **Dynamic tool building** - `tools/builder/` has LlmSoftwareBuilder with iterative build loop
 - ✅ **HTTP webhook security** - Secret validation implemented, proper error handling (no panics)
-- ✅ **Embeddings integration** - OpenAI and NEAR AI providers wired to workspace for semantic search
+- ✅ **Embeddings integration** - OpenAI, NEAR AI, and Ollama providers wired to workspace for semantic search
 - ✅ **Workspace system prompt** - Identity files (AGENTS.md, SOUL.md, USER.md, IDENTITY.md) injected into LLM context
 - ✅ **Heartbeat notifications** - Route through channel manager (broadcast API) instead of logging-only
 - ✅ **Auto-context compaction** - Triggers automatically when context exceeds threshold

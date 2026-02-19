@@ -42,7 +42,9 @@ use ironclaw::{
         mcp::{McpClient, McpSessionManager, config::load_mcp_servers_from_db, is_authenticated},
         wasm::{WasmToolLoader, WasmToolRuntime, load_dev_tools},
     },
-    workspace::{EmbeddingProvider, NearAiEmbeddings, OpenAiEmbeddings, Workspace},
+    workspace::{
+        EmbeddingProvider, NearAiEmbeddings, OllamaEmbeddings, OpenAiEmbeddings, Workspace,
+    },
 };
 
 #[cfg(feature = "libsql")]
@@ -115,18 +117,26 @@ async fn main() -> anyhow::Result<()> {
                                 &config.llm.nearai.base_url,
                                 session,
                             )
-                            .with_model(&config.embeddings.model, 1536),
+                            .with_model(
+                                &config.embeddings.model,
+                                config.embeddings.effective_dimension(),
+                            ),
+                        )),
+                        "ollama" => Some(Arc::new(
+                            ironclaw::workspace::OllamaEmbeddings::new(
+                                &config.embeddings.ollama_base_url,
+                            )
+                            .with_model(
+                                &config.embeddings.model,
+                                config.embeddings.effective_dimension(),
+                            ),
                         )),
                         _ => {
                             if let Some(api_key) = config.embeddings.openai_api_key() {
-                                let dim = match config.embeddings.model.as_str() {
-                                    "text-embedding-3-large" => 3072,
-                                    _ => 1536,
-                                };
                                 Some(Arc::new(ironclaw::workspace::OpenAiEmbeddings::with_model(
                                     api_key,
                                     &config.embeddings.model,
-                                    dim,
+                                    config.embeddings.effective_dimension(),
                                 )))
                             } else {
                                 None
@@ -690,7 +700,25 @@ async fn main() -> anyhow::Result<()> {
                 );
                 Some(Arc::new(
                     NearAiEmbeddings::new(&config.llm.nearai.base_url, session.clone())
-                        .with_model(&config.embeddings.model, 1536),
+                        .with_model(
+                            &config.embeddings.model,
+                            config.embeddings.effective_dimension(),
+                        ),
+                ))
+            }
+            "ollama" => {
+                tracing::info!(
+                    "Embeddings enabled via Ollama (model: {}, dim: {}, url: {})",
+                    config.embeddings.model,
+                    config.embeddings.effective_dimension(),
+                    config.embeddings.ollama_base_url,
+                );
+                Some(Arc::new(
+                    OllamaEmbeddings::new(&config.embeddings.ollama_base_url)
+                        .with_model(
+                            &config.embeddings.model,
+                            config.embeddings.effective_dimension(),
+                        ),
                 ))
             }
             _ => {
@@ -703,10 +731,7 @@ async fn main() -> anyhow::Result<()> {
                     Some(Arc::new(OpenAiEmbeddings::with_model(
                         api_key,
                         &config.embeddings.model,
-                        match config.embeddings.model.as_str() {
-                            "text-embedding-3-large" => 3072,
-                            _ => 1536, // text-embedding-3-small and ada-002
-                        },
+                        config.embeddings.effective_dimension(),
                     )))
                 } else {
                     tracing::warn!("Embeddings configured but OPENAI_API_KEY not set");
