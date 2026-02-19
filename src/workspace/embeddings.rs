@@ -455,6 +455,18 @@ impl EmbeddingProvider for OllamaEmbeddings {
             EmbeddingError::InvalidResponse(format!("Failed to parse Ollama response: {}", e))
         })?;
 
+        // Validate that returned embeddings match the configured dimension.
+        for (i, emb) in result.embeddings.iter().enumerate() {
+            if emb.len() != self.dimension {
+                return Err(EmbeddingError::InvalidResponse(format!(
+                    "Ollama returned embedding of dimension {}, expected {} at index {}",
+                    emb.len(),
+                    self.dimension,
+                    i
+                )));
+            }
+        }
+
         Ok(result.embeddings)
     }
 }

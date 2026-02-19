@@ -174,7 +174,10 @@ impl NearAiProvider {
             })?;
 
         let status = response.status();
-        let response_text = response.text().await.unwrap_or_default();
+        let response_text = response.text().await.map_err(|e| LlmError::RequestFailed {
+            provider: "nearai".to_string(),
+            reason: format!("Failed to read response body: {}", e),
+        })?;
 
         if !status.is_success() {
             if status.as_u16() == 401 {
@@ -326,7 +329,10 @@ impl NearAiProvider {
             })?;
 
         let status = response.status();
-        let response_text = response.text().await.unwrap_or_default();
+        let response_text = response.text().await.map_err(|e| LlmError::RequestFailed {
+            provider: "nearai".to_string(),
+            reason: format!("Failed to read response body: {}", e),
+        })?;
 
         tracing::debug!("NEAR AI response status: {}", status);
         tracing::debug!("NEAR AI response body: {}", response_text);

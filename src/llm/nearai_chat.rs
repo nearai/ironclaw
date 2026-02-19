@@ -113,7 +113,10 @@ impl NearAiChatProvider {
             })?;
 
         let status = response.status();
-        let response_text = response.text().await.unwrap_or_default();
+        let response_text = response.text().await.map_err(|e| LlmError::RequestFailed {
+            provider: "nearai_chat".to_string(),
+            reason: format!("Failed to read response body: {}", e),
+        })?;
 
         tracing::debug!("NEAR AI Chat response status: {}", status);
         tracing::debug!("NEAR AI Chat response body: {}", response_text);
@@ -166,7 +169,10 @@ impl NearAiChatProvider {
             })?;
 
         let status = response.status();
-        let response_text = response.text().await.unwrap_or_default();
+        let response_text = response.text().await.map_err(|e| LlmError::RequestFailed {
+            provider: "nearai_chat".to_string(),
+            reason: format!("Failed to read response body: {}", e),
+        })?;
 
         if !status.is_success() {
             let truncated = crate::agent::truncate_for_preview(&response_text, 512);

@@ -141,6 +141,23 @@ async fn main() -> anyhow::Result<()> {
                     None
                 };
 
+            // Warn if libSQL backend is used with non-1536 embedding dimension.
+            // libSQL schema uses F32_BLOB(1536) which cannot be altered without a
+            // table rebuild, so non-1536 embeddings will cause storage failures.
+            if config.database.backend == ironclaw::config::DatabaseBackend::LibSql
+                && config.embeddings.enabled
+                && config.embeddings.dimension != 1536
+            {
+                tracing::warn!(
+                    configured_dimension = config.embeddings.dimension,
+                    "Embedding dimension {} is not 1536. The libSQL schema uses \
+                     F32_BLOB(1536) which requires exactly 1536 dimensions. \
+                     Embedding storage will fail. Use PostgreSQL or set \
+                     EMBEDDING_DIMENSION=1536.",
+                    config.embeddings.dimension
+                );
+            }
+
             // Create a Database-trait-backed workspace for the memory command
             let db: Arc<dyn ironclaw::db::Database> =
                 ironclaw::db::connect_from_config(&config.database)
@@ -755,6 +772,21 @@ async fn main() -> anyhow::Result<()> {
         tracing::info!("Embeddings disabled (set OPENAI_API_KEY or EMBEDDING_ENABLED=true)");
         None
     };
+
+    // Warn if libSQL backend is used with non-1536 embedding dimension.
+    if config.database.backend == ironclaw::config::DatabaseBackend::LibSql
+        && config.embeddings.enabled
+        && config.embeddings.dimension != 1536
+    {
+        tracing::warn!(
+            configured_dimension = config.embeddings.dimension,
+            "Embedding dimension {} is not 1536. The libSQL schema uses \
+             F32_BLOB(1536) which requires exactly 1536 dimensions. \
+             Embedding storage will fail. Use PostgreSQL or set \
+             EMBEDDING_DIMENSION=1536.",
+            config.embeddings.dimension
+        );
+    }
 
     // Register memory tools if database is available
     if let Some(ref db) = db {
