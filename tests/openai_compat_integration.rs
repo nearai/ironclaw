@@ -580,6 +580,41 @@ async fn test_chat_completions_model_with_control_chars() {
 }
 
 #[tokio::test]
+async fn test_chat_completions_model_with_surrounding_whitespace() {
+    let (addr, _state, mock_state) = start_test_server().await;
+    let url = format!("http://{}/v1/chat/completions", addr);
+
+    let resp = client()
+        .post(&url)
+        .bearer_auth(AUTH_TOKEN)
+        .json(&serde_json::json!({
+            "model": " gpt-4 ",
+            "messages": [{"role": "user", "content": "Hi"}]
+        }))
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), 400);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert!(
+        body["error"]["message"]
+            .as_str()
+            .unwrap_or("")
+            .contains("leading or trailing whitespace"),
+        "Expected model validation error, got: {}",
+        body
+    );
+
+    let models = mock_state.completion_models.lock().await;
+    assert!(
+        models.is_empty(),
+        "provider should not be called: {:?}",
+        *models
+    );
+}
+
+#[tokio::test]
 async fn test_chat_completions_no_auth() {
     let (addr, _state, _mock_state) = start_test_server().await;
     let url = format!("http://{}/v1/chat/completions", addr);

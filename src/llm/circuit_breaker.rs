@@ -273,6 +273,10 @@ impl LlmProvider for CircuitBreakerProvider {
         self.inner.model_metadata().await
     }
 
+    fn effective_model_name(&self, requested_model: Option<&str>) -> String {
+        self.inner.effective_model_name(requested_model)
+    }
+
     fn active_model_name(&self) -> String {
         self.inner.active_model_name()
     }

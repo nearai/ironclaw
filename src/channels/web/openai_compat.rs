@@ -383,8 +383,13 @@ fn unix_timestamp() -> u64 {
 }
 
 fn validate_model_name(model: &str) -> Result<(), String> {
-    if model.trim().is_empty() {
+    let trimmed = model.trim();
+
+    if trimmed.is_empty() {
         return Err("model must not be empty".to_string());
+    }
+    if trimmed != model {
+        return Err("model must not have leading or trailing whitespace".to_string());
     }
     if model.len() > MAX_MODEL_NAME_BYTES {
         return Err(format!(
@@ -1098,5 +1103,19 @@ mod tests {
     fn test_parse_stop_null() {
         let v = serde_json::Value::Null;
         assert_eq!(parse_stop(&v), None);
+    }
+
+    #[test]
+    fn test_validate_model_name_rejects_leading_or_trailing_whitespace() {
+        let err = validate_model_name(" gpt-4").unwrap_err();
+        assert!(err.contains("leading or trailing whitespace"));
+
+        let err = validate_model_name("gpt-4 ").unwrap_err();
+        assert!(err.contains("leading or trailing whitespace"));
+    }
+
+    #[test]
+    fn test_validate_model_name_accepts_normal_name() {
+        assert!(validate_model_name("gpt-4").is_ok());
     }
 }

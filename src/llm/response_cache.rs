@@ -144,7 +144,8 @@ impl LlmProvider for CachedProvider {
     }
 
     async fn complete(&self, request: CompletionRequest) -> Result<CompletionResponse, LlmError> {
-        let key = cache_key(self.inner.model_name(), &request);
+        let effective_model = self.inner.effective_model_name(request.model.as_deref());
+        let key = cache_key(&effective_model, &request);
         let now = Instant::now();
 
         // Check cache
@@ -214,6 +215,10 @@ impl LlmProvider for CachedProvider {
 
     async fn model_metadata(&self) -> Result<ModelMetadata, LlmError> {
         self.inner.model_metadata().await
+    }
+
+    fn effective_model_name(&self, requested_model: Option<&str>) -> String {
+        self.inner.effective_model_name(requested_model)
     }
 
     fn active_model_name(&self) -> String {
@@ -446,6 +451,23 @@ mod tests {
 
         cached.clear().await;
         assert!(cached.is_empty().await);
+    }
+
+    #[tokio::test]
+    async fn model_override_gets_distinct_cache_entries() {
+        let stub = Arc::new(StubLlm::new("cached response"));
+        let cached = CachedProvider::new(stub.clone(), ResponseCacheConfig::default());
+
+        let mut req_a = simple_request();
+        req_a.model = Some("model-a".to_string());
+        let mut req_b = simple_request();
+        req_b.model = Some("model-b".to_string());
+
+        cached.complete(req_a).await.unwrap();
+        cached.complete(req_b).await.unwrap();
+
+        assert_eq!(stub.calls(), 2);
+        assert_eq!(cached.len().await, 2);
     }
 
     #[test]
