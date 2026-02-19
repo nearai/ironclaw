@@ -1161,7 +1161,26 @@ fn cdp_screenshot(
         Some(capture_params),
     )?;
 
-    let data = result.get("data").and_then(Value::as_str).unwrap_or("");
+    let data = result
+        .get("data")
+        .and_then(Value::as_str)
+        .ok_or_else(|| DispatchFailure {
+            error: StructuredError::new(
+                ERR_NETWORK_FAILURE,
+                "Screenshot response missing PNG payload",
+            )
+            .with_details(result.clone()),
+            attempts: 1,
+        })?;
+
+    if data.trim().is_empty() {
+        return Err(DispatchFailure {
+            error: StructuredError::new(ERR_NETWORK_FAILURE, "Screenshot payload is empty")
+                .with_details(result),
+            attempts: 1,
+        });
+    }
+
     ok_success(json!({
         "screenshot": data,
         "mimeType": "image/png"

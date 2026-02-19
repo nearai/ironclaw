@@ -157,10 +157,10 @@ fn normalize_schema_recursive(schema: &mut JsonValue) {
                 normalize_schema_recursive(prop_schema);
             }
             // Then make originally-optional properties nullable
-            if !current_required.contains(key) {
-                if let Some(prop_schema) = props.get_mut(key) {
-                    make_nullable(prop_schema);
-                }
+            if !current_required.contains(key)
+                && let Some(prop_schema) = props.get_mut(key)
+            {
+                make_nullable(prop_schema);
             }
         }
     }

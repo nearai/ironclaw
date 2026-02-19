@@ -395,7 +395,10 @@ impl WebSocketCapabilitySchema {
             cap.read_timeout = Duration::from_secs(secs);
         }
 
-        cap
+        // Session-based tools (e.g. browser-use) rely on ws-connect-pooled to
+        // persist browser context across invocations. Enable pooling whenever
+        // websocket capability is declared from JSON.
+        cap.with_pool()
     }
 }
 
@@ -884,6 +887,21 @@ mod tests {
                 "max_request_bytes": 32768,
                 "max_response_bytes": 524288
             },
+            "websocket": {
+                "allowlist": [
+                    {
+                        "host": "127.0.0.1",
+                        "port": 9222
+                    }
+                ],
+                "rate_limit": {
+                    "requests_per_minute": 10,
+                    "requests_per_hour": 100
+                },
+                "max_message_bytes": 1048576,
+                "connect_timeout_secs": 10,
+                "read_timeout_secs": 30
+            },
             "secrets": {
                 "allowed_names": []
             }
@@ -908,6 +926,17 @@ mod tests {
         assert_eq!(http.timeout.as_secs(), 30);
         assert_eq!(http.rate_limit.requests_per_minute, 30);
         assert_eq!(http.rate_limit.requests_per_hour, 600);
+
+        let websocket = runtime_caps
+            .websocket
+            .expect("websocket capability should exist");
+        assert_eq!(websocket.allowlist.len(), 1);
+        assert_eq!(websocket.allowlist[0].host, "127.0.0.1");
+        assert_eq!(websocket.allowlist[0].port, Some(9222));
+        assert!(
+            websocket.connection_pool.is_some(),
+            "websocket capability from JSON should enable pooling"
+        );
 
         let secrets = runtime_caps
             .secrets
