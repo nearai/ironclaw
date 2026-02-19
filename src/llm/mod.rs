@@ -15,6 +15,7 @@ mod provider;
 mod reasoning;
 mod retry;
 mod rig_adapter;
+pub mod routing;
 pub mod session;
 
 pub use failover::FailoverProvider;
