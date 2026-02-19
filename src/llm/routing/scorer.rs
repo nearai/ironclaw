@@ -150,7 +150,9 @@ lazy_static! {
         r"(?i)\b(previous|earlier|above|before|last|that|those|it|they|we discussed|you said|mentioned|remember|recall|as I said|like I mentioned)\b"
     ).unwrap();
 
-    // Domain-specific terms (configurable, but sensible defaults)
+    // Domain-specific terms
+    // TODO: Make configurable via ScorerConfig for project-specific keywords.
+    // Current list covers common web3/infra terms as sensible defaults.
     static ref RE_DOMAIN: Regex = Regex::new(
         r"(?i)\b(kubernetes|k8s|docker|terraform|solidity|rust|typescript|react|nextjs|vue|angular|svelte|postgresql|postgres|mysql|mongodb|redis|graphql|grpc|protobuf|websocket|oauth|jwt|cors|csrf|xss|sql.?injection|api|rest|http|https|tcp|udp|dns|cdn|aws|gcp|azure|vercel|netlify|cloudflare|nginx|apache|linux|unix|bash|shell|git|github|gitlab|ci/cd|devops|blockchain|web3|ethereum|near|solana|defi|nft|smart.?contract|near.?sdk|near.?api|testnet|mainnet|fogo|lobo|trezu|multisig|treasury|openclaw|ironclaw|substack|anchor|svm|firedancer|paymaster|gasless|sessions.?sdk|cargo.?near|workspaces|sandbox|rpc|indexer|relayer|cross.?chain|intents|meteor|ledger|cold.?wallet)\b"
     ).unwrap();
@@ -201,7 +203,7 @@ pub fn score_complexity_with_weights(prompt: &str, weights: &ScorerWeights) -> S
             "standard" => Tier::Standard,
             "pro" => Tier::Pro,
             "frontier" => Tier::Frontier,
-            _ => Tier::Standard,
+            _ => unreachable!("RE_TIER_HINT regex should only capture valid tiers"),
         };
         hints.push(format!("Explicit tier hint: {}", tier));
         return ScoreBreakdown {
@@ -310,20 +312,24 @@ pub fn score_complexity_with_weights(prompt: &str, weights: &ScorerWeights) -> S
     }
 
     // Calculate weighted total
-    let mut total: f32 = 0.0;
-    total += components.get("reasoning_words").copied().unwrap_or(0) as f32 * weights.reasoning_words;
-    total += components.get("token_estimate").copied().unwrap_or(0) as f32 * weights.token_estimate;
-    total += components.get("code_indicators").copied().unwrap_or(0) as f32 * weights.code_indicators;
-    total += components.get("multi_step").copied().unwrap_or(0) as f32 * weights.multi_step;
-    total += components.get("domain_specific").copied().unwrap_or(0) as f32 * weights.domain_specific;
-    total += components.get("ambiguity").copied().unwrap_or(0) as f32 * weights.ambiguity;
-    total += components.get("creativity").copied().unwrap_or(0) as f32 * weights.creativity;
-    total += components.get("precision").copied().unwrap_or(0) as f32 * weights.precision;
-    total += components.get("context_dependency").copied().unwrap_or(0) as f32 * weights.context_dependency;
-    total += components.get("tool_likelihood").copied().unwrap_or(0) as f32 * weights.tool_likelihood;
-    total += components.get("safety_sensitivity").copied().unwrap_or(0) as f32 * weights.safety_sensitivity;
-    total += components.get("question_complexity").copied().unwrap_or(0) as f32 * weights.question_complexity;
-    total += components.get("sentence_complexity").copied().unwrap_or(0) as f32 * weights.sentence_complexity;
+    let mut total: f32 = [
+        ("reasoning_words", weights.reasoning_words),
+        ("token_estimate", weights.token_estimate),
+        ("code_indicators", weights.code_indicators),
+        ("multi_step", weights.multi_step),
+        ("domain_specific", weights.domain_specific),
+        ("ambiguity", weights.ambiguity),
+        ("creativity", weights.creativity),
+        ("precision", weights.precision),
+        ("context_dependency", weights.context_dependency),
+        ("tool_likelihood", weights.tool_likelihood),
+        ("safety_sensitivity", weights.safety_sensitivity),
+        ("question_complexity", weights.question_complexity),
+        ("sentence_complexity", weights.sentence_complexity),
+    ]
+    .iter()
+    .map(|(name, weight)| components.get(*name).copied().unwrap_or(0) as f32 * weight)
+    .sum();
 
     // Multi-dimensional boost: +30% when 3+ dimensions fire above threshold
     let triggered_dimensions = components.values().filter(|&&v| v > 20).count();

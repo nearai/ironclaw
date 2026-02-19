@@ -7,6 +7,7 @@ use lazy_static::lazy_static;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use tracing;
 
 use super::scorer::{score_complexity, ScoreBreakdown, Tier};
 
@@ -114,9 +115,18 @@ impl Router {
                     "standard" => Tier::Standard,
                     "pro" => Tier::Pro,
                     "frontier" => Tier::Frontier,
-                    _ => return None,
+                    invalid_tier => {
+                        tracing::warn!(tier = %invalid_tier, pattern = %o.pattern, "Ignoring invalid tier in pattern override");
+                        return None;
+                    }
                 };
-                Regex::new(&o.pattern).ok().map(|re| (re, tier))
+                match Regex::new(&o.pattern) {
+                    Ok(re) => Some((re, tier)),
+                    Err(e) => {
+                        tracing::warn!(pattern = %o.pattern, error = %e, "Ignoring invalid regex pattern in override");
+                        None
+                    }
+                }
             })
             .collect();
 
