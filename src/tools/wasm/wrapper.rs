@@ -992,51 +992,36 @@ async fn resolve_host_credentials(
 /// Also handles IPv6 bracket notation like `http://[::1]:8080/path`.
 /// Returns None for malformed URLs.
 fn extract_host_from_url(url: &str) -> Option<String> {
-    let after_scheme = url
-        .strip_prefix("https://")
-        .or_else(|| url.strip_prefix("http://"))?;
-    let end = after_scheme
-        .find(['/', '?', '#'])
-        .unwrap_or(after_scheme.len());
-    let host_port = &after_scheme[..end];
-    // Strip userinfo (user:pass@host)
-    let after_userinfo = host_port
-        .rfind('@')
-        .map(|i| &host_port[i + 1..])
-        .unwrap_or(host_port);
-    // Handle IPv6 bracket notation: [::1]:port -> ::1
-    if after_userinfo.starts_with('[') {
-        let closing = after_userinfo.find(']')?;
-        return Some(after_userinfo[1..closing].to_string());
+    let parsed = url::Url::parse(url).ok()?;
+    if !matches!(parsed.scheme(), "http" | "https") {
+        return None;
     }
-    // Regular host:port -> host
-    let host = after_userinfo
-        .rfind(':')
-        .map(|i| &after_userinfo[..i])
-        .unwrap_or(after_userinfo);
-    Some(host.to_string())
+    parsed.host_str().map(|h| {
+        h.strip_prefix('[')
+            .and_then(|v| v.strip_suffix(']'))
+            .unwrap_or(h)
+            .to_lowercase()
+    })
 }
 
 /// Resolve the URL's hostname and reject connections to private/internal IP addresses.
 /// This prevents DNS rebinding attacks where an attacker's domain resolves to an
 /// internal IP after passing the allowlist check.
 fn reject_private_ip(url: &str) -> Result<(), String> {
-    let host = url
-        .split("://")
-        .nth(1)
-        .and_then(|rest| {
-            let host_and_port = rest.split('/').next().unwrap_or(rest);
-            // Strip port
-            if host_and_port.starts_with('[') {
-                // IPv6
-                host_and_port.find(']').map(|i| &host_and_port[1..i])
-            } else {
-                Some(
-                    host_and_port
-                        .rfind(':')
-                        .map_or(host_and_port, |i| &host_and_port[..i]),
-                )
-            }
+    let parsed = url::Url::parse(url).map_err(|e| format!("Failed to parse URL: {e}"))?;
+    if !matches!(parsed.scheme(), "http" | "https") {
+        return Err(format!("Unsupported URL scheme: {}", parsed.scheme()));
+    }
+    if !parsed.username().is_empty() || parsed.password().is_some() {
+        return Err("URL contains userinfo (@) which is not allowed".to_string());
+    }
+
+    let host = parsed
+        .host_str()
+        .map(|h| {
+            h.strip_prefix('[')
+                .and_then(|v| v.strip_suffix(']'))
+                .unwrap_or(h)
         })
         .ok_or_else(|| "Failed to parse host from URL".to_string())?;
 
