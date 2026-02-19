@@ -42,7 +42,9 @@ use wasmtime_wasi::{ResourceTable, WasiCtx, WasiCtxBuilder, WasiView};
 
 use crate::channels::wasm::capabilities::ChannelCapabilities;
 use crate::channels::wasm::error::WasmChannelError;
-use crate::channels::wasm::host::{ChannelEmitRateLimiter, ChannelHostState, EmittedMessage};
+use crate::channels::wasm::host::{
+    ChannelEmitRateLimiter, ChannelHostState, EmittedMessage, PendingWorkspaceWrite,
+};
 use crate::channels::wasm::router::RegisteredEndpoint;
 use crate::channels::wasm::runtime::{PreparedChannelModule, WasmChannelRuntime};
 use crate::channels::wasm::schema::ChannelConfig;
@@ -52,6 +54,45 @@ use crate::pairing::PairingStore;
 use crate::safety::LeakDetector;
 use crate::tools::wasm::LogLevel;
 use crate::tools::wasm::WasmResourceLimiter;
+use crate::tools::wasm::WorkspaceReader;
+
+/// In-memory workspace store for WASM channels.
+///
+/// Persists workspace writes across callback invocations within a single process
+/// lifetime. This is critical for channels like Telegram that store polling state
+/// (e.g., last_update_id) via workspace_write during on_poll callbacks.
+///
+/// Without this, pending_writes were silently dropped after each callback,
+/// causing polling channels to re-fetch the same updates indefinitely.
+#[derive(Debug, Clone, Default)]
+struct ChannelWorkspaceStore {
+    data: Arc<RwLock<HashMap<String, String>>>,
+}
+
+impl ChannelWorkspaceStore {
+    fn new() -> Self {
+        Self {
+            data: Arc::new(RwLock::new(HashMap::new())),
+        }
+    }
+
+    /// Commit pending writes from a callback execution.
+    async fn commit_writes(&self, writes: Vec<PendingWorkspaceWrite>) {
+        if writes.is_empty() {
+            return;
+        }
+        let mut guard = self.data.write().await;
+        for w in writes {
+            guard.insert(w.path, w.content);
+        }
+    }
+}
+
+impl WorkspaceReader for ChannelWorkspaceStore {
+    fn read(&self, path: &str) -> Option<String> {
+        self.data.try_read().ok()?.get(path).cloned()
+    }
+}
 
 // Generate component model bindings from the WIT file
 wasmtime::component::bindgen!({
@@ -547,6 +588,9 @@ pub struct WasmChannel {
 
     /// Pairing store for DM pairing (guest access control).
     pairing_store: Arc<PairingStore>,
+
+    /// In-memory workspace store for persisting writes across callbacks.
+    workspace_store: ChannelWorkspaceStore,
 }
 
 impl WasmChannel {
@@ -554,12 +598,22 @@ impl WasmChannel {
     pub fn new(
         runtime: Arc<WasmChannelRuntime>,
         prepared: Arc<PreparedChannelModule>,
-        capabilities: ChannelCapabilities,
+        mut capabilities: ChannelCapabilities,
         config_json: String,
         pairing_store: Arc<PairingStore>,
     ) -> Self {
         let name = prepared.name.clone();
         let rate_limiter = ChannelEmitRateLimiter::new(capabilities.emit_rate_limit.clone());
+
+        // Create workspace store and inject as reader into tool capabilities
+        let workspace_store = ChannelWorkspaceStore::new();
+        {
+            let ws = capabilities
+                .tool_capabilities
+                .workspace_read
+                .get_or_insert_with(Default::default);
+            ws.reader = Some(Arc::new(workspace_store.clone()));
+        }
 
         Self {
             name,
@@ -577,6 +631,7 @@ impl WasmChannel {
             credentials: Arc::new(RwLock::new(HashMap::new())),
             typing_task: RwLock::new(None),
             pairing_store,
+            workspace_store,
         }
     }
 
@@ -815,6 +870,11 @@ impl WasmChannel {
 
         match result {
             Ok(Ok((config, mut host_state))) => {
+                // Commit workspace writes
+                self.workspace_store
+                    .commit_writes(host_state.take_pending_writes())
+                    .await;
+
                 // Surface WASM guest logs (errors/warnings from webhook setup, etc.)
                 for entry in host_state.take_logs() {
                     match entry.level {
@@ -955,6 +1015,11 @@ impl WasmChannel {
         let channel_name = self.name.clone();
         match result {
             Ok(Ok((response, mut host_state))) => {
+                // Commit workspace writes
+                self.workspace_store
+                    .commit_writes(host_state.take_pending_writes())
+                    .await;
+
                 // Process emitted messages
                 let emitted = host_state.take_emitted_messages();
                 self.process_emitted_messages(emitted).await?;
@@ -1028,6 +1093,11 @@ impl WasmChannel {
         let channel_name = self.name.clone();
         match result {
             Ok(Ok(((), mut host_state))) => {
+                // Commit workspace writes
+                self.workspace_store
+                    .commit_writes(host_state.take_pending_writes())
+                    .await;
+
                 // Process emitted messages
                 let emitted = host_state.take_emitted_messages();
                 self.process_emitted_messages(emitted).await?;
@@ -1166,7 +1236,12 @@ impl WasmChannel {
 
         let channel_name = self.name.clone();
         match result {
-            Ok(Ok(((), _host_state))) => {
+            Ok(Ok(((), mut host_state))) => {
+                // Commit workspace writes
+                self.workspace_store
+                    .commit_writes(host_state.take_pending_writes())
+                    .await;
+
                 tracing::debug!(
                     channel = %channel_name,
                     message_id = %message_id,
@@ -1500,6 +1575,7 @@ impl WasmChannel {
         let rate_limiter = self.rate_limiter.clone();
         let credentials = self.credentials.clone();
         let pairing_store = self.pairing_store.clone();
+        let workspace_store = self.workspace_store.clone();
         let callback_timeout = self.runtime.config().callback_timeout;
 
         tokio::spawn(async move {
@@ -1522,6 +1598,7 @@ impl WasmChannel {
                             &capabilities,
                             &credentials,
                             pairing_store.clone(),
+                            &workspace_store,
                             callback_timeout,
                         ).await;
 
@@ -1573,6 +1650,7 @@ impl WasmChannel {
         capabilities: &ChannelCapabilities,
         credentials: &RwLock<HashMap<String, String>>,
         pairing_store: Arc<PairingStore>,
+        workspace_store: &ChannelWorkspaceStore,
         timeout: Duration,
     ) -> Result<Vec<EmittedMessage>, WasmChannelError> {
         // Skip if no WASM bytes (testing mode)
@@ -1622,6 +1700,11 @@ impl WasmChannel {
 
         match result {
             Ok(Ok(mut host_state)) => {
+                // Commit workspace writes (e.g., Telegram polling offset)
+                workspace_store
+                    .commit_writes(host_state.take_pending_writes())
+                    .await;
+
                 let emitted = host_state.take_emitted_messages();
                 tracing::debug!(
                     channel = %channel_name,
@@ -2133,6 +2216,7 @@ impl HttpResponse {
 mod tests {
     use std::sync::Arc;
 
+    use super::ChannelWorkspaceStore;
     use crate::channels::Channel;
     use crate::channels::wasm::capabilities::ChannelCapabilities;
     use crate::channels::wasm::runtime::{
@@ -2230,6 +2314,7 @@ mod tests {
         let credentials = Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new()));
         let timeout = std::time::Duration::from_secs(5);
 
+        let workspace_store = ChannelWorkspaceStore::new();
         let result = WasmChannel::execute_poll(
             "poll-test",
             &runtime,
@@ -2237,6 +2322,7 @@ mod tests {
             &capabilities,
             &credentials,
             Arc::new(PairingStore::new()),
+            &workspace_store,
             timeout,
         )
         .await;
