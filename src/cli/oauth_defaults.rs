@@ -95,7 +95,7 @@ pub fn callback_host() -> String {
 }
 
 /// Returns `true` if `host` is a loopback address that only accepts local connections.
-fn is_loopback_host(host: &str) -> bool {
+pub fn is_loopback_host(host: &str) -> bool {
     host == "127.0.0.1" || host == "::1" || host.eq_ignore_ascii_case("localhost")
 }
 
@@ -115,14 +115,23 @@ pub enum OAuthCallbackError {
     Io(String),
 }
 
+/// Map a `std::io::Error` from a bind attempt to an `OAuthCallbackError`.
+fn bind_error(e: std::io::Error) -> OAuthCallbackError {
+    if e.kind() == std::io::ErrorKind::AddrInUse {
+        OAuthCallbackError::PortInUse(OAUTH_CALLBACK_PORT, e.to_string())
+    } else {
+        OAuthCallbackError::Io(e.to_string())
+    }
+}
+
 /// Bind the OAuth callback listener on the fixed port.
 ///
 /// When `OAUTH_CALLBACK_HOST` is a loopback address (the default `127.0.0.1`),
 /// binds to `127.0.0.1` first and falls back to `[::1]` so local-only auth
 /// flows remain restricted to the local machine.
 ///
-/// When `OAUTH_CALLBACK_HOST` is set to a remote address, binds to `0.0.0.0`
-/// so the callback port is reachable from outside the machine.
+/// When `OAUTH_CALLBACK_HOST` is set to a remote address, binds to that
+/// specific address so only connections directed to it are accepted.
 pub async fn bind_callback_listener() -> Result<TcpListener, OAuthCallbackError> {
     let host = callback_host();
 
@@ -143,23 +152,12 @@ pub async fn bind_callback_listener() -> Result<TcpListener, OAuthCallbackError>
         }
         TcpListener::bind(format!("[::1]:{}", OAUTH_CALLBACK_PORT))
             .await
-            .map_err(|e| {
-                if e.kind() == std::io::ErrorKind::AddrInUse {
-                    OAuthCallbackError::PortInUse(OAUTH_CALLBACK_PORT, e.to_string())
-                } else {
-                    OAuthCallbackError::Io(e.to_string())
-                }
-            })
+            .map_err(bind_error)
     } else {
-        // Remote mode: bind to all interfaces so the port is reachable from outside.
-        let addr = format!("0.0.0.0:{}", OAUTH_CALLBACK_PORT);
-        TcpListener::bind(&addr).await.map_err(|e| {
-            if e.kind() == std::io::ErrorKind::AddrInUse {
-                OAuthCallbackError::PortInUse(OAUTH_CALLBACK_PORT, e.to_string())
-            } else {
-                OAuthCallbackError::Io(e.to_string())
-            }
-        })
+        // Remote mode: bind to the specific configured host address only,
+        // not 0.0.0.0, to limit exposure to the intended interface.
+        let addr = format!("{}:{}", host, OAUTH_CALLBACK_PORT);
+        TcpListener::bind(&addr).await.map_err(bind_error)
     }
 }
 
