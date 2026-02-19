@@ -46,6 +46,19 @@ impl WorkspaceSearchConfig {
         let fts_weight = parse_optional_env("SEARCH_FTS_WEIGHT", 0.3f32)?;
         let vector_weight = parse_optional_env("SEARCH_VECTOR_WEIGHT", 0.7f32)?;
 
+        if !fts_weight.is_finite() || fts_weight < 0.0 {
+            return Err(ConfigError::InvalidValue {
+                key: "SEARCH_FTS_WEIGHT".to_string(),
+                message: "must be a finite, non-negative float".to_string(),
+            });
+        }
+        if !vector_weight.is_finite() || vector_weight < 0.0 {
+            return Err(ConfigError::InvalidValue {
+                key: "SEARCH_VECTOR_WEIGHT".to_string(),
+                message: "must be a finite, non-negative float".to_string(),
+            });
+        }
+
         Ok(Self {
             fusion_strategy,
             rrf_k,

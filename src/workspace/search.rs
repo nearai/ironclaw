@@ -3,8 +3,9 @@
 //! Supports two fusion strategies:
 //! 1. **RRF** (Reciprocal Rank Fusion) — the default, rank-based method.
 //!    `score = sum(1 / (k + rank))` for each retrieval method.
-//! 2. **WeightedScore** — normalizes per-method scores to \[0,1\] and combines
-//!    with configurable weights: `fts_weight * fts_score + vector_weight * vector_score`.
+//! 2. **WeightedScore** — converts ranks to scores via `1/rank`, combines with
+//!    configurable weights (`fts_weight * fts_score + vector_weight * vector_score`),
+//!    then normalizes to \[0,1\] by dividing by the maximum combined score.
 //!
 //! Both strategies combine results from:
 //! - PostgreSQL / libSQL full-text search
@@ -124,7 +125,7 @@ pub struct SearchResult {
     pub chunk_id: Uuid,
     /// Chunk content.
     pub content: String,
-    /// Combined RRF score (0.0-1.0 normalized).
+    /// Combined fusion score (0.0-1.0 normalized). Strategy-dependent (RRF or WeightedScore).
     pub score: f32,
     /// Rank in FTS results (1-based, None if not in FTS results).
     pub fts_rank: Option<u32>,
