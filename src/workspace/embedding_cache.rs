@@ -173,12 +173,24 @@ impl EmbeddingProvider for CachedEmbeddingProvider {
 
         if miss_indices.is_empty() {
             tracing::debug!(count = texts.len(), "embedding batch: all cache hits");
-            return Ok(results.into_iter().map(|r| r.unwrap_or_default()).collect());
+            // All slots populated from cache hits -- unwrap is safe here
+            return Ok(results
+                .into_iter()
+                .map(|r| r.expect("all cache hits"))
+                .collect());
         }
 
         // Fetch missing embeddings
         let miss_texts: Vec<String> = miss_indices.iter().map(|&i| texts[i].clone()).collect();
         let new_embeddings = self.inner.embed_batch(&miss_texts).await?;
+
+        if new_embeddings.len() != miss_indices.len() {
+            return Err(EmbeddingError::InvalidResponse(format!(
+                "embed_batch returned {} embeddings, expected {}",
+                new_embeddings.len(),
+                miss_indices.len()
+            )));
+        }
 
         tracing::debug!(
             hits = texts.len() - miss_indices.len(),
@@ -189,26 +201,31 @@ impl EmbeddingProvider for CachedEmbeddingProvider {
         // Store misses and assemble results
         {
             let mut guard = self.cache.lock().await;
-            Self::evict_lru(
-                &mut guard,
-                self.config.max_entries.saturating_sub(new_embeddings.len()) + 1,
-            );
             let now = Instant::now();
             for (j, &orig_idx) in miss_indices.iter().enumerate() {
-                if let Some(emb) = new_embeddings.get(j) {
-                    guard.insert(
-                        keys[orig_idx].clone(),
-                        CacheEntry {
-                            embedding: emb.clone(),
-                            last_accessed: now,
-                        },
-                    );
-                    results[orig_idx] = Some(emb.clone());
-                }
+                let emb = &new_embeddings[j];
+                guard.insert(
+                    keys[orig_idx].clone(),
+                    CacheEntry {
+                        embedding: emb.clone(),
+                        last_accessed: now,
+                    },
+                );
+                results[orig_idx] = Some(emb.clone());
             }
+            // Enforce capacity after batch insert
+            Self::evict_lru(&mut guard, self.config.max_entries + 1);
         }
 
-        Ok(results.into_iter().map(|r| r.unwrap_or_default()).collect())
+        Ok(results
+            .into_iter()
+            .enumerate()
+            .map(|(i, slot)| {
+                slot.ok_or_else(|| {
+                    EmbeddingError::InvalidResponse(format!("embedding slot {i} was not populated"))
+                })
+            })
+            .collect::<Result<Vec<_>, _>>()?)
     }
 }
 
@@ -257,7 +274,7 @@ mod tests {
         }
         async fn embed(&self, text: &str) -> Result<Vec<f32>, EmbeddingError> {
             self.embed_calls.fetch_add(1, Ordering::SeqCst);
-            // Simple deterministic embedding
+            // Simple deterministic embedding: val = text.len() / 100.0
             let val = text.len() as f32 / 100.0;
             Ok(vec![val; self.dimension])
         }
@@ -283,7 +300,7 @@ mod tests {
         assert_eq!(inner.embed_calls(), 1);
 
         let r2 = cached.embed("hello").await.unwrap();
-        assert_eq!(inner.embed_calls(), 1); // still 1 — cache hit
+        assert_eq!(inner.embed_calls(), 1); // still 1 -- cache hit
         assert_eq!(r1, r2);
 
         assert_eq!(cached.len().await, 1);
@@ -315,7 +332,7 @@ mod tests {
             EmbeddingCacheConfig { max_entries: 100 },
         );
 
-        // Same text, different models → different cache keys
+        // Same text, different models -> different cache keys
         let key_a = cached_a.cache_key("hello");
         let key_b = cached_b.cache_key("hello");
         assert_ne!(key_a, key_b);
@@ -371,18 +388,22 @@ mod tests {
         let cached =
             CachedEmbeddingProvider::new(inner.clone(), EmbeddingCacheConfig { max_entries: 100 });
 
-        // Pre-cache "b"
-        cached.embed("b").await.unwrap();
+        // Pre-cache "bb" (len 2)
+        cached.embed("bb").await.unwrap();
 
-        // Batch: a (miss), b (hit), c (miss)
-        let texts = vec!["a".to_string(), "b".to_string(), "c".to_string()];
+        // Batch: "a" (miss, len 1), "bb" (hit, len 2), "ccc" (miss, len 3)
+        // Different lengths ensure distinct embeddings from CountingMock.
+        let texts = vec!["a".to_string(), "bb".to_string(), "ccc".to_string()];
         let results = cached.embed_batch(&texts).await.unwrap();
 
         assert_eq!(results.len(), 3);
-        // Each text has different length, so embeddings should differ
-        // "a" = len 1, "b" = len 1, "c" = len 1 — same length, same embedding
-        // But the result order must match input order
-        assert_eq!(results[0], results[1]); // same length texts
-        assert_eq!(results[1], results[2]);
+        // CountingMock produces val = text.len() / 100.0, so each input
+        // with a different length yields a distinct embedding.
+        let expected_a = vec![1.0_f32 / 100.0; 4];
+        let expected_bb = vec![2.0_f32 / 100.0; 4];
+        let expected_ccc = vec![3.0_f32 / 100.0; 4];
+        assert_eq!(results[0], expected_a);
+        assert_eq!(results[1], expected_bb);
+        assert_eq!(results[2], expected_ccc);
     }
 }

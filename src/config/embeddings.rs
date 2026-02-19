@@ -83,6 +83,13 @@ impl EmbeddingsConfig {
 
         let cache_size = parse_optional_env("EMBEDDING_CACHE_SIZE", 10_000usize)?;
 
+        if cache_size == 0 {
+            return Err(ConfigError::InvalidValue {
+                key: "EMBEDDING_CACHE_SIZE".to_string(),
+                message: "must be at least 1".to_string(),
+            });
+        }
+
         Ok(Self {
             enabled,
             provider,
@@ -173,6 +180,7 @@ mod tests {
             std::env::remove_var("EMBEDDING_PROVIDER");
             std::env::remove_var("EMBEDDING_MODEL");
             std::env::remove_var("OPENAI_API_KEY");
+            std::env::remove_var("EMBEDDING_CACHE_SIZE");
         }
     }
 
@@ -254,6 +262,32 @@ mod tests {
         // SAFETY: Under ENV_MUTEX.
         unsafe {
             std::env::remove_var("EMBEDDING_ENABLED");
+        }
+    }
+
+    #[test]
+    fn cache_size_zero_rejected() {
+        let _guard = ENV_MUTEX.lock().expect("env mutex poisoned");
+
+        clear_embedding_env();
+        // SAFETY: Under ENV_MUTEX.
+        unsafe {
+            std::env::set_var("EMBEDDING_CACHE_SIZE", "0");
+        }
+
+        let settings = Settings::default();
+        let result = EmbeddingsConfig::resolve(&settings);
+        assert!(result.is_err(), "cache_size=0 should be rejected");
+
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("at least 1"),
+            "error should mention minimum: {err}"
+        );
+
+        // SAFETY: Under ENV_MUTEX.
+        unsafe {
+            std::env::remove_var("EMBEDDING_CACHE_SIZE");
         }
     }
 }
