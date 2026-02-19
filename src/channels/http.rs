@@ -12,6 +12,7 @@ use axum::{
 };
 use secrecy::ExposeSecret;
 use serde::{Deserialize, Serialize};
+use subtle::ConstantTimeEq;
 use tokio::sync::{RwLock, mpsc, oneshot};
 use tokio_stream::wrappers::ReceiverStream;
 use uuid::Uuid;
@@ -173,7 +174,7 @@ async fn webhook_handler(
     // Validate secret if configured
     if let Some(ref expected_secret) = state.webhook_secret {
         match &req.secret {
-            Some(provided) if provided == expected_secret => {
+            Some(provided) if bool::from(provided.as_bytes().ct_eq(expected_secret.as_bytes())) => {
                 // Secret matches, continue
             }
             Some(_) => {
@@ -356,19 +357,89 @@ impl Channel for HttpChannel {
 
 #[cfg(test)]
 mod tests {
+    use axum::body::Body;
+    use axum::http::Request;
+    use secrecy::SecretString;
+    use tower::ServiceExt;
+
     use super::*;
+
+    fn test_channel(secret: Option<&str>) -> HttpChannel {
+        HttpChannel::new(HttpConfig {
+            host: "127.0.0.1".to_string(),
+            port: 0,
+            webhook_secret: secret.map(|s| SecretString::from(s.to_string())),
+            user_id: "http".to_string(),
+        })
+    }
 
     #[tokio::test]
     async fn test_http_channel_requires_secret() {
-        let config = HttpConfig {
-            host: "127.0.0.1".to_string(),
-            port: 0,
-            webhook_secret: None,
-            user_id: "http".to_string(),
-        };
-
-        let channel = HttpChannel::new(config);
+        let channel = test_channel(None);
         let result = channel.start().await;
         assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn webhook_correct_secret_returns_ok() {
+        let channel = test_channel(Some("test-secret-123"));
+        // Start the channel so the tx sender is populated (otherwise 503).
+        let _stream = channel.start().await.unwrap();
+        let app = channel.routes();
+
+        let body = serde_json::json!({
+            "content": "hello",
+            "secret": "test-secret-123"
+        });
+        let req = Request::builder()
+            .method("POST")
+            .uri("/webhook")
+            .header("content-type", "application/json")
+            .body(Body::from(serde_json::to_vec(&body).unwrap()))
+            .unwrap();
+
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn webhook_wrong_secret_returns_unauthorized() {
+        let channel = test_channel(Some("correct-secret"));
+        let _stream = channel.start().await.unwrap();
+        let app = channel.routes();
+
+        let body = serde_json::json!({
+            "content": "hello",
+            "secret": "wrong-secret"
+        });
+        let req = Request::builder()
+            .method("POST")
+            .uri("/webhook")
+            .header("content-type", "application/json")
+            .body(Body::from(serde_json::to_vec(&body).unwrap()))
+            .unwrap();
+
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn webhook_missing_secret_returns_unauthorized() {
+        let channel = test_channel(Some("correct-secret"));
+        let _stream = channel.start().await.unwrap();
+        let app = channel.routes();
+
+        let body = serde_json::json!({
+            "content": "hello"
+        });
+        let req = Request::builder()
+            .method("POST")
+            .uri("/webhook")
+            .header("content-type", "application/json")
+            .body(Body::from(serde_json::to_vec(&body).unwrap()))
+            .unwrap();
+
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
     }
 }
