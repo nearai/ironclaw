@@ -1476,14 +1476,18 @@ fn check_onboard_needed() -> Option<&'static str> {
         return Some("Database not configured");
     }
 
+    // The wizard writes ONBOARD_COMPLETED=true to ~/.ironclaw/.env,
+    // which load_ironclaw_env() loads before this function runs.
+    if std::env::var("ONBOARD_COMPLETED").is_ok() {
+        return None;
+    }
+
     // First run (onboarding never completed and no session).
-    // Reads NEARAI_API_KEY env var directly because this function runs
-    // before Config is loaded -- Config::from_env() may fail without a
-    // database URL, which is what triggers onboarding in the first place.
+    // Check for a NEAR AI API key or session file as a fallback
+    // for users who configured credentials manually (no wizard).
     if std::env::var("NEARAI_API_KEY").is_err() {
-        let settings = ironclaw::settings::Settings::load();
         let session_path = ironclaw::llm::session::default_session_path();
-        if !settings.onboard_completed && !session_path.exists() {
+        if !session_path.exists() {
             return Some("First run");
         }
     }
