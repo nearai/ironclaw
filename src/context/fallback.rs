@@ -38,7 +38,7 @@ pub struct FallbackDeliverable {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LastAction {
     pub tool_name: String,
-    /// Truncated to 200 chars.
+    /// Truncated to 200 bytes (UTF-8 safe).
     pub output_preview: String,
     pub success: bool,
 }
