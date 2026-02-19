@@ -50,4 +50,7 @@ mod router;
 mod scorer;
 
 pub use router::{PatternOverride, Router, RouterConfig, RoutingDecision};
-pub use scorer::{score_complexity, score_complexity_with_weights, ScoreBreakdown, ScorerWeights, Tier};
+pub use scorer::{
+    score_complexity, score_complexity_with_config, score_complexity_with_weights,
+    ScoreBreakdown, ScorerConfig, ScorerWeights, Tier, DEFAULT_DOMAIN_KEYWORDS,
+};

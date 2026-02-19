@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use tracing;
 
-use super::scorer::{score_complexity, ScoreBreakdown, Tier};
+use super::scorer::{score_complexity_with_config, ScoreBreakdown, ScorerConfig, Tier};
 
 /// Configuration for a pattern override.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -40,6 +40,12 @@ pub struct RouterConfig {
     /// Pattern overrides that bypass scoring.
     #[serde(default)]
     pub overrides: Vec<PatternOverride>,
+
+    /// Custom domain-specific keywords for complexity scoring.
+    /// If not set, uses DEFAULT_DOMAIN_KEYWORDS.
+    /// Example: ["kubernetes", "docker", "my-custom-term"]
+    #[serde(default)]
+    pub domain_keywords: Option<Vec<String>>,
 }
 
 fn default_enabled() -> bool {
@@ -53,6 +59,7 @@ impl Default for RouterConfig {
             tiers: HashMap::new(),
             thinking: HashMap::new(),
             overrides: vec![],
+            domain_keywords: None,
         }
     }
 }
@@ -100,6 +107,8 @@ pub struct Router {
     config: RouterConfig,
     /// Compiled user overrides.
     user_overrides: Vec<(Regex, Tier)>,
+    /// Scorer configuration (built from RouterConfig).
+    scorer_config: ScorerConfig,
 }
 
 impl Router {
@@ -130,9 +139,16 @@ impl Router {
             })
             .collect();
 
+        // Build scorer config from router config
+        let scorer_config = ScorerConfig {
+            weights: Default::default(),
+            domain_keywords: config.domain_keywords.clone(),
+        };
+
         Self {
             config,
             user_overrides,
+            scorer_config,
         }
     }
 
@@ -170,7 +186,7 @@ impl Router {
         }
 
         // Fall back to complexity scoring
-        let score = score_complexity(prompt);
+        let score = score_complexity_with_config(prompt, &self.scorer_config);
         let tier = score.tier;
         let reason = format!("Complexity score: {}/100", score.total);
 
@@ -336,6 +352,7 @@ mod tests {
                 pattern: r"(?i)my-special-pattern".to_string(),
                 tier: "frontier".to_string(),
             }],
+            domain_keywords: None,
         };
 
         let router = Router::new(config);

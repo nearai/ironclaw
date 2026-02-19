@@ -6,6 +6,7 @@
 use lazy_static::lazy_static;
 use regex::Regex;
 use std::collections::HashMap;
+use tracing;
 
 /// Complexity tier for model selection.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -96,6 +97,80 @@ impl Default for ScorerWeights {
     }
 }
 
+/// Default domain-specific keywords for complexity scoring.
+/// These cover common web3, infrastructure, and development terms.
+pub const DEFAULT_DOMAIN_KEYWORDS: &[&str] = &[
+    // Infrastructure
+    "kubernetes", "k8s", "docker", "terraform", "nginx", "apache", "linux", "unix", "bash", "shell",
+    // Languages & frameworks
+    "solidity", "rust", "typescript", "react", "nextjs", "vue", "angular", "svelte",
+    // Databases
+    "postgresql", "postgres", "mysql", "mongodb", "redis",
+    // APIs & protocols
+    "graphql", "grpc", "protobuf", "websocket", "oauth", "jwt", "cors", "csrf", "xss", "sql.?injection",
+    "api", "rest", "http", "https", "tcp", "udp", "dns", "cdn",
+    // Cloud & deployment
+    "aws", "gcp", "azure", "vercel", "netlify", "cloudflare", "ci/cd", "devops",
+    // Version control
+    "git", "github", "gitlab",
+    // Web3 general
+    "blockchain", "web3", "defi", "nft", "smart.?contract",
+    // Ethereum
+    "ethereum", "evm", "anchor",
+    // NEAR ecosystem
+    "near", "near.?sdk", "near.?api", "testnet", "mainnet", "meteor", "ledger", "cold.?wallet",
+    "rpc", "indexer", "relayer", "cross.?chain", "intents",
+    // Fogo/SVM
+    "fogo", "svm", "firedancer", "paymaster", "gasless", "sessions.?sdk",
+    // Rust/NEAR tooling
+    "cargo.?near", "workspaces", "sandbox",
+    // Project-specific (examples)
+    "lobo", "trezu", "multisig", "treasury", "openclaw", "ironclaw",
+];
+
+/// Configuration for the complexity scorer.
+#[derive(Debug, Clone)]
+pub struct ScorerConfig {
+    /// Weights for each scoring dimension.
+    pub weights: ScorerWeights,
+    /// Custom domain-specific keywords (overrides defaults if provided).
+    /// Each entry is a word or regex pattern fragment.
+    pub domain_keywords: Option<Vec<String>>,
+}
+
+impl Default for ScorerConfig {
+    fn default() -> Self {
+        Self {
+            weights: ScorerWeights::default(),
+            domain_keywords: None, // Uses DEFAULT_DOMAIN_KEYWORDS
+        }
+    }
+}
+
+impl ScorerConfig {
+    /// Create config with custom domain keywords.
+    pub fn with_domain_keywords(keywords: Vec<String>) -> Self {
+        Self {
+            weights: ScorerWeights::default(),
+            domain_keywords: Some(keywords),
+        }
+    }
+
+    /// Build the domain regex pattern from keywords.
+    pub fn build_domain_regex(&self) -> Regex {
+        let keywords: Vec<&str> = match &self.domain_keywords {
+            Some(custom) => custom.iter().map(|s| s.as_str()).collect(),
+            None => DEFAULT_DOMAIN_KEYWORDS.to_vec(),
+        };
+        let pattern = format!(r"(?i)\b({})\b", keywords.join("|"));
+        Regex::new(&pattern).unwrap_or_else(|_| {
+            // Fall back to a minimal pattern if custom regex is invalid
+            tracing::warn!("Invalid domain keywords pattern, using minimal fallback");
+            Regex::new(r"(?i)\b(api|code|deploy)\b").unwrap()
+        })
+    }
+}
+
 /// Breakdown of complexity score by dimension.
 #[derive(Debug, Clone)]
 pub struct ScoreBreakdown {
@@ -150,9 +225,8 @@ lazy_static! {
         r"(?i)\b(previous|earlier|above|before|last|that|those|it|they|we discussed|you said|mentioned|remember|recall|as I said|like I mentioned)\b"
     ).unwrap();
 
-    // Domain-specific terms
-    // TODO: Make configurable via ScorerConfig for project-specific keywords.
-    // Current list covers common web3/infra terms as sensible defaults.
+    // Domain-specific terms (default, used when ScorerConfig.domain_keywords is None)
+    // For custom keywords, use ScorerConfig::with_domain_keywords() or set domain_keywords field.
     static ref RE_DOMAIN: Regex = Regex::new(
         r"(?i)\b(kubernetes|k8s|docker|terraform|solidity|rust|typescript|react|nextjs|vue|angular|svelte|postgresql|postgres|mysql|mongodb|redis|graphql|grpc|protobuf|websocket|oauth|jwt|cors|csrf|xss|sql.?injection|api|rest|http|https|tcp|udp|dns|cdn|aws|gcp|azure|vercel|netlify|cloudflare|nginx|apache|linux|unix|bash|shell|git|github|gitlab|ci/cd|devops|blockchain|web3|ethereum|near|solana|defi|nft|smart.?contract|near.?sdk|near.?api|testnet|mainnet|fogo|lobo|trezu|multisig|treasury|openclaw|ironclaw|substack|anchor|svm|firedancer|paymaster|gasless|sessions.?sdk|cargo.?near|workspaces|sandbox|rpc|indexer|relayer|cross.?chain|intents|meteor|ledger|cold.?wallet)\b"
     ).unwrap();
@@ -187,11 +261,25 @@ fn count_matches(re: &Regex, text: &str) -> usize {
 ///
 /// Returns a breakdown with total score (0-100), tier, and per-dimension scores.
 pub fn score_complexity(prompt: &str) -> ScoreBreakdown {
-    score_complexity_with_weights(prompt, &ScorerWeights::default())
+    score_complexity_with_config(prompt, &ScorerConfig::default())
 }
 
 /// Score with custom weights.
 pub fn score_complexity_with_weights(prompt: &str, weights: &ScorerWeights) -> ScoreBreakdown {
+    score_complexity_with_config(prompt, &ScorerConfig {
+        weights: weights.clone(),
+        domain_keywords: None,
+    })
+}
+
+/// Score with full configuration (weights + domain keywords).
+pub fn score_complexity_with_config(prompt: &str, config: &ScorerConfig) -> ScoreBreakdown {
+    let domain_regex = config.build_domain_regex();
+    score_complexity_internal(prompt, &config.weights, &domain_regex)
+}
+
+/// Internal scoring implementation.
+fn score_complexity_internal(prompt: &str, weights: &ScorerWeights, domain_regex: &Regex) -> ScoreBreakdown {
     let mut hints = Vec::new();
     let mut components = HashMap::new();
 
@@ -278,8 +366,8 @@ pub fn score_complexity_with_weights(prompt: &str, weights: &ScorerWeights) -> S
     let context_score = (context_count * 50).min(100) as u32;
     components.insert("context_dependency".to_string(), context_score);
 
-    // Domain specific
-    let domain_count = count_matches(&RE_DOMAIN, prompt);
+    // Domain specific (uses configured keywords or defaults)
+    let domain_count = count_matches(domain_regex, prompt);
     let domain_score = (domain_count * 50).min(100) as u32;
     components.insert("domain_specific".to_string(), domain_score);
     if domain_count >= 2 {
@@ -425,5 +513,27 @@ mod tests {
     fn test_tier_display() {
         assert_eq!(Tier::Flash.as_str(), "flash");
         assert_eq!(Tier::Frontier.to_string(), "frontier");
+    }
+
+    #[test]
+    fn test_custom_domain_keywords() {
+        // With default keywords, "kubernetes" should trigger domain_specific
+        let default_result = score_complexity("How do I deploy kubernetes?");
+        let default_domain = default_result.components.get("domain_specific").copied().unwrap_or(0);
+        assert!(default_domain > 0, "Default keywords should match 'kubernetes'");
+
+        // With custom keywords that DON'T include kubernetes, it shouldn't match
+        let config = ScorerConfig::with_domain_keywords(vec![
+            "mycompany".to_string(),
+            "myproduct".to_string(),
+        ]);
+        let custom_result = score_complexity_with_config("How do I deploy kubernetes?", &config);
+        let custom_domain = custom_result.components.get("domain_specific").copied().unwrap_or(0);
+        assert_eq!(custom_domain, 0, "Custom keywords shouldn't match 'kubernetes'");
+
+        // Custom keywords should match
+        let custom_result2 = score_complexity_with_config("Tell me about myproduct features", &config);
+        let custom_domain2 = custom_result2.components.get("domain_specific").copied().unwrap_or(0);
+        assert!(custom_domain2 > 0, "Custom keywords should match 'myproduct'");
     }
 }
