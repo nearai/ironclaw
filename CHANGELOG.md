@@ -9,7 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- Added `OpenAiCompatibleChatProvider` and wired OpenAI-compatible chat completion routing for custom base URL usage.
+- Refactored OpenAI-compatible chat completion routing to use the rig adapter and `RetryProvider` composition for custom base URL usage.
 - Added Ollama embeddings provider support (`EMBEDDING_PROVIDER=ollama`, `OLLAMA_BASE_URL`) in workspace embeddings.
 - Added migration `V9__flexible_embedding_dimension.sql` for flexible embedding vector dimensions.
 
