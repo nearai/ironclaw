@@ -24,7 +24,7 @@ impl Completion {
         let mut cmd = crate::cli::Cli::command();
         let bin_name = cmd.get_name().to_string();
         
-        // Конвертируем наш enum в clap_complete::Shell
+        // Convert enum to clap_complete::Shell
         let shell = match self.shell {
             CompletionShell::Bash => Shell::Bash,
             CompletionShell::Zsh => Shell::Zsh,
@@ -33,7 +33,7 @@ impl Completion {
             CompletionShell::Elvish => Shell::Elvish,
         };
         
-        // Генерируем и выводим скрипт в stdout
+        // Generate and output a script to stdout
         generate(shell, &mut cmd, bin_name, &mut io::stdout());
         
         Ok(())
@@ -46,20 +46,20 @@ mod tests {
     
     #[test]
     fn test_completion_shell_enum() {
-    // Просто проверяем, что enum парсится
+    // Check that the enum is parsed
     let shells = ["bash", "zsh", "fish", "powershell", "elvish"];
     for shell in shells {
-        let result = CompletionShell::from_str(shell, false);  // ignore_case=false для точного совпадения
+        let result = CompletionShell::from_str(shell, false);  // ignore_case=false for exact match
         assert!(result.is_ok(), "Failed to parse {}", shell);
     }
 }
     
     #[test]
     fn test_run_does_not_panic() {
-        // Проверяем, что run() не паникует (без реального вывода)
+        // Check that run() doesn't panic (no real output)
         let completion = Completion { shell: CompletionShell::Zsh };
-        // Мы не вызываем run() полностью, чтобы не генерировать вывод в тестах,
-        // но проверяем, что структура валидна
+        // We don't call the run() method completely to avoid generating output in tests,
+        // but we do check that the structure is correct.
         assert_eq!(format!("{:?}", completion.shell), "Zsh");
     }
 }
