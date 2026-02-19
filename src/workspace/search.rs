@@ -41,9 +41,9 @@ pub struct SearchConfig {
     pub pre_fusion_limit: usize,
     /// Fusion strategy to use when combining results.
     pub fusion_strategy: FusionStrategy,
-    /// Weight for FTS results in `WeightedScore` fusion (default 0.7).
+    /// Weight for FTS results in `WeightedScore` fusion (default 0.3).
     pub fts_weight: f32,
-    /// Weight for vector results in `WeightedScore` fusion (default 0.3).
+    /// Weight for vector results in `WeightedScore` fusion (default 0.7).
     pub vector_weight: f32,
 }
 
@@ -57,8 +57,8 @@ impl Default for SearchConfig {
             min_score: 0.0,
             pre_fusion_limit: 50,
             fusion_strategy: FusionStrategy::default(),
-            fts_weight: 0.7,
-            vector_weight: 0.3,
+            fts_weight: 0.3,
+            vector_weight: 0.7,
         }
     }
 }
@@ -284,11 +284,13 @@ pub fn reciprocal_rank_fusion(
 
 /// Weighted score fusion.
 ///
-/// Normalizes ranks from each method to \[0,1\] scores
-/// (`1/rank` gives rank 1 → 1.0, rank N → 1/N), then combines with
+/// Converts ranks from each method into scores using `1/rank`
+/// (so rank 1 → 1.0, rank N → 1/N), then combines them with
 /// configurable weights: `fts_weight * fts_score + vector_weight * vector_score`.
 ///
-/// Post-processing (normalization, min_score filter, sort, truncate) matches RRF.
+/// The combined scores are then normalized to [0,1] by dividing by the
+/// maximum score; post-processing (normalization, min_score filter, sort,
+/// truncate) matches RRF.
 pub fn weighted_score_fusion(
     fts_results: Vec<RankedResult>,
     vector_results: Vec<RankedResult>,
