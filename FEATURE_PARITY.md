@@ -250,7 +250,7 @@ This document tracks feature parity between IronClaw (Rust implementation) and O
 | OpenAI embeddings | ✅ | ✅ | |
 | Gemini embeddings | ✅ | ❌ | |
 | Local embeddings | ✅ | ❌ | |
-| SQLite-vec backend | ✅ | ❌ | IronClaw uses PostgreSQL |
+| SQLite-vec backend | ✅ | ❌ | IronClaw uses PostgreSQL or libSQL/Turso |
 | LanceDB backend | ✅ | ❌ | |
 | QMD backend | ✅ | ❌ | |
 | Atomic reindexing | ✅ | ✅ | |
@@ -461,7 +461,7 @@ IronClaw intentionally differs from OpenClaw in these ways:
 
 1. **Rust vs TypeScript**: Native performance, memory safety, single binary distribution
 2. **WASM sandbox vs Docker**: Lighter weight, faster startup, capability-based security
-3. **PostgreSQL vs SQLite**: Better suited for production deployments
+3. **PostgreSQL + libSQL/Turso**: PostgreSQL for production, libSQL with Turso remote sync for embedded/edge deployments
 4. **NEAR AI focus**: Primary provider with session-based auth
 5. **No mobile/desktop apps**: Focus on server-side and CLI initially
 6. **WASM channels**: Novel extension mechanism not in OpenClaw
