@@ -305,6 +305,7 @@ impl Channel for GatewayChannel {
                 description,
                 parameters: serde_json::to_string_pretty(&parameters)
                     .unwrap_or_else(|_| parameters.to_string()),
+                thread_id,
             },
             StatusUpdate::AuthRequired {
                 extension_name,

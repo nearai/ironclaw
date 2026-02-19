@@ -9,12 +9,14 @@ use crate::settings::Settings;
 pub struct EmbeddingsConfig {
     /// Whether embeddings are enabled.
     pub enabled: bool,
-    /// Provider to use: "openai" or "nearai"
+    /// Provider to use: "openai", "nearai", or "ollama"
     pub provider: String,
     /// OpenAI API key (for OpenAI provider).
     pub openai_api_key: Option<SecretString>,
     /// Model to use for embeddings.
     pub model: String,
+    /// Ollama base URL (for Ollama provider). Defaults to http://localhost:11434.
+    pub ollama_base_url: String,
 }
 
 impl Default for EmbeddingsConfig {
@@ -24,6 +26,7 @@ impl Default for EmbeddingsConfig {
             provider: "openai".to_string(),
             openai_api_key: None,
             model: "text-embedding-3-small".to_string(),
+            ollama_base_url: "http://localhost:11434".to_string(),
         }
     }
 }
@@ -37,6 +40,10 @@ impl EmbeddingsConfig {
 
         let model =
             optional_env("EMBEDDING_MODEL")?.unwrap_or_else(|| settings.embeddings.model.clone());
+
+        let ollama_base_url = optional_env("OLLAMA_BASE_URL")?
+            .or_else(|| settings.ollama_base_url.clone())
+            .unwrap_or_else(|| "http://localhost:11434".to_string());
 
         let enabled = optional_env("EMBEDDING_ENABLED")?
             .map(|s| s.parse())
@@ -52,6 +59,7 @@ impl EmbeddingsConfig {
             provider,
             openai_api_key,
             model,
+            ollama_base_url,
         })
     }
 
