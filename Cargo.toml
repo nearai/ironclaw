@@ -5,6 +5,7 @@ exclude = [
     "channels-src/slack",
     "channels-src/whatsapp",
     "tools-src/gmail",
+    "tools-src/mcp-gpio",
 ]
 
 [package]
