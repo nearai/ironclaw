@@ -940,8 +940,7 @@ impl Agent {
 
                 let deferred_content = match deferred_result {
                     Ok(output) => {
-                        let sanitized =
-                            self.safety().sanitize_tool_output(&tc.name, &output);
+                        let sanitized = self.safety().sanitize_tool_output(&tc.name, &output);
                         self.safety().wrap_for_llm(
                             &tc.name,
                             &sanitized.content,
@@ -951,8 +950,7 @@ impl Agent {
                     Err(e) => format!("Error: {}", e),
                 };
 
-                context_messages
-                    .push(ChatMessage::tool_result(&tc.id, &tc.name, deferred_content));
+                context_messages.push(ChatMessage::tool_result(&tc.id, &tc.name, deferred_content));
             }
 
             // Continue the agentic loop (a tool was already executed this turn)

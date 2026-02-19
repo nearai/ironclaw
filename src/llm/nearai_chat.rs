@@ -16,7 +16,6 @@ use crate::llm::provider::{
     ChatMessage, CompletionRequest, CompletionResponse, FinishReason, LlmProvider, ModelMetadata,
     Role, ToolCall, ToolCompletionRequest, ToolCompletionResponse,
 };
-use crate::llm::retry::{is_retryable_status, retry_backoff_delay};
 
 /// NEAR AI Chat Completions API provider.
 pub struct NearAiChatProvider {
@@ -82,120 +81,72 @@ impl NearAiChatProvider {
             .unwrap_or_default()
     }
 
-    /// Send a request to the chat completions API with retry on transient errors.
+    /// Send a single request to the chat completions API.
     ///
-    /// Retries on HTTP 429, 500, 502, 503, 504 with exponential backoff.
-    /// Does not retry on client errors (400, 401, 403, 404) or parse errors.
+    /// Does not retry internally — retries are handled by the external
+    /// `RetryProvider` wrapper in the composition chain.
     async fn send_request<T: Serialize, R: for<'de> Deserialize<'de>>(
         &self,
         body: &T,
     ) -> Result<R, LlmError> {
         let url = self.api_url("chat/completions");
-        let max_retries = self.config.max_retries;
 
-        for attempt in 0..=max_retries {
-            tracing::debug!(
-                "Sending request to NEAR AI Chat: {} (attempt {})",
-                url,
-                attempt + 1,
-            );
+        tracing::debug!("Sending request to NEAR AI Chat: {}", url);
 
-            if tracing::enabled!(tracing::Level::DEBUG)
-                && let Ok(json) = serde_json::to_string(body)
-            {
-                tracing::debug!("NEAR AI Chat request body: {}", json);
-            }
+        if tracing::enabled!(tracing::Level::DEBUG)
+            && let Ok(json) = serde_json::to_string(body)
+        {
+            tracing::debug!("NEAR AI Chat request body: {}", json);
+        }
 
-            let response = self
-                .client
-                .post(&url)
-                .header("Authorization", format!("Bearer {}", self.api_key()))
-                .header("Content-Type", "application/json")
-                .json(body)
-                .send()
-                .await;
+        let response = self
+            .client
+            .post(&url)
+            .header("Authorization", format!("Bearer {}", self.api_key()))
+            .header("Content-Type", "application/json")
+            .json(body)
+            .send()
+            .await
+            .map_err(|e| LlmError::RequestFailed {
+                provider: "nearai_chat".to_string(),
+                reason: e.to_string(),
+            })?;
 
-            let response = match response {
-                Ok(r) => r,
-                Err(e) => {
-                    tracing::error!("NEAR AI Chat request failed: {}", e);
-                    if attempt < max_retries {
-                        let delay = retry_backoff_delay(attempt);
-                        tracing::warn!(
-                            "NEAR AI Chat request error (attempt {}/{}), retrying in {:?}: {}",
-                            attempt + 1,
-                            max_retries + 1,
-                            delay,
-                            e,
-                        );
-                        tokio::time::sleep(delay).await;
-                        continue;
-                    }
-                    return Err(LlmError::RequestFailed {
-                        provider: "nearai_chat".to_string(),
-                        reason: e.to_string(),
-                    });
-                }
-            };
+        let status = response.status();
+        let response_text = response.text().await.unwrap_or_default();
 
-            let status = response.status();
-            let response_text = response.text().await.unwrap_or_default();
+        tracing::debug!("NEAR AI Chat response status: {}", status);
+        tracing::debug!("NEAR AI Chat response body: {}", response_text);
 
-            tracing::debug!("NEAR AI Chat response status: {}", status);
-            tracing::debug!("NEAR AI Chat response body: {}", response_text);
+        if !status.is_success() {
+            let status_code = status.as_u16();
 
-            if !status.is_success() {
-                let status_code = status.as_u16();
-
-                // Auth errors are not retryable
-                if status_code == 401 {
-                    return Err(LlmError::AuthFailed {
-                        provider: "nearai_chat".to_string(),
-                    });
-                }
-
-                // Transient errors: retry with backoff
-                if is_retryable_status(status_code) && attempt < max_retries {
-                    let delay = retry_backoff_delay(attempt);
-                    tracing::warn!(
-                        "NEAR AI Chat returned HTTP {} (attempt {}/{}), retrying in {:?}",
-                        status_code,
-                        attempt + 1,
-                        max_retries + 1,
-                        delay,
-                    );
-                    tokio::time::sleep(delay).await;
-                    continue;
-                }
-
-                // Non-retryable or exhausted retries
-                if status_code == 429 {
-                    return Err(LlmError::RateLimited {
-                        provider: "nearai_chat".to_string(),
-                        retry_after: None,
-                    });
-                }
-                let truncated = crate::agent::truncate_for_preview(&response_text, 512);
-                return Err(LlmError::RequestFailed {
+            if status_code == 401 {
+                return Err(LlmError::AuthFailed {
                     provider: "nearai_chat".to_string(),
-                    reason: format!("HTTP {}: {}", status, truncated),
                 });
             }
 
-            // Success — parse the response
-            return serde_json::from_str(&response_text).map_err(|e| {
-                let truncated = crate::agent::truncate_for_preview(&response_text, 512);
-                LlmError::InvalidResponse {
+            if status_code == 429 {
+                return Err(LlmError::RateLimited {
                     provider: "nearai_chat".to_string(),
-                    reason: format!("JSON parse error: {}. Raw: {}", e, truncated),
-                }
+                    retry_after: None,
+                });
+            }
+
+            let truncated = crate::agent::truncate_for_preview(&response_text, 512);
+            return Err(LlmError::RequestFailed {
+                provider: "nearai_chat".to_string(),
+                reason: format!("HTTP {}: {}", status, truncated),
             });
         }
 
-        // Safety net: unreachable because the loop always returns
-        Err(LlmError::RequestFailed {
-            provider: "nearai_chat".to_string(),
-            reason: "retry loop exited unexpectedly".to_string(),
+        serde_json::from_str(&response_text).map_err(|e| {
+            let truncated = crate::agent::truncate_for_preview(&response_text, 512);
+            LlmError::InvalidResponse {
+                provider: "nearai_chat".to_string(),
+                reason: format!("JSON parse error: {}. Raw: {}", e, truncated),
+            }
         })
     }
 

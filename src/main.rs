@@ -26,9 +26,9 @@ use ironclaw::{
     hooks::HookRegistry,
     llm::{
         CachedProvider, CircuitBreakerConfig, CircuitBreakerProvider, CooldownConfig,
-        FailoverProvider, LlmProvider, ResponseCacheConfig, SessionConfig,
-        create_cheap_llm_provider, create_llm_provider, create_llm_provider_with_config,
-        create_session_manager,
+        FailoverProvider, LlmProvider, ResponseCacheConfig, RetryConfig, RetryProvider,
+        SessionConfig, create_cheap_llm_provider, create_llm_provider,
+        create_llm_provider_with_config, create_session_manager,
     },
     orchestrator::{
         ContainerJobConfig, ContainerJobManager, OrchestratorApi, TokenStore,
@@ -603,6 +603,22 @@ async fn main() -> anyhow::Result<()> {
     let llm = create_llm_provider(&config.llm, session.clone())?;
     tracing::info!("LLM provider initialized: {}", llm.model_name());
 
+    // Wrap each provider with RetryProvider for automatic retries on transient errors.
+    // RetryProvider sits inside FailoverProvider so each provider in the failover chain
+    // gets its own retry attempts before the failover moves to the next provider.
+    let retry_config = RetryConfig {
+        max_retries: config.llm.nearai.max_retries,
+    };
+    let llm: Arc<dyn LlmProvider> = if retry_config.max_retries > 0 {
+        tracing::info!(
+            max_retries = retry_config.max_retries,
+            "LLM retry wrapper enabled"
+        );
+        Arc::new(RetryProvider::new(llm, retry_config.clone()))
+    } else {
+        llm
+    };
+
     // Wrap in failover if a fallback model is configured
     let llm: Arc<dyn LlmProvider> =
         if let Some(fallback_model) = config.llm.nearai.fallback_model.as_ref() {
@@ -619,6 +635,12 @@ async fn main() -> anyhow::Result<()> {
                 fallback = %fallback.model_name(),
                 "LLM failover enabled"
             );
+            // Wrap fallback with retry too
+            let fallback: Arc<dyn LlmProvider> = if retry_config.max_retries > 0 {
+                Arc::new(RetryProvider::new(fallback, retry_config.clone()))
+            } else {
+                fallback
+            };
             let cooldown_config = CooldownConfig {
                 cooldown_duration: std::time::Duration::from_secs(
                     config.llm.nearai.failover_cooldown_secs,

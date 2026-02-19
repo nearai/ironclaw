@@ -21,30 +21,7 @@ use crate::llm::provider::{
     ToolCompletionResponse,
 };
 
-/// Returns `true` if the error is transient and the request should be retried
-/// on the next provider in the failover chain.
-///
-/// Retryable: `RequestFailed`, `RateLimited`, `InvalidResponse`,
-/// `SessionRenewalFailed`, `ModelNotAvailable`, `Http`, `Io`.
-///
-/// `ModelNotAvailable` is retryable because the next provider in the chain may
-/// offer a different model, so it's worth trying.
-///
-/// Non-retryable errors (`AuthFailed`, `SessionExpired`, `ContextLengthExceeded`)
-/// propagate immediately because a different provider won't fix them.
-fn is_retryable(err: &LlmError) -> bool {
-    matches!(
-        err,
-        LlmError::RequestFailed { .. }
-            | LlmError::RateLimited { .. }
-            | LlmError::InvalidResponse { .. }
-            | LlmError::SessionRenewalFailed { .. }
-            // ModelNotAvailable is retryable: the next provider may offer a different model.
-            | LlmError::ModelNotAvailable { .. }
-            | LlmError::Http(_)
-            | LlmError::Io(_)
-    )
-}
+use crate::llm::retry::is_retryable;
 
 /// Configuration for per-provider cooldown behavior.
 ///
@@ -1041,10 +1018,6 @@ mod tests {
             std::io::ErrorKind::ConnectionReset,
             "reset"
         ))));
-        assert!(is_retryable(&LlmError::ModelNotAvailable {
-            provider: "p".into(),
-            model: "m".into(),
-        }));
 
         // Non-retryable
         assert!(!is_retryable(&LlmError::AuthFailed {
@@ -1056,6 +1029,10 @@ mod tests {
         assert!(!is_retryable(&LlmError::ContextLengthExceeded {
             used: 100_000,
             limit: 50_000,
+        }));
+        assert!(!is_retryable(&LlmError::ModelNotAvailable {
+            provider: "p".into(),
+            model: "m".into(),
         }));
     }
 
