@@ -21,8 +21,9 @@ use crate::workspace::embeddings::{EmbeddingError, EmbeddingProvider};
 pub struct EmbeddingCacheConfig {
     /// Maximum number of cached embeddings (default 10,000).
     ///
-    /// Memory usage: `max_entries × dimension × 4 bytes`.
-    /// At 10,000 entries × 1536 floats = ~58 MB.
+    /// Approximate raw embedding payload: `max_entries × dimension × 4 bytes`.
+    /// At 10,000 entries × 1536 floats ≈ 58 MB (payload only; actual memory
+    /// is higher due to HashMap, String keys, and per-entry overhead).
     pub max_entries: usize,
 }
 
@@ -221,7 +222,7 @@ impl EmbeddingProvider for CachedEmbeddingProvider {
                 results[orig_idx] = Some(emb.clone());
             }
             // Enforce capacity after batch insert
-            Self::evict_lru(&mut guard, self.config.max_entries + 1);
+            Self::evict_lru(&mut guard, self.config.max_entries.saturating_add(1));
         }
 
         Ok(results

@@ -322,7 +322,8 @@ impl Workspace {
     /// Set the embedding provider for semantic search.
     ///
     /// The provider is automatically wrapped in a [`CachedEmbeddingProvider`]
-    /// with the default cache size (10,000 entries, ~58 MB for 1536-dim).
+    /// with the default cache size (10,000 entries; payload ~58 MB for 1536-dim,
+    /// actual memory higher due to per-entry overhead).
     pub fn with_embeddings(mut self, provider: Arc<dyn EmbeddingProvider>) -> Self {
         self.embeddings = Some(Arc::new(CachedEmbeddingProvider::new(
             provider,
