@@ -38,7 +38,8 @@ use ironclaw::{
         wasm::{WasmToolLoader, WasmToolRuntime, load_dev_tools},
     },
     workspace::{
-        EmbeddingProvider, NearAiEmbeddings, OllamaEmbeddings, OpenAiEmbeddings, Workspace,
+        EmbeddingCacheConfig, EmbeddingProvider, NearAiEmbeddings, OllamaEmbeddings,
+        OpenAiEmbeddings, Workspace,
     },
 };
 
@@ -706,9 +707,12 @@ async fn main() -> anyhow::Result<()> {
 
     // Create workspace once, reused for memory tools and agent
     let workspace: Option<Arc<Workspace>> = if let Some(ref db) = db {
+        let emb_cache_config = EmbeddingCacheConfig {
+            max_entries: config.embeddings.cache_size,
+        };
         let mut ws = Workspace::new_with_db("default", Arc::clone(db));
         if let Some(ref emb) = embeddings {
-            ws = ws.with_embeddings(emb.clone());
+            ws = ws.with_embeddings_cached(emb.clone(), emb_cache_config);
         }
         Some(Arc::new(ws))
     } else {
