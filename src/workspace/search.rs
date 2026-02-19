@@ -104,14 +104,22 @@ impl SearchConfig {
     }
 
     /// Set the FTS weight for `WeightedScore` fusion.
+    ///
+    /// Non-finite (NaN, ±inf) or negative values are ignored.
     pub fn with_fts_weight(mut self, weight: f32) -> Self {
-        self.fts_weight = weight;
+        if weight.is_finite() && weight >= 0.0 {
+            self.fts_weight = weight;
+        }
         self
     }
 
     /// Set the vector weight for `WeightedScore` fusion.
+    ///
+    /// Non-finite (NaN, ±inf) or negative values are ignored.
     pub fn with_vector_weight(mut self, weight: f32) -> Self {
-        self.vector_weight = weight;
+        if weight.is_finite() && weight >= 0.0 {
+            self.vector_weight = weight;
+        }
         self
     }
 }
@@ -623,6 +631,37 @@ mod tests {
         assert!(results[0].score > results[1].score);
         // Top result should be normalized to 1.0
         assert!((results[0].score - 1.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn test_weight_setters_reject_invalid() {
+        let config = SearchConfig::default();
+        let original_fts = config.fts_weight;
+        let original_vec = config.vector_weight;
+
+        // NaN is ignored
+        let c = config.clone().with_fts_weight(f32::NAN);
+        assert!((c.fts_weight - original_fts).abs() < 0.001);
+
+        // Infinity is ignored
+        let c = config.clone().with_vector_weight(f32::INFINITY);
+        assert!((c.vector_weight - original_vec).abs() < 0.001);
+
+        // Negative is ignored
+        let c = config.clone().with_fts_weight(-1.0);
+        assert!((c.fts_weight - original_fts).abs() < 0.001);
+
+        // Negative infinity is ignored
+        let c = config.clone().with_vector_weight(f32::NEG_INFINITY);
+        assert!((c.vector_weight - original_vec).abs() < 0.001);
+
+        // Valid values > 1.0 are accepted (weights don't need to sum to 1.0)
+        let c = config.clone().with_fts_weight(2.0);
+        assert!((c.fts_weight - 2.0).abs() < 0.001);
+
+        // Zero is valid
+        let c = config.clone().with_vector_weight(0.0);
+        assert!(c.vector_weight.abs() < 0.001);
     }
 
     #[test]
