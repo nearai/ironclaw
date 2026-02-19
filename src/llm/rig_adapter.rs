@@ -406,6 +406,16 @@ where
     }
 
     async fn complete(&self, request: CompletionRequest) -> Result<CompletionResponse, LlmError> {
+        if let Some(requested_model) = request.model.as_deref()
+            && requested_model != self.model_name.as_str()
+        {
+            tracing::warn!(
+                requested_model = requested_model,
+                active_model = %self.model_name,
+                "Per-request model override is not supported for this provider; using configured model"
+            );
+        }
+
         let mut messages = request.messages;
         crate::llm::provider::sanitize_tool_messages(&mut messages);
         let (preamble, history) = convert_messages(&messages);
@@ -443,6 +453,16 @@ where
         &self,
         request: ToolCompletionRequest,
     ) -> Result<ToolCompletionResponse, LlmError> {
+        if let Some(requested_model) = request.model.as_deref()
+            && requested_model != self.model_name.as_str()
+        {
+            tracing::warn!(
+                requested_model = requested_model,
+                active_model = %self.model_name,
+                "Per-request model override is not supported for this provider; using configured model"
+            );
+        }
+
         let known_tool_names: HashSet<String> =
             request.tools.iter().map(|t| t.name.clone()).collect();
 
@@ -497,6 +517,10 @@ where
 
     fn active_model_name(&self) -> String {
         self.model_name.clone()
+    }
+
+    fn effective_model_name(&self, _requested_model: Option<&str>) -> String {
+        self.active_model_name()
     }
 
     fn set_model(&self, _model: &str) -> Result<(), LlmError> {

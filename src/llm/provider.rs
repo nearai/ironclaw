@@ -105,6 +105,8 @@ impl ChatMessage {
 #[derive(Debug, Clone)]
 pub struct CompletionRequest {
     pub messages: Vec<ChatMessage>,
+    /// Optional per-request model override.
+    pub model: Option<String>,
     pub max_tokens: Option<u32>,
     pub temperature: Option<f32>,
     pub stop_sequences: Option<Vec<String>>,
@@ -117,11 +119,18 @@ impl CompletionRequest {
     pub fn new(messages: Vec<ChatMessage>) -> Self {
         Self {
             messages,
+            model: None,
             max_tokens: None,
             temperature: None,
             stop_sequences: None,
             metadata: std::collections::HashMap::new(),
         }
+    }
+
+    /// Set model override.
+    pub fn with_model(mut self, model: impl Into<String>) -> Self {
+        self.model = Some(model.into());
+        self
     }
 
     /// Set max tokens.
@@ -188,6 +197,8 @@ pub struct ToolResult {
 pub struct ToolCompletionRequest {
     pub messages: Vec<ChatMessage>,
     pub tools: Vec<ToolDefinition>,
+    /// Optional per-request model override.
+    pub model: Option<String>,
     pub max_tokens: Option<u32>,
     pub temperature: Option<f32>,
     /// How to handle tool use: "auto", "required", or "none".
@@ -202,11 +213,18 @@ impl ToolCompletionRequest {
         Self {
             messages,
             tools,
+            model: None,
             max_tokens: None,
             temperature: None,
             tool_choice: None,
             metadata: std::collections::HashMap::new(),
         }
+    }
+
+    /// Set model override.
+    pub fn with_model(mut self, model: impl Into<String>) -> Self {
+        self.model = Some(model.into());
+        self
     }
 
     /// Set max tokens.
@@ -281,6 +299,16 @@ pub trait LlmProvider: Send + Sync {
             id: self.model_name().to_string(),
             context_length: None,
         })
+    }
+
+    /// Resolve which model should be reported for a given request.
+    ///
+    /// Providers that ignore per-request model overrides should override this
+    /// and return `active_model_name()`.
+    fn effective_model_name(&self, requested_model: Option<&str>) -> String {
+        requested_model
+            .map(std::borrow::ToOwned::to_owned)
+            .unwrap_or_else(|| self.active_model_name())
     }
 
     /// Get the currently active model name.

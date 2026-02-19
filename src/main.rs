@@ -1282,6 +1282,13 @@ async fn main() -> anyhow::Result<()> {
     let mut webhook_server = if !webhook_routes.is_empty() {
         let addr =
             webhook_server_addr.unwrap_or_else(|| std::net::SocketAddr::from(([0, 0, 0, 0], 8080)));
+        if addr.ip().is_unspecified() {
+            tracing::warn!(
+                "Webhook server is binding to {} — it will be reachable from all network interfaces. \
+                 Set HTTP_HOST=127.0.0.1 to restrict to localhost.",
+                addr.ip()
+            );
+        }
         let mut server = WebhookServer::new(WebhookServerConfig { addr });
         for routes in webhook_routes {
             server.add_routes(routes);
@@ -1374,7 +1381,7 @@ async fn main() -> anyhow::Result<()> {
     // Add web gateway channel if configured
     let mut gateway_url: Option<String> = None;
     if let Some(ref gw_config) = config.channels.gateway {
-        let mut gw = GatewayChannel::new(gw_config.clone()).with_llm_provider(llm.clone());
+        let mut gw = GatewayChannel::new(gw_config.clone()).with_llm_provider(Arc::clone(&llm));
         if let Some(ref ws) = workspace {
             gw = gw.with_workspace(Arc::clone(ws));
         }

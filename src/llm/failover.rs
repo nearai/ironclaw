@@ -7,8 +7,10 @@
 //! so subsequent requests skip them, reducing latency when a provider
 //! is known to be down. Cooldown state is lock-free (atomics only).
 
+use std::collections::HashMap;
 use std::future::Future;
 use std::sync::Arc;
+use std::sync::Mutex;
 use std::sync::atomic::{AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
@@ -116,6 +118,12 @@ pub struct FailoverProvider {
     epoch: Instant,
     /// Cooldown configuration.
     cooldown_config: CooldownConfig,
+    /// Request-scoped provider index keyed by Tokio task ID.
+    ///
+    /// This allows `effective_model_name()` to report the provider that handled
+    /// the *current* request, even when other concurrent requests update
+    /// `last_used`.
+    provider_for_task: Mutex<HashMap<tokio::task::Id, usize>>,
 }
 
 impl FailoverProvider {
@@ -148,6 +156,7 @@ impl FailoverProvider {
             cooldowns,
             epoch: Instant::now(),
             cooldown_config,
+            provider_for_task: Mutex::new(HashMap::new()),
         })
     }
 
@@ -159,12 +168,36 @@ impl FailoverProvider {
         self.epoch.elapsed().as_nanos() as u64
     }
 
+    /// Current Tokio task ID if available.
+    fn current_task_id() -> Option<tokio::task::Id> {
+        tokio::task::try_id()
+    }
+
+    /// Bind the selected provider index to the current task.
+    fn bind_provider_to_current_task(&self, provider_idx: usize) {
+        let Some(task_id) = Self::current_task_id() else {
+            return;
+        };
+        if let Ok(mut guard) = self.provider_for_task.lock() {
+            guard.insert(task_id, provider_idx);
+        }
+    }
+
+    /// Take and remove the provider index bound to the current task.
+    fn take_bound_provider_for_current_task(&self) -> Option<usize> {
+        let task_id = Self::current_task_id()?;
+        self.provider_for_task
+            .lock()
+            .ok()
+            .and_then(|mut guard| guard.remove(&task_id))
+    }
+
     /// Try each provider in sequence until one succeeds or all fail.
     ///
     /// Providers in cooldown are skipped unless *all* providers are in
     /// cooldown, in which case the one with the oldest cooldown timestamp
     /// (most likely to have recovered) is tried.
-    async fn try_providers<T, F, Fut>(&self, mut call: F) -> Result<T, LlmError>
+    async fn try_providers<T, F, Fut>(&self, mut call: F) -> Result<(usize, T), LlmError>
     where
         F: FnMut(Arc<dyn LlmProvider>) -> Fut,
         Fut: Future<Output = Result<T, LlmError>>,
@@ -213,7 +246,7 @@ impl FailoverProvider {
                 Ok(response) => {
                     self.last_used.store(i, Ordering::Relaxed);
                     self.cooldowns[i].reset();
-                    return Ok(response);
+                    return Ok((i, response));
                 }
                 Err(err) => {
                     if !is_retryable(&err) {
@@ -264,22 +297,28 @@ impl LlmProvider for FailoverProvider {
     }
 
     async fn complete(&self, request: CompletionRequest) -> Result<CompletionResponse, LlmError> {
-        self.try_providers(|provider| {
-            let req = request.clone();
-            async move { provider.complete(req).await }
-        })
-        .await
+        let (provider_idx, response) = self
+            .try_providers(|provider| {
+                let req = request.clone();
+                async move { provider.complete(req).await }
+            })
+            .await?;
+        self.bind_provider_to_current_task(provider_idx);
+        Ok(response)
     }
 
     async fn complete_with_tools(
         &self,
         request: ToolCompletionRequest,
     ) -> Result<ToolCompletionResponse, LlmError> {
-        self.try_providers(|provider| {
-            let req = request.clone();
-            async move { provider.complete_with_tools(req).await }
-        })
-        .await
+        let (provider_idx, response) = self
+            .try_providers(|provider| {
+                let req = request.clone();
+                async move { provider.complete_with_tools(req).await }
+            })
+            .await?;
+        self.bind_provider_to_current_task(provider_idx);
+        Ok(response)
     }
 
     fn active_model_name(&self) -> String {
@@ -332,6 +371,14 @@ impl LlmProvider for FailoverProvider {
     fn calculate_cost(&self, input_tokens: u32, output_tokens: u32) -> Decimal {
         self.providers[self.last_used.load(Ordering::Relaxed)]
             .calculate_cost(input_tokens, output_tokens)
+    }
+
+    fn effective_model_name(&self, requested_model: Option<&str>) -> String {
+        if let Some(provider_idx) = self.take_bound_provider_for_current_task() {
+            return self.providers[provider_idx].effective_model_name(requested_model);
+        }
+
+        self.providers[self.last_used.load(Ordering::Relaxed)].effective_model_name(requested_model)
     }
 }
 
@@ -605,6 +652,49 @@ mod tests {
         let _ = failover.complete(make_request()).await.unwrap();
         assert_eq!(failover.model_name(), "fallback-model");
         assert_eq!(failover.cost_per_token(), (fallback_cost, fallback_cost));
+    }
+
+    // Test: model reporting is request-scoped under concurrent requests.
+    #[tokio::test]
+    async fn effective_model_name_is_request_scoped_under_concurrency() {
+        let config = CooldownConfig {
+            cooldown_duration: Duration::from_secs(60),
+            failure_threshold: 3,
+        };
+        let primary = Arc::new(MultiCallMockProvider::fail_then_ok("primary", 1));
+        let fallback = Arc::new(MultiCallMockProvider::always_ok("fallback"));
+        let failover =
+            Arc::new(FailoverProvider::with_cooldown(vec![primary, fallback], config).unwrap());
+
+        let (first_done_tx, first_done_rx) = tokio::sync::oneshot::channel::<()>();
+        let (second_done_tx, second_done_rx) = tokio::sync::oneshot::channel::<()>();
+
+        let failover_a = Arc::clone(&failover);
+        let task_a = tokio::spawn(async move {
+            // First request: primary fails once, fallback serves.
+            let _ = failover_a.complete(make_request()).await.unwrap();
+            let _ = first_done_tx.send(());
+
+            // Wait until the second request finishes and updates global state.
+            let _ = second_done_rx.await;
+            failover_a.effective_model_name(None)
+        });
+
+        let failover_b = Arc::clone(&failover);
+        let task_b = tokio::spawn(async move {
+            let _ = first_done_rx.await;
+            // Second request: primary now succeeds.
+            let _ = failover_b.complete(make_request()).await.unwrap();
+            let model = failover_b.effective_model_name(None);
+            let _ = second_done_tx.send(());
+            model
+        });
+
+        let model_b = task_b.await.unwrap();
+        let model_a = task_a.await.unwrap();
+
+        assert_eq!(model_a, "fallback");
+        assert_eq!(model_b, "primary");
     }
 
     // Test: list_models aggregates from all providers.
