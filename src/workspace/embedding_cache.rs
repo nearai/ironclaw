@@ -173,11 +173,18 @@ impl EmbeddingProvider for CachedEmbeddingProvider {
 
         if miss_indices.is_empty() {
             tracing::debug!(count = texts.len(), "embedding batch: all cache hits");
-            // All slots populated from cache hits -- unwrap is safe here
-            return Ok(results
+            // All slots populated from cache hits
+            return results
                 .into_iter()
-                .map(|r| r.expect("all cache hits"))
-                .collect());
+                .enumerate()
+                .map(|(i, slot)| {
+                    slot.ok_or_else(|| {
+                        EmbeddingError::InvalidResponse(format!(
+                            "embedding slot {i} was not populated"
+                        ))
+                    })
+                })
+                .collect::<Result<Vec<_>, _>>();
         }
 
         // Fetch missing embeddings
