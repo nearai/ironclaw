@@ -117,24 +117,20 @@ async fn main() -> anyhow::Result<()> {
                                 &config.llm.nearai.base_url,
                                 session,
                             )
-                            .with_model(&config.embeddings.model, 1536),
+                            .with_model(&config.embeddings.model, config.embeddings.dimension),
                         )),
                         "ollama" => Some(Arc::new(
                             ironclaw::workspace::OllamaEmbeddings::new(
                                 &config.embeddings.ollama_base_url,
                             )
-                            .with_model(&config.embeddings.model, 768),
+                            .with_model(&config.embeddings.model, config.embeddings.dimension),
                         )),
                         _ => {
                             if let Some(api_key) = config.embeddings.openai_api_key() {
-                                let dim = match config.embeddings.model.as_str() {
-                                    "text-embedding-3-large" => 3072,
-                                    _ => 1536,
-                                };
                                 Some(Arc::new(ironclaw::workspace::OpenAiEmbeddings::with_model(
                                     api_key,
                                     &config.embeddings.model,
-                                    dim,
+                                    config.embeddings.dimension,
                                 )))
                             } else {
                                 None
@@ -693,39 +689,39 @@ async fn main() -> anyhow::Result<()> {
         match config.embeddings.provider.as_str() {
             "nearai" => {
                 tracing::info!(
-                    "Embeddings enabled via NEAR AI (model: {})",
-                    config.embeddings.model
+                    "Embeddings enabled via NEAR AI (model: {}, dim: {})",
+                    config.embeddings.model,
+                    config.embeddings.dimension,
                 );
                 Some(Arc::new(
                     NearAiEmbeddings::new(&config.llm.nearai.base_url, session.clone())
-                        .with_model(&config.embeddings.model, 1536),
+                        .with_model(&config.embeddings.model, config.embeddings.dimension),
                 ))
             }
             "ollama" => {
                 tracing::info!(
-                    "Embeddings enabled via Ollama (model: {}, url: {})",
+                    "Embeddings enabled via Ollama (model: {}, url: {}, dim: {})",
                     config.embeddings.model,
                     config.embeddings.ollama_base_url,
+                    config.embeddings.dimension,
                 );
                 Some(Arc::new(
                     OllamaEmbeddings::new(&config.embeddings.ollama_base_url)
-                        .with_model(&config.embeddings.model, 768),
+                        .with_model(&config.embeddings.model, config.embeddings.dimension),
                 ))
             }
             _ => {
                 // Default to OpenAI for unknown providers
                 if let Some(api_key) = config.embeddings.openai_api_key() {
                     tracing::info!(
-                        "Embeddings enabled via OpenAI (model: {})",
-                        config.embeddings.model
+                        "Embeddings enabled via OpenAI (model: {}, dim: {})",
+                        config.embeddings.model,
+                        config.embeddings.dimension,
                     );
                     Some(Arc::new(OpenAiEmbeddings::with_model(
                         api_key,
                         &config.embeddings.model,
-                        match config.embeddings.model.as_str() {
-                            "text-embedding-3-large" => 3072,
-                            _ => 1536, // text-embedding-3-small and ada-002
-                        },
+                        config.embeddings.dimension,
                     )))
                 } else {
                     tracing::warn!("Embeddings configured but OPENAI_API_KEY not set");

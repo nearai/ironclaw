@@ -49,7 +49,10 @@ impl NearAiChatProvider {
         let client = Client::builder()
             .timeout(std::time::Duration::from_secs(120))
             .build()
-            .unwrap_or_else(|_| Client::new());
+            .map_err(|e| LlmError::RequestFailed {
+                provider: "nearai_chat".to_string(),
+                reason: format!("Failed to build HTTP client: {}", e),
+            })?;
 
         let active_model = std::sync::RwLock::new(config.model.clone());
         Ok(Self {
@@ -611,18 +614,30 @@ struct ChatCompletionUsage {
 mod tests {
     use super::*;
 
-    #[test]
-    fn test_api_url_with_base_without_v1() {
-        let mut cfg = NearAiConfig {
+    fn test_nearai_config(base_url: &str) -> NearAiConfig {
+        NearAiConfig {
             model: "test-model".to_string(),
-            base_url: "http://127.0.0.1:8318".to_string(),
+            base_url: base_url.to_string(),
             auth_base_url: "https://private.near.ai".to_string(),
             session_path: std::path::PathBuf::from("/tmp/session.json"),
             api_mode: crate::config::NearAiApiMode::ChatCompletions,
             api_key: Some(secrecy::SecretString::from("test-key".to_string())),
+            cheap_model: None,
             fallback_model: None,
             max_retries: 0,
-        };
+            circuit_breaker_threshold: None,
+            circuit_breaker_recovery_secs: 30,
+            response_cache_enabled: false,
+            response_cache_ttl_secs: 3600,
+            response_cache_max_entries: 1000,
+            failover_cooldown_secs: 300,
+            failover_cooldown_threshold: 3,
+        }
+    }
+
+    #[test]
+    fn test_api_url_with_base_without_v1() {
+        let mut cfg = test_nearai_config("http://127.0.0.1:8318");
 
         let provider = NearAiChatProvider::new(cfg.clone()).expect("provider");
         assert_eq!(
@@ -640,16 +655,7 @@ mod tests {
 
     #[test]
     fn test_api_url_with_base_already_v1() {
-        let cfg = NearAiConfig {
-            model: "test-model".to_string(),
-            base_url: "http://127.0.0.1:8318/v1".to_string(),
-            auth_base_url: "https://private.near.ai".to_string(),
-            session_path: std::path::PathBuf::from("/tmp/session.json"),
-            api_mode: crate::config::NearAiApiMode::ChatCompletions,
-            api_key: Some(secrecy::SecretString::from("test-key".to_string())),
-            fallback_model: None,
-            max_retries: 0,
-        };
+        let cfg = test_nearai_config("http://127.0.0.1:8318/v1");
 
         let provider = NearAiChatProvider::new(cfg).expect("provider");
         assert_eq!(
