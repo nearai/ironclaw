@@ -26,9 +26,9 @@ use ironclaw::{
     hooks::{HookRegistry, bootstrap_hooks},
     llm::{
         CachedProvider, CircuitBreakerConfig, CircuitBreakerProvider, CooldownConfig,
-        FailoverProvider, LlmProvider, ResponseCacheConfig, SessionConfig,
-        create_cheap_llm_provider, create_llm_provider, create_llm_provider_with_config,
-        create_session_manager,
+        FailoverProvider, LlmProvider, ResponseCacheConfig, RetryConfig, RetryProvider,
+        SessionConfig, create_cheap_llm_provider, create_llm_provider,
+        create_llm_provider_with_config, create_session_manager,
     },
     orchestrator::{
         ContainerJobConfig, ContainerJobManager, OrchestratorApi, TokenStore,
@@ -42,7 +42,9 @@ use ironclaw::{
         mcp::{McpClient, McpSessionManager, config::load_mcp_servers_from_db, is_authenticated},
         wasm::{WasmToolLoader, WasmToolRuntime, load_dev_tools},
     },
-    workspace::{EmbeddingProvider, NearAiEmbeddings, OpenAiEmbeddings, Workspace},
+    workspace::{
+        EmbeddingProvider, NearAiEmbeddings, OllamaEmbeddings, OpenAiEmbeddings, Workspace,
+    },
 };
 
 #[cfg(feature = "libsql")]
@@ -115,18 +117,20 @@ async fn main() -> anyhow::Result<()> {
                                 &config.llm.nearai.base_url,
                                 session,
                             )
-                            .with_model(&config.embeddings.model, 1536),
+                            .with_model(&config.embeddings.model, config.embeddings.dimension),
+                        )),
+                        "ollama" => Some(Arc::new(
+                            ironclaw::workspace::OllamaEmbeddings::new(
+                                &config.embeddings.ollama_base_url,
+                            )
+                            .with_model(&config.embeddings.model, config.embeddings.dimension),
                         )),
                         _ => {
                             if let Some(api_key) = config.embeddings.openai_api_key() {
-                                let dim = match config.embeddings.model.as_str() {
-                                    "text-embedding-3-large" => 3072,
-                                    _ => 1536,
-                                };
                                 Some(Arc::new(ironclaw::workspace::OpenAiEmbeddings::with_model(
                                     api_key,
                                     &config.embeddings.model,
-                                    dim,
+                                    config.embeddings.dimension,
                                 )))
                             } else {
                                 None
@@ -136,6 +140,23 @@ async fn main() -> anyhow::Result<()> {
                 } else {
                     None
                 };
+
+            // Warn if libSQL backend is used with non-1536 embedding dimension.
+            // libSQL schema uses F32_BLOB(1536) which cannot be altered without a
+            // table rebuild, so non-1536 embeddings will cause storage failures.
+            if config.database.backend == ironclaw::config::DatabaseBackend::LibSql
+                && config.embeddings.enabled
+                && config.embeddings.dimension != 1536
+            {
+                tracing::warn!(
+                    configured_dimension = config.embeddings.dimension,
+                    "Embedding dimension {} is not 1536. The libSQL schema uses \
+                     F32_BLOB(1536) which requires exactly 1536 dimensions. \
+                     Embedding storage will fail. Use PostgreSQL or set \
+                     EMBEDDING_DIMENSION=1536.",
+                    config.embeddings.dimension
+                );
+            }
 
             // Create a Database-trait-backed workspace for the memory command
             let db: Arc<dyn ironclaw::db::Database> =
@@ -599,6 +620,22 @@ async fn main() -> anyhow::Result<()> {
     let llm = create_llm_provider(&config.llm, session.clone())?;
     tracing::info!("LLM provider initialized: {}", llm.model_name());
 
+    // Wrap each provider with RetryProvider for automatic retries on transient errors.
+    // RetryProvider sits inside FailoverProvider so each provider in the failover chain
+    // gets its own retry attempts before the failover moves to the next provider.
+    let retry_config = RetryConfig {
+        max_retries: config.llm.nearai.max_retries,
+    };
+    let llm: Arc<dyn LlmProvider> = if retry_config.max_retries > 0 {
+        tracing::info!(
+            max_retries = retry_config.max_retries,
+            "LLM retry wrapper enabled"
+        );
+        Arc::new(RetryProvider::new(llm, retry_config.clone()))
+    } else {
+        llm
+    };
+
     // Wrap in failover if a fallback model is configured
     let llm: Arc<dyn LlmProvider> =
         if let Some(fallback_model) = config.llm.nearai.fallback_model.as_ref() {
@@ -615,6 +652,12 @@ async fn main() -> anyhow::Result<()> {
                 fallback = %fallback.model_name(),
                 "LLM failover enabled"
             );
+            // Wrap fallback with retry too
+            let fallback: Arc<dyn LlmProvider> = if retry_config.max_retries > 0 {
+                Arc::new(RetryProvider::new(fallback, retry_config.clone()))
+            } else {
+                fallback
+            };
             let cooldown_config = CooldownConfig {
                 cooldown_duration: std::time::Duration::from_secs(
                     config.llm.nearai.failover_cooldown_secs,
@@ -685,28 +728,39 @@ async fn main() -> anyhow::Result<()> {
         match config.embeddings.provider.as_str() {
             "nearai" => {
                 tracing::info!(
-                    "Embeddings enabled via NEAR AI (model: {})",
-                    config.embeddings.model
+                    "Embeddings enabled via NEAR AI (model: {}, dim: {})",
+                    config.embeddings.model,
+                    config.embeddings.dimension,
                 );
                 Some(Arc::new(
                     NearAiEmbeddings::new(&config.llm.nearai.base_url, session.clone())
-                        .with_model(&config.embeddings.model, 1536),
+                        .with_model(&config.embeddings.model, config.embeddings.dimension),
+                ))
+            }
+            "ollama" => {
+                tracing::info!(
+                    "Embeddings enabled via Ollama (model: {}, url: {}, dim: {})",
+                    config.embeddings.model,
+                    config.embeddings.ollama_base_url,
+                    config.embeddings.dimension,
+                );
+                Some(Arc::new(
+                    OllamaEmbeddings::new(&config.embeddings.ollama_base_url)
+                        .with_model(&config.embeddings.model, config.embeddings.dimension),
                 ))
             }
             _ => {
                 // Default to OpenAI for unknown providers
                 if let Some(api_key) = config.embeddings.openai_api_key() {
                     tracing::info!(
-                        "Embeddings enabled via OpenAI (model: {})",
-                        config.embeddings.model
+                        "Embeddings enabled via OpenAI (model: {}, dim: {})",
+                        config.embeddings.model,
+                        config.embeddings.dimension,
                     );
                     Some(Arc::new(OpenAiEmbeddings::with_model(
                         api_key,
                         &config.embeddings.model,
-                        match config.embeddings.model.as_str() {
-                            "text-embedding-3-large" => 3072,
-                            _ => 1536, // text-embedding-3-small and ada-002
-                        },
+                        config.embeddings.dimension,
                     )))
                 } else {
                     tracing::warn!("Embeddings configured but OPENAI_API_KEY not set");
@@ -718,6 +772,21 @@ async fn main() -> anyhow::Result<()> {
         tracing::info!("Embeddings disabled (set OPENAI_API_KEY or EMBEDDING_ENABLED=true)");
         None
     };
+
+    // Warn if libSQL backend is used with non-1536 embedding dimension.
+    if config.database.backend == ironclaw::config::DatabaseBackend::LibSql
+        && config.embeddings.enabled
+        && config.embeddings.dimension != 1536
+    {
+        tracing::warn!(
+            configured_dimension = config.embeddings.dimension,
+            "Embedding dimension {} is not 1536. The libSQL schema uses \
+             F32_BLOB(1536) which requires exactly 1536 dimensions. \
+             Embedding storage will fail. Use PostgreSQL or set \
+             EMBEDDING_DIMENSION=1536.",
+            config.embeddings.dimension
+        );
+    }
 
     // Register memory tools if database is available
     if let Some(ref db) = db {

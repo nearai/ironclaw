@@ -11,7 +11,7 @@ use uuid::Uuid;
 use crate::agent::Agent;
 use crate::agent::compaction::ContextCompactor;
 use crate::agent::dispatcher::{AgenticLoopResult, detect_auth_awaiting, parse_auth_result};
-use crate::agent::session::{Session, ThreadState};
+use crate::agent::session::{PendingApproval, Session, ThreadState};
 use crate::agent::submission::SubmissionResult;
 use crate::channels::{IncomingMessage, StatusUpdate};
 use crate::context::JobContext;
@@ -712,6 +712,7 @@ impl Agent {
 
             // Build context including the tool result
             let mut context_messages = pending.context_messages;
+            let deferred_tool_calls = pending.deferred_tool_calls;
 
             // Record result in thread
             {
@@ -779,6 +780,178 @@ impl Agent {
                 &pending.tool_name,
                 result_content,
             ));
+
+            // Replay deferred tool calls from the same assistant message so
+            // every tool_use ID gets a matching tool_result before the next
+            // LLM call.
+            if !deferred_tool_calls.is_empty() {
+                let _ = self
+                    .channels
+                    .send_status(
+                        &message.channel,
+                        StatusUpdate::Thinking(format!(
+                            "Executing {} deferred tool(s)...",
+                            deferred_tool_calls.len()
+                        )),
+                        &message.metadata,
+                    )
+                    .await;
+            }
+
+            let mut deferred_queue = std::collections::VecDeque::from(deferred_tool_calls);
+            while let Some(tc) = deferred_queue.pop_front() {
+                // Re-check approval for each deferred tool call
+                if let Some(tool) = self.tools().get(&tc.name).await
+                    && tool.requires_approval()
+                {
+                    let is_auto_approved = {
+                        let sess = session.lock().await;
+                        let mut approved = sess.is_tool_auto_approved(&tc.name);
+                        if approved && tool.requires_approval_for(&tc.arguments) {
+                            approved = false;
+                        }
+                        approved
+                    };
+
+                    if !is_auto_approved {
+                        let new_pending = PendingApproval {
+                            request_id: Uuid::new_v4(),
+                            tool_name: tc.name.clone(),
+                            parameters: tc.arguments.clone(),
+                            description: tool.description().to_string(),
+                            tool_call_id: tc.id.clone(),
+                            context_messages: context_messages.clone(),
+                            deferred_tool_calls: deferred_queue.iter().cloned().collect(),
+                        };
+
+                        let request_id = new_pending.request_id;
+                        let tool_name = new_pending.tool_name.clone();
+                        let description = new_pending.description.clone();
+                        let parameters = new_pending.parameters.clone();
+
+                        {
+                            let mut sess = session.lock().await;
+                            if let Some(thread) = sess.threads.get_mut(&thread_id) {
+                                thread.await_approval(new_pending);
+                            }
+                        }
+
+                        let _ = self
+                            .channels
+                            .send_status(
+                                &message.channel,
+                                StatusUpdate::Status("Awaiting approval".into()),
+                                &message.metadata,
+                            )
+                            .await;
+
+                        return Ok(SubmissionResult::NeedApproval {
+                            request_id,
+                            tool_name,
+                            description,
+                            parameters,
+                        });
+                    }
+                }
+
+                let _ = self
+                    .channels
+                    .send_status(
+                        &message.channel,
+                        StatusUpdate::ToolStarted {
+                            name: tc.name.clone(),
+                        },
+                        &message.metadata,
+                    )
+                    .await;
+
+                let deferred_result = self
+                    .execute_chat_tool(&tc.name, &tc.arguments, &job_ctx)
+                    .await;
+
+                let _ = self
+                    .channels
+                    .send_status(
+                        &message.channel,
+                        StatusUpdate::ToolCompleted {
+                            name: tc.name.clone(),
+                            success: deferred_result.is_ok(),
+                        },
+                        &message.metadata,
+                    )
+                    .await;
+
+                if let Ok(ref output) = deferred_result
+                    && !output.is_empty()
+                {
+                    let _ = self
+                        .channels
+                        .send_status(
+                            &message.channel,
+                            StatusUpdate::ToolResult {
+                                name: tc.name.clone(),
+                                preview: output.clone(),
+                            },
+                            &message.metadata,
+                        )
+                        .await;
+                }
+
+                // Record in thread
+                {
+                    let mut sess = session.lock().await;
+                    if let Some(thread) = sess.threads.get_mut(&thread_id)
+                        && let Some(turn) = thread.last_turn_mut()
+                    {
+                        match &deferred_result {
+                            Ok(output) => turn.record_tool_result(serde_json::json!(output)),
+                            Err(e) => turn.record_tool_error(e.to_string()),
+                        }
+                    }
+                }
+
+                // Auth detection for deferred tools
+                if let Some((ext_name, instructions)) =
+                    detect_auth_awaiting(&tc.name, &deferred_result)
+                {
+                    let auth_data = parse_auth_result(&deferred_result);
+                    {
+                        let mut sess = session.lock().await;
+                        if let Some(thread) = sess.threads.get_mut(&thread_id) {
+                            thread.enter_auth_mode(ext_name.clone());
+                            thread.complete_turn(&instructions);
+                        }
+                    }
+                    let _ = self
+                        .channels
+                        .send_status(
+                            &message.channel,
+                            StatusUpdate::AuthRequired {
+                                extension_name: ext_name,
+                                instructions: Some(instructions.clone()),
+                                auth_url: auth_data.auth_url,
+                                setup_url: auth_data.setup_url,
+                            },
+                            &message.metadata,
+                        )
+                        .await;
+                    return Ok(SubmissionResult::response(instructions));
+                }
+
+                let deferred_content = match deferred_result {
+                    Ok(output) => {
+                        let sanitized = self.safety().sanitize_tool_output(&tc.name, &output);
+                        self.safety().wrap_for_llm(
+                            &tc.name,
+                            &sanitized.content,
+                            sanitized.was_modified,
+                        )
+                    }
+                    Err(e) => format!("Error: {}", e),
+                };
+
+                context_messages.push(ChatMessage::tool_result(&tc.id, &tc.name, deferred_content));
+            }
 
             // Continue the agentic loop (a tool was already executed this turn)
             let result = self

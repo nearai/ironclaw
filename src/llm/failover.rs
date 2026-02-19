@@ -19,34 +19,11 @@ use rust_decimal::Decimal;
 
 use crate::error::LlmError;
 use crate::llm::provider::{
-    CompletionRequest, CompletionResponse, LlmProvider, ToolCompletionRequest,
+    CompletionRequest, CompletionResponse, LlmProvider, ModelMetadata, ToolCompletionRequest,
     ToolCompletionResponse,
 };
 
-/// Returns `true` if the error is transient and the request should be retried
-/// on the next provider in the failover chain.
-///
-/// Retryable: `RequestFailed`, `RateLimited`, `InvalidResponse`,
-/// `SessionRenewalFailed`, `ModelNotAvailable`, `Http`, `Io`.
-///
-/// `ModelNotAvailable` is retryable because the next provider in the chain may
-/// offer a different model, so it's worth trying.
-///
-/// Non-retryable errors (`AuthFailed`, `SessionExpired`, `ContextLengthExceeded`)
-/// propagate immediately because a different provider won't fix them.
-fn is_retryable(err: &LlmError) -> bool {
-    matches!(
-        err,
-        LlmError::RequestFailed { .. }
-            | LlmError::RateLimited { .. }
-            | LlmError::InvalidResponse { .. }
-            | LlmError::SessionRenewalFailed { .. }
-            // ModelNotAvailable is retryable: the next provider may offer a different model.
-            | LlmError::ModelNotAvailable { .. }
-            | LlmError::Http(_)
-            | LlmError::Io(_)
-    )
-}
+use crate::llm::retry::is_retryable;
 
 /// Configuration for per-provider cooldown behavior.
 ///
@@ -374,6 +351,26 @@ impl LlmProvider for FailoverProvider {
         all_models.sort();
         all_models.dedup();
         Ok(all_models)
+    }
+
+    async fn model_metadata(&self) -> Result<ModelMetadata, LlmError> {
+        self.providers[self.last_used.load(Ordering::Relaxed)]
+            .model_metadata()
+            .await
+    }
+
+    fn seed_response_chain(&self, thread_id: &str, response_id: String) {
+        self.providers[self.last_used.load(Ordering::Relaxed)]
+            .seed_response_chain(thread_id, response_id);
+    }
+
+    fn get_response_chain_id(&self, thread_id: &str) -> Option<String> {
+        self.providers[self.last_used.load(Ordering::Relaxed)].get_response_chain_id(thread_id)
+    }
+
+    fn calculate_cost(&self, input_tokens: u32, output_tokens: u32) -> Decimal {
+        self.providers[self.last_used.load(Ordering::Relaxed)]
+            .calculate_cost(input_tokens, output_tokens)
     }
 
     fn effective_model_name(&self, requested_model: Option<&str>) -> String {
@@ -1111,10 +1108,6 @@ mod tests {
             std::io::ErrorKind::ConnectionReset,
             "reset"
         ))));
-        assert!(is_retryable(&LlmError::ModelNotAvailable {
-            provider: "p".into(),
-            model: "m".into(),
-        }));
 
         // Non-retryable
         assert!(!is_retryable(&LlmError::AuthFailed {
@@ -1126,6 +1119,10 @@ mod tests {
         assert!(!is_retryable(&LlmError::ContextLengthExceeded {
             used: 100_000,
             limit: 50_000,
+        }));
+        assert!(!is_retryable(&LlmError::ModelNotAvailable {
+            provider: "p".into(),
+            model: "m".into(),
         }));
     }
 

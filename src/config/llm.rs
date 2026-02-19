@@ -64,6 +64,8 @@ impl std::fmt::Display for LlmBackend {
 pub struct OpenAiDirectConfig {
     pub api_key: SecretString,
     pub model: String,
+    /// Optional base URL override (e.g. for proxies like VibeProxy).
+    pub base_url: Option<String>,
 }
 
 /// Configuration for direct Anthropic API access.
@@ -71,6 +73,8 @@ pub struct OpenAiDirectConfig {
 pub struct AnthropicDirectConfig {
     pub api_key: SecretString,
     pub model: String,
+    /// Optional base URL override (e.g. for proxies like VibeProxy).
+    pub base_url: Option<String>,
 }
 
 /// Configuration for local Ollama.
@@ -274,7 +278,12 @@ impl LlmConfig {
                     hint: "Set OPENAI_API_KEY when LLM_BACKEND=openai".to_string(),
                 })?;
             let model = optional_env("OPENAI_MODEL")?.unwrap_or_else(|| "gpt-4o".to_string());
-            Some(OpenAiDirectConfig { api_key, model })
+            let base_url = optional_env("OPENAI_BASE_URL")?;
+            Some(OpenAiDirectConfig {
+                api_key,
+                model,
+                base_url,
+            })
         } else {
             None
         };
@@ -288,7 +297,12 @@ impl LlmConfig {
                 })?;
             let model = optional_env("ANTHROPIC_MODEL")?
                 .unwrap_or_else(|| "claude-sonnet-4-20250514".to_string());
-            Some(AnthropicDirectConfig { api_key, model })
+            let base_url = optional_env("ANTHROPIC_BASE_URL")?;
+            Some(AnthropicDirectConfig {
+                api_key,
+                model,
+                base_url,
+            })
         } else {
             None
         };

@@ -18,6 +18,8 @@ use serde::Serialize;
 use serde::de::DeserializeOwned;
 use serde_json::Value as JsonValue;
 
+use std::collections::HashSet;
+
 use crate::error::LlmError;
 use crate::llm::costs;
 use crate::llm::provider::{
@@ -414,7 +416,9 @@ where
             );
         }
 
-        let (preamble, history) = convert_messages(&request.messages);
+        let mut messages = request.messages;
+        crate::llm::provider::sanitize_tool_messages(&mut messages);
+        let (preamble, history) = convert_messages(&messages);
 
         let rig_req = build_rig_request(
             preamble,
@@ -459,7 +463,12 @@ where
             );
         }
 
-        let (preamble, history) = convert_messages(&request.messages);
+        let known_tool_names: HashSet<String> =
+            request.tools.iter().map(|t| t.name.clone()).collect();
+
+        let mut messages = request.messages;
+        crate::llm::provider::sanitize_tool_messages(&mut messages);
+        let (preamble, history) = convert_messages(&messages);
         let tools = convert_tools(&request.tools);
         let tool_choice = convert_tool_choice(request.tool_choice.as_deref());
 
@@ -481,7 +490,20 @@ where
                     reason: e.to_string(),
                 })?;
 
-        let (text, tool_calls, finish) = extract_response(&response.choice, &response.usage);
+        let (text, mut tool_calls, finish) = extract_response(&response.choice, &response.usage);
+
+        // Normalize tool call names: some proxies prepend "proxy_" prefixes.
+        for tc in &mut tool_calls {
+            let normalized = normalize_tool_name(&tc.name, &known_tool_names);
+            if normalized != tc.name {
+                tracing::debug!(
+                    original = %tc.name,
+                    normalized = %normalized,
+                    "Normalized tool call name from provider",
+                );
+                tc.name = normalized;
+            }
+        }
 
         Ok(ToolCompletionResponse {
             content: text,
@@ -511,6 +533,25 @@ where
                 .to_string(),
         })
     }
+}
+
+/// Normalize a tool call name returned by an OpenAI-compatible provider.
+///
+/// Some proxies (e.g. VibeProxy) prepend `proxy_` to tool names.
+/// If the returned name doesn't match any known tool but stripping a
+/// `proxy_` prefix yields a match, use the stripped version.
+fn normalize_tool_name(name: &str, known_tools: &HashSet<String>) -> String {
+    if known_tools.contains(name) {
+        return name.to_string();
+    }
+
+    if let Some(stripped) = name.strip_prefix("proxy_")
+        && known_tools.contains(stripped)
+    {
+        return stripped.to_string();
+    }
+
+    name.to_string()
 }
 
 #[cfg(test)]
@@ -800,5 +841,34 @@ mod tests {
         assert_eq!(saturate_u32(100), 100);
         assert_eq!(saturate_u32(u64::MAX), u32::MAX);
         assert_eq!(saturate_u32(u32::MAX as u64), u32::MAX);
+    }
+
+    // -- normalize_tool_name tests --
+
+    #[test]
+    fn test_normalize_tool_name_exact_match() {
+        let known = HashSet::from(["echo".to_string(), "list_jobs".to_string()]);
+        assert_eq!(normalize_tool_name("echo", &known), "echo");
+    }
+
+    #[test]
+    fn test_normalize_tool_name_proxy_prefix_match() {
+        let known = HashSet::from(["echo".to_string(), "list_jobs".to_string()]);
+        assert_eq!(normalize_tool_name("proxy_echo", &known), "echo");
+    }
+
+    #[test]
+    fn test_normalize_tool_name_proxy_prefix_no_match_kept() {
+        let known = HashSet::from(["echo".to_string(), "list_jobs".to_string()]);
+        assert_eq!(
+            normalize_tool_name("proxy_unknown", &known),
+            "proxy_unknown"
+        );
+    }
+
+    #[test]
+    fn test_normalize_tool_name_unknown_passthrough() {
+        let known = HashSet::from(["echo".to_string()]);
+        assert_eq!(normalize_tool_name("other_tool", &known), "other_tool");
     }
 }

@@ -255,7 +255,10 @@ impl Agent {
                     }
 
                     // Execute each tool (with approval checking and hook interception)
-                    for mut tc in tool_calls {
+                    let mut idx = 0usize;
+                    while idx < tool_calls.len() {
+                        let mut tc = tool_calls[idx].clone();
+
                         // Check if tool requires approval
                         if let Some(tool) = self.tools().get(&tc.name).await
                             && tool.requires_approval()
@@ -277,7 +280,9 @@ impl Agent {
                             }
 
                             if !is_auto_approved {
-                                // Need approval - store pending request and return
+                                // Need approval - store pending request and return.
+                                // Preserve remaining tool calls so they can be replayed
+                                // after approval.
                                 let pending = PendingApproval {
                                     request_id: Uuid::new_v4(),
                                     tool_name: tc.name.clone(),
@@ -285,6 +290,7 @@ impl Agent {
                                     description: tool.description().to_string(),
                                     tool_call_id: tc.id.clone(),
                                     context_messages: context_messages.clone(),
+                                    deferred_tool_calls: tool_calls[idx + 1..].to_vec(),
                                 };
 
                                 return Ok(AgenticLoopResult::NeedApproval { pending });
@@ -441,6 +447,8 @@ impl Agent {
                             &tc.name,
                             result_content,
                         ));
+
+                        idx += 1;
                     }
                 }
             }

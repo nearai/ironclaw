@@ -30,7 +30,7 @@ impl Default for SandboxModeConfig {
             timeout_secs: 120,
             memory_limit_mb: 2048,
             cpu_shares: 1024,
-            image: "ghcr.io/nearai/sandbox:latest".to_string(),
+            image: "ironclaw-worker:latest".to_string(),
             auto_pull_image: true,
             extra_allowed_domains: Vec::new(),
         }
@@ -57,7 +57,7 @@ impl SandboxModeConfig {
             memory_limit_mb: parse_optional_env("SANDBOX_MEMORY_LIMIT_MB", 2048)?,
             cpu_shares: parse_optional_env("SANDBOX_CPU_SHARES", 1024)?,
             image: optional_env("SANDBOX_IMAGE")?
-                .unwrap_or_else(|| "ghcr.io/nearai/sandbox:latest".to_string()),
+                .unwrap_or_else(|| "ironclaw-worker:latest".to_string()),
             auto_pull_image: optional_env("SANDBOX_AUTO_PULL")?
                 .map(|s| s.parse())
                 .transpose()

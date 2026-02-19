@@ -16,18 +16,29 @@ use crate::llm::provider::{
     ChatMessage, CompletionRequest, CompletionResponse, FinishReason, LlmProvider, ModelMetadata,
     Role, ToolCall, ToolCompletionRequest, ToolCompletionResponse,
 };
-use crate::llm::retry::{is_retryable_status, retry_backoff_delay};
 
 /// NEAR AI Chat Completions API provider.
 pub struct NearAiChatProvider {
     client: Client,
     config: NearAiConfig,
     active_model: std::sync::RwLock<String>,
+    flatten_tool_messages: bool,
 }
 
 impl NearAiChatProvider {
     /// Create a new NEAR AI chat completions provider with API key auth.
+    ///
+    /// By default this enables tool-message flattening for compatibility with
+    /// providers that reject `role: "tool"` messages (e.g. NEAR cloud-api).
     pub fn new(config: NearAiConfig) -> Result<Self, LlmError> {
+        Self::new_with_flatten(config, true)
+    }
+
+    /// Create a chat completions provider with configurable tool-message flattening.
+    pub fn new_with_flatten(
+        config: NearAiConfig,
+        flatten_tool_messages: bool,
+    ) -> Result<Self, LlmError> {
         if config.api_key.is_none() {
             return Err(LlmError::AuthFailed {
                 provider: "nearai_chat".to_string(),
@@ -37,22 +48,29 @@ impl NearAiChatProvider {
         let client = Client::builder()
             .timeout(std::time::Duration::from_secs(120))
             .build()
-            .unwrap_or_else(|_| Client::new());
+            .map_err(|e| LlmError::RequestFailed {
+                provider: "nearai_chat".to_string(),
+                reason: format!("Failed to build HTTP client: {}", e),
+            })?;
 
         let active_model = std::sync::RwLock::new(config.model.clone());
         Ok(Self {
             client,
             config,
             active_model,
+            flatten_tool_messages,
         })
     }
 
     fn api_url(&self, path: &str) -> String {
-        format!(
-            "{}/v1/{}",
-            self.config.base_url,
-            path.trim_start_matches('/')
-        )
+        let base = self.config.base_url.trim_end_matches('/');
+        let path = path.trim_start_matches('/');
+
+        if base.ends_with("/v1") {
+            format!("{}/{}", base, path)
+        } else {
+            format!("{}/v1/{}", base, path)
+        }
     }
 
     fn api_key(&self) -> String {
@@ -63,116 +81,75 @@ impl NearAiChatProvider {
             .unwrap_or_default()
     }
 
-    /// Send a request to the chat completions API with retry on transient errors.
+    /// Send a single request to the chat completions API.
     ///
-    /// Retries on HTTP 429, 500, 502, 503, 504 with exponential backoff.
-    /// Does not retry on client errors (400, 401, 403, 404) or parse errors.
+    /// Does not retry internally — retries are handled by the external
+    /// `RetryProvider` wrapper in the composition chain.
     async fn send_request<T: Serialize, R: for<'de> Deserialize<'de>>(
         &self,
         body: &T,
     ) -> Result<R, LlmError> {
         let url = self.api_url("chat/completions");
-        let max_retries = self.config.max_retries;
 
-        for attempt in 0..=max_retries {
-            tracing::debug!(
-                "Sending request to NEAR AI Chat: {} (attempt {})",
-                url,
-                attempt + 1,
-            );
+        tracing::debug!("Sending request to NEAR AI Chat: {}", url);
 
-            if tracing::enabled!(tracing::Level::DEBUG)
-                && let Ok(json) = serde_json::to_string(body)
-            {
-                tracing::debug!("NEAR AI Chat request body: {}", json);
-            }
+        if tracing::enabled!(tracing::Level::DEBUG)
+            && let Ok(json) = serde_json::to_string(body)
+        {
+            tracing::debug!("NEAR AI Chat request body: {}", json);
+        }
 
-            let response = self
-                .client
-                .post(&url)
-                .header("Authorization", format!("Bearer {}", self.api_key()))
-                .header("Content-Type", "application/json")
-                .json(body)
-                .send()
-                .await;
+        let response = self
+            .client
+            .post(&url)
+            .header("Authorization", format!("Bearer {}", self.api_key()))
+            .header("Content-Type", "application/json")
+            .json(body)
+            .send()
+            .await
+            .map_err(|e| LlmError::RequestFailed {
+                provider: "nearai_chat".to_string(),
+                reason: e.to_string(),
+            })?;
 
-            let response = match response {
-                Ok(r) => r,
-                Err(e) => {
-                    tracing::error!("NEAR AI Chat request failed: {}", e);
-                    if attempt < max_retries {
-                        let delay = retry_backoff_delay(attempt);
-                        tracing::warn!(
-                            "NEAR AI Chat request error (attempt {}/{}), retrying in {:?}: {}",
-                            attempt + 1,
-                            max_retries + 1,
-                            delay,
-                            e,
-                        );
-                        tokio::time::sleep(delay).await;
-                        continue;
-                    }
-                    return Err(LlmError::RequestFailed {
-                        provider: "nearai_chat".to_string(),
-                        reason: e.to_string(),
-                    });
-                }
-            };
+        let status = response.status();
+        let response_text = response.text().await.map_err(|e| LlmError::RequestFailed {
+            provider: "nearai_chat".to_string(),
+            reason: format!("Failed to read response body: {}", e),
+        })?;
 
-            let status = response.status();
-            let response_text = response.text().await.unwrap_or_default();
+        tracing::debug!("NEAR AI Chat response status: {}", status);
+        tracing::debug!("NEAR AI Chat response body: {}", response_text);
 
-            tracing::debug!("NEAR AI Chat response status: {}", status);
-            tracing::debug!("NEAR AI Chat response body: {}", response_text);
+        if !status.is_success() {
+            let status_code = status.as_u16();
 
-            if !status.is_success() {
-                let status_code = status.as_u16();
-
-                // Auth errors are not retryable
-                if status_code == 401 {
-                    return Err(LlmError::AuthFailed {
-                        provider: "nearai_chat".to_string(),
-                    });
-                }
-
-                // Transient errors: retry with backoff
-                if is_retryable_status(status_code) && attempt < max_retries {
-                    let delay = retry_backoff_delay(attempt);
-                    tracing::warn!(
-                        "NEAR AI Chat returned HTTP {} (attempt {}/{}), retrying in {:?}",
-                        status_code,
-                        attempt + 1,
-                        max_retries + 1,
-                        delay,
-                    );
-                    tokio::time::sleep(delay).await;
-                    continue;
-                }
-
-                // Non-retryable or exhausted retries
-                if status_code == 429 {
-                    return Err(LlmError::RateLimited {
-                        provider: "nearai_chat".to_string(),
-                        retry_after: None,
-                    });
-                }
-                return Err(LlmError::RequestFailed {
+            if status_code == 401 {
+                return Err(LlmError::AuthFailed {
                     provider: "nearai_chat".to_string(),
-                    reason: format!("HTTP {}: {}", status, response_text),
                 });
             }
 
-            // Success — parse the response
-            return serde_json::from_str(&response_text).map_err(|e| LlmError::InvalidResponse {
+            if status_code == 429 {
+                return Err(LlmError::RateLimited {
+                    provider: "nearai_chat".to_string(),
+                    retry_after: None,
+                });
+            }
+
+            let truncated = crate::agent::truncate_for_preview(&response_text, 512);
+            return Err(LlmError::RequestFailed {
                 provider: "nearai_chat".to_string(),
-                reason: format!("JSON parse error: {}. Raw: {}", e, response_text),
+                reason: format!("HTTP {}: {}", status, truncated),
             });
         }
 
-        // Safety net: unreachable because the loop always returns
-        Err(LlmError::RequestFailed {
-            provider: "nearai_chat".to_string(),
-            reason: "retry loop exited unexpectedly".to_string(),
+        serde_json::from_str(&response_text).map_err(|e| {
+            let truncated = crate::agent::truncate_for_preview(&response_text, 512);
+            LlmError::InvalidResponse {
+                provider: "nearai_chat".to_string(),
+                reason: format!("JSON parse error: {}. Raw: {}", e, truncated),
+            }
         })
     }
 
@@ -192,12 +169,16 @@ impl NearAiChatProvider {
             })?;
 
         let status = response.status();
-        let response_text = response.text().await.unwrap_or_default();
+        let response_text = response.text().await.map_err(|e| LlmError::RequestFailed {
+            provider: "nearai_chat".to_string(),
+            reason: format!("Failed to read response body: {}", e),
+        })?;
 
         if !status.is_success() {
+            let truncated = crate::agent::truncate_for_preview(&response_text, 512);
             return Err(LlmError::RequestFailed {
                 provider: "nearai_chat".to_string(),
-                reason: format!("HTTP {}: {}", status, response_text),
+                reason: format!("HTTP {}: {}", status, truncated),
             });
         }
 
@@ -228,8 +209,10 @@ struct ApiModelEntry {
 impl LlmProvider for NearAiChatProvider {
     async fn complete(&self, req: CompletionRequest) -> Result<CompletionResponse, LlmError> {
         let model = req.model.unwrap_or_else(|| self.active_model_name());
+        let mut raw_messages = req.messages;
+        crate::llm::provider::sanitize_tool_messages(&mut raw_messages);
         let messages: Vec<ChatCompletionMessage> =
-            req.messages.into_iter().map(|m| m.into()).collect();
+            raw_messages.into_iter().map(|m| m.into()).collect();
 
         let request = ChatCompletionRequest {
             model,
@@ -261,11 +244,13 @@ impl LlmProvider for NearAiChatProvider {
             _ => FinishReason::Unknown,
         };
 
+        let (input_tokens, output_tokens) = parse_usage(response.usage.as_ref());
+
         Ok(CompletionResponse {
             content,
             finish_reason,
-            input_tokens: response.usage.prompt_tokens,
-            output_tokens: response.usage.completion_tokens,
+            input_tokens,
+            output_tokens,
             response_id: None,
         })
     }
@@ -275,14 +260,18 @@ impl LlmProvider for NearAiChatProvider {
         req: ToolCompletionRequest,
     ) -> Result<ToolCompletionResponse, LlmError> {
         let model = req.model.unwrap_or_else(|| self.active_model_name());
+        let mut raw_messages = req.messages;
+        crate::llm::provider::sanitize_tool_messages(&mut raw_messages);
         let messages: Vec<ChatCompletionMessage> =
-            req.messages.into_iter().map(|m| m.into()).collect();
+            raw_messages.into_iter().map(|m| m.into()).collect();
 
-        // NEAR AI cloud-api does not support multi-turn tool calling (rejects
-        // any request containing role:"tool" messages with HTTP 400). Rewrite
-        // tool-call / tool-result pairs into plain text so the conversation
-        // history is preserved without using unsupported message roles.
-        let messages = flatten_tool_messages(messages);
+        // Some OpenAI-compatible providers reject `role:"tool"` messages.
+        // When enabled, rewrite tool-call / tool-result pairs into plain text.
+        let messages = if self.flatten_tool_messages {
+            flatten_tool_messages(messages)
+        } else {
+            messages
+        };
 
         let tools: Vec<ChatCompletionTool> = req
             .tools
@@ -349,12 +338,14 @@ impl LlmProvider for NearAiChatProvider {
             }
         };
 
+        let (input_tokens, output_tokens) = parse_usage(response.usage.as_ref());
+
         Ok(ToolCompletionResponse {
             content,
             tool_calls,
             finish_reason,
-            input_tokens: response.usage.prompt_tokens,
-            output_tokens: response.usage.completion_tokens,
+            input_tokens,
+            output_tokens,
             response_id: None,
         })
     }
@@ -384,18 +375,25 @@ impl LlmProvider for NearAiChatProvider {
     }
 
     fn active_model_name(&self) -> String {
-        self.active_model
-            .read()
-            .expect("active_model lock poisoned")
-            .clone()
+        match self.active_model.read() {
+            Ok(guard) => guard.clone(),
+            Err(poisoned) => {
+                tracing::warn!("active_model lock poisoned while reading; continuing");
+                poisoned.into_inner().clone()
+            }
+        }
     }
 
     fn set_model(&self, model: &str) -> Result<(), crate::error::LlmError> {
-        let mut guard = self
-            .active_model
-            .write()
-            .expect("active_model lock poisoned");
-        *guard = model.to_string();
+        match self.active_model.write() {
+            Ok(mut guard) => {
+                *guard = model.to_string();
+            }
+            Err(poisoned) => {
+                tracing::warn!("active_model lock poisoned while writing; continuing");
+                *poisoned.into_inner() = model.to_string();
+            }
+        }
         Ok(())
     }
 }
@@ -545,9 +543,11 @@ struct ChatCompletionFunction {
 #[derive(Debug, Deserialize)]
 struct ChatCompletionResponse {
     #[allow(dead_code)]
-    id: String,
+    #[serde(default)]
+    id: Option<String>,
     choices: Vec<ChatCompletionChoice>,
-    usage: ChatCompletionUsage,
+    #[serde(default)]
+    usage: Option<ChatCompletionUsage>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -579,17 +579,89 @@ struct ChatCompletionToolCallFunction {
     arguments: String,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Default)]
 struct ChatCompletionUsage {
-    prompt_tokens: u32,
-    completion_tokens: u32,
-    #[allow(dead_code)]
-    total_tokens: u32,
+    #[serde(default)]
+    prompt_tokens: Option<u64>,
+    #[serde(default)]
+    completion_tokens: Option<u64>,
+    #[serde(default)]
+    total_tokens: Option<u64>,
+}
+
+fn saturate_u32(val: u64) -> u32 {
+    val.min(u32::MAX as u64) as u32
+}
+
+fn parse_usage(usage: Option<&ChatCompletionUsage>) -> (u32, u32) {
+    let Some(u) = usage else {
+        return (0, 0);
+    };
+    let input = u.prompt_tokens.map(saturate_u32).unwrap_or(0);
+    let output = u.completion_tokens.map(saturate_u32).unwrap_or_else(|| {
+        // Fall back to total - prompt if completion is missing.
+        match (u.total_tokens, u.prompt_tokens) {
+            (Some(total), Some(prompt)) => saturate_u32(total.saturating_sub(prompt)),
+            (Some(total), None) => saturate_u32(total),
+            _ => 0,
+        }
+    });
+    (input, output)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn test_nearai_config(base_url: &str) -> NearAiConfig {
+        NearAiConfig {
+            model: "test-model".to_string(),
+            base_url: base_url.to_string(),
+            auth_base_url: "https://private.near.ai".to_string(),
+            session_path: std::path::PathBuf::from("/tmp/session.json"),
+            api_mode: crate::config::NearAiApiMode::ChatCompletions,
+            api_key: Some(secrecy::SecretString::from("test-key".to_string())),
+            cheap_model: None,
+            fallback_model: None,
+            max_retries: 0,
+            circuit_breaker_threshold: None,
+            circuit_breaker_recovery_secs: 30,
+            response_cache_enabled: false,
+            response_cache_ttl_secs: 3600,
+            response_cache_max_entries: 1000,
+            failover_cooldown_secs: 300,
+            failover_cooldown_threshold: 3,
+        }
+    }
+
+    #[test]
+    fn test_api_url_with_base_without_v1() {
+        let mut cfg = test_nearai_config("http://127.0.0.1:8318");
+
+        let provider = NearAiChatProvider::new(cfg.clone()).expect("provider");
+        assert_eq!(
+            provider.api_url("chat/completions"),
+            "http://127.0.0.1:8318/v1/chat/completions"
+        );
+
+        cfg.base_url = "http://127.0.0.1:8318/".to_string();
+        let provider = NearAiChatProvider::new(cfg).expect("provider");
+        assert_eq!(
+            provider.api_url("/chat/completions"),
+            "http://127.0.0.1:8318/v1/chat/completions"
+        );
+    }
+
+    #[test]
+    fn test_api_url_with_base_already_v1() {
+        let cfg = test_nearai_config("http://127.0.0.1:8318/v1");
+
+        let provider = NearAiChatProvider::new(cfg).expect("provider");
+        assert_eq!(
+            provider.api_url("chat/completions"),
+            "http://127.0.0.1:8318/v1/chat/completions"
+        );
+    }
 
     #[test]
     fn test_message_conversion() {

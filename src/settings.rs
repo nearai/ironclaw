@@ -462,7 +462,7 @@ fn default_sandbox_cpu_shares() -> u32 {
 }
 
 fn default_sandbox_image() -> String {
-    "ghcr.io/nearai/sandbox:latest".to_string()
+    "ironclaw-worker:latest".to_string()
 }
 
 impl Default for SandboxSettings {

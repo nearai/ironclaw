@@ -19,7 +19,6 @@ use crate::llm::provider::{
     ChatMessage, CompletionRequest, CompletionResponse, FinishReason, LlmProvider, Role, ToolCall,
     ToolCompletionRequest, ToolCompletionResponse,
 };
-use crate::llm::retry::{is_retryable_status, retry_backoff_delay};
 use crate::llm::session::SessionManager;
 
 /// Information about an available model from NEAR AI API.
@@ -54,28 +53,34 @@ pub struct NearAiProvider {
 
 impl NearAiProvider {
     /// Create a new NEAR AI provider with a session manager.
-    pub fn new(config: NearAiConfig, session: Arc<SessionManager>) -> Self {
+    pub fn new(config: NearAiConfig, session: Arc<SessionManager>) -> Result<Self, LlmError> {
         let client = Client::builder()
             .timeout(std::time::Duration::from_secs(120))
             .build()
-            .unwrap_or_else(|_| Client::new());
+            .map_err(|e| LlmError::RequestFailed {
+                provider: "nearai".to_string(),
+                reason: format!("Failed to build HTTP client: {}", e),
+            })?;
 
         let active_model = std::sync::RwLock::new(config.model.clone());
-        Self {
+        Ok(Self {
             client,
             config,
             session,
             active_model,
             response_chains: std::sync::RwLock::new(HashMap::new()),
-        }
+        })
     }
 
     /// Seed a response chain for a thread (e.g. when restoring from DB).
     pub fn seed_response_id(&self, thread_id: &str, response_id: String) {
-        let mut chains = self
-            .response_chains
-            .write()
-            .expect("response_chains lock poisoned");
+        let mut chains = match self.response_chains.write() {
+            Ok(guard) => guard,
+            Err(poisoned) => {
+                tracing::warn!("response_chains lock poisoned in seed; recovering");
+                poisoned.into_inner()
+            }
+        };
         chains.insert(
             thread_id.to_string(),
             ChainState {
@@ -87,19 +92,25 @@ impl NearAiProvider {
 
     /// Get the last response ID for a thread (for persistence).
     pub fn get_response_id(&self, thread_id: &str) -> Option<String> {
-        let chains = self
-            .response_chains
-            .read()
-            .expect("response_chains lock poisoned");
+        let chains = match self.response_chains.read() {
+            Ok(guard) => guard,
+            Err(poisoned) => {
+                tracing::warn!("response_chains lock poisoned in get; recovering");
+                poisoned.into_inner()
+            }
+        };
         chains.get(thread_id).map(|c| c.response_id.clone())
     }
 
     /// Store a response chain state after a successful call.
     fn store_chain(&self, thread_id: &str, response_id: String, input_count: usize) {
-        let mut chains = self
-            .response_chains
-            .write()
-            .expect("response_chains lock poisoned");
+        let mut chains = match self.response_chains.write() {
+            Ok(guard) => guard,
+            Err(poisoned) => {
+                tracing::warn!("response_chains lock poisoned in store; recovering");
+                poisoned.into_inner()
+            }
+        };
         chains.insert(
             thread_id.to_string(),
             ChainState {
@@ -111,10 +122,13 @@ impl NearAiProvider {
 
     /// Clear the chain for a thread (on error / fallback).
     fn clear_chain(&self, thread_id: &str) {
-        let mut chains = self
-            .response_chains
-            .write()
-            .expect("response_chains lock poisoned");
+        let mut chains = match self.response_chains.write() {
+            Ok(guard) => guard,
+            Err(poisoned) => {
+                tracing::warn!("response_chains lock poisoned in clear; recovering");
+                poisoned.into_inner()
+            }
+        };
         chains.remove(thread_id);
     }
 
@@ -160,7 +174,10 @@ impl NearAiProvider {
             })?;
 
         let status = response.status();
-        let response_text = response.text().await.unwrap_or_default();
+        let response_text = response.text().await.map_err(|e| LlmError::RequestFailed {
+            provider: "nearai".to_string(),
+            reason: format!("Failed to read response body: {}", e),
+        })?;
 
         if !status.is_success() {
             if status.as_u16() == 401 {
@@ -283,139 +300,95 @@ impl NearAiProvider {
         }
     }
 
-    /// Inner request implementation with retry logic for transient errors.
+    /// Inner request implementation (single attempt).
     ///
-    /// Retries on HTTP 429, 500, 502, 503, 504 with exponential backoff.
-    /// Does not retry on client errors (400, 401, 403, 404) or parse errors.
+    /// Does not retry internally — retries are handled by the external
+    /// `RetryProvider` wrapper in the composition chain.
     async fn send_request_inner<T: Serialize + std::fmt::Debug, R: for<'de> Deserialize<'de>>(
         &self,
         path: &str,
         body: &T,
     ) -> Result<R, LlmError> {
         let url = self.api_url(path);
-        let max_retries = self.config.max_retries;
+        let token = self.session.get_token().await?;
 
-        for attempt in 0..=max_retries {
-            let token = self.session.get_token().await?;
+        tracing::debug!("Sending request to NEAR AI: {}", url);
+        tracing::debug!("Request body: {:?}", body);
 
-            tracing::debug!(
-                "Sending request to NEAR AI: {} (attempt {})",
-                url,
-                attempt + 1
-            );
-            tracing::debug!("Request body: {:?}", body);
+        let response = self
+            .client
+            .post(&url)
+            .header("Authorization", format!("Bearer {}", token.expose_secret()))
+            .header("Content-Type", "application/json")
+            .json(body)
+            .send()
+            .await
+            .map_err(|e| {
+                tracing::error!("NEAR AI request failed: {}", e);
+                LlmError::Http(e)
+            })?;
 
-            let response = self
-                .client
-                .post(&url)
-                .header("Authorization", format!("Bearer {}", token.expose_secret()))
-                .header("Content-Type", "application/json")
-                .json(body)
-                .send()
-                .await;
+        let status = response.status();
+        let response_text = response.text().await.map_err(|e| LlmError::RequestFailed {
+            provider: "nearai".to_string(),
+            reason: format!("Failed to read response body: {}", e),
+        })?;
 
-            let response = match response {
-                Ok(r) => r,
-                Err(e) => {
-                    tracing::error!("NEAR AI request failed: {}", e);
-                    // Network errors (timeout, connection refused) are transient
-                    if attempt < max_retries {
-                        let delay = retry_backoff_delay(attempt);
-                        tracing::warn!(
-                            "NEAR AI request error (attempt {}/{}), retrying in {:?}: {}",
-                            attempt + 1,
-                            max_retries + 1,
-                            delay,
-                            e,
-                        );
-                        tokio::time::sleep(delay).await;
-                        continue;
-                    }
-                    return Err(e.into());
-                }
-            };
+        tracing::debug!("NEAR AI response status: {}", status);
+        tracing::debug!("NEAR AI response body: {}", response_text);
 
-            let status = response.status();
-            let response_text = response.text().await.unwrap_or_default();
+        if !status.is_success() {
+            let status_code = status.as_u16();
 
-            tracing::debug!("NEAR AI response status: {}", status);
-            tracing::debug!("NEAR AI response body: {}", response_text);
+            // Check for session expiration (401 with specific message patterns)
+            if status_code == 401 {
+                let lower = response_text.to_lowercase();
+                let is_session_expired = lower.contains("session")
+                    && (lower.contains("expired") || lower.contains("invalid"));
 
-            if !status.is_success() {
-                let status_code = status.as_u16();
-
-                // Check for session expiration (401 with specific message patterns)
-                if status_code == 401 {
-                    let lower = response_text.to_lowercase();
-                    let is_session_expired = lower.contains("session")
-                        && (lower.contains("expired") || lower.contains("invalid"));
-
-                    if is_session_expired {
-                        return Err(LlmError::SessionExpired {
-                            provider: "nearai".to_string(),
-                        });
-                    }
-
-                    // Generic 401 -- not retryable
-                    return Err(LlmError::AuthFailed {
+                if is_session_expired {
+                    return Err(LlmError::SessionExpired {
                         provider: "nearai".to_string(),
                     });
                 }
 
-                // Check if this is a transient error worth retrying
-                if is_retryable_status(status_code) && attempt < max_retries {
-                    let delay = retry_backoff_delay(attempt);
-                    tracing::warn!(
-                        "NEAR AI returned HTTP {} (attempt {}/{}), retrying in {:?}",
-                        status_code,
-                        attempt + 1,
-                        max_retries + 1,
-                        delay,
-                    );
-                    tokio::time::sleep(delay).await;
-                    continue;
-                }
-
-                // Non-retryable error or exhausted retries
-                if let Ok(error) = serde_json::from_str::<NearAiErrorResponse>(&response_text) {
-                    if status_code == 429 {
-                        return Err(LlmError::RateLimited {
-                            provider: "nearai".to_string(),
-                            retry_after: None,
-                        });
-                    }
-                    return Err(LlmError::RequestFailed {
-                        provider: "nearai".to_string(),
-                        reason: error.error,
-                    });
-                }
-
-                return Err(LlmError::RequestFailed {
+                return Err(LlmError::AuthFailed {
                     provider: "nearai".to_string(),
-                    reason: format!("HTTP {}: {}", status, response_text),
                 });
             }
 
-            // Success -- parse the response
-            return match serde_json::from_str::<R>(&response_text) {
-                Ok(parsed) => Ok(parsed),
-                Err(e) => {
-                    tracing::debug!("Response is not expected JSON format: {}", e);
-                    tracing::debug!("Will try alternative parsing in caller");
-                    Err(LlmError::InvalidResponse {
-                        provider: "nearai".to_string(),
-                        reason: format!("Parse error: {}. Raw: {}", e, response_text),
-                    })
-                }
-            };
+            if status_code == 429 {
+                return Err(LlmError::RateLimited {
+                    provider: "nearai".to_string(),
+                    retry_after: None,
+                });
+            }
+
+            if let Ok(error) = serde_json::from_str::<NearAiErrorResponse>(&response_text) {
+                return Err(LlmError::RequestFailed {
+                    provider: "nearai".to_string(),
+                    reason: error.error,
+                });
+            }
+
+            return Err(LlmError::RequestFailed {
+                provider: "nearai".to_string(),
+                reason: format!("HTTP {}: {}", status, response_text),
+            });
         }
 
-        // This is unreachable because the loop always returns, but the compiler
-        // cannot prove that. Return a generic error as a safety net.
-        Err(LlmError::RequestFailed {
-            provider: "nearai".to_string(),
-            reason: "retry loop exited unexpectedly".to_string(),
-        })
+        // Success -- parse the response
+        match serde_json::from_str::<R>(&response_text) {
+            Ok(parsed) => Ok(parsed),
+            Err(e) => {
+                tracing::debug!("Response is not expected JSON format: {}", e);
+                tracing::debug!("Will try alternative parsing in caller");
+                Err(LlmError::InvalidResponse {
+                    provider: "nearai".to_string(),
+                    reason: format!("Parse error: {}. Raw: {}", e, response_text),
+                })
+            }
+        }
     }
 }
 
@@ -464,7 +437,9 @@ impl LlmProvider for NearAiProvider {
     async fn complete(&self, req: CompletionRequest) -> Result<CompletionResponse, LlmError> {
         let model = req.model.unwrap_or_else(|| self.active_model_name());
         let thread_id = req.metadata.get("thread_id").cloned();
-        let (instructions, input) = split_messages(req.messages, false);
+        let mut messages = req.messages;
+        crate::llm::provider::sanitize_tool_messages(&mut messages);
+        let (instructions, input) = split_messages(messages, false);
 
         let request = NearAiRequest {
             model,
@@ -582,13 +557,20 @@ impl LlmProvider for NearAiProvider {
     ) -> Result<ToolCompletionResponse, LlmError> {
         let model = req.model.unwrap_or_else(|| self.active_model_name());
         let thread_id = req.metadata.get("thread_id").cloned();
+        let mut messages = req.messages;
+        crate::llm::provider::sanitize_tool_messages(&mut messages);
 
         // Look up chaining state for this thread
         let chain_state = thread_id.as_ref().and_then(|tid| {
-            let chains = self
-                .response_chains
-                .read()
-                .expect("response_chains lock poisoned");
+            let chains = match self.response_chains.read() {
+                Ok(guard) => guard,
+                Err(poisoned) => {
+                    tracing::warn!(
+                        "response_chains lock poisoned in complete_with_tools; recovering"
+                    );
+                    poisoned.into_inner()
+                }
+            };
             chains
                 .get(tid)
                 .map(|c| (c.response_id.clone(), c.input_count))
@@ -601,7 +583,7 @@ impl LlmProvider for NearAiProvider {
 
         // When chaining, only send new messages (the delta since last call).
         // Tool results are converted to function_call_output items.
-        let (instructions, all_input) = split_messages(req.messages, chaining);
+        let (instructions, all_input) = split_messages(messages, chaining);
         let input = if chaining && all_input.len() > prev_input_count {
             all_input[prev_input_count..].to_vec()
         } else {
@@ -806,18 +788,25 @@ impl LlmProvider for NearAiProvider {
     }
 
     fn active_model_name(&self) -> String {
-        self.active_model
-            .read()
-            .expect("active_model lock poisoned")
-            .clone()
+        match self.active_model.read() {
+            Ok(guard) => guard.clone(),
+            Err(poisoned) => {
+                tracing::warn!("active_model lock poisoned while reading; continuing");
+                poisoned.into_inner().clone()
+            }
+        }
     }
 
     fn set_model(&self, model: &str) -> Result<(), LlmError> {
-        let mut guard = self
-            .active_model
-            .write()
-            .expect("active_model lock poisoned");
-        *guard = model.to_string();
+        match self.active_model.write() {
+            Ok(mut guard) => {
+                *guard = model.to_string();
+            }
+            Err(poisoned) => {
+                tracing::warn!("active_model lock poisoned while writing; continuing");
+                *poisoned.into_inner() = model.to_string();
+            }
+        }
         Ok(())
     }
 
@@ -952,7 +941,6 @@ struct NearAiTool {
 /// Primary response format (output array style)
 #[derive(Debug, Deserialize)]
 struct NearAiResponse {
-    #[allow(dead_code)]
     id: String,
     output: Vec<NearAiOutputItem>,
     usage: NearAiUsage,
