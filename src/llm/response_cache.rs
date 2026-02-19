@@ -242,6 +242,7 @@ mod tests {
     fn simple_request() -> CompletionRequest {
         CompletionRequest {
             messages: vec![ChatMessage::user("hello")],
+            model: None,
             max_tokens: None,
             temperature: None,
             stop_sequences: None,
@@ -252,6 +253,7 @@ mod tests {
     fn different_request() -> CompletionRequest {
         CompletionRequest {
             messages: vec![ChatMessage::user("goodbye")],
+            model: None,
             max_tokens: None,
             temperature: None,
             stop_sequences: None,
@@ -378,6 +380,7 @@ mod tests {
         // Add a third: should evict the oldest
         let third = CompletionRequest {
             messages: vec![ChatMessage::user("third")],
+            model: None,
             max_tokens: None,
             temperature: None,
             stop_sequences: None,
@@ -396,6 +399,7 @@ mod tests {
         let req = ToolCompletionRequest {
             messages: vec![ChatMessage::user("use tool")],
             tools: vec![],
+            model: None,
             max_tokens: None,
             temperature: None,
             tool_choice: None,
