@@ -463,8 +463,16 @@ impl WorkspaceStore for LibSqlBackend {
                 reason: format!("Row fetch failed: {}", e),
             })?
         {
-            if let Ok(id) = get_text(&row, 0).parse() {
-                doc_ids.push(id);
+            let id_str = get_text(&row, 0);
+            match id_str.parse() {
+                Ok(id) => doc_ids.push(id),
+                Err(_) => {
+                    // Log parse failures for observability — shouldn't happen with valid data
+                    tracing::warn!(
+                        "Failed to parse document ID '{}' from stale chunk query",
+                        id_str
+                    );
+                }
             }
         }
         Ok(doc_ids)
