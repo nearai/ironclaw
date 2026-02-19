@@ -78,7 +78,7 @@ pub fn create_llm_provider_with_config(
                 model = %config.model,
                 "Using Responses API (chat-api) with session auth"
             );
-            Ok(Arc::new(NearAiProvider::new(config.clone(), session)))
+            Ok(Arc::new(NearAiProvider::new(config.clone(), session)?))
         }
         NearAiApiMode::ChatCompletions => {
             tracing::info!(
@@ -263,7 +263,7 @@ pub fn create_cheap_llm_provider(
     tracing::info!("Cheap LLM provider: {}", cheap_model);
 
     match cheap_config.api_mode {
-        NearAiApiMode::Responses => Ok(Some(Arc::new(NearAiProvider::new(cheap_config, session)))),
+        NearAiApiMode::Responses => Ok(Some(Arc::new(NearAiProvider::new(cheap_config, session)?))),
         NearAiApiMode::ChatCompletions => {
             Ok(Some(Arc::new(NearAiChatProvider::new(cheap_config)?)))
         }

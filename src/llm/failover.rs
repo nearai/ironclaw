@@ -17,7 +17,7 @@ use rust_decimal::Decimal;
 
 use crate::error::LlmError;
 use crate::llm::provider::{
-    CompletionRequest, CompletionResponse, LlmProvider, ToolCompletionRequest,
+    CompletionRequest, CompletionResponse, LlmProvider, ModelMetadata, ToolCompletionRequest,
     ToolCompletionResponse,
 };
 
@@ -335,6 +335,26 @@ impl LlmProvider for FailoverProvider {
         all_models.sort();
         all_models.dedup();
         Ok(all_models)
+    }
+
+    async fn model_metadata(&self) -> Result<ModelMetadata, LlmError> {
+        self.providers[self.last_used.load(Ordering::Relaxed)]
+            .model_metadata()
+            .await
+    }
+
+    fn seed_response_chain(&self, thread_id: &str, response_id: String) {
+        self.providers[self.last_used.load(Ordering::Relaxed)]
+            .seed_response_chain(thread_id, response_id);
+    }
+
+    fn get_response_chain_id(&self, thread_id: &str) -> Option<String> {
+        self.providers[self.last_used.load(Ordering::Relaxed)].get_response_chain_id(thread_id)
+    }
+
+    fn calculate_cost(&self, input_tokens: u32, output_tokens: u32) -> Decimal {
+        self.providers[self.last_used.load(Ordering::Relaxed)]
+            .calculate_cost(input_tokens, output_tokens)
     }
 }
 

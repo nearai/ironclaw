@@ -54,28 +54,34 @@ pub struct NearAiProvider {
 
 impl NearAiProvider {
     /// Create a new NEAR AI provider with a session manager.
-    pub fn new(config: NearAiConfig, session: Arc<SessionManager>) -> Self {
+    pub fn new(config: NearAiConfig, session: Arc<SessionManager>) -> Result<Self, LlmError> {
         let client = Client::builder()
             .timeout(std::time::Duration::from_secs(120))
             .build()
-            .unwrap_or_else(|_| Client::new());
+            .map_err(|e| LlmError::RequestFailed {
+                provider: "nearai".to_string(),
+                reason: format!("Failed to build HTTP client: {}", e),
+            })?;
 
         let active_model = std::sync::RwLock::new(config.model.clone());
-        Self {
+        Ok(Self {
             client,
             config,
             session,
             active_model,
             response_chains: std::sync::RwLock::new(HashMap::new()),
-        }
+        })
     }
 
     /// Seed a response chain for a thread (e.g. when restoring from DB).
     pub fn seed_response_id(&self, thread_id: &str, response_id: String) {
-        let mut chains = self
-            .response_chains
-            .write()
-            .expect("response_chains lock poisoned");
+        let mut chains = match self.response_chains.write() {
+            Ok(guard) => guard,
+            Err(poisoned) => {
+                tracing::warn!("response_chains lock poisoned in seed; recovering");
+                poisoned.into_inner()
+            }
+        };
         chains.insert(
             thread_id.to_string(),
             ChainState {
@@ -87,19 +93,25 @@ impl NearAiProvider {
 
     /// Get the last response ID for a thread (for persistence).
     pub fn get_response_id(&self, thread_id: &str) -> Option<String> {
-        let chains = self
-            .response_chains
-            .read()
-            .expect("response_chains lock poisoned");
+        let chains = match self.response_chains.read() {
+            Ok(guard) => guard,
+            Err(poisoned) => {
+                tracing::warn!("response_chains lock poisoned in get; recovering");
+                poisoned.into_inner()
+            }
+        };
         chains.get(thread_id).map(|c| c.response_id.clone())
     }
 
     /// Store a response chain state after a successful call.
     fn store_chain(&self, thread_id: &str, response_id: String, input_count: usize) {
-        let mut chains = self
-            .response_chains
-            .write()
-            .expect("response_chains lock poisoned");
+        let mut chains = match self.response_chains.write() {
+            Ok(guard) => guard,
+            Err(poisoned) => {
+                tracing::warn!("response_chains lock poisoned in store; recovering");
+                poisoned.into_inner()
+            }
+        };
         chains.insert(
             thread_id.to_string(),
             ChainState {
@@ -111,10 +123,13 @@ impl NearAiProvider {
 
     /// Clear the chain for a thread (on error / fallback).
     fn clear_chain(&self, thread_id: &str) {
-        let mut chains = self
-            .response_chains
-            .write()
-            .expect("response_chains lock poisoned");
+        let mut chains = match self.response_chains.write() {
+            Ok(guard) => guard,
+            Err(poisoned) => {
+                tracing::warn!("response_chains lock poisoned in clear; recovering");
+                poisoned.into_inner()
+            }
+        };
         chains.remove(thread_id);
     }
 
@@ -587,10 +602,15 @@ impl LlmProvider for NearAiProvider {
 
         // Look up chaining state for this thread
         let chain_state = thread_id.as_ref().and_then(|tid| {
-            let chains = self
-                .response_chains
-                .read()
-                .expect("response_chains lock poisoned");
+            let chains = match self.response_chains.read() {
+                Ok(guard) => guard,
+                Err(poisoned) => {
+                    tracing::warn!(
+                        "response_chains lock poisoned in complete_with_tools; recovering"
+                    );
+                    poisoned.into_inner()
+                }
+            };
             chains
                 .get(tid)
                 .map(|c| (c.response_id.clone(), c.input_count))
@@ -808,18 +828,25 @@ impl LlmProvider for NearAiProvider {
     }
 
     fn active_model_name(&self) -> String {
-        self.active_model
-            .read()
-            .expect("active_model lock poisoned")
-            .clone()
+        match self.active_model.read() {
+            Ok(guard) => guard.clone(),
+            Err(poisoned) => {
+                tracing::warn!("active_model lock poisoned while reading; continuing");
+                poisoned.into_inner().clone()
+            }
+        }
     }
 
     fn set_model(&self, model: &str) -> Result<(), LlmError> {
-        let mut guard = self
-            .active_model
-            .write()
-            .expect("active_model lock poisoned");
-        *guard = model.to_string();
+        match self.active_model.write() {
+            Ok(mut guard) => {
+                *guard = model.to_string();
+            }
+            Err(poisoned) => {
+                tracing::warn!("active_model lock poisoned while writing; continuing");
+                *poisoned.into_inner() = model.to_string();
+            }
+        }
         Ok(())
     }
 

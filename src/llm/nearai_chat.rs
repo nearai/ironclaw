@@ -175,16 +175,20 @@ impl NearAiChatProvider {
                         retry_after: None,
                     });
                 }
+                let truncated = crate::agent::truncate_for_preview(&response_text, 512);
                 return Err(LlmError::RequestFailed {
                     provider: "nearai_chat".to_string(),
-                    reason: format!("HTTP {}: {}", status, response_text),
+                    reason: format!("HTTP {}: {}", status, truncated),
                 });
             }
 
             // Success — parse the response
-            return serde_json::from_str(&response_text).map_err(|e| LlmError::InvalidResponse {
-                provider: "nearai_chat".to_string(),
-                reason: format!("JSON parse error: {}. Raw: {}", e, response_text),
+            return serde_json::from_str(&response_text).map_err(|e| {
+                let truncated = crate::agent::truncate_for_preview(&response_text, 512);
+                LlmError::InvalidResponse {
+                    provider: "nearai_chat".to_string(),
+                    reason: format!("JSON parse error: {}. Raw: {}", e, truncated),
+                }
             });
         }
 
@@ -214,9 +218,10 @@ impl NearAiChatProvider {
         let response_text = response.text().await.unwrap_or_default();
 
         if !status.is_success() {
+            let truncated = crate::agent::truncate_for_preview(&response_text, 512);
             return Err(LlmError::RequestFailed {
                 provider: "nearai_chat".to_string(),
-                reason: format!("HTTP {}: {}", status, response_text),
+                reason: format!("HTTP {}: {}", status, truncated),
             });
         }
 
@@ -281,11 +286,13 @@ impl LlmProvider for NearAiChatProvider {
             _ => FinishReason::Unknown,
         };
 
+        let (input_tokens, output_tokens) = parse_usage(response.usage.as_ref());
+
         Ok(CompletionResponse {
             content,
             finish_reason,
-            input_tokens: response.usage.prompt_tokens,
-            output_tokens: response.usage.completion_tokens,
+            input_tokens,
+            output_tokens,
             response_id: None,
         })
     }
@@ -372,12 +379,14 @@ impl LlmProvider for NearAiChatProvider {
             }
         };
 
+        let (input_tokens, output_tokens) = parse_usage(response.usage.as_ref());
+
         Ok(ToolCompletionResponse {
             content,
             tool_calls,
             finish_reason,
-            input_tokens: response.usage.prompt_tokens,
-            output_tokens: response.usage.completion_tokens,
+            input_tokens,
+            output_tokens,
             response_id: None,
         })
     }
@@ -407,18 +416,25 @@ impl LlmProvider for NearAiChatProvider {
     }
 
     fn active_model_name(&self) -> String {
-        self.active_model
-            .read()
-            .expect("active_model lock poisoned")
-            .clone()
+        match self.active_model.read() {
+            Ok(guard) => guard.clone(),
+            Err(poisoned) => {
+                tracing::warn!("active_model lock poisoned while reading; continuing");
+                poisoned.into_inner().clone()
+            }
+        }
     }
 
     fn set_model(&self, model: &str) -> Result<(), crate::error::LlmError> {
-        let mut guard = self
-            .active_model
-            .write()
-            .expect("active_model lock poisoned");
-        *guard = model.to_string();
+        match self.active_model.write() {
+            Ok(mut guard) => {
+                *guard = model.to_string();
+            }
+            Err(poisoned) => {
+                tracing::warn!("active_model lock poisoned while writing; continuing");
+                *poisoned.into_inner() = model.to_string();
+            }
+        }
         Ok(())
     }
 }
@@ -568,9 +584,11 @@ struct ChatCompletionFunction {
 #[derive(Debug, Deserialize)]
 struct ChatCompletionResponse {
     #[allow(dead_code)]
-    id: String,
+    #[serde(default)]
+    id: Option<String>,
     choices: Vec<ChatCompletionChoice>,
-    usage: ChatCompletionUsage,
+    #[serde(default)]
+    usage: Option<ChatCompletionUsage>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -602,12 +620,34 @@ struct ChatCompletionToolCallFunction {
     arguments: String,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Default)]
 struct ChatCompletionUsage {
-    prompt_tokens: u32,
-    completion_tokens: u32,
-    #[allow(dead_code)]
-    total_tokens: u32,
+    #[serde(default)]
+    prompt_tokens: Option<u64>,
+    #[serde(default)]
+    completion_tokens: Option<u64>,
+    #[serde(default)]
+    total_tokens: Option<u64>,
+}
+
+fn saturate_u32(val: u64) -> u32 {
+    val.min(u32::MAX as u64) as u32
+}
+
+fn parse_usage(usage: Option<&ChatCompletionUsage>) -> (u32, u32) {
+    let Some(u) = usage else {
+        return (0, 0);
+    };
+    let input = u.prompt_tokens.map(saturate_u32).unwrap_or(0);
+    let output = u.completion_tokens.map(saturate_u32).unwrap_or_else(|| {
+        // Fall back to total - prompt if completion is missing.
+        match (u.total_tokens, u.prompt_tokens) {
+            (Some(total), Some(prompt)) => saturate_u32(total.saturating_sub(prompt)),
+            (Some(total), None) => saturate_u32(total),
+            _ => 0,
+        }
+    });
+    (input, output)
 }
 
 #[cfg(test)]
