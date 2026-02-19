@@ -760,7 +760,7 @@ Report when the job is complete or if you encounter issues you cannot resolve."#
         self.context_manager()
             .update_context(self.job_id, |ctx| {
                 ctx.transition_to(JobState::Failed, Some(reason.to_string()))?;
-                store_fallback_in_metadata(ctx, &fallback);
+                store_fallback_in_metadata(ctx, fallback.as_ref());
                 Ok(())
             })
             .await?
@@ -780,7 +780,7 @@ Report when the job is complete or if you encounter issues you cannot resolve."#
         self.context_manager()
             .update_context(self.job_id, |ctx| {
                 ctx.mark_stuck(reason)?;
-                store_fallback_in_metadata(ctx, &fallback);
+                store_fallback_in_metadata(ctx, fallback.as_ref());
                 Ok(())
             })
             .await?
@@ -810,7 +810,7 @@ Report when the job is complete or if you encounter issues you cannot resolve."#
 /// Store a fallback deliverable in the job context's metadata.
 fn store_fallback_in_metadata(
     ctx: &mut crate::context::JobContext,
-    fallback: &Option<crate::context::FallbackDeliverable>,
+    fallback: Option<&crate::context::FallbackDeliverable>,
 ) {
     if let Some(fb) = fallback
         && let Ok(val) = serde_json::to_value(fb)
