@@ -7,7 +7,8 @@
 //! 4. Model selection
 //! 5. Embeddings
 //! 6. Channel configuration
-//! 7. Heartbeat (background tasks)
+//! 7. Extensions (tool installation from registry)
+//! 8. Heartbeat (background tasks)
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -132,7 +133,7 @@ impl SetupWizard {
             print_step(1, 1, "Channel Configuration");
             self.step_channels().await?;
         } else {
-            let total_steps = 7;
+            let total_steps = 8;
 
             // Step 1: Database
             print_step(1, total_steps, "Database Connection");
@@ -162,8 +163,12 @@ impl SetupWizard {
             print_step(6, total_steps, "Channel Configuration");
             self.step_channels().await?;
 
-            // Step 7: Heartbeat
-            print_step(7, total_steps, "Background Tasks");
+            // Step 7: Extensions (tools)
+            print_step(7, total_steps, "Extensions");
+            self.step_extensions().await?;
+
+            // Step 8: Heartbeat
+            print_step(8, total_steps, "Background Tasks");
             self.step_heartbeat()?;
         }
 
@@ -1279,7 +1284,9 @@ impl SetupWizard {
             .iter()
             .map(|(name, _)| name.clone())
             .collect();
-        let wasm_channel_names = wasm_channel_option_names(&discovered_channels);
+
+        // Build channel list from registry (if available) + bundled + discovered
+        let wasm_channel_names = build_channel_options(&discovered_channels);
 
         // Build options list dynamically
         let mut options: Vec<(String, bool)> = vec![
@@ -1290,11 +1297,15 @@ impl SetupWizard {
             ),
         ];
 
-        // Add available WASM channels (installed + bundled)
+        // Add available WASM channels (installed + bundled + registry)
         for name in &wasm_channel_names {
             let is_enabled = self.settings.channels.wasm_channels.contains(name);
-            let display_name = format!("{} (WASM)", capitalize_first(name));
-            options.push((display_name, is_enabled));
+            let label = if installed_names.contains(name) {
+                format!("{} (installed)", capitalize_first(name))
+            } else {
+                format!("{} (will install)", capitalize_first(name))
+            };
+            options.push((label, is_enabled));
         }
 
         let options_refs: Vec<(&str, bool)> =
@@ -1315,6 +1326,10 @@ impl SetupWizard {
             })
             .collect();
 
+        // Install selected channels that aren't already on disk
+        let mut any_installed = false;
+
+        // Try bundled channels first (pre-compiled artifacts from channels-src/)
         if let Some(installed) = install_selected_bundled_channels(
             &channels_dir,
             &selected_wasm_channels,
@@ -1323,7 +1338,31 @@ impl SetupWizard {
         .await?
             && !installed.is_empty()
         {
-            print_success(&format!("Installed channels: {}", installed.join(", ")));
+            print_success(&format!(
+                "Installed bundled channels: {}",
+                installed.join(", ")
+            ));
+            any_installed = true;
+        }
+
+        // Then try registry channels (build from source for any still missing)
+        let installed_from_registry = install_selected_registry_channels(
+            &channels_dir,
+            &selected_wasm_channels,
+            &installed_names,
+        )
+        .await;
+
+        if !installed_from_registry.is_empty() {
+            print_success(&format!(
+                "Built from registry: {}",
+                installed_from_registry.join(", ")
+            ));
+            any_installed = true;
+        }
+
+        // Re-discover after installs
+        if any_installed {
             discovered_channels = discover_wasm_channels(&channels_dir).await;
         }
 
@@ -1414,7 +1453,135 @@ impl SetupWizard {
         Ok(())
     }
 
-    /// Step 7: Heartbeat configuration.
+    /// Step 7: Extensions (tools) installation from registry.
+    async fn step_extensions(&mut self) -> Result<(), SetupError> {
+        let catalog = match load_registry_catalog() {
+            Some(c) => c,
+            None => {
+                print_info("Extension registry not found. Skipping tool installation.");
+                print_info("Install tools manually with: ironclaw tool install <path>");
+                return Ok(());
+            }
+        };
+
+        let tools: Vec<_> = catalog
+            .list(Some(crate::registry::manifest::ManifestKind::Tool), None)
+            .into_iter()
+            .cloned()
+            .collect();
+
+        if tools.is_empty() {
+            print_info("No tools found in registry.");
+            return Ok(());
+        }
+
+        print_info("Available tools from the extension registry:");
+        print_info("Select which tools to install. You can install more later with:");
+        print_info("  ironclaw registry install <name>");
+        println!();
+
+        // Check which tools are already installed
+        let tools_dir = dirs::home_dir()
+            .ok_or_else(|| SetupError::Config("Could not determine home directory".into()))?
+            .join(".ironclaw/tools");
+
+        let installed_tools = discover_installed_tools(&tools_dir).await;
+
+        // Build options: show display_name + description, pre-check "default" tagged + already installed
+        let mut options: Vec<(String, bool)> = Vec::new();
+        for tool in &tools {
+            let is_installed = installed_tools.contains(&tool.source.crate_name);
+            let is_default = tool.tags.contains(&"default".to_string());
+            let status = if is_installed { " (installed)" } else { "" };
+            let auth_hint = tool
+                .auth_summary
+                .as_ref()
+                .and_then(|a| a.method.as_deref())
+                .map(|m| format!(" [{}]", m))
+                .unwrap_or_default();
+
+            let label = format!(
+                "{}{}{} - {}",
+                tool.display_name, auth_hint, status, tool.description
+            );
+            options.push((label, is_default || is_installed));
+        }
+
+        let options_refs: Vec<(&str, bool)> =
+            options.iter().map(|(s, b)| (s.as_str(), *b)).collect();
+
+        let selected = select_many("Which tools do you want to install?", &options_refs)
+            .map_err(SetupError::Io)?;
+
+        if selected.is_empty() {
+            print_info("No tools selected.");
+            return Ok(());
+        }
+
+        // Install selected tools that aren't already on disk
+        let repo_root = catalog.root().parent().unwrap_or(catalog.root());
+        let installer = crate::registry::installer::RegistryInstaller::new(
+            repo_root.to_path_buf(),
+            tools_dir.clone(),
+            dirs::home_dir()
+                .unwrap_or_default()
+                .join(".ironclaw/channels"),
+        );
+
+        let mut installed_count = 0;
+        let mut auth_needed: Vec<String> = Vec::new();
+
+        for idx in &selected {
+            let tool = &tools[*idx];
+            let crate_name = &tool.source.crate_name;
+
+            if installed_tools.contains(crate_name) {
+                continue; // Already installed, skip
+            }
+
+            match installer.install_from_source(tool, false).await {
+                Ok(outcome) => {
+                    print_success(&format!("Installed {}", outcome.name));
+                    installed_count += 1;
+
+                    // Track auth needs
+                    if let Some(auth) = &tool.auth_summary {
+                        if auth.method.as_deref() != Some("none") && auth.method.is_some() {
+                            let provider = auth.provider.as_deref().unwrap_or(&tool.name);
+                            // Only mention unique providers (Google tools share auth)
+                            let hint = format!("  {} - ironclaw tool auth {}", provider, tool.name);
+                            if !auth_needed
+                                .iter()
+                                .any(|h| h.starts_with(&format!("  {} -", provider)))
+                            {
+                                auth_needed.push(hint);
+                            }
+                        }
+                    }
+                }
+                Err(e) => {
+                    print_error(&format!("Failed to install {}: {}", tool.display_name, e));
+                }
+            }
+        }
+
+        if installed_count > 0 {
+            println!();
+            print_success(&format!("{} tool(s) installed.", installed_count));
+        }
+
+        if !auth_needed.is_empty() {
+            println!();
+            print_info("Some tools need authentication. Run after setup:");
+            for hint in &auth_needed {
+                print_info(hint);
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Step 8: Heartbeat configuration.
     fn step_heartbeat(&mut self) -> Result<(), SetupError> {
         print_info("Heartbeat runs periodic background tasks (e.g., checking your calendar,");
         print_info("monitoring for notifications, running scheduled workflows).");
@@ -2065,12 +2232,158 @@ async fn install_missing_bundled_channels(
     Ok(installed)
 }
 
-fn wasm_channel_option_names(discovered: &[(String, ChannelCapabilitiesFile)]) -> Vec<String> {
+/// Build channel options from discovered channels + bundled + registry catalog.
+///
+/// Returns a deduplicated, sorted list of channel names available for selection.
+fn build_channel_options(discovered: &[(String, ChannelCapabilitiesFile)]) -> Vec<String> {
     let mut names: Vec<String> = discovered.iter().map(|(name, _)| name.clone()).collect();
 
+    // Add bundled channels
     for bundled in available_channel_names().iter().copied() {
         if !names.iter().any(|name| name == bundled) {
             names.push(bundled.to_string());
+        }
+    }
+
+    // Add registry channels
+    if let Some(catalog) = load_registry_catalog() {
+        for manifest in catalog.list(Some(crate::registry::manifest::ManifestKind::Channel), None) {
+            if !names.iter().any(|n| n == &manifest.name) {
+                names.push(manifest.name.clone());
+            }
+        }
+    }
+
+    names.sort();
+    names
+}
+
+/// Try to load the registry catalog. Returns None if the registry directory
+/// cannot be found (e.g. running from an installed binary without the repo).
+fn load_registry_catalog() -> Option<crate::registry::catalog::RegistryCatalog> {
+    // Try relative to current directory (dev usage)
+    let cwd = std::env::current_dir().ok()?;
+    let candidate = cwd.join("registry");
+    if candidate.is_dir() {
+        return crate::registry::catalog::RegistryCatalog::load(&candidate).ok();
+    }
+
+    // Try relative to executable
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(parent) = exe.parent() {
+            let candidate = parent.join("registry");
+            if candidate.is_dir() {
+                return crate::registry::catalog::RegistryCatalog::load(&candidate).ok();
+            }
+            if let Some(grandparent) = parent.parent() {
+                let candidate = grandparent.join("registry");
+                if candidate.is_dir() {
+                    return crate::registry::catalog::RegistryCatalog::load(&candidate).ok();
+                }
+            }
+        }
+    }
+
+    // Try CARGO_MANIFEST_DIR (compile-time, works in dev builds)
+    let manifest_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let candidate = manifest_dir.join("registry");
+    if candidate.is_dir() {
+        return crate::registry::catalog::RegistryCatalog::load(&candidate).ok();
+    }
+
+    None
+}
+
+/// Install selected channels from the registry that aren't already on disk
+/// and weren't handled by the bundled installer.
+///
+/// This builds channels from source using `cargo component build`.
+async fn install_selected_registry_channels(
+    channels_dir: &std::path::Path,
+    selected_channels: &[String],
+    already_installed: &HashSet<String>,
+) -> Vec<String> {
+    let catalog = match load_registry_catalog() {
+        Some(c) => c,
+        None => return Vec::new(),
+    };
+
+    let repo_root = catalog
+        .root()
+        .parent()
+        .unwrap_or(catalog.root())
+        .to_path_buf();
+
+    let bundled: HashSet<&str> = available_channel_names().iter().copied().collect();
+    let mut installed = Vec::new();
+
+    for name in selected_channels {
+        // Skip if already installed or handled by bundled installer
+        if already_installed.contains(name) || bundled.contains(name.as_str()) {
+            continue;
+        }
+
+        // Check if already on disk (may have been installed between bundled and here)
+        let wasm_on_disk = channels_dir.join(format!("{}.wasm", name)).exists()
+            || channels_dir.join(format!("{}-channel.wasm", name)).exists();
+        if wasm_on_disk {
+            continue;
+        }
+
+        // Look up in registry
+        let manifest = match catalog.get(&format!("channels/{}", name)) {
+            Some(m) => m,
+            None => continue,
+        };
+
+        let installer = crate::registry::installer::RegistryInstaller::new(
+            repo_root.clone(),
+            dirs::home_dir().unwrap_or_default().join(".ironclaw/tools"),
+            channels_dir.to_path_buf(),
+        );
+
+        match installer.install_from_source(manifest, false).await {
+            Ok(_) => {
+                installed.push(name.clone());
+            }
+            Err(e) => {
+                tracing::warn!(
+                    channel = %name,
+                    error = %e,
+                    "Failed to install channel from registry"
+                );
+                crate::setup::prompts::print_error(&format!(
+                    "Failed to install channel '{}': {}",
+                    name, e
+                ));
+            }
+        }
+    }
+
+    installed
+}
+
+/// Discover which tools are already installed in the tools directory.
+///
+/// Returns a set of tool names (the stem of .wasm files).
+async fn discover_installed_tools(tools_dir: &std::path::Path) -> HashSet<String> {
+    let mut names = HashSet::new();
+
+    if !tools_dir.is_dir() {
+        return names;
+    }
+
+    let mut entries = match tokio::fs::read_dir(tools_dir).await {
+        Ok(e) => e,
+        Err(_) => return names,
+    };
+
+    while let Ok(Some(entry)) = entries.next_entry().await {
+        let path = entry.path();
+        if path.extension().and_then(|e| e.to_str()) == Some("wasm") {
+            if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
+                names.insert(stem.to_string());
+            }
         }
     }
 
@@ -2187,9 +2500,9 @@ mod tests {
     }
 
     #[test]
-    fn test_wasm_channel_option_names_includes_available_when_missing() {
+    fn test_build_channel_options_includes_available_when_missing() {
         let discovered = Vec::new();
-        let options = wasm_channel_option_names(&discovered);
+        let options = build_channel_options(&discovered);
         let available = available_channel_names();
         // All available (built) channels should appear
         for name in &available {
@@ -2202,9 +2515,9 @@ mod tests {
     }
 
     #[test]
-    fn test_wasm_channel_option_names_dedupes_available() {
+    fn test_build_channel_options_dedupes_available() {
         let discovered = vec![(String::from("telegram"), ChannelCapabilitiesFile::default())];
-        let options = wasm_channel_option_names(&discovered);
+        let options = build_channel_options(&discovered);
         // telegram should appear exactly once despite being both discovered and available
         assert_eq!(
             options.iter().filter(|n| *n == "telegram").count(),
