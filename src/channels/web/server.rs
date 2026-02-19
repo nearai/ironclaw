@@ -144,7 +144,7 @@ pub struct GatewayState {
     /// Skill catalog for searching the ClawHub registry.
     pub skill_catalog: Option<Arc<crate::skills::catalog::SkillCatalog>>,
     /// Rate limiter for chat endpoints (30 messages per 60 seconds).
-    pub chat_rate_limiter: RateLimiter,
+    pub chat_rate_limiter: Arc<RateLimiter>,
 }
 
 /// Start the gateway HTTP server.
@@ -170,7 +170,9 @@ pub async fn start_server(
             })?;
 
     // Public routes (no auth)
-    let public = Router::new().route("/api/health", get(health_handler));
+    let public = Router::new()
+        .route("/api/health", get(health_handler))
+        .route("/v1/browser/health", get(browser_health_handler));
 
     // Protected routes (require auth)
     let auth_state = AuthState { token: auth_token };
@@ -249,6 +251,8 @@ pub async fn start_server(
         )
         // Gateway control plane
         .route("/api/gateway/status", get(gateway_status_handler))
+        // Browser backend dispatcher for browser-use WASM tool
+        .route("/v1/browser/dispatch", post(browser_dispatch_handler))
         // OpenAI-compatible API
         .route(
             "/v1/chat/completions",
@@ -2437,6 +2441,10 @@ async fn settings_set_handler(
     Path(key): Path<String>,
     Json(body): Json<SettingWriteRequest>,
 ) -> Result<StatusCode, StatusCode> {
+    if key.starts_with("browser_use.") {
+        return Err(StatusCode::FORBIDDEN);
+    }
+
     let store = state
         .store
         .as_ref()
@@ -2456,6 +2464,10 @@ async fn settings_delete_handler(
     State(state): State<Arc<GatewayState>>,
     Path(key): Path<String>,
 ) -> Result<StatusCode, StatusCode> {
+    if key.starts_with("browser_use.") {
+        return Err(StatusCode::FORBIDDEN);
+    }
+
     let store = state
         .store
         .as_ref()
@@ -2490,6 +2502,14 @@ async fn settings_import_handler(
     State(state): State<Arc<GatewayState>>,
     Json(body): Json<SettingsImportRequest>,
 ) -> Result<StatusCode, StatusCode> {
+    if body
+        .settings
+        .keys()
+        .any(|key| key.starts_with("browser_use."))
+    {
+        return Err(StatusCode::FORBIDDEN);
+    }
+
     let store = state
         .store
         .as_ref()
@@ -2529,6 +2549,53 @@ struct GatewayStatusResponse {
     sse_connections: u64,
     ws_connections: u64,
     total_connections: u64,
+}
+
+#[derive(Debug, serde::Deserialize)]
+#[allow(dead_code)]
+struct BrowserDispatchRequest {
+    action: String,
+    #[serde(default)]
+    session_id: Option<String>,
+    #[serde(default)]
+    timeout_ms: Option<u32>,
+    #[serde(default)]
+    payload: serde_json::Value,
+}
+
+async fn browser_health_handler(
+    State(_state): State<Arc<GatewayState>>,
+) -> Json<serde_json::Value> {
+    Json(serde_json::json!({
+        "ok": true,
+        "sessions": 0,
+        "backend": "browserless-sidecar",
+        "note": "Browser automation is now provided by an external Browserless sidecar container"
+    }))
+}
+
+async fn browser_dispatch_handler(
+    State(_state): State<Arc<GatewayState>>,
+    Json(req): Json<BrowserDispatchRequest>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
+    let _ = req;
+    Err((
+        StatusCode::GONE,
+        Json(serde_json::json!({
+            "ok": false,
+            "action": "browser_dispatch",
+            "error": {
+                "code": "endpoint_deprecated",
+                "message": "The /v1/browser/dispatch endpoint is deprecated. Browser automation is now provided by an external Browserless sidecar container.",
+                "retryable": false,
+                "hint": "Configure BROWSERLESS_ENABLED=true and BROWSERLESS_PORT=9222. The browser-use WASM tool calls Browserless directly.",
+                "details": {
+                    "sidecar_endpoint": "http://localhost:9222",
+                    "documentation": "https://docs.browserless.io/rest-apis/intro"
+                }
+            }
+        })),
+    ))
 }
 
 #[cfg(test)]

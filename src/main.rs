@@ -37,6 +37,7 @@ use ironclaw::{
     pairing::PairingStore,
     safety::SafetyLayer,
     secrets::SecretsStore,
+    sidecar::SidecarManager,
     tools::{
         ToolRegistry,
         mcp::{McpClient, McpSessionManager, config::load_mcp_servers_from_db, is_authenticated},
@@ -1365,6 +1366,44 @@ async fn main() -> anyhow::Result<()> {
     let boot_llm_model = llm.model_name().to_string();
     let boot_cheap_model = cheap_llm.as_ref().map(|c| c.model_name().to_string());
 
+    // Initialize sidecar managers for external services (e.g., browserless)
+    let sidecar_managers: Vec<std::sync::Arc<SidecarManager>> = if config.sidecar.any_enabled() {
+        let mut managers = Vec::new();
+
+        if config.sidecar.browserless_enabled {
+            let manager =
+                std::sync::Arc::new(SidecarManager::new(config.sidecar.to_browserless_config()));
+            managers.push(manager);
+            tracing::info!(
+                "Browserless sidecar configured (port {})",
+                config.sidecar.browserless_port
+            );
+        }
+
+        for manager in &managers {
+            match manager.ensure_ready().await {
+                Ok(endpoint) => {
+                    tracing::info!(
+                        sidecar = %manager.config().name,
+                        endpoint = %endpoint,
+                        "Sidecar started and ready"
+                    );
+                }
+                Err(e) => {
+                    tracing::error!(
+                        sidecar = %manager.config().name,
+                        error = %e,
+                        "Failed to start sidecar"
+                    );
+                }
+            }
+        }
+
+        managers
+    } else {
+        Vec::new()
+    };
+
     // Create and run the agent
     let cost_guard = Arc::new(ironclaw::agent::cost_guard::CostGuard::new(
         ironclaw::agent::cost_guard::CostGuardConfig {
@@ -1436,6 +1475,11 @@ async fn main() -> anyhow::Result<()> {
 
     // Run the agent (blocks until shutdown)
     agent.run().await?;
+
+    // Shut down sidecar containers
+    for manager in &sidecar_managers {
+        manager.shutdown().await;
+    }
 
     // Shut down the webhook server if one was started
     if let Some(ref mut server) = webhook_server {

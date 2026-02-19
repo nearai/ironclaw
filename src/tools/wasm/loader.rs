@@ -679,6 +679,27 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn test_discover_dev_tools_includes_browser_use_naming_convention() {
+        // Verifies M1.3 discovery convention for tools-src/browser-use.
+        // We only assert expected naming/path conventions so the test is stable
+        // whether or not build artifacts are present.
+        let tools = super::discover_dev_tools().await.unwrap();
+
+        if let Some(discovered) = tools.get("browser-use-tool") {
+            let wasm_path = discovered.wasm_path.to_string_lossy();
+            let cap_path = discovered
+                .capabilities_path
+                .as_ref()
+                .map(|p| p.to_string_lossy().to_string())
+                .unwrap_or_default();
+
+            assert!(wasm_path.contains("tools-src/browser-use/target/wasm32-wasip2/release"));
+            assert!(wasm_path.ends_with("browser_use_tool.wasm"));
+            assert!(cap_path.ends_with("tools-src/browser-use/browser-use-tool.capabilities.json"));
+        }
+    }
+
     #[test]
     fn test_resolve_oauth_refresh_config_with_oauth() {
         use crate::tools::wasm::capabilities_schema::{

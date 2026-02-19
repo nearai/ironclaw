@@ -100,6 +100,12 @@ src/
 │   ├── auth.rs         # Per-job bearer token store
 │   └── job_manager.rs  # Container lifecycle (create, stop, cleanup)
 │
+├── sidecar/            # Docker sidecar lifecycle management
+│   ├── mod.rs          # Module root, re-exports
+│   ├── config.rs       # SidecarConfig, HealthCheck, SidecarEndpoint
+│   ├── manager.rs      # SidecarManager (lazy init, health checks, shutdown)
+│   └── error.rs        # SidecarError types
+│
 ├── worker/             # Runs inside Docker containers
 │   ├── mod.rs
 │   ├── runtime.rs      # Worker execution loop (tool calls, LLM)
@@ -141,15 +147,19 @@ src/
 │   │   ├── client.rs   # MCP client over HTTP
 │   │   └── protocol.rs # JSON-RPC types
 │   └── wasm/           # Full WASM sandbox (wasmtime)
+│       ├── mod.rs      # Module root, re-exports
 │       ├── runtime.rs  # Module compilation and caching
 │       ├── wrapper.rs  # Tool trait wrapper for WASM modules
 │       ├── host.rs     # Host functions (logging, time, workspace)
 │       ├── limits.rs   # Fuel metering and memory limiting
+│       ├── error.rs    # WasmError types
 │       ├── allowlist.rs # Network endpoint allowlisting
 │       ├── credential_injector.rs # Safe credential injection
 │       ├── loader.rs   # WASM tool discovery from filesystem
 │       ├── rate_limiter.rs # Per-tool rate limiting
-│       └── storage.rs  # Linear memory persistence
+│       ├── storage.rs  # Linear memory persistence
+│       ├── capabilities.rs # WebSocket pooling, capability types
+│       └── capabilities_schema.rs # JSON schema for capabilities files
 │
 ├── db/                 # Database abstraction layer
 │   ├── mod.rs          # Database trait (~60 async methods)
@@ -308,6 +318,14 @@ CLAUDE_CODE_CONFIG_DIR=/home/worker/.claude
 ROUTINES_ENABLED=true
 ROUTINES_CRON_INTERVAL=60            # Tick interval in seconds
 ROUTINES_MAX_CONCURRENT=3
+
+# Sidecar (Docker sidecar services, e.g., Browserless)
+SIDECAR_ENABLED=false
+BROWSERLESS_ENABLED=false
+BROWSERLESS_PORT=9222
+BROWSERLESS_TOKEN=                    # Optional auth token for Browserless
+SIDECAR_KEEP_ON_SHUTDOWN=false        # Keep sidecar container running after agent stops
+SIDECAR_STARTUP_TIMEOUT_SECS=90      # Max time to wait for sidecar health check
 ```
 
 ### NEAR AI Provider

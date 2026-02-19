@@ -13,6 +13,10 @@
 
 target/
 
+# Editor settings
+.zed/
+.vscode/
+
 # Benchmark results (local runs, not committed)
 bench-results/
 

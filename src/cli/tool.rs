@@ -134,6 +134,8 @@ async fn install_tool(
 ) -> anyhow::Result<()> {
     let target_dir = target.unwrap_or_else(default_tools_dir);
 
+    maybe_prepare_browser_use_chromium(&path, name.as_deref()).await?;
+
     // Determine if path is a directory (source) or .wasm file
     let metadata = fs::metadata(&path).await?;
 
@@ -1315,6 +1317,17 @@ fn print_success(display_name: &str) {
     println!();
     println!("  The tool can now access the API.");
     println!();
+}
+
+/// Stub for browser-use chromium preparation.
+///
+/// Browser automation is now provided by the Browserless sidecar container,
+/// so no local Chromium download is needed.
+async fn maybe_prepare_browser_use_chromium(
+    _install_path: &Path,
+    _requested_name: Option<&str>,
+) -> anyhow::Result<()> {
+    Ok(())
 }
 
 #[cfg(test)]

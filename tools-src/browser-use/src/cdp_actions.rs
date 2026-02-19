@@ -1,0 +1,1467 @@
+use serde_json::{json, Map, Value};
+
+use crate::cdp::CdpClient;
+use crate::constants::*;
+use crate::error::{DispatchFailure, DispatchSuccess, StructuredError};
+use crate::near::agent::host as wit_host;
+
+pub fn dispatch_cdp_action(
+    action: &str,
+    params: &Map<String, Value>,
+    client: &mut CdpClient,
+    conn: &wit_host::WsConnection,
+    session_id: Option<&str>,
+    cdp_session_id: &str,
+) -> Result<DispatchSuccess, DispatchFailure> {
+    let result = match action {
+        "open" => cdp_open(client, conn, cdp_session_id, params),
+        "back" => cdp_history_nav(client, conn, cdp_session_id, -1),
+        "forward" => cdp_history_nav(client, conn, cdp_session_id, 1),
+        "reload" => cdp_reload(client, conn, cdp_session_id),
+        "snapshot" => cdp_snapshot(client, conn, cdp_session_id, params),
+        "click" => cdp_click(client, conn, cdp_session_id, params),
+        "dblclick" => cdp_dblclick(client, conn, cdp_session_id, params),
+        "focus" => cdp_focus(client, conn, cdp_session_id, params),
+        "fill" => cdp_fill(client, conn, cdp_session_id, params),
+        "type" => cdp_type_text(client, conn, cdp_session_id, params),
+        "press" => cdp_press(client, conn, cdp_session_id, params),
+        "keydown" => cdp_key_event(client, conn, cdp_session_id, params, "keyDown"),
+        "keyup" => cdp_key_event(client, conn, cdp_session_id, params, "keyUp"),
+        "hover" => cdp_hover(client, conn, cdp_session_id, params),
+        "check" => cdp_check_uncheck(client, conn, cdp_session_id, params, true),
+        "uncheck" => cdp_check_uncheck(client, conn, cdp_session_id, params, false),
+        "select" => cdp_select(client, conn, cdp_session_id, params),
+        "scroll" => cdp_scroll(client, conn, cdp_session_id, params),
+        "scroll_into_view" => cdp_scroll_into_view(client, conn, cdp_session_id, params),
+        "drag" => cdp_drag(client, conn, cdp_session_id, params),
+        "upload" => cdp_upload(client, conn, cdp_session_id, params),
+        "wait" => cdp_wait(client, conn, cdp_session_id, params),
+        "get_text" => cdp_get_text(client, conn, cdp_session_id, params),
+        "get_html" => cdp_get_html(client, conn, cdp_session_id, params),
+        "get_value" => cdp_get_value(client, conn, cdp_session_id, params),
+        "get_attr" => cdp_get_attr(client, conn, cdp_session_id, params),
+        "get_title" => cdp_get_title(client, conn, cdp_session_id),
+        "get_url" => cdp_get_url(client, conn, cdp_session_id),
+        "get_count" => cdp_get_count(client, conn, cdp_session_id, params),
+        "get_box" => cdp_get_box(client, conn, cdp_session_id, params),
+        "screenshot" => cdp_screenshot(client, conn, cdp_session_id, params),
+        "eval" => cdp_eval(client, conn, cdp_session_id, params),
+        "cookies_list" => cdp_cookies_list(client, conn, cdp_session_id),
+        "cookies_get" => cdp_cookies_get(client, conn, cdp_session_id, params),
+        "cookies_set" => cdp_cookies_set(client, conn, cdp_session_id, params),
+        "cookies_set_batch" => cdp_cookies_set_batch(client, conn, cdp_session_id, params),
+        "cookies_delete" => cdp_cookies_delete(client, conn, cdp_session_id, params),
+        "local_storage_list" => cdp_storage_list(client, conn, cdp_session_id, "localStorage"),
+        "local_storage_get" => {
+            cdp_storage_get(client, conn, cdp_session_id, params, "localStorage")
+        }
+        "local_storage_set" => {
+            cdp_storage_set(client, conn, cdp_session_id, params, "localStorage")
+        }
+        "local_storage_delete" => {
+            cdp_storage_delete(client, conn, cdp_session_id, params, "localStorage")
+        }
+        "session_storage_list" => cdp_storage_list(client, conn, cdp_session_id, "sessionStorage"),
+        "session_storage_get" => {
+            cdp_storage_get(client, conn, cdp_session_id, params, "sessionStorage")
+        }
+        "session_storage_set" => {
+            cdp_storage_set(client, conn, cdp_session_id, params, "sessionStorage")
+        }
+        "session_storage_delete" => {
+            cdp_storage_delete(client, conn, cdp_session_id, params, "sessionStorage")
+        }
+        "pdf" => cdp_pdf(client, conn, cdp_session_id, params),
+        _ => Err(DispatchFailure {
+            error: StructuredError::new(ERR_INVALID_ACTION, format!("Unknown action: {action}")),
+            attempts: 1,
+        }),
+    }?;
+
+    Ok(DispatchSuccess {
+        session_id: session_id.map(String::from),
+        ..result
+    })
+}
+
+pub(crate) fn send_session_command(
+    client: &mut CdpClient,
+    conn: &wit_host::WsConnection,
+    session_id: &str,
+    method: &str,
+    params: Option<Value>,
+) -> Result<Value, DispatchFailure> {
+    let id = client.next_id();
+    let command = json!({
+        "id": id,
+        "method": method,
+        "sessionId": session_id,
+        "params": params.unwrap_or(json!({}))
+    });
+
+    conn.send(&command.to_string())
+        .map_err(|e| DispatchFailure {
+            error: StructuredError::new(ERR_NETWORK_FAILURE, format!("WebSocket send failed: {e}")),
+            attempts: 1,
+        })?;
+
+    loop {
+        let response_str = conn
+            .recv(Some(CDP_TIMEOUT_MS))
+            .map_err(|e| DispatchFailure {
+                error: StructuredError::new(ERR_TIMEOUT, format!("CDP recv timeout: {e}")),
+                attempts: 1,
+            })?;
+
+        let response: Value = serde_json::from_str(&response_str).map_err(|e| DispatchFailure {
+            error: StructuredError::new(ERR_NETWORK_FAILURE, format!("Invalid CDP response: {e}")),
+            attempts: 1,
+        })?;
+
+        if response.get("id").and_then(Value::as_u64) == Some(id as u64) {
+            if let Some(error) = response.get("error") {
+                let msg = error
+                    .get("message")
+                    .and_then(Value::as_str)
+                    .unwrap_or("CDP error");
+                return Err(DispatchFailure {
+                    error: StructuredError::new(ERR_NETWORK_FAILURE, msg),
+                    attempts: 1,
+                });
+            }
+            return Ok(response.get("result").cloned().unwrap_or(json!({})));
+        }
+        // Skip events (method-only messages with no id)
+    }
+}
+
+fn eval_js(
+    client: &mut CdpClient,
+    conn: &wit_host::WsConnection,
+    session_id: &str,
+    expression: &str,
+    return_by_value: bool,
+) -> Result<Value, DispatchFailure> {
+    let result = send_session_command(
+        client,
+        conn,
+        session_id,
+        "Runtime.evaluate",
+        Some(json!({
+            "expression": expression,
+            "returnByValue": return_by_value,
+            "awaitPromise": true,
+        })),
+    )?;
+
+    if let Some(exception) = result.get("exceptionDetails") {
+        let text = exception
+            .get("text")
+            .or_else(|| {
+                exception
+                    .get("exception")
+                    .and_then(|e| e.get("description"))
+            })
+            .and_then(Value::as_str)
+            .unwrap_or("JavaScript exception");
+        return Err(DispatchFailure {
+            error: StructuredError::new(ERR_NETWORK_FAILURE, format!("JS error: {text}")),
+            attempts: 1,
+        });
+    }
+
+    Ok(result.get("result").cloned().unwrap_or(json!({})))
+}
+
+fn eval_js_value(
+    client: &mut CdpClient,
+    conn: &wit_host::WsConnection,
+    session_id: &str,
+    expression: &str,
+) -> Result<Value, DispatchFailure> {
+    let result = eval_js(client, conn, session_id, expression, true)?;
+    Ok(result.get("value").cloned().unwrap_or(Value::Null))
+}
+
+fn ok_success(data: Value) -> Result<DispatchSuccess, DispatchFailure> {
+    Ok(DispatchSuccess {
+        data,
+        session_id: None,
+        snapshot_id: None,
+        attempts: 1,
+        backend_status: 200,
+        warnings: vec![],
+    })
+}
+
+fn require_str<'a>(params: &'a Map<String, Value>, key: &str) -> Result<&'a str, DispatchFailure> {
+    params
+        .get(key)
+        .and_then(Value::as_str)
+        .filter(|s| !s.trim().is_empty())
+        .ok_or_else(|| DispatchFailure {
+            error: StructuredError::new(
+                ERR_INVALID_PARAMS,
+                format!("Missing required field '{key}'"),
+            ),
+            attempts: 1,
+        })
+}
+
+fn get_selector_param(params: &Map<String, Value>) -> Result<String, DispatchFailure> {
+    params
+        .get("selector")
+        .and_then(Value::as_str)
+        .map(|s| s.to_string())
+        .ok_or_else(|| DispatchFailure {
+            error: StructuredError::new(ERR_INVALID_PARAMS, "Missing required 'selector' field"),
+            attempts: 1,
+        })
+}
+
+fn escape_js(s: &str) -> String {
+    let mut result = String::with_capacity(s.len() + 8);
+    for ch in s.chars() {
+        match ch {
+            '\\' => result.push_str("\\\\"),
+            '\'' => result.push_str("\\'"),
+            '"' => result.push_str("\\\""),
+            '`' => result.push_str("\\`"),
+            '$' => result.push_str("\\$"),
+            '\n' => result.push_str("\\n"),
+            '\r' => result.push_str("\\r"),
+            '\t' => result.push_str("\\t"),
+            '\0' => result.push_str("\\0"),
+            '\u{2028}' => result.push_str("\\u2028"),
+            '\u{2029}' => result.push_str("\\u2029"),
+            ')' => result.push_str("\\)"),
+            '(' => result.push_str("\\("),
+            _ => result.push(ch),
+        }
+    }
+    result
+}
+
+fn wait_for_navigation(
+    client: &mut CdpClient,
+    conn: &wit_host::WsConnection,
+    session_id: &str,
+) -> Result<(), DispatchFailure> {
+    // Poll messages for Page.loadEventFired or Page.frameStoppedLoading
+    let deadline_ms = 30_000u32;
+    let max_iterations = 2000u32;
+    let start = wit_host::now_millis();
+    for _ in 0..max_iterations {
+        let elapsed = wit_host::now_millis() - start;
+        if elapsed > deadline_ms as u64 {
+            break;
+        }
+        let remaining = deadline_ms.saturating_sub(elapsed as u32).max(100);
+        match conn.recv(Some(remaining)) {
+            Ok(msg) => {
+                if let Ok(parsed) = serde_json::from_str::<Value>(&msg) {
+                    let method = parsed.get("method").and_then(Value::as_str).unwrap_or("");
+                    if method == "Page.loadEventFired"
+                        || method == "Page.frameStoppedLoading"
+                        || method == "Page.domContentEventFired"
+                    {
+                        return Ok(());
+                    }
+                }
+            }
+            Err(_) => break,
+        }
+    }
+    // Timeout is not necessarily fatal - page might have loaded synchronously
+    let _ = eval_js_value(client, conn, session_id, "document.readyState");
+    Ok(())
+}
+
+// === Navigation ===
+
+fn cdp_open(
+    client: &mut CdpClient,
+    conn: &wit_host::WsConnection,
+    session_id: &str,
+    params: &Map<String, Value>,
+) -> Result<DispatchSuccess, DispatchFailure> {
+    let url = require_str(params, "url")?;
+
+    send_session_command(client, conn, session_id, "Page.enable", None)?;
+
+    send_session_command(
+        client,
+        conn,
+        session_id,
+        "Page.navigate",
+        Some(json!({ "url": url })),
+    )?;
+
+    wait_for_navigation(client, conn, session_id)?;
+
+    let title = eval_js_value(client, conn, session_id, "document.title")?;
+    let final_url = eval_js_value(client, conn, session_id, "window.location.href")?;
+
+    ok_success(json!({
+        "url": final_url,
+        "title": title,
+        "loaded": true
+    }))
+}
+
+fn cdp_history_nav(
+    client: &mut CdpClient,
+    conn: &wit_host::WsConnection,
+    session_id: &str,
+    delta: i32,
+) -> Result<DispatchSuccess, DispatchFailure> {
+    let history =
+        send_session_command(client, conn, session_id, "Page.getNavigationHistory", None)?;
+
+    let current_index = history
+        .get("currentIndex")
+        .and_then(Value::as_i64)
+        .unwrap_or(0);
+    let new_index = current_index + delta as i64;
+
+    let entries = history.get("entries").and_then(Value::as_array);
+    if let Some(entries) = entries {
+        if new_index >= 0 && (new_index as usize) < entries.len() {
+            if let Some(entry_id) = entries[new_index as usize]
+                .get("id")
+                .and_then(Value::as_i64)
+            {
+                send_session_command(
+                    client,
+                    conn,
+                    session_id,
+                    "Page.navigateToHistoryEntry",
+                    Some(json!({ "entryId": entry_id })),
+                )?;
+            }
+        }
+    }
+
+    ok_success(json!({ "navigated": true }))
+}
+
+fn cdp_reload(
+    client: &mut CdpClient,
+    conn: &wit_host::WsConnection,
+    session_id: &str,
+) -> Result<DispatchSuccess, DispatchFailure> {
+    send_session_command(client, conn, session_id, "Page.enable", None)?;
+    send_session_command(client, conn, session_id, "Page.reload", None)?;
+    wait_for_navigation(client, conn, session_id)?;
+    ok_success(json!({ "reloaded": true }))
+}
+
+// === Snapshot ===
+
+fn cdp_snapshot(
+    client: &mut CdpClient,
+    conn: &wit_host::WsConnection,
+    session_id: &str,
+    params: &Map<String, Value>,
+) -> Result<DispatchSuccess, DispatchFailure> {
+    let mode = params
+        .get("mode")
+        .and_then(Value::as_str)
+        .unwrap_or("interactive-only");
+    let depth = params.get("depth").and_then(Value::as_u64).unwrap_or(20);
+
+    let js = format!(
+        r#"(function() {{
+            const mode = '{mode}';
+            const maxDepth = {depth};
+            function buildTree(node, depth, refCounter) {{
+                if (depth > maxDepth) return null;
+                if (!node || node.nodeType !== 1) return null;
+                const tag = node.tagName.toLowerCase();
+                const isInteractive = ["a","button","input","select","textarea","details","summary","iframe","object","embed","video","audio","canvas"].includes(tag) ||
+                    node.hasAttribute("onclick") || node.hasAttribute("tabindex") ||
+                    node.getAttribute("role") === "button" || node.getAttribute("role") === "link";
+                if (mode === "interactive-only" && !isInteractive && !["html","body","head","div","section","article","main","nav","header","footer","aside","form"].includes(tag)) {{
+                    const ic = node.querySelectorAll('a,button,input,select,textarea,[onclick],[tabindex],[role="button"],[role="link"]');
+                    if (ic.length === 0) return null;
+                }}
+                const ref = isInteractive ? '@e' + (refCounter.count++) : null;
+                const result = {{ tag, ref }};
+                if (tag === "a" && node.href) result.href = node.href;
+                if (tag === "img") {{ if (node.alt) result.alt = node.alt; if (node.src) result.src = node.src; }}
+                if (node.id) result.id = node.id;
+                if (node.className && typeof node.className === "string") result["class"] = node.className;
+                if (node.getAttribute("aria-label")) result.ariaLabel = node.getAttribute("aria-label");
+                if (node.getAttribute("placeholder")) result.placeholder = node.getAttribute("placeholder");
+                if (node.getAttribute("type")) result.type = node.getAttribute("type");
+                if (node.getAttribute("name")) result.name = node.getAttribute("name");
+                if (node.getAttribute("value")) result.value = node.getAttribute("value");
+                if (tag === "input" || tag === "textarea") result.value = node.value;
+                if (isInteractive && tag !== "input" && tag !== "textarea") {{
+                    const text = node.textContent?.trim().slice(0, 200);
+                    if (text) result.text = text;
+                }}
+                const children = [];
+                for (const child of node.children) {{
+                    const childTree = buildTree(child, depth + 1, refCounter);
+                    if (childTree) children.push(childTree);
+                }}
+                if (children.length > 0) result.children = children;
+                return result;
+            }}
+            const refCounter = {{ count: 0 }};
+            const tree = buildTree(document.documentElement, 0, refCounter);
+            return {{ refs: tree?.children || [], refCount: refCounter.count }};
+        }})()"#,
+    );
+
+    let snapshot = eval_js_value(client, conn, session_id, &js)?;
+    ok_success(snapshot)
+}
+
+// === Interactions ===
+
+fn resolve_element_js(selector: &str) -> String {
+    let s = escape_js(selector);
+    format!("document.querySelector('{s}')")
+}
+
+fn cdp_click(
+    client: &mut CdpClient,
+    conn: &wit_host::WsConnection,
+    session_id: &str,
+    params: &Map<String, Value>,
+) -> Result<DispatchSuccess, DispatchFailure> {
+    let sel = get_selector_param(params)?;
+    let js = format!(
+        r#"(function() {{
+            const el = {};
+            if (!el) return {{ clicked: false, error: 'Element not found' }};
+            el.click();
+            return {{ clicked: true, selector: '{}' }};
+        }})()"#,
+        resolve_element_js(&sel),
+        escape_js(&sel),
+    );
+    let result = eval_js_value(client, conn, session_id, &js)?;
+    ok_success(result)
+}
+
+fn cdp_dblclick(
+    client: &mut CdpClient,
+    conn: &wit_host::WsConnection,
+    session_id: &str,
+    params: &Map<String, Value>,
+) -> Result<DispatchSuccess, DispatchFailure> {
+    let sel = get_selector_param(params)?;
+    let js = format!(
+        r#"(function() {{
+            const el = {};
+            if (!el) return {{ dblclicked: false, error: 'Element not found' }};
+            el.dispatchEvent(new MouseEvent('dblclick', {{ bubbles: true }}));
+            return {{ dblclicked: true, selector: '{}' }};
+        }})()"#,
+        resolve_element_js(&sel),
+        escape_js(&sel),
+    );
+    let result = eval_js_value(client, conn, session_id, &js)?;
+    ok_success(result)
+}
+
+fn cdp_focus(
+    client: &mut CdpClient,
+    conn: &wit_host::WsConnection,
+    session_id: &str,
+    params: &Map<String, Value>,
+) -> Result<DispatchSuccess, DispatchFailure> {
+    let sel = get_selector_param(params)?;
+    let js = format!(
+        r#"(function() {{
+            const el = {};
+            if (!el) return {{ focused: false, error: 'Element not found' }};
+            el.focus();
+            return {{ focused: true, selector: '{}' }};
+        }})()"#,
+        resolve_element_js(&sel),
+        escape_js(&sel),
+    );
+    let result = eval_js_value(client, conn, session_id, &js)?;
+    ok_success(result)
+}
+
+fn cdp_fill(
+    client: &mut CdpClient,
+    conn: &wit_host::WsConnection,
+    session_id: &str,
+    params: &Map<String, Value>,
+) -> Result<DispatchSuccess, DispatchFailure> {
+    let sel = get_selector_param(params)?;
+    let value = require_str(params, "value")?;
+    let js = format!(
+        r#"(function() {{
+            const el = {};
+            if (!el) return {{ filled: false, error: 'Element not found' }};
+            el.focus();
+            el.value = '{}';
+            el.dispatchEvent(new Event('input', {{ bubbles: true }}));
+            el.dispatchEvent(new Event('change', {{ bubbles: true }}));
+            return {{ filled: true, selector: '{}' }};
+        }})()"#,
+        resolve_element_js(&sel),
+        escape_js(value),
+        escape_js(&sel),
+    );
+    let result = eval_js_value(client, conn, session_id, &js)?;
+    ok_success(result)
+}
+
+fn cdp_type_text(
+    client: &mut CdpClient,
+    conn: &wit_host::WsConnection,
+    session_id: &str,
+    params: &Map<String, Value>,
+) -> Result<DispatchSuccess, DispatchFailure> {
+    let sel = get_selector_param(params)?;
+    let value = require_str(params, "value")?;
+
+    // Focus the element first
+    let focus_js = format!(
+        r#"(function() {{
+            const el = {};
+            if (!el) return false;
+            el.focus();
+            return true;
+        }})()"#,
+        resolve_element_js(&sel),
+    );
+    let focused = eval_js_value(client, conn, session_id, &focus_js)?;
+    if focused != Value::Bool(true) {
+        return ok_success(json!({ "typed": false, "error": "Element not found" }));
+    }
+
+    // Type character by character using Input.dispatchKeyEvent
+    for ch in value.chars() {
+        send_session_command(
+            client,
+            conn,
+            session_id,
+            "Input.dispatchKeyEvent",
+            Some(json!({
+                "type": "keyDown",
+                "text": ch.to_string(),
+            })),
+        )?;
+        send_session_command(
+            client,
+            conn,
+            session_id,
+            "Input.dispatchKeyEvent",
+            Some(json!({
+                "type": "keyUp",
+                "text": ch.to_string(),
+            })),
+        )?;
+    }
+
+    ok_success(json!({ "typed": true, "selector": sel }))
+}
+
+fn cdp_press(
+    client: &mut CdpClient,
+    conn: &wit_host::WsConnection,
+    session_id: &str,
+    params: &Map<String, Value>,
+) -> Result<DispatchSuccess, DispatchFailure> {
+    let key = require_str(params, "key")?;
+
+    if let Some(sel) = params.get("selector").and_then(Value::as_str) {
+        let focus_js = format!(
+            r#"(function() {{
+                const el = {};
+                if (el) el.focus();
+            }})()"#,
+            resolve_element_js(sel),
+        );
+        eval_js(client, conn, session_id, &focus_js, false)?;
+    }
+
+    send_session_command(
+        client,
+        conn,
+        session_id,
+        "Input.dispatchKeyEvent",
+        Some(json!({
+            "type": "keyDown",
+            "key": key,
+        })),
+    )?;
+    send_session_command(
+        client,
+        conn,
+        session_id,
+        "Input.dispatchKeyEvent",
+        Some(json!({
+            "type": "keyUp",
+            "key": key,
+        })),
+    )?;
+
+    ok_success(json!({ "pressed": true, "key": key }))
+}
+
+fn cdp_key_event(
+    client: &mut CdpClient,
+    conn: &wit_host::WsConnection,
+    session_id: &str,
+    params: &Map<String, Value>,
+    event_type: &str,
+) -> Result<DispatchSuccess, DispatchFailure> {
+    let key = require_str(params, "key")?;
+    send_session_command(
+        client,
+        conn,
+        session_id,
+        "Input.dispatchKeyEvent",
+        Some(json!({
+            "type": event_type,
+            "key": key,
+        })),
+    )?;
+    ok_success(json!({ event_type: true, "key": key }))
+}
+
+fn cdp_hover(
+    client: &mut CdpClient,
+    conn: &wit_host::WsConnection,
+    session_id: &str,
+    params: &Map<String, Value>,
+) -> Result<DispatchSuccess, DispatchFailure> {
+    let sel = get_selector_param(params)?;
+    let js = format!(
+        r#"(function() {{
+            const el = {};
+            if (!el) return null;
+            const rect = el.getBoundingClientRect();
+            return {{ x: rect.x + rect.width / 2, y: rect.y + rect.height / 2 }};
+        }})()"#,
+        resolve_element_js(&sel),
+    );
+    let pos = eval_js_value(client, conn, session_id, &js)?;
+
+    if pos.is_null() {
+        return ok_success(json!({ "hovered": false, "error": "Element not found" }));
+    }
+
+    let x = pos.get("x").and_then(Value::as_f64).unwrap_or(0.0);
+    let y = pos.get("y").and_then(Value::as_f64).unwrap_or(0.0);
+
+    send_session_command(
+        client,
+        conn,
+        session_id,
+        "Input.dispatchMouseEvent",
+        Some(json!({
+            "type": "mouseMoved",
+            "x": x,
+            "y": y,
+        })),
+    )?;
+
+    ok_success(json!({ "hovered": true, "selector": sel }))
+}
+
+fn cdp_check_uncheck(
+    client: &mut CdpClient,
+    conn: &wit_host::WsConnection,
+    session_id: &str,
+    params: &Map<String, Value>,
+    check: bool,
+) -> Result<DispatchSuccess, DispatchFailure> {
+    let sel = get_selector_param(params)?;
+    let el_js = resolve_element_js(&sel);
+    let sel_escaped = escape_js(&sel);
+    let js = format!(
+        r#"(function() {{
+            const el = {el_js};
+            if (!el) return {{ done: false, error: 'Element not found' }};
+            if (el.checked !== {check}) el.click();
+            return {{ done: true, checked: el.checked, selector: '{sel_escaped}' }};
+        }})()"#,
+    );
+    let result = eval_js_value(client, conn, session_id, &js)?;
+    ok_success(result)
+}
+
+fn cdp_select(
+    client: &mut CdpClient,
+    conn: &wit_host::WsConnection,
+    session_id: &str,
+    params: &Map<String, Value>,
+) -> Result<DispatchSuccess, DispatchFailure> {
+    let sel = get_selector_param(params)?;
+    let value = require_str(params, "value")?;
+    let js = format!(
+        r#"(function() {{
+            const el = {};
+            if (!el) return {{ selected: false, error: 'Element not found' }};
+            el.value = '{}';
+            el.dispatchEvent(new Event('change', {{ bubbles: true }}));
+            return {{ selected: true, selector: '{}', value: '{}' }};
+        }})()"#,
+        resolve_element_js(&sel),
+        escape_js(value),
+        escape_js(&sel),
+        escape_js(value),
+    );
+    let result = eval_js_value(client, conn, session_id, &js)?;
+    ok_success(result)
+}
+
+fn cdp_scroll(
+    client: &mut CdpClient,
+    conn: &wit_host::WsConnection,
+    session_id: &str,
+    params: &Map<String, Value>,
+) -> Result<DispatchSuccess, DispatchFailure> {
+    let x = params.get("x").and_then(Value::as_i64).unwrap_or(0);
+    let y = params.get("y").and_then(Value::as_i64).unwrap_or(0);
+    let js = format!("window.scrollTo({x}, {y})");
+    eval_js(client, conn, session_id, &js, false)?;
+    ok_success(json!({ "scrolled": true, "x": x, "y": y }))
+}
+
+fn cdp_scroll_into_view(
+    client: &mut CdpClient,
+    conn: &wit_host::WsConnection,
+    session_id: &str,
+    params: &Map<String, Value>,
+) -> Result<DispatchSuccess, DispatchFailure> {
+    let sel = get_selector_param(params)?;
+    let js = format!(
+        r#"(function() {{
+            const el = {};
+            if (!el) return {{ scrolledIntoView: false, error: 'Element not found' }};
+            el.scrollIntoView({{ behavior: 'smooth', block: 'center' }});
+            return {{ scrolledIntoView: true, selector: '{}' }};
+        }})()"#,
+        resolve_element_js(&sel),
+        escape_js(&sel),
+    );
+    let result = eval_js_value(client, conn, session_id, &js)?;
+    ok_success(result)
+}
+
+fn cdp_drag(
+    client: &mut CdpClient,
+    conn: &wit_host::WsConnection,
+    session_id: &str,
+    params: &Map<String, Value>,
+) -> Result<DispatchSuccess, DispatchFailure> {
+    let src_sel = params
+        .get("source_selector")
+        .and_then(Value::as_str)
+        .ok_or_else(|| DispatchFailure {
+            error: StructuredError::new(ERR_INVALID_PARAMS, "Missing 'source_selector'"),
+            attempts: 1,
+        })?;
+    let tgt_sel = params
+        .get("target_selector")
+        .and_then(Value::as_str)
+        .ok_or_else(|| DispatchFailure {
+            error: StructuredError::new(ERR_INVALID_PARAMS, "Missing 'target_selector'"),
+            attempts: 1,
+        })?;
+
+    let js = format!(
+        r#"(function() {{
+            const src = document.querySelector('{}');
+            const tgt = document.querySelector('{}');
+            if (!src || !tgt) return {{ dragged: false, error: 'Element not found' }};
+            const srcRect = src.getBoundingClientRect();
+            const tgtRect = tgt.getBoundingClientRect();
+            return {{
+                src: {{ x: srcRect.x + srcRect.width / 2, y: srcRect.y + srcRect.height / 2 }},
+                tgt: {{ x: tgtRect.x + tgtRect.width / 2, y: tgtRect.y + tgtRect.height / 2 }}
+            }};
+        }})()"#,
+        escape_js(src_sel),
+        escape_js(tgt_sel),
+    );
+    let positions = eval_js_value(client, conn, session_id, &js)?;
+
+    if positions.get("error").is_some() {
+        return ok_success(positions);
+    }
+
+    let sx = positions
+        .get("src")
+        .and_then(|s| s.get("x"))
+        .and_then(Value::as_f64)
+        .unwrap_or(0.0);
+    let sy = positions
+        .get("src")
+        .and_then(|s| s.get("y"))
+        .and_then(Value::as_f64)
+        .unwrap_or(0.0);
+    let tx = positions
+        .get("tgt")
+        .and_then(|s| s.get("x"))
+        .and_then(Value::as_f64)
+        .unwrap_or(0.0);
+    let ty = positions
+        .get("tgt")
+        .and_then(|s| s.get("y"))
+        .and_then(Value::as_f64)
+        .unwrap_or(0.0);
+
+    // Mouse down on source
+    send_session_command(
+        client,
+        conn,
+        session_id,
+        "Input.dispatchMouseEvent",
+        Some(json!({
+            "type": "mousePressed", "x": sx, "y": sy, "button": "left", "clickCount": 1
+        })),
+    )?;
+    // Move to target
+    send_session_command(
+        client,
+        conn,
+        session_id,
+        "Input.dispatchMouseEvent",
+        Some(json!({
+            "type": "mouseMoved", "x": tx, "y": ty, "button": "left"
+        })),
+    )?;
+    // Release
+    send_session_command(
+        client,
+        conn,
+        session_id,
+        "Input.dispatchMouseEvent",
+        Some(json!({
+            "type": "mouseReleased", "x": tx, "y": ty, "button": "left", "clickCount": 1
+        })),
+    )?;
+
+    ok_success(json!({ "dragged": true, "source": src_sel, "target": tgt_sel }))
+}
+
+fn cdp_upload(
+    _client: &mut CdpClient,
+    _conn: &wit_host::WsConnection,
+    _session_id: &str,
+    _params: &Map<String, Value>,
+) -> Result<DispatchSuccess, DispatchFailure> {
+    Err(DispatchFailure {
+        error: StructuredError::new(
+            ERR_NOT_IMPLEMENTED,
+            "File upload via CDP requires DOM.setFileInputFiles which needs node resolution. Use eval with a custom approach.",
+        ),
+        attempts: 1,
+    })
+}
+
+// === Wait ===
+
+fn cdp_wait(
+    client: &mut CdpClient,
+    conn: &wit_host::WsConnection,
+    session_id: &str,
+    params: &Map<String, Value>,
+) -> Result<DispatchSuccess, DispatchFailure> {
+    if let Some(ms) = params.get("ms").and_then(Value::as_u64) {
+        let js = format!("new Promise(r => setTimeout(r, {ms}))");
+        eval_js(client, conn, session_id, &js, false)?;
+        return ok_success(json!({ "waited": true, "ms": ms }));
+    }
+
+    if let Some(sel) = params.get("selector").and_then(Value::as_str) {
+        let js = format!(
+            r#"new Promise((resolve, reject) => {{
+                const start = Date.now();
+                const check = () => {{
+                    if (document.querySelector('{}')) return resolve(true);
+                    if (Date.now() - start > 30000) return reject(new Error('Timeout'));
+                    requestAnimationFrame(check);
+                }};
+                check();
+            }})"#,
+            escape_js(sel),
+        );
+        eval_js(client, conn, session_id, &js, false)?;
+        return ok_success(json!({ "waited": true, "selector": sel }));
+    }
+
+    if let Some(text) = params.get("text").and_then(Value::as_str) {
+        let js = format!(
+            r#"new Promise((resolve, reject) => {{
+                const start = Date.now();
+                const check = () => {{
+                    if (document.body.innerText.includes('{}')) return resolve(true);
+                    if (Date.now() - start > 30000) return reject(new Error('Timeout'));
+                    requestAnimationFrame(check);
+                }};
+                check();
+            }})"#,
+            escape_js(text),
+        );
+        eval_js(client, conn, session_id, &js, false)?;
+        return ok_success(json!({ "waited": true, "text": text }));
+    }
+
+    if let Some(url_pat) = params.get("url_pattern").and_then(Value::as_str) {
+        let js = format!(
+            r#"new Promise((resolve, reject) => {{
+                const start = Date.now();
+                const check = () => {{
+                    if (window.location.href.includes('{}')) return resolve(true);
+                    if (Date.now() - start > 30000) return reject(new Error('Timeout'));
+                    setTimeout(check, 200);
+                }};
+                check();
+            }})"#,
+            escape_js(url_pat),
+        );
+        eval_js(client, conn, session_id, &js, false)?;
+        return ok_success(json!({ "waited": true, "urlPattern": url_pat }));
+    }
+
+    if let Some(ls) = params.get("load_state").and_then(Value::as_str) {
+        let state = match ls {
+            "domcontentloaded" => "interactive",
+            "load" | "networkidle" => "complete",
+            _ => "complete",
+        };
+        let js = format!(
+            r#"new Promise((resolve, reject) => {{
+                if (document.readyState === '{state}' || document.readyState === 'complete') return resolve(true);
+                const start = Date.now();
+                const check = () => {{
+                    if (document.readyState === '{state}' || document.readyState === 'complete') return resolve(true);
+                    if (Date.now() - start > 30000) return reject(new Error('Timeout'));
+                    setTimeout(check, 200);
+                }};
+                check();
+            }})"#,
+        );
+        eval_js(client, conn, session_id, &js, false)?;
+        return ok_success(json!({ "waited": true, "loadState": ls }));
+    }
+
+    if let Some(js_cond) = params.get("js_condition").and_then(Value::as_str) {
+        // Wrap js_condition as a string argument to eval() inside the promise
+        // to prevent injection breakout from the condition expression.
+        let escaped_cond = escape_js(js_cond);
+        let js = format!(
+            r#"new Promise((resolve, reject) => {{
+                const start = Date.now();
+                const condFn = new Function('return (' + '{escaped_cond}' + ')');
+                const check = () => {{
+                    try {{ if (condFn()) return resolve(true); }} catch(e) {{}}
+                    if (Date.now() - start > 30000) return reject(new Error('Timeout'));
+                    requestAnimationFrame(check);
+                }};
+                check();
+            }})"#,
+        );
+        eval_js(client, conn, session_id, &js, false)?;
+        return ok_success(json!({ "waited": true, "jsCondition": js_cond }));
+    }
+
+    Err(DispatchFailure {
+        error: StructuredError::new(
+            ERR_INVALID_PARAMS,
+            "wait requires one of: ms, selector, text, url_pattern, load_state, js_condition",
+        ),
+        attempts: 1,
+    })
+}
+
+// === Retrieval ===
+
+fn cdp_get_text(
+    client: &mut CdpClient,
+    conn: &wit_host::WsConnection,
+    session_id: &str,
+    params: &Map<String, Value>,
+) -> Result<DispatchSuccess, DispatchFailure> {
+    let sel = get_selector_param(params)?;
+    let js = format!(
+        r#"(function() {{
+            const el = {};
+            return {{ text: el ? (el.textContent || '') : '' }};
+        }})()"#,
+        resolve_element_js(&sel),
+    );
+    let result = eval_js_value(client, conn, session_id, &js)?;
+    ok_success(result)
+}
+
+fn cdp_get_html(
+    client: &mut CdpClient,
+    conn: &wit_host::WsConnection,
+    session_id: &str,
+    params: &Map<String, Value>,
+) -> Result<DispatchSuccess, DispatchFailure> {
+    let sel = get_selector_param(params)?;
+    let js = format!(
+        r#"(function() {{
+            const el = {};
+            return {{ html: el ? el.innerHTML : '' }};
+        }})()"#,
+        resolve_element_js(&sel),
+    );
+    let result = eval_js_value(client, conn, session_id, &js)?;
+    ok_success(result)
+}
+
+fn cdp_get_value(
+    client: &mut CdpClient,
+    conn: &wit_host::WsConnection,
+    session_id: &str,
+    params: &Map<String, Value>,
+) -> Result<DispatchSuccess, DispatchFailure> {
+    let sel = get_selector_param(params)?;
+    let js = format!(
+        r#"(function() {{
+            const el = {};
+            return {{ value: el ? (el.value || '') : '' }};
+        }})()"#,
+        resolve_element_js(&sel),
+    );
+    let result = eval_js_value(client, conn, session_id, &js)?;
+    ok_success(result)
+}
+
+fn cdp_get_attr(
+    client: &mut CdpClient,
+    conn: &wit_host::WsConnection,
+    session_id: &str,
+    params: &Map<String, Value>,
+) -> Result<DispatchSuccess, DispatchFailure> {
+    let sel = get_selector_param(params)?;
+    let name = require_str(params, "name")?;
+    let js = format!(
+        r#"(function() {{
+            const el = {};
+            return {{ attribute: el ? el.getAttribute('{}') : null, name: '{}' }};
+        }})()"#,
+        resolve_element_js(&sel),
+        escape_js(name),
+        escape_js(name),
+    );
+    let result = eval_js_value(client, conn, session_id, &js)?;
+    ok_success(result)
+}
+
+fn cdp_get_title(
+    client: &mut CdpClient,
+    conn: &wit_host::WsConnection,
+    session_id: &str,
+) -> Result<DispatchSuccess, DispatchFailure> {
+    let title = eval_js_value(client, conn, session_id, "document.title")?;
+    ok_success(json!({ "title": title }))
+}
+
+fn cdp_get_url(
+    client: &mut CdpClient,
+    conn: &wit_host::WsConnection,
+    session_id: &str,
+) -> Result<DispatchSuccess, DispatchFailure> {
+    let url = eval_js_value(client, conn, session_id, "window.location.href")?;
+    ok_success(json!({ "url": url }))
+}
+
+fn cdp_get_count(
+    client: &mut CdpClient,
+    conn: &wit_host::WsConnection,
+    session_id: &str,
+    params: &Map<String, Value>,
+) -> Result<DispatchSuccess, DispatchFailure> {
+    let sel = get_selector_param(params)?;
+    let js = format!("document.querySelectorAll('{}').length", escape_js(&sel),);
+    let count = eval_js_value(client, conn, session_id, &js)?;
+    ok_success(json!({ "count": count }))
+}
+
+fn cdp_get_box(
+    client: &mut CdpClient,
+    conn: &wit_host::WsConnection,
+    session_id: &str,
+    params: &Map<String, Value>,
+) -> Result<DispatchSuccess, DispatchFailure> {
+    let sel = get_selector_param(params)?;
+    let js = format!(
+        r#"(function() {{
+            const el = {};
+            if (!el) return {{ box: null }};
+            const r = el.getBoundingClientRect();
+            return {{ box: {{ x: r.x, y: r.y, width: r.width, height: r.height }} }};
+        }})()"#,
+        resolve_element_js(&sel),
+    );
+    let result = eval_js_value(client, conn, session_id, &js)?;
+    ok_success(result)
+}
+
+// === Screenshot ===
+
+fn cdp_screenshot(
+    client: &mut CdpClient,
+    conn: &wit_host::WsConnection,
+    session_id: &str,
+    params: &Map<String, Value>,
+) -> Result<DispatchSuccess, DispatchFailure> {
+    let mut capture_params = json!({ "format": "png" });
+
+    if let Some(true) = params.get("full_page").and_then(Value::as_bool) {
+        let metrics =
+            send_session_command(client, conn, session_id, "Page.getLayoutMetrics", None)?;
+        if let Some(content_size) = metrics.get("contentSize") {
+            capture_params["clip"] = json!({
+                "x": 0,
+                "y": 0,
+                "width": content_size.get("width").and_then(Value::as_f64).unwrap_or(1280.0),
+                "height": content_size.get("height").and_then(Value::as_f64).unwrap_or(800.0),
+                "scale": 1,
+            });
+            capture_params["captureBeyondViewport"] = json!(true);
+        }
+    }
+
+    if let Some(sel) = params.get("selector").and_then(Value::as_str) {
+        let js = format!(
+            r#"(function() {{
+                const el = {};
+                if (!el) return null;
+                const r = el.getBoundingClientRect();
+                return {{ x: r.x, y: r.y, width: r.width, height: r.height }};
+            }})()"#,
+            resolve_element_js(sel),
+        );
+        let clip = eval_js_value(client, conn, session_id, &js)?;
+        if !clip.is_null() {
+            capture_params["clip"] = json!({
+                "x": clip.get("x").and_then(Value::as_f64).unwrap_or(0.0),
+                "y": clip.get("y").and_then(Value::as_f64).unwrap_or(0.0),
+                "width": clip.get("width").and_then(Value::as_f64).unwrap_or(100.0),
+                "height": clip.get("height").and_then(Value::as_f64).unwrap_or(100.0),
+                "scale": 1,
+            });
+        }
+    }
+
+    let result = send_session_command(
+        client,
+        conn,
+        session_id,
+        "Page.captureScreenshot",
+        Some(capture_params),
+    )?;
+
+    let data = result.get("data").and_then(Value::as_str).unwrap_or("");
+    ok_success(json!({
+        "screenshot": data,
+        "mimeType": "image/png"
+    }))
+}
+
+// === Eval ===
+
+fn cdp_eval(
+    client: &mut CdpClient,
+    conn: &wit_host::WsConnection,
+    session_id: &str,
+    params: &Map<String, Value>,
+) -> Result<DispatchSuccess, DispatchFailure> {
+    let script = require_str(params, "script")?;
+    // CDP Runtime.evaluate takes an expression, not a function body.
+    // Wrap in an IIFE if the script contains `return` so it evaluates correctly.
+    let expression = if script.contains("return ") || script.contains("return;") {
+        format!("(function() {{ {} }})()", script)
+    } else {
+        script.to_string()
+    };
+    let result = eval_js_value(client, conn, session_id, &expression)?;
+    ok_success(json!({ "result": result }))
+}
+
+// === Cookies ===
+
+fn cdp_cookies_list(
+    client: &mut CdpClient,
+    conn: &wit_host::WsConnection,
+    session_id: &str,
+) -> Result<DispatchSuccess, DispatchFailure> {
+    let result = send_session_command(client, conn, session_id, "Network.getCookies", None)?;
+    let cookies = result.get("cookies").cloned().unwrap_or(json!([]));
+    ok_success(json!({ "cookies": cookies }))
+}
+
+fn cdp_cookies_get(
+    client: &mut CdpClient,
+    conn: &wit_host::WsConnection,
+    session_id: &str,
+    params: &Map<String, Value>,
+) -> Result<DispatchSuccess, DispatchFailure> {
+    let name = require_str(params, "name")?;
+    let result = send_session_command(client, conn, session_id, "Network.getCookies", None)?;
+    let cookies = result.get("cookies").and_then(Value::as_array);
+    let cookie = cookies
+        .and_then(|arr| {
+            arr.iter()
+                .find(|c| c.get("name").and_then(Value::as_str) == Some(name))
+                .cloned()
+        })
+        .unwrap_or(Value::Null);
+    ok_success(json!({ "cookie": cookie }))
+}
+
+fn build_cookie_params(
+    params: &Map<String, Value>,
+    client: &mut CdpClient,
+    conn: &wit_host::WsConnection,
+    session_id: &str,
+) -> Result<Value, DispatchFailure> {
+    let name = require_str(params, "name")?;
+    let value = require_str(params, "value")?;
+
+    let mut cookie = json!({
+        "name": name,
+        "value": value,
+        "path": params.get("path").and_then(Value::as_str).unwrap_or("/"),
+    });
+    let obj = cookie.as_object_mut().ok_or_else(|| DispatchFailure {
+        error: StructuredError::new(ERR_INVALID_PARAMS, "Internal error building cookie params"),
+        attempts: 1,
+    })?;
+
+    // Prefer explicit `url` (works on about:blank before navigation),
+    // then `domain`, then fall back to current hostname.
+    if let Some(url) = params.get("url").and_then(Value::as_str) {
+        obj.insert("url".to_string(), json!(url));
+    } else {
+        let domain = params.get("domain").and_then(Value::as_str).unwrap_or("");
+        if domain.is_empty() {
+            let hostname = eval_js_value(client, conn, session_id, "window.location.hostname")?;
+            let host = hostname.as_str().unwrap_or("");
+            if host.is_empty() || host == "null" {
+                return Err(DispatchFailure {
+                    error: StructuredError::new(
+                        ERR_INVALID_PARAMS,
+                        "Cannot infer cookie domain from about:blank. Provide 'domain' or 'url'.",
+                    ),
+                    attempts: 1,
+                });
+            }
+            obj.insert("domain".to_string(), json!(host));
+        } else {
+            obj.insert("domain".to_string(), json!(domain));
+        }
+    }
+
+    if let Some(v) = params.get("httpOnly").and_then(Value::as_bool) {
+        obj.insert("httpOnly".to_string(), json!(v));
+    }
+    if let Some(v) = params.get("secure").and_then(Value::as_bool) {
+        obj.insert("secure".to_string(), json!(v));
+    }
+    if let Some(v) = params.get("sameSite").and_then(Value::as_str) {
+        obj.insert("sameSite".to_string(), json!(v));
+    }
+    if let Some(v) = params.get("expires").and_then(Value::as_f64) {
+        obj.insert("expires".to_string(), json!(v));
+    }
+
+    Ok(cookie)
+}
+
+fn cdp_cookies_set(
+    client: &mut CdpClient,
+    conn: &wit_host::WsConnection,
+    session_id: &str,
+    params: &Map<String, Value>,
+) -> Result<DispatchSuccess, DispatchFailure> {
+    let cookie = build_cookie_params(params, client, conn, session_id)?;
+    let name = cookie["name"].as_str().unwrap_or("").to_string();
+
+    send_session_command(client, conn, session_id, "Network.setCookie", Some(cookie))?;
+
+    ok_success(json!({ "set": true, "name": name }))
+}
+
+fn cdp_cookies_set_batch(
+    client: &mut CdpClient,
+    conn: &wit_host::WsConnection,
+    session_id: &str,
+    params: &Map<String, Value>,
+) -> Result<DispatchSuccess, DispatchFailure> {
+    let cookies_arr = params
+        .get("cookies")
+        .and_then(Value::as_array)
+        .ok_or_else(|| DispatchFailure {
+            error: StructuredError::new(ERR_INVALID_PARAMS, "Missing required 'cookies' array"),
+            attempts: 1,
+        })?;
+
+    let mut built: Vec<Value> = Vec::with_capacity(cookies_arr.len());
+    for entry in cookies_arr {
+        let entry_map = entry.as_object().ok_or_else(|| DispatchFailure {
+            error: StructuredError::new(
+                ERR_INVALID_PARAMS,
+                "Each cookie must be a JSON object with 'name' and 'value'",
+            ),
+            attempts: 1,
+        })?;
+        built.push(build_cookie_params(entry_map, client, conn, session_id)?);
+    }
+
+    let count = built.len();
+    send_session_command(
+        client,
+        conn,
+        session_id,
+        "Network.setCookies",
+        Some(json!({ "cookies": built })),
+    )?;
+
+    ok_success(json!({ "set": true, "count": count }))
+}
+
+fn cdp_cookies_delete(
+    client: &mut CdpClient,
+    conn: &wit_host::WsConnection,
+    session_id: &str,
+    params: &Map<String, Value>,
+) -> Result<DispatchSuccess, DispatchFailure> {
+    let name = require_str(params, "name")?;
+    send_session_command(
+        client,
+        conn,
+        session_id,
+        "Network.deleteCookies",
+        Some(json!({ "name": name })),
+    )?;
+    ok_success(json!({ "deleted": true, "name": name }))
+}
+
+// === Storage ===
+
+fn cdp_storage_list(
+    client: &mut CdpClient,
+    conn: &wit_host::WsConnection,
+    session_id: &str,
+    storage_type: &str,
+) -> Result<DispatchSuccess, DispatchFailure> {
+    let js =
+        format!("JSON.parse(JSON.stringify(Object.fromEntries(Object.entries({storage_type}))))");
+    let entries = eval_js_value(client, conn, session_id, &js)?;
+    ok_success(json!({ "entries": entries }))
+}
+
+fn cdp_storage_get(
+    client: &mut CdpClient,
+    conn: &wit_host::WsConnection,
+    session_id: &str,
+    params: &Map<String, Value>,
+    storage_type: &str,
+) -> Result<DispatchSuccess, DispatchFailure> {
+    let key = require_str(params, "key")?;
+    let js = format!("{storage_type}.getItem('{}')", escape_js(key));
+    let value = eval_js_value(client, conn, session_id, &js)?;
+    ok_success(json!({ "key": key, "value": value }))
+}
+
+fn cdp_storage_set(
+    client: &mut CdpClient,
+    conn: &wit_host::WsConnection,
+    session_id: &str,
+    params: &Map<String, Value>,
+    storage_type: &str,
+) -> Result<DispatchSuccess, DispatchFailure> {
+    let key = require_str(params, "key")?;
+    let value = require_str(params, "value")?;
+    let js = format!(
+        "{storage_type}.setItem('{}', '{}')",
+        escape_js(key),
+        escape_js(value),
+    );
+    eval_js(client, conn, session_id, &js, false)?;
+    ok_success(json!({ "set": true, "key": key }))
+}
+
+fn cdp_storage_delete(
+    client: &mut CdpClient,
+    conn: &wit_host::WsConnection,
+    session_id: &str,
+    params: &Map<String, Value>,
+    storage_type: &str,
+) -> Result<DispatchSuccess, DispatchFailure> {
+    let key = require_str(params, "key")?;
+    let js = format!("{storage_type}.removeItem('{}')", escape_js(key));
+    eval_js(client, conn, session_id, &js, false)?;
+    ok_success(json!({ "deleted": true, "key": key }))
+}
+
+// === PDF ===
+
+fn cdp_pdf(
+    client: &mut CdpClient,
+    conn: &wit_host::WsConnection,
+    session_id: &str,
+    params: &Map<String, Value>,
+) -> Result<DispatchSuccess, DispatchFailure> {
+    let print_bg = params
+        .get("print_background")
+        .and_then(Value::as_bool)
+        .unwrap_or(true);
+
+    let mut pdf_params = json!({
+        "printBackground": print_bg,
+        "marginTop": 0.79,
+        "marginBottom": 0.79,
+        "marginLeft": 0.79,
+        "marginRight": 0.79,
+    });
+
+    if let Some(format) = params.get("format").and_then(Value::as_str) {
+        match format {
+            "A3" => {
+                pdf_params["paperWidth"] = json!(11.69);
+                pdf_params["paperHeight"] = json!(16.54);
+            }
+            "A5" => {
+                pdf_params["paperWidth"] = json!(5.83);
+                pdf_params["paperHeight"] = json!(8.27);
+            }
+            "Legal" => {
+                pdf_params["paperWidth"] = json!(8.5);
+                pdf_params["paperHeight"] = json!(14.0);
+            }
+            "Letter" => {
+                pdf_params["paperWidth"] = json!(8.5);
+                pdf_params["paperHeight"] = json!(11.0);
+            }
+            "Tabloid" => {
+                pdf_params["paperWidth"] = json!(11.0);
+                pdf_params["paperHeight"] = json!(17.0);
+            }
+            _ => {} // A4 is default
+        }
+    }
+
+    let result = send_session_command(
+        client,
+        conn,
+        session_id,
+        "Page.printToPDF",
+        Some(pdf_params),
+    )?;
+    let data = result.get("data").and_then(Value::as_str).unwrap_or("");
+    ok_success(json!({
+        "pdf": data,
+        "mimeType": "application/pdf"
+    }))
+}

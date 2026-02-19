@@ -40,6 +40,18 @@ interface host {
     /// Returns None if the file doesn't exist or capability not granted.
     workspace-read: func(path: string) -> option<string>;
 
+    /// Write a file to the workspace (if capability granted).
+    ///
+    /// Security:
+    /// - Only allowed prefixes can be written to
+    /// - Path must be relative (no leading /) and cannot contain ".."
+    /// - Creates parent directories if needed
+    ///
+    /// Returns Err with error message if:
+    /// - Path not in allowed prefixes
+    /// - Write fails
+    workspace-write: func(path: string, content: string) -> result<_, string>;
+
     // ==================== HTTP Capability ====================
 
     /// Response from an HTTP request.
@@ -78,6 +90,53 @@ interface host {
         body: option<list<u8>>,
         timeout-ms: option<u32>,
     ) -> result<http-response, string>;
+
+    // ==================== WebSocket Capability ====================
+
+    /// WebSocket connection handle.
+    resource ws-connection {
+        /// Send a text message over the WebSocket connection.
+        ///
+        /// Returns error if connection is closed or send fails.
+        send: func(message: string) -> result<_, string>;
+
+        /// Receive a text message from the WebSocket connection.
+        ///
+        /// Blocks until a message is received or timeout.
+        /// Returns the message or error if connection closed.
+        /// Timeout in milliseconds, None for default (30s).
+        recv: func(timeout-ms: option<u32>) -> result<string, string>;
+
+        /// Close the WebSocket connection.
+        close: func() -> result<_, string>;
+    }
+
+    /// Connect to a WebSocket endpoint (if capability granted).
+    ///
+    /// Security:
+    /// - Only allowed endpoints can be accessed
+    /// - Connections are rate-limited
+    /// - Messages are scanned for leaked secrets
+    ///
+    /// Returns a connection handle or error message.
+    ws-connect: func(url: string) -> result<ws-connection, string>;
+
+    /// Connect to a WebSocket endpoint with connection pooling.
+    ///
+    /// Like `ws-connect`, but the connection is keyed by `pool-key` and kept
+    /// alive across tool invocations. If a live connection already exists for
+    /// the given key, it is returned instead of opening a new one.
+    ///
+    /// This enables stateful protocols (e.g., CDP browser sessions) where
+    /// server-side state is tied to the WebSocket connection lifetime.
+    ///
+    /// Security:
+    /// - Same endpoint allowlist and rate-limit rules as `ws-connect`
+    /// - Pool keys are scoped per tool instance (no cross-tool leakage)
+    /// - Idle connections are reaped after a configurable TTL
+    ///
+    /// Returns a connection handle or error message.
+    ws-connect-pooled: func(url: string, pool-key: string) -> result<ws-connection, string>;
 
     // ==================== Tool Invocation Capability ====================
 

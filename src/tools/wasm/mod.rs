@@ -99,7 +99,8 @@ pub use wrapper::{OAuthRefreshConfig, WasmToolWrapper};
 // Capabilities (V2)
 pub use capabilities::{
     Capabilities, EndpointPattern, HttpCapability, RateLimitConfig, SecretsCapability,
-    ToolInvokeCapability, WorkspaceCapability, WorkspaceReader,
+    ToolInvokeCapability, WebSocketCapability, WebSocketEndpoint, WorkspaceCapability,
+    WorkspaceReader, WorkspaceWriter,
 };
 
 // Security components (V2)
@@ -126,5 +127,5 @@ pub use loader::{
 // Capabilities schema (for parsing *.capabilities.json files)
 pub use capabilities_schema::{
     AuthCapabilitySchema, CapabilitiesFile, OAuthConfigSchema, RateLimitSchema,
-    ValidationEndpointSchema,
+    ValidationEndpointSchema, WebSocketCapabilitySchema, WebSocketEndpointSchema,
 };

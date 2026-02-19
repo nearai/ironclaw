@@ -1,0 +1,77 @@
+{
+  "workspace": {
+    "allowed_prefixes": ["browser-sessions/"]
+  },
+  "http": {
+    "allowlist": [
+      {
+        "host": "127.0.0.1",
+        "port": 9222,
+        "path_prefix": "/json",
+        "methods": ["GET"]
+      },
+      {
+        "host": "127.0.0.1",
+        "port": 9222,
+        "path_prefix": "/content",
+        "methods": ["POST"]
+      },
+      {
+        "host": "127.0.0.1",
+        "port": 9222,
+        "path_prefix": "/screenshot",
+        "methods": ["POST"]
+      },
+      {
+        "host": "127.0.0.1",
+        "port": 9222,
+        "path_prefix": "/pdf",
+        "methods": ["POST"]
+      },
+      {
+        "host": "127.0.0.1",
+        "port": 9222,
+        "path_prefix": "/function",
+        "methods": ["POST"]
+      }
+    ],
+    "rate_limit": {
+      "requests_per_minute": 30,
+      "requests_per_hour": 600
+    },
+    "timeout_secs": 30,
+    "max_request_bytes": 32768,
+    "max_response_bytes": 524288
+  },
+  "websocket": {
+    "allowlist": [
+      {
+        "host": "127.0.0.1",
+        "port": 9222
+      },
+      {
+        "host": "localhost",
+        "port": 9222
+      }
+    ],
+    "rate_limit": {
+      "requests_per_minute": 10,
+      "requests_per_hour": 100
+    },
+    "max_message_bytes": 1048576,
+    "connect_timeout_secs": 10,
+    "read_timeout_secs": 30
+  },
+  "secrets": {
+    "allowed_names": []
+  },
+  "approval_policy": {
+    "actions_requiring_approval": [
+      "eval", "upload", "cookies_set", "cookies_set_batch", "cookies_delete",
+      "local_storage_set", "local_storage_delete",
+      "session_storage_set", "session_storage_delete"
+    ],
+    "js_condition_requires_approval": true
+  },
+  "_comment": "Browserless sidecar with WebSocket CDP support. Backend URL: http://localhost:9222 (mapped from container port 3000). Browserless REST APIs at /content, /screenshot, /pdf, /function and WebSocket CDP on port 9222. Session actions use WebSocket CDP for persistent sessions with workspace storage."
+}

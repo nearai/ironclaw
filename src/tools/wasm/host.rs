@@ -223,6 +223,67 @@ impl HostState {
         }
     }
 
+    /// Write to workspace if capability granted.
+    ///
+    /// Uses the dedicated `workspace_write` capability (separate from read)
+    /// to enforce least-privilege. Falls back to the writer on `workspace_read`
+    /// for backward compatibility if `workspace_write` is not explicitly set.
+    ///
+    /// Returns an error message if:
+    /// - Neither workspace write nor read capability is granted
+    /// - No writer configured
+    /// - Path not in allowed prefixes
+    /// - Write fails
+    pub fn workspace_write(&self, path: &str, content: &str) -> Result<(), String> {
+        // Validate path (security critical) - do this first regardless of capability
+        validate_workspace_path(path).map_err(|e| e.to_string())?;
+
+        // Prefer dedicated workspace_write capability
+        if let Some(write_cap) = &self.capabilities.workspace_write {
+            if !write_cap.allowed_prefixes.is_empty() {
+                let allowed = write_cap
+                    .allowed_prefixes
+                    .iter()
+                    .any(|prefix| path.starts_with(prefix));
+                if !allowed {
+                    return Err(format!(
+                        "Path '{}' not in allowed write prefixes: {:?}",
+                        path, write_cap.allowed_prefixes
+                    ));
+                }
+            }
+            return match &write_cap.writer {
+                Some(writer) => writer.write(path, content),
+                None => Err("No workspace writer configured".to_string()),
+            };
+        }
+
+        // Backward compatibility: fall back to writer on workspace_read
+        let capability = self
+            .capabilities
+            .workspace_read
+            .as_ref()
+            .ok_or_else(|| "Workspace write capability not granted".to_string())?;
+
+        if !capability.allowed_prefixes.is_empty() {
+            let allowed = capability
+                .allowed_prefixes
+                .iter()
+                .any(|prefix| path.starts_with(prefix));
+            if !allowed {
+                return Err(format!(
+                    "Path '{}' not in allowed prefixes: {:?}",
+                    path, capability.allowed_prefixes
+                ));
+            }
+        }
+
+        match &capability.writer {
+            Some(writer) => writer.write(path, content),
+            None => Err("No workspace writer configured".to_string()),
+        }
+    }
+
     /// Get collected logs after execution.
     pub fn take_logs(&mut self) -> Vec<LogEntry> {
         std::mem::take(&mut self.logs)
@@ -266,10 +327,23 @@ impl HostState {
         let result = validator.validate(url, method);
 
         if result.is_allowed() {
-            Ok(())
-        } else {
-            Err(format!("HTTP request not allowed: {:?}", result))
+            return Ok(());
         }
+
+        let localhost_allowed = capability.allowlist.iter().any(|pattern| {
+            pattern.host.eq_ignore_ascii_case("localhost") || pattern.host == "127.0.0.1"
+        });
+
+        if localhost_allowed && is_loopback_http_url(url) {
+            let localhost_validator =
+                AllowlistValidator::new(capability.allowlist.clone()).allow_http();
+            let localhost_result = localhost_validator.validate(url, method);
+            if localhost_result.is_allowed() {
+                return Ok(());
+            }
+        }
+
+        Err(format!("HTTP request not allowed: {:?}", result))
     }
 
     /// Check if tool invocation is allowed for an alias.
@@ -340,6 +414,28 @@ impl HostState {
     pub fn tool_invoke_count(&self) -> u32 {
         self.tool_invoke_count
     }
+}
+
+fn is_loopback_http_url(url: &str) -> bool {
+    if !url.starts_with("http://") {
+        return false;
+    }
+
+    let without_scheme = &url["http://".len()..];
+    let host_port = without_scheme
+        .split(['/', '?', '#'])
+        .next()
+        .unwrap_or(without_scheme);
+
+    let host = host_port
+        .rfind('@')
+        .map(|idx| &host_port[idx + 1..])
+        .unwrap_or(host_port);
+
+    host.eq_ignore_ascii_case("localhost")
+        || host.starts_with("localhost:")
+        || host == "127.0.0.1"
+        || host.starts_with("127.0.0.1:")
 }
 
 /// Validate a workspace path for security.
@@ -468,6 +564,7 @@ mod tests {
             workspace_read: Some(WorkspaceCapability {
                 allowed_prefixes: vec![],
                 reader: Some(reader),
+                writer: None,
             }),
             ..Default::default()
         };
@@ -487,6 +584,7 @@ mod tests {
             workspace_read: Some(WorkspaceCapability {
                 allowed_prefixes: vec!["context/".to_string()],
                 reader: Some(reader),
+                writer: None,
             }),
             ..Default::default()
         };
@@ -602,5 +700,217 @@ mod tests {
     fn test_new_with_user() {
         let state = HostState::new_with_user(Capabilities::default(), "user123");
         assert_eq!(state.user_id(), Some("user123"));
+    }
+
+    #[test]
+    fn test_http_allowlist_localhost_enables_http_scheme() {
+        let capabilities = Capabilities {
+            http: Some(crate::tools::wasm::capabilities::HttpCapability {
+                allowlist: vec![crate::tools::wasm::capabilities::EndpointPattern {
+                    host: "localhost".to_string(),
+                    port: None,
+                    path_prefix: Some("/v1/browser/".to_string()),
+                    methods: vec!["POST".to_string()],
+                }],
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+
+        let state = HostState::new(capabilities);
+        let allowed = state.check_http_allowed("http://localhost:9223/v1/browser/dispatch", "POST");
+        assert!(allowed.is_ok());
+    }
+
+    #[test]
+    fn test_http_allowlist_non_localhost_still_requires_https() {
+        let capabilities = Capabilities {
+            http: Some(crate::tools::wasm::capabilities::HttpCapability {
+                allowlist: vec![crate::tools::wasm::capabilities::EndpointPattern {
+                    host: "example.com".to_string(),
+                    port: None,
+                    path_prefix: Some("/api/".to_string()),
+                    methods: vec!["GET".to_string()],
+                }],
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+
+        let state = HostState::new(capabilities);
+        let denied = state.check_http_allowed("http://example.com/api/data", "GET");
+        assert!(denied.is_err());
+    }
+
+    #[test]
+    fn test_is_loopback_http_url_parser() {
+        assert!(super::is_loopback_http_url(
+            "http://localhost:9223/v1/browser/dispatch"
+        ));
+        assert!(super::is_loopback_http_url(
+            "http://127.0.0.1:9223/v1/browser/dispatch"
+        ));
+        assert!(!super::is_loopback_http_url(
+            "https://localhost:9223/v1/browser/dispatch"
+        ));
+        assert!(!super::is_loopback_http_url(
+            "http://example.com/v1/browser/dispatch"
+        ));
+    }
+
+    // ===== Workspace Write Tests =====
+
+    struct MockWriter {
+        data: std::sync::Mutex<std::collections::HashMap<String, String>>,
+    }
+
+    impl MockWriter {
+        fn new() -> Self {
+            Self {
+                data: std::sync::Mutex::new(std::collections::HashMap::new()),
+            }
+        }
+
+        fn get(&self, path: &str) -> Option<String> {
+            self.data.lock().unwrap().get(path).cloned()
+        }
+    }
+
+    impl crate::tools::wasm::WorkspaceWriter for MockWriter {
+        fn write(&self, path: &str, content: &str) -> Result<(), String> {
+            self.data
+                .lock()
+                .unwrap()
+                .insert(path.to_string(), content.to_string());
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn test_workspace_write_no_capability() {
+        let state = HostState::minimal();
+        let result = state.workspace_write("test/file.txt", "content");
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("not granted"));
+    }
+
+    #[test]
+    fn test_workspace_write_no_writer_configured() {
+        let capabilities = Capabilities {
+            workspace_read: Some(WorkspaceCapability {
+                allowed_prefixes: vec![],
+                reader: None,
+                writer: None,
+            }),
+            ..Default::default()
+        };
+
+        let state = HostState::new(capabilities);
+        let result = state.workspace_write("test/file.txt", "content");
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("No workspace writer"));
+    }
+
+    #[test]
+    fn test_workspace_write_with_writer() {
+        let writer = Arc::new(MockWriter::new());
+
+        let capabilities = Capabilities {
+            workspace_read: Some(WorkspaceCapability {
+                allowed_prefixes: vec![],
+                reader: None,
+                writer: Some(writer.clone()),
+            }),
+            ..Default::default()
+        };
+
+        let state = HostState::new(capabilities);
+        let result = state.workspace_write("test/file.txt", "hello world");
+        assert!(result.is_ok());
+        assert_eq!(writer.get("test/file.txt"), Some("hello world".to_string()));
+    }
+
+    #[test]
+    fn test_workspace_write_prefix_restriction() {
+        let writer = Arc::new(MockWriter::new());
+
+        let capabilities = Capabilities {
+            workspace_read: Some(WorkspaceCapability {
+                allowed_prefixes: vec!["browser-sessions/".to_string()],
+                reader: None,
+                writer: Some(writer.clone()),
+            }),
+            ..Default::default()
+        };
+
+        let state = HostState::new(capabilities);
+
+        // Allowed prefix
+        let result = state.workspace_write("browser-sessions/s1.json", "{}");
+        assert!(result.is_ok());
+
+        // Disallowed prefix
+        let result = state.workspace_write("secrets/key.txt", "secret");
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("not in allowed prefixes"));
+    }
+
+    #[test]
+    fn test_workspace_write_blocks_path_traversal() {
+        let writer = Arc::new(MockWriter::new());
+
+        let capabilities = Capabilities {
+            workspace_read: Some(WorkspaceCapability {
+                allowed_prefixes: vec![],
+                reader: None,
+                writer: Some(writer),
+            }),
+            ..Default::default()
+        };
+
+        let state = HostState::new(capabilities);
+
+        assert!(state.workspace_write("../etc/passwd", "hacked").is_err());
+        assert!(
+            state
+                .workspace_write("browser-sessions/../../secrets", "hacked")
+                .is_err()
+        );
+        assert!(state.workspace_write("/absolute/path", "hacked").is_err());
+    }
+
+    #[test]
+    fn test_workspace_write_then_read_round_trip() {
+        let writer = Arc::new(MockWriter::new());
+        let reader = Arc::new(MockReader {
+            content: "placeholder".to_string(),
+        });
+
+        let capabilities = Capabilities {
+            workspace_read: Some(WorkspaceCapability {
+                allowed_prefixes: vec!["browser-sessions/".to_string()],
+                reader: Some(reader),
+                writer: Some(writer.clone()),
+            }),
+            ..Default::default()
+        };
+
+        let state = HostState::new(capabilities);
+
+        // Write session data
+        let session_json = r#"{"sessionId":"s-123","browserContextId":"ctx-abc"}"#;
+        let write_result = state.workspace_write("browser-sessions/s-123.json", session_json);
+        assert!(write_result.is_ok());
+
+        // Verify data was persisted to the writer
+        assert_eq!(
+            writer.get("browser-sessions/s-123.json"),
+            Some(session_json.to_string())
+        );
+
+        // Note: read uses MockReader which returns fixed content.
+        // In a real scenario, the reader and writer share storage.
+        let read_result = state.workspace_read("browser-sessions/s-123.json").unwrap();
+        assert!(read_result.is_some());
     }
 }
