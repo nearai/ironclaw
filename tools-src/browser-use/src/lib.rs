@@ -13,7 +13,7 @@ mod normalize;
 mod session;
 mod validation;
 
-use serde_json::{json, Value};
+use serde_json::{json, Map, Value};
 
 use crate::constants::*;
 use crate::dispatch::dispatch_with_retries;
@@ -45,9 +45,13 @@ impl exports::near::agent::tool::Guest for BrowserUseTool {
                     "enum": CANONICAL_ACTIONS,
                     "description": "Canonical browser-use action (aliases like goto/navigate normalize to open)."
                 },
+                "url": {
+                    "type": "string",
+                    "description": "Navigation URL for action=open. Must start with http:// or https://."
+                },
                 "session_id": {
                     "type": "string",
-                    "description": "Browser session identifier. Required for all actions except session_create/session_list."
+                    "description": "Browser session identifier. Required for stateful actions except session_create/session_list."
                 },
                 "ref": {
                     "type": "string",
@@ -55,7 +59,7 @@ impl exports::near::agent::tool::Guest for BrowserUseTool {
                 },
                 "selector": {
                     "type": "string",
-                    "description": "Semantic selector when ref is unavailable."
+                    "description": "Semantic selector for DOM actions (click/fill/etc). Not used as navigation URL for open."
                 },
                 "timeout_ms": {
                     "type": "integer",
@@ -82,6 +86,119 @@ impl exports::near::agent::tool::Guest for BrowserUseTool {
          Uses selector-based element targeting. Configure BROWSERLESS_ENABLED=true to use."
             .to_string()
     }
+}
+
+fn looks_like_navigation_url(value: &str) -> bool {
+    value.starts_with("http://") || value.starts_with("https://")
+}
+
+fn normalize_open_url_params(params_obj: &mut Map<String, Value>) -> Option<String> {
+    let has_url = params_obj
+        .get("url")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .is_some();
+
+    if has_url {
+        return None;
+    }
+
+    let normalized = ["selector", "ref"].iter().find_map(|key| {
+        params_obj
+            .get(*key)
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| looks_like_navigation_url(value))
+            .map(|value| ((*key).to_string(), value.to_string()))
+    });
+
+    if let Some((source_field, url)) = normalized {
+        params_obj.insert("url".to_string(), Value::String(url));
+        return Some(format!(
+            "Normalized action=open URL from '{}' to 'url'.",
+            source_field
+        ));
+    }
+
+    None
+}
+
+fn normalize_value_params(action: &str, params_obj: &mut Map<String, Value>) -> Option<String> {
+    if !matches!(action, "fill" | "type" | "select") {
+        return None;
+    }
+
+    let has_value = params_obj
+        .get("value")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+        .is_some();
+    if has_value {
+        return None;
+    }
+
+    let normalized = ["text", "input", "content"].iter().find_map(|key| {
+        params_obj
+            .get(*key)
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|v| !v.is_empty())
+            .map(|v| ((*key).to_string(), v.to_string()))
+    });
+
+    if let Some((source_field, value)) = normalized {
+        params_obj.insert("value".to_string(), Value::String(value));
+        return Some(format!(
+            "Normalized action={} payload from '{}' to 'value'.",
+            action, source_field
+        ));
+    }
+
+    None
+}
+
+fn strip_null_fields(value: &mut Value) {
+    match value {
+        Value::Object(map) => {
+            let null_keys: Vec<String> = map
+                .iter()
+                .filter_map(|(key, value)| value.is_null().then_some(key.clone()))
+                .collect();
+
+            for key in null_keys {
+                map.remove(&key);
+            }
+
+            for value in map.values_mut() {
+                strip_null_fields(value);
+            }
+        }
+        Value::Array(items) => {
+            for item in items {
+                strip_null_fields(item);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn strip_top_level_null_fields(params_obj: &mut Map<String, Value>) -> Vec<String> {
+    let removed: Vec<String> = params_obj
+        .iter()
+        .filter_map(|(key, value)| value.is_null().then_some(key.clone()))
+        .collect();
+
+    for key in &removed {
+        params_obj.remove(key);
+    }
+
+    for value in params_obj.values_mut() {
+        strip_null_fields(value);
+    }
+
+    removed
 }
 
 fn execute_inner(raw_params: &str) -> String {
@@ -114,7 +231,7 @@ fn execute_inner(raw_params: &str) -> String {
         }
     };
 
-    let Some(params_obj) = params.as_object() else {
+    let Some(mut params_obj) = params.as_object().cloned() else {
         return error_envelope(
             None,
             None,
@@ -124,12 +241,21 @@ fn execute_inner(raw_params: &str) -> String {
         );
     };
 
+    let removed_null_fields = strip_top_level_null_fields(&mut params_obj);
+    let mut normalization_notes: Vec<String> = Vec::new();
+    if !removed_null_fields.is_empty() {
+        normalization_notes.push(format!(
+            "Ignored null fields: {}.",
+            removed_null_fields.join(", ")
+        ));
+    }
+
     let raw_action = match params_obj.get("action").and_then(Value::as_str) {
-        Some(action) if !action.trim().is_empty() => action,
+        Some(action) if !action.trim().is_empty() => action.to_string(),
         _ => {
             return error_envelope(
                 None,
-                extract_optional_session_id(params_obj),
+                extract_optional_session_id(&params_obj),
                 StructuredError::new(ERR_INVALID_ACTION, "Missing required 'action' string")
                     .with_hint(
                         "Set action to a canonical command like 'open', 'snapshot', or 'click'.",
@@ -140,10 +266,10 @@ fn execute_inner(raw_params: &str) -> String {
         }
     };
 
-    let Some(action) = normalize_action(raw_action) else {
+    let Some(action) = normalize_action(&raw_action) else {
         return error_envelope(
             Some(raw_action.trim()),
-            extract_optional_session_id(params_obj),
+            extract_optional_session_id(&params_obj),
             StructuredError::new(
                 ERR_INVALID_ACTION,
                 format!("Unknown action '{raw_action}'"),
@@ -154,37 +280,50 @@ fn execute_inner(raw_params: &str) -> String {
         );
     };
 
-    if let Err(err) = validate_action_params(action, &params) {
+    if action == "open" {
+        if let Some(note) = normalize_open_url_params(&mut params_obj) {
+            normalization_notes.push(note);
+        }
+    }
+
+    if let Some(note) = normalize_value_params(action, &mut params_obj) {
+        normalization_notes.push(note);
+    }
+
+    let normalized_params = Value::Object(params_obj.clone());
+
+    if let Err(err) = validate_action_params(action, &normalized_params) {
         return error_envelope(
             Some(action),
-            extract_optional_session_id(params_obj),
+            extract_optional_session_id(&params_obj),
             err,
             None,
         );
     }
 
-    let backend_url = match resolve_backend_url(params_obj) {
+    let backend_url = match resolve_backend_url(&params_obj) {
         Ok(url) => url,
         Err(err) => {
             return error_envelope(
                 Some(action),
-                extract_optional_session_id(params_obj),
+                extract_optional_session_id(&params_obj),
                 err,
                 None,
             );
         }
     };
 
-    let timeout_ms = resolve_timeout_ms(action, params_obj);
+    let timeout_ms = resolve_timeout_ms(action, &params_obj);
 
-    match dispatch_with_retries(action, &params, &backend_url, timeout_ms) {
+    match dispatch_with_retries(action, &normalized_params, &backend_url, timeout_ms) {
         Ok(success) => {
             let mut warnings = success.warnings;
-            if let Some(note) = alias_note(raw_action, action) {
+            if let Some(note) = alias_note(&raw_action, action) {
                 warnings.push(note);
             }
+            warnings.extend(normalization_notes.clone());
 
-            let fallback_session_id = extract_optional_session_id(params_obj);
+            let fallback_session_id = extract_optional_session_id(&params_obj);
             let session_id = success
                 .session_id
                 .as_deref()
@@ -204,16 +343,28 @@ fn execute_inner(raw_params: &str) -> String {
                 }),
             )
         }
-        Err(failure) => error_envelope(
-            Some(action),
-            extract_optional_session_id(params_obj),
-            failure.error,
-            Some(json!({
+        Err(failure) => {
+            let mut meta = json!({
                 "contract_version": CONTRACT_VERSION,
                 "attempts": failure.attempts,
                 "timeout_ms": timeout_ms,
-            })),
-        ),
+            });
+            if !normalization_notes.is_empty() {
+                if let Some(obj) = meta.as_object_mut() {
+                    obj.insert(
+                        "normalization_notes".to_string(),
+                        json!(normalization_notes),
+                    );
+                }
+            }
+
+            error_envelope(
+                Some(action),
+                extract_optional_session_id(&params_obj),
+                failure.error,
+                Some(meta),
+            )
+        }
     }
 }
 
@@ -321,6 +472,208 @@ mod tests {
         assert_eq!(normalize_action("take_screenshot"), Some("screenshot"));
         assert_eq!(normalize_action("evaluate"), Some("eval"));
         assert_eq!(normalize_action("nonexistent"), None);
+    }
+
+    #[test]
+    fn test_open_normalizes_selector_url() {
+        let mut params = serde_json::Map::from_iter([
+            ("action".to_string(), Value::String("open".to_string())),
+            (
+                "selector".to_string(),
+                Value::String("https://www.wikipedia.org".to_string()),
+            ),
+        ]);
+
+        let note = normalize_open_url_params(&mut params);
+
+        assert_eq!(
+            params.get("url"),
+            Some(&Value::String("https://www.wikipedia.org".to_string()))
+        );
+        assert!(note.is_some());
+    }
+
+    #[test]
+    fn test_open_normalizes_ref_url() {
+        let mut params = serde_json::Map::from_iter([
+            ("action".to_string(), Value::String("open".to_string())),
+            (
+                "ref".to_string(),
+                Value::String("https://example.com".to_string()),
+            ),
+        ]);
+
+        let note = normalize_open_url_params(&mut params);
+
+        assert_eq!(
+            params.get("url"),
+            Some(&Value::String("https://example.com".to_string()))
+        );
+        assert!(note.is_some());
+    }
+
+    #[test]
+    fn test_open_does_not_override_existing_url() {
+        let mut params = serde_json::Map::from_iter([
+            ("action".to_string(), Value::String("open".to_string())),
+            (
+                "url".to_string(),
+                Value::String("https://already-set.example".to_string()),
+            ),
+            (
+                "selector".to_string(),
+                Value::String("https://wrong-source.example".to_string()),
+            ),
+        ]);
+
+        let note = normalize_open_url_params(&mut params);
+
+        assert_eq!(
+            params.get("url"),
+            Some(&Value::String("https://already-set.example".to_string()))
+        );
+        assert!(note.is_none());
+    }
+
+    #[test]
+    fn test_fill_normalizes_text_to_value() {
+        let mut params = serde_json::Map::from_iter([
+            ("action".to_string(), Value::String("fill".to_string())),
+            ("selector".to_string(), Value::String("#email".to_string())),
+            (
+                "text".to_string(),
+                Value::String("user@example.com".to_string()),
+            ),
+        ]);
+
+        let note = normalize_value_params("fill", &mut params);
+
+        assert_eq!(
+            params.get("value"),
+            Some(&Value::String("user@example.com".to_string()))
+        );
+        assert!(note.is_some());
+    }
+
+    #[test]
+    fn test_type_normalizes_input_to_value() {
+        let mut params = serde_json::Map::from_iter([
+            ("action".to_string(), Value::String("type".to_string())),
+            (
+                "selector".to_string(),
+                Value::String("#password".to_string()),
+            ),
+            ("input".to_string(), Value::String("secret".to_string())),
+        ]);
+
+        let note = normalize_value_params("type", &mut params);
+
+        assert_eq!(
+            params.get("value"),
+            Some(&Value::String("secret".to_string()))
+        );
+        assert!(note.is_some());
+    }
+
+    #[test]
+    fn test_value_normalization_does_not_override_existing_value() {
+        let mut params = serde_json::Map::from_iter([
+            ("action".to_string(), Value::String("fill".to_string())),
+            ("selector".to_string(), Value::String("#field".to_string())),
+            (
+                "value".to_string(),
+                Value::String("authoritative".to_string()),
+            ),
+            ("text".to_string(), Value::String("ignored".to_string())),
+        ]);
+
+        let note = normalize_value_params("fill", &mut params);
+
+        assert_eq!(
+            params.get("value"),
+            Some(&Value::String("authoritative".to_string()))
+        );
+        assert!(note.is_none());
+    }
+
+    #[test]
+    fn test_strip_top_level_null_fields_removes_nulls() {
+        let mut params = serde_json::Map::from_iter([
+            ("action".to_string(), Value::String("snapshot".to_string())),
+            ("selector".to_string(), Value::Null),
+            ("ref".to_string(), Value::Null),
+            (
+                "session_id".to_string(),
+                Value::String("session-1".to_string()),
+            ),
+        ]);
+
+        let removed = strip_top_level_null_fields(&mut params);
+
+        assert_eq!(removed, vec!["ref".to_string(), "selector".to_string()]);
+        assert!(params.get("selector").is_none());
+        assert!(params.get("ref").is_none());
+        assert_eq!(
+            params.get("session_id"),
+            Some(&Value::String("session-1".to_string()))
+        );
+    }
+
+    #[test]
+    fn test_strip_top_level_null_fields_strips_nested_nulls() {
+        let mut params = serde_json::Map::from_iter([
+            (
+                "action".to_string(),
+                Value::String("cookies_set_batch".to_string()),
+            ),
+            (
+                "cookies".to_string(),
+                json!([
+                    {"name": "a", "value": "1", "sameSite": null},
+                    {"name": "b", "value": "2", "secure": true}
+                ]),
+            ),
+        ]);
+
+        let removed = strip_top_level_null_fields(&mut params);
+
+        assert!(removed.is_empty());
+        let cookies = params
+            .get("cookies")
+            .and_then(Value::as_array)
+            .expect("cookies array");
+        assert!(cookies[0].get("sameSite").is_none());
+        assert_eq!(cookies[1].get("secure"), Some(&Value::Bool(true)));
+    }
+
+    #[test]
+    fn test_strip_top_level_null_fields_removes_nested_object_nulls() {
+        let mut params = serde_json::Map::from_iter([
+            ("action".to_string(), Value::String("eval".to_string())),
+            (
+                "options".to_string(),
+                json!({
+                    "timeout": 1000,
+                    "frame": null,
+                    "meta": {"tag": "x", "hint": null}
+                }),
+            ),
+        ]);
+
+        let removed = strip_top_level_null_fields(&mut params);
+
+        assert!(removed.is_empty());
+        let options = params
+            .get("options")
+            .and_then(Value::as_object)
+            .expect("options object");
+        assert!(options.get("frame").is_none());
+        let meta = options
+            .get("meta")
+            .and_then(Value::as_object)
+            .expect("meta object");
+        assert!(meta.get("hint").is_none());
+        assert_eq!(meta.get("tag"), Some(&Value::String("x".to_string())));
     }
 
     #[test]

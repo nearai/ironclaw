@@ -55,7 +55,10 @@ pub struct DispatchFailure {
 }
 
 pub fn retryable_for_code(code: &str) -> bool {
-    matches!(code, ERR_NETWORK_FAILURE | ERR_TIMEOUT)
+    matches!(
+        code,
+        ERR_NETWORK_FAILURE | ERR_TIMEOUT | ERR_SESSION_RESTORE_FAILED
+    )
 }
 
 #[cfg(test)]
@@ -66,6 +69,7 @@ mod tests {
     fn test_retryable_flags() {
         assert!(retryable_for_code(ERR_NETWORK_FAILURE));
         assert!(retryable_for_code(ERR_TIMEOUT));
+        assert!(retryable_for_code(ERR_SESSION_RESTORE_FAILED));
         assert!(!retryable_for_code(ERR_INVALID_PARAMS));
     }
 }

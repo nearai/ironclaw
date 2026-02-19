@@ -115,7 +115,9 @@ async fn start_test_server() -> (SocketAddr, Arc<GatewayState>) {
         llm_provider: Some(Arc::new(MockLlmProvider)),
         skill_registry: None,
         skill_catalog: None,
-        chat_rate_limiter: std::sync::Arc::new(ironclaw::channels::web::server::RateLimiter::new(30, 60)),
+        chat_rate_limiter: std::sync::Arc::new(ironclaw::channels::web::server::RateLimiter::new(
+            30, 60,
+        )),
     });
 
     let addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
@@ -437,7 +439,9 @@ async fn test_no_llm_provider_returns_503() {
         llm_provider: None, // No LLM!
         skill_registry: None,
         skill_catalog: None,
-        chat_rate_limiter: std::sync::Arc::new(ironclaw::channels::web::server::RateLimiter::new(30, 60)),
+        chat_rate_limiter: std::sync::Arc::new(ironclaw::channels::web::server::RateLimiter::new(
+            30, 60,
+        )),
     });
 
     let addr: SocketAddr = "127.0.0.1:0".parse().unwrap();

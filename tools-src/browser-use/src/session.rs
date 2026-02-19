@@ -92,7 +92,21 @@ pub fn dispatch_page_action(
                 attempts: 1,
             })?;
 
-        dispatch_with_session(&mut client, &conn, action, params, session_id)
+        let first = dispatch_with_session(&mut client, &conn, action, params, session_id);
+        match first {
+            Ok(success) => Ok(success),
+            Err(failure) if should_recover_session(&failure.error) => {
+                let fresh_conn =
+                    CdpClient::connect_pooled(backend_url, session_id).map_err(|e| {
+                        DispatchFailure {
+                            error: StructuredError::new(ERR_NETWORK_FAILURE, e),
+                            attempts: 1,
+                        }
+                    })?;
+                dispatch_with_session(&mut client, &fresh_conn, action, params, session_id)
+            }
+            Err(failure) => Err(failure),
+        }
         // Don't close -- the pool manages the connection lifecycle.
     } else {
         // Ephemeral connection: fresh context per call
@@ -105,6 +119,34 @@ pub fn dispatch_page_action(
         let _ = conn.close();
         result
     }
+}
+
+fn error_looks_like_closed_stream(error: &StructuredError) -> bool {
+    let msg = error.message.to_ascii_lowercase();
+    msg.contains("websocket stream ended")
+        || msg.contains("stream ended")
+        || msg.contains("connection closed")
+        || msg.contains("cdp recv failed")
+}
+
+fn should_recover_session(error: &StructuredError) -> bool {
+    error.code == ERR_NETWORK_FAILURE && error_looks_like_closed_stream(error)
+}
+
+fn reopen_last_url_after_recovery(
+    client: &mut CdpClient,
+    conn: &wit_host::WsConnection,
+    cdp_session: &str,
+    last_url: &str,
+) {
+    let _ = dispatch_cdp_action(
+        "open",
+        &Map::from_iter([("url".to_string(), Value::String(last_url.to_string()))]),
+        client,
+        conn,
+        None,
+        cdp_session,
+    );
 }
 
 fn dispatch_with_session(
@@ -147,6 +189,7 @@ fn dispatch_with_session(
         .and_then(Value::as_str)
         .map(String::from);
 
+    let mut recovered_session = false;
     let cdp_session = if let Some(ref existing_session) = cdp_session_id {
         // Verify the page target is still alive
         let target_alive = if let Some(ref tid) = stored_target_id {
@@ -169,6 +212,7 @@ fn dispatch_with_session(
             let (new_ctx, new_target, new_session) =
                 create_fresh_session_state(client, conn, session_id)?;
             update_session_workspace(session_id, &new_ctx, &new_target, &new_session);
+            recovered_session = true;
             new_session
         }
     } else {
@@ -176,10 +220,41 @@ fn dispatch_with_session(
         let (new_ctx, new_target, new_session) =
             create_fresh_session_state(client, conn, session_id)?;
         update_session_workspace(session_id, &new_ctx, &new_target, &new_session);
+        recovered_session = true;
         new_session
     };
 
-    dispatch_cdp_action(action, params, client, conn, Some(session_id), &cdp_session)
+    if recovered_session && action != "open" {
+        let last_url = session_state
+            .get("lastUrl")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|url| !url.is_empty() && *url != "about:blank");
+        if let Some(url) = last_url {
+            reopen_last_url_after_recovery(client, conn, &cdp_session, url);
+        }
+    }
+
+    let action_result =
+        dispatch_cdp_action(action, params, client, conn, Some(session_id), &cdp_session);
+
+    if action == "open" {
+        if let Ok(success) = &action_result {
+            if let Some(url) = success.data.get("url").and_then(Value::as_str) {
+                if let Some(mut state_obj) = session_state.as_object().cloned() {
+                    state_obj.insert("lastUrl".to_string(), Value::String(url.to_string()));
+                    state_obj.insert("updatedAt".to_string(), json!(wit_host::now_millis()));
+                    let workspace_path = format!("browser-sessions/{}.json", session_id);
+                    let _ = wit_host::workspace_write(
+                        &workspace_path,
+                        &Value::Object(state_obj).to_string(),
+                    );
+                }
+            }
+        }
+    }
+
+    action_result
     // Don't dispose context -- pooled connection keeps it alive for next call.
 }
 
@@ -601,7 +676,12 @@ fn session_close(
         }
     }
 
-    let _ = wit_host::workspace_write(&workspace_path, "{}");
+    let closed_state = json!({
+        "sessionId": session_id,
+        "closed": true,
+        "closedAt": wit_host::now_millis(),
+    });
+    let _ = wit_host::workspace_write(&workspace_path, &closed_state.to_string());
 
     Ok(DispatchSuccess {
         data: json!({ "sessionId": session_id, "closed": true }),
@@ -753,5 +833,28 @@ fn state_load(params: &Map<String, Value>) -> Result<DispatchSuccess, DispatchFa
             ),
             attempts: 1,
         }),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_should_recover_session_for_stream_ended_error() {
+        let err = StructuredError::new(ERR_NETWORK_FAILURE, "WebSocket stream ended while waiting");
+        assert!(should_recover_session(&err));
+    }
+
+    #[test]
+    fn test_should_not_recover_session_for_non_network_error() {
+        let err = StructuredError::new(ERR_INVALID_PARAMS, "Missing selector");
+        assert!(!should_recover_session(&err));
+    }
+
+    #[test]
+    fn test_should_not_recover_session_for_other_network_error() {
+        let err = StructuredError::new(ERR_NETWORK_FAILURE, "DNS lookup failed");
+        assert!(!should_recover_session(&err));
     }
 }

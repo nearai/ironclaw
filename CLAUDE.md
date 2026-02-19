@@ -463,7 +463,7 @@ Key test patterns:
 1. **Domain-specific tools** - `marketplace.rs`, `restaurant.rs`, `taskrabbit.rs`, `ecommerce.rs` return placeholder responses; need real API integrations
 2. **Integration tests** - Need testcontainers setup for PostgreSQL
 3. **MCP stdio transport** - Only HTTP transport implemented
-4. **WIT bindgen integration** - Auto-extract tool description/schema from WASM modules (stubbed)
+4. **WIT metadata extraction coverage** - Runtime metadata extraction is implemented; expand integration tests and edge-case coverage for malformed/legacy components
 5. **Capability granting after tool build** - Built tools get empty capabilities; need UX for granting HTTP/secrets access
 6. **Tool versioning workflow** - No version tracking or rollback for dynamically built tools
 7. **Webhook trigger endpoint** - Routines webhook trigger not yet exposed in web gateway

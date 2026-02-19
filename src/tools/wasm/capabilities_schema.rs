@@ -33,6 +33,7 @@ use std::time::Duration;
 use serde::{Deserialize, Serialize};
 
 use crate::secrets::{CredentialLocation, CredentialMapping};
+use crate::tools::wasm::capabilities::WorkspaceWriteCapability;
 use crate::tools::wasm::{
     Capabilities, EndpointPattern, HttpCapability, RateLimitConfig, SecretsCapability,
     ToolInvokeCapability, WebSocketCapability, WebSocketEndpoint, WorkspaceCapability,
@@ -112,6 +113,10 @@ impl CapabilitiesFile {
             caps.workspace_read = Some(WorkspaceCapability {
                 allowed_prefixes: workspace.allowed_prefixes.clone(),
                 reader: None, // Injected at runtime
+                writer: None, // Injected at runtime
+            });
+            caps.workspace_write = Some(WorkspaceWriteCapability {
+                allowed_prefixes: workspace.allowed_prefixes.clone(),
                 writer: None, // Injected at runtime
             });
         }

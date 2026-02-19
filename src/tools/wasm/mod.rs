@@ -84,6 +84,7 @@ mod loader;
 mod rate_limiter;
 mod runtime;
 mod storage;
+mod workspace_bridge;
 mod wrapper;
 
 // Core types
@@ -94,6 +95,7 @@ pub use limits::{
     WasmResourceLimiter,
 };
 pub use runtime::{PreparedModule, WasmRuntimeConfig, WasmToolRuntime};
+pub use workspace_bridge::WasmWorkspaceBridge;
 pub use wrapper::{OAuthRefreshConfig, WasmToolWrapper};
 
 // Capabilities (V2)

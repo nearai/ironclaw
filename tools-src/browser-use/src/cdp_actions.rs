@@ -84,6 +84,21 @@ pub fn dispatch_cdp_action(
     })
 }
 
+fn ws_error_indicates_closed(msg: &str) -> bool {
+    let lower = msg.to_ascii_lowercase();
+    lower.contains("websocket stream ended")
+        || lower.contains("stream ended")
+        || lower.contains("connection closed")
+        || lower.contains("closed")
+        || lower.contains("eof")
+}
+
+fn has_non_zero_clip(clip: &Value) -> bool {
+    let width = clip.get("width").and_then(Value::as_f64).unwrap_or(0.0);
+    let height = clip.get("height").and_then(Value::as_f64).unwrap_or(0.0);
+    width > 0.0 && height > 0.0
+}
+
 pub(crate) fn send_session_command(
     client: &mut CdpClient,
     conn: &wit_host::WsConnection,
@@ -105,13 +120,21 @@ pub(crate) fn send_session_command(
             attempts: 1,
         })?;
 
-    loop {
-        let response_str = conn
-            .recv(Some(CDP_TIMEOUT_MS))
-            .map_err(|e| DispatchFailure {
-                error: StructuredError::new(ERR_TIMEOUT, format!("CDP recv timeout: {e}")),
+    const MAX_RECV_ATTEMPTS: u32 = 2000;
+
+    for _ in 0..MAX_RECV_ATTEMPTS {
+        let response_str = conn.recv(Some(CDP_TIMEOUT_MS)).map_err(|e| {
+            let err_msg = e.to_string();
+            let code = if ws_error_indicates_closed(&err_msg) {
+                ERR_NETWORK_FAILURE
+            } else {
+                ERR_TIMEOUT
+            };
+            DispatchFailure {
+                error: StructuredError::new(code, format!("CDP recv failed: {err_msg}")),
                 attempts: 1,
-            })?;
+            }
+        })?;
 
         let response: Value = serde_json::from_str(&response_str).map_err(|e| DispatchFailure {
             error: StructuredError::new(ERR_NETWORK_FAILURE, format!("Invalid CDP response: {e}")),
@@ -133,6 +156,17 @@ pub(crate) fn send_session_command(
         }
         // Skip events (method-only messages with no id)
     }
+
+    Err(DispatchFailure {
+        error: StructuredError::new(
+            ERR_TIMEOUT,
+            format!(
+                "CDP response for command '{}' (id {}) not received after {} messages",
+                method, id, MAX_RECV_ATTEMPTS
+            ),
+        ),
+        attempts: 1,
+    })
 }
 
 fn eval_js(
@@ -208,15 +242,115 @@ fn require_str<'a>(params: &'a Map<String, Value>, key: &str) -> Result<&'a str,
         })
 }
 
-fn get_selector_param(params: &Map<String, Value>) -> Result<String, DispatchFailure> {
-    params
-        .get("selector")
-        .and_then(Value::as_str)
-        .map(|s| s.to_string())
-        .ok_or_else(|| DispatchFailure {
-            error: StructuredError::new(ERR_INVALID_PARAMS, "Missing required 'selector' field"),
-            attempts: 1,
-        })
+#[derive(Debug, Clone)]
+enum ElementTarget {
+    Selector(String),
+    Ref(String),
+}
+
+impl ElementTarget {
+    fn label(&self) -> &str {
+        match self {
+            Self::Selector(selector) => selector,
+            Self::Ref(reference) => reference,
+        }
+    }
+}
+
+fn get_target_param(params: &Map<String, Value>) -> Result<ElementTarget, DispatchFailure> {
+    if let Some(selector) = params.get("selector").and_then(Value::as_str) {
+        let trimmed = selector.trim();
+        if !trimmed.is_empty() {
+            return Ok(ElementTarget::Selector(trimmed.to_string()));
+        }
+    }
+
+    if let Some(reference) = params.get("ref").and_then(Value::as_str) {
+        let trimmed = reference.trim();
+        if !trimmed.is_empty() {
+            return Ok(ElementTarget::Ref(trimmed.to_string()));
+        }
+    }
+
+    Err(DispatchFailure {
+        error: StructuredError::new(
+            ERR_INVALID_PARAMS,
+            "Missing required target field: provide 'selector' or 'ref'",
+        ),
+        attempts: 1,
+    })
+}
+
+fn interactive_predicate_js(tag_expr: &str, node_expr: &str) -> String {
+    format!(
+        r#"(["a", "button", "input", "select", "textarea", "details", "summary", "iframe", "object", "embed", "video", "audio", "canvas"].includes({tag_expr}) ||
+                    {node_expr}.hasAttribute('onclick') ||
+                    {node_expr}.hasAttribute('tabindex') ||
+                    {node_expr}.getAttribute('role') === 'button' ||
+                    {node_expr}.getAttribute('role') === 'link')"#
+    )
+}
+
+fn interactive_ref_cache_bootstrap_js() -> String {
+    let interactive_predicate = interactive_predicate_js("tag", "node");
+    format!(
+        r#"(function() {{
+            const docEl = document.documentElement;
+            if (!docEl) return null;
+
+            const cache = window.__ironclawRefCache;
+            if (cache && typeof cache.get === 'function') return cache;
+
+            const built = new Map();
+            const stack = [{{ node: docEl, depth: 0 }}];
+            const maxDepth = 64;
+            let interactiveIndex = 0;
+
+            while (stack.length > 0) {{
+                const current = stack.pop();
+                const node = current.node;
+                const depth = current.depth;
+
+                if (!node || node.nodeType !== 1) continue;
+                if (depth > maxDepth) continue;
+
+                const tag = node.tagName.toLowerCase();
+                const interactive = {interactive_predicate};
+
+                if (interactive) {{
+                    built.set(interactiveIndex, node);
+                    interactiveIndex += 1;
+                }}
+
+                const children = node.children;
+                for (let i = children.length - 1; i >= 0; i--) {{
+                    stack.push({{ node: children[i], depth: depth + 1 }});
+                }}
+            }}
+
+            window.__ironclawRefCache = built;
+            return built;
+        }})()"#
+    )
+}
+
+fn resolve_ref_element_js(reference: &str) -> String {
+    let escaped_ref = escape_js(reference);
+    let cache_bootstrap = interactive_ref_cache_bootstrap_js();
+    format!(
+        r#"(function() {{
+            const raw = '{escaped_ref}';
+            const normalized = raw.trim().replace(/^@/, '');
+            if (!/^e\d+$/.test(normalized)) return null;
+
+            const targetIndex = parseInt(normalized.slice(1), 10);
+            if (!Number.isFinite(targetIndex) || targetIndex < 0) return null;
+
+            const cache = {cache_bootstrap};
+            if (!cache || typeof cache.get !== 'function') return null;
+            return cache.get(targetIndex) || null;
+        }})()"#
+    )
 }
 
 fn escape_js(s: &str) -> String {
@@ -358,6 +492,146 @@ fn cdp_reload(
 
 // === Snapshot ===
 
+fn enforce_snapshot_size(snapshot: &Value) -> Result<(), DispatchFailure> {
+    let serialized = serde_json::to_string(snapshot).map_err(|e| DispatchFailure {
+        error: StructuredError::new(
+            ERR_NETWORK_FAILURE,
+            format!("Failed to serialize snapshot payload: {e}"),
+        ),
+        attempts: 1,
+    })?;
+
+    if serialized.len() > MAX_SNAPSHOT_BYTES {
+        return Err(DispatchFailure {
+            error: StructuredError::new(
+                ERR_SNAPSHOT_TOO_LARGE,
+                format!(
+                    "Snapshot payload too large: {} bytes exceeds limit of {} bytes",
+                    serialized.len(),
+                    MAX_SNAPSHOT_BYTES
+                ),
+            )
+            .with_hint("Use snapshot mode=interactive-only, reduce depth, or scope with selector."),
+            attempts: 1,
+        });
+    }
+
+    Ok(())
+}
+
+fn build_snapshot_js(mode: &str, depth: u64, selector: Option<&str>) -> String {
+    let text_char_limit = MAX_SNAPSHOT_TEXT_CHARS;
+    let node_limit = MAX_SNAPSHOT_NODES;
+    let payload_limit = MAX_SNAPSHOT_BYTES;
+    let root_selector_expr =
+        selector.map_or_else(|| "null".to_string(), |sel| format!("'{}'", escape_js(sel)));
+    let interactive_predicate = interactive_predicate_js("tag", "node");
+
+    format!(
+        r#"(function() {{
+            const mode = '{mode}';
+            const maxDepth = {depth};
+            const maxNodes = {node_limit};
+            const textLimit = {text_char_limit};
+            const maxPayload = {payload_limit};
+            const rootSelector = {root_selector_expr};
+
+            function isInteractive(node, tag) {{
+                return {interactive_predicate};
+            }}
+
+            function keepNode(tag, interactive) {{
+                if (mode === "full") return true;
+                if (mode === "compact") {{
+                    return interactive || ["html","body","main","nav","header","footer","form","section","article","div","aside"].includes(tag);
+                }}
+                return interactive;
+            }}
+
+            const root = rootSelector ? document.querySelector(rootSelector) : document.documentElement;
+            if (!root) {{
+                return {{ refs: [], refCount: 0, stats: {{ nodes: 0, truncated: false, scoped: true, mode }} }};
+            }}
+
+            const refs = [];
+            const stack = [{{ node: root, depth: 0 }}];
+            let refCount = 0;
+            let visited = 0;
+            let approxChars = 0;
+            let truncated = false;
+
+            while (stack.length > 0) {{
+                const current = stack.pop();
+                const node = current.node;
+                const currentDepth = current.depth;
+
+                if (!node || node.nodeType !== 1) continue;
+                if (currentDepth > maxDepth) continue;
+
+                visited += 1;
+                const tag = node.tagName.toLowerCase();
+                const interactive = isInteractive(node, tag);
+
+                if (keepNode(tag, interactive)) {{
+                    const item = {{ tag }};
+                    if (interactive) item.ref = '@e' + (refCount++);
+
+                    if (node.id) item.id = String(node.id).slice(0, 96);
+                    if (node.className && typeof node.className === 'string') item.class = node.className.slice(0, 128);
+                    if (node.getAttribute('aria-label')) item.ariaLabel = node.getAttribute('aria-label').slice(0, 128);
+                    if (node.getAttribute('placeholder')) item.placeholder = node.getAttribute('placeholder').slice(0, 96);
+                    if (node.getAttribute('type')) item.type = node.getAttribute('type').slice(0, 48);
+                    if (node.getAttribute('name')) item.name = node.getAttribute('name').slice(0, 96);
+                    if (tag === 'a' && node.href) item.href = String(node.href).slice(0, 256);
+
+                    if (interactive) {{
+                        const text = (node.textContent || '').trim();
+                        if (text) item.text = text.slice(0, textLimit);
+                    }}
+
+                    const approxItemChars =
+                        (item.id ? item.id.length : 0) +
+                        (item.class ? item.class.length : 0) +
+                        (item.ariaLabel ? item.ariaLabel.length : 0) +
+                        (item.placeholder ? item.placeholder.length : 0) +
+                        (item.type ? item.type.length : 0) +
+                        (item.name ? item.name.length : 0) +
+                        (item.href ? item.href.length : 0) +
+                        (item.text ? item.text.length : 0) +
+                        32;
+
+                    if (refs.length >= maxNodes || approxChars + approxItemChars > maxPayload) {{
+                        truncated = true;
+                        break;
+                    }}
+
+                    approxChars += approxItemChars;
+                    refs.push(item);
+                }}
+
+                const children = node.children;
+                for (let i = children.length - 1; i >= 0; i--) {{
+                    stack.push({{ node: children[i], depth: currentDepth + 1 }});
+                }}
+            }}
+
+            if (stack.length > 0) truncated = true;
+
+            return {{
+                refs,
+                refCount,
+                stats: {{
+                    nodes: visited,
+                    truncated,
+                    scoped: Boolean(rootSelector),
+                    mode,
+                    depth: maxDepth,
+                }},
+            }};
+        }})()"#,
+    )
+}
+
 fn cdp_snapshot(
     client: &mut CdpClient,
     conn: &wit_host::WsConnection,
@@ -369,61 +643,30 @@ fn cdp_snapshot(
         .and_then(Value::as_str)
         .unwrap_or("interactive-only");
     let depth = params.get("depth").and_then(Value::as_u64).unwrap_or(20);
+    let selector = params.get("selector").and_then(Value::as_str);
 
-    let js = format!(
-        r#"(function() {{
-            const mode = '{mode}';
-            const maxDepth = {depth};
-            function buildTree(node, depth, refCounter) {{
-                if (depth > maxDepth) return null;
-                if (!node || node.nodeType !== 1) return null;
-                const tag = node.tagName.toLowerCase();
-                const isInteractive = ["a","button","input","select","textarea","details","summary","iframe","object","embed","video","audio","canvas"].includes(tag) ||
-                    node.hasAttribute("onclick") || node.hasAttribute("tabindex") ||
-                    node.getAttribute("role") === "button" || node.getAttribute("role") === "link";
-                if (mode === "interactive-only" && !isInteractive && !["html","body","head","div","section","article","main","nav","header","footer","aside","form"].includes(tag)) {{
-                    const ic = node.querySelectorAll('a,button,input,select,textarea,[onclick],[tabindex],[role="button"],[role="link"]');
-                    if (ic.length === 0) return null;
-                }}
-                const ref = isInteractive ? '@e' + (refCounter.count++) : null;
-                const result = {{ tag, ref }};
-                if (tag === "a" && node.href) result.href = node.href;
-                if (tag === "img") {{ if (node.alt) result.alt = node.alt; if (node.src) result.src = node.src; }}
-                if (node.id) result.id = node.id;
-                if (node.className && typeof node.className === "string") result["class"] = node.className;
-                if (node.getAttribute("aria-label")) result.ariaLabel = node.getAttribute("aria-label");
-                if (node.getAttribute("placeholder")) result.placeholder = node.getAttribute("placeholder");
-                if (node.getAttribute("type")) result.type = node.getAttribute("type");
-                if (node.getAttribute("name")) result.name = node.getAttribute("name");
-                if (node.getAttribute("value")) result.value = node.getAttribute("value");
-                if (tag === "input" || tag === "textarea") result.value = node.value;
-                if (isInteractive && tag !== "input" && tag !== "textarea") {{
-                    const text = node.textContent?.trim().slice(0, 200);
-                    if (text) result.text = text;
-                }}
-                const children = [];
-                for (const child of node.children) {{
-                    const childTree = buildTree(child, depth + 1, refCounter);
-                    if (childTree) children.push(childTree);
-                }}
-                if (children.length > 0) result.children = children;
-                return result;
-            }}
-            const refCounter = {{ count: 0 }};
-            const tree = buildTree(document.documentElement, 0, refCounter);
-            return {{ refs: tree?.children || [], refCount: refCounter.count }};
-        }})()"#,
-    );
+    let js = build_snapshot_js(mode, depth, selector);
 
     let snapshot = eval_js_value(client, conn, session_id, &js)?;
+    enforce_snapshot_size(&snapshot)?;
     ok_success(snapshot)
 }
 
 // === Interactions ===
 
+fn resolve_element_target_js(target: &ElementTarget) -> String {
+    match target {
+        ElementTarget::Selector(selector) => {
+            let s = escape_js(selector);
+            format!("document.querySelector('{s}')")
+        }
+        ElementTarget::Ref(reference) => resolve_ref_element_js(reference),
+    }
+}
+
+#[cfg(test)]
 fn resolve_element_js(selector: &str) -> String {
-    let s = escape_js(selector);
-    format!("document.querySelector('{s}')")
+    resolve_element_target_js(&ElementTarget::Selector(selector.to_string()))
 }
 
 fn cdp_click(
@@ -432,16 +675,17 @@ fn cdp_click(
     session_id: &str,
     params: &Map<String, Value>,
 ) -> Result<DispatchSuccess, DispatchFailure> {
-    let sel = get_selector_param(params)?;
+    let target = get_target_param(params)?;
+    let target_label = escape_js(target.label());
     let js = format!(
         r#"(function() {{
             const el = {};
             if (!el) return {{ clicked: false, error: 'Element not found' }};
             el.click();
-            return {{ clicked: true, selector: '{}' }};
+            return {{ clicked: true, target: '{}' }};
         }})()"#,
-        resolve_element_js(&sel),
-        escape_js(&sel),
+        resolve_element_target_js(&target),
+        target_label,
     );
     let result = eval_js_value(client, conn, session_id, &js)?;
     ok_success(result)
@@ -453,16 +697,17 @@ fn cdp_dblclick(
     session_id: &str,
     params: &Map<String, Value>,
 ) -> Result<DispatchSuccess, DispatchFailure> {
-    let sel = get_selector_param(params)?;
+    let target = get_target_param(params)?;
+    let target_label = escape_js(target.label());
     let js = format!(
         r#"(function() {{
             const el = {};
             if (!el) return {{ dblclicked: false, error: 'Element not found' }};
             el.dispatchEvent(new MouseEvent('dblclick', {{ bubbles: true }}));
-            return {{ dblclicked: true, selector: '{}' }};
+            return {{ dblclicked: true, target: '{}' }};
         }})()"#,
-        resolve_element_js(&sel),
-        escape_js(&sel),
+        resolve_element_target_js(&target),
+        target_label,
     );
     let result = eval_js_value(client, conn, session_id, &js)?;
     ok_success(result)
@@ -474,16 +719,17 @@ fn cdp_focus(
     session_id: &str,
     params: &Map<String, Value>,
 ) -> Result<DispatchSuccess, DispatchFailure> {
-    let sel = get_selector_param(params)?;
+    let target = get_target_param(params)?;
+    let target_label = escape_js(target.label());
     let js = format!(
         r#"(function() {{
             const el = {};
             if (!el) return {{ focused: false, error: 'Element not found' }};
             el.focus();
-            return {{ focused: true, selector: '{}' }};
+            return {{ focused: true, target: '{}' }};
         }})()"#,
-        resolve_element_js(&sel),
-        escape_js(&sel),
+        resolve_element_target_js(&target),
+        target_label,
     );
     let result = eval_js_value(client, conn, session_id, &js)?;
     ok_success(result)
@@ -495,8 +741,9 @@ fn cdp_fill(
     session_id: &str,
     params: &Map<String, Value>,
 ) -> Result<DispatchSuccess, DispatchFailure> {
-    let sel = get_selector_param(params)?;
+    let target = get_target_param(params)?;
     let value = require_str(params, "value")?;
+    let target_label = escape_js(target.label());
     let js = format!(
         r#"(function() {{
             const el = {};
@@ -505,11 +752,11 @@ fn cdp_fill(
             el.value = '{}';
             el.dispatchEvent(new Event('input', {{ bubbles: true }}));
             el.dispatchEvent(new Event('change', {{ bubbles: true }}));
-            return {{ filled: true, selector: '{}' }};
+            return {{ filled: true, target: '{}' }};
         }})()"#,
-        resolve_element_js(&sel),
+        resolve_element_target_js(&target),
         escape_js(value),
-        escape_js(&sel),
+        target_label,
     );
     let result = eval_js_value(client, conn, session_id, &js)?;
     ok_success(result)
@@ -521,7 +768,7 @@ fn cdp_type_text(
     session_id: &str,
     params: &Map<String, Value>,
 ) -> Result<DispatchSuccess, DispatchFailure> {
-    let sel = get_selector_param(params)?;
+    let target = get_target_param(params)?;
     let value = require_str(params, "value")?;
 
     // Focus the element first
@@ -532,7 +779,7 @@ fn cdp_type_text(
             el.focus();
             return true;
         }})()"#,
-        resolve_element_js(&sel),
+        resolve_element_target_js(&target),
     );
     let focused = eval_js_value(client, conn, session_id, &focus_js)?;
     if focused != Value::Bool(true) {
@@ -563,7 +810,7 @@ fn cdp_type_text(
         )?;
     }
 
-    ok_success(json!({ "typed": true, "selector": sel }))
+    ok_success(json!({ "typed": true, "target": target.label() }))
 }
 
 fn cdp_press(
@@ -574,13 +821,14 @@ fn cdp_press(
 ) -> Result<DispatchSuccess, DispatchFailure> {
     let key = require_str(params, "key")?;
 
-    if let Some(sel) = params.get("selector").and_then(Value::as_str) {
+    if params.contains_key("selector") || params.contains_key("ref") {
+        let target = get_target_param(params)?;
         let focus_js = format!(
             r#"(function() {{
                 const el = {};
                 if (el) el.focus();
             }})()"#,
-            resolve_element_js(sel),
+            resolve_element_target_js(&target),
         );
         eval_js(client, conn, session_id, &focus_js, false)?;
     }
@@ -636,7 +884,7 @@ fn cdp_hover(
     session_id: &str,
     params: &Map<String, Value>,
 ) -> Result<DispatchSuccess, DispatchFailure> {
-    let sel = get_selector_param(params)?;
+    let target = get_target_param(params)?;
     let js = format!(
         r#"(function() {{
             const el = {};
@@ -644,7 +892,7 @@ fn cdp_hover(
             const rect = el.getBoundingClientRect();
             return {{ x: rect.x + rect.width / 2, y: rect.y + rect.height / 2 }};
         }})()"#,
-        resolve_element_js(&sel),
+        resolve_element_target_js(&target),
     );
     let pos = eval_js_value(client, conn, session_id, &js)?;
 
@@ -667,7 +915,7 @@ fn cdp_hover(
         })),
     )?;
 
-    ok_success(json!({ "hovered": true, "selector": sel }))
+    ok_success(json!({ "hovered": true, "target": target.label() }))
 }
 
 fn cdp_check_uncheck(
@@ -677,15 +925,15 @@ fn cdp_check_uncheck(
     params: &Map<String, Value>,
     check: bool,
 ) -> Result<DispatchSuccess, DispatchFailure> {
-    let sel = get_selector_param(params)?;
-    let el_js = resolve_element_js(&sel);
-    let sel_escaped = escape_js(&sel);
+    let target = get_target_param(params)?;
+    let el_js = resolve_element_target_js(&target);
+    let target_escaped = escape_js(target.label());
     let js = format!(
         r#"(function() {{
             const el = {el_js};
             if (!el) return {{ done: false, error: 'Element not found' }};
             if (el.checked !== {check}) el.click();
-            return {{ done: true, checked: el.checked, selector: '{sel_escaped}' }};
+            return {{ done: true, checked: el.checked, target: '{target_escaped}' }};
         }})()"#,
     );
     let result = eval_js_value(client, conn, session_id, &js)?;
@@ -698,19 +946,20 @@ fn cdp_select(
     session_id: &str,
     params: &Map<String, Value>,
 ) -> Result<DispatchSuccess, DispatchFailure> {
-    let sel = get_selector_param(params)?;
+    let target = get_target_param(params)?;
     let value = require_str(params, "value")?;
+    let target_label = escape_js(target.label());
     let js = format!(
         r#"(function() {{
             const el = {};
             if (!el) return {{ selected: false, error: 'Element not found' }};
             el.value = '{}';
             el.dispatchEvent(new Event('change', {{ bubbles: true }}));
-            return {{ selected: true, selector: '{}', value: '{}' }};
+            return {{ selected: true, target: '{}', value: '{}' }};
         }})()"#,
-        resolve_element_js(&sel),
+        resolve_element_target_js(&target),
         escape_js(value),
-        escape_js(&sel),
+        target_label,
         escape_js(value),
     );
     let result = eval_js_value(client, conn, session_id, &js)?;
@@ -736,19 +985,51 @@ fn cdp_scroll_into_view(
     session_id: &str,
     params: &Map<String, Value>,
 ) -> Result<DispatchSuccess, DispatchFailure> {
-    let sel = get_selector_param(params)?;
+    let target = get_target_param(params)?;
+    let target_label = escape_js(target.label());
     let js = format!(
         r#"(function() {{
             const el = {};
             if (!el) return {{ scrolledIntoView: false, error: 'Element not found' }};
             el.scrollIntoView({{ behavior: 'smooth', block: 'center' }});
-            return {{ scrolledIntoView: true, selector: '{}' }};
+            return {{ scrolledIntoView: true, target: '{}' }};
         }})()"#,
-        resolve_element_js(&sel),
-        escape_js(&sel),
+        resolve_element_target_js(&target),
+        target_label,
     );
     let result = eval_js_value(client, conn, session_id, &js)?;
     ok_success(result)
+}
+
+fn get_named_target_param(
+    params: &Map<String, Value>,
+    selector_key: &str,
+    ref_key: &str,
+) -> Result<ElementTarget, DispatchFailure> {
+    if let Some(selector) = params.get(selector_key).and_then(Value::as_str) {
+        let trimmed = selector.trim();
+        if !trimmed.is_empty() {
+            return Ok(ElementTarget::Selector(trimmed.to_string()));
+        }
+    }
+
+    if let Some(reference) = params.get(ref_key).and_then(Value::as_str) {
+        let trimmed = reference.trim();
+        if !trimmed.is_empty() {
+            return Ok(ElementTarget::Ref(trimmed.to_string()));
+        }
+    }
+
+    Err(DispatchFailure {
+        error: StructuredError::new(
+            ERR_INVALID_PARAMS,
+            format!(
+                "Missing required target field: provide '{}' or '{}'",
+                selector_key, ref_key
+            ),
+        ),
+        attempts: 1,
+    })
 }
 
 fn cdp_drag(
@@ -757,25 +1038,13 @@ fn cdp_drag(
     session_id: &str,
     params: &Map<String, Value>,
 ) -> Result<DispatchSuccess, DispatchFailure> {
-    let src_sel = params
-        .get("source_selector")
-        .and_then(Value::as_str)
-        .ok_or_else(|| DispatchFailure {
-            error: StructuredError::new(ERR_INVALID_PARAMS, "Missing 'source_selector'"),
-            attempts: 1,
-        })?;
-    let tgt_sel = params
-        .get("target_selector")
-        .and_then(Value::as_str)
-        .ok_or_else(|| DispatchFailure {
-            error: StructuredError::new(ERR_INVALID_PARAMS, "Missing 'target_selector'"),
-            attempts: 1,
-        })?;
+    let source = get_named_target_param(params, "source_selector", "source_ref")?;
+    let target = get_named_target_param(params, "target_selector", "target_ref")?;
 
     let js = format!(
         r#"(function() {{
-            const src = document.querySelector('{}');
-            const tgt = document.querySelector('{}');
+            const src = {};
+            const tgt = {};
             if (!src || !tgt) return {{ dragged: false, error: 'Element not found' }};
             const srcRect = src.getBoundingClientRect();
             const tgtRect = tgt.getBoundingClientRect();
@@ -784,8 +1053,8 @@ fn cdp_drag(
                 tgt: {{ x: tgtRect.x + tgtRect.width / 2, y: tgtRect.y + tgtRect.height / 2 }}
             }};
         }})()"#,
-        escape_js(src_sel),
-        escape_js(tgt_sel),
+        resolve_element_target_js(&source),
+        resolve_element_target_js(&target),
     );
     let positions = eval_js_value(client, conn, session_id, &js)?;
 
@@ -845,7 +1114,11 @@ fn cdp_drag(
         })),
     )?;
 
-    ok_success(json!({ "dragged": true, "source": src_sel, "target": tgt_sel }))
+    ok_success(json!({
+        "dragged": true,
+        "source": source.label(),
+        "target": target.label(),
+    }))
 }
 
 fn cdp_upload(
@@ -877,21 +1150,22 @@ fn cdp_wait(
         return ok_success(json!({ "waited": true, "ms": ms }));
     }
 
-    if let Some(sel) = params.get("selector").and_then(Value::as_str) {
+    if params.contains_key("selector") || params.contains_key("ref") {
+        let target = get_target_param(params)?;
         let js = format!(
             r#"new Promise((resolve, reject) => {{
                 const start = Date.now();
                 const check = () => {{
-                    if (document.querySelector('{}')) return resolve(true);
+                    if ({}) return resolve(true);
                     if (Date.now() - start > 30000) return reject(new Error('Timeout'));
                     requestAnimationFrame(check);
                 }};
                 check();
             }})"#,
-            escape_js(sel),
+            resolve_element_target_js(&target),
         );
         eval_js(client, conn, session_id, &js, false)?;
-        return ok_success(json!({ "waited": true, "selector": sel }));
+        return ok_success(json!({ "waited": true, "target": target.label() }));
     }
 
     if let Some(text) = params.get("text").and_then(Value::as_str) {
@@ -987,15 +1261,17 @@ fn cdp_get_text(
     session_id: &str,
     params: &Map<String, Value>,
 ) -> Result<DispatchSuccess, DispatchFailure> {
-    let sel = get_selector_param(params)?;
+    let target = get_target_param(params)?;
     let js = format!(
         r#"(function() {{
             const el = {};
-            return {{ text: el ? (el.textContent || '') : '' }};
+            const text = el ? (el.textContent || '') : '';
+            return {{ text: text.slice(0, {MAX_SNAPSHOT_BYTES}) }};
         }})()"#,
-        resolve_element_js(&sel),
+        resolve_element_target_js(&target),
     );
     let result = eval_js_value(client, conn, session_id, &js)?;
+    enforce_snapshot_size(&result)?;
     ok_success(result)
 }
 
@@ -1005,15 +1281,17 @@ fn cdp_get_html(
     session_id: &str,
     params: &Map<String, Value>,
 ) -> Result<DispatchSuccess, DispatchFailure> {
-    let sel = get_selector_param(params)?;
+    let target = get_target_param(params)?;
     let js = format!(
         r#"(function() {{
             const el = {};
-            return {{ html: el ? el.innerHTML : '' }};
+            const html = el ? el.innerHTML : '';
+            return {{ html: html.slice(0, {MAX_SNAPSHOT_BYTES}) }};
         }})()"#,
-        resolve_element_js(&sel),
+        resolve_element_target_js(&target),
     );
     let result = eval_js_value(client, conn, session_id, &js)?;
+    enforce_snapshot_size(&result)?;
     ok_success(result)
 }
 
@@ -1023,13 +1301,13 @@ fn cdp_get_value(
     session_id: &str,
     params: &Map<String, Value>,
 ) -> Result<DispatchSuccess, DispatchFailure> {
-    let sel = get_selector_param(params)?;
+    let target = get_target_param(params)?;
     let js = format!(
         r#"(function() {{
             const el = {};
             return {{ value: el ? (el.value || '') : '' }};
         }})()"#,
-        resolve_element_js(&sel),
+        resolve_element_target_js(&target),
     );
     let result = eval_js_value(client, conn, session_id, &js)?;
     ok_success(result)
@@ -1041,14 +1319,14 @@ fn cdp_get_attr(
     session_id: &str,
     params: &Map<String, Value>,
 ) -> Result<DispatchSuccess, DispatchFailure> {
-    let sel = get_selector_param(params)?;
+    let target = get_target_param(params)?;
     let name = require_str(params, "name")?;
     let js = format!(
         r#"(function() {{
             const el = {};
             return {{ attribute: el ? el.getAttribute('{}') : null, name: '{}' }};
         }})()"#,
-        resolve_element_js(&sel),
+        resolve_element_target_js(&target),
         escape_js(name),
         escape_js(name),
     );
@@ -1080,10 +1358,16 @@ fn cdp_get_count(
     session_id: &str,
     params: &Map<String, Value>,
 ) -> Result<DispatchSuccess, DispatchFailure> {
-    let sel = get_selector_param(params)?;
-    let js = format!("document.querySelectorAll('{}').length", escape_js(&sel),);
-    let count = eval_js_value(client, conn, session_id, &js)?;
-    ok_success(json!({ "count": count }))
+    let target = get_target_param(params)?;
+    let js = format!(
+        r#"(function() {{
+            const el = {};
+            return {{ count: el ? 1 : 0 }};
+        }})()"#,
+        resolve_element_target_js(&target),
+    );
+    let result = eval_js_value(client, conn, session_id, &js)?;
+    ok_success(result)
 }
 
 fn cdp_get_box(
@@ -1092,7 +1376,7 @@ fn cdp_get_box(
     session_id: &str,
     params: &Map<String, Value>,
 ) -> Result<DispatchSuccess, DispatchFailure> {
-    let sel = get_selector_param(params)?;
+    let target = get_target_param(params)?;
     let js = format!(
         r#"(function() {{
             const el = {};
@@ -1100,7 +1384,7 @@ fn cdp_get_box(
             const r = el.getBoundingClientRect();
             return {{ box: {{ x: r.x, y: r.y, width: r.width, height: r.height }} }};
         }})()"#,
-        resolve_element_js(&sel),
+        resolve_element_target_js(&target),
     );
     let result = eval_js_value(client, conn, session_id, &js)?;
     ok_success(result)
@@ -1131,7 +1415,8 @@ fn cdp_screenshot(
         }
     }
 
-    if let Some(sel) = params.get("selector").and_then(Value::as_str) {
+    if params.contains_key("selector") || params.contains_key("ref") {
+        let target = get_target_param(params)?;
         let js = format!(
             r#"(function() {{
                 const el = {};
@@ -1139,15 +1424,15 @@ fn cdp_screenshot(
                 const r = el.getBoundingClientRect();
                 return {{ x: r.x, y: r.y, width: r.width, height: r.height }};
             }})()"#,
-            resolve_element_js(sel),
+            resolve_element_target_js(&target),
         );
         let clip = eval_js_value(client, conn, session_id, &js)?;
-        if !clip.is_null() {
+        if !clip.is_null() && has_non_zero_clip(&clip) {
             capture_params["clip"] = json!({
                 "x": clip.get("x").and_then(Value::as_f64).unwrap_or(0.0),
                 "y": clip.get("y").and_then(Value::as_f64).unwrap_or(0.0),
-                "width": clip.get("width").and_then(Value::as_f64).unwrap_or(100.0),
-                "height": clip.get("height").and_then(Value::as_f64).unwrap_or(100.0),
+                "width": clip.get("width").and_then(Value::as_f64).unwrap_or(0.0),
+                "height": clip.get("height").and_then(Value::as_f64).unwrap_or(0.0),
                 "scale": 1,
             });
         }
@@ -1483,4 +1768,194 @@ fn cdp_pdf(
         "pdf": data,
         "mimeType": "application/pdf"
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_ws_error_indicates_closed_variants() {
+        assert!(ws_error_indicates_closed(
+            "WebSocket stream ended unexpectedly"
+        ));
+        assert!(ws_error_indicates_closed("connection closed by peer"));
+        assert!(!ws_error_indicates_closed("request timed out"));
+    }
+
+    #[test]
+    fn test_has_non_zero_clip_true_when_dimensions_positive() {
+        assert!(has_non_zero_clip(&json!({"width": 100.0, "height": 50.0})));
+    }
+
+    #[test]
+    fn test_has_non_zero_clip_false_when_dimension_missing_or_zero() {
+        assert!(!has_non_zero_clip(&json!({"width": 0.0, "height": 50.0})));
+        assert!(!has_non_zero_clip(&json!({"width": 100.0, "height": 0.0})));
+        assert!(!has_non_zero_clip(&json!({"x": 1.0, "y": 2.0})));
+    }
+
+    #[test]
+    fn test_snapshot_payload_size_guard_constant_is_reasonable() {
+        let max = MAX_SNAPSHOT_BYTES;
+        assert!(max >= 64 * 1024);
+        assert!(max <= 1024 * 1024);
+    }
+
+    #[test]
+    fn test_snapshot_mode_compact_is_accepted_by_validation() {
+        let params = json!({
+            "action": "snapshot",
+            "session_id": "s1",
+            "mode": "compact"
+        });
+        let result = crate::validation::validate_action_params("snapshot", &params);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_enforce_snapshot_size_allows_small_payload() {
+        let snapshot = json!({"refs": [{"tag": "a"}], "stats": {"nodes": 1}});
+        let result = enforce_snapshot_size(&snapshot);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_enforce_snapshot_size_rejects_large_payload() {
+        let oversized = "x".repeat(MAX_SNAPSHOT_BYTES + 1024);
+        let snapshot = json!({"refs": [{"text": oversized}]});
+        let result = enforce_snapshot_size(&snapshot);
+        assert!(result.is_err());
+        let err = result.expect_err("expected snapshot size failure");
+        assert_eq!(err.error.code, ERR_SNAPSHOT_TOO_LARGE);
+        assert!(!err.error.retryable);
+    }
+
+    #[test]
+    fn test_get_html_slice_js_contains_size_guard() {
+        let selector = "body";
+        let js = format!(
+            r#"(function() {{
+            const el = {};
+            const html = el ? el.innerHTML : '';
+            return {{ html: html.slice(0, {MAX_SNAPSHOT_BYTES}) }};
+        }})()"#,
+            resolve_element_js(selector),
+        );
+        assert!(js.contains("html.slice(0"));
+        assert!(js.contains(&MAX_SNAPSHOT_BYTES.to_string()));
+    }
+
+    #[test]
+    fn test_get_text_slice_js_contains_size_guard() {
+        let selector = "body";
+        let js = format!(
+            r#"(function() {{
+            const el = {};
+            const text = el ? (el.textContent || '') : '';
+            return {{ text: text.slice(0, {MAX_SNAPSHOT_BYTES}) }};
+        }})()"#,
+            resolve_element_js(selector),
+        );
+        assert!(js.contains("text.slice(0"));
+        assert!(js.contains(&MAX_SNAPSHOT_BYTES.to_string()));
+    }
+
+    #[test]
+    fn test_build_snapshot_js_contains_iterative_guards() {
+        let js = build_snapshot_js("interactive-only", 8, Some("body"));
+        assert!(js.contains("while (stack.length > 0)"));
+        assert!(js.contains("approxChars"));
+        assert!(js.contains("maxPayload"));
+        assert!(js.contains("refs.length >= maxNodes"));
+    }
+
+    #[test]
+    fn test_get_target_param_prefers_selector() {
+        let params = Map::from_iter([
+            (
+                "selector".to_string(),
+                Value::String("button.submit".to_string()),
+            ),
+            ("ref".to_string(), Value::String("@e7".to_string())),
+        ]);
+
+        let target = get_target_param(&params).expect("target should resolve");
+        match target {
+            ElementTarget::Selector(selector) => assert_eq!(selector, "button.submit"),
+            ElementTarget::Ref(_) => panic!("selector should be preferred when both are present"),
+        }
+    }
+
+    #[test]
+    fn test_get_target_param_accepts_ref_only() {
+        let params = Map::from_iter([("ref".to_string(), Value::String("@e12".to_string()))]);
+
+        let target = get_target_param(&params).expect("target should resolve");
+        match target {
+            ElementTarget::Ref(reference) => assert_eq!(reference, "@e12"),
+            ElementTarget::Selector(_) => panic!("ref target expected"),
+        }
+    }
+
+    #[test]
+    fn test_get_named_target_param_supports_source_ref() {
+        let params = Map::from_iter([(
+            "source_ref".to_string(),
+            Value::String("@e3".to_string()),
+        )]);
+
+        let target = get_named_target_param(&params, "source_selector", "source_ref")
+            .expect("source target should resolve");
+        match target {
+            ElementTarget::Ref(reference) => assert_eq!(reference, "@e3"),
+            ElementTarget::Selector(_) => panic!("ref target expected"),
+        }
+    }
+
+    #[test]
+    fn test_get_named_target_param_supports_target_selector() {
+        let params = Map::from_iter([(
+            "target_selector".to_string(),
+            Value::String(".dropzone".to_string()),
+        )]);
+
+        let target = get_named_target_param(&params, "target_selector", "target_ref")
+            .expect("target should resolve");
+        match target {
+            ElementTarget::Selector(selector) => assert_eq!(selector, ".dropzone"),
+            ElementTarget::Ref(_) => panic!("selector target expected"),
+        }
+    }
+
+    #[test]
+    fn test_resolve_ref_element_js_contains_ref_parser() {
+        let js = resolve_ref_element_js("@e42");
+        assert!(js.contains("/^e\\d+$/"));
+        assert!(js.contains("targetIndex"));
+        assert!(js.contains("window.__ironclawRefCache"));
+    }
+
+    #[test]
+    fn test_interactive_ref_cache_bootstrap_js_contains_cache_key() {
+        let js = interactive_ref_cache_bootstrap_js();
+        assert!(js.contains("window.__ironclawRefCache"));
+        assert!(js.contains("built.set(interactiveIndex, node)"));
+    }
+
+    #[test]
+    fn test_send_session_command_timeout_contains_method() {
+        let err = DispatchFailure {
+            error: StructuredError::new(
+                ERR_TIMEOUT,
+                format!(
+                    "CDP response for command '{}' (id {}) not received after {} messages",
+                    "Runtime.evaluate", 5, 2000
+                ),
+            ),
+            attempts: 1,
+        };
+        assert_eq!(err.error.code, ERR_TIMEOUT);
+        assert!(err.error.message.contains("Runtime.evaluate"));
+    }
 }

@@ -9,11 +9,12 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use tokio::sync::RwLock;
-use wasmtime::{Config, Engine, OptLevel};
 use wasmtime::component::Component;
+use wasmtime::{Config, Engine, OptLevel};
 
 use crate::tools::wasm::error::WasmError;
 use crate::tools::wasm::limits::{FuelConfig, ResourceLimits};
+use crate::tools::wasm::wrapper::extract_tool_metadata_from_component;
 
 /// Default epoch tick interval. Each tick increments the engine's epoch counter,
 /// which causes any store with an expired epoch deadline to trap.
@@ -200,6 +201,7 @@ impl WasmToolRuntime {
         let wasm_bytes = wasm_bytes.to_vec();
         let engine = self.engine.clone();
         let default_limits = self.config.default_limits.clone();
+        let fuel_enabled = self.config.fuel_config.enabled;
 
         // Compile in blocking task (Wasmtime compilation is synchronous)
         let prepared = tokio::task::spawn_blocking(move || {
@@ -207,11 +209,15 @@ impl WasmToolRuntime {
             let component = wasmtime::component::Component::new(&engine, &wasm_bytes)
                 .map_err(|e| WasmError::CompilationFailed(e.to_string()))?;
 
-            // We need to instantiate briefly to extract metadata.
-            // In a full implementation, we'd use WIT bindgen to get typed access.
-            // For now, we extract what we can from the component.
-            let description = extract_tool_description(&engine, &component)?;
-            let schema = extract_tool_schema(&engine, &component)?;
+            let resolved_limits = limits.unwrap_or(default_limits);
+
+            // Extract metadata from the tool's exported WIT functions.
+            let (description, schema) = extract_tool_metadata_from_component(
+                &engine,
+                &component,
+                &resolved_limits,
+                fuel_enabled,
+            )?;
 
             Ok::<_, WasmError>(PreparedModule {
                 name: name.clone(),
@@ -219,7 +225,7 @@ impl WasmToolRuntime {
                 schema,
                 compiled_component: component,
                 component_bytes: wasm_bytes,
-                limits: limits.unwrap_or(default_limits),
+                limits: resolved_limits,
             })
         })
         .await
@@ -264,36 +270,6 @@ impl WasmToolRuntime {
     }
 }
 
-/// Extract tool description from a compiled component.
-///
-/// In a full implementation, this would use WIT bindgen to call the description() export.
-/// For now, we return a placeholder since we can't easily introspect without more setup.
-fn extract_tool_description(
-    _engine: &Engine,
-    _component: &wasmtime::component::Component,
-) -> Result<String, WasmError> {
-    // TODO: Use WIT bindgen to properly extract description
-    // This requires instantiating with a linker, which needs host functions.
-    // For now, tools should have their description set externally.
-    Ok("WASM sandboxed tool".to_string())
-}
-
-/// Extract tool schema from a compiled component.
-///
-/// In a full implementation, this would use WIT bindgen to call the schema() export.
-fn extract_tool_schema(
-    _engine: &Engine,
-    _component: &wasmtime::component::Component,
-) -> Result<serde_json::Value, WasmError> {
-    // TODO: Use WIT bindgen to properly extract schema
-    // For now, return a minimal schema that accepts any object.
-    Ok(serde_json::json!({
-        "type": "object",
-        "properties": {},
-        "additionalProperties": true
-    }))
-}
-
 impl std::fmt::Debug for WasmToolRuntime {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("WasmToolRuntime")
@@ -307,6 +283,15 @@ impl std::fmt::Debug for WasmToolRuntime {
 mod tests {
     use crate::tools::wasm::limits::ResourceLimits;
     use crate::tools::wasm::runtime::{WasmRuntimeConfig, WasmToolRuntime};
+
+    #[test]
+    fn test_runtime_no_placeholder_metadata_extractors_remain() {
+        let runtime_src = include_str!("runtime.rs");
+        let desc_marker = format!("fn {}(", "extract_tool_description");
+        let schema_marker = format!("fn {}(", "extract_tool_schema");
+        assert!(!runtime_src.contains(&desc_marker));
+        assert!(!runtime_src.contains(&schema_marker));
+    }
 
     #[test]
     fn test_runtime_config_default() {

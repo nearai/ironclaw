@@ -25,7 +25,7 @@ use crate::tools::builtin::{
 use crate::tools::tool::{Tool, ToolDomain};
 use crate::tools::wasm::{
     Capabilities, OAuthRefreshConfig, ResourceLimits, WasmError, WasmStorageError, WasmToolRuntime,
-    WasmToolStore, WasmToolWrapper,
+    WasmToolStore, WasmToolWrapper, WorkspaceReader, WorkspaceWriter,
 };
 use crate::workspace::Workspace;
 
@@ -435,6 +435,9 @@ impl ToolRegistry {
         if let Some(oauth) = reg.oauth_refresh {
             wrapper = wrapper.with_oauth_refresh(oauth);
         }
+        if let Some(reader) = reg.workspace_reader {
+            wrapper = wrapper.with_workspace(reader, reg.workspace_writer);
+        }
 
         // Register the tool
         self.register(Arc::new(wrapper)).await;
@@ -492,6 +495,8 @@ impl ToolRegistry {
             schema: Some(tool_with_binary.tool.parameters_schema.clone()),
             secrets_store: None,
             oauth_refresh: None,
+            workspace_reader: None,
+            workspace_writer: None,
         })
         .await
         .map_err(WasmRegistrationError::Wasm)?;
@@ -537,6 +542,10 @@ pub struct WasmToolRegistration<'a> {
     pub secrets_store: Option<Arc<dyn SecretsStore + Send + Sync>>,
     /// OAuth refresh configuration for auto-refreshing expired tokens.
     pub oauth_refresh: Option<OAuthRefreshConfig>,
+    /// Optional workspace reader for tools that persist session/state data.
+    pub workspace_reader: Option<Arc<dyn WorkspaceReader>>,
+    /// Optional workspace writer for tools that persist session/state data.
+    pub workspace_writer: Option<Arc<dyn WorkspaceWriter>>,
 }
 
 impl Default for ToolRegistry {

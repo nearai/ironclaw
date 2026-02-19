@@ -22,7 +22,7 @@ use crate::context::JobContext;
 use crate::safety::LeakDetector;
 use crate::secrets::SecretsStore;
 use crate::tools::tool::{Tool, ToolError, ToolOutput};
-use crate::tools::wasm::capabilities::Capabilities;
+use crate::tools::wasm::capabilities::{Capabilities, PooledWsEntry};
 use crate::tools::wasm::credential_injector::{
     InjectedCredentials, host_matches_pattern, inject_credential,
 };
@@ -50,6 +50,63 @@ wasmtime::component::bindgen!({
 
 // Alias the export interface types for convenience.
 use exports::near::agent::tool as wit_tool;
+
+fn map_execute_trap(error_str: String, limits: &ResourceLimits) -> WasmError {
+    if error_str.contains("out of fuel") {
+        WasmError::FuelExhausted { limit: limits.fuel }
+    } else if error_str.contains("unreachable") {
+        WasmError::Trapped("unreachable code executed".to_string())
+    } else {
+        WasmError::Trapped(error_str)
+    }
+}
+
+pub fn extract_tool_metadata_from_component(
+    engine: &wasmtime::Engine,
+    component: &wasmtime::component::Component,
+    limits: &ResourceLimits,
+    fuel_enabled: bool,
+) -> Result<(String, serde_json::Value), WasmError> {
+    let store_data = StoreData::new(
+        limits.memory_bytes,
+        Capabilities::default(),
+        "metadata-extraction".to_string(),
+        HashMap::new(),
+        Vec::new(),
+    );
+    let mut store = Store::new(engine, store_data);
+
+    if fuel_enabled {
+        store
+            .set_fuel(limits.fuel)
+            .map_err(|e| WasmError::ConfigError(format!("Failed to set fuel: {}", e)))?;
+    }
+
+    store.epoch_deadline_trap();
+    let ticks = (limits.timeout.as_millis() / EPOCH_TICK_INTERVAL.as_millis()).max(1) as u64;
+    store.set_epoch_deadline(ticks);
+    store.limiter(|data| &mut data.limiter);
+
+    let mut linker = Linker::new(engine);
+    WasmToolWrapper::add_host_functions(&mut linker)?;
+
+    let instance = SandboxedTool::instantiate(&mut store, component, &linker)
+        .map_err(|e| WasmError::InstantiationFailed(e.to_string()))?;
+    let tool_iface = instance.near_agent_tool();
+
+    let description = tool_iface
+        .call_description(&mut store)
+        .map_err(|e| map_execute_trap(e.to_string(), limits))?;
+
+    let schema_json = tool_iface
+        .call_schema(&mut store)
+        .map_err(|e| map_execute_trap(e.to_string(), limits))?;
+
+    let schema: serde_json::Value = serde_json::from_str(&schema_json)
+        .map_err(|e| WasmError::InvalidResponseJson(e.to_string()))?;
+
+    Ok((description, schema))
+}
 
 /// Configuration needed to refresh an expired OAuth access token.
 ///
@@ -669,6 +726,27 @@ type WsStream = futures_util::stream::SplitStream<
     tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>,
 >;
 
+fn is_ws_terminal_error(err: &str) -> bool {
+    let lower = err.to_ascii_lowercase();
+    lower.contains("stream ended")
+        || lower.contains("connection closed")
+        || lower.contains("connection reset")
+        || lower.contains("broken pipe")
+        || lower.contains("already closed")
+        || lower.contains("io error")
+}
+
+fn evict_pooled_connection(capabilities: &Capabilities, entry: &Arc<PooledWsEntry>) {
+    if let Some(pool) = capabilities
+        .websocket
+        .as_ref()
+        .and_then(|cap| cap.connection_pool.as_ref())
+        && let Some(pool_key) = pool.remove_entry(entry)
+    {
+        tracing::debug!(pool_key = %pool_key, "Evicted pooled WebSocket connection after terminal error");
+    }
+}
+
 /// Helper: lock and return the sink mutex from a `WsConnState`.
 fn ws_sink(conn_state: &WsConnState) -> Result<std::sync::MutexGuard<'_, WsSink>, String> {
     match conn_state {
@@ -725,15 +803,29 @@ impl near::agent::host::HostWsConnection for StoreData {
             .get(&conn)
             .map_err(|e| format!("Invalid WebSocket connection: {}", e))?;
 
+        let pooled_entry = match conn_state {
+            WsConnState::Pooled(entry) => Some(Arc::clone(entry)),
+            WsConnState::Owned { .. } => None,
+        };
+
         let mut sink = ws_sink(conn_state)?;
 
-        ws_block_on(conn_state, self.ws_runtime.as_ref(), async {
+        let result = ws_block_on(conn_state, self.ws_runtime.as_ref(), async {
             sink.send(tokio_tungstenite::tungstenite::Message::Text(
                 message.into(),
             ))
             .await
             .map_err(|e| format!("Failed to send WebSocket message: {}", e))
-        })?
+        })?;
+
+        if let Err(ref err) = result
+            && let Some(entry) = pooled_entry.as_ref()
+            && is_ws_terminal_error(err)
+        {
+            evict_pooled_connection(self.host_state.capabilities(), entry);
+        }
+
+        result
     }
 
     fn recv(
@@ -746,10 +838,15 @@ impl near::agent::host::HostWsConnection for StoreData {
             .get(&conn)
             .map_err(|e| format!("Invalid WebSocket connection: {}", e))?;
 
+        let pooled_entry = match conn_state {
+            WsConnState::Pooled(entry) => Some(Arc::clone(entry)),
+            WsConnState::Owned { .. } => None,
+        };
+
         let mut stream = ws_stream(conn_state)?;
         let timeout = Duration::from_millis(timeout_ms.unwrap_or(30_000) as u64);
 
-        ws_block_on(conn_state, self.ws_runtime.as_ref(), async {
+        let result = ws_block_on(conn_state, self.ws_runtime.as_ref(), async {
             loop {
                 match tokio::time::timeout(timeout, stream.next()).await {
                     Ok(Some(Ok(tokio_tungstenite::tungstenite::Message::Text(text)))) => {
@@ -778,7 +875,16 @@ impl near::agent::host::HostWsConnection for StoreData {
                     }
                 }
             }
-        })?
+        })?;
+
+        if let Err(ref err) = result
+            && let Some(entry) = pooled_entry.as_ref()
+            && is_ws_terminal_error(err)
+        {
+            evict_pooled_connection(self.host_state.capabilities(), entry);
+        }
+
+        result
     }
 
     fn close(&mut self, _conn: Resource<near::agent::host::WsConnection>) -> Result<(), String> {
@@ -890,8 +996,11 @@ impl WasmToolWrapper {
         writer: Option<Arc<dyn crate::tools::wasm::capabilities::WorkspaceWriter>>,
     ) -> Self {
         if let Some(ref mut ws_cap) = self.capabilities.workspace_read {
-            ws_cap.reader = Some(reader);
-            ws_cap.writer = writer;
+            ws_cap.reader = Some(Arc::clone(&reader));
+            ws_cap.writer = writer.clone();
+        }
+        if let Some(ref mut ws_write_cap) = self.capabilities.workspace_write {
+            ws_write_cap.writer = writer;
         }
         self
     }
@@ -978,16 +1087,9 @@ impl WasmToolWrapper {
 
         // Call execute using the generated typed interface
         let tool_iface = instance.near_agent_tool();
-        let response = tool_iface.call_execute(&mut store, &request).map_err(|e| {
-            let error_str = e.to_string();
-            if error_str.contains("out of fuel") {
-                WasmError::FuelExhausted { limit: limits.fuel }
-            } else if error_str.contains("unreachable") {
-                WasmError::Trapped("unreachable code executed".to_string())
-            } else {
-                WasmError::Trapped(error_str)
-            }
-        })?;
+        let response = tool_iface
+            .call_execute(&mut store, &request)
+            .map_err(|e| map_execute_trap(e.to_string(), limits))?;
 
         // Get logs from host state
         let logs = store.data_mut().host_state.take_logs();
@@ -1603,13 +1705,22 @@ mod tests {
 
     #[test]
     fn test_wrapper_creation() {
-        // This test verifies the runtime can be created
-        // Actual execution tests require a valid WASM component
         let config = WasmRuntimeConfig::for_testing();
         let runtime = Arc::new(WasmToolRuntime::new(config).unwrap());
 
-        // Runtime was created successfully
         assert!(runtime.config().fuel_config.enabled);
+    }
+
+    #[test]
+    fn test_extract_tool_metadata_from_invalid_component_fails() {
+        let config = WasmRuntimeConfig::for_testing();
+        let runtime = WasmToolRuntime::new(config).unwrap();
+        let engine = runtime.engine();
+
+        // Minimal valid Wasm core module bytes (not a component).
+        let core_wasm: &[u8] = b"\0asm\x01\0\0\0";
+        let result = wasmtime::component::Component::new(engine, core_wasm);
+        assert!(result.is_err());
     }
 
     #[test]

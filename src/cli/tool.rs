@@ -322,9 +322,7 @@ fn build_wasm_component(source_dir: &Path, release: bool) -> anyhow::Result<Path
     let candidates = [
         base_target.join("wasm32-wasip1").join(profile),
         base_target.join("wasm32-wasip2").join(profile),
-        base_target
-            .join("wasm32-unknown-unknown")
-            .join(profile),
+        base_target.join("wasm32-unknown-unknown").join(profile),
     ];
 
     let target_dir = candidates.iter().find(|p| p.exists()).ok_or_else(|| {
@@ -377,9 +375,7 @@ fn find_wasm_artifact(source_dir: &Path, name: &str, release: bool) -> anyhow::R
     let target_dirs = [
         base_target.join("wasm32-wasip1").join(profile),
         base_target.join("wasm32-wasip2").join(profile),
-        base_target
-            .join("wasm32-unknown-unknown")
-            .join(profile),
+        base_target.join("wasm32-unknown-unknown").join(profile),
     ];
 
     let snake_name = name.replace('-', "_");

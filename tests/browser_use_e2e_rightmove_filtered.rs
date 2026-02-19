@@ -314,14 +314,20 @@ async fn e2e_rightmove_rotherhithe_2bed_3k_unfurnished() {
         eprintln!("  Matching selectors:");
         if let Some(probes) = d["probes"].as_object() {
             for (sel, info) in probes {
-                eprintln!("    {sel}: count={}, tag={}, classes={}", info["count"], info["firstTag"], info["firstClasses"]);
+                eprintln!(
+                    "    {sel}: count={}, tag={}, classes={}",
+                    info["count"], info["firstTag"], info["firstClasses"]
+                );
             }
         }
         eprintln!("  Price elements:");
         if let Some(pels) = d["priceElements"].as_array() {
             for p in pels {
                 eprintln!("    <{}> cls='{}' text='{}'", p["tag"], p["cls"], p["text"]);
-                eprintln!("      parent: <{}> cls='{}'", p["parentTag"], p["parentCls"]);
+                eprintln!(
+                    "      parent: <{}> cls='{}'",
+                    p["parentTag"], p["parentCls"]
+                );
             }
         }
         eprintln!("  data-testid values:");
@@ -401,9 +407,18 @@ async fn e2e_rightmove_rotherhithe_2bed_3k_unfurnished() {
         eprintln!("\n  Child data-testid elements:");
         if let Some(arr) = d["childTestIds"].as_array() {
             for item in arr {
-                eprintln!("    [{}] <{}> cls='{}' text='{}'",
-                    item["testid"], item["tag"], item["cls"],
-                    item["text"].as_str().unwrap_or("").chars().take(80).collect::<String>());
+                eprintln!(
+                    "    [{}] <{}> cls='{}' text='{}'",
+                    item["testid"],
+                    item["tag"],
+                    item["cls"],
+                    item["text"]
+                        .as_str()
+                        .unwrap_or("")
+                        .chars()
+                        .take(80)
+                        .collect::<String>()
+                );
             }
         }
         eprintln!("\n  Links:");
@@ -555,19 +570,13 @@ async fn e2e_rightmove_rotherhithe_2bed_3k_unfurnished() {
                 if let Some(features) = l["features"].as_array()
                     && !features.is_empty()
                 {
-                    let tags: Vec<&str> = features
-                        .iter()
-                        .filter_map(|f| f.as_str())
-                        .collect();
+                    let tags: Vec<&str> = features.iter().filter_map(|f| f.as_str()).collect();
                     eprintln!("  Features: {}", tags.join(", "));
                 }
                 if let Some(desc) = l["description"].as_str()
                     && !desc.is_empty()
                 {
-                    eprintln!(
-                        "  Desc:     {}",
-                        &desc[..desc.len().min(200)]
-                    );
+                    eprintln!("  Desc:     {}", &desc[..desc.len().min(200)]);
                 }
                 if let Some(link) = l["link"].as_str() {
                     eprintln!("  Link:     {link}");

@@ -25,7 +25,8 @@ use crate::tools::mcp::auth::{
 };
 use crate::tools::mcp::config::McpServerConfig;
 use crate::tools::mcp::session::McpSessionManager;
-use crate::tools::wasm::{WasmToolLoader, WasmToolRuntime, discover_tools};
+use crate::tools::wasm::{WasmToolLoader, WasmToolRuntime, WasmWorkspaceBridge, discover_tools};
+use crate::workspace::Workspace;
 
 /// Pending OAuth authorization state.
 struct PendingAuth {
@@ -58,6 +59,8 @@ pub struct ExtensionManager {
     user_id: String,
     /// Optional database store for DB-backed MCP config.
     store: Option<Arc<dyn crate::db::Database>>,
+    /// Workspace bridge for WASM tool session/state persistence.
+    workspace: Option<Arc<Workspace>>,
 }
 
 impl ExtensionManager {
@@ -72,6 +75,7 @@ impl ExtensionManager {
         tunnel_url: Option<String>,
         user_id: String,
         store: Option<Arc<dyn crate::db::Database>>,
+        workspace: Option<Arc<Workspace>>,
     ) -> Self {
         Self {
             registry: ExtensionRegistry::new(),
@@ -87,6 +91,7 @@ impl ExtensionManager {
             _tunnel_url: tunnel_url,
             user_id,
             store,
+            workspace,
         }
     }
 
@@ -963,7 +968,15 @@ impl ExtensionManager {
             None
         };
 
-        let loader = WasmToolLoader::new(Arc::clone(runtime), Arc::clone(&self.tool_registry));
+        let mut loader = WasmToolLoader::new(Arc::clone(runtime), Arc::clone(&self.tool_registry));
+        if let Some(ref ws) = self.workspace {
+            let bridge: Arc<WasmWorkspaceBridge> =
+                Arc::new(WasmWorkspaceBridge::new(Arc::clone(ws)));
+            loader = loader.with_workspace(
+                Arc::clone(&bridge) as Arc<dyn crate::tools::wasm::WorkspaceReader>,
+                Some(bridge as Arc<dyn crate::tools::wasm::WorkspaceWriter>),
+            );
+        }
         loader
             .load_from_files(name, &wasm_path, cap_path_option)
             .await

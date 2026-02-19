@@ -143,13 +143,11 @@ async fn test_browser_use_tool_registration_and_metadata() {
 
     let schema = wrapper.parameters_schema();
     assert!(schema.is_object(), "schema should be a JSON object");
-    // Note: the runtime's extract_tool_schema is currently a stub that returns a
-    // generic schema. The real schema (with action enum) lives inside the WASM
-    // module and is only available when WIT bindgen extraction is implemented.
-    assert!(
-        schema.get("type").is_some(),
-        "schema should have a type field"
-    );
+    assert_eq!(schema["type"], "object");
+    assert_eq!(schema["required"], serde_json::json!(["action"]));
+    assert!(schema["properties"]["action"]["enum"].is_array());
+    assert_eq!(schema["properties"]["selector"]["type"], "string");
+    assert_eq!(schema["properties"]["session_id"]["type"], "string");
 }
 
 #[tokio::test]
@@ -384,6 +382,153 @@ async fn test_browser_use_validation_rejects_invalid_selector() {
     assert_eq!(value["error"]["code"], "invalid_selector");
 }
 
+#[tokio::test]
+async fn test_browser_use_fill_normalizes_text_to_value() {
+    let wrapper = make_wrapper(make_capabilities()).await;
+    let ctx = make_job_context();
+
+    let params = serde_json::json!({
+        "action": "fill",
+        "session_id": "s1",
+        "selector": "#email",
+        "text": "user@example.com",
+        "backend_url": "http://127.0.0.1:19222"
+    });
+
+    let result = wrapper.execute(params, &ctx).await;
+    assert!(result.is_ok());
+
+    let output = result.unwrap();
+    let value: serde_json::Value =
+        serde_json::from_str(&output.result.to_string()).unwrap_or(output.result);
+
+    assert_eq!(value["action"], "fill");
+    let notes = value["meta"]["normalization_notes"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+    assert!(
+        notes
+            .iter()
+            .filter_map(|v| v.as_str())
+            .any(|n| n.contains("text") && n.contains("value")),
+        "expected normalization note in {}",
+        value
+    );
+}
+
+#[tokio::test]
+async fn test_browser_use_click_accepts_ref_target_validation() {
+    let wrapper = make_wrapper(make_capabilities()).await;
+    let ctx = make_job_context();
+
+    let params = serde_json::json!({
+        "action": "click",
+        "session_id": "s1",
+        "ref": "@e1",
+        "backend_url": "http://127.0.0.1:19222"
+    });
+
+    let result = wrapper.execute(params, &ctx).await;
+    assert!(result.is_ok());
+
+    let output = result.unwrap();
+    let value: serde_json::Value =
+        serde_json::from_str(&output.result.to_string()).unwrap_or(output.result);
+
+    assert_ne!(value["error"]["code"], "not_implemented");
+}
+
+#[tokio::test]
+async fn test_browser_use_wait_accepts_ref_target_validation() {
+    let wrapper = make_wrapper(make_capabilities()).await;
+    let ctx = make_job_context();
+
+    let params = serde_json::json!({
+        "action": "wait",
+        "session_id": "s1",
+        "ref": "@e1",
+        "backend_url": "http://127.0.0.1:19222"
+    });
+
+    let result = wrapper.execute(params, &ctx).await;
+    assert!(result.is_ok());
+
+    let output = result.unwrap();
+    let value: serde_json::Value =
+        serde_json::from_str(&output.result.to_string()).unwrap_or(output.result);
+
+    assert_ne!(value["error"]["code"], "invalid_params");
+}
+
+#[tokio::test]
+async fn test_browser_use_drag_accepts_ref_targets_validation() {
+    let wrapper = make_wrapper(make_capabilities()).await;
+    let ctx = make_job_context();
+
+    let params = serde_json::json!({
+        "action": "drag",
+        "session_id": "s1",
+        "source_ref": "@e1",
+        "target_ref": "@e2",
+        "backend_url": "http://127.0.0.1:19222"
+    });
+
+    let result = wrapper.execute(params, &ctx).await;
+    assert!(result.is_ok());
+
+    let output = result.unwrap();
+    let value: serde_json::Value =
+        serde_json::from_str(&output.result.to_string()).unwrap_or(output.result);
+
+    assert_ne!(value["error"]["code"], "invalid_params");
+}
+
+#[tokio::test]
+async fn test_browser_use_snapshot_rejects_ref_and_selector_together() {
+    let wrapper = make_wrapper(make_capabilities()).await;
+    let ctx = make_job_context();
+
+    let params = serde_json::json!({
+        "action": "snapshot",
+        "session_id": "s1",
+        "ref": "@e1",
+        "selector": "main"
+    });
+
+    let result = wrapper.execute(params, &ctx).await;
+    assert!(result.is_ok());
+
+    let output = result.unwrap();
+    let value: serde_json::Value =
+        serde_json::from_str(&output.result.to_string()).unwrap_or(output.result);
+
+    assert_eq!(value["ok"], serde_json::Value::Bool(false));
+    assert_eq!(value["error"]["code"], "invalid_params");
+}
+
+#[tokio::test]
+async fn test_browser_use_snapshot_rejects_malformed_ref() {
+    let wrapper = make_wrapper(make_capabilities()).await;
+    let ctx = make_job_context();
+
+    let params = serde_json::json!({
+        "action": "snapshot",
+        "session_id": "s1",
+        "ref": "@x1"
+    });
+
+    let result = wrapper.execute(params, &ctx).await;
+    assert!(result.is_ok());
+
+    let output = result.unwrap();
+    let value: serde_json::Value =
+        serde_json::from_str(&output.result.to_string()).unwrap_or(output.result);
+
+    assert_eq!(value["ok"], serde_json::Value::Bool(false));
+    assert_eq!(value["error"]["code"], "invalid_ref");
+}
+
 // ===== CDP Session + Workspace Persistence Integration Tests =====
 
 #[tokio::test]
@@ -592,6 +737,128 @@ async fn e2e_browser_use_screenshot() {
 
     assert_eq!(value["ok"], serde_json::Value::Bool(true));
     assert_eq!(value["action"], "screenshot");
+}
+
+#[tokio::test]
+#[ignore = "requires running Browserless Docker container on port 9222"]
+async fn e2e_browser_use_snapshot_rightmove_does_not_trap() {
+    if !browserless_available() {
+        eprintln!("Skipping: Browserless not available on 127.0.0.1:9222");
+        return;
+    }
+
+    let workspace = InMemoryWorkspace::new();
+    let ws_arc: Arc<dyn WorkspaceReader> = Arc::new(workspace.clone());
+    let ws_writer: Arc<dyn WorkspaceWriter> = Arc::new(workspace.clone());
+
+    let mut caps = make_capabilities();
+    if let Some(ref mut ws_cap) = caps.workspace_read {
+        ws_cap.reader = Some(ws_arc);
+        ws_cap.writer = Some(ws_writer);
+    }
+
+    let wrapper = make_wrapper(caps).await;
+    let ctx = make_job_context();
+
+    let create_result = wrapper
+        .execute(
+            serde_json::json!({
+                "action": "session_create",
+                "backend_url": "http://127.0.0.1:9222"
+            }),
+            &ctx,
+        )
+        .await;
+    assert!(
+        create_result.is_ok(),
+        "session_create failed: {:?}",
+        create_result.err()
+    );
+
+    let create_output = create_result.unwrap();
+    let create_value: serde_json::Value =
+        serde_json::from_str(&create_output.result.to_string()).unwrap_or(create_output.result);
+    assert_eq!(create_value["ok"], serde_json::Value::Bool(true));
+    let session_id = create_value["data"]["sessionId"]
+        .as_str()
+        .expect("session id")
+        .to_string();
+
+    let open_result = wrapper
+        .execute(
+            serde_json::json!({
+                "action": "open",
+                "url": "https://www.rightmove.co.uk",
+                "session_id": &session_id,
+                "backend_url": "http://127.0.0.1:9222"
+            }),
+            &ctx,
+        )
+        .await;
+    assert!(open_result.is_ok(), "open failed: {:?}", open_result.err());
+
+    let snapshot_result = wrapper
+        .execute(
+            serde_json::json!({
+                "action": "snapshot",
+                "mode": "interactive-only",
+                "depth": 8,
+                "session_id": &session_id,
+                "backend_url": "http://127.0.0.1:9222"
+            }),
+            &ctx,
+        )
+        .await;
+
+    // Critical assertion: no sandbox trap panic/Err should occur.
+    assert!(
+        snapshot_result.is_ok(),
+        "snapshot should not trap: {:?}",
+        snapshot_result.err()
+    );
+
+    let snapshot_output = snapshot_result.unwrap();
+    let snapshot_value: serde_json::Value =
+        serde_json::from_str(&snapshot_output.result.to_string()).unwrap_or(snapshot_output.result);
+    assert_eq!(snapshot_value["action"], "snapshot");
+
+    if snapshot_value["ok"] == serde_json::Value::Bool(false) {
+        let code = snapshot_value["error"]["code"].as_str().unwrap_or("");
+        assert_eq!(
+            code, "snapshot_too_large",
+            "snapshot should either succeed or return snapshot_too_large, got: {}",
+            snapshot_value
+        );
+    }
+
+    let get_html_result = wrapper
+        .execute(
+            serde_json::json!({
+                "action": "get_html",
+                "selector": "body",
+                "session_id": &session_id,
+                "backend_url": "http://127.0.0.1:9222"
+            }),
+            &ctx,
+        )
+        .await;
+    assert!(
+        get_html_result.is_ok(),
+        "get_html should not trap: {:?}",
+        get_html_result.err()
+    );
+
+    let close_result = wrapper
+        .execute(
+            serde_json::json!({
+                "action": "session_close",
+                "session_id": &session_id,
+                "backend_url": "http://127.0.0.1:9222"
+            }),
+            &ctx,
+        )
+        .await;
+    assert!(close_result.is_ok());
 }
 
 #[tokio::test]

@@ -553,9 +553,7 @@ impl WsConnectionPool {
                 if conns.len() >= self.max_size {
                     let lru_key = conns
                         .iter()
-                        .filter_map(|(k, e)| {
-                            e.last_used.lock().ok().map(|t| (k.clone(), *t))
-                        })
+                        .filter_map(|(k, e)| e.last_used.lock().ok().map(|t| (k.clone(), *t)))
                         .min_by_key(|(_, t)| *t)
                         .map(|(k, _)| k);
                     if let Some(k) = lru_key {
@@ -571,6 +569,18 @@ impl WsConnectionPool {
     /// Remove a connection from the pool by key.
     pub fn remove(&self, key: &str) -> Option<Arc<PooledWsEntry>> {
         self.connections.lock().ok()?.remove(key)
+    }
+
+    /// Remove a connection from the pool by pointer equality.
+    ///
+    /// Returns the removed pool key when an entry was found.
+    pub fn remove_entry(&self, target: &Arc<PooledWsEntry>) -> Option<String> {
+        let mut conns = self.connections.lock().ok()?;
+        let key = conns
+            .iter()
+            .find_map(|(key, entry)| Arc::ptr_eq(entry, target).then_some(key.clone()))?;
+        conns.remove(&key);
+        Some(key)
     }
 
     /// Evict all connections that have exceeded the idle TTL.

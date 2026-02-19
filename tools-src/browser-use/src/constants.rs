@@ -8,6 +8,9 @@ pub const MAX_SELECTOR_BYTES: usize = 2 * 1024;
 pub const MAX_SCRIPT_BYTES: usize = 16 * 1024;
 pub const MAX_ACTION_TIMEOUT_MS: u32 = 60_000;
 pub const MAX_ATTEMPTS: u8 = 3;
+pub const MAX_SNAPSHOT_NODES: usize = 1200;
+pub const MAX_SNAPSHOT_BYTES: usize = 256 * 1024;
+pub const MAX_SNAPSHOT_TEXT_CHARS: usize = 120;
 
 // CDP WebSocket constants
 pub const CDP_TIMEOUT_MS: u32 = 30_000;
@@ -26,6 +29,7 @@ pub const ERR_SESSION_RESTORE_FAILED: &str = "session_restore_failed";
 pub const ERR_POLICY_BLOCKED: &str = "policy_blocked";
 pub const ERR_ARTIFACT_NOT_FOUND: &str = "artifact_not_found";
 pub const ERR_NOT_IMPLEMENTED: &str = "not_implemented";
+pub const ERR_SNAPSHOT_TOO_LARGE: &str = "snapshot_too_large";
 
 // Canonical action surface
 pub const CANONICAL_ACTIONS: &[&str] = &[

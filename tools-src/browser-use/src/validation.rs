@@ -12,7 +12,7 @@ pub fn validate_action_params(action: &str, params: &Value) -> Result<(), Struct
     };
 
     if let Some(timeout) = obj.get("timeout_ms") {
-        if !timeout.is_u64() {
+        if !(timeout.is_null() || timeout.is_u64()) {
             return Err(StructuredError::new(
                 ERR_INVALID_PARAMS,
                 "Field 'timeout_ms' must be an integer",
@@ -56,6 +56,26 @@ pub fn validate_action_params(action: &str, params: &Value) -> Result<(), Struct
 
             if obj.get("selector").is_some() {
                 validate_selector_field(obj, "selector")?;
+            }
+
+            if obj.get("selector").is_some() && obj.get("ref").is_some() {
+                return Err(StructuredError::new(
+                    ERR_INVALID_PARAMS,
+                    "Provide at most one of 'ref' or 'selector' for snapshot",
+                ));
+            }
+
+            if let Some(reference) = obj.get("ref") {
+                let raw_ref = reference.as_str().ok_or_else(|| {
+                    StructuredError::new(ERR_INVALID_REF, "Field 'ref' must be a string")
+                })?;
+                let normalized = raw_ref.trim().trim_start_matches('@');
+                if !normalized.starts_with('e') || normalized.len() < 2 {
+                    return Err(StructuredError::new(
+                        ERR_INVALID_REF,
+                        "Field 'ref' must match @eN (example: @e12)",
+                    ));
+                }
             }
         }
 
@@ -316,19 +336,24 @@ fn validate_single_target(
     if !has_ref && !has_selector {
         return Err(StructuredError::new(
             ERR_INVALID_PARAMS,
-            format!("Provide '{selector_key}' for element targeting"),
+            format!("Provide '{selector_key}' or '{ref_key}' for element targeting"),
         )
-        .with_hint("Refs require a prior snapshot; use selector for direct element targeting."));
+        .with_hint("Use selector for direct targeting, or ref from a prior snapshot (@eN)."));
+    }
+
+    if has_ref && has_selector {
+        return Err(StructuredError::new(
+            ERR_INVALID_PARAMS,
+            format!("Provide at most one of '{ref_key}' or '{selector_key}'"),
+        ));
+    }
+
+    if has_ref {
+        validate_ref_field(obj, ref_key)?;
     }
 
     if has_selector {
         validate_selector_field(obj, selector_key)?;
-    } else if has_ref {
-        return Err(StructuredError::new(
-            ERR_NOT_IMPLEMENTED,
-            format!("'{ref_key}' requires WebSocket CDP connection for snapshot-based targeting"),
-        )
-        .with_hint("Use 'selector' for REST API element interactions."));
     }
 
     Ok(())
@@ -482,7 +507,7 @@ pub fn resolve_timeout_ms(action: &str, params: &Map<String, Value>) -> u32 {
 pub fn resolve_backend_url(params: &Map<String, Value>) -> Result<String, StructuredError> {
     let url = params
         .get("backend_url")
-        .and_then(Value::as_str)
+        .and_then(|v| if v.is_null() { None } else { v.as_str() })
         .map(str::trim)
         .filter(|s| !s.is_empty())
         .unwrap_or(DEFAULT_BROWSERLESS_URL);
@@ -503,7 +528,7 @@ pub fn resolve_backend_url(params: &Map<String, Value>) -> Result<String, Struct
 pub fn extract_optional_session_id(params: &Map<String, Value>) -> Option<String> {
     params
         .get("session_id")
-        .and_then(Value::as_str)
+        .and_then(|v| if v.is_null() { None } else { v.as_str() })
         .map(str::trim)
         .filter(|v| !v.is_empty())
         .map(String::from)
@@ -524,13 +549,31 @@ mod tests {
     }
 
     #[test]
-    fn test_ref_not_supported_in_rest_mode() {
-        let err = validate_action_params(
+    fn test_wait_validation_accepts_ref_mode() {
+        let result = validate_action_params(
+            "wait",
+            &json!({"action": "wait", "session_id": "s1", "ref": "@e5"}),
+        );
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_ref_target_is_accepted_for_click() {
+        let result = validate_action_params(
             "click",
             &json!({"action": "click", "session_id": "s1", "ref": "@e1"}),
+        );
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_ref_and_selector_together_for_click_is_rejected() {
+        let err = validate_action_params(
+            "click",
+            &json!({"action": "click", "session_id": "s1", "ref": "@e1", "selector": "button"}),
         )
-        .expect_err("must fail ref not supported");
-        assert_eq!(err.code, ERR_NOT_IMPLEMENTED);
+        .expect_err("must fail when both ref and selector are provided");
+        assert_eq!(err.code, ERR_INVALID_PARAMS);
     }
 
     #[test]
@@ -601,6 +644,29 @@ mod tests {
     }
 
     #[test]
+    fn test_timeout_null_is_accepted() {
+        let result = validate_action_params(
+            "open",
+            &json!({"action": "open", "url": "https://example.com", "timeout_ms": null}),
+        );
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_backend_url_null_uses_default() {
+        let url = resolve_backend_url(&Map::from_iter([("backend_url".to_string(), Value::Null)]))
+            .expect("null backend_url should use default");
+        assert_eq!(url, DEFAULT_BROWSERLESS_URL);
+    }
+
+    #[test]
+    fn test_extract_optional_session_id_null_returns_none() {
+        let session_id =
+            extract_optional_session_id(&Map::from_iter([("session_id".to_string(), Value::Null)]));
+        assert!(session_id.is_none());
+    }
+
+    #[test]
     fn test_session_create_validation_passes_without_session_id() {
         let result = validate_action_params("session_create", &json!({"action": "session_create"}));
         assert!(result.is_ok());
@@ -618,6 +684,35 @@ mod tests {
         let result = validate_action_params("session_close", &json!({"action": "session_close"}));
         assert!(result.is_err());
         assert_eq!(result.unwrap_err().code, ERR_INVALID_PARAMS);
+    }
+
+    #[test]
+    fn test_snapshot_validation_rejects_ref_and_selector_together() {
+        let result = validate_action_params(
+            "snapshot",
+            &json!({
+                "action": "snapshot",
+                "session_id": "s1",
+                "ref": "@e1",
+                "selector": "main"
+            }),
+        );
+        assert!(result.is_err());
+        assert_eq!(result.unwrap_err().code, ERR_INVALID_PARAMS);
+    }
+
+    #[test]
+    fn test_snapshot_validation_rejects_malformed_ref() {
+        let result = validate_action_params(
+            "snapshot",
+            &json!({
+                "action": "snapshot",
+                "session_id": "s1",
+                "ref": "@x1"
+            }),
+        );
+        assert!(result.is_err());
+        assert_eq!(result.unwrap_err().code, ERR_INVALID_REF);
     }
 
     #[test]
@@ -677,5 +772,35 @@ mod tests {
             }),
         );
         assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_drag_validation_accepts_ref_targets() {
+        let result = validate_action_params(
+            "drag",
+            &json!({
+                "action": "drag",
+                "session_id": "s1",
+                "source_ref": "@e1",
+                "target_ref": "@e2"
+            }),
+        );
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_drag_validation_rejects_mixed_source_target_modes() {
+        let err = validate_action_params(
+            "drag",
+            &json!({
+                "action": "drag",
+                "session_id": "s1",
+                "source_ref": "@e1",
+                "source_selector": "#a",
+                "target_selector": "#b"
+            }),
+        )
+        .expect_err("must fail mixed source targeting fields");
+        assert_eq!(err.code, ERR_INVALID_PARAMS);
     }
 }
