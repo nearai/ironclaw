@@ -12,7 +12,7 @@ use uuid::Uuid;
 use crate::error::WorkspaceError;
 
 use crate::workspace::document::{MemoryChunk, MemoryDocument, WorkspaceEntry};
-use crate::workspace::search::{RankedResult, SearchConfig, SearchResult, reciprocal_rank_fusion};
+use crate::workspace::search::{RankedResult, SearchConfig, SearchResult, fuse_results};
 
 /// Database repository for workspace operations.
 pub struct Repository {
@@ -415,7 +415,7 @@ impl Repository {
             Vec::new()
         };
 
-        Ok(reciprocal_rank_fusion(fts_results, vector_results, config))
+        Ok(fuse_results(fts_results, vector_results, config))
     }
 
     /// Full-text search using PostgreSQL ts_rank_cd.

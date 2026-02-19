@@ -14,7 +14,7 @@ use crate::db::WorkspaceStore;
 use crate::error::WorkspaceError;
 use crate::workspace::{
     MemoryChunk, MemoryDocument, RankedResult, SearchConfig, SearchResult, WorkspaceEntry,
-    reciprocal_rank_fusion,
+    fuse_results,
 };
 
 use chrono::Utc;
@@ -602,6 +602,6 @@ impl WorkspaceStore for LibSqlBackend {
             );
         }
 
-        Ok(reciprocal_rank_fusion(fts_results, vector_results, config))
+        Ok(fuse_results(fts_results, vector_results, config))
     }
 }

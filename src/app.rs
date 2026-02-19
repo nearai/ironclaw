@@ -354,7 +354,8 @@ impl AppBuilder {
 
         // Register memory tools if database is available
         let workspace = if let Some(ref db) = self.db {
-            let mut ws = Workspace::new_with_db("default", db.clone());
+            let mut ws = Workspace::new_with_db("default", db.clone())
+                .with_search_config(&self.config.search);
             if let Some(ref emb) = embeddings {
                 ws = ws.with_embeddings(emb.clone());
             }
