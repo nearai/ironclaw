@@ -17,6 +17,8 @@ pub struct EmbeddingsConfig {
     pub model: String,
     /// Ollama base URL (for Ollama provider). Defaults to http://localhost:11434.
     pub ollama_base_url: String,
+    /// Embedding vector dimension. Auto-detected from known models when not set.
+    pub dimension: Option<usize>,
 }
 
 impl Default for EmbeddingsConfig {
@@ -27,7 +29,22 @@ impl Default for EmbeddingsConfig {
             openai_api_key: None,
             model: "text-embedding-3-small".to_string(),
             ollama_base_url: "http://localhost:11434".to_string(),
+            dimension: None,
         }
+    }
+}
+
+/// Infer embedding dimension from well-known model names.
+fn infer_dimension(model: &str) -> usize {
+    match model {
+        "text-embedding-3-small" => 1536,
+        "text-embedding-3-large" => 3072,
+        "text-embedding-ada-002" => 1536,
+        "nomic-embed-text" => 768,
+        "mxbai-embed-large" => 1024,
+        "all-minilm" | "all-minilm:l6-v2" => 384,
+        "snowflake-arctic-embed" => 1024,
+        _ => 768, // Conservative default for unknown models
     }
 }
 
@@ -45,6 +62,14 @@ impl EmbeddingsConfig {
             .or_else(|| settings.ollama_base_url.clone())
             .unwrap_or_else(|| "http://localhost:11434".to_string());
 
+        let dimension = optional_env("EMBEDDING_DIMENSION")?
+            .map(|s| s.parse::<usize>())
+            .transpose()
+            .map_err(|e| ConfigError::InvalidValue {
+                key: "EMBEDDING_DIMENSION".to_string(),
+                message: format!("must be a positive integer: {e}"),
+            })?;
+
         let enabled = optional_env("EMBEDDING_ENABLED")?
             .map(|s| s.parse())
             .transpose()
@@ -60,12 +85,18 @@ impl EmbeddingsConfig {
             openai_api_key,
             model,
             ollama_base_url,
+            dimension,
         })
     }
 
     /// Get the OpenAI API key if configured.
     pub fn openai_api_key(&self) -> Option<&str> {
         self.openai_api_key.as_ref().map(|s| s.expose_secret())
+    }
+
+    /// Get the embedding dimension — explicit override, or inferred from model name.
+    pub fn effective_dimension(&self) -> usize {
+        self.dimension.unwrap_or_else(|| infer_dimension(&self.model))
     }
 }
 

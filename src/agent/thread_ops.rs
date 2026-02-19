@@ -11,7 +11,7 @@ use uuid::Uuid;
 use crate::agent::Agent;
 use crate::agent::compaction::ContextCompactor;
 use crate::agent::dispatcher::{AgenticLoopResult, detect_auth_awaiting, parse_auth_result};
-use crate::agent::session::{Session, ThreadState};
+use crate::agent::session::{PendingApproval, Session, ThreadState};
 use crate::agent::submission::SubmissionResult;
 use crate::channels::{IncomingMessage, StatusUpdate};
 use crate::context::JobContext;
@@ -781,7 +781,8 @@ impl Agent {
                 result_content,
             ));
 
-            // Execute deferred tool calls from the same assistant message
+            // Execute deferred tool calls from the same assistant message,
+            // applying the same approval + hook checks as the main dispatcher loop.
             if !deferred_tool_calls.is_empty() {
                 let _ = self
                     .channels
@@ -796,7 +797,65 @@ impl Agent {
                     .await;
             }
 
-            for tc in deferred_tool_calls {
+            let mut deferred_idx = 0usize;
+            while deferred_idx < deferred_tool_calls.len() {
+                let tc = &deferred_tool_calls[deferred_idx];
+
+                // Check approval for each deferred tool (same logic as dispatcher)
+                if let Some(tool) = self.tools().get(&tc.name).await
+                    && tool.requires_approval()
+                {
+                    let mut is_auto_approved = {
+                        let sess = session.lock().await;
+                        sess.is_tool_auto_approved(&tc.name)
+                    };
+
+                    if is_auto_approved && tool.requires_approval_for(&tc.arguments) {
+                        is_auto_approved = false;
+                    }
+
+                    if !is_auto_approved {
+                        // Need approval — store remaining deferred tools and return
+                        let remaining = deferred_tool_calls[deferred_idx + 1..].to_vec();
+                        let new_pending = PendingApproval {
+                            request_id: Uuid::new_v4(),
+                            tool_name: tc.name.clone(),
+                            parameters: tc.arguments.clone(),
+                            description: tool.description().to_string(),
+                            tool_call_id: tc.id.clone(),
+                            context_messages: context_messages.clone(),
+                            deferred_tool_calls: remaining,
+                        };
+
+                        let request_id = new_pending.request_id;
+                        let tool_name = new_pending.tool_name.clone();
+                        let description = new_pending.description.clone();
+                        let parameters = new_pending.parameters.clone();
+
+                        {
+                            let mut sess = session.lock().await;
+                            if let Some(thread) = sess.threads.get_mut(&thread_id) {
+                                thread.await_approval(new_pending);
+                            }
+                        }
+
+                        let _ = self
+                            .channels
+                            .send_status(
+                                &message.channel,
+                                StatusUpdate::Status("Awaiting approval".into()),
+                                &message.metadata,
+                            )
+                            .await;
+                        return Ok(SubmissionResult::NeedApproval {
+                            request_id,
+                            tool_name,
+                            description,
+                            parameters,
+                        });
+                    }
+                }
+
                 let _ = self
                     .channels
                     .send_status(
@@ -842,6 +901,8 @@ impl Agent {
                     &tc.name,
                     deferred_content,
                 ));
+
+                deferred_idx += 1;
             }
 
             // Continue the agentic loop (a tool was already executed this turn)

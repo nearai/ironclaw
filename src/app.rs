@@ -389,7 +389,7 @@ impl AppBuilder {
         ),
         anyhow::Error,
     > {
-        use crate::workspace::{NearAiEmbeddings, OpenAiEmbeddings};
+        use crate::workspace::{NearAiEmbeddings, OllamaEmbeddings, OpenAiEmbeddings};
 
         let safety = Arc::new(SafetyLayer::new(&self.config.safety));
         tracing::info!("Safety layer initialized");
@@ -411,7 +411,25 @@ impl AppBuilder {
                             &self.config.llm.nearai.base_url,
                             self.session.clone(),
                         )
-                        .with_model(&self.config.embeddings.model, 1536),
+                        .with_model(
+                            &self.config.embeddings.model,
+                            self.config.embeddings.effective_dimension(),
+                        ),
+                    ))
+                }
+                "ollama" => {
+                    tracing::info!(
+                        "Embeddings enabled via Ollama (model: {}, dim: {}, url: {})",
+                        self.config.embeddings.model,
+                        self.config.embeddings.effective_dimension(),
+                        self.config.embeddings.ollama_base_url,
+                    );
+                    Some(Arc::new(
+                        OllamaEmbeddings::new(&self.config.embeddings.ollama_base_url)
+                            .with_model(
+                                &self.config.embeddings.model,
+                                self.config.embeddings.effective_dimension(),
+                            ),
                     ))
                 }
                 _ => {
@@ -423,10 +441,7 @@ impl AppBuilder {
                         Some(Arc::new(OpenAiEmbeddings::with_model(
                             api_key,
                             &self.config.embeddings.model,
-                            match self.config.embeddings.model.as_str() {
-                                "text-embedding-3-large" => 3072,
-                                _ => 1536,
-                            },
+                            self.config.embeddings.effective_dimension(),
                         )))
                     } else {
                         tracing::warn!("Embeddings configured but OPENAI_API_KEY not set");

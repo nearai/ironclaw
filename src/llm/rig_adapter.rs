@@ -437,7 +437,9 @@ where
         &self,
         request: ToolCompletionRequest,
     ) -> Result<ToolCompletionResponse, LlmError> {
-        let (preamble, history) = convert_messages(&request.messages);
+        let mut messages = request.messages;
+        crate::llm::provider::sanitize_tool_messages(&mut messages);
+        let (preamble, history) = convert_messages(&messages);
         let tools = convert_tools(&request.tools);
         let tool_choice = convert_tool_choice(request.tool_choice.as_deref());
 
