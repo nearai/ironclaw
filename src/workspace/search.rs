@@ -1,16 +1,28 @@
 //! Hybrid search combining full-text and semantic search.
 //!
-//! Uses Reciprocal Rank Fusion (RRF) to combine results from:
-//! 1. PostgreSQL full-text search (ts_rank_cd)
-//! 2. pgvector cosine similarity search
+//! Supports two fusion strategies:
+//! 1. **RRF** (Reciprocal Rank Fusion) — the default, rank-based method.
+//!    `score = sum(1 / (k + rank))` for each retrieval method.
+//! 2. **WeightedScore** — normalizes per-method scores to \[0,1\] and combines
+//!    with configurable weights: `fts_weight * fts_score + vector_weight * vector_score`.
 //!
-//! RRF formula: score = sum(1 / (k + rank)) for each retrieval method
-//! This is robust to different score scales and produces better results
-//! than simple score averaging.
+//! Both strategies combine results from:
+//! - PostgreSQL / libSQL full-text search
+//! - pgvector / libsql_vector cosine similarity search
 
 use std::collections::HashMap;
 
 use uuid::Uuid;
+
+/// Strategy used to fuse FTS and vector search results.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum FusionStrategy {
+    /// Reciprocal Rank Fusion (default). Ignores `fts_weight`/`vector_weight`.
+    #[default]
+    Rrf,
+    /// Weighted score fusion using normalized rank-derived scores.
+    WeightedScore,
+}
 
 /// Configuration for hybrid search.
 #[derive(Debug, Clone)]
@@ -27,6 +39,12 @@ pub struct SearchConfig {
     pub min_score: f32,
     /// Maximum results to fetch from each method before fusion.
     pub pre_fusion_limit: usize,
+    /// Fusion strategy to use when combining results.
+    pub fusion_strategy: FusionStrategy,
+    /// Weight for FTS results in `WeightedScore` fusion (default 0.7).
+    pub fts_weight: f32,
+    /// Weight for vector results in `WeightedScore` fusion (default 0.3).
+    pub vector_weight: f32,
 }
 
 impl Default for SearchConfig {
@@ -38,6 +56,9 @@ impl Default for SearchConfig {
             use_vector: true,
             min_score: 0.0,
             pre_fusion_limit: 50,
+            fusion_strategy: FusionStrategy::default(),
+            fts_weight: 0.7,
+            vector_weight: 0.3,
         }
     }
 }
@@ -72,6 +93,24 @@ impl SearchConfig {
     /// Set minimum score threshold.
     pub fn with_min_score(mut self, score: f32) -> Self {
         self.min_score = score.clamp(0.0, 1.0);
+        self
+    }
+
+    /// Set the fusion strategy.
+    pub fn with_fusion_strategy(mut self, strategy: FusionStrategy) -> Self {
+        self.fusion_strategy = strategy;
+        self
+    }
+
+    /// Set the FTS weight for `WeightedScore` fusion.
+    pub fn with_fts_weight(mut self, weight: f32) -> Self {
+        self.fts_weight = weight;
+        self
+    }
+
+    /// Set the vector weight for `WeightedScore` fusion.
+    pub fn with_vector_weight(mut self, weight: f32) -> Self {
+        self.vector_weight = weight;
         self
     }
 }
@@ -117,6 +156,22 @@ pub struct RankedResult {
     pub document_id: Uuid,
     pub content: String,
     pub rank: u32, // 1-based rank
+}
+
+/// Fuse FTS and vector search results using the strategy specified in `config`.
+///
+/// This is the primary entry point for result fusion. Delegates to
+/// [`reciprocal_rank_fusion`] or [`weighted_score_fusion`] based on
+/// `config.fusion_strategy`.
+pub fn fuse_results(
+    fts_results: Vec<RankedResult>,
+    vector_results: Vec<RankedResult>,
+    config: &SearchConfig,
+) -> Vec<SearchResult> {
+    match config.fusion_strategy {
+        FusionStrategy::Rrf => reciprocal_rank_fusion(fts_results, vector_results, config),
+        FusionStrategy::WeightedScore => weighted_score_fusion(fts_results, vector_results, config),
+    }
 }
 
 /// Reciprocal Rank Fusion algorithm.
@@ -188,6 +243,103 @@ pub fn reciprocal_rank_fusion(
     }
 
     // Convert to SearchResult and sort by score
+    let mut results: Vec<SearchResult> = chunk_scores
+        .into_iter()
+        .map(|(chunk_id, info)| SearchResult {
+            document_id: info.document_id,
+            chunk_id,
+            content: info.content,
+            score: info.score,
+            fts_rank: info.fts_rank,
+            vector_rank: info.vector_rank,
+        })
+        .collect();
+
+    // Normalize scores to 0-1 range
+    if let Some(max_score) = results.iter().map(|r| r.score).reduce(f32::max)
+        && max_score > 0.0
+    {
+        for result in &mut results {
+            result.score /= max_score;
+        }
+    }
+
+    // Filter by minimum score
+    if config.min_score > 0.0 {
+        results.retain(|r| r.score >= config.min_score);
+    }
+
+    // Sort by score descending
+    results.sort_by(|a, b| {
+        b.score
+            .partial_cmp(&a.score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+
+    // Limit results
+    results.truncate(config.limit);
+
+    results
+}
+
+/// Weighted score fusion.
+///
+/// Normalizes ranks from each method to \[0,1\] scores
+/// (`1/rank` gives rank 1 → 1.0, rank N → 1/N), then combines with
+/// configurable weights: `fts_weight * fts_score + vector_weight * vector_score`.
+///
+/// Post-processing (normalization, min_score filter, sort, truncate) matches RRF.
+pub fn weighted_score_fusion(
+    fts_results: Vec<RankedResult>,
+    vector_results: Vec<RankedResult>,
+    config: &SearchConfig,
+) -> Vec<SearchResult> {
+    struct ChunkInfo {
+        document_id: Uuid,
+        content: String,
+        score: f32,
+        fts_rank: Option<u32>,
+        vector_rank: Option<u32>,
+    }
+
+    let mut chunk_scores: HashMap<Uuid, ChunkInfo> = HashMap::new();
+
+    // Process FTS results: score = fts_weight * (1 / rank)
+    for result in fts_results {
+        let score = config.fts_weight * (1.0 / result.rank as f32);
+        chunk_scores
+            .entry(result.chunk_id)
+            .and_modify(|info| {
+                info.score += score;
+                info.fts_rank = Some(result.rank);
+            })
+            .or_insert(ChunkInfo {
+                document_id: result.document_id,
+                content: result.content,
+                score,
+                fts_rank: Some(result.rank),
+                vector_rank: None,
+            });
+    }
+
+    // Process vector results: score = vector_weight * (1 / rank)
+    for result in vector_results {
+        let score = config.vector_weight * (1.0 / result.rank as f32);
+        chunk_scores
+            .entry(result.chunk_id)
+            .and_modify(|info| {
+                info.score += score;
+                info.vector_rank = Some(result.rank);
+            })
+            .or_insert(ChunkInfo {
+                document_id: result.document_id,
+                content: result.content,
+                score,
+                fts_rank: None,
+                vector_rank: Some(result.rank),
+            });
+    }
+
     let mut results: Vec<SearchResult> = chunk_scores
         .into_iter()
         .map(|(chunk_id, info)| SearchResult {
@@ -387,5 +539,110 @@ mod tests {
         let vector_only = SearchConfig::default().vector_only();
         assert!(!vector_only.use_fts);
         assert!(vector_only.use_vector);
+
+        let weighted = SearchConfig::default()
+            .with_fusion_strategy(FusionStrategy::WeightedScore)
+            .with_fts_weight(0.8)
+            .with_vector_weight(0.2);
+        assert_eq!(weighted.fusion_strategy, FusionStrategy::WeightedScore);
+        assert!((weighted.fts_weight - 0.8).abs() < 0.001);
+        assert!((weighted.vector_weight - 0.2).abs() < 0.001);
+    }
+
+    #[test]
+    fn test_weighted_fusion_basic() {
+        // With equal weights, a hybrid match should still rank highest.
+        let config = SearchConfig::default()
+            .with_fusion_strategy(FusionStrategy::WeightedScore)
+            .with_fts_weight(1.0)
+            .with_vector_weight(1.0)
+            .with_limit(10);
+
+        let chunk1 = Uuid::new_v4(); // In both
+        let chunk2 = Uuid::new_v4(); // FTS only
+        let chunk3 = Uuid::new_v4(); // Vector only
+        let doc = Uuid::new_v4();
+
+        let fts = vec![make_result(chunk1, doc, 1), make_result(chunk2, doc, 2)];
+        let vec_results = vec![make_result(chunk1, doc, 1), make_result(chunk3, doc, 2)];
+
+        let results = weighted_score_fusion(fts, vec_results, &config);
+
+        assert_eq!(results.len(), 3);
+        // Hybrid match (chunk1) should be first — it gets score from both
+        assert_eq!(results[0].chunk_id, chunk1);
+        assert!(results[0].is_hybrid());
+        assert!(results[0].score > results[1].score);
+    }
+
+    #[test]
+    fn test_weighted_fusion_fts_boost() {
+        // High FTS weight should elevate FTS-only results above vector-only.
+        let config = SearchConfig::default()
+            .with_fusion_strategy(FusionStrategy::WeightedScore)
+            .with_fts_weight(2.0)
+            .with_vector_weight(0.5)
+            .with_limit(10);
+
+        let chunk_fts = Uuid::new_v4(); // FTS only, rank 2
+        let chunk_vec = Uuid::new_v4(); // Vector only, rank 2
+        let doc = Uuid::new_v4();
+
+        let fts = vec![make_result(chunk_fts, doc, 2)];
+        let vec_results = vec![make_result(chunk_vec, doc, 2)];
+
+        let results = weighted_score_fusion(fts, vec_results, &config);
+
+        assert_eq!(results.len(), 2);
+        // FTS result should rank higher because of the 2.0 weight vs 0.5
+        assert_eq!(results[0].chunk_id, chunk_fts);
+        assert!(results[0].from_fts());
+        assert!(!results[0].from_vector());
+    }
+
+    #[test]
+    fn test_weighted_fusion_single_source() {
+        // Only FTS results — should still work correctly.
+        let config = SearchConfig::default()
+            .with_fusion_strategy(FusionStrategy::WeightedScore)
+            .with_limit(10);
+
+        let chunk1 = Uuid::new_v4();
+        let chunk2 = Uuid::new_v4();
+        let doc = Uuid::new_v4();
+
+        let fts = vec![make_result(chunk1, doc, 1), make_result(chunk2, doc, 3)];
+
+        let results = weighted_score_fusion(fts, Vec::new(), &config);
+
+        assert_eq!(results.len(), 2);
+        assert_eq!(results[0].chunk_id, chunk1);
+        assert!(results[0].score > results[1].score);
+        // Top result should be normalized to 1.0
+        assert!((results[0].score - 1.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn test_fuse_results_dispatches_correctly() {
+        let chunk1 = Uuid::new_v4();
+        let doc = Uuid::new_v4();
+
+        let fts = vec![make_result(chunk1, doc, 1)];
+
+        // RRF strategy
+        let rrf_config = SearchConfig::default().with_limit(10);
+        let rrf_results = fuse_results(fts.clone(), Vec::new(), &rrf_config);
+        assert_eq!(rrf_results.len(), 1);
+
+        // Weighted strategy
+        let weighted_config = SearchConfig::default()
+            .with_fusion_strategy(FusionStrategy::WeightedScore)
+            .with_limit(10);
+        let weighted_results = fuse_results(fts, Vec::new(), &weighted_config);
+        assert_eq!(weighted_results.len(), 1);
+
+        // Both should normalize single result to 1.0
+        assert!((rrf_results[0].score - 1.0).abs() < 0.001);
+        assert!((weighted_results[0].score - 1.0).abs() < 0.001);
     }
 }

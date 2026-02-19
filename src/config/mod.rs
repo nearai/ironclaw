@@ -17,6 +17,7 @@ mod llm;
 mod routines;
 mod safety;
 mod sandbox;
+mod search;
 mod secrets;
 mod skills;
 mod tunnel;
@@ -43,6 +44,7 @@ pub use self::llm::{
 pub use self::routines::RoutineConfig;
 pub use self::safety::SafetyConfig;
 pub use self::sandbox::{ClaudeCodeConfig, SandboxModeConfig};
+pub use self::search::WorkspaceSearchConfig;
 pub use self::secrets::SecretsConfig;
 pub use self::skills::SkillsConfig;
 pub use self::tunnel::TunnelConfig;
@@ -74,6 +76,7 @@ pub struct Config {
     pub sandbox: SandboxModeConfig,
     pub claude_code: ClaudeCodeConfig,
     pub skills: SkillsConfig,
+    pub search: WorkspaceSearchConfig,
     pub observability: crate::observability::ObservabilityConfig,
 }
 
@@ -198,6 +201,7 @@ impl Config {
             sandbox: SandboxModeConfig::resolve()?,
             claude_code: ClaudeCodeConfig::resolve()?,
             skills: SkillsConfig::resolve()?,
+            search: WorkspaceSearchConfig::resolve()?,
             observability: crate::observability::ObservabilityConfig {
                 backend: std::env::var("OBSERVABILITY_BACKEND").unwrap_or_else(|_| "none".into()),
             },
