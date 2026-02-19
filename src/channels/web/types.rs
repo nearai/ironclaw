@@ -412,6 +412,43 @@ impl ActionResponse {
     }
 }
 
+// --- Skills ---
+
+#[derive(Debug, Serialize)]
+pub struct SkillInfo {
+    pub name: String,
+    pub description: String,
+    pub version: String,
+    pub trust: String,
+    pub source: String,
+    pub keywords: Vec<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct SkillListResponse {
+    pub skills: Vec<SkillInfo>,
+    pub count: usize,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct SkillSearchRequest {
+    pub query: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct SkillSearchResponse {
+    pub catalog: Vec<serde_json::Value>,
+    pub installed: Vec<SkillInfo>,
+    pub registry_url: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct SkillInstallRequest {
+    pub name: String,
+    pub url: Option<String>,
+    pub content: Option<String>,
+}
+
 // --- Auth Token ---
 
 /// Request to submit an auth token for an extension (dedicated endpoint).

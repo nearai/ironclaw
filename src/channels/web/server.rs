@@ -139,6 +139,10 @@ pub struct GatewayState {
     pub ws_tracker: Option<Arc<crate::channels::web::ws::WsConnectionTracker>>,
     /// LLM provider for OpenAI-compatible API proxy.
     pub llm_provider: Option<Arc<dyn crate::llm::LlmProvider>>,
+    /// Skill registry for skill management API.
+    pub skill_registry: Option<Arc<std::sync::RwLock<crate::skills::SkillRegistry>>>,
+    /// Skill catalog for searching the ClawHub registry.
+    pub skill_catalog: Option<Arc<crate::skills::catalog::SkillCatalog>>,
     /// Rate limiter for chat endpoints (30 messages per 60 seconds).
     pub chat_rate_limiter: RateLimiter,
 }
@@ -222,6 +226,14 @@ pub async fn start_server(
             axum::routing::delete(routines_delete_handler),
         )
         .route("/api/routines/{id}/runs", get(routines_runs_handler))
+        // Skills
+        .route("/api/skills", get(skills_list_handler))
+        .route("/api/skills/search", post(skills_search_handler))
+        .route("/api/skills/install", post(skills_install_handler))
+        .route(
+            "/api/skills/{name}",
+            axum::routing::delete(skills_remove_handler),
+        )
         // Settings
         .route("/api/settings", get(settings_list_handler))
         .route("/api/settings/export", get(settings_export_handler))
@@ -773,7 +785,7 @@ async fn chat_threads_handler(
 ) -> Result<Json<ThreadListResponse>, (StatusCode, String)> {
     const THREAD_PAGE_DEFAULT: usize = 50;
     const THREAD_PAGE_MAX: usize = 200;
-    const THREAD_FETCH_MAX: usize = 50_000;
+    const THREAD_OFFSET_MAX: usize = 50_000;
 
     let session_manager = state.session_manager.as_ref().ok_or((
         StatusCode::SERVICE_UNAVAILABLE,
@@ -783,15 +795,12 @@ async fn chat_threads_handler(
     let session = session_manager.get_or_create_session(&state.user_id).await;
     let sess = session.lock().await;
     let active_thread = sess.active_thread;
-    let offset = query.offset.min(THREAD_FETCH_MAX);
+    let offset = query.offset.min(THREAD_OFFSET_MAX);
     let page_limit = query
         .limit
         .unwrap_or(THREAD_PAGE_DEFAULT)
         .clamp(1, THREAD_PAGE_MAX);
-    let fetch_limit = offset
-        .saturating_add(page_limit)
-        .saturating_add(2)
-        .min(THREAD_FETCH_MAX);
+    let fetch_limit = page_limit.saturating_add(1);
 
     // Try DB first for persistent thread list
     if let Some(ref store) = state.store {
@@ -802,7 +811,12 @@ async fn chat_threads_handler(
             .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
         let summaries = store
-            .list_conversations_with_preview(&state.user_id, "gateway", fetch_limit as i64)
+            .list_conversations_with_preview(
+                &state.user_id,
+                "gateway",
+                offset as i64,
+                fetch_limit as i64,
+            )
             .await
             .map_err(|e| {
                 tracing::error!(
@@ -839,17 +853,11 @@ async fn chat_threads_handler(
                 threads.push(info);
             }
         }
-        threads.sort_by(|a, b| {
-            b.updated_at
-                .cmp(&a.updated_at)
-                .then_with(|| b.id.cmp(&a.id))
-        });
-        let total_regular = threads.len();
-        let page_threads: Vec<ThreadInfo> =
-            threads.into_iter().skip(offset).take(page_limit).collect();
-        let page_len = page_threads.len();
-        let next_offset = offset.saturating_add(page_len);
-        let has_more = total_regular > next_offset;
+        let has_more = threads.len() > page_limit;
+        if has_more {
+            threads.truncate(page_limit);
+        }
+        let next_offset = offset.saturating_add(threads.len());
 
         // If assistant wasn't in the list (0 messages), synthesize it
         if assistant_thread.is_none() {
@@ -866,7 +874,7 @@ async fn chat_threads_handler(
 
         return Ok(Json(ThreadListResponse {
             assistant_thread,
-            threads: page_threads,
+            threads,
             active_thread,
             has_more,
             next_offset: if has_more { Some(next_offset) } else { None },
@@ -1342,6 +1350,7 @@ async fn jobs_restart_handler(
         created_at: now,
         started_at: None,
         completed_at: None,
+        credential_grants_json: old_job.credential_grants_json.clone(),
     };
     store
         .save_sandbox_job(&record)
@@ -1354,9 +1363,28 @@ async fn jobs_restart_handler(
         _ => crate::orchestrator::job_manager::JobMode::Worker,
     };
 
+    // Restore credential grants from the original job so the restarted container
+    // has access to the same secrets.
+    let credential_grants: Vec<crate::orchestrator::auth::CredentialGrant> =
+        serde_json::from_str(&old_job.credential_grants_json).unwrap_or_else(|e| {
+            tracing::warn!(
+                job_id = %old_job.id,
+                "Failed to deserialize credential grants from stored job: {}. \
+                 Restarted job will have no credentials.",
+                e
+            );
+            vec![]
+        });
+
     let project_dir = std::path::PathBuf::from(&old_job.project_dir);
     let _token = jm
-        .create_job(new_job_id, &old_job.task, Some(project_dir), mode)
+        .create_job(
+            new_job_id,
+            &old_job.task,
+            Some(project_dir),
+            mode,
+            credential_grants,
+        )
         .await
         .map_err(|e| {
             (
@@ -1452,7 +1480,7 @@ async fn jobs_events_handler(
     }
 
     let events = store
-        .list_job_events(job_id)
+        .list_job_events(job_id, None)
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
@@ -1843,6 +1871,253 @@ async fn extensions_remove_handler(
 
     match ext_mgr.remove(&name).await {
         Ok(message) => Ok(Json(ActionResponse::ok(message))),
+        Err(e) => Ok(Json(ActionResponse::fail(e.to_string()))),
+    }
+}
+
+// --- Skills handlers ---
+
+async fn skills_list_handler(
+    State(state): State<Arc<GatewayState>>,
+) -> Result<Json<super::types::SkillListResponse>, (StatusCode, String)> {
+    let registry = state.skill_registry.as_ref().ok_or((
+        StatusCode::NOT_IMPLEMENTED,
+        "Skills system not enabled".to_string(),
+    ))?;
+
+    let guard = registry.read().map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Skill registry lock poisoned: {}", e),
+        )
+    })?;
+
+    let skills: Vec<super::types::SkillInfo> = guard
+        .skills()
+        .iter()
+        .map(|s| super::types::SkillInfo {
+            name: s.manifest.name.clone(),
+            description: s.manifest.description.clone(),
+            version: s.manifest.version.clone(),
+            trust: s.trust.to_string(),
+            source: format!("{:?}", s.source),
+            keywords: s.manifest.activation.keywords.clone(),
+        })
+        .collect();
+
+    let count = skills.len();
+    Ok(Json(super::types::SkillListResponse { skills, count }))
+}
+
+async fn skills_search_handler(
+    State(state): State<Arc<GatewayState>>,
+    Json(req): Json<super::types::SkillSearchRequest>,
+) -> Result<Json<super::types::SkillSearchResponse>, (StatusCode, String)> {
+    let registry = state.skill_registry.as_ref().ok_or((
+        StatusCode::NOT_IMPLEMENTED,
+        "Skills system not enabled".to_string(),
+    ))?;
+
+    let catalog = state.skill_catalog.as_ref().ok_or((
+        StatusCode::NOT_IMPLEMENTED,
+        "Skill catalog not available".to_string(),
+    ))?;
+
+    // Search ClawHub catalog
+    let catalog_results = catalog.search(&req.query).await;
+    let catalog_json: Vec<serde_json::Value> = catalog_results
+        .into_iter()
+        .map(|e| {
+            serde_json::json!({
+                "slug": e.slug,
+                "name": e.name,
+                "description": e.description,
+                "version": e.version,
+                "score": e.score,
+            })
+        })
+        .collect();
+
+    // Search local skills
+    let query_lower = req.query.to_lowercase();
+    let installed: Vec<super::types::SkillInfo> = {
+        let guard = registry.read().map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Skill registry lock poisoned: {}", e),
+            )
+        })?;
+        guard
+            .skills()
+            .iter()
+            .filter(|s| {
+                s.manifest.name.to_lowercase().contains(&query_lower)
+                    || s.manifest.description.to_lowercase().contains(&query_lower)
+            })
+            .map(|s| super::types::SkillInfo {
+                name: s.manifest.name.clone(),
+                description: s.manifest.description.clone(),
+                version: s.manifest.version.clone(),
+                trust: s.trust.to_string(),
+                source: format!("{:?}", s.source),
+                keywords: s.manifest.activation.keywords.clone(),
+            })
+            .collect()
+    };
+
+    Ok(Json(super::types::SkillSearchResponse {
+        catalog: catalog_json,
+        installed,
+        registry_url: catalog.registry_url().to_string(),
+    }))
+}
+
+async fn skills_install_handler(
+    State(state): State<Arc<GatewayState>>,
+    headers: axum::http::HeaderMap,
+    Json(req): Json<super::types::SkillInstallRequest>,
+) -> Result<Json<ActionResponse>, (StatusCode, String)> {
+    // Require explicit confirmation header to prevent accidental installs.
+    // Chat tools have requires_approval(); this is the equivalent for the web API.
+    if headers
+        .get("x-confirm-action")
+        .and_then(|v| v.to_str().ok())
+        != Some("true")
+    {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "Skill install requires X-Confirm-Action: true header".to_string(),
+        ));
+    }
+
+    let registry = state.skill_registry.as_ref().ok_or((
+        StatusCode::NOT_IMPLEMENTED,
+        "Skills system not enabled".to_string(),
+    ))?;
+
+    let content = if let Some(ref raw) = req.content {
+        raw.clone()
+    } else if let Some(ref url) = req.url {
+        // Fetch from explicit URL (with SSRF protection)
+        crate::tools::builtin::skill_tools::fetch_skill_content(url)
+            .await
+            .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?
+    } else if let Some(ref catalog) = state.skill_catalog {
+        let url = crate::skills::catalog::skill_download_url(catalog.registry_url(), &req.name);
+        crate::tools::builtin::skill_tools::fetch_skill_content(&url)
+            .await
+            .map_err(|e| (StatusCode::BAD_GATEWAY, e.to_string()))?
+    } else {
+        return Ok(Json(ActionResponse::fail(
+            "Provide 'content' or 'url' to install a skill".to_string(),
+        )));
+    };
+
+    // Parse, check duplicates, and get user_dir under a brief read lock.
+    let (user_dir, skill_name_from_parse) = {
+        let guard = registry.read().map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Skill registry lock poisoned: {}", e),
+            )
+        })?;
+
+        let normalized = crate::skills::normalize_line_endings(&content);
+        let parsed = crate::skills::parser::parse_skill_md(&normalized)
+            .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
+        let skill_name = parsed.manifest.name.clone();
+
+        if guard.has(&skill_name) {
+            return Ok(Json(ActionResponse::fail(format!(
+                "Skill '{}' already exists",
+                skill_name
+            ))));
+        }
+
+        (guard.user_dir().to_path_buf(), skill_name)
+    };
+
+    // Perform async I/O (write to disk, load) with no lock held.
+    let normalized = crate::skills::normalize_line_endings(&content);
+    let (skill_name, loaded_skill) =
+        crate::skills::registry::SkillRegistry::prepare_install_to_disk(
+            &user_dir,
+            &skill_name_from_parse,
+            &normalized,
+        )
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    // Commit: brief write lock for in-memory addition
+    let mut guard = registry.write().map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Skill registry lock poisoned: {}", e),
+        )
+    })?;
+
+    match guard.commit_install(&skill_name, loaded_skill) {
+        Ok(()) => Ok(Json(ActionResponse::ok(format!(
+            "Skill '{}' installed",
+            skill_name
+        )))),
+        Err(e) => Ok(Json(ActionResponse::fail(e.to_string()))),
+    }
+}
+
+async fn skills_remove_handler(
+    State(state): State<Arc<GatewayState>>,
+    headers: axum::http::HeaderMap,
+    Path(name): Path<String>,
+) -> Result<Json<ActionResponse>, (StatusCode, String)> {
+    // Require explicit confirmation header to prevent accidental removals.
+    if headers
+        .get("x-confirm-action")
+        .and_then(|v| v.to_str().ok())
+        != Some("true")
+    {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "Skill removal requires X-Confirm-Action: true header".to_string(),
+        ));
+    }
+
+    let registry = state.skill_registry.as_ref().ok_or((
+        StatusCode::NOT_IMPLEMENTED,
+        "Skills system not enabled".to_string(),
+    ))?;
+
+    // Validate removal under a brief read lock
+    let skill_path = {
+        let guard = registry.read().map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Skill registry lock poisoned: {}", e),
+            )
+        })?;
+        guard
+            .validate_remove(&name)
+            .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?
+    };
+
+    // Delete files from disk (async I/O, no lock held)
+    crate::skills::registry::SkillRegistry::delete_skill_files(&skill_path)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    // Remove from in-memory registry under a brief write lock
+    let mut guard = registry.write().map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Skill registry lock poisoned: {}", e),
+        )
+    })?;
+
+    match guard.commit_remove(&name) {
+        Ok(()) => Ok(Json(ActionResponse::ok(format!(
+            "Skill '{}' removed",
+            name
+        )))),
         Err(e) => Ok(Json(ActionResponse::fail(e.to_string()))),
     }
 }

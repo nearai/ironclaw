@@ -141,8 +141,9 @@ ironclaw onboard
 ```
 
 The wizard handles database connection, NEAR AI authentication (via browser OAuth),
-and secrets encryption (using your system keychain). All settings are saved to
-`~/.ironclaw/settings.toml`.
+and secrets encryption (using your system keychain). Settings are persisted in the
+connected database; bootstrap variables (e.g. `DATABASE_URL`, `LLM_BACKEND`) are
+written to `~/.ironclaw/.env` so they are available before the database connects.
 
 ## Import Existing Claude History
 

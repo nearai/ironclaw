@@ -1038,9 +1038,18 @@ fn handle_message(message: TelegramMessage) {
         },
     );
 
-    // For /start with no args, emit placeholder so agent can respond with welcome
-    let content_to_emit = if cleaned_text.is_empty() && content.trim().starts_with('/') {
+    // Determine what to emit to the agent.
+    // - `/start` (no args): emit a welcome placeholder so the agent greets the user
+    // - Other bare `/commands` (e.g. /interrupt, /help): pass the raw command through
+    //   so Submission::parse() can handle it
+    // - Commands with args (e.g. `/start hello`): cleaned_text already has the args
+    // - Plain text: pass through as-is
+    let trimmed_content = content.trim();
+    let content_to_emit = if trimmed_content.eq_ignore_ascii_case("/start") {
         "[User started the bot]".to_string()
+    } else if cleaned_text.is_empty() && trimmed_content.starts_with('/') {
+        // Bare control command like /interrupt, /stop, /help — pass through raw
+        trimmed_content.to_string()
     } else if cleaned_text.is_empty() {
         return;
     } else {
@@ -1157,6 +1166,77 @@ mod tests {
             "@alice hello"
         );
         assert_eq!(clean_message_text("@MyBot", Some("MyBot")), "");
+    }
+
+    #[test]
+    fn test_clean_message_text_bare_commands() {
+        // Bare commands return empty (the caller decides what to emit)
+        assert_eq!(clean_message_text("/start", None), "");
+        assert_eq!(clean_message_text("/interrupt", None), "");
+        assert_eq!(clean_message_text("/stop", None), "");
+        assert_eq!(clean_message_text("/help", None), "");
+        assert_eq!(clean_message_text("/undo", None), "");
+        assert_eq!(clean_message_text("/ping", None), "");
+
+        // Commands with args: command prefix stripped, args returned
+        assert_eq!(clean_message_text("/start hello", None), "hello");
+        assert_eq!(clean_message_text("/help me please", None), "me please");
+        assert_eq!(clean_message_text("/model claude-opus-4-6", None), "claude-opus-4-6");
+    }
+
+    /// Tests for the content_to_emit logic in handle_message.
+    /// Since handle_message uses WASM host calls, we test the decision logic inline.
+    #[test]
+    fn test_content_to_emit_logic() {
+        // Simulates the content_to_emit decision for various inputs.
+        // This mirrors the logic in handle_message after clean_message_text.
+        fn resolve_content(content: &str) -> Option<String> {
+            let cleaned_text = clean_message_text(content, None);
+            let trimmed_content = content.trim();
+            if trimmed_content.eq_ignore_ascii_case("/start") {
+                Some("[User started the bot]".to_string())
+            } else if cleaned_text.is_empty() && trimmed_content.starts_with('/') {
+                Some(trimmed_content.to_string())
+            } else if cleaned_text.is_empty() {
+                None // would return/skip in handle_message
+            } else {
+                Some(cleaned_text)
+            }
+        }
+
+        // /start → welcome placeholder
+        assert_eq!(resolve_content("/start"), Some("[User started the bot]".to_string()));
+        assert_eq!(resolve_content("/Start"), Some("[User started the bot]".to_string()));
+        assert_eq!(resolve_content("  /start  "), Some("[User started the bot]".to_string()));
+
+        // /start with args → pass args through
+        assert_eq!(resolve_content("/start hello"), Some("hello".to_string()));
+
+        // Control commands → pass through raw so Submission::parse() can match
+        assert_eq!(resolve_content("/interrupt"), Some("/interrupt".to_string()));
+        assert_eq!(resolve_content("/stop"), Some("/stop".to_string()));
+        assert_eq!(resolve_content("/help"), Some("/help".to_string()));
+        assert_eq!(resolve_content("/undo"), Some("/undo".to_string()));
+        assert_eq!(resolve_content("/redo"), Some("/redo".to_string()));
+        assert_eq!(resolve_content("/ping"), Some("/ping".to_string()));
+        assert_eq!(resolve_content("/tools"), Some("/tools".to_string()));
+        assert_eq!(resolve_content("/compact"), Some("/compact".to_string()));
+        assert_eq!(resolve_content("/clear"), Some("/clear".to_string()));
+        assert_eq!(resolve_content("/version"), Some("/version".to_string()));
+
+        // Commands with args → cleaned text (command stripped)
+        assert_eq!(resolve_content("/help me please"), Some("me please".to_string()));
+
+        // Plain text → pass through
+        assert_eq!(resolve_content("hello world"), Some("hello world".to_string()));
+        assert_eq!(resolve_content("just text"), Some("just text".to_string()));
+
+        // Empty / whitespace → skip (None)
+        assert_eq!(resolve_content(""), None);
+        assert_eq!(resolve_content("   "), None);
+
+        // Bare @mention without bot → skip
+        assert_eq!(resolve_content("@botname"), None);
     }
 
     #[test]

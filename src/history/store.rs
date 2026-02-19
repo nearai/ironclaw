@@ -259,6 +259,7 @@ impl Store {
                     metadata: serde_json::Value::Null,
                     total_tokens_used: 0,
                     max_tokens: 0,
+                    extra_env: std::sync::Arc::new(std::collections::HashMap::new()),
                 }))
             }
             None => Ok(None),
@@ -490,6 +491,9 @@ pub struct SandboxJobRecord {
     pub created_at: DateTime<Utc>,
     pub started_at: Option<DateTime<Utc>>,
     pub completed_at: Option<DateTime<Utc>>,
+    /// Serialized JSON of `Vec<CredentialGrant>` for restart support.
+    /// Stored in the `description` column of `agent_jobs` (unused for sandbox jobs).
+    pub credential_grants_json: String,
 }
 
 /// Summary of sandbox job counts grouped by status.
@@ -513,7 +517,7 @@ impl Store {
             INSERT INTO agent_jobs (
                 id, title, description, status, source, user_id, project_dir,
                 success, failure_reason, created_at, started_at, completed_at
-            ) VALUES ($1, $2, '', $3, 'sandbox', $4, $5, $6, $7, $8, $9, $10)
+            ) VALUES ($1, $2, $3, $4, 'sandbox', $5, $6, $7, $8, $9, $10, $11)
             ON CONFLICT (id) DO UPDATE SET
                 status = EXCLUDED.status,
                 success = EXCLUDED.success,
@@ -524,6 +528,7 @@ impl Store {
             &[
                 &job.id,
                 &job.task,
+                &job.credential_grants_json,
                 &job.status,
                 &job.user_id,
                 &job.project_dir,
@@ -547,7 +552,7 @@ impl Store {
         let row = conn
             .query_opt(
                 r#"
-                SELECT id, title, status, user_id, project_dir,
+                SELECT id, title, description, status, user_id, project_dir,
                        success, failure_reason, created_at, started_at, completed_at
                 FROM agent_jobs WHERE id = $1 AND source = 'sandbox'
                 "#,
@@ -568,6 +573,7 @@ impl Store {
             created_at: r.get("created_at"),
             started_at: r.get("started_at"),
             completed_at: r.get("completed_at"),
+            credential_grants_json: r.get::<_, String>("description"),
         }))
     }
 
@@ -577,7 +583,7 @@ impl Store {
         let rows = conn
             .query(
                 r#"
-                SELECT id, title, status, user_id, project_dir,
+                SELECT id, title, description, status, user_id, project_dir,
                        success, failure_reason, created_at, started_at, completed_at
                 FROM agent_jobs WHERE source = 'sandbox'
                 ORDER BY created_at DESC
@@ -601,6 +607,7 @@ impl Store {
                 created_at: r.get("created_at"),
                 started_at: r.get("started_at"),
                 completed_at: r.get("completed_at"),
+                credential_grants_json: r.get::<_, String>("description"),
             })
             .collect())
     }
@@ -614,7 +621,7 @@ impl Store {
         let rows = conn
             .query(
                 r#"
-                SELECT id, title, status, user_id, project_dir,
+                SELECT id, title, description, status, user_id, project_dir,
                        success, failure_reason, created_at, started_at, completed_at
                 FROM agent_jobs WHERE source = 'sandbox' AND user_id = $1
                 ORDER BY created_at DESC
@@ -638,6 +645,7 @@ impl Store {
                 created_at: r.get("created_at"),
                 started_at: r.get("started_at"),
                 completed_at: r.get("completed_at"),
+                credential_grants_json: r.get::<_, String>("description"),
             })
             .collect())
     }
@@ -801,14 +809,35 @@ impl Store {
         Ok(())
     }
 
-    /// Load all job events for a job, ordered by id.
+    /// Load job events for a job, ordered by id.
+    ///
+    /// When `limit` is `Some(n)`, returns the **most recent** `n` events
+    /// (ordered ascending by id). When `None`, returns all events.
     pub async fn list_job_events(
         &self,
         job_id: Uuid,
+        limit: Option<i64>,
     ) -> Result<Vec<JobEventRecord>, DatabaseError> {
         let conn = self.conn().await?;
-        let rows = conn
-            .query(
+        let rows = if let Some(n) = limit {
+            // Sub-select the last N rows by id DESC, then re-sort ASC.
+            conn.query(
+                r#"
+                SELECT id, job_id, event_type, data, created_at
+                FROM (
+                    SELECT id, job_id, event_type, data, created_at
+                    FROM job_events
+                    WHERE job_id = $1
+                    ORDER BY id DESC
+                    LIMIT $2
+                ) sub
+                ORDER BY id ASC
+                "#,
+                &[&job_id, &n],
+            )
+            .await?
+        } else {
+            conn.query(
                 r#"
                 SELECT id, job_id, event_type, data, created_at
                 FROM job_events
@@ -817,7 +846,8 @@ impl Store {
                 "#,
                 &[&job_id],
             )
-            .await?;
+            .await?
+        };
         Ok(rows
             .iter()
             .map(|r| JobEventRecord {
@@ -1284,6 +1314,7 @@ impl Store {
         &self,
         user_id: &str,
         channel: &str,
+        offset: i64,
         limit: i64,
     ) -> Result<Vec<ConversationSummary>, DatabaseError> {
         let conn = self.conn().await?;
@@ -1299,6 +1330,7 @@ impl Store {
                     NULLIF(c.metadata->>'title', '') AS title
                 FROM conversations c
                 WHERE c.user_id = $1 AND c.channel = $2
+                  AND (c.metadata->>'thread_type') IS DISTINCT FROM 'assistant'
                 ORDER BY COALESCE(
                     (SELECT MAX(m3.created_at)
                      FROM conversation_messages m3
@@ -1307,9 +1339,10 @@ impl Store {
                     c.last_activity
                 ) DESC,
                 c.last_activity DESC
-                LIMIT $3
+                OFFSET $3
+                LIMIT $4
                 "#,
-                &[&user_id, &channel, &limit],
+                &[&user_id, &channel, &offset, &limit],
             )
             .await?;
 
