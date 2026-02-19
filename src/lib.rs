@@ -39,6 +39,7 @@
 //! - **Continuous learning** - Improve estimates from historical data
 
 pub mod agent;
+pub mod app;
 pub mod boot_screen;
 pub mod bootstrap;
 pub mod channels;
@@ -69,6 +70,9 @@ pub mod tunnel;
 pub mod util;
 pub mod worker;
 pub mod workspace;
+
+#[cfg(test)]
+pub mod testing;
 
 pub use config::Config;
 pub use error::{Error, Result};

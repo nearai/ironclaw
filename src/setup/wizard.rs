@@ -79,7 +79,7 @@ pub struct SetupWizard {
     db_pool: Option<deadpool_postgres::Pool>,
     /// libSQL backend (created during setup, libsql only).
     #[cfg(feature = "libsql")]
-    db_backend: Option<crate::db::libsql_backend::LibSqlBackend>,
+    db_backend: Option<crate::db::libsql::LibSqlBackend>,
     /// Secrets crypto (created during setup).
     secrets_crypto: Option<Arc<SecretsCrypto>>,
     /// Cached API key from provider setup (used by model fetcher without env mutation).
@@ -438,7 +438,7 @@ impl SetupWizard {
         turso_url: Option<&str>,
         turso_token: Option<&str>,
     ) -> Result<(), SetupError> {
-        use crate::db::libsql_backend::LibSqlBackend;
+        use crate::db::libsql::LibSqlBackend;
         use std::path::Path;
 
         let db_path = Path::new(path);
@@ -1486,7 +1486,7 @@ impl SetupWizard {
             #[cfg(feature = "libsql")]
             let saved = if !saved {
                 if let Some(ref backend) = self.db_backend {
-                    use crate::db::Database as _;
+                    use crate::db::SettingsStore as _;
                     backend
                         .set_all_settings("default", &db_map)
                         .await
