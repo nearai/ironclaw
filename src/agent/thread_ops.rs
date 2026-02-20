@@ -278,7 +278,7 @@ impl Agent {
 
         // Run the agentic tool execution loop
         let result = self
-            .run_agentic_loop(message, session.clone(), thread_id, turn_messages, false)
+            .run_agentic_loop(message, session.clone(), thread_id, turn_messages)
             .await;
 
         // Re-acquire lock and check if interrupted
@@ -1057,7 +1057,7 @@ impl Agent {
 
             // Continue the agentic loop (a tool was already executed this turn)
             let result = self
-                .run_agentic_loop(message, session.clone(), thread_id, context_messages, true)
+                .run_agentic_loop(message, session.clone(), thread_id, context_messages)
                 .await;
 
             // Handle the result
