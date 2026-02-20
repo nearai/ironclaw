@@ -220,14 +220,16 @@ impl SetupWizard {
 
         self.test_database_connection_postgres(&url).await?;
         self.settings.database_backend = Some("postgres".to_string());
-        self.settings.database_url = Some(url);
+        self.settings.database_url = Some(url.clone());
 
-        // Load existing settings from DB.
+        // Load existing settings from DB, then restore connection fields that
+        // may not be persisted in the settings map.
         if let Some(ref pool) = self.db_pool {
             let store = crate::history::Store::from_pool(pool.clone());
             if let Ok(map) = store.get_all_settings("default").await {
                 self.settings = Settings::from_db_map(&map);
                 self.settings.database_backend = Some("postgres".to_string());
+                self.settings.database_url = Some(url);
             }
         }
 
@@ -249,17 +251,22 @@ impl SetupWizard {
             .await?;
 
         self.settings.database_backend = Some("libsql".to_string());
-        self.settings.libsql_path = Some(path);
-        if let Some(url) = turso_url {
-            self.settings.libsql_url = Some(url);
+        self.settings.libsql_path = Some(path.clone());
+        if let Some(ref url) = turso_url {
+            self.settings.libsql_url = Some(url.clone());
         }
 
-        // Load existing settings from DB.
+        // Load existing settings from DB, then restore connection fields that
+        // may not be persisted in the settings map.
         if let Some(ref db) = self.db_backend {
             use crate::db::SettingsStore as _;
             if let Ok(map) = db.get_all_settings("default").await {
                 self.settings = Settings::from_db_map(&map);
                 self.settings.database_backend = Some("libsql".to_string());
+                self.settings.libsql_path = Some(path);
+                if let Some(url) = turso_url {
+                    self.settings.libsql_url = Some(url);
+                }
             }
         }
 

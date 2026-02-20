@@ -185,10 +185,10 @@ fn cmd_info(catalog: &RegistryCatalog, name: &str) -> anyhow::Result<()> {
         return Ok(());
     }
 
-    // Single extension
+    // Single extension (use get_strict to surface ambiguous bare names)
     let manifest = catalog
-        .get(name)
-        .ok_or_else(|| anyhow::anyhow!("Extension '{}' not found in registry.", name))?;
+        .get_strict(name)
+        .map_err(|e| anyhow::anyhow!("{}", e))?;
 
     println!("{} ({})", manifest.display_name, manifest.kind);
     println!("  Version: {}", manifest.version);
