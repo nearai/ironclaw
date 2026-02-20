@@ -66,12 +66,14 @@ pub trait SelfRepair: Send + Sync {
 /// Default self-repair implementation.
 pub struct DefaultSelfRepair {
     context_manager: Arc<ContextManager>,
-    #[allow(dead_code)] // Will be used for time-based stuck detection
+    // TODO: use for time-based stuck detection (currently only max_repair_attempts is checked)
+    #[allow(dead_code)]
     stuck_threshold: Duration,
     max_repair_attempts: u32,
     store: Option<Arc<dyn Database>>,
     builder: Option<Arc<dyn SoftwareBuilder>>,
-    #[allow(dead_code)] // Will be used for tool hot-reload after repair
+    // TODO: use for tool hot-reload after repair
+    #[allow(dead_code)]
     tools: Option<Arc<ToolRegistry>>,
 }
 
@@ -93,15 +95,15 @@ impl DefaultSelfRepair {
     }
 
     /// Add a Store for tool failure tracking.
-    #[allow(dead_code)] // Public API for configuring repair with persistence
-    pub fn with_store(mut self, store: Arc<dyn Database>) -> Self {
+    #[allow(dead_code)] // TODO: wire up in main.rs when persistence is needed
+    pub(crate) fn with_store(mut self, store: Arc<dyn Database>) -> Self {
         self.store = Some(store);
         self
     }
 
     /// Add a Builder and ToolRegistry for automatic tool repair.
-    #[allow(dead_code)] // Public API for enabling automatic tool repair
-    pub fn with_builder(
+    #[allow(dead_code)] // TODO: wire up in main.rs when auto-repair is needed
+    pub(crate) fn with_builder(
         mut self,
         builder: Arc<dyn SoftwareBuilder>,
         tools: Arc<ToolRegistry>,

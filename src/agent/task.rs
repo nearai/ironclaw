@@ -29,6 +29,7 @@ impl TaskOutput {
     }
 
     /// Create a text result.
+    #[cfg(test)]
     pub fn text(text: impl Into<String>, duration: Duration) -> Self {
         Self {
             result: serde_json::Value::String(text.into()),
@@ -37,6 +38,7 @@ impl TaskOutput {
     }
 
     /// Create an empty success result.
+    #[cfg(test)]
     pub fn empty(duration: Duration) -> Self {
         Self {
             result: serde_json::Value::Null,
@@ -130,6 +132,7 @@ impl Task {
     }
 
     /// Create a new Job task with a specific ID.
+    #[cfg(test)]
     pub fn job_with_id(id: Uuid, title: impl Into<String>, description: impl Into<String>) -> Self {
         Self::Job {
             id,
@@ -152,6 +155,7 @@ impl Task {
     }
 
     /// Create a new Background task.
+    #[cfg(test)]
     pub fn background(handler: std::sync::Arc<dyn TaskHandler>) -> Self {
         Self::Background {
             id: Uuid::new_v4(),
@@ -160,6 +164,7 @@ impl Task {
     }
 
     /// Create a new Background task with a specific ID.
+    #[cfg(test)]
     pub fn background_with_id(id: Uuid, handler: std::sync::Arc<dyn TaskHandler>) -> Self {
         Self::Background { id, handler }
     }
@@ -174,6 +179,7 @@ impl Task {
     }
 
     /// Get the parent ID for sub-tasks.
+    #[cfg(test)]
     pub fn parent_id(&self) -> Option<Uuid> {
         match self {
             Self::Job { .. } => None,
@@ -225,6 +231,7 @@ impl fmt::Debug for Task {
 }
 
 /// Status of a scheduled task.
+#[cfg(test)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TaskStatus {
     /// Task is queued waiting for execution.

@@ -505,7 +505,8 @@ Report when the job is complete or if you encounter issues you cannot resolve."#
                 let output_str = serde_json::to_string_pretty(&output.result)
                     .ok()
                     .map(|s| deps.safety.sanitize_tool_output(tool_name, &s).content);
-                deps.context_manager
+                match deps
+                    .context_manager
                     .update_memory(job_id, |mem| {
                         let rec = mem.create_action(tool_name, params.clone()).succeed(
                             output_str.clone(),
@@ -516,30 +517,52 @@ Report when the job is complete or if you encounter issues you cannot resolve."#
                         rec
                     })
                     .await
-                    .ok()
+                {
+                    Ok(rec) => Some(rec),
+                    Err(e) => {
+                        tracing::warn!(job_id = %job_id, tool = tool_name, "Failed to record action in memory: {e}");
+                        None
+                    }
+                }
             }
-            Ok(Err(e)) => deps
-                .context_manager
-                .update_memory(job_id, |mem| {
-                    let rec = mem
-                        .create_action(tool_name, params.clone())
-                        .fail(e.to_string(), elapsed);
-                    mem.record_action(rec.clone());
-                    rec
-                })
-                .await
-                .ok(),
-            Err(_) => deps
-                .context_manager
-                .update_memory(job_id, |mem| {
-                    let rec = mem
-                        .create_action(tool_name, params.clone())
-                        .fail("Execution timeout", elapsed);
-                    mem.record_action(rec.clone());
-                    rec
-                })
-                .await
-                .ok(),
+            Ok(Err(e)) => {
+                match deps
+                    .context_manager
+                    .update_memory(job_id, |mem| {
+                        let rec = mem
+                            .create_action(tool_name, params.clone())
+                            .fail(e.to_string(), elapsed);
+                        mem.record_action(rec.clone());
+                        rec
+                    })
+                    .await
+                {
+                    Ok(rec) => Some(rec),
+                    Err(e) => {
+                        tracing::warn!(job_id = %job_id, tool = tool_name, "Failed to record action in memory: {e}");
+                        None
+                    }
+                }
+            }
+            Err(_) => {
+                match deps
+                    .context_manager
+                    .update_memory(job_id, |mem| {
+                        let rec = mem
+                            .create_action(tool_name, params.clone())
+                            .fail("Execution timeout", elapsed);
+                        mem.record_action(rec.clone());
+                        rec
+                    })
+                    .await
+                {
+                    Ok(rec) => Some(rec),
+                    Err(e) => {
+                        tracing::warn!(job_id = %job_id, tool = tool_name, "Failed to record action in memory: {e}");
+                        None
+                    }
+                }
+            }
         };
 
         // Persist action to database (fire-and-forget)
