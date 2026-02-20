@@ -33,16 +33,12 @@ impl Agent {
     /// Returns `AgenticLoopResult::Response` on completion, or
     /// `AgenticLoopResult::NeedApproval` if a tool requires user approval.
     ///
-    /// When `resume_after_tool` is true the loop already knows a tool was
-    /// executed earlier in this turn (e.g. an approved tool), so it won't
-    /// force the LLM to use tools if it responds with text.
     pub(super) async fn run_agentic_loop(
         &self,
         message: &IncomingMessage,
         session: Arc<Mutex<Session>>,
         thread_id: Uuid,
         initial_messages: Vec<ChatMessage>,
-        resume_after_tool: bool,
     ) -> Result<AgenticLoopResult, Error> {
         // Load workspace system prompt (identity files: AGENTS.md, SOUL.md, etc.)
         let system_prompt = if let Some(ws) = self.workspace() {
@@ -114,8 +110,6 @@ impl Agent {
 
         const MAX_TOOL_ITERATIONS: usize = 10;
         let mut iteration = 0;
-        let mut tools_executed = resume_after_tool;
-
         loop {
             iteration += 1;
             if iteration > MAX_TOOL_ITERATIONS {
@@ -199,30 +193,12 @@ impl Agent {
 
             match output.result {
                 RespondResult::Text(text) => {
-                    // If no tools have been executed yet, prompt the LLM to use tools
-                    // This handles the case where the model explains what it will do
-                    // instead of actually calling tools
-                    if !tools_executed && iteration < 3 {
-                        tracing::debug!(
-                            "No tools executed yet (iteration {}), prompting for tool use",
-                            iteration
-                        );
-                        context_messages.push(ChatMessage::assistant(&text));
-                        context_messages.push(ChatMessage::user(
-                            "Please proceed and use the available tools to complete this task.",
-                        ));
-                        continue;
-                    }
-
-                    // Tools have been executed or we've tried multiple times, return response
                     return Ok(AgenticLoopResult::Response(text));
                 }
                 RespondResult::ToolCalls {
                     tool_calls,
                     content,
                 } => {
-                    tools_executed = true;
-
                     // Add the assistant message with tool_calls to context.
                     // OpenAI protocol requires this before tool-result messages.
                     context_messages.push(ChatMessage::assistant_with_tool_calls(
