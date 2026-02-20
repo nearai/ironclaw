@@ -136,7 +136,9 @@ impl Scheduler {
             });
 
             // Start the worker
-            let _ = tx.send(WorkerMessage::Start).await;
+            if tx.send(WorkerMessage::Start).await.is_err() {
+                tracing::error!(job_id = %job_id, "Worker died before receiving Start message");
+            }
 
             // Insert while still holding the write lock
             jobs.insert(job_id, ScheduledJob { handle, tx });
@@ -418,10 +420,16 @@ impl Scheduler {
             // Update job state
             self.context_manager
                 .update_context(job_id, |ctx| {
-                    let _ = ctx.transition_to(
+                    if let Err(e) = ctx.transition_to(
                         JobState::Cancelled,
                         Some("Stopped by scheduler".to_string()),
-                    );
+                    ) {
+                        tracing::warn!(
+                            job_id = %job_id,
+                            error = %e,
+                            "Failed to transition job to Cancelled state"
+                        );
+                    }
                 })
                 .await?;
 

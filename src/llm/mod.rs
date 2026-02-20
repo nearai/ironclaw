@@ -76,14 +76,16 @@ pub fn create_llm_provider_with_config(
         NearAiApiMode::Responses => {
             tracing::info!(
                 model = %config.model,
-                "Using Responses API (chat-api) with session auth"
+                base_url = %config.base_url,
+                "Using NEAR AI Chat (Responses API, session token auth)"
             );
             Ok(Arc::new(NearAiProvider::new(config.clone(), session)?))
         }
         NearAiApiMode::ChatCompletions => {
             tracing::info!(
                 model = %config.model,
-                "Using Chat Completions API (cloud-api) with API key auth"
+                base_url = %config.base_url,
+                "Using NEAR AI Cloud (Chat Completions API, API key auth)"
             );
             Ok(Arc::new(NearAiChatProvider::new(config.clone())?))
         }
