@@ -19,8 +19,9 @@ Explicit invocation. Loads `.env` files, runs the wizard, exits.
 ironclaw          (first run, no database configured)
 ```
 
-Auto-detection via `check_onboard_needed()` in `main.rs`. Triggers when
-none of these are true:
+Auto-detection via `check_onboard_needed()` in `main.rs`. Skips onboarding
+when `ONBOARD_COMPLETED` env var is set (written to `~/.ironclaw/.env` by
+the wizard). Otherwise triggers when no database is configured:
 - `DATABASE_URL` env var is set
 - `LIBSQL_PATH` env var is set
 - `~/.ironclaw/ironclaw.db` exists on disk
@@ -49,7 +50,7 @@ The `--no-onboard` CLI flag suppresses auto-detection.
 
 ---
 
-## The 7-Step Wizard
+## The 8-Step Wizard
 
 ### Overview
 
@@ -60,7 +61,8 @@ Step 3: Inference Provider          ← skipped if --skip-auth
 Step 4: Model Selection
 Step 5: Embeddings
 Step 6: Channel Configuration
-Step 7: Background Tasks (heartbeat)
+Step 7: Extensions (tools)
+Step 8: Background Tasks (heartbeat)
        ↓
    save_and_summarize()
 ```
@@ -165,7 +167,8 @@ env-var mode or skipped secrets.
 
 | Provider | Auth Method | Secret Name | Env Var |
 |----------|-------------|-------------|---------|
-| NEAR AI | Browser OAuth | (session token) | `NEARAI_SESSION_TOKEN` |
+| NEAR AI Chat | Browser OAuth or session token | - | `NEARAI_SESSION_TOKEN` |
+| NEAR AI Cloud | API key | `llm_nearai_api_key` | `NEARAI_API_KEY` |
 | Anthropic | API key | `anthropic_api_key` | `ANTHROPIC_API_KEY` |
 | OpenAI | API key | `openai_api_key` | `OPENAI_API_KEY` |
 | Ollama | None | - | - |
@@ -178,8 +181,18 @@ env-var mode or skipped secrets.
 4. **Cache key in `self.llm_api_key`** for model fetching in Step 4
 
 **NEAR AI** (`setup_nearai`):
-- Calls `session_manager.ensure_authenticated()` which opens browser
-- Session token saved to `~/.ironclaw/session.json`
+- Calls `session_manager.ensure_authenticated()` which shows the auth menu:
+  - Options 1-2 (GitHub/Google): browser OAuth → **NEAR AI Chat** mode
+    (Responses API at `private.near.ai`, session token auth)
+  - Option 4: NEAR AI Cloud API key → **NEAR AI Cloud** mode
+    (Chat Completions API at `cloud-api.near.ai`, API key auth)
+- **NEAR AI Chat** path: session token saved to `~/.ironclaw/session.json`.
+  Hosting providers can set `NEARAI_SESSION_TOKEN` env var directly (takes
+  precedence over file-based tokens).
+- **NEAR AI Cloud** path: `NEARAI_API_KEY` saved to `~/.ironclaw/.env`
+  (bootstrap) and encrypted secrets store (`llm_nearai_api_key`).
+  `LlmConfig::resolve()` auto-selects `ChatCompletions` mode when the
+  API key is present.
 
 **`self.llm_api_key` caching:** The wizard caches the API key as
 `Option<SecretString>` so that Step 4 (model fetching) and Step 5
@@ -242,12 +255,19 @@ key first, then falls back to the standard env var.
 ```
 6a. Tunnel setup (if webhook channels needed)
 6b. Discover WASM channels from ~/.ironclaw/channels/
-6c. Multi-select: CLI/TUI, HTTP, discovered channels, bundled channels
-6d. Install missing bundled channels (copy WASM binaries)
-6e. Initialize SecretsContext (for token storage)
-6f. Setup HTTP webhook (if selected)
-6g. Setup each WASM channel (secrets, owner binding)
+6c. Build channel options: discovered + bundled + registry catalog
+6d. Multi-select: CLI/TUI, HTTP, all available channels
+6e. Install missing bundled channels (copy WASM binaries)
+6f. Install missing registry channels (build from source)
+6g. Initialize SecretsContext (for token storage)
+6h. Setup HTTP webhook (if selected)
+6i. Setup each WASM channel (secrets, owner binding)
 ```
+
+**Channel sources** (priority order for installation):
+1. Already installed in `~/.ironclaw/channels/`
+2. Bundled channels (pre-compiled in `channels-src/`)
+3. Registry channels (`registry/channels/*.json`, built from source)
 
 **Tunnel setup** (`setup_tunnel`):
 - Options: ngrok, Cloudflare Tunnel, localtunnel, custom URL
@@ -272,7 +292,33 @@ key first, then falls back to the standard env var.
 
 ---
 
-### Step 7: Heartbeat
+### Step 7: Extensions (Tools)
+
+**Module:** `wizard.rs` → `step_extensions()`
+
+**Goal:** Install WASM tools from the extension registry.
+
+**Flow:**
+1. Load `RegistryCatalog` from `registry/` directory
+2. If registry not found, print info and skip
+3. List all tool manifests from the catalog
+4. Discover already-installed tools in `~/.ironclaw/tools/`
+5. Multi-select: show all registry tools with display name, auth method,
+   and description. Pre-check tools tagged `"default"` and already installed.
+6. For each selected tool not yet installed, build from source via
+   `RegistryInstaller::install_from_source()`
+7. Print consolidated auth hints (deduplicated by provider, e.g. one hint
+   for all Google tools sharing `google_oauth_token`)
+
+**Registry lookup** (`load_registry_catalog`):
+Searches for `registry/` directory in order:
+1. Current working directory
+2. Next to the executable
+3. `CARGO_MANIFEST_DIR` (compile-time, dev builds)
+
+---
+
+### Step 8: Heartbeat
 
 **Module:** `wizard.rs` → `step_heartbeat()`
 
@@ -337,23 +383,59 @@ heartbeat.enabled = "true"
 heartbeat.interval_secs = "300"
 ```
 
+### Incremental Persistence
+
+Settings are persisted **after every successful step**, not just at the end.
+This prevents data loss if a later step fails (e.g., the user enters an
+API key in step 3 but step 5 crashes — they won't need to re-enter it).
+
+**`persist_after_step()`** is called after each step in `run()` and:
+1. Writes bootstrap vars to `~/.ironclaw/.env` via `write_bootstrap_env()`
+2. Writes all current settings to the database via `persist_settings()`
+3. Silently ignores errors (e.g., if called before Step 1 establishes a DB)
+
+**`try_load_existing_settings()`** is called after Step 1 establishes a
+database connection. It loads any previously saved settings from the
+database using `get_all_settings("default")` → `Settings::from_db_map()`
+→ `merge_from()`. This recovers progress from prior partial wizard runs.
+
+**Ordering after Step 1 is critical:**
+
+```
+step_database()                        → sets DB fields in self.settings
+let step1 = self.settings.clone()      → snapshot Step 1 choices
+try_load_existing_settings()           → merge DB values into self.settings
+self.settings.merge_from(&step1)       → re-apply Step 1 (fresh wins over stale)
+persist_after_step()                   → save merged state
+```
+
+This ordering ensures:
+- Prior progress (steps 2-7 from a previous partial run) is recovered
+- Fresh Step 1 choices override stale DB values (not the reverse)
+- The first DB persist doesn't clobber prior settings with defaults
+
 ### save_and_summarize()
 
 Final step of the wizard:
 
 ```
 1. Mark onboard_completed = true
-2. Write ALL settings to database (try postgres pool, then libSQL backend)
-3. Write bootstrap vars to ~/.ironclaw/.env:
-   - DATABASE_BACKEND (always)
-   - DATABASE_URL     (if postgres)
-   - LIBSQL_PATH      (if libsql)
-   - LIBSQL_URL       (if turso sync)
-   - LLM_BACKEND      (always, when set)
-   - LLM_BASE_URL     (if openai_compatible)
-   - OLLAMA_BASE_URL   (if ollama)
+2. Call persist_settings() for final write (idempotent — ensures
+   onboard_completed flag is saved)
+3. Call write_bootstrap_env() for final .env write (idempotent)
 4. Print configuration summary
 ```
+
+Bootstrap vars written to `~/.ironclaw/.env`:
+- `DATABASE_BACKEND` (always)
+- `DATABASE_URL` (if postgres)
+- `LIBSQL_PATH` (if libsql)
+- `LIBSQL_URL` (if turso sync)
+- `LLM_BACKEND` (always, when set)
+- `LLM_BASE_URL` (if openai_compatible)
+- `OLLAMA_BASE_URL` (if ollama)
+- `NEARAI_API_KEY` (if API key auth path)
+- `ONBOARD_COMPLETED` (always, "true")
 
 **Invariant:** Both Layer 1 and Layer 2 must be written. If the database
 write fails, the wizard returns an error and the `.env` file is not written.
@@ -462,9 +544,9 @@ anthropic_api_key     → encrypted API key
 | `confirm(label, default)` | `[Y/n]` or `[y/N]` prompt |
 | `print_header(text)` | Bold section header with underline |
 | `print_step(n, total, text)` | `[1/7] Step Name` |
-| `print_success(text)` | Green checkmark prefix |
-| `print_error(text)` | Red X prefix |
-| `print_info(text)` | Blue info prefix |
+| `print_success(text)` | Green `✓` prefix (ANSI color), message in default color |
+| `print_error(text)` | Red `✗` prefix (ANSI color), message in default color |
+| `print_info(text)` | Blue `ℹ` prefix (ANSI color), message in default color |
 
 `select_many` uses `crossterm` raw mode for arrow key navigation.
 Must properly restore terminal state on all exit paths.
@@ -486,6 +568,30 @@ Must properly restore terminal state on all exit paths.
 - Uses GNOME Keyring or KWallet via `secret-service` crate
 - May need `gnome-keyring` daemon running
 - Collection unlock may prompt for password
+
+### Remote Server Authentication
+
+On remote/VPS servers, the browser-based OAuth flow for NEAR AI may not
+work because `http://127.0.0.1:9876` is unreachable from the user's
+local browser.
+
+**Solutions:**
+
+1. **NEAR AI Cloud API key (option 4 in auth menu):** Get an API key
+   from `https://cloud.near.ai` and paste it into the terminal. No
+   local listener is needed. The key is saved to `~/.ironclaw/.env`
+   and the encrypted secrets store. Uses the OpenAI-compatible
+   ChatCompletions API mode.
+
+2. **Custom callback URL:** Set `IRONCLAW_OAUTH_CALLBACK_URL` to a
+   publicly accessible URL (e.g., via SSH tunnel or reverse proxy) that
+   forwards to port 9876 on the server:
+   ```bash
+   export IRONCLAW_OAUTH_CALLBACK_URL=https://myserver.example.com:9876
+   ```
+
+The `callback_url()` function in `oauth_defaults.rs` checks this env var
+and falls back to `http://127.0.0.1:{OAUTH_CALLBACK_PORT}`.
 
 ### URL Passwords
 

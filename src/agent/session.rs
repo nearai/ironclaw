@@ -16,7 +16,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use crate::llm::ChatMessage;
+use crate::llm::{ChatMessage, ToolCall};
 
 /// A session containing one or more threads.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -70,10 +70,9 @@ impl Session {
     pub fn create_thread(&mut self) -> &mut Thread {
         let thread = Thread::new(self.id);
         let thread_id = thread.id;
-        self.threads.insert(thread_id, thread);
         self.active_thread = Some(thread_id);
         self.last_active_at = Utc::now();
-        self.threads.get_mut(&thread_id).expect("just inserted")
+        self.threads.entry(thread_id).or_insert(thread)
     }
 
     /// Get the active thread.
@@ -88,10 +87,19 @@ impl Session {
 
     /// Get or create the active thread.
     pub fn get_or_create_thread(&mut self) -> &mut Thread {
-        if self.active_thread.is_none() {
-            self.create_thread();
+        match self.active_thread {
+            None => self.create_thread(),
+            Some(id) => {
+                if self.threads.contains_key(&id) {
+                    // Safe: contains_key confirmed the entry exists.
+                    self.threads.get_mut(&id).unwrap()
+                } else {
+                    // Stale active_thread ID: create a new thread, which
+                    // updates self.active_thread to the new thread's ID.
+                    self.create_thread()
+                }
+            }
         }
-        self.active_thread_mut().expect("just created")
     }
 
     /// Switch to a different thread.
@@ -148,6 +156,10 @@ pub struct PendingApproval {
     pub tool_call_id: String,
     /// Context messages at the time of the request (to resume from).
     pub context_messages: Vec<ChatMessage>,
+    /// Remaining tool calls from the same assistant message that were not
+    /// executed yet when approval was requested.
+    #[serde(default)]
+    pub deferred_tool_calls: Vec<ToolCall>,
 }
 
 /// A conversation thread within a session.
@@ -236,7 +248,8 @@ impl Thread {
         self.turns.push(turn);
         self.state = ThreadState::Processing;
         self.updated_at = Utc::now();
-        self.turns.last_mut().expect("just pushed")
+        // turn_number was len() before push, so it's a valid index after push
+        &mut self.turns[turn_number]
     }
 
     /// Complete the current turn with a response.
@@ -349,8 +362,10 @@ impl Thread {
                 if let Some(next) = iter.peek()
                     && next.role == crate::llm::Role::Assistant
                 {
-                    let response = iter.next().expect("peeked");
-                    turn.complete(&response.content);
+                    // iter.next() is guaranteed Some after a successful peek()
+                    if let Some(response) = iter.next() {
+                        turn.complete(&response.content);
+                    }
                 }
 
                 self.turns.push(turn);
@@ -946,6 +961,7 @@ mod tests {
             description: "dangerous command".to_string(),
             tool_call_id: "call_123".to_string(),
             context_messages: vec![ChatMessage::user("do it")],
+            deferred_tool_calls: vec![],
         };
 
         thread.await_approval(approval);
@@ -969,6 +985,7 @@ mod tests {
             description: "test".to_string(),
             tool_call_id: "call_456".to_string(),
             context_messages: vec![],
+            deferred_tool_calls: vec![],
         };
 
         thread.await_approval(approval);

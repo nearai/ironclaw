@@ -1,15 +1,25 @@
 [workspace]
 members = [".", "benchmarks"]
 exclude = [
+    "channels-src/discord",
     "channels-src/telegram",
     "channels-src/slack",
     "channels-src/whatsapp",
+    "tools-src/github",
     "tools-src/gmail",
+    "tools-src/google-calendar",
+    "tools-src/google-docs",
+    "tools-src/google-drive",
+    "tools-src/google-sheets",
+    "tools-src/google-slides",
+    "tools-src/okta",
+    "tools-src/slack",
+    "tools-src/telegram",
 ]
 
 [package]
 name = "ironclaw"
-version = "0.5.0"
+version = "0.7.0"
 edition = "2024"
 rust-version = "1.92"
 description = "Secure personal AI assistant that protects your data and expands its capabilities on the fly"
@@ -78,7 +88,7 @@ termimad = "0.34"
 # Channel integrations
 axum = { version = "0.8", features = ["ws"] }
 tower = "0.5"
-tower-http = { version = "0.6", features = ["trace", "cors"] }
+tower-http = { version = "0.6", features = ["trace", "cors", "set-header"] }
 
 # Cron scheduling for routines
 cron = "0.13"

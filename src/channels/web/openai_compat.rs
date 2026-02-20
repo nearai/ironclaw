@@ -24,6 +24,8 @@ use crate::llm::{
 
 use super::server::GatewayState;
 
+const MAX_MODEL_NAME_BYTES: usize = 256;
+
 // ---------------------------------------------------------------------------
 // OpenAI request types
 // ---------------------------------------------------------------------------
@@ -380,6 +382,27 @@ fn unix_timestamp() -> u64 {
         .as_secs()
 }
 
+fn validate_model_name(model: &str) -> Result<(), String> {
+    let trimmed = model.trim();
+
+    if trimmed.is_empty() {
+        return Err("model must not be empty".to_string());
+    }
+    if trimmed != model {
+        return Err("model must not have leading or trailing whitespace".to_string());
+    }
+    if model.len() > MAX_MODEL_NAME_BYTES {
+        return Err(format!(
+            "model must be at most {} bytes",
+            MAX_MODEL_NAME_BYTES
+        ));
+    }
+    if model.chars().any(char::is_control) {
+        return Err("model contains control characters".to_string());
+    }
+    Ok(())
+}
+
 /// Extract stop sequences from the flexible `stop` field.
 fn parse_stop(val: &serde_json::Value) -> Option<Vec<String>> {
     match val {
@@ -426,29 +449,17 @@ pub async fn chat_completions_handler(
             "invalid_request_error",
         ));
     }
-
-    // Validate the requested model matches the active model.
-    // Per-request model switching is not yet supported (see GH issue).
-    let active_model = llm.active_model_name();
-    if req.model != active_model {
-        return Err((
-            StatusCode::NOT_FOUND,
-            Json(OpenAiErrorResponse {
-                error: OpenAiErrorDetail {
-                    message: format!(
-                        "Model '{}' not found. The active model is '{}'.",
-                        req.model, active_model
-                    ),
-                    error_type: "invalid_request_error".to_string(),
-                    param: Some("model".to_string()),
-                    code: Some("model_not_found".to_string()),
-                },
-            }),
+    if let Err(e) = validate_model_name(&req.model) {
+        return Err(openai_error(
+            StatusCode::BAD_REQUEST,
+            e,
+            "invalid_request_error",
         ));
     }
 
     let has_tools = req.tools.as_ref().is_some_and(|t| !t.is_empty());
     let stream = req.stream.unwrap_or(false);
+    let requested_model = req.model.clone();
 
     if stream {
         return handle_streaming(llm.clone(), req, has_tools)
@@ -460,13 +471,12 @@ pub async fn chat_completions_handler(
 
     let messages = convert_messages(&req.messages)
         .map_err(|e| openai_error(StatusCode::BAD_REQUEST, e, "invalid_request_error"))?;
-    let model_name = llm.active_model_name();
     let id = chat_completion_id();
     let created = unix_timestamp();
 
     if has_tools {
         let tools = convert_tools(req.tools.as_deref().unwrap_or(&[]));
-        let mut tool_req = ToolCompletionRequest::new(messages, tools);
+        let mut tool_req = ToolCompletionRequest::new(messages, tools).with_model(req.model);
         if let Some(t) = req.temperature {
             tool_req = tool_req.with_temperature(t);
         }
@@ -483,6 +493,7 @@ pub async fn chat_completions_handler(
             .complete_with_tools(tool_req)
             .await
             .map_err(map_llm_error)?;
+        let model_name = llm.effective_model_name(Some(requested_model.as_str()));
 
         let tool_calls_openai = if resp.tool_calls.is_empty() {
             None
@@ -515,7 +526,7 @@ pub async fn chat_completions_handler(
 
         Ok(Json(response).into_response())
     } else {
-        let mut comp_req = CompletionRequest::new(messages);
+        let mut comp_req = CompletionRequest::new(messages).with_model(req.model);
         if let Some(t) = req.temperature {
             comp_req = comp_req.with_temperature(t);
         }
@@ -527,6 +538,7 @@ pub async fn chat_completions_handler(
         }
 
         let resp = llm.complete(comp_req).await.map_err(map_llm_error)?;
+        let model_name = llm.effective_model_name(Some(requested_model.as_str()));
 
         let response = OpenAiChatResponse {
             id,
@@ -570,7 +582,7 @@ async fn handle_streaming(
     let messages = convert_messages(&req.messages)
         .map_err(|e| openai_error(StatusCode::BAD_REQUEST, e, "invalid_request_error"))?;
 
-    let model_name = llm.active_model_name();
+    let requested_model = req.model.clone();
     let id = chat_completion_id();
     let created = unix_timestamp();
 
@@ -584,7 +596,7 @@ async fn handle_streaming(
 
     let llm_result = if has_tools {
         let tools = convert_tools(req.tools.as_deref().unwrap_or(&[]));
-        let mut tool_req = ToolCompletionRequest::new(messages, tools);
+        let mut tool_req = ToolCompletionRequest::new(messages, tools).with_model(req.model);
         if let Some(t) = req.temperature {
             tool_req = tool_req.with_temperature(t);
         }
@@ -602,7 +614,7 @@ async fn handle_streaming(
                 .map_err(map_llm_error)?,
         )
     } else {
-        let mut comp_req = CompletionRequest::new(messages);
+        let mut comp_req = CompletionRequest::new(messages).with_model(req.model);
         if let Some(t) = req.temperature {
             comp_req = comp_req.with_temperature(t);
         }
@@ -614,6 +626,7 @@ async fn handle_streaming(
         }
         LlmResult::Simple(llm.complete(comp_req).await.map_err(map_llm_error)?)
     };
+    let model_name = llm.effective_model_name(Some(requested_model.as_str()));
 
     // LLM succeeded — emit the response as SSE chunks
     let (tx, rx) = tokio::sync::mpsc::channel::<Result<Event, std::convert::Infallible>>(64);
@@ -1090,5 +1103,19 @@ mod tests {
     fn test_parse_stop_null() {
         let v = serde_json::Value::Null;
         assert_eq!(parse_stop(&v), None);
+    }
+
+    #[test]
+    fn test_validate_model_name_rejects_leading_or_trailing_whitespace() {
+        let err = validate_model_name(" gpt-4").unwrap_err();
+        assert!(err.contains("leading or trailing whitespace"));
+
+        let err = validate_model_name("gpt-4 ").unwrap_err();
+        assert!(err.contains("leading or trailing whitespace"));
+    }
+
+    #[test]
+    fn test_validate_model_name_accepts_normal_name() {
+        assert!(validate_model_name("gpt-4").is_ok());
     }
 }

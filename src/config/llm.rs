@@ -64,6 +64,8 @@ impl std::fmt::Display for LlmBackend {
 pub struct OpenAiDirectConfig {
     pub api_key: SecretString,
     pub model: String,
+    /// Optional base URL override (e.g. for proxies like VibeProxy).
+    pub base_url: Option<String>,
 }
 
 /// Configuration for direct Anthropic API access.
@@ -71,6 +73,8 @@ pub struct OpenAiDirectConfig {
 pub struct AnthropicDirectConfig {
     pub api_key: SecretString,
     pub model: String,
+    /// Optional base URL override (e.g. for proxies like VibeProxy).
+    pub base_url: Option<String>,
 }
 
 /// Configuration for local Ollama.
@@ -118,12 +122,15 @@ pub struct LlmConfig {
 }
 
 /// API mode for NEAR AI.
+///
+/// - `Responses` = **NEAR AI Chat** (`private.near.ai`, session token auth)
+/// - `ChatCompletions` = **NEAR AI Cloud** (`cloud-api.near.ai`, API key auth)
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum NearAiApiMode {
-    /// Use the Responses API (chat-api proxy) - session-based auth
+    /// NEAR AI Chat: Responses API with session token auth
     #[default]
     Responses,
-    /// Use the Chat Completions API (cloud-api) - API key auth
+    /// NEAR AI Cloud: Chat Completions API with API key auth
     ChatCompletions,
 }
 
@@ -144,7 +151,7 @@ impl std::str::FromStr for NearAiApiMode {
     }
 }
 
-/// NEAR AI chat-api configuration.
+/// NEAR AI configuration (shared by Chat and Cloud modes).
 #[derive(Debug, Clone)]
 pub struct NearAiConfig {
     /// Model to use (e.g., "claude-3-5-sonnet-20241022", "gpt-4o")
@@ -152,15 +159,17 @@ pub struct NearAiConfig {
     /// Cheap/fast model for lightweight tasks (heartbeat, routing, evaluation).
     /// Falls back to the main model if not set.
     pub cheap_model: Option<String>,
-    /// Base URL for the NEAR AI API (default: https://private.near.ai).
+    /// Base URL for the NEAR AI API.
+    /// Chat mode default: `https://private.near.ai`
+    /// Cloud mode default: `https://cloud-api.near.ai`
     pub base_url: String,
     /// Base URL for auth/refresh endpoints (default: https://private.near.ai)
     pub auth_base_url: String,
     /// Path to session file (default: ~/.ironclaw/session.json)
     pub session_path: PathBuf,
-    /// API mode: "responses" (chat-api) or "chat_completions" (cloud-api)
+    /// API mode: NEAR AI Chat (Responses) or NEAR AI Cloud (ChatCompletions)
     pub api_mode: NearAiApiMode,
-    /// API key for cloud-api (required for chat_completions mode)
+    /// API key for NEAR AI Cloud (required for ChatCompletions mode)
     pub api_key: Option<SecretString>,
     /// Optional fallback model for failover (default: None).
     /// When set, a secondary provider is created with this model and wrapped
@@ -239,8 +248,13 @@ impl LlmConfig {
                         .to_string()
                 }),
             cheap_model: optional_env("NEARAI_CHEAP_MODEL")?,
-            base_url: optional_env("NEARAI_BASE_URL")?
-                .unwrap_or_else(|| "https://private.near.ai".to_string()),
+            base_url: optional_env("NEARAI_BASE_URL")?.unwrap_or_else(|| {
+                if api_mode == NearAiApiMode::ChatCompletions {
+                    "https://cloud-api.near.ai".to_string()
+                } else {
+                    "https://private.near.ai".to_string()
+                }
+            }),
             auth_base_url: optional_env("NEARAI_AUTH_URL")?
                 .unwrap_or_else(|| "https://private.near.ai".to_string()),
             session_path: optional_env("NEARAI_SESSION_PATH")?
@@ -274,7 +288,12 @@ impl LlmConfig {
                     hint: "Set OPENAI_API_KEY when LLM_BACKEND=openai".to_string(),
                 })?;
             let model = optional_env("OPENAI_MODEL")?.unwrap_or_else(|| "gpt-4o".to_string());
-            Some(OpenAiDirectConfig { api_key, model })
+            let base_url = optional_env("OPENAI_BASE_URL")?;
+            Some(OpenAiDirectConfig {
+                api_key,
+                model,
+                base_url,
+            })
         } else {
             None
         };
@@ -288,7 +307,12 @@ impl LlmConfig {
                 })?;
             let model = optional_env("ANTHROPIC_MODEL")?
                 .unwrap_or_else(|| "claude-sonnet-4-20250514".to_string());
-            Some(AnthropicDirectConfig { api_key, model })
+            let base_url = optional_env("ANTHROPIC_BASE_URL")?;
+            Some(AnthropicDirectConfig {
+                api_key,
+                model,
+                base_url,
+            })
         } else {
             None
         };
@@ -359,11 +383,8 @@ fn default_session_path() -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::helpers::ENV_MUTEX;
     use crate::settings::Settings;
-    use std::sync::Mutex;
-
-    /// Serializes env-mutating tests to prevent parallel races.
-    static ENV_MUTEX: Mutex<()> = Mutex::new(());
 
     /// Clear all openai-compatible-related env vars.
     fn clear_openai_compatible_env() {

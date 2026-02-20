@@ -85,6 +85,7 @@ pub struct Agent {
     pub(super) session_manager: Arc<SessionManager>,
     pub(super) context_monitor: ContextMonitor,
     pub(super) heartbeat_config: Option<HeartbeatConfig>,
+    pub(super) hygiene_config: Option<crate::config::HygieneConfig>,
     pub(super) routine_config: Option<RoutineConfig>,
 }
 
@@ -93,11 +94,13 @@ impl Agent {
     ///
     /// Optionally accepts pre-created `ContextManager` and `SessionManager` for sharing
     /// with external components (job tools, web gateway). Creates new ones if not provided.
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         config: AgentConfig,
         deps: AgentDeps,
         channels: ChannelManager,
         heartbeat_config: Option<HeartbeatConfig>,
+        hygiene_config: Option<crate::config::HygieneConfig>,
         routine_config: Option<RoutineConfig>,
         context_manager: Option<Arc<ContextManager>>,
         session_manager: Option<Arc<SessionManager>>,
@@ -127,6 +130,7 @@ impl Agent {
             session_manager,
             context_monitor: ContextMonitor::new(),
             heartbeat_config,
+            hygiene_config,
             routine_config,
         }
     }
@@ -358,8 +362,15 @@ impl Agent {
                         "Heartbeat enabled with {}s interval",
                         hb_config.interval_secs
                     );
+                    let hygiene = self
+                        .hygiene_config
+                        .as_ref()
+                        .map(|h| h.to_workspace_config())
+                        .unwrap_or_default();
+
                     Some(spawn_heartbeat(
                         config,
+                        hygiene,
                         workspace.clone(),
                         self.cheap_llm().clone(),
                         Some(notify_tx),

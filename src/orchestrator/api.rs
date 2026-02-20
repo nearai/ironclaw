@@ -143,6 +143,7 @@ async fn llm_complete(
 ) -> Result<Json<ProxyCompletionResponse>, StatusCode> {
     let completion_req = CompletionRequest {
         messages: req.messages,
+        model: req.model,
         max_tokens: req.max_tokens,
         temperature: req.temperature,
         stop_sequences: req.stop_sequences,
@@ -170,6 +171,7 @@ async fn llm_complete_with_tools(
     let tool_req = ToolCompletionRequest {
         messages: req.messages,
         tools: req.tools,
+        model: req.model,
         max_tokens: req.max_tokens,
         temperature: req.temperature,
         tool_choice: req.tool_choice,
