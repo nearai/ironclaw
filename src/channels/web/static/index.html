@@ -40,6 +40,13 @@
       <button data-tab="routines">Routines</button>
       <button data-tab="extensions">Extensions</button>
       <div class="spacer"></div>
+      <div class="tee-shield" id="tee-shield" style="display:none" title="Running in a Trusted Execution Environment">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/>
+        </svg>
+        <span id="tee-shield-label">TEE Verified</span>
+        <div class="tee-popover" id="tee-popover"></div>
+      </div>
       <div class="status" id="gateway-status-trigger">
         <div class="dot" id="sse-dot"></div>
         <span id="sse-status">Connected</span>
