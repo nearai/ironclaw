@@ -130,11 +130,15 @@ pub fn upsert_bootstrap_var(key: &str, value: &str) -> std::io::Result<()> {
     let mut result = String::new();
     for line in existing.lines() {
         if line.starts_with(&prefix) {
-            result.push_str(&new_line);
-            found = true;
-        } else {
-            result.push_str(line);
+            if !found {
+                result.push_str(&new_line);
+                result.push('\n');
+                found = true;
+            }
+            // Skip duplicate lines for this key
+            continue;
         }
+        result.push_str(line);
         result.push('\n');
     }
 
