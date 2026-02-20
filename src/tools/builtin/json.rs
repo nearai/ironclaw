@@ -28,8 +28,8 @@ impl Tool for JsonTool {
                     "description": "The JSON operation to perform"
                 },
                 "data": {
-                    "type": "string",
-                    "description": "JSON input string. For query/stringify/validate, pass serialized JSON."
+                    "type": ["string", "object", "array", "number", "boolean", "null"],
+                    "description": "JSON input data. Pass a string for parse, any type otherwise."
                 },
                 "path": {
                     "type": "string",
@@ -155,13 +155,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_json_tool_schema_data_has_type() {
-        let tool = JsonTool;
-        let schema = tool.parameters_schema();
-        assert_eq!(schema["properties"]["data"]["type"], "string");
-    }
-
-    #[test]
     fn test_query_json() {
         let data = serde_json::json!({
             "foo": {
@@ -196,5 +189,19 @@ mod tests {
         let input = serde_json::json!("{not valid json}");
         let err = parse_json_input(&input).unwrap_err();
         assert!(err.to_string().contains("invalid JSON input"));
+    }
+
+    #[test]
+    fn test_json_tool_schema_data_has_type() {
+        let schema = JsonTool.parameters_schema();
+        let data = schema
+            .get("properties")
+            .and_then(|p| p.get("data"))
+            .expect("data schema missing");
+
+        assert!(
+            data.get("type").is_some(),
+            "data schema must include a type for OpenAI-compatible tool validation"
+        );
     }
 }

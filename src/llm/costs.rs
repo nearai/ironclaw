@@ -17,7 +17,17 @@ pub fn model_cost(model_id: &str) -> Option<(Decimal, Decimal)> {
         .unwrap_or(model_id);
 
     match id {
-        // OpenAI models -- prices per token (USD)
+        // OpenAI — GPT-5.x / Codex
+        "gpt-5.3-codex" | "gpt-5.3-codex-spark" => Some((dec!(0.000002), dec!(0.000008))),
+        "gpt-5.2-codex" | "gpt-5.2-pro" | "gpt-5.2" => Some((dec!(0.000002), dec!(0.000008))),
+        "gpt-5.1-codex" | "gpt-5.1-codex-max" | "gpt-5.1" => Some((dec!(0.000002), dec!(0.000008))),
+        "gpt-5.1-codex-mini" => Some((dec!(0.0000003), dec!(0.0000012))),
+        "gpt-5-codex" | "gpt-5-pro" | "gpt-5" => Some((dec!(0.000002), dec!(0.000008))),
+        "gpt-5-mini" | "gpt-5-nano" => Some((dec!(0.0000003), dec!(0.0000012))),
+        // OpenAI — GPT-4.x
+        "gpt-4.1" => Some((dec!(0.000002), dec!(0.000008))),
+        "gpt-4.1-mini" => Some((dec!(0.0000004), dec!(0.0000016))),
+        "gpt-4.1-nano" => Some((dec!(0.0000001), dec!(0.0000004))),
         "gpt-4o" | "gpt-4o-2024-11-20" | "gpt-4o-2024-08-06" => {
             Some((dec!(0.0000025), dec!(0.00001)))
         }
@@ -25,20 +35,36 @@ pub fn model_cost(model_id: &str) -> Option<(Decimal, Decimal)> {
         "gpt-4-turbo" | "gpt-4-turbo-2024-04-09" => Some((dec!(0.00001), dec!(0.00003))),
         "gpt-4" | "gpt-4-0613" => Some((dec!(0.00003), dec!(0.00006))),
         "gpt-3.5-turbo" | "gpt-3.5-turbo-0125" => Some((dec!(0.0000005), dec!(0.0000015))),
+        // OpenAI — reasoning
+        "o3" => Some((dec!(0.000002), dec!(0.000008))),
+        "o3-mini" | "o3-mini-2025-01-31" => Some((dec!(0.0000011), dec!(0.0000044))),
+        "o4-mini" => Some((dec!(0.0000011), dec!(0.0000044))),
         "o1" | "o1-2024-12-17" => Some((dec!(0.000015), dec!(0.00006))),
         "o1-mini" | "o1-mini-2024-09-12" => Some((dec!(0.000003), dec!(0.000012))),
-        "o3-mini" | "o3-mini-2025-01-31" => Some((dec!(0.0000011), dec!(0.0000044))),
 
-        // Anthropic models
-        "claude-3-5-sonnet-20241022" | "claude-3-5-sonnet-latest" | "claude-sonnet-4-20250514" => {
-            Some((dec!(0.000003), dec!(0.000015)))
-        }
-        "claude-3-5-haiku-20241022" | "claude-3-5-haiku-latest" => {
-            Some((dec!(0.0000008), dec!(0.000004)))
-        }
-        "claude-3-opus-20240229" | "claude-3-opus-latest" | "claude-opus-4-20250514" => {
-            Some((dec!(0.000015), dec!(0.000075)))
-        }
+        // Anthropic
+        "claude-opus-4-6"
+        | "claude-opus-4-5"
+        | "claude-opus-4-5-20251101"
+        | "claude-opus-4-1"
+        | "claude-opus-4-1-20250805"
+        | "claude-opus-4-0"
+        | "claude-opus-4-20250514"
+        | "claude-3-opus-20240229"
+        | "claude-3-opus-latest" => Some((dec!(0.000015), dec!(0.000075))),
+        "claude-sonnet-4-6"
+        | "claude-sonnet-4-5"
+        | "claude-sonnet-4-5-20250929"
+        | "claude-sonnet-4-0"
+        | "claude-sonnet-4-20250514"
+        | "claude-3-7-sonnet-20250219"
+        | "claude-3-7-sonnet-latest"
+        | "claude-3-5-sonnet-20241022"
+        | "claude-3-5-sonnet-latest" => Some((dec!(0.000003), dec!(0.000015))),
+        "claude-haiku-4-5"
+        | "claude-haiku-4-5-20251001"
+        | "claude-3-5-haiku-20241022"
+        | "claude-3-5-haiku-latest" => Some((dec!(0.0000008), dec!(0.000004))),
         "claude-3-haiku-20240307" => Some((dec!(0.00000025), dec!(0.00000125))),
 
         // Ollama / local models -- free
