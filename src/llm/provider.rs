@@ -105,6 +105,8 @@ impl ChatMessage {
 #[derive(Debug, Clone)]
 pub struct CompletionRequest {
     pub messages: Vec<ChatMessage>,
+    /// Optional per-request model override.
+    pub model: Option<String>,
     pub max_tokens: Option<u32>,
     pub temperature: Option<f32>,
     pub stop_sequences: Option<Vec<String>>,
@@ -117,11 +119,18 @@ impl CompletionRequest {
     pub fn new(messages: Vec<ChatMessage>) -> Self {
         Self {
             messages,
+            model: None,
             max_tokens: None,
             temperature: None,
             stop_sequences: None,
             metadata: std::collections::HashMap::new(),
         }
+    }
+
+    /// Set model override.
+    pub fn with_model(mut self, model: impl Into<String>) -> Self {
+        self.model = Some(model.into());
+        self
     }
 
     /// Set max tokens.
@@ -188,6 +197,8 @@ pub struct ToolResult {
 pub struct ToolCompletionRequest {
     pub messages: Vec<ChatMessage>,
     pub tools: Vec<ToolDefinition>,
+    /// Optional per-request model override.
+    pub model: Option<String>,
     pub max_tokens: Option<u32>,
     pub temperature: Option<f32>,
     /// How to handle tool use: "auto", "required", or "none".
@@ -202,11 +213,18 @@ impl ToolCompletionRequest {
         Self {
             messages,
             tools,
+            model: None,
             max_tokens: None,
             temperature: None,
             tool_choice: None,
             metadata: std::collections::HashMap::new(),
         }
+    }
+
+    /// Set model override.
+    pub fn with_model(mut self, model: impl Into<String>) -> Self {
+        self.model = Some(model.into());
+        self
     }
 
     /// Set max tokens.
@@ -283,6 +301,16 @@ pub trait LlmProvider: Send + Sync {
         })
     }
 
+    /// Resolve which model should be reported for a given request.
+    ///
+    /// Providers that ignore per-request model overrides should override this
+    /// and return `active_model_name()`.
+    fn effective_model_name(&self, requested_model: Option<&str>) -> String {
+        requested_model
+            .map(std::borrow::ToOwned::to_owned)
+            .unwrap_or_else(|| self.active_model_name())
+    }
+
     /// Get the currently active model name.
     ///
     /// May differ from `model_name()` if the model was switched at runtime
@@ -317,5 +345,126 @@ pub trait LlmProvider: Send + Sync {
     fn calculate_cost(&self, input_tokens: u32, output_tokens: u32) -> Decimal {
         let (input_cost, output_cost) = self.cost_per_token();
         input_cost * Decimal::from(input_tokens) + output_cost * Decimal::from(output_tokens)
+    }
+}
+
+/// Sanitize a message list to ensure tool_use / tool_result integrity.
+///
+/// LLM APIs (especially Anthropic) require every tool_result to reference a
+/// tool_call_id that exists in an immediately preceding assistant message's
+/// tool_calls. Orphaned tool_results cause HTTP 400 errors.
+///
+/// This function:
+/// 1. Tracks all tool_call_ids emitted by assistant messages.
+/// 2. Rewrites orphaned tool_result messages (whose tool_call_id has no
+///    matching assistant tool_call) as user messages so the content is
+///    preserved without violating the protocol.
+///
+/// Call this before sending messages to any LLM provider.
+pub fn sanitize_tool_messages(messages: &mut [ChatMessage]) {
+    use std::collections::HashSet;
+
+    // Collect all tool_call_ids from assistant messages with tool_calls.
+    let mut known_ids: HashSet<String> = HashSet::new();
+    for msg in messages.iter() {
+        if msg.role == Role::Assistant
+            && let Some(ref calls) = msg.tool_calls
+        {
+            for tc in calls {
+                known_ids.insert(tc.id.clone());
+            }
+        }
+    }
+
+    // Rewrite orphaned tool_result messages as user messages.
+    for msg in messages.iter_mut() {
+        if msg.role != Role::Tool {
+            continue;
+        }
+        let is_orphaned = match &msg.tool_call_id {
+            Some(id) => !known_ids.contains(id),
+            None => true,
+        };
+        if is_orphaned {
+            let tool_name = msg.name.as_deref().unwrap_or("unknown");
+            tracing::debug!(
+                tool_call_id = ?msg.tool_call_id,
+                tool_name,
+                "Rewriting orphaned tool_result as user message",
+            );
+            msg.role = Role::User;
+            msg.content = format!("[Tool `{}` returned: {}]", tool_name, msg.content);
+            msg.tool_call_id = None;
+            msg.name = None;
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_sanitize_preserves_valid_pairs() {
+        let tc = ToolCall {
+            id: "call_1".to_string(),
+            name: "echo".to_string(),
+            arguments: serde_json::json!({}),
+        };
+        let mut messages = vec![
+            ChatMessage::user("hello"),
+            ChatMessage::assistant_with_tool_calls(None, vec![tc]),
+            ChatMessage::tool_result("call_1", "echo", "result"),
+        ];
+        sanitize_tool_messages(&mut messages);
+        assert_eq!(messages[2].role, Role::Tool);
+        assert_eq!(messages[2].tool_call_id, Some("call_1".to_string()));
+    }
+
+    #[test]
+    fn test_sanitize_rewrites_orphaned_tool_result() {
+        let mut messages = vec![
+            ChatMessage::user("hello"),
+            ChatMessage::assistant("I'll use a tool"),
+            ChatMessage::tool_result("call_missing", "search", "some result"),
+        ];
+        sanitize_tool_messages(&mut messages);
+        assert_eq!(messages[2].role, Role::User);
+        assert!(messages[2].content.contains("[Tool `search` returned:"));
+        assert!(messages[2].tool_call_id.is_none());
+        assert!(messages[2].name.is_none());
+    }
+
+    #[test]
+    fn test_sanitize_handles_no_tool_messages() {
+        let mut messages = vec![
+            ChatMessage::system("prompt"),
+            ChatMessage::user("hello"),
+            ChatMessage::assistant("hi"),
+        ];
+        let original_len = messages.len();
+        sanitize_tool_messages(&mut messages);
+        assert_eq!(messages.len(), original_len);
+    }
+
+    #[test]
+    fn test_sanitize_multiple_orphaned() {
+        let tc = ToolCall {
+            id: "call_1".to_string(),
+            name: "echo".to_string(),
+            arguments: serde_json::json!({}),
+        };
+        let mut messages = vec![
+            ChatMessage::user("test"),
+            ChatMessage::assistant_with_tool_calls(None, vec![tc]),
+            ChatMessage::tool_result("call_1", "echo", "ok"),
+            // These are orphaned (call_2 and call_3 have no matching assistant message)
+            ChatMessage::tool_result("call_2", "search", "orphan 1"),
+            ChatMessage::tool_result("call_3", "http", "orphan 2"),
+        ];
+        sanitize_tool_messages(&mut messages);
+        assert_eq!(messages[2].role, Role::Tool); // call_1 is valid
+        assert_eq!(messages[3].role, Role::User); // call_2 orphaned
+        assert_eq!(messages[4].role, Role::User); // call_3 orphaned
     }
 }

@@ -19,8 +19,9 @@ Explicit invocation. Loads `.env` files, runs the wizard, exits.
 ironclaw          (first run, no database configured)
 ```
 
-Auto-detection via `check_onboard_needed()` in `main.rs`. Triggers when
-none of these are true:
+Auto-detection via `check_onboard_needed()` in `main.rs`. Skips onboarding
+when `ONBOARD_COMPLETED` env var is set (written to `~/.ironclaw/.env` by
+the wizard). Otherwise triggers when no database is configured:
 - `DATABASE_URL` env var is set
 - `LIBSQL_PATH` env var is set
 - `~/.ironclaw/ironclaw.db` exists on disk
@@ -49,7 +50,7 @@ The `--no-onboard` CLI flag suppresses auto-detection.
 
 ---
 
-## The 7-Step Wizard
+## The 8-Step Wizard
 
 ### Overview
 
@@ -60,7 +61,8 @@ Step 3: Inference Provider          ← skipped if --skip-auth
 Step 4: Model Selection
 Step 5: Embeddings
 Step 6: Channel Configuration
-Step 7: Background Tasks (heartbeat)
+Step 7: Extensions (tools)
+Step 8: Background Tasks (heartbeat)
        ↓
    save_and_summarize()
 ```
@@ -242,12 +244,19 @@ key first, then falls back to the standard env var.
 ```
 6a. Tunnel setup (if webhook channels needed)
 6b. Discover WASM channels from ~/.ironclaw/channels/
-6c. Multi-select: CLI/TUI, HTTP, discovered channels, bundled channels
-6d. Install missing bundled channels (copy WASM binaries)
-6e. Initialize SecretsContext (for token storage)
-6f. Setup HTTP webhook (if selected)
-6g. Setup each WASM channel (secrets, owner binding)
+6c. Build channel options: discovered + bundled + registry catalog
+6d. Multi-select: CLI/TUI, HTTP, all available channels
+6e. Install missing bundled channels (copy WASM binaries)
+6f. Install missing registry channels (build from source)
+6g. Initialize SecretsContext (for token storage)
+6h. Setup HTTP webhook (if selected)
+6i. Setup each WASM channel (secrets, owner binding)
 ```
+
+**Channel sources** (priority order for installation):
+1. Already installed in `~/.ironclaw/channels/`
+2. Bundled channels (pre-compiled in `channels-src/`)
+3. Registry channels (`registry/channels/*.json`, built from source)
 
 **Tunnel setup** (`setup_tunnel`):
 - Options: ngrok, Cloudflare Tunnel, localtunnel, custom URL
@@ -272,7 +281,33 @@ key first, then falls back to the standard env var.
 
 ---
 
-### Step 7: Heartbeat
+### Step 7: Extensions (Tools)
+
+**Module:** `wizard.rs` → `step_extensions()`
+
+**Goal:** Install WASM tools from the extension registry.
+
+**Flow:**
+1. Load `RegistryCatalog` from `registry/` directory
+2. If registry not found, print info and skip
+3. List all tool manifests from the catalog
+4. Discover already-installed tools in `~/.ironclaw/tools/`
+5. Multi-select: show all registry tools with display name, auth method,
+   and description. Pre-check tools tagged `"default"` and already installed.
+6. For each selected tool not yet installed, build from source via
+   `RegistryInstaller::install_from_source()`
+7. Print consolidated auth hints (deduplicated by provider, e.g. one hint
+   for all Google tools sharing `google_oauth_token`)
+
+**Registry lookup** (`load_registry_catalog`):
+Searches for `registry/` directory in order:
+1. Current working directory
+2. Next to the executable
+3. `CARGO_MANIFEST_DIR` (compile-time, dev builds)
+
+---
+
+### Step 8: Heartbeat
 
 **Module:** `wizard.rs` → `step_heartbeat()`
 
@@ -345,13 +380,14 @@ Final step of the wizard:
 1. Mark onboard_completed = true
 2. Write ALL settings to database (try postgres pool, then libSQL backend)
 3. Write bootstrap vars to ~/.ironclaw/.env:
-   - DATABASE_BACKEND (always)
-   - DATABASE_URL     (if postgres)
-   - LIBSQL_PATH      (if libsql)
-   - LIBSQL_URL       (if turso sync)
-   - LLM_BACKEND      (always, when set)
-   - LLM_BASE_URL     (if openai_compatible)
-   - OLLAMA_BASE_URL   (if ollama)
+   - DATABASE_BACKEND   (always)
+   - DATABASE_URL       (if postgres)
+   - LIBSQL_PATH        (if libsql)
+   - LIBSQL_URL         (if turso sync)
+   - LLM_BACKEND        (always, when set)
+   - LLM_BASE_URL       (if openai_compatible)
+   - OLLAMA_BASE_URL    (if ollama)
+   - ONBOARD_COMPLETED  (always, "true")
 4. Print configuration summary
 ```
 
