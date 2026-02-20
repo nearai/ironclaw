@@ -71,9 +71,7 @@ impl WorkspaceSearchConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Mutex;
-
-    static ENV_MUTEX: Mutex<()> = Mutex::new(());
+    use crate::config::helpers::ENV_MUTEX;
 
     fn clear_search_env() {
         // SAFETY: Only called under ENV_MUTEX in tests.
