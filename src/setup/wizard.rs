@@ -949,6 +949,11 @@ impl SetupWizard {
                         "anthropic::claude-sonnet-4-20250514".into(),
                         "Claude Sonnet 4 (best quality)".into(),
                     ),
+                    (
+                        "openai::gpt-5.3-codex".into(),
+                        "GPT-5.3 Codex (flagship)".into(),
+                    ),
+                    ("openai::gpt-5.2".into(), "GPT-5.2".into()),
                     ("openai::gpt-4o".into(), "GPT-4o".into()),
                 ];
 
@@ -1714,12 +1719,14 @@ fn mask_password_in_url(url: &str) -> String {
 /// Returns `(model_id, display_label)` pairs. Falls back to static defaults on error.
 async fn fetch_anthropic_models(cached_key: Option<&str>) -> Vec<(String, String)> {
     let static_defaults = vec![
-        ("claude-sonnet-4-20250514".into(), "Claude Sonnet 4".into()),
-        ("claude-opus-4-20250514".into(), "Claude Opus 4".into()),
         (
-            "claude-3-5-haiku-20241022".into(),
-            "Claude 3.5 Haiku (fast)".into(),
+            "claude-opus-4-6".into(),
+            "Claude Opus 4.6 (latest flagship)".into(),
         ),
+        ("claude-sonnet-4-6".into(), "Claude Sonnet 4.6".into()),
+        ("claude-opus-4-5".into(), "Claude Opus 4.5".into()),
+        ("claude-sonnet-4-5".into(), "Claude Sonnet 4.5".into()),
+        ("claude-haiku-4-5".into(), "Claude Haiku 4.5 (fast)".into()),
     ];
 
     let api_key = cached_key
@@ -1780,10 +1787,21 @@ async fn fetch_anthropic_models(cached_key: Option<&str>) -> Vec<(String, String
 /// Returns `(model_id, display_label)` pairs. Falls back to static defaults on error.
 async fn fetch_openai_models(cached_key: Option<&str>) -> Vec<(String, String)> {
     let static_defaults = vec![
-        ("gpt-5".into(), "GPT-5 (flagship)".into()),
-        ("gpt-5-mini".into(), "GPT-5 Mini (fast)".into()),
+        (
+            "gpt-5.3-codex".into(),
+            "GPT-5.3 Codex (latest flagship)".into(),
+        ),
+        ("gpt-5.2-codex".into(), "GPT-5.2 Codex".into()),
+        ("gpt-5.2".into(), "GPT-5.2".into()),
+        (
+            "gpt-5.1-codex-mini".into(),
+            "GPT-5.1 Codex Mini (fast)".into(),
+        ),
+        ("gpt-5".into(), "GPT-5".into()),
+        ("gpt-5-mini".into(), "GPT-5 Mini".into()),
         ("gpt-4.1".into(), "GPT-4.1".into()),
-        ("gpt-4o".into(), "GPT-4o".into()),
+        ("gpt-4.1-mini".into(), "GPT-4.1 Mini".into()),
+        ("o4-mini".into(), "o4-mini (fast reasoning)".into()),
         ("o3".into(), "o3 (reasoning)".into()),
     ];
 
@@ -1864,11 +1882,15 @@ fn openai_model_priority(model_id: &str) -> usize {
     let id = model_id.to_ascii_lowercase();
 
     const EXACT_PRIORITY: &[&str] = &[
+        "gpt-5.3-codex",
+        "gpt-5.2-codex",
+        "gpt-5.2",
+        "gpt-5.1-codex-mini",
         "gpt-5",
         "gpt-5-mini",
         "gpt-5-nano",
-        "o3",
         "o4-mini",
+        "o3",
         "o1",
         "gpt-4.1",
         "gpt-4.1-mini",
@@ -1880,7 +1902,7 @@ fn openai_model_priority(model_id: &str) -> usize {
     }
 
     const PREFIX_PRIORITY: &[&str] = &[
-        "gpt-5-", "o3-", "o4-", "o1-", "gpt-4.1-", "gpt-4o-", "gpt-3.5-", "chatgpt-",
+        "gpt-5.", "gpt-5-", "o3-", "o4-", "o1-", "gpt-4.1-", "gpt-4o-", "gpt-3.5-", "chatgpt-",
     ];
     if let Some(pos) = PREFIX_PRIORITY
         .iter()
@@ -2230,7 +2252,7 @@ mod tests {
         let _guard = EnvGuard::clear("OPENAI_API_KEY");
         let models = fetch_openai_models(None).await;
         assert!(!models.is_empty());
-        assert_eq!(models[0].0, "gpt-5");
+        assert_eq!(models[0].0, "gpt-5.3-codex");
         assert!(
             models.iter().any(|(id, _)| id.contains("gpt")),
             "static defaults should include a GPT model"
