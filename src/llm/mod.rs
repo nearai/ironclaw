@@ -80,10 +80,7 @@ pub fn create_llm_provider_with_config(
         auth = auth_mode,
         "Using NEAR AI (Chat Completions API)"
     );
-    Ok(Arc::new(NearAiChatProvider::new(
-        config.clone(),
-        session,
-    )?))
+    Ok(Arc::new(NearAiChatProvider::new(config.clone(), session)?))
 }
 
 fn create_openai_provider(config: &LlmConfig) -> Result<Arc<dyn LlmProvider>, LlmError> {
@@ -271,7 +268,8 @@ pub fn create_cheap_llm_provider(
     cheap_config.model = cheap_model.clone();
 
     Ok(Some(Arc::new(NearAiChatProvider::new(
-        cheap_config, session,
+        cheap_config,
+        session,
     )?)))
 }
 

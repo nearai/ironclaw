@@ -404,7 +404,6 @@ mod tests {
                     input_tokens: 10,
                     output_tokens: 5,
                     finish_reason: FinishReason::Stop,
-
                 }))),
                 tool_complete_result: Mutex::new(Some(Ok(ToolCompletionResponse {
                     content: Some(content.to_string()),
@@ -412,7 +411,6 @@ mod tests {
                     input_tokens: 10,
                     output_tokens: 5,
                     finish_reason: FinishReason::Stop,
-
                 }))),
             }
         }

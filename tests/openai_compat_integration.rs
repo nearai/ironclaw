@@ -96,7 +96,7 @@ impl LlmProvider for MockLlmProvider {
                 input_tokens: 15,
                 output_tokens: 8,
                 finish_reason: FinishReason::ToolUse,
-                })
+            })
         } else {
             Ok(ToolCompletionResponse {
                 content: Some("No tools available".to_string()),
@@ -104,7 +104,7 @@ impl LlmProvider for MockLlmProvider {
                 input_tokens: 10,
                 output_tokens: 4,
                 finish_reason: FinishReason::Stop,
-                })
+            })
         }
     }
 
@@ -185,6 +185,7 @@ async fn start_test_server_with_provider(
         workspace: None,
         session_manager: None,
         log_broadcaster: None,
+        log_level_handle: None,
         extension_manager: None,
         tool_registry: None,
         store: None,
@@ -669,6 +670,7 @@ async fn test_no_llm_provider_returns_503() {
         workspace: None,
         session_manager: None,
         log_broadcaster: None,
+        log_level_handle: None,
         extension_manager: None,
         tool_registry: None,
         store: None,

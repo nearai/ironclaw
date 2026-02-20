@@ -228,7 +228,6 @@ impl LlmProvider for CachedProvider {
     fn set_model(&self, model: &str) -> Result<(), LlmError> {
         self.inner.set_model(model)
     }
-
 }
 
 #[cfg(test)]

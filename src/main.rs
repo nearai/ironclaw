@@ -3,7 +3,7 @@
 use std::sync::Arc;
 
 use clap::Parser;
-use tracing_subscriber::{EnvFilter, layer::SubscriberExt, util::SubscriberInitExt};
+use tracing_subscriber::EnvFilter;
 
 use ironclaw::{
     agent::{Agent, AgentDeps, SessionManager},
@@ -14,7 +14,7 @@ use ironclaw::{
             RegisteredEndpoint, SharedWasmChannel, WasmChannelLoader, WasmChannelRouter,
             WasmChannelRuntime, WasmChannelRuntimeConfig, create_wasm_channel_router,
         },
-        web::log_layer::{LogBroadcaster, WebLogLayer},
+        web::log_layer::LogBroadcaster,
     },
     cli::{
         Cli, Command, run_mcp_command, run_pairing_command, run_service_command,
@@ -366,23 +366,14 @@ async fn main() -> anyhow::Result<()> {
     };
     let session = create_session_manager(session_config).await;
 
-    // Initialize tracing
-    let env_filter = EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| EnvFilter::new("ironclaw=info,tower_http=warn"));
-
     // Create log broadcaster before tracing init so the WebLogLayer can capture all events.
     // This gets wired to the gateway's /api/logs/events SSE endpoint later.
     let log_broadcaster = Arc::new(LogBroadcaster::new());
 
-    tracing_subscriber::registry()
-        .with(env_filter)
-        .with(
-            tracing_subscriber::fmt::layer()
-                .with_target(false)
-                .with_writer(ironclaw::tracing_fmt::TruncatingStderr::default()),
-        )
-        .with(WebLogLayer::new(Arc::clone(&log_broadcaster)))
-        .init();
+    // Initialize tracing with a reloadable EnvFilter so the gateway can switch
+    // log levels (e.g. ironclaw=debug) at runtime without restarting.
+    let log_level_handle =
+        ironclaw::channels::web::log_layer::init_tracing(Arc::clone(&log_broadcaster));
 
     // Create CLI channel
     let repl_channel = if let Some(ref msg) = cli.message {
@@ -1428,6 +1419,7 @@ async fn main() -> anyhow::Result<()> {
         }
         gw = gw.with_session_manager(Arc::clone(&session_manager));
         gw = gw.with_log_broadcaster(Arc::clone(&log_broadcaster));
+        gw = gw.with_log_level_handle(Arc::clone(&log_level_handle));
         gw = gw.with_tool_registry(Arc::clone(&tools));
         if let Some(ref ext_mgr) = extension_manager {
             gw = gw.with_extension_manager(Arc::clone(ext_mgr));

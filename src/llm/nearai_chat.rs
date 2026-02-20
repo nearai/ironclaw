@@ -398,7 +398,6 @@ impl LlmProvider for NearAiChatProvider {
             finish_reason,
             input_tokens,
             output_tokens,
-
         })
     }
 
@@ -493,7 +492,6 @@ impl LlmProvider for NearAiChatProvider {
             finish_reason,
             input_tokens,
             output_tokens,
-
         })
     }
 
