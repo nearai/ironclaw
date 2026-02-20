@@ -11,6 +11,8 @@ use std::sync::Arc;
 use reqwest::Client;
 use secrecy::{ExposeSecret, SecretString};
 use serde::Deserialize;
+use url::Url;
+use uuid::Uuid;
 
 #[cfg(feature = "postgres")]
 use crate::secrets::SecretsCrypto;
@@ -639,6 +641,16 @@ pub struct HttpSetupResult {
     pub host: String,
 }
 
+/// Result of Signal channel setup.
+#[derive(Debug, Clone)]
+pub struct SignalSetupResult {
+    pub enabled: bool,
+    pub http_url: String,
+    pub account: String,
+    pub allowed_users: String,
+    pub allowed_groups: String,
+}
+
 /// Set up HTTP webhook channel.
 pub async fn setup_http(secrets: &SecretsContext) -> Result<HttpSetupResult, ChannelSetupError> {
     println!("HTTP Webhook Setup:");
@@ -682,6 +694,160 @@ pub async fn setup_http(secrets: &SecretsContext) -> Result<HttpSetupResult, Cha
 /// Generate a random webhook secret.
 pub fn generate_webhook_secret() -> String {
     generate_secret_with_length(32)
+}
+
+fn validate_e164(account: &str) -> Result<(), String> {
+    if !account.starts_with('+') {
+        return Err("E.164 account must start with '+'".to_string());
+    }
+    let digits = &account[1..];
+    if digits.is_empty() {
+        return Err("E.164 account must have digits after '+'".to_string());
+    }
+    if !digits.chars().all(|c| c.is_ascii_digit()) {
+        return Err("E.164 account must contain only digits after '+'".to_string());
+    }
+    if digits.len() < 7 || digits.len() > 15 {
+        return Err("E.164 account must be 7-15 digits after '+'".to_string());
+    }
+    Ok(())
+}
+
+fn validate_allowed_users_list(list: &str) -> Result<(), String> {
+    if list.is_empty() {
+        return Ok(());
+    }
+    for (i, item) in list.split(',').enumerate() {
+        let trimmed = item.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        if trimmed == "*" {
+            continue;
+        }
+        if let Some(uuid_part) = trimmed.strip_prefix("uuid:") {
+            if Uuid::parse_str(uuid_part).is_err() {
+                return Err(format!(
+                    "allowed_users[{}]: '{}' is not a valid UUID (after 'uuid:' prefix)",
+                    i, trimmed
+                ));
+            }
+            continue;
+        }
+        if validate_e164(trimmed).is_ok() {
+            continue;
+        }
+        if Uuid::parse_str(trimmed).is_ok() {
+            continue;
+        }
+        return Err(format!(
+            "allowed_users[{}]: '{}' must be '*', E.164 phone number, UUID, or 'uuid:<id>'",
+            i, trimmed
+        ));
+    }
+    Ok(())
+}
+
+fn validate_allowed_groups_list(list: &str) -> Result<(), String> {
+    if list.is_empty() {
+        return Ok(());
+    }
+    for (i, item) in list.split(',').enumerate() {
+        let trimmed = item.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        if trimmed == "*" {
+            continue;
+        }
+        if trimmed.is_empty() {
+            return Err(format!(
+                "allowed_groups[{}]: group ID cannot be empty",
+                i
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Set up Signal channel.
+/// `Settings` is reserved for future use
+pub async fn setup_signal(_settings: &Settings) -> Result<SignalSetupResult, ChannelSetupError> {
+    // Explicitly "use" settings to satisfy static analysis
+    let _ = _settings;
+
+    println!("Signal Channel Setup:");
+    println!();
+    print_info("Signal channel connects to a signal-cli daemon running in HTTP mode.");
+    println!();
+
+    let http_url = input("Signal-cli HTTP URL")?;
+    match Url::parse(&http_url) {
+        Ok(url) if url.scheme() == "http" || url.scheme() == "https" => {}
+        Ok(_) => {
+            print_error("URL must use http or https scheme");
+            return Err(ChannelSetupError::Validation(
+                "Invalid HTTP URL: must use http or https scheme".to_string(),
+            ));
+        }
+        Err(e) => {
+            print_error(&format!("Invalid URL: {}", e));
+            return Err(ChannelSetupError::Validation(format!(
+                "Invalid HTTP URL: {}",
+                e
+            )));
+        }
+    }
+
+    let account = input("Signal account (E.164)")?;
+    if let Err(e) = validate_e164(&account) {
+        print_error(&e);
+        return Err(ChannelSetupError::Validation(e));
+    }
+
+    let allowed_users = optional_input(
+        "Allowed users (comma-separated: E.164 numbers, '*' for anyone, UUIDs or 'uuid:<id>'; empty for self-only)",
+        Some(&format!("default: {} (self-only)", account)),
+    )?
+    .unwrap_or_else(|| account.clone());
+
+    let allowed_groups = optional_input(
+        "Allowed groups (comma-separated group IDs, '*' for any group; empty for none)",
+        Some("default: (none)"),
+    )?
+    .unwrap_or_default();
+
+    if let Err(e) = validate_allowed_users_list(&allowed_users) {
+        print_error(&e);
+        return Err(ChannelSetupError::Validation(e));
+    }
+
+    if let Err(e) = validate_allowed_groups_list(&allowed_groups) {
+        print_error(&e);
+        return Err(ChannelSetupError::Validation(e));
+    }
+
+    println!();
+    print_success(&format!("Signal channel configured for account: {}", account));
+    print_info(&format!("HTTP URL: {}", http_url));
+    if allowed_users == account {
+        print_info("Allowed users: self-only");
+    } else {
+        print_info(&format!("Allowed users: {}", allowed_users));
+    }
+    if allowed_groups.is_empty() {
+        print_info("Allowed groups: (none)");
+    } else {
+        print_info(&format!("Allowed groups: {}", allowed_groups));
+    }
+
+    Ok(SignalSetupResult {
+        enabled: true,
+        http_url,
+        account,
+        allowed_users,
+        allowed_groups,
+    })
 }
 
 /// Result of WASM channel setup.

@@ -212,6 +212,28 @@ pub struct ChannelSettings {
     #[serde(default)]
     pub http_host: Option<String>,
 
+    /// Whether Signal channel is enabled.
+    #[serde(default)]
+    pub signal_enabled: bool,
+
+    /// Signal HTTP URL (signal-cli daemon endpoint).
+    #[serde(default)]
+    pub signal_http_url: Option<String>,
+
+    /// Signal account (E.164 phone number).
+    #[serde(default)]
+    pub signal_account: Option<String>,
+
+    /// Signal allowed users (comma-separated E.164 phone numbers).
+    /// When empty, Signal channel denies all senders.
+    /// Defaults to the configured account.
+    #[serde(default)]
+    pub signal_allowed_users: Option<String>,
+
+    /// Signal allowed groups (comma-separated group IDs).
+    #[serde(default)]
+    pub signal_allowed_groups: Option<String>,
+
     /// Telegram owner user ID. When set, the bot only responds to this user.
     /// Captured during setup by having the user message the bot.
     #[serde(default)]

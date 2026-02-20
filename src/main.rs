@@ -9,7 +9,7 @@ use ironclaw::{
     agent::{Agent, AgentDeps},
     app::{AppBuilder, AppBuilderFlags},
     channels::{
-        ChannelManager, GatewayChannel, HttpChannel, ReplChannel, WebhookServer,
+        ChannelManager, GatewayChannel, HttpChannel, ReplChannel, SignalChannel, WebhookServer,
         WebhookServerConfig,
         wasm::{
             RegisteredEndpoint, SharedWasmChannel, WasmChannelLoader, WasmChannelRouter,
@@ -365,6 +365,25 @@ async fn main() -> anyhow::Result<()> {
             if let Some(routes) = result.webhook_routes {
                 webhook_routes.push(routes);
             }
+        }
+    }
+
+    // Add Signal channel if configured and not CLI-only mode.
+    if !cli.cli_only
+        && let Some(ref signal_config) = config.channels.signal
+    {
+        let signal_channel = SignalChannel::new(signal_config.clone());
+        channel_names.push("signal".to_string());
+        channels.add(Box::new(signal_channel)).await;
+        let safe_url = SignalChannel::redact_url(&signal_config.http_url);
+        tracing::info!(
+            url = %safe_url,
+            "Signal channel enabled"
+        );
+        if signal_config.allowed_users.is_empty() {
+            tracing::warn!(
+                "Signal channel has empty allowed_users list - ALL messages will be DENIED."
+            );
         }
     }
 

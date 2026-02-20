@@ -27,12 +27,17 @@ use crate::llm::{SessionConfig, SessionManager};
 use crate::secrets::{SecretsCrypto, SecretsStore};
 use crate::settings::{KeySource, Settings};
 use crate::setup::channels::{
-    SecretsContext, setup_http, setup_telegram, setup_tunnel, setup_wasm_channel,
+    SecretsContext, setup_http, setup_signal, setup_telegram, setup_tunnel, setup_wasm_channel,
 };
 use crate::setup::prompts::{
     confirm, input, optional_input, print_error, print_header, print_info, print_step,
     print_success, secret_input, select_many, select_one,
 };
+
+// unused const, keep commented for clarity / future use
+// const CHANNEL_INDEX_CLI: usize = 0;
+const CHANNEL_INDEX_HTTP: usize = 1;
+const CHANNEL_INDEX_SIGNAL: usize = 2;
 
 /// Setup wizard error.
 #[derive(Debug, thiserror::Error)]
@@ -1443,7 +1448,10 @@ impl SetupWizard {
                 "HTTP webhook".to_string(),
                 self.settings.channels.http_enabled,
             ),
+            ("Signal".to_string(), self.settings.channels.signal_enabled),
         ];
+
+        let non_wasm_count = options.len();
 
         // Add available WASM channels (installed + bundled + registry)
         for name in &wasm_channel_names {
@@ -1466,7 +1474,7 @@ impl SetupWizard {
             .iter()
             .enumerate()
             .filter_map(|(idx, name)| {
-                if selected.contains(&(idx + 2)) {
+                if selected.contains(&(non_wasm_count + idx)) {
                     Some(name.clone())
                 } else {
                     None
@@ -1514,7 +1522,8 @@ impl SetupWizard {
         }
 
         // Determine if we need secrets context
-        let needs_secrets = selected.contains(&1) || !selected_wasm_channels.is_empty();
+        let needs_secrets =
+            selected.contains(&CHANNEL_INDEX_HTTP) || !selected_wasm_channels.is_empty();
         let secrets = if needs_secrets {
             match self.init_secrets_context().await {
                 Ok(ctx) => Some(ctx),
@@ -1528,8 +1537,8 @@ impl SetupWizard {
             None
         };
 
-        // HTTP is index 1
-        if selected.contains(&1) {
+        // HTTP channel
+        if selected.contains(&CHANNEL_INDEX_HTTP) {
             println!();
             if let Some(ref ctx) = secrets {
                 let result = setup_http(ctx).await?;
@@ -1542,6 +1551,23 @@ impl SetupWizard {
             }
         } else {
             self.settings.channels.http_enabled = false;
+        }
+
+        // Signal channel
+        if selected.contains(&CHANNEL_INDEX_SIGNAL) {
+            println!();
+            let result = setup_signal(&self.settings).await?;
+            self.settings.channels.signal_enabled = result.enabled;
+            self.settings.channels.signal_http_url = Some(result.http_url);
+            self.settings.channels.signal_account = Some(result.account);
+            self.settings.channels.signal_allowed_users = Some(result.allowed_users);
+            self.settings.channels.signal_allowed_groups = Some(result.allowed_groups);
+        } else {
+            self.settings.channels.signal_enabled = false;
+            self.settings.channels.signal_http_url = None;
+            self.settings.channels.signal_account = None;
+            self.settings.channels.signal_allowed_users = None;
+            self.settings.channels.signal_allowed_groups = None;
         }
 
         let discovered_by_name: HashMap<String, ChannelCapabilitiesFile> =
@@ -1937,6 +1963,22 @@ impl SetupWizard {
         // (which runs before the DB is connected) knows to skip re-onboarding.
         if self.settings.onboard_completed {
             env_vars.push(("ONBOARD_COMPLETED", "true".to_string()));
+        }
+
+        // Signal channel env vars (chicken-and-egg: config resolves before DB).
+        if let Some(ref url) = self.settings.channels.signal_http_url {
+            env_vars.push(("SIGNAL_HTTP_URL", url.clone()));
+        }
+        if let Some(ref account) = self.settings.channels.signal_account {
+            env_vars.push(("SIGNAL_ACCOUNT", account.clone()));
+        }
+        if let Some(ref allowed_users) = self.settings.channels.signal_allowed_users {
+            env_vars.push(("SIGNAL_ALLOWED_USERS", allowed_users.clone()));
+        }
+        if let Some(ref allowed_groups) = self.settings.channels.signal_allowed_groups {
+            if !allowed_groups.is_empty() {
+                env_vars.push(("SIGNAL_ALLOWED_GROUPS", allowed_groups.clone()));
+            }
         }
 
         if !env_vars.is_empty() {
