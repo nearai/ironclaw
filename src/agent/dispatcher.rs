@@ -444,7 +444,14 @@ impl Agent {
                                     exec_results[pf_idx] = Some(result);
                                 }
                                 Err(e) => {
-                                    tracing::error!("Chat tool execution task panicked: {}", e);
+                                    if e.is_panic() {
+                                        tracing::error!("Chat tool execution task panicked: {}", e);
+                                    } else {
+                                        tracing::error!(
+                                            "Chat tool execution task cancelled: {}",
+                                            e
+                                        );
+                                    }
                                 }
                             }
                         }
@@ -455,12 +462,12 @@ impl Agent {
                                 tracing::error!(
                                     tool = %tc.name,
                                     runnable_idx,
-                                    "Filling panicked slot with error"
+                                    "Filling failed task slot with error"
                                 );
                                 exec_results[*pf_idx] =
                                     Some(Err(crate::error::ToolError::ExecutionFailed {
                                         name: tc.name.clone(),
-                                        reason: "Task panicked during execution".to_string(),
+                                        reason: "Task failed during execution".to_string(),
                                     }
                                     .into()));
                             }
@@ -471,7 +478,7 @@ impl Agent {
                     // Process all results — both hook rejections and execution
                     // results — in the original tool_calls order. Auth intercept
                     // is deferred until after every result is recorded.
-                    let mut deferred_auth: Option<(String, String)> = None;
+                    let mut deferred_auth: Option<String> = None;
 
                     for (pf_idx, (tc, outcome)) in preflight.into_iter().enumerate() {
                         match outcome {
@@ -559,7 +566,7 @@ impl Agent {
                                             &message.metadata,
                                         )
                                         .await;
-                                    deferred_auth = Some((tc.name.clone(), instructions));
+                                    deferred_auth = Some(instructions);
                                 }
 
                                 // Sanitize and add tool result to context
@@ -586,7 +593,7 @@ impl Agent {
                     }
 
                     // Return auth response after all results are recorded
-                    if let Some((_tool_name, instructions)) = deferred_auth {
+                    if let Some(instructions) = deferred_auth {
                         return Ok(AgenticLoopResult::Response(instructions));
                     }
 

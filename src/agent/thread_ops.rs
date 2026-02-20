@@ -821,121 +821,126 @@ impl Agent {
             }
 
             // === Phase 2: Parallel execution ===
-            let exec_results: Vec<(crate::llm::ToolCall, Result<String, Error>)> =
-                if runnable.len() <= 1 {
-                    // Single tool (or none): execute inline
-                    let mut results = Vec::new();
-                    for tc in &runnable {
-                        let _ = self
-                            .channels
+            let exec_results: Vec<(crate::llm::ToolCall, Result<String, Error>)> = if runnable.len()
+                <= 1
+            {
+                // Single tool (or none): execute inline
+                let mut results = Vec::new();
+                for tc in &runnable {
+                    let _ = self
+                        .channels
+                        .send_status(
+                            &message.channel,
+                            StatusUpdate::ToolStarted {
+                                name: tc.name.clone(),
+                            },
+                            &message.metadata,
+                        )
+                        .await;
+
+                    let result = self
+                        .execute_chat_tool(&tc.name, &tc.arguments, &job_ctx)
+                        .await;
+
+                    let _ = self
+                        .channels
+                        .send_status(
+                            &message.channel,
+                            StatusUpdate::ToolCompleted {
+                                name: tc.name.clone(),
+                                success: result.is_ok(),
+                            },
+                            &message.metadata,
+                        )
+                        .await;
+
+                    results.push((tc.clone(), result));
+                }
+                results
+            } else {
+                // Multiple tools: execute in parallel via JoinSet
+                let mut join_set = JoinSet::new();
+                let runnable_count = runnable.len();
+
+                for (spawn_idx, tc) in runnable.iter().enumerate() {
+                    let tools = self.tools().clone();
+                    let safety = self.safety().clone();
+                    let channels = self.channels.clone();
+                    let job_ctx = job_ctx.clone();
+                    let tc = tc.clone();
+                    let channel = message.channel.clone();
+                    let metadata = message.metadata.clone();
+
+                    join_set.spawn(async move {
+                        let _ = channels
                             .send_status(
-                                &message.channel,
+                                &channel,
                                 StatusUpdate::ToolStarted {
                                     name: tc.name.clone(),
                                 },
-                                &message.metadata,
+                                &metadata,
                             )
                             .await;
 
-                        let result = self
-                            .execute_chat_tool(&tc.name, &tc.arguments, &job_ctx)
-                            .await;
+                        let result = execute_chat_tool_standalone(
+                            &tools,
+                            &safety,
+                            &tc.name,
+                            &tc.arguments,
+                            &job_ctx,
+                        )
+                        .await;
 
-                        let _ = self
-                            .channels
+                        let _ = channels
                             .send_status(
-                                &message.channel,
+                                &channel,
                                 StatusUpdate::ToolCompleted {
                                     name: tc.name.clone(),
                                     success: result.is_ok(),
                                 },
-                                &message.metadata,
+                                &metadata,
                             )
                             .await;
 
-                        results.push((tc.clone(), result));
-                    }
-                    results
-                } else {
-                    // Multiple tools: execute in parallel via JoinSet
-                    let mut join_set = JoinSet::new();
-                    let runnable_count = runnable.len();
+                        (spawn_idx, tc, result)
+                    });
+                }
 
-                    for (spawn_idx, tc) in runnable.iter().enumerate() {
-                        let tools = self.tools().clone();
-                        let safety = self.safety().clone();
-                        let channels = self.channels.clone();
-                        let job_ctx = job_ctx.clone();
-                        let tc = tc.clone();
-                        let channel = message.channel.clone();
-                        let metadata = message.metadata.clone();
-
-                        join_set.spawn(async move {
-                            let _ = channels
-                                .send_status(
-                                    &channel,
-                                    StatusUpdate::ToolStarted {
-                                        name: tc.name.clone(),
-                                    },
-                                    &metadata,
-                                )
-                                .await;
-
-                            let result = execute_chat_tool_standalone(
-                                &tools,
-                                &safety,
-                                &tc.name,
-                                &tc.arguments,
-                                &job_ctx,
-                            )
-                            .await;
-
-                            let _ = channels
-                                .send_status(
-                                    &channel,
-                                    StatusUpdate::ToolCompleted {
-                                        name: tc.name.clone(),
-                                        success: result.is_ok(),
-                                    },
-                                    &metadata,
-                                )
-                                .await;
-
-                            (spawn_idx, tc, result)
-                        });
-                    }
-
-                    // Collect and reorder by original index
-                    let mut ordered: Vec<Option<(crate::llm::ToolCall, Result<String, Error>)>> =
-                        (0..runnable_count).map(|_| None).collect();
-                    while let Some(join_result) = join_set.join_next().await {
-                        match join_result {
-                            Ok((idx, tc, result)) => {
-                                ordered[idx] = Some((tc, result));
-                            }
-                            Err(e) => {
+                // Collect and reorder by original index
+                let mut ordered: Vec<Option<(crate::llm::ToolCall, Result<String, Error>)>> =
+                    (0..runnable_count).map(|_| None).collect();
+                while let Some(join_result) = join_set.join_next().await {
+                    match join_result {
+                        Ok((idx, tc, result)) => {
+                            ordered[idx] = Some((tc, result));
+                        }
+                        Err(e) => {
+                            if e.is_panic() {
                                 tracing::error!("Deferred tool execution task panicked: {}", e);
+                            } else {
+                                tracing::error!("Deferred tool execution task cancelled: {}", e);
                             }
                         }
                     }
+                }
 
-                    // Fill panicked slots with error results
-                    ordered
-                        .into_iter()
-                        .enumerate()
-                        .map(|(i, opt)| {
-                            opt.unwrap_or_else(|| {
-                                let tc = runnable[i].clone();
-                                let err: Error = crate::error::ToolError::ExecutionFailed {
-                                    name: tc.name.clone(),
-                                    reason: "Task panicked during execution".to_string(),
-                                }
-                                .into();
-                                (tc, Err(err))
-                            })
+                // Fill panicked slots with error results
+                ordered
+                    .into_iter()
+                    .enumerate()
+                    .map(|(i, opt)| {
+                        opt.unwrap_or_else(|| {
+                            let tc = runnable[i].clone();
+                            let err: Error = crate::error::ToolError::ExecutionFailed {
+                                name: tc.name.clone(),
+                                reason: "Task failed during execution".to_string(),
+                            }
+                            .into();
+                            (tc, Err(err))
                         })
-                        .collect()
-                };
+                    })
+                    .collect()
+            };
 
             // === Phase 3: Post-flight (sequential, in original order) ===
             // Process all results before any conditional return so every

@@ -355,6 +355,23 @@ Report when the job is complete or if you encounter issues you cannot resolve."#
     /// in the same order as `selections`, regardless of completion order.
     async fn execute_tools_parallel(&self, selections: &[ToolSelection]) -> Vec<ToolExecResult> {
         let count = selections.len();
+
+        // Short-circuit for single tool: execute directly without JoinSet overhead
+        if count <= 1 {
+            let mut results = Vec::with_capacity(count);
+            for selection in selections {
+                let result = Self::execute_tool_inner(
+                    &self.deps,
+                    self.job_id,
+                    &selection.tool_name,
+                    &selection.parameters,
+                )
+                .await;
+                results.push(ToolExecResult { result });
+            }
+            return results;
+        }
+
         let mut join_set = JoinSet::new();
 
         for (idx, selection) in selections.iter().enumerate() {
@@ -373,7 +390,13 @@ Report when the job is complete or if you encounter issues you cannot resolve."#
         while let Some(join_result) = join_set.join_next().await {
             match join_result {
                 Ok((idx, exec_result)) => results[idx] = Some(exec_result),
-                Err(e) => tracing::error!("Tool execution task panicked: {}", e),
+                Err(e) => {
+                    if e.is_panic() {
+                        tracing::error!("Tool execution task panicked: {}", e);
+                    } else {
+                        tracing::error!("Tool execution task cancelled: {}", e);
+                    }
+                }
             }
         }
 
@@ -385,7 +408,7 @@ Report when the job is complete or if you encounter issues you cannot resolve."#
                 opt.unwrap_or_else(|| ToolExecResult {
                     result: Err(crate::error::ToolError::ExecutionFailed {
                         name: selections[i].tool_name.clone(),
-                        reason: "Task panicked during execution".to_string(),
+                        reason: "Task failed during execution".to_string(),
                     }
                     .into()),
                 })
