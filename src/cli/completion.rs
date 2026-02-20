@@ -1,4 +1,4 @@
-use clap::{CommandFactory, Parser, ValueEnum};
+use clap::{CommandFactory, Parser};
 use clap_complete::{Shell, generate};
 use std::io;
 
@@ -7,16 +7,7 @@ use std::io;
 pub struct Completion {
     /// The shell to generate completions for
     #[arg(value_enum, long)]
-    pub shell: CompletionShell,
-}
-
-#[derive(Debug, Clone, Copy, ValueEnum)]
-pub enum CompletionShell {
-    Bash,
-    Zsh,
-    Fish,
-    Powershell,
-    Elvish,
+    pub shell: Shell,
 }
 
 impl Completion {
@@ -24,17 +15,8 @@ impl Completion {
         let mut cmd = crate::cli::Cli::command();
         let bin_name = cmd.get_name().to_string();
 
-        // Convert enum to clap_complete::Shell
-        let shell = match self.shell {
-            CompletionShell::Bash => Shell::Bash,
-            CompletionShell::Zsh => Shell::Zsh,
-            CompletionShell::Fish => Shell::Fish,
-            CompletionShell::Powershell => Shell::PowerShell,
-            CompletionShell::Elvish => Shell::Elvish,
-        };
-
-        // Generate and output a script to stdout
-        generate(shell, &mut cmd, bin_name, &mut io::stdout());
+        // Generated and output script to stdout
+        generate(self.shell, &mut cmd, bin_name, &mut io::stdout());
 
         Ok(())
     }
@@ -43,25 +25,15 @@ impl Completion {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use clap::CommandFactory;
 
     #[test]
-    fn test_completion_shell_enum() {
-        // Check that the enum is parsed
-        let shells = ["bash", "zsh", "fish", "powershell", "elvish"];
-        for shell in shells {
-            let result = CompletionShell::from_str(shell, false); // ignore_case=false for exact match
-            assert!(result.is_ok(), "Failed to parse {}", shell);
-        }
-    }
-
-    #[test]
-    fn test_run_does_not_panic() {
-        // Check that run() doesn't panic (no real output)
-        let completion = Completion {
-            shell: CompletionShell::Zsh,
-        };
-        // We don't call the run() method completely to avoid generating output in tests,
-        // but we do check that the structure is correct.
-        assert_eq!(format!("{:?}", completion.shell), "Zsh");
+    fn test_run_generates_output() {
+        let completion = Completion { shell: Shell::Zsh };
+        let mut cmd = crate::cli::Cli::command();
+        let bin_name = cmd.get_name().to_string();
+        let mut buf = Vec::new();
+        generate(completion.shell, &mut cmd, bin_name, &mut buf);
+        assert!(!buf.is_empty(), "generate() should produce output");
     }
 }
