@@ -42,7 +42,9 @@ use wasmtime_wasi::{ResourceTable, WasiCtx, WasiCtxBuilder, WasiView};
 
 use crate::channels::wasm::capabilities::ChannelCapabilities;
 use crate::channels::wasm::error::WasmChannelError;
-use crate::channels::wasm::host::{ChannelEmitRateLimiter, ChannelHostState, EmittedMessage};
+use crate::channels::wasm::host::{
+    ChannelEmitRateLimiter, ChannelHostState, ChannelWorkspaceStore, EmittedMessage,
+};
 use crate::channels::wasm::router::RegisteredEndpoint;
 use crate::channels::wasm::runtime::{PreparedChannelModule, WasmChannelRuntime};
 use crate::channels::wasm::schema::ChannelConfig;
@@ -547,6 +549,10 @@ pub struct WasmChannel {
 
     /// Pairing store for DM pairing (guest access control).
     pairing_store: Arc<PairingStore>,
+
+    /// In-memory workspace store persisting writes across callback invocations.
+    /// Ensures WASM channels can maintain state (e.g., polling offsets) between ticks.
+    workspace_store: Arc<ChannelWorkspaceStore>,
 }
 
 impl WasmChannel {
@@ -577,6 +583,7 @@ impl WasmChannel {
             credentials: Arc::new(RwLock::new(HashMap::new())),
             typing_task: RwLock::new(None),
             pairing_store,
+            workspace_store: Arc::new(ChannelWorkspaceStore::new()),
         }
     }
 
@@ -632,6 +639,26 @@ impl WasmChannel {
     /// Get the registered endpoints.
     pub async fn endpoints(&self) -> Vec<RegisteredEndpoint> {
         self.endpoints.read().await.clone()
+    }
+
+    /// Inject the workspace store as the reader into a capabilities clone.
+    ///
+    /// Ensures `workspace_read` capability is present with the store as its reader,
+    /// so WASM callbacks can read previously written workspace state.
+    fn inject_workspace_reader(
+        capabilities: &ChannelCapabilities,
+        store: &Arc<ChannelWorkspaceStore>,
+    ) -> ChannelCapabilities {
+        let mut caps = capabilities.clone();
+        let ws_cap = caps
+            .tool_capabilities
+            .workspace_read
+            .get_or_insert_with(|| crate::tools::wasm::WorkspaceCapability {
+                allowed_prefixes: Vec::new(),
+                reader: None,
+            });
+        ws_cap.reader = Some(Arc::clone(store) as Arc<dyn crate::tools::wasm::WorkspaceReader>);
+        caps
     }
 
     /// Add channel host functions to the linker using generated bindings.
@@ -765,12 +792,13 @@ impl WasmChannel {
 
         let runtime = Arc::clone(&self.runtime);
         let prepared = Arc::clone(&self.prepared);
-        let capabilities = self.capabilities.clone();
+        let capabilities = Self::inject_workspace_reader(&self.capabilities, &self.workspace_store);
         let config_json = self.config_json.read().await.clone();
         let timeout = self.runtime.config().callback_timeout;
         let channel_name = self.name.clone();
         let credentials = self.get_credentials().await;
         let pairing_store = self.pairing_store.clone();
+        let workspace_store = self.workspace_store.clone();
 
         // Execute in blocking task with timeout
         let result = tokio::time::timeout(timeout, async move {
@@ -801,8 +829,13 @@ impl WasmChannel {
                     }
                 };
 
-                let host_state =
+                let mut host_state =
                     Self::extract_host_state(&mut store, &prepared.name, &capabilities);
+
+                // Commit pending workspace writes to the persistent store
+                let pending_writes = host_state.take_pending_writes();
+                workspace_store.commit_writes(&pending_writes);
+
                 Ok((config, host_state))
             })
             .await
@@ -897,10 +930,11 @@ impl WasmChannel {
 
         let runtime = Arc::clone(&self.runtime);
         let prepared = Arc::clone(&self.prepared);
-        let capabilities = self.capabilities.clone();
+        let capabilities = Self::inject_workspace_reader(&self.capabilities, &self.workspace_store);
         let timeout = self.runtime.config().callback_timeout;
         let credentials = self.get_credentials().await;
         let pairing_store = self.pairing_store.clone();
+        let workspace_store = self.workspace_store.clone();
 
         // Prepare request data
         let method = method.to_string();
@@ -940,8 +974,13 @@ impl WasmChannel {
                     .map_err(|e| Self::map_wasm_error(e, &prepared.name, prepared.limits.fuel))?;
 
                 let response = convert_http_response(wit_response);
-                let host_state =
+                let mut host_state =
                     Self::extract_host_state(&mut store, &prepared.name, &capabilities);
+
+                // Commit pending workspace writes to the persistent store
+                let pending_writes = host_state.take_pending_writes();
+                workspace_store.commit_writes(&pending_writes);
+
                 Ok((response, host_state))
             })
             .await
@@ -989,11 +1028,12 @@ impl WasmChannel {
 
         let runtime = Arc::clone(&self.runtime);
         let prepared = Arc::clone(&self.prepared);
-        let capabilities = self.capabilities.clone();
+        let capabilities = Self::inject_workspace_reader(&self.capabilities, &self.workspace_store);
         let timeout = self.runtime.config().callback_timeout;
         let channel_name = self.name.clone();
         let credentials = self.get_credentials().await;
         let pairing_store = self.pairing_store.clone();
+        let workspace_store = self.workspace_store.clone();
 
         // Execute in blocking task with timeout
         let result = tokio::time::timeout(timeout, async move {
@@ -1013,8 +1053,13 @@ impl WasmChannel {
                     .call_on_poll(&mut store)
                     .map_err(|e| Self::map_wasm_error(e, &prepared.name, prepared.limits.fuel))?;
 
-                let host_state =
+                let mut host_state =
                     Self::extract_host_state(&mut store, &prepared.name, &capabilities);
+
+                // Commit pending workspace writes to the persistent store
+                let pending_writes = host_state.take_pending_writes();
+                workspace_store.commit_writes(&pending_writes);
+
                 Ok(((), host_state))
             })
             .await
@@ -1501,6 +1546,7 @@ impl WasmChannel {
         let credentials = self.credentials.clone();
         let pairing_store = self.pairing_store.clone();
         let callback_timeout = self.runtime.config().callback_timeout;
+        let workspace_store = self.workspace_store.clone();
 
         tokio::spawn(async move {
             let mut interval_timer = tokio::time::interval(interval);
@@ -1523,6 +1569,7 @@ impl WasmChannel {
                             &credentials,
                             pairing_store.clone(),
                             callback_timeout,
+                            &workspace_store,
                         ).await;
 
                         match result {
@@ -1565,7 +1612,10 @@ impl WasmChannel {
 
     /// Execute a single poll callback with a fresh WASM instance.
     ///
-    /// Returns any emitted messages from the callback.
+    /// Returns any emitted messages from the callback. Pending workspace writes
+    /// are committed to the shared `ChannelWorkspaceStore` so state persists
+    /// across poll ticks (e.g., Telegram polling offset).
+    #[allow(clippy::too_many_arguments)]
     async fn execute_poll(
         channel_name: &str,
         runtime: &Arc<WasmChannelRuntime>,
@@ -1574,6 +1624,7 @@ impl WasmChannel {
         credentials: &RwLock<HashMap<String, String>>,
         pairing_store: Arc<PairingStore>,
         timeout: Duration,
+        workspace_store: &Arc<ChannelWorkspaceStore>,
     ) -> Result<Vec<EmittedMessage>, WasmChannelError> {
         // Skip if no WASM bytes (testing mode)
         if prepared.component_bytes.is_empty() {
@@ -1586,9 +1637,10 @@ impl WasmChannel {
 
         let runtime = Arc::clone(runtime);
         let prepared = Arc::clone(prepared);
-        let capabilities = capabilities.clone();
+        let capabilities = Self::inject_workspace_reader(capabilities, workspace_store);
         let credentials_snapshot = credentials.read().await.clone();
         let channel_name_owned = channel_name.to_string();
+        let workspace_store = Arc::clone(workspace_store);
 
         // Execute in blocking task with timeout
         let result = tokio::time::timeout(timeout, async move {
@@ -1608,8 +1660,13 @@ impl WasmChannel {
                     .call_on_poll(&mut store)
                     .map_err(|e| Self::map_wasm_error(e, &prepared.name, prepared.limits.fuel))?;
 
-                let host_state =
+                let mut host_state =
                     Self::extract_host_state(&mut store, &prepared.name, &capabilities);
+
+                // Commit pending workspace writes to the persistent store
+                let pending_writes = host_state.take_pending_writes();
+                workspace_store.commit_writes(&pending_writes);
+
                 Ok(host_state)
             })
             .await
@@ -2230,6 +2287,8 @@ mod tests {
         let credentials = Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new()));
         let timeout = std::time::Duration::from_secs(5);
 
+        let workspace_store = Arc::new(crate::channels::wasm::host::ChannelWorkspaceStore::new());
+
         let result = WasmChannel::execute_poll(
             "poll-test",
             &runtime,
@@ -2238,6 +2297,7 @@ mod tests {
             &credentials,
             Arc::new(PairingStore::new()),
             timeout,
+            &workspace_store,
         )
         .await;
 
