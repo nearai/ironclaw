@@ -80,6 +80,15 @@ async fn main() -> anyhow::Result<()> {
 
             return ironclaw::cli::run_config_command(config_cmd.clone()).await;
         }
+        Some(Command::Registry(registry_cmd)) => {
+            tracing_subscriber::fmt()
+                .with_env_filter(
+                    EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("warn")),
+                )
+                .init();
+
+            return ironclaw::cli::run_registry_command(registry_cmd.clone()).await;
+        }
         Some(Command::Mcp(mcp_cmd)) => {
             // Simple logging for MCP commands
             tracing_subscriber::fmt()

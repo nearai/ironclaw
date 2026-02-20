@@ -1,0 +1,31 @@
+{
+  "name": "telegram",
+  "display_name": "Telegram",
+  "kind": "channel",
+  "version": "0.1.0",
+  "description": "Telegram Bot API channel for receiving and responding to messages",
+  "keywords": ["messaging", "bot", "chat", "telegram"],
+
+  "source": {
+    "dir": "channels-src/telegram",
+    "capabilities": "telegram.capabilities.json",
+    "crate_name": "telegram-channel"
+  },
+
+  "artifacts": {
+    "wasm32-wasip2": {
+      "url": null,
+      "sha256": null
+    }
+  },
+
+  "auth_summary": {
+    "method": "manual",
+    "provider": "Telegram",
+    "secrets": ["telegram_bot_token"],
+    "shared_auth": null,
+    "setup_url": "https://t.me/BotFather"
+  },
+
+  "tags": ["default", "messaging"]
+}

@@ -16,3 +16,5 @@ serde_json = "1"
 opt-level = "s"
 lto = true
 strip = true
+
+[workspace]

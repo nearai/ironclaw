@@ -1,0 +1,31 @@
+{
+  "name": "google-sheets",
+  "display_name": "Google Sheets",
+  "kind": "tool",
+  "version": "0.1.0",
+  "description": "Read and write Google Sheets spreadsheet data",
+  "keywords": ["spreadsheets", "google", "data", "sheets"],
+
+  "source": {
+    "dir": "tools-src/google-sheets",
+    "capabilities": "google-sheets-tool.capabilities.json",
+    "crate_name": "google-sheets-tool"
+  },
+
+  "artifacts": {
+    "wasm32-wasip2": {
+      "url": null,
+      "sha256": null
+    }
+  },
+
+  "auth_summary": {
+    "method": "oauth",
+    "provider": "Google",
+    "secrets": ["google_oauth_token"],
+    "shared_auth": "google_oauth_token",
+    "setup_url": "https://console.cloud.google.com/apis/credentials"
+  },
+
+  "tags": ["google", "productivity"]
+}

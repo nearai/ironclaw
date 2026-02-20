@@ -7,7 +7,8 @@
 //! 4. Model selection
 //! 5. Embeddings
 //! 6. Channel configuration (HTTP, Telegram, etc.)
-//! 7. Heartbeat (background tasks)
+//! 7. Extensions (tool installation from registry)
+//! 8. Heartbeat (background tasks)
 //!
 //! # Example
 //!
