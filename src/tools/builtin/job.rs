@@ -1369,7 +1369,10 @@ mod tests {
     #[tokio::test]
     async fn test_job_status_includes_fallback_deliverable() {
         let manager = Arc::new(ContextManager::new(5));
-        let job_id = manager.create_job("Failing Job", "Will fail").await.unwrap();
+        let job_id = manager
+            .create_job("Failing Job", "Will fail")
+            .await
+            .unwrap();
 
         // Inject a fallback_deliverable into the job metadata.
         let fallback = serde_json::json!({
