@@ -331,7 +331,18 @@ pub trait LlmProvider: Send + Sync {
     ///
     /// Providers that support response chaining (e.g. NEAR AI `previous_response_id`)
     /// store this so subsequent calls send only delta messages.
-    fn seed_response_chain(&self, _thread_id: &str, _response_id: String) {}
+    ///
+    /// `input_count` is the number of non-system input items that were part of
+    /// the conversation when the chain was last active. This enables accurate
+    /// delta calculation on the next call (only new messages since `input_count`
+    /// are sent). Pass `0` only when the count is unknown.
+    fn seed_response_chain(
+        &self,
+        _thread_id: &str,
+        _response_id: String,
+        _input_count: usize,
+    ) {
+    }
 
     /// Get the last response chain ID for a thread.
     ///

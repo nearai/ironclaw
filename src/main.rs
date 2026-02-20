@@ -201,6 +201,9 @@ async fn main() -> anyhow::Result<()> {
                 )
                 .init();
 
+            let _ = dotenvy::dotenv();
+            ironclaw::bootstrap::load_ironclaw_env();
+
             return ironclaw::cli::run_doctor_command().await;
         }
         Some(Command::Status) => {
@@ -209,6 +212,9 @@ async fn main() -> anyhow::Result<()> {
                     EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("warn")),
                 )
                 .init();
+
+            let _ = dotenvy::dotenv();
+            ironclaw::bootstrap::load_ironclaw_env();
 
             return run_status_command().await;
         }
@@ -730,7 +736,6 @@ async fn main() -> anyhow::Result<()> {
     // Initialize tool registry
     let tools = Arc::new(ToolRegistry::new());
     tools.register_builtin_tools();
-    tracing::info!("Registered {} built-in tools", tools.count());
 
     // Create embeddings provider if configured
     let embeddings: Option<Arc<dyn EmbeddingProvider>> = if config.embeddings.enabled {
@@ -1024,11 +1029,12 @@ async fn main() -> anyhow::Result<()> {
     // Set up orchestrator for sandboxed job execution
     // When allow_local_tools is false (default), the LLM uses create_job for FS/shell work.
     // When allow_local_tools is true, dev tools are also registered directly (current behavior).
-    if config.agent.allow_local_tools {
+    // register_builder_tool() already calls register_dev_tools() internally,
+    // so only register them here when the builder didn't already do it.
+    let builder_registered_dev_tools =
+        config.builder.enabled && (config.agent.allow_local_tools || !config.sandbox.enabled);
+    if config.agent.allow_local_tools && !builder_registered_dev_tools {
         tools.register_dev_tools();
-        tracing::info!(
-            "Local tools enabled (allow_local_tools=true), dev tools registered directly"
-        );
     }
 
     // Shared state for job events (used by both orchestrator and web gateway)
@@ -1079,7 +1085,6 @@ async fn main() -> anyhow::Result<()> {
             }
         });
 
-        tracing::info!("Orchestrator API started on :50051, sandbox delegation enabled");
         if config.claude_code.enabled {
             tracing::info!(
                 "Claude Code sandbox mode available (model: {}, max_turns: {})",
@@ -1333,9 +1338,6 @@ async fn main() -> anyhow::Result<()> {
     // Seed workspace with core identity files on first boot
     if let Some(ref ws) = workspace {
         match ws.seed_if_empty().await {
-            Ok(count) if count > 0 => {
-                tracing::info!("Workspace seeded with {} core files", count);
-            }
             Ok(_) => {}
             Err(e) => {
                 tracing::warn!("Failed to seed workspace: {}", e);
@@ -1464,11 +1466,6 @@ async fn main() -> anyhow::Result<()> {
             gw.auth_token()
         ));
 
-        tracing::info!(
-            "Web gateway enabled on {}:{}",
-            gw_config.host,
-            gw_config.port
-        );
         tracing::info!("Web UI: http://{}:{}/", gw_config.host, gw_config.port);
 
         channel_names.push("gateway".to_string());
@@ -1510,8 +1507,6 @@ async fn main() -> anyhow::Result<()> {
         Some(context_manager),
         Some(session_manager),
     );
-
-    tracing::info!("Agent initialized, starting main loop...");
 
     // Print boot screen for interactive CLI mode (not single-message mode).
     if config.channels.cli.enabled && cli.message.is_none() {

@@ -75,7 +75,16 @@ impl NearAiProvider {
     }
 
     /// Seed a response chain for a thread (e.g. when restoring from DB).
-    pub fn seed_response_id(&self, thread_id: &str, response_id: String) {
+    ///
+    /// `input_count` should be the number of non-system input items already
+    /// covered by the chain. This enables accurate delta calculation — only
+    /// messages after index `input_count` will be sent on the next call.
+    pub fn seed_response_id(
+        &self,
+        thread_id: &str,
+        response_id: String,
+        input_count: usize,
+    ) {
         let mut chains = match self.response_chains.write() {
             Ok(guard) => guard,
             Err(poisoned) => {
@@ -87,7 +96,7 @@ impl NearAiProvider {
             thread_id.to_string(),
             ChainState {
                 response_id,
-                input_count: 0,
+                input_count,
             },
         );
     }
@@ -379,12 +388,20 @@ impl NearAiProvider {
             });
         }
 
-        // Success -- parse the response
+        // Success -- parse the response.
+        // The NEAR AI Responses API may return format variants (e.g. `output`
+        // as a string instead of an array). Callers handle these via
+        // NearAiAltResponse fallback parsing using the raw text from the error.
         match serde_json::from_str::<R>(&response_text) {
             Ok(parsed) => Ok(parsed),
             Err(e) => {
-                tracing::debug!("Response is not expected JSON format: {}", e);
-                tracing::debug!("Will try alternative parsing in caller");
+                tracing::trace!(
+                    "Response format variant ({}B), will try alternative parsing: {}",
+                    response_text.len(),
+                    e
+                );
+                // Keep full raw text in the error — callers extract it for
+                // fallback parsing via `reason.split("Raw: ")`.
                 Err(LlmError::InvalidResponse {
                     provider: "nearai".to_string(),
                     reason: format!("Parse error: {}. Raw: {}", e, response_text),
@@ -469,12 +486,18 @@ impl LlmProvider for NearAiProvider {
                         input_tokens: 0,
                         output_tokens: 0,
                     });
+
+                    // Preserve response ID for chaining continuity
+                    if let Some(ref tid) = thread_id {
+                        self.store_chain(tid, alt.id.clone(), 0);
+                    }
+
                     return Ok(CompletionResponse {
                         content: text,
                         finish_reason: FinishReason::Stop,
                         input_tokens: usage.input_tokens,
                         output_tokens: usage.output_tokens,
-                        response_id: None,
+                        response_id: Some(alt.id),
                     });
                 }
 
@@ -516,7 +539,6 @@ impl LlmProvider for NearAiProvider {
                         contents
                             .iter()
                             .filter_map(|c| {
-                                // Accept various content types that might contain text
                                 match c.content_type.as_str() {
                                     "output_text" | "text" => c.text.clone(),
                                     _ => None,
@@ -544,11 +566,16 @@ impl LlmProvider for NearAiProvider {
             self.store_chain(tid, response.id.clone(), 0);
         }
 
+        let usage = response.usage.unwrap_or(NearAiUsage {
+            input_tokens: 0,
+            output_tokens: 0,
+        });
+
         Ok(CompletionResponse {
             content: text,
             finish_reason: FinishReason::Stop,
-            input_tokens: response.usage.input_tokens,
-            output_tokens: response.usage.output_tokens,
+            input_tokens: usage.input_tokens,
+            output_tokens: usage.output_tokens,
             response_id: Some(response.id),
         })
     }
@@ -675,6 +702,11 @@ impl LlmProvider for NearAiProvider {
                         FinishReason::ToolUse
                     };
 
+                    // Preserve response ID for chaining continuity
+                    if let Some(ref tid) = thread_id {
+                        self.store_chain(tid, alt.id.clone(), total_input_count);
+                    }
+
                     tracing::info!(
                         "NEAR AI returned alternative response format ({} tool calls)",
                         tool_calls.len()
@@ -686,7 +718,7 @@ impl LlmProvider for NearAiProvider {
                         finish_reason,
                         input_tokens: usage.input_tokens,
                         output_tokens: usage.output_tokens,
-                        response_id: None,
+                        response_id: Some(alt.id),
                     });
                 }
 
@@ -763,12 +795,17 @@ impl LlmProvider for NearAiProvider {
             self.store_chain(tid, response.id.clone(), total_input_count);
         }
 
+        let usage = response.usage.unwrap_or(NearAiUsage {
+            input_tokens: 0,
+            output_tokens: 0,
+        });
+
         Ok(ToolCompletionResponse {
             content: if text.is_empty() { None } else { Some(text) },
             tool_calls,
             finish_reason,
-            input_tokens: response.usage.input_tokens,
-            output_tokens: response.usage.output_tokens,
+            input_tokens: usage.input_tokens,
+            output_tokens: usage.output_tokens,
             response_id: Some(response.id),
         })
     }
@@ -812,8 +849,8 @@ impl LlmProvider for NearAiProvider {
         Ok(())
     }
 
-    fn seed_response_chain(&self, thread_id: &str, response_id: String) {
-        self.seed_response_id(thread_id, response_id);
+    fn seed_response_chain(&self, thread_id: &str, response_id: String, input_count: usize) {
+        self.seed_response_id(thread_id, response_id, input_count);
     }
 
     fn get_response_chain_id(&self, thread_id: &str) -> Option<String> {
@@ -945,13 +982,15 @@ struct NearAiTool {
 struct NearAiResponse {
     id: String,
     output: Vec<NearAiOutputItem>,
-    usage: NearAiUsage,
+    /// Usage may be absent in some response variants (e.g. when the API
+    /// returns before generating output tokens).
+    #[serde(default)]
+    usage: Option<NearAiUsage>,
 }
 
 /// Alternative response format (OpenAI-compatible style)
 #[derive(Debug, Deserialize)]
 struct NearAiAltResponse {
-    #[allow(dead_code)]
     id: String,
     #[allow(dead_code)]
     object: Option<String>,
@@ -967,7 +1006,10 @@ struct NearAiAltResponse {
 struct NearAiOutputItem {
     #[serde(rename = "type")]
     item_type: String,
-    #[serde(default)]
+    /// Content field — the API returns an array of content objects for
+    /// `message` type items, but a plain string for `reasoning` type items.
+    /// We accept both via a custom deserializer.
+    #[serde(default, deserialize_with = "deserialize_content")]
     content: Option<Vec<NearAiContent>>,
     // Direct text field (some response formats)
     #[serde(default)]
@@ -979,6 +1021,34 @@ struct NearAiOutputItem {
     call_id: Option<String>,
     #[serde(default)]
     arguments: Option<String>,
+}
+
+/// Deserialize the `content` field which may be an array of content objects
+/// (message items) or a plain string (reasoning items).
+fn deserialize_content<'de, D>(deserializer: D) -> Result<Option<Vec<NearAiContent>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value: Option<serde_json::Value> = Option::deserialize(deserializer)?;
+    match value {
+        None | Some(serde_json::Value::Null) => Ok(None),
+        Some(serde_json::Value::Array(arr)) => {
+            let contents: Vec<NearAiContent> = arr
+                .into_iter()
+                .filter_map(|v| serde_json::from_value(v).ok())
+                .collect();
+            Ok(Some(contents))
+        }
+        Some(serde_json::Value::String(s)) => {
+            // Reasoning items have content as a plain string.
+            // Wrap it as a single content object so extraction logic works uniformly.
+            Ok(Some(vec![NearAiContent {
+                content_type: "text".to_string(),
+                text: Some(s),
+            }]))
+        }
+        Some(_) => Ok(None),
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -1016,8 +1086,10 @@ fn extract_text_from_output(output: &Option<serde_json::Value>) -> String {
         let texts: Vec<String> = arr
             .iter()
             .filter_map(|item| {
-                // Skip function_call items
-                if item.get("type").and_then(|t| t.as_str()) == Some("function_call") {
+                // Only extract text from message items; skip reasoning,
+                // function_call, and other non-message output types
+                let item_type = item.get("type").and_then(|t| t.as_str());
+                if item_type != Some("message") {
                     return None;
                 }
                 // Check for direct text field

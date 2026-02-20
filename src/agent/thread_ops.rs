@@ -87,7 +87,10 @@ impl Agent {
             thread.restore_from_messages(chat_messages);
         }
 
-        // Restore response chain from conversation metadata
+        // Restore response chain from conversation metadata.
+        // Pass the message count so the chaining delta calculation knows how
+        // many input items the server already has, avoiding re-sending the
+        // entire history on the next call.
         if let Some(store) = self.store()
             && let Ok(Some(metadata)) = store.get_conversation_metadata(thread_uuid).await
             && let Some(rid) = metadata
@@ -96,9 +99,14 @@ impl Agent {
                 .map(String::from)
         {
             thread.last_response_id = Some(rid.clone());
+            let input_count = thread.messages().len();
             self.llm()
-                .seed_response_chain(&thread_uuid.to_string(), rid);
-            tracing::debug!("Restored response chain for thread {}", thread_uuid);
+                .seed_response_chain(&thread_uuid.to_string(), rid, input_count);
+            tracing::debug!(
+                "Restored response chain for thread {} (input_count={})",
+                thread_uuid,
+                input_count
+            );
         }
 
         // Insert into session and register with session manager
@@ -228,7 +236,7 @@ impl Agent {
                     )
                     .await;
 
-                let compactor = ContextCompactor::new(self.llm().clone());
+                let compactor = ContextCompactor::new(self.llm().clone(), self.safety().clone());
                 if let Err(e) = compactor
                     .compact(thread, strategy, self.workspace().map(|w| w.as_ref()))
                     .await
@@ -335,8 +343,10 @@ impl Agent {
                     )
                     .await;
 
-                // Fire-and-forget: persist turn to DB
-                self.persist_turn(thread_id, &message.user_id, content, Some(&response));
+                // Persist turn to DB before returning so the write
+                // completes even if the process shuts down right after.
+                self.persist_turn(thread_id, &message.user_id, content, Some(&response))
+                    .await;
 
                 Ok(SubmissionResult::response(response))
             }
@@ -366,15 +376,16 @@ impl Agent {
                 thread.fail_turn(e.to_string());
 
                 // Persist the user message even on failure
-                self.persist_turn(thread_id, &message.user_id, content, None);
+                self.persist_turn(thread_id, &message.user_id, content, None)
+                    .await;
 
                 Ok(SubmissionResult::error(e.to_string()))
             }
         }
     }
 
-    /// Fire-and-forget: persist a turn (user message + optional assistant response) to the DB.
-    pub(super) fn persist_turn(
+    /// Persist a turn (user message + optional assistant response) to the DB.
+    pub(super) async fn persist_turn(
         &self,
         thread_id: Uuid,
         user_id: &str,
@@ -386,35 +397,29 @@ impl Agent {
             None => return,
         };
 
-        let user_id = user_id.to_string();
-        let user_input = user_input.to_string();
-        let response = response.map(String::from);
+        if let Err(e) = store
+            .ensure_conversation(thread_id, "gateway", user_id, None)
+            .await
+        {
+            tracing::warn!("Failed to ensure conversation {}: {}", thread_id, e);
+            return;
+        }
 
-        tokio::spawn(async move {
-            if let Err(e) = store
-                .ensure_conversation(thread_id, "gateway", &user_id, None)
+        if let Err(e) = store
+            .add_conversation_message(thread_id, "user", user_input)
+            .await
+        {
+            tracing::warn!("Failed to persist user message: {}", e);
+            return;
+        }
+
+        if let Some(resp) = response
+            && let Err(e) = store
+                .add_conversation_message(thread_id, "assistant", resp)
                 .await
-            {
-                tracing::warn!("Failed to ensure conversation {}: {}", thread_id, e);
-                return;
-            }
-
-            if let Err(e) = store
-                .add_conversation_message(thread_id, "user", &user_input)
-                .await
-            {
-                tracing::warn!("Failed to persist user message: {}", e);
-                return;
-            }
-
-            if let Some(ref resp) = response
-                && let Err(e) = store
-                    .add_conversation_message(thread_id, "assistant", resp)
-                    .await
-            {
-                tracing::warn!("Failed to persist assistant message: {}", e);
-            }
-        });
+        {
+            tracing::warn!("Failed to persist assistant message: {}", e);
+        }
     }
 
     /// Sync the provider's response chain ID to the thread and DB metadata.
@@ -562,7 +567,7 @@ impl Agent {
                 crate::agent::context_monitor::CompactionStrategy::Summarize { keep_recent: 5 },
             );
 
-        let compactor = ContextCompactor::new(self.llm().clone());
+        let compactor = ContextCompactor::new(self.llm().clone(), self.safety().clone());
         match compactor
             .compact(thread, strategy, self.workspace().map(|w| w.as_ref()))
             .await
@@ -1072,7 +1077,8 @@ impl Agent {
                     let user_input = thread.last_turn().map(|t| t.user_input.clone());
                     thread.complete_turn(&response);
                     if let Some(input) = user_input {
-                        self.persist_turn(thread_id, &message.user_id, &input, Some(&response));
+                        self.persist_turn(thread_id, &message.user_id, &input, Some(&response))
+                            .await;
                     }
                     self.persist_response_chain(thread);
                     let _ = self
@@ -1112,7 +1118,8 @@ impl Agent {
                     let user_input = thread.last_turn().map(|t| t.user_input.clone());
                     thread.fail_turn(e.to_string());
                     if let Some(input) = user_input {
-                        self.persist_turn(thread_id, &message.user_id, &input, None);
+                        self.persist_turn(thread_id, &message.user_id, &input, None)
+                            .await;
                     }
                     Ok(SubmissionResult::error(e.to_string()))
                 }
@@ -1131,7 +1138,8 @@ impl Agent {
                     thread.clear_pending_approval();
                     thread.complete_turn(&rejection);
                     if let Some(input) = user_input {
-                        self.persist_turn(thread_id, &message.user_id, &input, Some(&rejection));
+                        self.persist_turn(thread_id, &message.user_id, &input, Some(&rejection))
+                            .await;
                     }
                 }
             }
@@ -1171,7 +1179,8 @@ impl Agent {
                 thread.enter_auth_mode(ext_name.clone());
                 thread.complete_turn(&instructions);
                 if let Some(input) = user_input {
-                    self.persist_turn(thread_id, &message.user_id, &input, Some(&instructions));
+                    self.persist_turn(thread_id, &message.user_id, &input, Some(&instructions))
+                        .await;
                 }
                 self.persist_response_chain(thread);
             }

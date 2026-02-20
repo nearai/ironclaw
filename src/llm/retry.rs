@@ -210,8 +210,9 @@ impl LlmProvider for RetryProvider {
         self.inner.set_model(model)
     }
 
-    fn seed_response_chain(&self, thread_id: &str, response_id: String) {
-        self.inner.seed_response_chain(thread_id, response_id)
+    fn seed_response_chain(&self, thread_id: &str, response_id: String, input_count: usize) {
+        self.inner
+            .seed_response_chain(thread_id, response_id, input_count)
     }
 
     fn get_response_chain_id(&self, thread_id: &str) -> Option<String> {
