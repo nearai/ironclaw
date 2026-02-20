@@ -130,7 +130,11 @@ impl ModelListFetcher for OpenAiModelFetcher {
 
     /// Check for a single model via `GET /v1/models/{model_id}`.
     async fn fetch_model_entry(&self, model_id: &str) -> Result<Option<ModelMetadata>, LlmError> {
-        let url = format!("{}/v1/models/{}", self.base_url, model_id);
+        let url = format!(
+            "{}/v1/models/{}",
+            self.base_url,
+            urlencoding::encode(model_id)
+        );
 
         let resp = self
             .authed_get(&url)

@@ -122,7 +122,7 @@ fn create_openai_provider(config: &LlmConfig) -> Result<Arc<dyn LlmProvider>, Ll
 
     let model = client.completion_model(&oai.model);
     let fetcher = Arc::new(discovery::OpenAiModelFetcher::new(
-        "https://api.openai.com",
+        oai.base_url.as_deref().unwrap_or("https://api.openai.com"),
         Some(oai.api_key.clone()),
         "openai",
     ));
