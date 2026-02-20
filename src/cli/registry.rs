@@ -50,6 +50,10 @@ pub enum RegistryCommand {
         /// Force overwrite if already installed
         #[arg(short, long)]
         force: bool,
+
+        /// Build from source instead of downloading pre-built artifact
+        #[arg(long)]
+        build: bool,
     },
 }
 
@@ -66,8 +70,8 @@ pub async fn run_registry_command(cmd: RegistryCommand) -> anyhow::Result<()> {
         RegistryCommand::Install { name, force, build } => {
             cmd_install(&catalog, &registry_dir, &name, force, build).await
         }
-        RegistryCommand::InstallDefaults { force } => {
-            cmd_install(&catalog, &registry_dir, "default", force, true).await
+        RegistryCommand::InstallDefaults { force, build } => {
+            cmd_install(&catalog, &registry_dir, "default", force, build).await
         }
     }
 }
@@ -81,21 +85,28 @@ fn find_registry_dir() -> anyhow::Result<PathBuf> {
         return Ok(candidate);
     }
 
-    // Try relative to executable
+    // Try relative to executable (covers installed binary, target/debug/, target/release/)
     if let Ok(exe) = std::env::current_exe()
         && let Some(parent) = exe.parent()
     {
-        let candidate = parent.join("registry");
-        if candidate.is_dir() {
-            return Ok(candidate);
-        }
-        // Also try one level up (for target/release/ironclaw)
-        if let Some(grandparent) = parent.parent() {
-            let candidate = grandparent.join("registry");
-            if candidate.is_dir() {
-                return Ok(candidate);
+        // Walk up to 3 levels: exe dir, parent (target/release → target), grandparent (→ repo root)
+        let mut dir = Some(parent);
+        for _ in 0..3 {
+            if let Some(d) = dir {
+                let candidate = d.join("registry");
+                if candidate.is_dir() {
+                    return Ok(candidate);
+                }
+                dir = d.parent();
             }
         }
+    }
+
+    // Try CARGO_MANIFEST_DIR (compile-time, works in dev builds)
+    let manifest_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let candidate = manifest_dir.join("registry");
+    if candidate.is_dir() {
+        return Ok(candidate);
     }
 
     anyhow::bail!(
