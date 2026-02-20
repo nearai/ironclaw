@@ -57,6 +57,7 @@ pub mod llm;
 pub mod observability;
 pub mod orchestrator;
 pub mod pairing;
+pub mod registry;
 pub mod safety;
 pub mod sandbox;
 pub mod secrets;

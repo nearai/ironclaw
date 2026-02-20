@@ -50,7 +50,7 @@ The `--no-onboard` CLI flag suppresses auto-detection.
 
 ---
 
-## The 7-Step Wizard
+## The 8-Step Wizard
 
 ### Overview
 
@@ -61,7 +61,8 @@ Step 3: Inference Provider          ← skipped if --skip-auth
 Step 4: Model Selection
 Step 5: Embeddings
 Step 6: Channel Configuration
-Step 7: Background Tasks (heartbeat)
+Step 7: Extensions (tools)
+Step 8: Background Tasks (heartbeat)
        ↓
    save_and_summarize()
 ```
@@ -243,12 +244,19 @@ key first, then falls back to the standard env var.
 ```
 6a. Tunnel setup (if webhook channels needed)
 6b. Discover WASM channels from ~/.ironclaw/channels/
-6c. Multi-select: CLI/TUI, HTTP, discovered channels, bundled channels
-6d. Install missing bundled channels (copy WASM binaries)
-6e. Initialize SecretsContext (for token storage)
-6f. Setup HTTP webhook (if selected)
-6g. Setup each WASM channel (secrets, owner binding)
+6c. Build channel options: discovered + bundled + registry catalog
+6d. Multi-select: CLI/TUI, HTTP, all available channels
+6e. Install missing bundled channels (copy WASM binaries)
+6f. Install missing registry channels (build from source)
+6g. Initialize SecretsContext (for token storage)
+6h. Setup HTTP webhook (if selected)
+6i. Setup each WASM channel (secrets, owner binding)
 ```
+
+**Channel sources** (priority order for installation):
+1. Already installed in `~/.ironclaw/channels/`
+2. Bundled channels (pre-compiled in `channels-src/`)
+3. Registry channels (`registry/channels/*.json`, built from source)
 
 **Tunnel setup** (`setup_tunnel`):
 - Options: ngrok, Cloudflare Tunnel, localtunnel, custom URL
@@ -273,7 +281,33 @@ key first, then falls back to the standard env var.
 
 ---
 
-### Step 7: Heartbeat
+### Step 7: Extensions (Tools)
+
+**Module:** `wizard.rs` → `step_extensions()`
+
+**Goal:** Install WASM tools from the extension registry.
+
+**Flow:**
+1. Load `RegistryCatalog` from `registry/` directory
+2. If registry not found, print info and skip
+3. List all tool manifests from the catalog
+4. Discover already-installed tools in `~/.ironclaw/tools/`
+5. Multi-select: show all registry tools with display name, auth method,
+   and description. Pre-check tools tagged `"default"` and already installed.
+6. For each selected tool not yet installed, build from source via
+   `RegistryInstaller::install_from_source()`
+7. Print consolidated auth hints (deduplicated by provider, e.g. one hint
+   for all Google tools sharing `google_oauth_token`)
+
+**Registry lookup** (`load_registry_catalog`):
+Searches for `registry/` directory in order:
+1. Current working directory
+2. Next to the executable
+3. `CARGO_MANIFEST_DIR` (compile-time, dev builds)
+
+---
+
+### Step 8: Heartbeat
 
 **Module:** `wizard.rs` → `step_heartbeat()`
 

@@ -1,10 +1,20 @@
 [workspace]
 members = [".", "benchmarks"]
 exclude = [
+    "channels-src/discord",
     "channels-src/telegram",
     "channels-src/slack",
     "channels-src/whatsapp",
+    "tools-src/github",
     "tools-src/gmail",
+    "tools-src/google-calendar",
+    "tools-src/google-docs",
+    "tools-src/google-drive",
+    "tools-src/google-sheets",
+    "tools-src/google-slides",
+    "tools-src/okta",
+    "tools-src/slack",
+    "tools-src/telegram",
 ]
 
 [package]
