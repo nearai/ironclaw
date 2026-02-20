@@ -42,7 +42,7 @@
 
 mod chunker;
 mod document;
-pub mod embedding_cache;
+mod embedding_cache;
 mod embeddings;
 pub mod hygiene;
 #[cfg(feature = "postgres")]
