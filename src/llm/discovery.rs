@@ -55,7 +55,9 @@ pub(crate) trait ModelListFetcher: Send + Sync {
 // OpenAI-compatible /v1/models
 // ---------------------------------------------------------------------------
 
-/// Fetches models from any endpoint that implements the OpenAI `/v1/models` API.
+/// Fetches models from endpoints that implement the OpenAI `/v1/models` list
+/// API. Per-model metadata uses `GET /v1/models/{model_id}` and gracefully
+/// degrades to `None` when the detail route is not supported (404 or 405).
 ///
 /// Covers: OpenAI direct, OpenAI-compatible providers.
 pub(crate) struct OpenAiModelFetcher {
@@ -150,7 +152,9 @@ impl ModelListFetcher for OpenAiModelFetcher {
                 id: model_id.to_string(),
                 context_length: None,
             }))
-        } else if resp.status() == reqwest::StatusCode::NOT_FOUND {
+        } else if resp.status() == reqwest::StatusCode::NOT_FOUND
+            || resp.status() == reqwest::StatusCode::METHOD_NOT_ALLOWED
+        {
             Ok(None)
         } else {
             Err(LlmError::RequestFailed {
