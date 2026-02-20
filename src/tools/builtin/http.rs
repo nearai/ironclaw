@@ -10,7 +10,7 @@ use reqwest::Client;
 
 use crate::context::JobContext;
 use crate::safety::LeakDetector;
-use crate::tools::tool::{Tool, ToolError, ToolOutput, require_str};
+use crate::tools::tool::{ApprovalRequirement, Tool, ToolError, ToolOutput, require_str};
 
 /// Maximum response body size (5 MB).
 ///
@@ -143,6 +143,33 @@ fn parse_headers_param(
         Some(_) => Err(ToolError::InvalidParameters(
             "'headers' must be an object or an array of {name, value}".to_string(),
         )),
+    }
+}
+
+/// Header names (case-insensitive) that carry authentication credentials.
+const AUTH_HEADER_NAMES: &[&str] = &[
+    "authorization",
+    "x-api-key",
+    "cookie",
+    "proxy-authorization",
+    "x-auth-token",
+];
+
+/// Check whether the `headers` parameter contains any authentication headers.
+///
+/// Handles both the object format `{"Authorization": "Bearer …"}` and the
+/// array format `[{"name": "Authorization", "value": "Bearer …"}]`.
+fn has_auth_headers(params: &serde_json::Value) -> bool {
+    match params.get("headers") {
+        Some(serde_json::Value::Object(map)) => map
+            .keys()
+            .any(|k| AUTH_HEADER_NAMES.contains(&k.to_lowercase().as_str())),
+        Some(serde_json::Value::Array(items)) => items.iter().any(|item| {
+            item.get("name")
+                .and_then(|n| n.as_str())
+                .is_some_and(|n| AUTH_HEADER_NAMES.contains(&n.to_lowercase().as_str()))
+        }),
+        _ => false,
     }
 }
 
@@ -352,8 +379,12 @@ impl Tool for HttpTool {
         true // External data always needs sanitization
     }
 
-    fn requires_approval(&self) -> bool {
-        true // HTTP requests go to external services, require user approval
+    fn requires_approval(&self, params: &serde_json::Value) -> ApprovalRequirement {
+        if has_auth_headers(params) {
+            ApprovalRequirement::Always
+        } else {
+            ApprovalRequirement::Never
+        }
     }
 }
 
@@ -466,5 +497,118 @@ mod tests {
             body.get("type").is_some(),
             "body schema must include a type for OpenAI-compatible tool validation"
         );
+    }
+
+    // ── Approval requirement tests ──────────────────────────────────────
+
+    #[test]
+    fn test_no_auth_headers_returns_never() {
+        let tool = HttpTool::new();
+        let params = serde_json::json!({
+            "method": "GET",
+            "url": "https://api.example.com/data"
+        });
+        assert_eq!(tool.requires_approval(&params), ApprovalRequirement::Never);
+    }
+
+    #[test]
+    fn test_auth_header_object_format_returns_always() {
+        let tool = HttpTool::new();
+        let params = serde_json::json!({
+            "method": "GET",
+            "url": "https://api.example.com/data",
+            "headers": {"Authorization": "Bearer token123"}
+        });
+        assert_eq!(tool.requires_approval(&params), ApprovalRequirement::Always);
+    }
+
+    #[test]
+    fn test_auth_header_array_format_returns_always() {
+        let tool = HttpTool::new();
+        let params = serde_json::json!({
+            "method": "GET",
+            "url": "https://api.example.com/data",
+            "headers": [{"name": "Authorization", "value": "Bearer token123"}]
+        });
+        assert_eq!(tool.requires_approval(&params), ApprovalRequirement::Always);
+    }
+
+    #[test]
+    fn test_auth_header_case_insensitive() {
+        let tool = HttpTool::new();
+
+        // Object format with mixed case
+        let params = serde_json::json!({
+            "method": "GET",
+            "url": "https://example.com",
+            "headers": {"AUTHORIZATION": "Bearer x"}
+        });
+        assert_eq!(tool.requires_approval(&params), ApprovalRequirement::Always);
+
+        // Array format with mixed case
+        let params = serde_json::json!({
+            "method": "GET",
+            "url": "https://example.com",
+            "headers": [{"name": "X-Api-Key", "value": "key123"}]
+        });
+        assert_eq!(tool.requires_approval(&params), ApprovalRequirement::Always);
+    }
+
+    #[test]
+    fn test_all_auth_header_names_detected() {
+        let tool = HttpTool::new();
+        for header_name in [
+            "authorization",
+            "x-api-key",
+            "cookie",
+            "proxy-authorization",
+            "x-auth-token",
+        ] {
+            let mut headers = serde_json::Map::new();
+            headers.insert(header_name.to_string(), serde_json::json!("value"));
+            let params = serde_json::json!({
+                "method": "GET",
+                "url": "https://example.com",
+                "headers": headers
+            });
+            assert_eq!(
+                tool.requires_approval(&params),
+                ApprovalRequirement::Always,
+                "Header '{}' should trigger Always approval",
+                header_name
+            );
+        }
+    }
+
+    #[test]
+    fn test_non_auth_headers_return_never() {
+        let tool = HttpTool::new();
+        let params = serde_json::json!({
+            "method": "GET",
+            "url": "https://example.com",
+            "headers": {"Content-Type": "application/json", "Accept": "text/html"}
+        });
+        assert_eq!(tool.requires_approval(&params), ApprovalRequirement::Never);
+    }
+
+    #[test]
+    fn test_empty_headers_return_never() {
+        let tool = HttpTool::new();
+
+        // Empty object
+        let params = serde_json::json!({
+            "method": "GET",
+            "url": "https://example.com",
+            "headers": {}
+        });
+        assert_eq!(tool.requires_approval(&params), ApprovalRequirement::Never);
+
+        // Empty array
+        let params = serde_json::json!({
+            "method": "GET",
+            "url": "https://example.com",
+            "headers": []
+        });
+        assert_eq!(tool.requires_approval(&params), ApprovalRequirement::Never);
     }
 }
