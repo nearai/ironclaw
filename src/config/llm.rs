@@ -248,14 +248,13 @@ impl LlmConfig {
                         .to_string()
                 }),
             cheap_model: optional_env("NEARAI_CHEAP_MODEL")?,
-            base_url: optional_env("NEARAI_BASE_URL")?
-                .unwrap_or_else(|| {
-                    if api_mode == NearAiApiMode::ChatCompletions {
-                        "https://cloud-api.near.ai".to_string()
-                    } else {
-                        "https://private.near.ai".to_string()
-                    }
-                }),
+            base_url: optional_env("NEARAI_BASE_URL")?.unwrap_or_else(|| {
+                if api_mode == NearAiApiMode::ChatCompletions {
+                    "https://cloud-api.near.ai".to_string()
+                } else {
+                    "https://private.near.ai".to_string()
+                }
+            }),
             auth_base_url: optional_env("NEARAI_AUTH_URL")?
                 .unwrap_or_else(|| "https://private.near.ai".to_string()),
             session_path: optional_env("NEARAI_SESSION_PATH")?
