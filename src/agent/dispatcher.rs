@@ -542,9 +542,7 @@ impl Agent {
                                     let auth_data = parse_auth_result(&tool_result);
                                     {
                                         let mut sess = session.lock().await;
-                                        if let Some(thread) =
-                                            sess.threads.get_mut(&thread_id)
-                                        {
+                                        if let Some(thread) = sess.threads.get_mut(&thread_id) {
                                             thread.enter_auth_mode(ext_name.clone());
                                         }
                                     }
