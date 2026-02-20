@@ -144,7 +144,7 @@ body {
   flex-shrink: 0;
 }
 
-.tab-bar button {
+.tab-bar button:not(.status-logs-btn) {
   padding: 10px 20px;
   background: none;
   border: none;
@@ -155,17 +155,41 @@ body {
   transition: color 0.15s, border-color 0.15s;
 }
 
-.tab-bar button:hover {
+.tab-bar button:not(.status-logs-btn):hover {
   color: var(--text);
 }
 
-.tab-bar button.active {
+.tab-bar button:not(.status-logs-btn).active {
   color: var(--accent);
   border-bottom-color: var(--accent);
 }
 
 .tab-bar .spacer {
   flex: 1;
+}
+
+.tab-bar .status-logs-btn {
+  padding: 4px 10px;
+  background: none;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  color: var(--text-secondary);
+  cursor: pointer;
+  font-size: 11px;
+  align-self: center;
+  margin-right: 8px;
+  transition: color 0.15s, border-color 0.15s, background 0.15s;
+}
+
+.tab-bar .status-logs-btn:hover {
+  color: var(--text);
+  border-color: var(--text-secondary);
+}
+
+.tab-bar .status-logs-btn.active {
+  color: var(--accent);
+  border-color: var(--accent);
+  background: rgba(99, 102, 241, 0.1);
 }
 
 .tab-bar .status {
@@ -2410,7 +2434,7 @@ mark {
     padding: 0 8px;
   }
 
-  .tab-bar button {
+  .tab-bar button:not(.status-logs-btn) {
     padding: 8px 12px;
     font-size: 13px;
     white-space: nowrap;

@@ -2133,10 +2133,10 @@ document.addEventListener('keydown', (e) => {
   const tag = (e.target.tagName || '').toLowerCase();
   const inInput = tag === 'input' || tag === 'textarea';
 
-  // Mod+1-6: switch tabs
-  if (mod && e.key >= '1' && e.key <= '6') {
+  // Mod+1-5: switch tabs
+  if (mod && e.key >= '1' && e.key <= '5') {
     e.preventDefault();
-    const tabs = ['chat', 'memory', 'jobs', 'routines', 'logs', 'extensions'];
+    const tabs = ['chat', 'memory', 'jobs', 'routines', 'extensions'];
     const idx = parseInt(e.key) - 1;
     if (tabs[idx]) switchTab(tabs[idx]);
     return;
