@@ -773,7 +773,8 @@ impl SetupWizard {
             "Anthropic        - Claude models (direct API key)",
             "OpenAI           - GPT models (direct API key)",
             "Ollama           - local models, no API key needed",
-            "OpenAI-compatible - custom endpoint (vLLM, LiteLLM, Together, etc.)",
+            "OpenRouter       - 200+ models via single API key",
+            "OpenAI-compatible - custom endpoint (vLLM, LiteLLM, etc.)",
         ];
 
         let choice = select_one("Provider:", options).map_err(SetupError::Io)?;
@@ -783,7 +784,8 @@ impl SetupWizard {
             1 => self.setup_anthropic().await?,
             2 => self.setup_openai().await?,
             3 => self.setup_ollama()?,
-            4 => self.setup_openai_compatible().await?,
+            4 => self.setup_openrouter().await?,
+            5 => self.setup_openai_compatible().await?,
             _ => return Err(SetupError::Config("Invalid provider selection".to_string())),
         }
 
@@ -957,6 +959,60 @@ impl SetupWizard {
         self.settings.ollama_base_url = Some(url.clone());
 
         print_success(&format!("Ollama configured ({})", url));
+        Ok(())
+    }
+
+    /// OpenRouter provider setup: pre-configured OpenAI-compatible endpoint.
+    ///
+    /// Sets the base URL to `https://openrouter.ai/api/v1` and prompts for
+    /// an API key. Under the hood this uses the `openai_compatible` backend.
+    ///
+    /// Inlines the API key collection (rather than delegating to
+    /// `setup_api_key_provider`) so the success message says "OpenRouter"
+    /// instead of "openai_compatible".
+    async fn setup_openrouter(&mut self) -> Result<(), SetupError> {
+        self.settings.llm_backend = Some("openai_compatible".to_string());
+        self.settings.openai_compatible_base_url = Some("https://openrouter.ai/api/v1".to_string());
+        self.settings.selected_model = None;
+
+        // Check env var first
+        if let Ok(existing) = std::env::var("LLM_API_KEY") {
+            print_info(&format!("LLM_API_KEY found: {}", mask_api_key(&existing)));
+            if confirm("Use this key?", true).map_err(SetupError::Io)? {
+                if let Ok(ctx) = self.init_secrets_context().await {
+                    let key = SecretString::from(existing.clone());
+                    if let Err(e) = ctx.save_secret("llm_compatible_api_key", &key).await {
+                        tracing::warn!("Failed to persist env key to secrets: {}", e);
+                    }
+                }
+                self.llm_api_key = Some(SecretString::from(existing));
+                print_success("OpenRouter configured (from env)");
+                return Ok(());
+            }
+        }
+
+        println!();
+        print_info("Get your API key from: https://openrouter.ai/settings/keys");
+        println!();
+
+        let key = secret_input("OpenRouter API key").map_err(SetupError::Io)?;
+        let key_str = key.expose_secret();
+
+        if key_str.is_empty() {
+            return Err(SetupError::Config("API key cannot be empty".to_string()));
+        }
+
+        if let Ok(ctx) = self.init_secrets_context().await {
+            ctx.save_secret("llm_compatible_api_key", &key)
+                .await
+                .map_err(|e| SetupError::Config(format!("Failed to save API key: {e}")))?;
+            print_success("API key encrypted and saved");
+        } else {
+            print_info("Secrets not available. Set LLM_API_KEY in your environment.");
+        }
+
+        self.llm_api_key = Some(SecretString::from(key_str.to_string()));
+        print_success("OpenRouter configured (https://openrouter.ai/api/v1)");
         Ok(())
     }
 

@@ -172,7 +172,14 @@ env-var mode or skipped secrets.
 | Anthropic | API key | `anthropic_api_key` | `ANTHROPIC_API_KEY` |
 | OpenAI | API key | `openai_api_key` | `OPENAI_API_KEY` |
 | Ollama | None | - | - |
+| OpenRouter | API key | `llm_compatible_api_key` | `LLM_API_KEY` |
 | OpenAI-compatible | Optional API key | `llm_compatible_api_key` | `LLM_API_KEY` |
+
+**OpenRouter** (`setup_openrouter`):
+- Pre-configured OpenAI-compatible preset with base URL `https://openrouter.ai/api/v1`
+- Prompts for API key directly (inlined, not via `setup_api_key_provider()`) so the success message says "OpenRouter"
+- Sets `llm_backend = "openai_compatible"` and `openai_compatible_base_url` automatically
+- Clears `selected_model` so Step 4 can fetch models from OpenRouter's API
 
 **API-key providers** (`setup_api_key_provider`):
 1. Check env var → if set, ask to reuse, persist to secrets store
