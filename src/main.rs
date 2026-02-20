@@ -1478,7 +1478,10 @@ fn check_onboard_needed() -> Option<&'static str> {
 
     // The wizard writes ONBOARD_COMPLETED=true to ~/.ironclaw/.env,
     // which load_ironclaw_env() loads before this function runs.
-    if std::env::var("ONBOARD_COMPLETED").is_ok() {
+    if std::env::var("ONBOARD_COMPLETED")
+        .map(|v| v == "true")
+        .unwrap_or(false)
+    {
         return None;
     }
 
