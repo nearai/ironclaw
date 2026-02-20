@@ -363,12 +363,54 @@ pub fn setup_tunnel(settings: &Settings) -> Result<TunnelSettings, ChannelSetupE
     // Show existing config
     let has_existing = settings.tunnel.public_url.is_some() || settings.tunnel.provider.is_some();
     if has_existing {
-        if let Some(ref url) = settings.tunnel.public_url {
-            print_info(&format!("Existing static tunnel URL: {}", url));
+        println!();
+        print_info("Current tunnel configuration:");
+        let t = &settings.tunnel;
+        match t.provider.as_deref() {
+            Some("ngrok") => {
+                print_info("  Provider:  ngrok");
+                if let Some(ref domain) = t.ngrok_domain {
+                    print_info(&format!("  Domain:    {}", domain));
+                }
+                if t.ngrok_token.is_some() {
+                    print_info("  Auth:      token configured");
+                }
+            }
+            Some("cloudflare") => {
+                print_info("  Provider:  Cloudflare Tunnel");
+                if t.cf_token.is_some() {
+                    print_info("  Auth:      token configured");
+                }
+            }
+            Some("tailscale") => {
+                let mode = if t.ts_funnel {
+                    "Funnel (public)"
+                } else {
+                    "Serve (tailnet-only)"
+                };
+                print_info(&format!("  Provider:  Tailscale {}", mode));
+                if let Some(ref hostname) = t.ts_hostname {
+                    print_info(&format!("  Hostname:  {}", hostname));
+                }
+            }
+            Some("custom") => {
+                print_info("  Provider:  Custom command");
+                if let Some(ref cmd) = t.custom_command {
+                    print_info(&format!("  Command:   {}", cmd));
+                }
+                if let Some(ref url) = t.custom_health_url {
+                    print_info(&format!("  Health:    {}", url));
+                }
+            }
+            Some(other) => {
+                print_info(&format!("  Provider:  {}", other));
+            }
+            None => {}
         }
-        if let Some(ref provider) = settings.tunnel.provider {
-            print_info(&format!("Existing managed provider: {}", provider));
+        if let Some(ref url) = t.public_url {
+            print_info(&format!("  URL:       {}", url));
         }
+        println!();
         if !confirm("Change tunnel configuration?", false)? {
             return Ok(settings.tunnel.clone());
         }

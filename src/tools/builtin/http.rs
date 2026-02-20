@@ -189,8 +189,8 @@ impl Tool for HttpTool {
                     }
                 },
                 "body": {
-                    "type": "string",
-                    "description": "Request body. Use plain text or serialized JSON."
+                    "type": ["object", "array", "string", "number", "boolean", "null"],
+                    "description": "Request body (for POST/PUT/PATCH)"
                 },
                 "timeout_secs": {
                     "type": "integer",
@@ -362,13 +362,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_http_tool_schema_body_has_type() {
-        let tool = HttpTool::new();
-        let schema = tool.parameters_schema();
-        assert_eq!(schema["properties"]["body"]["type"], "string");
-    }
-
-    #[test]
     fn test_http_tool_schema_headers_is_array() {
         let tool = HttpTool::new();
         let schema = tool.parameters_schema();
@@ -458,6 +451,20 @@ mod tests {
                 ("Authorization".to_string(), "Bearer token".to_string()),
                 ("X-Test".to_string(), "1".to_string())
             ]
+        );
+    }
+
+    #[test]
+    fn test_http_tool_schema_body_has_type() {
+        let schema = HttpTool::new().parameters_schema();
+        let body = schema
+            .get("properties")
+            .and_then(|p| p.get("body"))
+            .expect("body schema missing");
+
+        assert!(
+            body.get("type").is_some(),
+            "body schema must include a type for OpenAI-compatible tool validation"
         );
     }
 }
