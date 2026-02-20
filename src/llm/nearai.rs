@@ -1,7 +1,9 @@
-//! NEAR AI Chat API provider implementation.
+//! NEAR AI Chat provider implementation (Responses API).
 //!
-//! This provider uses the NEAR AI chat-api which provides a unified interface
-//! to multiple LLM models (OpenAI, Anthropic, etc.) with user authentication.
+//! This provider uses the NEAR AI Responses API (`private.near.ai`) which
+//! provides a unified interface to multiple LLM models with session token
+//! authentication. Supports response chaining for efficient multi-turn
+//! conversations.
 
 use std::collections::HashMap;
 use std::sync::Arc;

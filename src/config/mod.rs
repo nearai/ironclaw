@@ -219,6 +219,7 @@ pub async fn inject_llm_keys_from_secrets(
         ("llm_openai_api_key", "OPENAI_API_KEY"),
         ("llm_anthropic_api_key", "ANTHROPIC_API_KEY"),
         ("llm_compatible_api_key", "LLM_API_KEY"),
+        ("llm_nearai_api_key", "NEARAI_API_KEY"),
     ];
 
     let mut injected = HashMap::new();

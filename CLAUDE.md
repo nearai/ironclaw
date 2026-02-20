@@ -339,9 +339,14 @@ LIBSQL_PATH=~/.ironclaw/ironclaw.db    # libSQL local path (default)
 # LIBSQL_AUTH_TOKEN=xxx                # Required with LIBSQL_URL
 
 # NEAR AI (when LLM_BACKEND=nearai, the default)
-NEARAI_SESSION_TOKEN=sess_...
-NEARAI_MODEL=claude-3-5-sonnet-20241022
+# Two modes: "NEAR AI Chat" (session token) or "NEAR AI Cloud" (API key)
+# NEAR AI Chat (Responses API, default):
+NEARAI_SESSION_TOKEN=sess_...           # session token for chat-api
 NEARAI_BASE_URL=https://private.near.ai
+# NEAR AI Cloud (Chat Completions API, auto-selected when API key is set):
+# NEARAI_API_KEY=...                    # API key from cloud.near.ai
+# NEARAI_BASE_URL=https://cloud-api.near.ai
+NEARAI_MODEL=claude-3-5-sonnet-20241022
 
 # Agent settings
 AGENT_NAME=ironclaw
@@ -403,7 +408,9 @@ TINFOIL_MODEL=kimi-k2-5               # Default model
 
 IronClaw supports multiple LLM backends via the `LLM_BACKEND` env var: `nearai` (default), `openai`, `anthropic`, `ollama`, `openai_compatible`, and `tinfoil`.
 
-**NEAR AI** -- Uses the NEAR AI chat-api (`https://api.near.ai/v1/responses`) which provides unified access to multiple models, user authentication via session tokens (`sess_xxx`, 37 characters), and usage tracking/billing through NEAR AI.
+**NEAR AI Chat** -- Uses the NEAR AI Responses API (`https://private.near.ai/v1/responses`). Authenticates with session tokens (`sess_xxx`) obtained via browser OAuth (GitHub/Google). Supports response chaining (delta-only follow-up messages) for efficient multi-turn conversations. This is the default mode when no `NEARAI_API_KEY` is set. Set `NEARAI_SESSION_TOKEN` env var for hosting providers that inject tokens via environment. Configure with `NEARAI_BASE_URL` (default: `https://private.near.ai`).
+
+**NEAR AI Cloud** -- Uses the OpenAI-compatible Chat Completions API (`https://cloud-api.near.ai/v1/chat/completions`). Authenticates with API keys from `cloud.near.ai`. Auto-selected when `NEARAI_API_KEY` is set (or explicitly via `NEARAI_API_MODE=chat_completions`). Tool messages are flattened to plain text for compatibility. Configure with `NEARAI_API_KEY` and `NEARAI_BASE_URL` (default: `https://cloud-api.near.ai`).
 
 **Tinfoil** -- Private inference via `https://inference.tinfoil.sh/v1`. Runs models inside hardware-attested TEEs so neither Tinfoil nor the cloud provider can see prompts or responses. Uses the OpenAI-compatible Chat Completions API only (not the Responses API, so tool calls are adapted to chat format). Configure with `TINFOIL_API_KEY` and `TINFOIL_MODEL` (default: `kimi-k2-5`).
 

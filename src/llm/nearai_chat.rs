@@ -1,7 +1,8 @@
-//! NEAR AI Chat Completions API provider implementation.
+//! NEAR AI Cloud provider implementation (Chat Completions API).
 //!
-//! This provider uses the standard OpenAI-compatible chat completions API
-//! with API key authentication (for cloud-api).
+//! This provider uses the NEAR AI Cloud API (`cloud-api.near.ai`) which
+//! exposes an OpenAI-compatible chat completions endpoint with API key
+//! authentication.
 
 use async_trait::async_trait;
 use reqwest::Client;
@@ -17,7 +18,7 @@ use crate::llm::provider::{
     Role, ToolCall, ToolCompletionRequest, ToolCompletionResponse,
 };
 
-/// NEAR AI Chat Completions API provider.
+/// NEAR AI Cloud provider (Chat Completions API, API key auth).
 pub struct NearAiChatProvider {
     client: Client,
     config: NearAiConfig,
@@ -26,10 +27,10 @@ pub struct NearAiChatProvider {
 }
 
 impl NearAiChatProvider {
-    /// Create a new NEAR AI chat completions provider with API key auth.
+    /// Create a new NEAR AI Cloud provider with API key auth.
     ///
     /// By default this enables tool-message flattening for compatibility with
-    /// providers that reject `role: "tool"` messages (e.g. NEAR cloud-api).
+    /// providers that reject `role: "tool"` messages.
     pub fn new(config: NearAiConfig) -> Result<Self, LlmError> {
         Self::new_with_flatten(config, true)
     }
