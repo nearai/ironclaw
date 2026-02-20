@@ -292,6 +292,60 @@ impl Database for LibSqlBackend {
         conn.execute_batch(libsql_migrations::SCHEMA)
             .await
             .map_err(|e| DatabaseError::Migration(format!("libSQL migration failed: {}", e)))?;
+
+        // Idempotent migrations for existing databases.
+        // These handle cases where CREATE TABLE IF NOT EXISTS is a no-op because the
+        // table already exists, but new columns were added in later schema versions.
+        self.run_idempotent_migrations(&conn).await?;
+
+        Ok(())
+    }
+}
+
+impl LibSqlBackend {
+    /// Run idempotent migrations for schema changes that need ALTER TABLE.
+    ///
+    /// SQLite doesn't support `ADD COLUMN IF NOT EXISTS`, so we run the
+    /// ALTER TABLE and ignore "duplicate column name" errors.
+    async fn run_idempotent_migrations(&self, conn: &Connection) -> Result<(), DatabaseError> {
+        // V10: Add chunk_version column to memory_chunks (for existing databases)
+        // New databases get this via CREATE TABLE; existing ones need ALTER TABLE.
+        let v10_migration = r#"
+            ALTER TABLE memory_chunks ADD COLUMN chunk_version INTEGER NOT NULL DEFAULT 1
+        "#;
+
+        match conn.execute(v10_migration, ()).await {
+            Ok(_) => {
+                tracing::info!("libSQL migration: added chunk_version column to memory_chunks");
+                // Also create the index if we just added the column
+                conn.execute(
+                    "CREATE INDEX IF NOT EXISTS idx_memory_chunks_version ON memory_chunks(chunk_version)",
+                    (),
+                )
+                .await
+                .map_err(|e| {
+                    DatabaseError::Migration(format!("Failed to create chunk_version index: {}", e))
+                })?;
+            }
+            Err(e) => {
+                let err_msg = e.to_string();
+                // SQLite returns "duplicate column name" if column already exists
+                if err_msg.contains("duplicate column name") {
+                    tracing::debug!("libSQL migration: chunk_version column already exists");
+                } else {
+                    // It's possible the table doesn't exist yet if run_migrations failed silently
+                    // or if SCHEMA didn't create it. But SCHEMA should have created it.
+                    // Wait, if this is a fresh DB, SCHEMA creates memory_chunks WITH chunk_version.
+                    // So ALTER TABLE will fail with "duplicate column name".
+                    // If the table doesn't exist (should not happen), it will fail with "no such table".
+                    return Err(DatabaseError::Migration(format!(
+                        "Failed to add chunk_version column: {}",
+                        e
+                    )));
+                }
+            }
+        }
+
         Ok(())
     }
 }
@@ -379,6 +433,7 @@ pub(crate) fn row_to_routine_run_libsql(row: &libsql::Row) -> Result<RoutineRun,
 #[cfg(test)]
 mod tests {
     use crate::db::Database;
+    use crate::db::WorkspaceStore;
     use crate::db::libsql::LibSqlBackend;
 
     #[tokio::test]
@@ -456,5 +511,97 @@ mod tests {
         let row = rows.next().await.unwrap().unwrap();
         let count: i64 = row.get(0).unwrap();
         assert_eq!(count, 20);
+    }
+
+    #[tokio::test]
+    async fn test_stale_chunk_detection() {
+        // Tests that get_documents_with_stale_chunks correctly finds documents
+        // with chunks older than the target version.
+        
+        // Use a file-based DB instead of memory to avoid potential sharing issues
+        // (though memory should work if structured correctly, let's be safe)
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("test_stale.db");
+        let backend = LibSqlBackend::new_local(&db_path).await.unwrap();
+        
+        backend.run_migrations().await.unwrap();
+
+        let user_id = "test_user";
+        let conn = backend.connect().await.unwrap();
+
+        // Create a test document
+        let doc_id = uuid::Uuid::new_v4();
+        conn.execute(
+            r#"INSERT INTO memory_documents (id, user_id, path, content, metadata)
+               VALUES (?1, ?2, ?3, ?4, '{}')"#,
+            libsql::params![doc_id.to_string(), user_id, "test.md", "Test content"],
+        )
+        .await
+        .unwrap();
+
+        // Insert a V1 chunk (stale)
+        let chunk_id = uuid::Uuid::new_v4();
+        conn.execute(
+            r#"INSERT INTO memory_chunks (id, document_id, chunk_index, content, chunk_version)
+               VALUES (?1, ?2, ?3, ?4, ?5)"#,
+            libsql::params![chunk_id.to_string(), doc_id.to_string(), 0i64, "Chunk content", 1i64],
+        )
+        .await
+        .unwrap();
+
+        // Query for stale chunks (version < 2)
+        let stale = backend
+            .get_documents_with_stale_chunks(user_id, None, 2, 100)
+            .await
+            .unwrap();
+
+        assert_eq!(stale.len(), 1, "Should find 1 document with stale chunks");
+        assert_eq!(stale[0], doc_id);
+
+        // Query for stale chunks with version < 1 (should find none)
+        let not_stale = backend
+            .get_documents_with_stale_chunks(user_id, None, 1, 100)
+            .await
+            .unwrap();
+
+        assert!(not_stale.is_empty(), "Should find no documents with version < 1");
+    }
+
+    #[tokio::test]
+    async fn test_idempotent_migration_chunk_version() {
+        // Tests that run_migrations() is idempotent for the chunk_version column.
+        // First run creates the column, second run should not error.
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("test_idempotent.db");
+
+        // First run
+        {
+            let backend = LibSqlBackend::new_local(&db_path).await.unwrap();
+            backend.run_migrations().await.unwrap();
+
+            // Verify column exists
+            let conn = backend.connect().await.unwrap();
+            let mut rows = conn
+                .query("PRAGMA table_info(memory_chunks)", ())
+                .await
+                .unwrap();
+
+            let mut has_chunk_version = false;
+            while let Some(row) = rows.next().await.unwrap() {
+                let name: String = row.get(1).unwrap();
+                if name == "chunk_version" {
+                    has_chunk_version = true;
+                    break;
+                }
+            }
+            assert!(has_chunk_version, "chunk_version column should exist after first migration");
+        }
+
+        // Second run (should not error)
+        {
+            let backend = LibSqlBackend::new_local(&db_path).await.unwrap();
+            let result = backend.run_migrations().await;
+            assert!(result.is_ok(), "Second run_migrations should succeed: {:?}", result.err());
+        }
     }
 }

@@ -33,6 +33,11 @@ pub struct HygieneConfig {
     pub cadence_hours: u32,
     /// Directory to store state file (default: `~/.ironclaw`).
     pub state_dir: PathBuf,
+    /// Maximum documents to re-index per hygiene pass.
+    ///
+    /// Re-indexing involves embedding API calls, so we process in batches
+    /// to avoid overwhelming the API or blocking startup.
+    pub reindex_batch_size: usize,
 }
 
 impl Default for HygieneConfig {
@@ -46,6 +51,7 @@ impl Default for HygieneConfig {
             retention_days: 30,
             cadence_hours: 12,
             state_dir,
+            reindex_batch_size: 20, // Process 20 docs per pass (~2 seconds with 100ms throttle)
         }
     }
 }
@@ -61,6 +67,12 @@ struct HygieneState {
 pub struct HygieneReport {
     /// Number of daily log documents deleted.
     pub daily_logs_deleted: u32,
+    /// Number of documents re-indexed due to stale chunks.
+    pub docs_reindexed: usize,
+    /// Number of documents that failed to re-index.
+    pub reindex_failed: usize,
+    /// True if more stale documents remain after this batch.
+    pub reindex_has_more: bool,
     /// Whether the run was skipped (cadence not yet elapsed).
     pub skipped: bool,
 }
@@ -68,7 +80,7 @@ pub struct HygieneReport {
 impl HygieneReport {
     /// True if any cleanup work was done.
     pub fn had_work(&self) -> bool {
-        self.daily_logs_deleted > 0
+        self.daily_logs_deleted > 0 || self.docs_reindexed > 0
     }
 }
 
@@ -105,6 +117,7 @@ pub async fn run_if_due(workspace: &Workspace, config: &HygieneConfig) -> Hygien
 
     tracing::info!(
         retention_days = config.retention_days,
+        reindex_batch_size = config.reindex_batch_size,
         "memory hygiene: starting cleanup pass"
     );
 
@@ -116,9 +129,22 @@ pub async fn run_if_due(workspace: &Workspace, config: &HygieneConfig) -> Hygien
         Err(e) => tracing::warn!("memory hygiene: failed to clean daily logs: {e}"),
     }
 
+    // Re-index documents with stale chunks
+    match workspace.reindex_stale_chunks(config.reindex_batch_size).await {
+        Ok(reindex_report) => {
+            report.docs_reindexed = reindex_report.processed;
+            report.reindex_failed = reindex_report.failed;
+            report.reindex_has_more = reindex_report.has_more;
+        }
+        Err(e) => tracing::warn!("memory hygiene: failed to re-index stale chunks: {e}"),
+    }
+
     if report.had_work() {
         tracing::info!(
             daily_logs_deleted = report.daily_logs_deleted,
+            docs_reindexed = report.docs_reindexed,
+            reindex_failed = report.reindex_failed,
+            reindex_has_more = report.reindex_has_more,
             "memory hygiene: cleanup complete"
         );
     } else {
@@ -214,6 +240,16 @@ mod tests {
         let report = HygieneReport {
             daily_logs_deleted: 3,
             skipped: false,
+            ..Default::default()
+        };
+        assert!(report.had_work());
+    }
+
+    #[test]
+    fn report_had_work_when_reindexed() {
+        let report = HygieneReport {
+            docs_reindexed: 5,
+            ..Default::default()
         };
         assert!(report.had_work());
     }

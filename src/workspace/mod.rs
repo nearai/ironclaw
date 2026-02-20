@@ -57,6 +57,28 @@ pub use search::{RankedResult, SearchConfig, SearchResult, reciprocal_rank_fusio
 
 use std::sync::Arc;
 
+/// Report from a stale chunk re-indexing pass.
+#[derive(Debug, Default)]
+pub struct ReindexReport {
+    /// Number of documents successfully re-indexed.
+    pub processed: usize,
+    /// Number of documents that failed to re-index.
+    pub failed: usize,
+    /// True if more stale documents remain after this batch.
+    ///
+    /// When true, the caller should schedule another pass to continue
+    /// re-indexing. This allows incremental migration without blocking
+    /// startup or overwhelming the embedding API.
+    pub has_more: bool,
+}
+
+impl ReindexReport {
+    /// True if any re-indexing work was done.
+    pub fn had_work(&self) -> bool {
+        self.processed > 0 || self.failed > 0
+    }
+}
+
 use chrono::{NaiveDate, Utc};
 #[cfg(feature = "postgres")]
 use deadpool_postgres::Pool;
@@ -680,13 +702,14 @@ impl Workspace {
     /// 1. Query for documents with any chunk_version < CHUNK_VERSION
     /// 2. For each document: delete old chunks, re-chunk, insert with new version
     /// 3. Generate new embeddings if provider is available
+    /// 4. Throttle between documents to avoid overwhelming embedding APIs
     ///
     /// ## When to call?
-    /// - On startup (automatic)
+    /// - During hygiene passes (automatic, with throttling)
     /// - After upgrading IronClaw to a version with new chunk parameters
     ///
-    /// Returns (documents_processed, total_found) for progress reporting.
-    pub async fn reindex_stale_chunks(&self, batch_size: usize) -> Result<(usize, usize), WorkspaceError> {
+    /// Returns `ReindexReport` with progress and whether more documents remain.
+    pub async fn reindex_stale_chunks(&self, batch_size: usize) -> Result<ReindexReport, WorkspaceError> {
         // Find documents with stale chunks
         let stale_doc_ids = self
             .storage
@@ -698,40 +721,60 @@ impl Workspace {
             )
             .await?;
 
-        let total = stale_doc_ids.len();
-        if total == 0 {
-            return Ok((0, 0));
+        let batch_count = stale_doc_ids.len();
+        if batch_count == 0 {
+            return Ok(ReindexReport {
+                processed: 0,
+                failed: 0,
+                has_more: false,
+            });
         }
+
+        // If we got exactly batch_size results, there may be more
+        let has_more = batch_count == batch_size;
 
         tracing::info!(
             "Found {} documents with stale chunks (version < {}), re-indexing...",
-            total,
+            batch_count,
             CHUNK_VERSION
         );
 
         let mut processed = 0;
-        for doc_id in stale_doc_ids {
+        let mut failed = 0;
+        for (i, doc_id) in stale_doc_ids.into_iter().enumerate() {
             match self.reindex_document(doc_id).await {
                 Ok(()) => {
                     processed += 1;
                     if processed % 10 == 0 {
-                        tracing::info!("Re-indexed {}/{} documents", processed, total);
+                        tracing::info!("Re-indexed {}/{} documents", processed, batch_count);
                     }
                 }
                 Err(e) => {
                     tracing::warn!("Failed to re-index document {}: {}", doc_id, e);
+                    failed += 1;
                     // Continue with other documents
                 }
+            }
+
+            // Throttle: sleep 100ms between documents to avoid overwhelming embedding APIs.
+            // Skip sleep after the last document.
+            if i < batch_count - 1 {
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
             }
         }
 
         tracing::info!(
-            "Re-indexing complete: {}/{} documents processed",
+            "Re-indexing complete: {} processed, {} failed, has_more={}",
             processed,
-            total
+            failed,
+            has_more
         );
 
-        Ok((processed, total))
+        Ok(ReindexReport {
+            processed,
+            failed,
+            has_more,
+        })
     }
 
     // ==================== Seeding ====================
