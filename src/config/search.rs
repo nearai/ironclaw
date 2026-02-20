@@ -64,6 +64,15 @@ impl WorkspaceSearchConfig {
                 message: "must be a finite, non-negative float".to_string(),
             });
         }
+        if matches!(fusion_strategy, FusionStrategy::WeightedScore)
+            && fts_weight == 0.0
+            && vector_weight == 0.0
+        {
+            return Err(ConfigError::InvalidValue {
+                key: "SEARCH_FTS_WEIGHT".to_string(),
+                message: "weighted fusion requires at least one non-zero weight".to_string(),
+            });
+        }
 
         Ok(Self {
             fusion_strategy,
@@ -154,6 +163,42 @@ mod tests {
         // Weighted mode should default to 0.3 FTS / 0.7 vector
         assert!((config.fts_weight - 0.3).abs() < 0.001);
         assert!((config.vector_weight - 0.7).abs() < 0.001);
+
+        clear_search_env();
+    }
+
+    #[test]
+    fn weighted_both_zero_rejected() {
+        let _guard = ENV_MUTEX.lock().expect("env mutex poisoned");
+        clear_search_env();
+
+        // SAFETY: Under ENV_MUTEX.
+        unsafe {
+            std::env::set_var("SEARCH_FUSION_STRATEGY", "weighted");
+            std::env::set_var("SEARCH_FTS_WEIGHT", "0.0");
+            std::env::set_var("SEARCH_VECTOR_WEIGHT", "0.0");
+        }
+
+        let result = WorkspaceSearchConfig::resolve();
+        assert!(result.is_err());
+
+        clear_search_env();
+    }
+
+    #[test]
+    fn rrf_both_zero_allowed() {
+        let _guard = ENV_MUTEX.lock().expect("env mutex poisoned");
+        clear_search_env();
+
+        // SAFETY: Under ENV_MUTEX.
+        unsafe {
+            std::env::set_var("SEARCH_FTS_WEIGHT", "0.0");
+            std::env::set_var("SEARCH_VECTOR_WEIGHT", "0.0");
+        }
+
+        // RRF ignores weights, so both=0 is fine
+        let config = WorkspaceSearchConfig::resolve().expect("should resolve");
+        assert_eq!(config.fusion_strategy, FusionStrategy::Rrf);
 
         clear_search_env();
     }
