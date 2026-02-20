@@ -105,7 +105,16 @@ impl ContextCompactor {
 
         // Write to workspace if available
         let summary_written = if let Some(ws) = workspace {
-            self.write_summary_to_workspace(ws, &summary).await.is_ok()
+            match self.write_summary_to_workspace(ws, &summary).await {
+                Ok(()) => true,
+                Err(e) => {
+                    tracing::warn!(
+                        "Compaction summary write failed (turns will still be truncated): {}",
+                        e
+                    );
+                    false
+                }
+            }
         } else {
             false
         };
@@ -157,7 +166,16 @@ impl ContextCompactor {
         let content = format_turns_for_storage(old_turns);
 
         // Write to workspace
-        let written = self.write_context_to_workspace(ws, &content).await.is_ok();
+        let written = match self.write_context_to_workspace(ws, &content).await {
+            Ok(()) => true,
+            Err(e) => {
+                tracing::warn!(
+                    "Compaction context write failed (turns will still be truncated): {}",
+                    e
+                );
+                false
+            }
+        };
 
         // Truncate
         thread.truncate_turns(keep_recent);

@@ -234,6 +234,7 @@ impl Submission {
     }
 
     /// Create an approval submission.
+    #[cfg(test)]
     pub fn approval(request_id: Uuid, approved: bool) -> Self {
         Self::ExecApproval {
             request_id,
@@ -243,6 +244,7 @@ impl Submission {
     }
 
     /// Create an "always approve" submission.
+    #[cfg(test)]
     pub fn always_approve(request_id: Uuid) -> Self {
         Self::ExecApproval {
             request_id,
@@ -252,26 +254,31 @@ impl Submission {
     }
 
     /// Create an interrupt submission.
+    #[cfg(test)]
     pub fn interrupt() -> Self {
         Self::Interrupt
     }
 
     /// Create a compact submission.
+    #[cfg(test)]
     pub fn compact() -> Self {
         Self::Compact
     }
 
     /// Create an undo submission.
+    #[cfg(test)]
     pub fn undo() -> Self {
         Self::Undo
     }
 
     /// Create a redo submission.
+    #[cfg(test)]
     pub fn redo() -> Self {
         Self::Redo
     }
 
     /// Check if this submission starts a new turn.
+    #[cfg(test)]
     pub fn starts_turn(&self) -> bool {
         matches!(self, Self::UserInput { .. })
     }
@@ -340,6 +347,7 @@ impl SubmissionResult {
     }
 
     /// Create an OK result.
+    #[cfg(test)]
     pub fn ok() -> Self {
         Self::Ok { message: None }
     }

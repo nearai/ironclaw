@@ -1179,10 +1179,10 @@ fn row_to_routine(row: &tokio_postgres::Row) -> Result<Routine, DatabaseError> {
     let max_concurrent: i32 = row.get("max_concurrent");
     let dedup_window_secs: Option<i32> = row.get("dedup_window_secs");
 
-    let trigger =
-        Trigger::from_db(&trigger_type, trigger_config).map_err(DatabaseError::Serialization)?;
+    let trigger = Trigger::from_db(&trigger_type, trigger_config)
+        .map_err(|e| DatabaseError::Serialization(e.to_string()))?;
     let action = RoutineAction::from_db(&action_type, action_config)
-        .map_err(DatabaseError::Serialization)?;
+        .map_err(|e| DatabaseError::Serialization(e.to_string()))?;
 
     Ok(Routine {
         id: row.get("id"),
@@ -1219,7 +1219,7 @@ fn row_to_routine_run(row: &tokio_postgres::Row) -> Result<RoutineRun, DatabaseE
     let status_str: String = row.get("status");
     let status: RunStatus = status_str
         .parse()
-        .map_err(|e: String| DatabaseError::Serialization(e))?;
+        .map_err(|e: crate::error::RoutineError| DatabaseError::Serialization(e.to_string()))?;
 
     Ok(RoutineRun {
         id: row.get("id"),

@@ -13,6 +13,9 @@ use crate::agent::session::Session;
 use crate::agent::undo::UndoManager;
 use crate::hooks::HookRegistry;
 
+/// Warn when session count exceeds this threshold.
+const SESSION_COUNT_WARNING_THRESHOLD: usize = 1000;
+
 /// Key for mapping external thread IDs to internal ones.
 #[derive(Clone, Hash, Eq, PartialEq)]
 struct ThreadKey {
@@ -67,6 +70,14 @@ impl SessionManager {
         let session_id = new_session.id.to_string();
         let session = Arc::new(Mutex::new(new_session));
         sessions.insert(user_id.to_string(), Arc::clone(&session));
+
+        if sessions.len() >= SESSION_COUNT_WARNING_THRESHOLD && sessions.len() % 100 == 0 {
+            tracing::warn!(
+                "High session count: {} active sessions. \
+                 Pruning runs every 10 minutes; consider reducing session_idle_timeout.",
+                sessions.len()
+            );
+        }
 
         // Fire OnSessionStart hook (fire-and-forget)
         if let Some(ref hooks) = self.hooks {
