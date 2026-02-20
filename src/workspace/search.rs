@@ -42,9 +42,11 @@ pub struct SearchConfig {
     pub pre_fusion_limit: usize,
     /// Fusion strategy to use when combining results.
     pub fusion_strategy: FusionStrategy,
-    /// Weight for FTS results in `WeightedScore` fusion (default 0.3).
+    /// Weight for FTS results in `WeightedScore` fusion.
+    /// Default depends on strategy: 0.5 for RRF, 0.3 for WeightedScore.
     pub fts_weight: f32,
-    /// Weight for vector results in `WeightedScore` fusion (default 0.7).
+    /// Weight for vector results in `WeightedScore` fusion.
+    /// Default depends on strategy: 0.5 for RRF, 0.7 for WeightedScore.
     pub vector_weight: f32,
 }
 
@@ -58,8 +60,8 @@ impl Default for SearchConfig {
             min_score: 0.0,
             pre_fusion_limit: 50,
             fusion_strategy: FusionStrategy::default(),
-            fts_weight: 0.3,
-            vector_weight: 0.7,
+            fts_weight: 0.5,
+            vector_weight: 0.5,
         }
     }
 }
