@@ -9,9 +9,9 @@ pub struct WorkspaceSearchConfig {
     pub fusion_strategy: FusionStrategy,
     /// RRF constant k (default 60).
     pub rrf_k: u32,
-    /// FTS weight for weighted fusion (default 0.3).
+    /// FTS weight for fusion. Default depends on strategy: 0.5 (RRF), 0.3 (weighted).
     pub fts_weight: f32,
-    /// Vector weight for weighted fusion (default 0.7).
+    /// Vector weight for fusion. Default depends on strategy: 0.5 (RRF), 0.7 (weighted).
     pub vector_weight: f32,
 }
 
@@ -20,8 +20,8 @@ impl Default for WorkspaceSearchConfig {
         Self {
             fusion_strategy: FusionStrategy::default(),
             rrf_k: 60,
-            fts_weight: 0.3,
-            vector_weight: 0.7,
+            fts_weight: 0.5,
+            vector_weight: 0.5,
         }
     }
 }
@@ -43,8 +43,14 @@ impl WorkspaceSearchConfig {
         };
 
         let rrf_k = parse_optional_env("SEARCH_RRF_K", 60u32)?;
-        let fts_weight = parse_optional_env("SEARCH_FTS_WEIGHT", 0.3f32)?;
-        let vector_weight = parse_optional_env("SEARCH_VECTOR_WEIGHT", 0.7f32)?;
+
+        // Per-strategy weight defaults: RRF uses 0.5/0.5, weighted uses 0.3/0.7 (vector-biased).
+        let (default_fts, default_vec) = match fusion_strategy {
+            FusionStrategy::Rrf => (0.5f32, 0.5f32),
+            FusionStrategy::WeightedScore => (0.3f32, 0.7f32),
+        };
+        let fts_weight = parse_optional_env("SEARCH_FTS_WEIGHT", default_fts)?;
+        let vector_weight = parse_optional_env("SEARCH_VECTOR_WEIGHT", default_vec)?;
 
         if !fts_weight.is_finite() || fts_weight < 0.0 {
             return Err(ConfigError::InvalidValue {
@@ -91,8 +97,8 @@ mod tests {
         let config = WorkspaceSearchConfig::resolve().expect("should resolve");
         assert_eq!(config.fusion_strategy, FusionStrategy::Rrf);
         assert_eq!(config.rrf_k, 60);
-        assert!((config.fts_weight - 0.3).abs() < 0.001);
-        assert!((config.vector_weight - 0.7).abs() < 0.001);
+        assert!((config.fts_weight - 0.5).abs() < 0.001);
+        assert!((config.vector_weight - 0.5).abs() < 0.001);
     }
 
     #[test]
@@ -129,6 +135,25 @@ mod tests {
 
         let result = WorkspaceSearchConfig::resolve();
         assert!(result.is_err());
+
+        clear_search_env();
+    }
+
+    #[test]
+    fn weighted_strategy_defaults() {
+        let _guard = ENV_MUTEX.lock().expect("env mutex poisoned");
+        clear_search_env();
+
+        // SAFETY: Under ENV_MUTEX.
+        unsafe {
+            std::env::set_var("SEARCH_FUSION_STRATEGY", "weighted");
+        }
+
+        let config = WorkspaceSearchConfig::resolve().expect("should resolve");
+        assert_eq!(config.fusion_strategy, FusionStrategy::WeightedScore);
+        // Weighted mode should default to 0.3 FTS / 0.7 vector
+        assert!((config.fts_weight - 0.3).abs() < 0.001);
+        assert!((config.vector_weight - 0.7).abs() < 0.001);
 
         clear_search_env();
     }
