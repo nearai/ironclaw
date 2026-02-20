@@ -815,7 +815,7 @@ fn store_fallback_in_metadata(
     if let Some(fb) = fallback
         && let Ok(val) = serde_json::to_value(fb)
     {
-        if ctx.metadata.is_null() {
+        if !ctx.metadata.is_object() {
             ctx.metadata = serde_json::json!({});
         }
         ctx.metadata["fallback_deliverable"] = val;
