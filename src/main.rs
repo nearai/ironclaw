@@ -3,7 +3,7 @@
 use std::sync::Arc;
 
 use clap::Parser;
-use tracing_subscriber::{EnvFilter, layer::SubscriberExt, util::SubscriberInitExt};
+use tracing_subscriber::EnvFilter;
 
 use ironclaw::{
     agent::{Agent, AgentDeps, SessionManager},
@@ -14,7 +14,7 @@ use ironclaw::{
             RegisteredEndpoint, SharedWasmChannel, WasmChannelLoader, WasmChannelRouter,
             WasmChannelRuntime, WasmChannelRuntimeConfig, create_wasm_channel_router,
         },
-        web::log_layer::{LogBroadcaster, WebLogLayer},
+        web::log_layer::LogBroadcaster,
     },
     cli::{
         Cli, Command, run_mcp_command, run_pairing_command, run_service_command,
@@ -201,6 +201,9 @@ async fn main() -> anyhow::Result<()> {
                 )
                 .init();
 
+            let _ = dotenvy::dotenv();
+            ironclaw::bootstrap::load_ironclaw_env();
+
             return ironclaw::cli::run_doctor_command().await;
         }
         Some(Command::Status) => {
@@ -209,6 +212,9 @@ async fn main() -> anyhow::Result<()> {
                     EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("warn")),
                 )
                 .init();
+
+            let _ = dotenvy::dotenv();
+            ironclaw::bootstrap::load_ironclaw_env();
 
             return run_status_command().await;
         }
@@ -360,23 +366,14 @@ async fn main() -> anyhow::Result<()> {
     };
     let session = create_session_manager(session_config).await;
 
-    // Initialize tracing
-    let env_filter = EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| EnvFilter::new("ironclaw=info,tower_http=warn"));
-
     // Create log broadcaster before tracing init so the WebLogLayer can capture all events.
     // This gets wired to the gateway's /api/logs/events SSE endpoint later.
     let log_broadcaster = Arc::new(LogBroadcaster::new());
 
-    tracing_subscriber::registry()
-        .with(env_filter)
-        .with(
-            tracing_subscriber::fmt::layer()
-                .with_target(false)
-                .with_writer(ironclaw::tracing_fmt::TruncatingStderr::default()),
-        )
-        .with(WebLogLayer::new(Arc::clone(&log_broadcaster)))
-        .init();
+    // Initialize tracing with a reloadable EnvFilter so the gateway can switch
+    // log levels (e.g. ironclaw=debug) at runtime without restarting.
+    let log_level_handle =
+        ironclaw::channels::web::log_layer::init_tracing(Arc::clone(&log_broadcaster));
 
     // Create CLI channel
     let repl_channel = if let Some(ref msg) = cli.message {
@@ -730,7 +727,6 @@ async fn main() -> anyhow::Result<()> {
     // Initialize tool registry
     let tools = Arc::new(ToolRegistry::new());
     tools.register_builtin_tools();
-    tracing::info!("Registered {} built-in tools", tools.count());
 
     // Create embeddings provider if configured
     let embeddings: Option<Arc<dyn EmbeddingProvider>> = if config.embeddings.enabled {
@@ -1024,11 +1020,12 @@ async fn main() -> anyhow::Result<()> {
     // Set up orchestrator for sandboxed job execution
     // When allow_local_tools is false (default), the LLM uses create_job for FS/shell work.
     // When allow_local_tools is true, dev tools are also registered directly (current behavior).
-    if config.agent.allow_local_tools {
+    // register_builder_tool() already calls register_dev_tools() internally,
+    // so only register them here when the builder didn't already do it.
+    let builder_registered_dev_tools =
+        config.builder.enabled && (config.agent.allow_local_tools || !config.sandbox.enabled);
+    if config.agent.allow_local_tools && !builder_registered_dev_tools {
         tools.register_dev_tools();
-        tracing::info!(
-            "Local tools enabled (allow_local_tools=true), dev tools registered directly"
-        );
     }
 
     // Shared state for job events (used by both orchestrator and web gateway)
@@ -1079,7 +1076,6 @@ async fn main() -> anyhow::Result<()> {
             }
         });
 
-        tracing::info!("Orchestrator API started on :50051, sandbox delegation enabled");
         if config.claude_code.enabled {
             tracing::info!(
                 "Claude Code sandbox mode available (model: {}, max_turns: {})",
@@ -1333,9 +1329,6 @@ async fn main() -> anyhow::Result<()> {
     // Seed workspace with core identity files on first boot
     if let Some(ref ws) = workspace {
         match ws.seed_if_empty().await {
-            Ok(count) if count > 0 => {
-                tracing::info!("Workspace seeded with {} core files", count);
-            }
             Ok(_) => {}
             Err(e) => {
                 tracing::warn!("Failed to seed workspace: {}", e);
@@ -1426,6 +1419,7 @@ async fn main() -> anyhow::Result<()> {
         }
         gw = gw.with_session_manager(Arc::clone(&session_manager));
         gw = gw.with_log_broadcaster(Arc::clone(&log_broadcaster));
+        gw = gw.with_log_level_handle(Arc::clone(&log_level_handle));
         gw = gw.with_tool_registry(Arc::clone(&tools));
         if let Some(ref ext_mgr) = extension_manager {
             gw = gw.with_extension_manager(Arc::clone(ext_mgr));
@@ -1464,11 +1458,6 @@ async fn main() -> anyhow::Result<()> {
             gw.auth_token()
         ));
 
-        tracing::info!(
-            "Web gateway enabled on {}:{}",
-            gw_config.host,
-            gw_config.port
-        );
         tracing::info!("Web UI: http://{}:{}/", gw_config.host, gw_config.port);
 
         channel_names.push("gateway".to_string());
@@ -1510,8 +1499,6 @@ async fn main() -> anyhow::Result<()> {
         Some(context_manager),
         Some(session_manager),
     );
-
-    tracing::info!("Agent initialized, starting main loop...");
 
     // Print boot screen for interactive CLI mode (not single-message mode).
     if config.channels.cli.enabled && cli.message.is_none() {

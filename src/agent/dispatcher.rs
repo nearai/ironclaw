@@ -109,10 +109,17 @@ impl Agent {
         let job_ctx = JobContext::with_user(&message.user_id, "chat", "Interactive chat session");
 
         const MAX_TOOL_ITERATIONS: usize = 10;
+        // Force a text-only response on the last iteration to guarantee termination
+        // instead of hard-erroring. The penultimate iteration also gets a nudge
+        // message so the LLM knows it should wrap up.
+        const FORCE_TEXT_AT: usize = MAX_TOOL_ITERATIONS;
+        const NUDGE_AT: usize = MAX_TOOL_ITERATIONS - 1;
         let mut iteration = 0;
         loop {
             iteration += 1;
-            if iteration > MAX_TOOL_ITERATIONS {
+            // Hard ceiling one past the forced-text iteration (should never be reached
+            // since FORCE_TEXT_AT guarantees a text response, but kept as a safety net).
+            if iteration > MAX_TOOL_ITERATIONS + 1 {
                 return Err(crate::error::LlmError::InvalidResponse {
                     provider: "agent".to_string(),
                     reason: format!("Exceeded maximum tool iterations ({})", MAX_TOOL_ITERATIONS),
@@ -143,6 +150,19 @@ impl Agent {
                 .into());
             }
 
+            // Inject a nudge message when approaching the iteration limit so the
+            // LLM is aware it should produce a final answer on the next turn.
+            if iteration == NUDGE_AT {
+                context_messages.push(ChatMessage::system(
+                    "You are approaching the tool call limit. \
+                     Provide your best final answer on the next response \
+                     using the information you have gathered so far. \
+                     Do not call any more tools.",
+                ));
+            }
+
+            let force_text = iteration >= FORCE_TEXT_AT;
+
             // Refresh tool definitions each iteration so newly built tools become visible
             let tool_defs = self.tools().tool_definitions().await;
 
@@ -162,8 +182,9 @@ impl Agent {
                 tool_defs
             };
 
-            // Call LLM with current context
-            let context = ReasoningContext::new()
+            // Call LLM with current context; force_text drops tools to guarantee a
+            // text response on the final iteration.
+            let mut context = ReasoningContext::new()
                 .with_messages(context_messages.clone())
                 .with_tools(tool_defs)
                 .with_metadata({
@@ -171,6 +192,14 @@ impl Agent {
                     m.insert("thread_id".to_string(), thread_id.to_string());
                     m
                 });
+            context.force_text = force_text;
+
+            if force_text {
+                tracing::info!(
+                    iteration,
+                    "Forcing text-only response (iteration limit reached)"
+                );
+            }
 
             let output = reasoning.respond_with_tools(&context).await?;
 
@@ -799,7 +828,6 @@ mod tests {
                 input_tokens: 0,
                 output_tokens: 0,
                 finish_reason: FinishReason::Stop,
-                response_id: None,
             })
         }
 
@@ -813,7 +841,6 @@ mod tests {
                 input_tokens: 0,
                 output_tokens: 0,
                 finish_reason: FinishReason::Stop,
-                response_id: None,
             })
         }
     }

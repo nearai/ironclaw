@@ -134,6 +134,12 @@
     <div class="tab-panel" id="tab-logs">
       <div class="logs-container">
         <div class="logs-toolbar">
+          <select id="logs-server-level" onchange="setServerLogLevel(this.value)" title="Server-side log level (changes what the server emits)">
+            <option value="error">Server: ERROR</option>
+            <option value="warn">Server: WARN</option>
+            <option value="info" selected>Server: INFO</option>
+            <option value="debug">Server: DEBUG</option>
+          </select>
           <select id="logs-level-filter">
             <option value="all">All Levels</option>
             <option value="ERROR">Error</option>

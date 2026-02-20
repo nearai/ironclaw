@@ -29,9 +29,11 @@ function authenticate() {
       sessionStorage.setItem('ironclaw_token', token);
       document.getElementById('auth-screen').style.display = 'none';
       document.getElementById('app').style.display = 'flex';
-      // Strip token from URL so it's not visible in the address bar
+      // Strip token and log_level from URL so they're not visible in the address bar
       const cleaned = new URL(window.location);
+      const urlLogLevel = cleaned.searchParams.get('log_level');
       cleaned.searchParams.delete('token');
+      cleaned.searchParams.delete('log_level');
       window.history.replaceState({}, '', cleaned.pathname + cleaned.search);
       connectSSE();
       connectLogSSE();
@@ -40,6 +42,12 @@ function authenticate() {
       loadThreads();
       loadMemoryTree();
       loadJobs();
+      // Apply URL log_level param if present, otherwise just sync the dropdown
+      if (urlLogLevel) {
+        setServerLogLevel(urlLogLevel);
+      } else {
+        loadServerLogLevel();
+      }
     })
     .catch(() => {
       sessionStorage.removeItem('ironclaw_token');
@@ -1166,6 +1174,30 @@ function applyLogFilters() {
     const matchesTarget = !targetFilter || el.getAttribute('data-target').toLowerCase().includes(targetFilter);
     el.style.display = (matchesLevel && matchesTarget) ? '' : 'none';
   }
+}
+
+// --- Server-side log level control ---
+
+function setServerLogLevel(level) {
+  apiFetch('/api/logs/level', {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ level: level }),
+  })
+    .then(r => r.json())
+    .then(data => {
+      document.getElementById('logs-server-level').value = data.level;
+    })
+    .catch(err => console.error('Failed to set server log level:', err));
+}
+
+function loadServerLogLevel() {
+  apiFetch('/api/logs/level')
+    .then(r => r.json())
+    .then(data => {
+      document.getElementById('logs-server-level').value = data.level;
+    })
+    .catch(() => {}); // ignore if not available
 }
 
 // --- Extensions ---

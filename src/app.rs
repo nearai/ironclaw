@@ -396,7 +396,6 @@ impl AppBuilder {
 
         let tools = Arc::new(ToolRegistry::new());
         tools.register_builtin_tools();
-        tracing::info!("Registered {} built-in tools", tools.count());
 
         // Create embeddings provider if configured
         let embeddings: Option<Arc<dyn EmbeddingProvider>> = if self.config.embeddings.enabled {
@@ -681,12 +680,12 @@ impl AppBuilder {
             None
         };
 
-        // Register dev tools if local tools are enabled
-        if self.config.agent.allow_local_tools {
+        // register_builder_tool() already calls register_dev_tools() internally,
+        // so only register them here when the builder didn't already do it.
+        let builder_registered_dev_tools = self.config.builder.enabled
+            && (self.config.agent.allow_local_tools || !self.config.sandbox.enabled);
+        if self.config.agent.allow_local_tools && !builder_registered_dev_tools {
             tools.register_dev_tools();
-            tracing::info!(
-                "Local tools enabled (allow_local_tools=true), dev tools registered directly"
-            );
         }
 
         Ok((mcp_session_manager, wasm_tool_runtime, extension_manager))
@@ -709,9 +708,6 @@ impl AppBuilder {
         // Seed workspace and backfill embeddings
         if let Some(ref ws) = workspace {
             match ws.seed_if_empty().await {
-                Ok(count) if count > 0 => {
-                    tracing::info!("Workspace seeded with {} core files", count);
-                }
                 Ok(_) => {}
                 Err(e) => {
                     tracing::warn!("Failed to seed workspace: {}", e);
