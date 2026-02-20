@@ -608,8 +608,8 @@ impl Agent {
         approved: bool,
         always: bool,
     ) -> Result<SubmissionResult, Error> {
-        // Get thread state and pending approval
-        let (_thread_state, pending) = {
+        // Get pending approval for this thread
+        let pending = {
             let mut sess = session.lock().await;
             let thread = sess
                 .threads
@@ -620,8 +620,7 @@ impl Agent {
                 return Ok(SubmissionResult::error("No pending approval request."));
             }
 
-            let pending = thread.take_pending_approval();
-            (thread.state, pending)
+            thread.take_pending_approval()
         };
 
         let pending = match pending {
@@ -740,8 +739,17 @@ impl Agent {
                 {
                     let mut sess = session.lock().await;
                     if let Some(thread) = sess.threads.get_mut(&thread_id) {
+                        let user_input = thread.last_turn().map(|t| t.user_input.clone());
                         thread.enter_auth_mode(ext_name.clone());
                         thread.complete_turn(&instructions);
+                        if let Some(input) = user_input {
+                            self.persist_turn(
+                                thread_id,
+                                &message.user_id,
+                                &input,
+                                Some(&instructions),
+                            );
+                        }
                     }
                 }
                 let _ = self
@@ -918,8 +926,17 @@ impl Agent {
                     {
                         let mut sess = session.lock().await;
                         if let Some(thread) = sess.threads.get_mut(&thread_id) {
+                            let user_input = thread.last_turn().map(|t| t.user_input.clone());
                             thread.enter_auth_mode(ext_name.clone());
                             thread.complete_turn(&instructions);
+                            if let Some(input) = user_input {
+                                self.persist_turn(
+                                    thread_id,
+                                    &message.user_id,
+                                    &input,
+                                    Some(&instructions),
+                                );
+                            }
                         }
                     }
                     let _ = self
@@ -967,8 +984,12 @@ impl Agent {
 
             match result {
                 Ok(AgenticLoopResult::Response(response)) => {
+                    let user_input = thread.last_turn().map(|t| t.user_input.clone());
                     thread.complete_turn(&response);
                     self.persist_response_chain(thread);
+                    if let Some(input) = user_input {
+                        self.persist_turn(thread_id, &message.user_id, &input, Some(&response));
+                    }
                     let _ = self
                         .channels
                         .send_status(
@@ -1003,7 +1024,11 @@ impl Agent {
                     })
                 }
                 Err(e) => {
+                    let user_input = thread.last_turn().map(|t| t.user_input.clone());
                     thread.fail_turn(e.to_string());
+                    if let Some(input) = user_input {
+                        self.persist_turn(thread_id, &message.user_id, &input, None);
+                    }
                     Ok(SubmissionResult::error(e.to_string()))
                 }
             }
