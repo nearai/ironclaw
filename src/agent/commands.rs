@@ -232,6 +232,7 @@ impl Agent {
 
         let runner = crate::agent::HeartbeatRunner::new(
             crate::agent::HeartbeatConfig::default(),
+            crate::workspace::hygiene::HygieneConfig::default(),
             workspace.clone(),
             self.llm().clone(),
         );

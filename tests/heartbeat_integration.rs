@@ -95,7 +95,8 @@ async fn test_heartbeat_end_to_end() {
     println!("[6/6] Running check_heartbeat()...\n");
 
     let hb_config = ironclaw::agent::HeartbeatConfig::default();
-    let runner = HeartbeatRunner::new(hb_config, workspace, llm);
+    let hygiene_config = ironclaw::workspace::hygiene::HygieneConfig::default();
+    let runner = HeartbeatRunner::new(hb_config, hygiene_config, workspace, llm);
 
     let result = runner.check_heartbeat().await;
 
