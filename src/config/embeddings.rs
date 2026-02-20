@@ -102,16 +102,12 @@ impl EmbeddingsConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::helpers::ENV_MUTEX;
     use crate::settings::{EmbeddingsSettings, Settings};
-    use std::sync::Mutex;
-
-    /// Serializes env-mutating tests to prevent parallel races.
-    static ENV_MUTEX: Mutex<()> = Mutex::new(());
 
     /// Clear all embedding-related env vars.
     fn clear_embedding_env() {
-        // SAFETY: Only called under ENV_MUTEX in tests. No other threads
-        // observe these vars while the lock is held.
+        // SAFETY: Only called under ENV_MUTEX in tests.
         unsafe {
             std::env::remove_var("EMBEDDING_ENABLED");
             std::env::remove_var("EMBEDDING_PROVIDER");

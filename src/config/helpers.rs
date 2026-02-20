@@ -2,6 +2,15 @@ use crate::error::ConfigError;
 
 use super::INJECTED_VARS;
 
+/// Crate-wide mutex for tests that mutate process environment variables.
+///
+/// The process environment is global state shared across all threads.
+/// Per-module mutexes do NOT prevent races between modules running in
+/// parallel.  Every `unsafe { set_var / remove_var }` call in tests
+/// MUST hold this single lock.
+#[cfg(test)]
+pub(crate) static ENV_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 pub(crate) fn optional_env(key: &str) -> Result<Option<String>, ConfigError> {
     // Check real env vars first (always win over injected secrets)
     match std::env::var(key) {
