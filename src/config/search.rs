@@ -9,9 +9,15 @@ pub struct WorkspaceSearchConfig {
     pub fusion_strategy: FusionStrategy,
     /// RRF constant k (default 60).
     pub rrf_k: u32,
-    /// FTS weight for fusion. Default depends on strategy: 0.5 (RRF), 0.3 (weighted).
+    /// FTS weight for fusion.
+    ///
+    /// [`Default`] uses 0.5. [`resolve()`](Self::resolve) applies per-strategy
+    /// defaults: 0.5 (RRF) or 0.3 (weighted).
     pub fts_weight: f32,
-    /// Vector weight for fusion. Default depends on strategy: 0.5 (RRF), 0.7 (weighted).
+    /// Vector weight for fusion.
+    ///
+    /// [`Default`] uses 0.5. [`resolve()`](Self::resolve) applies per-strategy
+    /// defaults: 0.5 (RRF) or 0.7 (weighted).
     pub vector_weight: f32,
 }
 
@@ -69,7 +75,7 @@ impl WorkspaceSearchConfig {
             && vector_weight == 0.0
         {
             return Err(ConfigError::InvalidValue {
-                key: "SEARCH_FTS_WEIGHT".to_string(),
+                key: "SEARCH_FTS_WEIGHT/SEARCH_VECTOR_WEIGHT".to_string(),
                 message: "weighted fusion requires at least one non-zero weight".to_string(),
             });
         }
