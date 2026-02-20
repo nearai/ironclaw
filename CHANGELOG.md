@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.0](https://github.com/nearai/ironclaw/compare/ironclaw-v0.6.0...ironclaw-v0.7.0) - 2026-02-19
+
+### Added
+
+- extend lifecycle hooks with declarative bundles ([#176](https://github.com/nearai/ironclaw/pull/176))
+- support per-request model override in /v1/chat/completions ([#103](https://github.com/nearai/ironclaw/pull/103))
+
+### Fixed
+
+- harden openai-compatible provider, approval replay, and embeddings defaults ([#237](https://github.com/nearai/ironclaw/pull/237))
+- Network Security Findings ([#201](https://github.com/nearai/ironclaw/pull/201))
+
 ### Added
 
 - Refactored OpenAI-compatible chat completion routing to use the rig adapter and `RetryProvider` composition for custom base URL usage.
