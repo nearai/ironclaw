@@ -28,6 +28,39 @@ impl ApprovalRequirement {
     }
 }
 
+/// Per-tool rate limit configuration for built-in tool invocations.
+///
+/// Controls how many times a tool can be invoked per user, per time window.
+/// Read-only tools (echo, time, json, file_read, etc.) should NOT be rate limited.
+/// Write/external tools (shell, http, file_write, memory_write, create_job) should be.
+#[derive(Debug, Clone)]
+pub struct ToolRateLimitConfig {
+    /// Maximum invocations per minute.
+    pub requests_per_minute: u32,
+    /// Maximum invocations per hour.
+    pub requests_per_hour: u32,
+}
+
+impl ToolRateLimitConfig {
+    /// Create a config with explicit limits.
+    pub fn new(requests_per_minute: u32, requests_per_hour: u32) -> Self {
+        Self {
+            requests_per_minute,
+            requests_per_hour,
+        }
+    }
+}
+
+impl Default for ToolRateLimitConfig {
+    /// Default: 60 requests/minute, 1000 requests/hour (generous for WASM HTTP).
+    fn default() -> Self {
+        Self {
+            requests_per_minute: 60,
+            requests_per_hour: 1000,
+        }
+    }
+}
+
 /// Where a tool should execute: orchestrator process or inside a container.
 ///
 /// Orchestrator tools run in the main agent process (memory access, job mgmt, etc).
@@ -204,6 +237,22 @@ pub trait Tool: Send + Sync {
     /// Default: `Orchestrator` (safe for the main process).
     fn domain(&self) -> ToolDomain {
         ToolDomain::Orchestrator
+    }
+
+    /// Per-invocation rate limit for this tool.
+    ///
+    /// Return `Some(config)` to throttle how often this tool can be called per user.
+    /// Read-only tools (echo, time, json, file_read, memory_search, etc.) should
+    /// return `None`. Write/external tools (shell, http, file_write, memory_write,
+    /// create_job) should return sensible limits to prevent runaway agents.
+    ///
+    /// Rate limits are per-user, per-tool, and in-memory (reset on restart).
+    /// This is orthogonal to `requires_approval()` — a tool can be both
+    /// approval-gated and rate limited. Rate limit is checked first (cheaper).
+    ///
+    /// Default: `None` (no rate limiting).
+    fn rate_limit_config(&self) -> Option<ToolRateLimitConfig> {
+        None
     }
 
     /// Get the tool schema for LLM function calling.
