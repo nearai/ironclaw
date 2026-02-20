@@ -1,0 +1,166 @@
+# Scope labels for actions/labeler@v6
+# Maps file path globs to scope labels. Multiple labels can apply per PR.
+
+"scope: agent":
+  - changed-files:
+      - any-glob-to-any-file:
+          - src/agent/**
+
+"scope: channel":
+  - changed-files:
+      - any-glob-to-any-file:
+          - src/channels/channel.rs
+          - src/channels/manager.rs
+          - src/channels/mod.rs
+
+"scope: channel/cli":
+  - changed-files:
+      - any-glob-to-any-file:
+          - src/channels/cli/**
+          - src/cli/**
+
+"scope: channel/web":
+  - changed-files:
+      - any-glob-to-any-file:
+          - src/channels/web/**
+
+"scope: channel/wasm":
+  - changed-files:
+      - any-glob-to-any-file:
+          - src/channels/wasm/**
+
+"scope: tool":
+  - changed-files:
+      - any-glob-to-any-file:
+          - src/tools/tool.rs
+          - src/tools/registry.rs
+          - src/tools/mod.rs
+          - src/tools/sandbox.rs
+
+"scope: tool/builtin":
+  - changed-files:
+      - any-glob-to-any-file:
+          - src/tools/builtin/**
+
+"scope: tool/wasm":
+  - changed-files:
+      - any-glob-to-any-file:
+          - src/tools/wasm/**
+
+"scope: tool/mcp":
+  - changed-files:
+      - any-glob-to-any-file:
+          - src/tools/mcp/**
+
+"scope: tool/builder":
+  - changed-files:
+      - any-glob-to-any-file:
+          - src/tools/builder/**
+
+"scope: db":
+  - changed-files:
+      - any-glob-to-any-file:
+          - src/db/mod.rs
+
+"scope: db/postgres":
+  - changed-files:
+      - any-glob-to-any-file:
+          - src/db/postgres.rs
+          - migrations/**
+
+"scope: db/libsql":
+  - changed-files:
+      - any-glob-to-any-file:
+          - src/db/libsql_backend.rs
+          - src/db/libsql_migrations.rs
+
+"scope: safety":
+  - changed-files:
+      - any-glob-to-any-file:
+          - src/safety/**
+
+"scope: llm":
+  - changed-files:
+      - any-glob-to-any-file:
+          - src/llm/**
+
+"scope: workspace":
+  - changed-files:
+      - any-glob-to-any-file:
+          - src/workspace/**
+
+"scope: orchestrator":
+  - changed-files:
+      - any-glob-to-any-file:
+          - src/orchestrator/**
+
+"scope: worker":
+  - changed-files:
+      - any-glob-to-any-file:
+          - src/worker/**
+
+"scope: secrets":
+  - changed-files:
+      - any-glob-to-any-file:
+          - src/secrets/**
+
+"scope: config":
+  - changed-files:
+      - any-glob-to-any-file:
+          - src/config.rs
+          - src/settings.rs
+
+"scope: extensions":
+  - changed-files:
+      - any-glob-to-any-file:
+          - src/extensions/**
+
+"scope: setup":
+  - changed-files:
+      - any-glob-to-any-file:
+          - src/setup/**
+
+"scope: evaluation":
+  - changed-files:
+      - any-glob-to-any-file:
+          - src/evaluation/**
+
+"scope: estimation":
+  - changed-files:
+      - any-glob-to-any-file:
+          - src/estimation/**
+
+"scope: sandbox":
+  - changed-files:
+      - any-glob-to-any-file:
+          - src/sandbox/**
+          - Dockerfile*
+
+"scope: hooks":
+  - changed-files:
+      - any-glob-to-any-file:
+          - src/hooks/**
+
+"scope: pairing":
+  - changed-files:
+      - any-glob-to-any-file:
+          - src/pairing/**
+
+"scope: ci":
+  - changed-files:
+      - any-glob-to-any-file:
+          - .github/workflows/**
+          - .github/scripts/**
+
+"scope: docs":
+  - changed-files:
+      - any-glob-to-any-file:
+          - "**/*.md"
+          - docs/**
+          - LICENSE*
+
+"scope: dependencies":
+  - changed-files:
+      - any-glob-to-any-file:
+          - Cargo.toml
+          - Cargo.lock
