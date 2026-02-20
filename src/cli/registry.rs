@@ -82,18 +82,18 @@ fn find_registry_dir() -> anyhow::Result<PathBuf> {
     }
 
     // Try relative to executable
-    if let Ok(exe) = std::env::current_exe() {
-        if let Some(parent) = exe.parent() {
-            let candidate = parent.join("registry");
+    if let Ok(exe) = std::env::current_exe()
+        && let Some(parent) = exe.parent()
+    {
+        let candidate = parent.join("registry");
+        if candidate.is_dir() {
+            return Ok(candidate);
+        }
+        // Also try one level up (for target/release/ironclaw)
+        if let Some(grandparent) = parent.parent() {
+            let candidate = grandparent.join("registry");
             if candidate.is_dir() {
                 return Ok(candidate);
-            }
-            // Also try one level up (for target/release/ironclaw)
-            if let Some(grandparent) = parent.parent() {
-                let candidate = grandparent.join("registry");
-                if candidate.is_dir() {
-                    return Ok(candidate);
-                }
             }
         }
     }
@@ -127,12 +127,12 @@ fn cmd_list(
     // Print header
     if verbose {
         println!(
-            "{:<20} {:<8} {:<8} {:<10} {}",
-            "NAME", "KIND", "VERSION", "AUTH", "DESCRIPTION"
+            "{:<20} {:<8} {:<8} {:<10} DESCRIPTION",
+            "NAME", "KIND", "VERSION", "AUTH"
         );
         println!("{}", "-".repeat(80));
     } else {
-        println!("{:<20} {:<8} {}", "NAME", "KIND", "DESCRIPTION");
+        println!("{:<20} {:<8} DESCRIPTION", "NAME", "KIND");
         println!("{}", "-".repeat(60));
     }
 
@@ -311,15 +311,15 @@ async fn cmd_install(
         println!("  WASM: {}", outcome.wasm_path.display());
         println!("  Capabilities: {}", outcome.has_capabilities);
 
-        if let Some(auth) = &manifest.auth_summary {
-            if auth.method.as_deref() != Some("none") {
-                println!(
-                    "\nNext step: authenticate with `ironclaw tool auth {}`",
-                    manifest.name
-                );
-                if let Some(url) = &auth.setup_url {
-                    println!("  Setup credentials at: {}", url);
-                }
+        if let Some(auth) = &manifest.auth_summary
+            && auth.method.as_deref() != Some("none")
+        {
+            println!(
+                "\nNext step: authenticate with `ironclaw tool auth {}`",
+                manifest.name
+            );
+            if let Some(url) = &auth.setup_url {
+                println!("  Setup credentials at: {}", url);
             }
         }
     }

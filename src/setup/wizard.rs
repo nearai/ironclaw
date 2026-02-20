@@ -1638,17 +1638,18 @@ impl SetupWizard {
                     installed_count += 1;
 
                     // Track auth needs
-                    if let Some(auth) = &tool.auth_summary {
-                        if auth.method.as_deref() != Some("none") && auth.method.is_some() {
-                            let provider = auth.provider.as_deref().unwrap_or(&tool.name);
-                            // Only mention unique providers (Google tools share auth)
-                            let hint = format!("  {} - ironclaw tool auth {}", provider, tool.name);
-                            if !auth_needed
-                                .iter()
-                                .any(|h| h.starts_with(&format!("  {} -", provider)))
-                            {
-                                auth_needed.push(hint);
-                            }
+                    if let Some(auth) = &tool.auth_summary
+                        && auth.method.as_deref() != Some("none")
+                        && auth.method.is_some()
+                    {
+                        let provider = auth.provider.as_deref().unwrap_or(&tool.name);
+                        // Only mention unique providers (Google tools share auth)
+                        let hint = format!("  {} - ironclaw tool auth {}", provider, tool.name);
+                        if !auth_needed
+                            .iter()
+                            .any(|h| h.starts_with(&format!("  {} -", provider)))
+                        {
+                            auth_needed.push(hint);
                         }
                     }
                 }
@@ -2362,17 +2363,17 @@ fn load_registry_catalog() -> Option<crate::registry::catalog::RegistryCatalog> 
     }
 
     // Try relative to executable
-    if let Ok(exe) = std::env::current_exe() {
-        if let Some(parent) = exe.parent() {
-            let candidate = parent.join("registry");
+    if let Ok(exe) = std::env::current_exe()
+        && let Some(parent) = exe.parent()
+    {
+        let candidate = parent.join("registry");
+        if candidate.is_dir() {
+            return crate::registry::catalog::RegistryCatalog::load(&candidate).ok();
+        }
+        if let Some(grandparent) = parent.parent() {
+            let candidate = grandparent.join("registry");
             if candidate.is_dir() {
                 return crate::registry::catalog::RegistryCatalog::load(&candidate).ok();
-            }
-            if let Some(grandparent) = parent.parent() {
-                let candidate = grandparent.join("registry");
-                if candidate.is_dir() {
-                    return crate::registry::catalog::RegistryCatalog::load(&candidate).ok();
-                }
             }
         }
     }
@@ -2473,10 +2474,10 @@ async fn discover_installed_tools(tools_dir: &std::path::Path) -> HashSet<String
 
     while let Ok(Some(entry)) = entries.next_entry().await {
         let path = entry.path();
-        if path.extension().and_then(|e| e.to_str()) == Some("wasm") {
-            if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
-                names.insert(stem.to_string());
-            }
+        if path.extension().and_then(|e| e.to_str()) == Some("wasm")
+            && let Some(stem) = path.file_stem().and_then(|s| s.to_str())
+        {
+            names.insert(stem.to_string());
         }
     }
 
