@@ -129,7 +129,9 @@ src/
 │   ├── failover.rs     # Multi-provider failover chain
 │   ├── response_cache.rs # LLM response caching
 │   ├── costs.rs        # Token cost tracking
-│   └── rig_adapter.rs  # Rig framework adapter
+│   ├── rig_adapter.rs  # Rig framework adapter
+│   ├── claude_cli.rs   # Claude CLI provider (wraps `claude` binary for Max/Pro subscriptions)
+│   └── claude_cli_types.rs # Shared NDJSON event types (used by claude_cli.rs and claude_bridge.rs)
 │
 ├── tools/              # Extensible tool system
 │   ├── tool.rs         # Tool trait, ToolOutput, ToolError
@@ -401,11 +403,13 @@ TINFOIL_MODEL=kimi-k2-5               # Default model
 
 ### LLM Providers
 
-IronClaw supports multiple LLM backends via the `LLM_BACKEND` env var: `nearai` (default), `openai`, `anthropic`, `ollama`, `openai_compatible`, and `tinfoil`.
+IronClaw supports multiple LLM backends via the `LLM_BACKEND` env var: `nearai` (default), `openai`, `anthropic`, `ollama`, `openai_compatible`, `tinfoil`, and `claude_cli`.
 
 **NEAR AI** -- Uses the NEAR AI chat-api (`https://api.near.ai/v1/responses`) which provides unified access to multiple models, user authentication via session tokens (`sess_xxx`, 37 characters), and usage tracking/billing through NEAR AI.
 
 **Tinfoil** -- Private inference via `https://inference.tinfoil.sh/v1`. Runs models inside hardware-attested TEEs so neither Tinfoil nor the cloud provider can see prompts or responses. Uses the OpenAI-compatible Chat Completions API only (not the Responses API, so tool calls are adapted to chat format). Configure with `TINFOIL_API_KEY` and `TINFOIL_MODEL` (default: `kimi-k2-5`).
+
+**Claude CLI** -- Wraps the official `claude` CLI binary as an LLM backend. Ideal for users with a Claude Max or Pro subscription who want zero per-token API cost. Requires the `claude` CLI installed and authenticated (`claude auth login`). Multi-turn conversations use `--resume <session_id>` for continuity. Configure with `CLAUDE_CLI_MODEL`, `CLAUDE_CLI_MAX_TURNS` (default: 1), `CLAUDE_CLI_TIMEOUT_SECS` (default: 300), and `CLAUDE_CLI_BINARY_PATH` (default: `claude`).
 
 ## Database
 

@@ -8,6 +8,8 @@
 //! - **OpenAI-compatible**: Any endpoint that speaks the OpenAI API
 
 pub mod circuit_breaker;
+mod claude_cli;
+pub mod claude_cli_types;
 pub mod costs;
 pub mod failover;
 mod nearai;
@@ -20,6 +22,7 @@ mod rig_adapter;
 pub mod session;
 
 pub use circuit_breaker::{CircuitBreakerConfig, CircuitBreakerProvider};
+pub use claude_cli::ClaudeCliProvider;
 pub use failover::{CooldownConfig, FailoverProvider};
 pub use nearai::{ModelInfo, NearAiProvider};
 pub use nearai_chat::NearAiChatProvider;
@@ -60,6 +63,7 @@ pub fn create_llm_provider(
         LlmBackend::Ollama => create_ollama_provider(config),
         LlmBackend::OpenAiCompatible => create_openai_compatible_provider(config),
         LlmBackend::Tinfoil => create_tinfoil_provider(config),
+        LlmBackend::ClaudeCli => create_claude_cli_provider(config),
     }
 }
 
@@ -249,6 +253,22 @@ fn create_openai_compatible_provider(config: &LlmConfig) -> Result<Arc<dyn LlmPr
     Ok(Arc::new(RigAdapter::new(model, &compat.model)))
 }
 
+fn create_claude_cli_provider(config: &LlmConfig) -> Result<Arc<dyn LlmProvider>, LlmError> {
+    let cli_config = config
+        .claude_cli
+        .clone()
+        .ok_or_else(|| LlmError::AuthFailed {
+            provider: "claude_cli".to_string(),
+        })?;
+
+    tracing::info!(
+        "Using Claude CLI provider (model: {}, binary: {})",
+        cli_config.model,
+        cli_config.binary_path,
+    );
+    Ok(Arc::new(ClaudeCliProvider::new(cli_config)))
+}
+
 /// Create a cheap/fast LLM provider for lightweight tasks (heartbeat, routing, evaluation).
 ///
 /// Uses `NEARAI_CHEAP_MODEL` if set, otherwise falls back to the main provider.
@@ -319,6 +339,7 @@ mod tests {
             ollama: None,
             openai_compatible: None,
             tinfoil: None,
+            claude_cli: None,
         }
     }
 

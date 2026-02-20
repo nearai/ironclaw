@@ -29,12 +29,12 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command;
 use uuid::Uuid;
 
 use crate::error::WorkerError;
+use crate::llm::claude_cli_types::ClaudeStreamEvent;
 use crate::worker::api::{CompletionReport, JobEventPayload, PromptResponse, WorkerHttpClient};
 
 /// Configuration for the Claude bridge runtime.
@@ -46,85 +46,6 @@ pub struct ClaudeBridgeConfig {
     pub timeout: Duration,
     /// Tool patterns to auto-approve via project-level settings.json.
     pub allowed_tools: Vec<String>,
-}
-
-/// A Claude Code streaming event (NDJSON line from `--output-format stream-json`).
-///
-/// Claude Code emits one JSON object per line with these top-level types:
-///
-///   system    -> session init (session_id, tools, model)
-///   assistant -> LLM response, nested under message.content[] as text/tool_use blocks
-///   user      -> tool results, nested under message.content[] as tool_result blocks
-///   result    -> final summary (is_error, duration_ms, num_turns, result text)
-///
-/// Content blocks live under `message.content`, NOT at the top level.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ClaudeStreamEvent {
-    #[serde(rename = "type")]
-    pub event_type: String,
-
-    #[serde(default)]
-    pub session_id: Option<String>,
-
-    #[serde(default)]
-    pub subtype: Option<String>,
-
-    /// For `assistant` and `user` events: the message wrapper containing content blocks.
-    #[serde(default)]
-    pub message: Option<MessageWrapper>,
-
-    /// For `result` events: the final text output.
-    #[serde(default)]
-    pub result: Option<serde_json::Value>,
-
-    /// For `result` events: whether the session ended in error.
-    #[serde(default)]
-    pub is_error: Option<bool>,
-
-    /// For `result` events: total wall-clock duration.
-    #[serde(default)]
-    pub duration_ms: Option<u64>,
-
-    /// For `result` events: number of agentic turns used.
-    #[serde(default)]
-    pub num_turns: Option<u32>,
-}
-
-/// Wrapper around the `message` field in assistant/user events.
-///
-/// ```text
-/// { "type": "assistant", "message": { "content": [ { "type": "text", ... } ] } }
-/// ```
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct MessageWrapper {
-    #[serde(default)]
-    pub role: Option<String>,
-    #[serde(default)]
-    pub content: Option<Vec<ContentBlock>>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ContentBlock {
-    #[serde(rename = "type")]
-    pub block_type: String,
-    /// Text block content.
-    #[serde(default)]
-    pub text: Option<String>,
-    /// Tool name (for tool_use blocks).
-    #[serde(default)]
-    pub name: Option<String>,
-    /// Tool use ID (for tool_use and tool_result blocks).
-    #[serde(default)]
-    pub id: Option<String>,
-    /// Tool input params (for tool_use blocks).
-    #[serde(default)]
-    pub input: Option<serde_json::Value>,
-    /// Tool result content (for tool_result blocks), or general content.
-    #[serde(default)]
-    pub content: Option<serde_json::Value>,
-    /// Tool use ID reference (for tool_result blocks).
-    #[serde(default)]
-    pub tool_use_id: Option<String>,
 }
 
 /// The Claude Code bridge runtime.
@@ -708,6 +629,7 @@ fn truncate(s: &str, max_len: usize) -> &str {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::llm::claude_cli_types::{ContentBlock, MessageWrapper};
 
     #[test]
     fn test_parse_system_event() {
@@ -780,6 +702,7 @@ mod tests {
             is_error: None,
             duration_ms: None,
             num_turns: None,
+            usage: None,
         };
         let payloads = stream_event_to_payloads(&event);
         assert_eq!(payloads.len(), 1);
@@ -804,11 +727,13 @@ mod tests {
                     content: None,
                     tool_use_id: None,
                 }]),
+                usage: None,
             }),
             result: None,
             is_error: None,
             duration_ms: None,
             num_turns: None,
+            usage: None,
         };
         let payloads = stream_event_to_payloads(&event);
         assert_eq!(payloads.len(), 1);
@@ -834,11 +759,13 @@ mod tests {
                     content: None,
                     tool_use_id: None,
                 }]),
+                usage: None,
             }),
             result: None,
             is_error: None,
             duration_ms: None,
             num_turns: None,
+            usage: None,
         };
         let payloads = stream_event_to_payloads(&event);
         assert_eq!(payloads.len(), 1);
@@ -864,11 +791,13 @@ mod tests {
                     content: Some(serde_json::json!("/workspace")),
                     tool_use_id: Some("toolu_01abc".to_string()),
                 }]),
+                usage: None,
             }),
             result: None,
             is_error: None,
             duration_ms: None,
             num_turns: None,
+            usage: None,
         };
         let payloads = stream_event_to_payloads(&event);
         assert_eq!(payloads.len(), 1);
@@ -888,6 +817,7 @@ mod tests {
             is_error: Some(false),
             duration_ms: Some(12000),
             num_turns: Some(5),
+            usage: None,
         };
         let payloads = stream_event_to_payloads(&event);
         // Should emit a message (the result text) + a result event
@@ -909,6 +839,7 @@ mod tests {
             is_error: Some(true),
             duration_ms: None,
             num_turns: None,
+            usage: None,
         };
         let payloads = stream_event_to_payloads(&event);
         assert_eq!(payloads.len(), 1);
@@ -926,6 +857,7 @@ mod tests {
             is_error: None,
             duration_ms: None,
             num_turns: None,
+            usage: None,
         };
         let payloads = stream_event_to_payloads(&event);
         assert_eq!(payloads.len(), 1);

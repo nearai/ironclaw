@@ -707,6 +707,7 @@ impl SetupWizard {
                 "openai" => "OpenAI",
                 "ollama" => "Ollama (local)",
                 "openai_compatible" => "OpenAI-compatible endpoint",
+                "claude_cli" => "Claude CLI (Max/Pro subscription)",
                 other => other,
             };
             print_info(&format!("Current provider: {}", display));
@@ -714,7 +715,7 @@ impl SetupWizard {
 
             let is_known = matches!(
                 current.as_str(),
-                "nearai" | "anthropic" | "openai" | "ollama" | "openai_compatible"
+                "nearai" | "anthropic" | "openai" | "ollama" | "openai_compatible" | "claude_cli"
             );
 
             if is_known && confirm("Keep current provider?", true).map_err(SetupError::Io)? {
@@ -725,6 +726,7 @@ impl SetupWizard {
                     "openai" => return self.setup_openai().await,
                     "ollama" => return self.setup_ollama(),
                     "openai_compatible" => return self.setup_openai_compatible().await,
+                    "claude_cli" => return self.setup_claude_cli(),
                     _ => {
                         return Err(SetupError::Config(format!(
                             "Unhandled provider: {}",
@@ -751,6 +753,7 @@ impl SetupWizard {
             "OpenAI           - GPT models (direct API key)",
             "Ollama           - local models, no API key needed",
             "OpenAI-compatible - custom endpoint (vLLM, LiteLLM, Together, etc.)",
+            "Claude CLI       - use Claude Max/Pro subscription (no API key)",
         ];
 
         let choice = select_one("Provider:", options).map_err(SetupError::Io)?;
@@ -761,6 +764,7 @@ impl SetupWizard {
             2 => self.setup_openai().await?,
             3 => self.setup_ollama()?,
             4 => self.setup_openai_compatible().await?,
+            5 => self.setup_claude_cli()?,
             _ => return Err(SetupError::Config("Invalid provider selection".to_string())),
         }
 
@@ -975,6 +979,52 @@ impl SetupWizard {
         Ok(())
     }
 
+    /// Claude CLI provider setup: validate binary and auth, no API key needed.
+    fn setup_claude_cli(&mut self) -> Result<(), SetupError> {
+        self.settings.llm_backend = Some("claude_cli".to_string());
+        if self.settings.selected_model.is_some() {
+            self.settings.selected_model = None;
+        }
+
+        // Check if claude binary is available
+        match std::process::Command::new("claude")
+            .arg("--version")
+            .output()
+        {
+            Ok(output) if output.status.success() => {
+                let version = String::from_utf8_lossy(&output.stdout);
+                print_success(&format!("Claude CLI found: {}", version.trim()));
+            }
+            _ => {
+                print_error("Claude CLI not found in PATH.");
+                print_info("Install it from: https://docs.anthropic.com/en/docs/claude-code");
+                print_info("Then run: claude auth login");
+                return Err(SetupError::Config(
+                    "Claude CLI binary not found. Install it first.".to_string(),
+                ));
+            }
+        }
+
+        // Check auth status
+        match std::process::Command::new("claude")
+            .arg("auth")
+            .arg("status")
+            .output()
+        {
+            Ok(output) if output.status.success() => {
+                let status = String::from_utf8_lossy(&output.stdout);
+                print_success(&format!("Auth status: {}", status.trim()));
+            }
+            _ => {
+                print_info("Claude CLI may not be authenticated.");
+                print_info("Run `claude auth login` to authenticate.");
+            }
+        }
+
+        print_success("Claude CLI configured (uses your Max/Pro subscription)");
+        Ok(())
+    }
+
     /// Step 4: Model selection.
     ///
     /// Branches on the selected LLM backend and fetches models from the
@@ -1035,6 +1085,23 @@ impl SetupWizard {
                 }
                 self.settings.selected_model = Some(model_id.clone());
                 print_success(&format!("Selected {}", model_id));
+            }
+            "claude_cli" => {
+                let models: Vec<(String, String)> = vec![
+                    (
+                        "claude-sonnet-4-6-20250520".into(),
+                        "Claude Sonnet 4.6 (default, recommended)".into(),
+                    ),
+                    (
+                        "claude-opus-4-20250514".into(),
+                        "Claude Opus 4 (most capable)".into(),
+                    ),
+                    (
+                        "claude-haiku-4-20250514".into(),
+                        "Claude Haiku 4 (fastest)".into(),
+                    ),
+                ];
+                self.select_from_model_list(&models)?;
             }
             _ => {
                 // NEAR AI: use existing provider list_models()
@@ -1140,6 +1207,7 @@ impl SetupWizard {
             ollama: None,
             openai_compatible: None,
             tinfoil: None,
+            claude_cli: None,
         };
 
         match create_llm_provider(&config, session) {

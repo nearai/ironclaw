@@ -25,6 +25,8 @@ pub enum LlmBackend {
     OpenAiCompatible,
     /// Tinfoil private inference
     Tinfoil,
+    /// Claude CLI (wraps the `claude` binary for Max/Pro subscription users)
+    ClaudeCli,
 }
 
 impl std::str::FromStr for LlmBackend {
@@ -38,8 +40,9 @@ impl std::str::FromStr for LlmBackend {
             "ollama" => Ok(Self::Ollama),
             "openai_compatible" | "openai-compatible" | "compatible" => Ok(Self::OpenAiCompatible),
             "tinfoil" => Ok(Self::Tinfoil),
+            "claude_cli" | "claude-cli" | "claude_max" | "claude-max" => Ok(Self::ClaudeCli),
             _ => Err(format!(
-                "invalid LLM backend '{}', expected one of: nearai, openai, anthropic, ollama, openai_compatible, tinfoil",
+                "invalid LLM backend '{}', expected one of: nearai, openai, anthropic, ollama, openai_compatible, tinfoil, claude_cli",
                 s
             )),
         }
@@ -55,6 +58,7 @@ impl std::fmt::Display for LlmBackend {
             Self::Ollama => write!(f, "ollama"),
             Self::OpenAiCompatible => write!(f, "openai_compatible"),
             Self::Tinfoil => write!(f, "tinfoil"),
+            Self::ClaudeCli => write!(f, "claude_cli"),
         }
     }
 }
@@ -99,6 +103,22 @@ pub struct TinfoilConfig {
     pub model: String,
 }
 
+/// Configuration for the Claude CLI provider.
+///
+/// Wraps the official `claude` binary for users with Claude Max/Pro subscriptions.
+/// No API key needed -- the CLI manages its own authentication.
+#[derive(Debug, Clone)]
+pub struct ClaudeCliConfig {
+    /// Model to use (default: "claude-sonnet-4-6-20250520").
+    pub model: String,
+    /// Max agentic turns per request (default: 1, prevents CLI's own tool loop).
+    pub max_turns: u32,
+    /// Timeout in seconds for a single CLI invocation (default: 300).
+    pub timeout_secs: u64,
+    /// Path to the `claude` binary (default: "claude", found via PATH).
+    pub binary_path: String,
+}
+
 /// LLM provider configuration.
 ///
 /// NEAR AI remains the default backend. Users can switch to other providers
@@ -119,6 +139,8 @@ pub struct LlmConfig {
     pub openai_compatible: Option<OpenAiCompatibleConfig>,
     /// Tinfoil config (populated when backend=tinfoil)
     pub tinfoil: Option<TinfoilConfig>,
+    /// Claude CLI config (populated when backend=claude_cli)
+    pub claude_cli: Option<ClaudeCliConfig>,
 }
 
 /// API mode for NEAR AI.
@@ -350,6 +372,23 @@ impl LlmConfig {
             None
         };
 
+        let claude_cli = if backend == LlmBackend::ClaudeCli {
+            let model = optional_env("CLAUDE_CLI_MODEL")?
+                .unwrap_or_else(|| "claude-sonnet-4-6-20250520".to_string());
+            let max_turns = parse_optional_env("CLAUDE_CLI_MAX_TURNS", 1)?;
+            let timeout_secs = parse_optional_env("CLAUDE_CLI_TIMEOUT_SECS", 300)?;
+            let binary_path =
+                optional_env("CLAUDE_CLI_BINARY_PATH")?.unwrap_or_else(|| "claude".to_string());
+            Some(ClaudeCliConfig {
+                model,
+                max_turns,
+                timeout_secs,
+                binary_path,
+            })
+        } else {
+            None
+        };
+
         Ok(Self {
             backend,
             nearai,
@@ -358,6 +397,7 @@ impl LlmConfig {
             ollama,
             openai_compatible,
             tinfoil,
+            claude_cli,
         })
     }
 }
