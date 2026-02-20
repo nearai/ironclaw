@@ -90,10 +90,13 @@ impl Session {
         match self.active_thread {
             None => self.create_thread(),
             Some(id) => {
-                let session_id = self.id;
-                self.threads
-                    .entry(id)
-                    .or_insert_with(|| Thread::new(session_id))
+                if self.threads.contains_key(&id) {
+                    self.threads.get_mut(&id).unwrap()
+                } else {
+                    // Stale active_thread ID: create a new thread, which
+                    // updates self.active_thread to the new thread's ID.
+                    self.create_thread()
+                }
             }
         }
     }

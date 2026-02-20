@@ -944,10 +944,10 @@ impl Agent {
                 Ok(AgenticLoopResult::Response(response)) => {
                     let user_input = thread.last_turn().map(|t| t.user_input.clone());
                     thread.complete_turn(&response);
-                    self.persist_response_chain(thread);
                     if let Some(input) = user_input {
                         self.persist_turn(thread_id, &message.user_id, &input, Some(&response));
                     }
+                    self.persist_response_chain(thread);
                     let _ = self
                         .channels
                         .send_status(
@@ -991,11 +991,21 @@ impl Agent {
                 }
             }
         } else {
-            // Rejected - clear approval and return to idle
+            // Rejected - complete the turn with a rejection message and persist
+            let rejection = format!(
+                "Tool '{}' was rejected. The agent will not execute this tool.\n\n\
+                 You can continue the conversation or try a different approach.",
+                pending.tool_name
+            );
             {
                 let mut sess = session.lock().await;
                 if let Some(thread) = sess.threads.get_mut(&thread_id) {
+                    let user_input = thread.last_turn().map(|t| t.user_input.clone());
                     thread.clear_pending_approval();
+                    thread.complete_turn(&rejection);
+                    if let Some(input) = user_input {
+                        self.persist_turn(thread_id, &message.user_id, &input, Some(&rejection));
+                    }
                 }
             }
 
@@ -1008,11 +1018,7 @@ impl Agent {
                 )
                 .await;
 
-            Ok(SubmissionResult::response(format!(
-                "Tool '{}' was rejected. The agent will not execute this tool.\n\n\
-                 You can continue the conversation or try a different approach.",
-                pending.tool_name
-            )))
+            Ok(SubmissionResult::response(rejection))
         }
     }
 
@@ -1040,6 +1046,7 @@ impl Agent {
                 if let Some(input) = user_input {
                     self.persist_turn(thread_id, &message.user_id, &input, Some(&instructions));
                 }
+                self.persist_response_chain(thread);
             }
         }
         let _ = self

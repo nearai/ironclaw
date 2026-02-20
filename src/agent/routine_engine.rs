@@ -405,9 +405,17 @@ async fn execute_routine(ctx: EngineContext, routine: Routine, run: RoutineRun) 
 }
 
 /// Sanitize a routine name for use in workspace paths.
-/// Strips path separators and traversal sequences to prevent directory escape.
+/// Only keeps alphanumeric, dash, and underscore characters; replaces everything else.
 fn sanitize_routine_name(name: &str) -> String {
-    name.replace(['/', '\\'], "_").replace("..", "_")
+    name.chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect()
 }
 
 /// Execute a lightweight routine (single LLM call).
