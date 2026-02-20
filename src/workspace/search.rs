@@ -44,11 +44,11 @@ pub struct SearchConfig {
     pub fusion_strategy: FusionStrategy,
     /// Weight for FTS results in `WeightedScore` fusion (default 0.5).
     /// Ignored by `Rrf` fusion. For env-based config via
-    /// [`WorkspaceSearchConfig::resolve`], defaults are per-strategy.
+    /// `WorkspaceSearchConfig::resolve`, defaults are per-strategy.
     pub fts_weight: f32,
     /// Weight for vector results in `WeightedScore` fusion (default 0.5).
     /// Ignored by `Rrf` fusion. For env-based config via
-    /// [`WorkspaceSearchConfig::resolve`], defaults are per-strategy.
+    /// `WorkspaceSearchConfig::resolve`, defaults are per-strategy.
     pub vector_weight: f32,
 }
 

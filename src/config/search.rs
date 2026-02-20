@@ -11,13 +11,13 @@ pub struct WorkspaceSearchConfig {
     pub rrf_k: u32,
     /// FTS weight for fusion.
     ///
-    /// [`Default`] uses 0.5. [`resolve()`](Self::resolve) applies per-strategy
-    /// defaults: 0.5 (RRF) or 0.3 (weighted).
+    /// [`Default`] uses 0.5. When the configuration is resolved, per-strategy
+    /// defaults are applied: 0.5 (RRF) or 0.3 (weighted).
     pub fts_weight: f32,
     /// Vector weight for fusion.
     ///
-    /// [`Default`] uses 0.5. [`resolve()`](Self::resolve) applies per-strategy
-    /// defaults: 0.5 (RRF) or 0.7 (weighted).
+    /// [`Default`] uses 0.5. When the configuration is resolved, per-strategy
+    /// defaults are applied: 0.5 (RRF) or 0.7 (weighted).
     pub vector_weight: f32,
 }
 
