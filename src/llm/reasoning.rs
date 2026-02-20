@@ -44,6 +44,9 @@ pub struct ReasoningContext {
     pub current_state: Option<String>,
     /// Opaque metadata forwarded to the LLM provider (e.g. thread_id for chaining).
     pub metadata: std::collections::HashMap<String, String>,
+    /// When true, force a text-only response (ignore available tools).
+    /// Used by the agentic loop to guarantee termination near the iteration limit.
+    pub force_text: bool,
 }
 
 impl ReasoningContext {
@@ -55,6 +58,7 @@ impl ReasoningContext {
             job_description: None,
             current_state: None,
             metadata: std::collections::HashMap::new(),
+            force_text: false,
         }
     }
 
@@ -393,7 +397,11 @@ Respond in JSON format:
         let mut messages = vec![ChatMessage::system(system_prompt)];
         messages.extend(context.messages.clone());
 
-        let effective_tools = context.available_tools.clone();
+        let effective_tools = if context.force_text {
+            Vec::new()
+        } else {
+            context.available_tools.clone()
+        };
 
         // If we have tools, use tool completion mode
         if !effective_tools.is_empty() {
@@ -564,7 +572,10 @@ Example:
 - Be concise and direct
 - Use markdown formatting where helpful
 - For code, use appropriate code blocks with language tags
-- Call tools when they would help accomplish the task{}
+- Call tools when they would help accomplish the task
+- Do NOT call the same tool repeatedly with similar arguments; if a tool returned unhelpful results, move on
+- If you have already called tools and gathered enough information, produce your final answer immediately
+- If tools return empty or irrelevant results, answer with what you already know rather than retrying{}
 {}{}"#,
             tools_section, identity_section, skills_section
         )
