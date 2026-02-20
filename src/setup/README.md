@@ -166,7 +166,8 @@ env-var mode or skipped secrets.
 
 | Provider | Auth Method | Secret Name | Env Var |
 |----------|-------------|-------------|---------|
-| NEAR AI | Browser OAuth or API key | `llm_nearai_api_key` (API key path) | `NEARAI_API_KEY` |
+| NEAR AI Chat | Browser OAuth or session token | - | `NEARAI_SESSION_TOKEN` |
+| NEAR AI Cloud | API key | `llm_nearai_api_key` | `NEARAI_API_KEY` |
 | Anthropic | API key | `anthropic_api_key` | `ANTHROPIC_API_KEY` |
 | OpenAI | API key | `openai_api_key` | `OPENAI_API_KEY` |
 | Ollama | None | - | - |
@@ -180,12 +181,17 @@ env-var mode or skipped secrets.
 
 **NEAR AI** (`setup_nearai`):
 - Calls `session_manager.ensure_authenticated()` which shows the auth menu:
-  - Options 1-2 (GitHub/Google): browser OAuth, requires localhost access
-  - Option 4: NEAR AI Cloud API key from `cloud.near.ai`
-- OAuth path: session token saved to `~/.ironclaw/session.json`
-- API key path: `NEARAI_API_KEY` saved to `~/.ironclaw/.env` (bootstrap)
-  and encrypted secrets store (`llm_nearai_api_key`). `LlmConfig::resolve()`
-  auto-selects `ChatCompletions` mode when the API key is present.
+  - Options 1-2 (GitHub/Google): browser OAuth → **NEAR AI Chat** mode
+    (Responses API at `private.near.ai`, session token auth)
+  - Option 4: NEAR AI Cloud API key → **NEAR AI Cloud** mode
+    (Chat Completions API at `cloud-api.near.ai`, API key auth)
+- **NEAR AI Chat** path: session token saved to `~/.ironclaw/session.json`.
+  Hosting providers can set `NEARAI_SESSION_TOKEN` env var directly (takes
+  precedence over file-based tokens).
+- **NEAR AI Cloud** path: `NEARAI_API_KEY` saved to `~/.ironclaw/.env`
+  (bootstrap) and encrypted secrets store (`llm_nearai_api_key`).
+  `LlmConfig::resolve()` auto-selects `ChatCompletions` mode when the
+  API key is present.
 
 **`self.llm_api_key` caching:** The wizard caches the API key as
 `Option<SecretString>` so that Step 4 (model fetching) and Step 5
