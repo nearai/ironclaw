@@ -358,10 +358,6 @@ impl Agent {
                         }
                     });
 
-                    tracing::info!(
-                        "Heartbeat enabled with {}s interval",
-                        hb_config.interval_secs
-                    );
                     let hygiene = self
                         .hygiene_config
                         .as_ref()
@@ -373,6 +369,7 @@ impl Agent {
                         hygiene,
                         workspace.clone(),
                         self.cheap_llm().clone(),
+                        self.safety().clone(),
                         Some(notify_tx),
                     ))
                 } else {

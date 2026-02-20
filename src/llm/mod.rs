@@ -1,7 +1,7 @@
 //! LLM integration for the agent.
 //!
 //! Supports multiple backends:
-//! - **NEAR AI** (default): Session-based or API key auth via NEAR AI proxy
+//! - **NEAR AI** (default): Session token or API key auth via Chat Completions API
 //! - **OpenAI**: Direct API access with your own key
 //! - **Anthropic**: Direct API access with your own key
 //! - **Ollama**: Local model inference
@@ -10,7 +10,6 @@
 pub mod circuit_breaker;
 pub mod costs;
 pub mod failover;
-mod nearai;
 mod nearai_chat;
 mod provider;
 mod reasoning;
@@ -21,8 +20,7 @@ pub mod session;
 
 pub use circuit_breaker::{CircuitBreakerConfig, CircuitBreakerProvider};
 pub use failover::{CooldownConfig, FailoverProvider};
-pub use nearai::{ModelInfo, NearAiProvider};
-pub use nearai_chat::NearAiChatProvider;
+pub use nearai_chat::{ModelInfo, NearAiChatProvider};
 pub use provider::{
     ChatMessage, CompletionRequest, CompletionResponse, FinishReason, LlmProvider, ModelMetadata,
     Role, ToolCall, ToolCompletionRequest, ToolCompletionResponse, ToolDefinition, ToolResult,
@@ -41,7 +39,7 @@ use std::sync::Arc;
 use rig::client::CompletionClient;
 use secrecy::ExposeSecret;
 
-use crate::config::{LlmBackend, LlmConfig, NearAiApiMode, NearAiConfig};
+use crate::config::{LlmBackend, LlmConfig, NearAiConfig};
 use crate::error::LlmError;
 
 /// Create an LLM provider based on configuration.
@@ -71,24 +69,18 @@ pub fn create_llm_provider_with_config(
     config: &NearAiConfig,
     session: Arc<SessionManager>,
 ) -> Result<Arc<dyn LlmProvider>, LlmError> {
-    match config.api_mode {
-        NearAiApiMode::Responses => {
-            tracing::info!(
-                model = %config.model,
-                base_url = %config.base_url,
-                "Using NEAR AI Chat (Responses API, session token auth)"
-            );
-            Ok(Arc::new(NearAiProvider::new(config.clone(), session)?))
-        }
-        NearAiApiMode::ChatCompletions => {
-            tracing::info!(
-                model = %config.model,
-                base_url = %config.base_url,
-                "Using NEAR AI Cloud (Chat Completions API, API key auth)"
-            );
-            Ok(Arc::new(NearAiChatProvider::new(config.clone())?))
-        }
-    }
+    let auth_mode = if config.api_key.is_some() {
+        "API key"
+    } else {
+        "session token"
+    };
+    tracing::info!(
+        model = %config.model,
+        base_url = %config.base_url,
+        auth = auth_mode,
+        "Using NEAR AI (Chat Completions API)"
+    );
+    Ok(Arc::new(NearAiChatProvider::new(config.clone(), session)?))
 }
 
 fn create_openai_provider(config: &LlmConfig) -> Result<Arc<dyn LlmProvider>, LlmError> {
@@ -254,7 +246,7 @@ fn create_openai_compatible_provider(config: &LlmConfig) -> Result<Arc<dyn LlmPr
 /// Create a cheap/fast LLM provider for lightweight tasks (heartbeat, routing, evaluation).
 ///
 /// Uses `NEARAI_CHEAP_MODEL` if set, otherwise falls back to the main provider.
-/// Currently only supports NEAR AI backends (Responses and ChatCompletions modes).
+/// Currently only supports NEAR AI backend.
 pub fn create_cheap_llm_provider(
     config: &LlmConfig,
     session: Arc<SessionManager>,
@@ -275,20 +267,16 @@ pub fn create_cheap_llm_provider(
     let mut cheap_config = config.nearai.clone();
     cheap_config.model = cheap_model.clone();
 
-    tracing::info!("Cheap LLM provider: {}", cheap_model);
-
-    match cheap_config.api_mode {
-        NearAiApiMode::Responses => Ok(Some(Arc::new(NearAiProvider::new(cheap_config, session)?))),
-        NearAiApiMode::ChatCompletions => {
-            Ok(Some(Arc::new(NearAiChatProvider::new(cheap_config)?)))
-        }
-    }
+    Ok(Some(Arc::new(NearAiChatProvider::new(
+        cheap_config,
+        session,
+    )?)))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::{LlmBackend, NearAiApiMode, NearAiConfig};
+    use crate::config::{LlmBackend, NearAiConfig};
     use std::path::PathBuf;
 
     fn test_nearai_config() -> NearAiConfig {
@@ -298,7 +286,6 @@ mod tests {
             base_url: "https://api.near.ai".to_string(),
             auth_base_url: "https://private.near.ai".to_string(),
             session_path: PathBuf::from("/tmp/test-session.json"),
-            api_mode: NearAiApiMode::Responses,
             api_key: None,
             fallback_model: None,
             max_retries: 3,

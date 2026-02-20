@@ -22,7 +22,9 @@ use std::sync::{Arc, Mutex};
 use serde::Serialize;
 use tokio::sync::broadcast;
 use tracing::field::{Field, Visit};
-use tracing_subscriber::Layer;
+use tracing_subscriber::layer::SubscriberExt;
+use tracing_subscriber::util::SubscriberInitExt;
+use tracing_subscriber::{EnvFilter, Layer, reload};
 
 use crate::safety::LeakDetector;
 
@@ -100,6 +102,115 @@ impl Default for LogBroadcaster {
     fn default() -> Self {
         Self::new()
     }
+}
+
+/// Handle for changing the tracing `EnvFilter` at runtime.
+///
+/// Wraps a `reload::Handle` so the gateway can switch between log levels
+/// (e.g. `ironclaw=debug`) without restarting the process.
+pub struct LogLevelHandle {
+    handle: reload::Handle<EnvFilter, tracing_subscriber::Registry>,
+    current_level: Mutex<String>,
+    base_filter: String,
+}
+
+impl LogLevelHandle {
+    pub fn new(
+        handle: reload::Handle<EnvFilter, tracing_subscriber::Registry>,
+        initial_level: String,
+        base_filter: String,
+    ) -> Self {
+        Self {
+            handle,
+            current_level: Mutex::new(initial_level),
+            base_filter,
+        }
+    }
+
+    /// Change the `ironclaw=<level>` directive at runtime.
+    ///
+    /// `level` must be one of: trace, debug, info, warn, error.
+    pub fn set_level(&self, level: &str) -> Result<(), String> {
+        const VALID: &[&str] = &["trace", "debug", "info", "warn", "error"];
+        let level = level.to_lowercase();
+        if !VALID.contains(&level.as_str()) {
+            return Err(format!(
+                "invalid level '{}', must be one of: {}",
+                level,
+                VALID.join(", ")
+            ));
+        }
+
+        let filter_str = if self.base_filter.is_empty() {
+            format!("ironclaw={}", level)
+        } else {
+            format!("ironclaw={},{}", level, self.base_filter)
+        };
+
+        let new_filter = EnvFilter::new(&filter_str);
+        self.handle
+            .reload(new_filter)
+            .map_err(|e| format!("failed to reload filter: {}", e))?;
+
+        if let Ok(mut current) = self.current_level.lock() {
+            *current = level;
+        }
+        Ok(())
+    }
+
+    /// Returns the current ironclaw log level (e.g. "info", "debug").
+    pub fn current_level(&self) -> String {
+        self.current_level
+            .lock()
+            .map(|l| l.clone())
+            .unwrap_or_else(|_| "info".to_string())
+    }
+}
+
+/// Initialise the tracing subscriber with a reloadable `EnvFilter`.
+///
+/// Returns the `LogLevelHandle` so callers can swap the filter at runtime.
+/// The fmt layer and `WebLogLayer` are attached alongside the reloadable filter.
+pub fn init_tracing(log_broadcaster: Arc<LogBroadcaster>) -> Arc<LogLevelHandle> {
+    let raw_filter =
+        std::env::var("RUST_LOG").unwrap_or_else(|_| "ironclaw=info,tower_http=warn".to_string());
+
+    // Split into the ironclaw directive and "everything else" (base_filter).
+    let mut ironclaw_level = String::from("info");
+    let mut base_parts: Vec<&str> = Vec::new();
+
+    for part in raw_filter.split(',') {
+        let trimmed = part.trim();
+        if trimmed.starts_with("ironclaw=") {
+            if let Some(lvl) = trimmed.strip_prefix("ironclaw=") {
+                ironclaw_level = lvl.to_string();
+            }
+        } else if !trimmed.is_empty() {
+            base_parts.push(trimmed);
+        }
+    }
+    let base_filter = base_parts.join(",");
+
+    let env_filter = EnvFilter::new(&raw_filter);
+    let (reload_layer, reload_handle) = reload::Layer::new(env_filter);
+
+    let handle = Arc::new(LogLevelHandle::new(
+        reload_handle,
+        ironclaw_level,
+        base_filter,
+    ));
+
+    tracing_subscriber::registry()
+        .with(reload_layer)
+        .with(
+            tracing_subscriber::fmt::layer()
+                .with_target(false)
+                .with_writer(crate::tracing_fmt::TruncatingStderr::default()),
+        )
+        .with(WebLogLayer::new(log_broadcaster))
+        .init();
+
+    handle
 }
 
 /// Visitor that extracts the `message` field and all extra key-value
