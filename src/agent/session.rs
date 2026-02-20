@@ -70,10 +70,9 @@ impl Session {
     pub fn create_thread(&mut self) -> &mut Thread {
         let thread = Thread::new(self.id);
         let thread_id = thread.id;
-        self.threads.insert(thread_id, thread);
         self.active_thread = Some(thread_id);
         self.last_active_at = Utc::now();
-        self.threads.get_mut(&thread_id).expect("just inserted")
+        self.threads.entry(thread_id).or_insert(thread)
     }
 
     /// Get the active thread.
@@ -88,10 +87,15 @@ impl Session {
 
     /// Get or create the active thread.
     pub fn get_or_create_thread(&mut self) -> &mut Thread {
-        if self.active_thread.is_none() {
-            self.create_thread();
+        match self.active_thread {
+            None => self.create_thread(),
+            Some(id) => {
+                let session_id = self.id;
+                self.threads
+                    .entry(id)
+                    .or_insert_with(|| Thread::new(session_id))
+            }
         }
-        self.active_thread_mut().expect("just created")
     }
 
     /// Switch to a different thread.
@@ -240,7 +244,8 @@ impl Thread {
         self.turns.push(turn);
         self.state = ThreadState::Processing;
         self.updated_at = Utc::now();
-        self.turns.last_mut().expect("just pushed")
+        // turn_number was len() before push, so it's a valid index after push
+        &mut self.turns[turn_number]
     }
 
     /// Complete the current turn with a response.
@@ -353,8 +358,10 @@ impl Thread {
                 if let Some(next) = iter.peek()
                     && next.role == crate::llm::Role::Assistant
                 {
-                    let response = iter.next().expect("peeked");
-                    turn.complete(&response.content);
+                    // iter.next() is guaranteed Some after a successful peek()
+                    if let Some(response) = iter.next() {
+                        turn.complete(&response.content);
+                    }
                 }
 
                 self.turns.push(turn);

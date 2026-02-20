@@ -10,7 +10,7 @@ use uuid::Uuid;
 
 use crate::agent::Agent;
 use crate::agent::compaction::ContextCompactor;
-use crate::agent::dispatcher::{AgenticLoopResult, detect_auth_awaiting, parse_auth_result};
+use crate::agent::dispatcher::{AgenticLoopResult, check_auth_required, parse_auth_result};
 use crate::agent::session::{PendingApproval, Session, ThreadState};
 use crate::agent::submission::SubmissionResult;
 use crate::channels::{IncomingMessage, StatusUpdate};
@@ -733,38 +733,17 @@ impl Agent {
             // If tool_auth returned awaiting_token, enter auth mode and
             // return instructions directly (skip agentic loop continuation).
             if let Some((ext_name, instructions)) =
-                detect_auth_awaiting(&pending.tool_name, &tool_result)
+                check_auth_required(&pending.tool_name, &tool_result)
             {
-                let auth_data = parse_auth_result(&tool_result);
-                {
-                    let mut sess = session.lock().await;
-                    if let Some(thread) = sess.threads.get_mut(&thread_id) {
-                        let user_input = thread.last_turn().map(|t| t.user_input.clone());
-                        thread.enter_auth_mode(ext_name.clone());
-                        thread.complete_turn(&instructions);
-                        if let Some(input) = user_input {
-                            self.persist_turn(
-                                thread_id,
-                                &message.user_id,
-                                &input,
-                                Some(&instructions),
-                            );
-                        }
-                    }
-                }
-                let _ = self
-                    .channels
-                    .send_status(
-                        &message.channel,
-                        StatusUpdate::AuthRequired {
-                            extension_name: ext_name,
-                            instructions: Some(instructions.clone()),
-                            auth_url: auth_data.auth_url,
-                            setup_url: auth_data.setup_url,
-                        },
-                        &message.metadata,
-                    )
-                    .await;
+                self.handle_auth_intercept(
+                    &session,
+                    thread_id,
+                    message,
+                    &tool_result,
+                    ext_name,
+                    instructions.clone(),
+                )
+                .await;
                 return Ok(SubmissionResult::response(instructions));
             }
 
@@ -920,38 +899,17 @@ impl Agent {
 
                 // Auth detection for deferred tools
                 if let Some((ext_name, instructions)) =
-                    detect_auth_awaiting(&tc.name, &deferred_result)
+                    check_auth_required(&tc.name, &deferred_result)
                 {
-                    let auth_data = parse_auth_result(&deferred_result);
-                    {
-                        let mut sess = session.lock().await;
-                        if let Some(thread) = sess.threads.get_mut(&thread_id) {
-                            let user_input = thread.last_turn().map(|t| t.user_input.clone());
-                            thread.enter_auth_mode(ext_name.clone());
-                            thread.complete_turn(&instructions);
-                            if let Some(input) = user_input {
-                                self.persist_turn(
-                                    thread_id,
-                                    &message.user_id,
-                                    &input,
-                                    Some(&instructions),
-                                );
-                            }
-                        }
-                    }
-                    let _ = self
-                        .channels
-                        .send_status(
-                            &message.channel,
-                            StatusUpdate::AuthRequired {
-                                extension_name: ext_name,
-                                instructions: Some(instructions.clone()),
-                                auth_url: auth_data.auth_url,
-                                setup_url: auth_data.setup_url,
-                            },
-                            &message.metadata,
-                        )
-                        .await;
+                    self.handle_auth_intercept(
+                        &session,
+                        thread_id,
+                        message,
+                        &deferred_result,
+                        ext_name,
+                        instructions.clone(),
+                    )
+                    .await;
                     return Ok(SubmissionResult::response(instructions));
                 }
 
@@ -1056,6 +1014,47 @@ impl Agent {
                 pending.tool_name
             )))
         }
+    }
+
+    /// Handle an auth-required result from a tool execution.
+    ///
+    /// Enters auth mode on the thread, completes + persists the turn,
+    /// and sends the AuthRequired status to the channel.
+    /// Returns the instructions string for the caller to wrap in a response.
+    async fn handle_auth_intercept(
+        &self,
+        session: &Arc<Mutex<Session>>,
+        thread_id: Uuid,
+        message: &IncomingMessage,
+        tool_result: &Result<String, Error>,
+        ext_name: String,
+        instructions: String,
+    ) {
+        let auth_data = parse_auth_result(tool_result);
+        {
+            let mut sess = session.lock().await;
+            if let Some(thread) = sess.threads.get_mut(&thread_id) {
+                let user_input = thread.last_turn().map(|t| t.user_input.clone());
+                thread.enter_auth_mode(ext_name.clone());
+                thread.complete_turn(&instructions);
+                if let Some(input) = user_input {
+                    self.persist_turn(thread_id, &message.user_id, &input, Some(&instructions));
+                }
+            }
+        }
+        let _ = self
+            .channels
+            .send_status(
+                &message.channel,
+                StatusUpdate::AuthRequired {
+                    extension_name: ext_name,
+                    instructions: Some(instructions.clone()),
+                    auth_url: auth_data.auth_url,
+                    setup_url: auth_data.setup_url,
+                },
+                &message.metadata,
+            )
+            .await;
     }
 
     /// Handle an auth token submitted while the thread is in auth mode.

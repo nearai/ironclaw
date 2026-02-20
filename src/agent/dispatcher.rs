@@ -402,7 +402,7 @@ impl Agent {
                         // and short-circuit: return the instructions directly so
                         // the LLM doesn't get a chance to hallucinate tool calls.
                         if let Some((ext_name, instructions)) =
-                            detect_auth_awaiting(&tc.name, &tool_result)
+                            check_auth_required(&tc.name, &tool_result)
                         {
                             let auth_data = parse_auth_result(&tool_result);
                             {
@@ -581,7 +581,7 @@ pub(super) fn parse_auth_result(result: &Result<String, Error>) -> ParsedAuthDat
 ///
 /// Returns `Some((extension_name, instructions))` if the tool result contains
 /// `awaiting_token: true`, meaning the thread should enter auth mode.
-pub(super) fn detect_auth_awaiting(
+pub(super) fn check_auth_required(
     tool_name: &str,
     result: &Result<String, Error>,
 ) -> Option<(String, String)> {
@@ -625,7 +625,7 @@ mod tests {
     use crate::safety::SafetyLayer;
     use crate::tools::ToolRegistry;
 
-    use super::detect_auth_awaiting;
+    use super::check_auth_required;
 
     /// Minimal LLM provider for unit tests that always returns a static response.
     struct StaticLlmProvider;
@@ -703,6 +703,7 @@ mod tests {
             },
             deps,
             ChannelManager::new(),
+            None,
             None,
             None,
             Some(Arc::new(ContextManager::new(1))),
@@ -822,7 +823,7 @@ mod tests {
         })
         .to_string());
 
-        let detected = detect_auth_awaiting("tool_auth", &result);
+        let detected = check_auth_required("tool_auth", &result);
         assert!(detected.is_some());
         let (name, instructions) = detected.unwrap();
         assert_eq!(name, "telegram");
@@ -839,7 +840,7 @@ mod tests {
         })
         .to_string());
 
-        assert!(detect_auth_awaiting("tool_auth", &result).is_none());
+        assert!(check_auth_required("tool_auth", &result).is_none());
     }
 
     #[test]
@@ -850,14 +851,14 @@ mod tests {
         })
         .to_string());
 
-        assert!(detect_auth_awaiting("tool_list", &result).is_none());
+        assert!(check_auth_required("tool_list", &result).is_none());
     }
 
     #[test]
     fn test_detect_auth_awaiting_error_result() {
         let result: Result<String, Error> =
             Err(crate::error::ToolError::NotFound { name: "x".into() }.into());
-        assert!(detect_auth_awaiting("tool_auth", &result).is_none());
+        assert!(check_auth_required("tool_auth", &result).is_none());
     }
 
     #[test]
@@ -869,7 +870,7 @@ mod tests {
         })
         .to_string());
 
-        let (_, instructions) = detect_auth_awaiting("tool_auth", &result).unwrap();
+        let (_, instructions) = check_auth_required("tool_auth", &result).unwrap();
         assert_eq!(instructions, "Please provide your API token/key.");
     }
 
@@ -884,7 +885,7 @@ mod tests {
         })
         .to_string());
 
-        let detected = detect_auth_awaiting("tool_activate", &result);
+        let detected = check_auth_required("tool_activate", &result);
         assert!(detected.is_some());
         let (name, instructions) = detected.unwrap();
         assert_eq!(name, "slack");
@@ -900,6 +901,6 @@ mod tests {
         })
         .to_string());
 
-        assert!(detect_auth_awaiting("tool_activate", &result).is_none());
+        assert!(check_auth_required("tool_activate", &result).is_none());
     }
 }
