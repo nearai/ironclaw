@@ -256,9 +256,20 @@ impl Agent {
                     }
 
                     // === Phase 1: Preflight (sequential) ===
-                    // Walk tool_calls checking approval and hooks. Collect
-                    // runnable tools; stop at the first that needs approval.
-                    let mut runnable: Vec<crate::llm::ToolCall> = Vec::new();
+                    // Walk tool_calls checking approval and hooks. Classify
+                    // each tool as Rejected (by hook) or Runnable. Stop at the
+                    // first tool that needs approval.
+                    //
+                    // Outcomes are indexed by original tool_calls position so
+                    // Phase 3 can emit results in the correct order.
+                    enum PreflightOutcome {
+                        /// Hook rejected/blocked this tool; contains the error message.
+                        Rejected(String),
+                        /// Tool passed preflight and will be executed.
+                        Runnable,
+                    }
+                    let mut preflight: Vec<(crate::llm::ToolCall, PreflightOutcome)> = Vec::new();
+                    let mut runnable: Vec<(usize, crate::llm::ToolCall)> = Vec::new();
                     let mut approval_needed: Option<(
                         usize,
                         crate::llm::ToolCall,
@@ -301,18 +312,22 @@ impl Agent {
                         };
                         match self.hooks().run(&event).await {
                             Err(crate::hooks::HookError::Rejected { reason }) => {
-                                context_messages.push(ChatMessage::tool_result(
-                                    &tc.id,
-                                    &tc.name,
-                                    format!("Tool call rejected by hook: {}", reason),
+                                preflight.push((
+                                    tc,
+                                    PreflightOutcome::Rejected(format!(
+                                        "Tool call rejected by hook: {}",
+                                        reason
+                                    )),
                                 ));
                                 continue; // skip to next tool (not infinite: using for loop)
                             }
                             Err(err) => {
-                                context_messages.push(ChatMessage::tool_result(
-                                    &tc.id,
-                                    &tc.name,
-                                    format!("Tool call blocked by hook policy: {}", err),
+                                preflight.push((
+                                    tc,
+                                    PreflightOutcome::Rejected(format!(
+                                        "Tool call blocked by hook policy: {}",
+                                        err
+                                    )),
                                 ));
                                 continue;
                             }
@@ -331,209 +346,250 @@ impl Agent {
                             _ => {}
                         }
 
-                        runnable.push(tc);
+                        let preflight_idx = preflight.len();
+                        preflight.push((tc.clone(), PreflightOutcome::Runnable));
+                        runnable.push((preflight_idx, tc));
                     }
 
                     // === Phase 2: Parallel execution ===
-                    let exec_results: Vec<(crate::llm::ToolCall, Result<String, Error>)> =
-                        if runnable.len() <= 1 {
-                            // Single tool (or none): execute inline
-                            let mut results = Vec::new();
-                            for tc in &runnable {
-                                let _ = self
-                                    .channels
+                    // Execute runnable tools and slot results back by preflight
+                    // index so Phase 3 can iterate in original order.
+                    let mut exec_results: Vec<Option<Result<String, Error>>> =
+                        (0..preflight.len()).map(|_| None).collect();
+
+                    if runnable.len() <= 1 {
+                        // Single tool (or none): execute inline
+                        for (pf_idx, tc) in &runnable {
+                            let _ = self
+                                .channels
+                                .send_status(
+                                    &message.channel,
+                                    StatusUpdate::ToolStarted {
+                                        name: tc.name.clone(),
+                                    },
+                                    &message.metadata,
+                                )
+                                .await;
+
+                            let result = self
+                                .execute_chat_tool(&tc.name, &tc.arguments, &job_ctx)
+                                .await;
+
+                            let _ = self
+                                .channels
+                                .send_status(
+                                    &message.channel,
+                                    StatusUpdate::ToolCompleted {
+                                        name: tc.name.clone(),
+                                        success: result.is_ok(),
+                                    },
+                                    &message.metadata,
+                                )
+                                .await;
+
+                            exec_results[*pf_idx] = Some(result);
+                        }
+                    } else {
+                        // Multiple tools: execute in parallel via JoinSet
+                        let mut join_set = JoinSet::new();
+
+                        for (pf_idx, tc) in &runnable {
+                            let pf_idx = *pf_idx;
+                            let tools = self.tools().clone();
+                            let safety = self.safety().clone();
+                            let channels = self.channels.clone();
+                            let job_ctx = job_ctx.clone();
+                            let tc = tc.clone();
+                            let channel = message.channel.clone();
+                            let metadata = message.metadata.clone();
+
+                            join_set.spawn(async move {
+                                let _ = channels
                                     .send_status(
-                                        &message.channel,
+                                        &channel,
                                         StatusUpdate::ToolStarted {
                                             name: tc.name.clone(),
                                         },
-                                        &message.metadata,
+                                        &metadata,
                                     )
                                     .await;
 
-                                let result = self
-                                    .execute_chat_tool(&tc.name, &tc.arguments, &job_ctx)
-                                    .await;
+                                let result = execute_chat_tool_standalone(
+                                    &tools,
+                                    &safety,
+                                    &tc.name,
+                                    &tc.arguments,
+                                    &job_ctx,
+                                )
+                                .await;
 
-                                let _ = self
-                                    .channels
+                                let _ = channels
                                     .send_status(
-                                        &message.channel,
+                                        &channel,
                                         StatusUpdate::ToolCompleted {
                                             name: tc.name.clone(),
                                             success: result.is_ok(),
                                         },
-                                        &message.metadata,
+                                        &metadata,
                                     )
                                     .await;
 
-                                results.push((tc.clone(), result));
-                            }
-                            results
-                        } else {
-                            // Multiple tools: execute in parallel via JoinSet
-                            let mut join_set = JoinSet::new();
-                            let runnable_count = runnable.len();
+                                (pf_idx, result)
+                            });
+                        }
 
-                            for (spawn_idx, tc) in runnable.iter().enumerate() {
-                                let tools = self.tools().clone();
-                                let safety = self.safety().clone();
-                                let channels = self.channels.clone();
-                                let job_ctx = job_ctx.clone();
-                                let tc = tc.clone();
-                                let channel = message.channel.clone();
-                                let metadata = message.metadata.clone();
-
-                                join_set.spawn(async move {
-                                    let _ = channels
-                                        .send_status(
-                                            &channel,
-                                            StatusUpdate::ToolStarted {
-                                                name: tc.name.clone(),
-                                            },
-                                            &metadata,
-                                        )
-                                        .await;
-
-                                    let result = execute_chat_tool_standalone(
-                                        &tools,
-                                        &safety,
-                                        &tc.name,
-                                        &tc.arguments,
-                                        &job_ctx,
-                                    )
-                                    .await;
-
-                                    let _ = channels
-                                        .send_status(
-                                            &channel,
-                                            StatusUpdate::ToolCompleted {
-                                                name: tc.name.clone(),
-                                                success: result.is_ok(),
-                                            },
-                                            &metadata,
-                                        )
-                                        .await;
-
-                                    (spawn_idx, tc, result)
-                                });
-                            }
-
-                            // Collect and reorder by original index
-                            let mut ordered: Vec<
-                                Option<(crate::llm::ToolCall, Result<String, Error>)>,
-                            > = (0..runnable_count).map(|_| None).collect();
-                            while let Some(join_result) = join_set.join_next().await {
-                                match join_result {
-                                    Ok((idx, tc, result)) => {
-                                        ordered[idx] = Some((tc, result));
-                                    }
-                                    Err(e) => {
-                                        tracing::error!("Chat tool execution task panicked: {}", e);
-                                    }
+                        while let Some(join_result) = join_set.join_next().await {
+                            match join_result {
+                                Ok((pf_idx, result)) => {
+                                    exec_results[pf_idx] = Some(result);
+                                }
+                                Err(e) => {
+                                    tracing::error!("Chat tool execution task panicked: {}", e);
                                 }
                             }
+                        }
 
-                            // Fill panicked slots with error results
-                            ordered
-                                .into_iter()
-                                .enumerate()
-                                .map(|(i, opt)| {
-                                    opt.unwrap_or_else(|| {
-                                        let tc = runnable[i].clone();
-                                        let err: Error = crate::error::ToolError::ExecutionFailed {
-                                            name: tc.name.clone(),
-                                            reason: "Task panicked during execution".to_string(),
-                                        }
-                                        .into();
-                                        (tc, Err(err))
-                                    })
-                                })
-                                .collect()
-                        };
+                        // Fill panicked slots with error results
+                        for (runnable_idx, (pf_idx, tc)) in runnable.iter().enumerate() {
+                            if exec_results[*pf_idx].is_none() {
+                                tracing::error!(
+                                    tool = %tc.name,
+                                    runnable_idx,
+                                    "Filling panicked slot with error"
+                                );
+                                exec_results[*pf_idx] =
+                                    Some(Err(crate::error::ToolError::ExecutionFailed {
+                                        name: tc.name.clone(),
+                                        reason: "Task panicked during execution".to_string(),
+                                    }
+                                    .into()));
+                            }
+                        }
+                    }
 
                     // === Phase 3: Post-flight (sequential, in original order) ===
-                    for (tc, tool_result) in exec_results {
-                        // Send ToolResult preview
-                        if let Ok(ref output) = tool_result
-                            && !output.is_empty()
-                        {
-                            let _ = self
-                                .channels
-                                .send_status(
-                                    &message.channel,
-                                    StatusUpdate::ToolResult {
-                                        name: tc.name.clone(),
-                                        preview: output.clone(),
-                                    },
-                                    &message.metadata,
-                                )
-                                .await;
-                        }
+                    // Process all results — both hook rejections and execution
+                    // results — in the original tool_calls order. Auth intercept
+                    // is deferred until after every result is recorded.
+                    let mut deferred_auth: Option<(String, String)> = None;
 
-                        // Record result in thread
-                        {
-                            let mut sess = session.lock().await;
-                            if let Some(thread) = sess.threads.get_mut(&thread_id)
-                                && let Some(turn) = thread.last_turn_mut()
-                            {
-                                match &tool_result {
+                    for (pf_idx, (tc, outcome)) in preflight.into_iter().enumerate() {
+                        match outcome {
+                            PreflightOutcome::Rejected(error_msg) => {
+                                // Record hook rejection in thread
+                                {
+                                    let mut sess = session.lock().await;
+                                    if let Some(thread) = sess.threads.get_mut(&thread_id)
+                                        && let Some(turn) = thread.last_turn_mut()
+                                    {
+                                        turn.record_tool_error(error_msg.clone());
+                                    }
+                                }
+                                context_messages
+                                    .push(ChatMessage::tool_result(&tc.id, &tc.name, error_msg));
+                            }
+                            PreflightOutcome::Runnable => {
+                                // Retrieve the execution result for this slot
+                                let tool_result =
+                                    exec_results[pf_idx].take().unwrap_or_else(|| {
+                                        Err(crate::error::ToolError::ExecutionFailed {
+                                            name: tc.name.clone(),
+                                            reason: "No result available".to_string(),
+                                        }
+                                        .into())
+                                    });
+
+                                // Send ToolResult preview
+                                if let Ok(ref output) = tool_result
+                                    && !output.is_empty()
+                                {
+                                    let _ = self
+                                        .channels
+                                        .send_status(
+                                            &message.channel,
+                                            StatusUpdate::ToolResult {
+                                                name: tc.name.clone(),
+                                                preview: output.clone(),
+                                            },
+                                            &message.metadata,
+                                        )
+                                        .await;
+                                }
+
+                                // Record result in thread
+                                {
+                                    let mut sess = session.lock().await;
+                                    if let Some(thread) = sess.threads.get_mut(&thread_id)
+                                        && let Some(turn) = thread.last_turn_mut()
+                                    {
+                                        match &tool_result {
+                                            Ok(output) => {
+                                                turn.record_tool_result(serde_json::json!(output));
+                                            }
+                                            Err(e) => {
+                                                turn.record_tool_error(e.to_string());
+                                            }
+                                        }
+                                    }
+                                }
+
+                                // Check for auth awaiting — defer the return
+                                // until all results are recorded.
+                                if deferred_auth.is_none()
+                                    && let Some((ext_name, instructions)) =
+                                        check_auth_required(&tc.name, &tool_result)
+                                {
+                                    let auth_data = parse_auth_result(&tool_result);
+                                    {
+                                        let mut sess = session.lock().await;
+                                        if let Some(thread) =
+                                            sess.threads.get_mut(&thread_id)
+                                        {
+                                            thread.enter_auth_mode(ext_name.clone());
+                                        }
+                                    }
+                                    let _ = self
+                                        .channels
+                                        .send_status(
+                                            &message.channel,
+                                            StatusUpdate::AuthRequired {
+                                                extension_name: ext_name,
+                                                instructions: Some(instructions.clone()),
+                                                auth_url: auth_data.auth_url,
+                                                setup_url: auth_data.setup_url,
+                                            },
+                                            &message.metadata,
+                                        )
+                                        .await;
+                                    deferred_auth = Some((tc.name.clone(), instructions));
+                                }
+
+                                // Sanitize and add tool result to context
+                                let result_content = match tool_result {
                                     Ok(output) => {
-                                        turn.record_tool_result(serde_json::json!(output));
+                                        let sanitized =
+                                            self.safety().sanitize_tool_output(&tc.name, &output);
+                                        self.safety().wrap_for_llm(
+                                            &tc.name,
+                                            &sanitized.content,
+                                            sanitized.was_modified,
+                                        )
                                     }
-                                    Err(e) => {
-                                        turn.record_tool_error(e.to_string());
-                                    }
-                                }
-                            }
-                        }
+                                    Err(e) => format!("Error: {}", e),
+                                };
 
-                        // Check for auth awaiting (tool_auth/tool_activate)
-                        if let Some((ext_name, instructions)) =
-                            check_auth_required(&tc.name, &tool_result)
-                        {
-                            let auth_data = parse_auth_result(&tool_result);
-                            {
-                                let mut sess = session.lock().await;
-                                if let Some(thread) = sess.threads.get_mut(&thread_id) {
-                                    thread.enter_auth_mode(ext_name.clone());
-                                }
-                            }
-                            let _ = self
-                                .channels
-                                .send_status(
-                                    &message.channel,
-                                    StatusUpdate::AuthRequired {
-                                        extension_name: ext_name,
-                                        instructions: Some(instructions.clone()),
-                                        auth_url: auth_data.auth_url,
-                                        setup_url: auth_data.setup_url,
-                                    },
-                                    &message.metadata,
-                                )
-                                .await;
-                            return Ok(AgenticLoopResult::Response(instructions));
-                        }
-
-                        // Sanitize and add tool result to context
-                        let result_content = match tool_result {
-                            Ok(output) => {
-                                let sanitized =
-                                    self.safety().sanitize_tool_output(&tc.name, &output);
-                                self.safety().wrap_for_llm(
+                                context_messages.push(ChatMessage::tool_result(
+                                    &tc.id,
                                     &tc.name,
-                                    &sanitized.content,
-                                    sanitized.was_modified,
-                                )
+                                    result_content,
+                                ));
                             }
-                            Err(e) => format!("Error: {}", e),
-                        };
+                        }
+                    }
 
-                        context_messages.push(ChatMessage::tool_result(
-                            &tc.id,
-                            &tc.name,
-                            result_content,
-                        ));
+                    // Return auth response after all results are recorded
+                    if let Some((_tool_name, instructions)) = deferred_auth {
+                        return Ok(AgenticLoopResult::Response(instructions));
                     }
 
                     // Handle approval if a tool needed it
@@ -562,92 +618,7 @@ impl Agent {
         params: &serde_json::Value,
         job_ctx: &JobContext,
     ) -> Result<String, Error> {
-        let tool =
-            self.tools()
-                .get(tool_name)
-                .await
-                .ok_or_else(|| crate::error::ToolError::NotFound {
-                    name: tool_name.to_string(),
-                })?;
-
-        // Validate tool parameters
-        let validation = self.safety().validator().validate_tool_params(params);
-        if !validation.is_valid {
-            let details = validation
-                .errors
-                .iter()
-                .map(|e| format!("{}: {}", e.field, e.message))
-                .collect::<Vec<_>>()
-                .join("; ");
-            return Err(crate::error::ToolError::InvalidParameters {
-                name: tool_name.to_string(),
-                reason: format!("Invalid tool parameters: {}", details),
-            }
-            .into());
-        }
-
-        tracing::debug!(
-            tool = %tool_name,
-            params = %params,
-            "Tool call started"
-        );
-
-        // Execute with per-tool timeout
-        let timeout = tool.execution_timeout();
-        let start = std::time::Instant::now();
-        let result = tokio::time::timeout(timeout, async {
-            tool.execute(params.clone(), job_ctx).await
-        })
-        .await;
-        let elapsed = start.elapsed();
-
-        match &result {
-            Ok(Ok(output)) => {
-                let result_str = serde_json::to_string(&output.result)
-                    .unwrap_or_else(|_| "<serialize error>".to_string());
-                tracing::debug!(
-                    tool = %tool_name,
-                    elapsed_ms = elapsed.as_millis() as u64,
-                    result = %result_str,
-                    "Tool call succeeded"
-                );
-            }
-            Ok(Err(e)) => {
-                tracing::debug!(
-                    tool = %tool_name,
-                    elapsed_ms = elapsed.as_millis() as u64,
-                    error = %e,
-                    "Tool call failed"
-                );
-            }
-            Err(_) => {
-                tracing::debug!(
-                    tool = %tool_name,
-                    elapsed_ms = elapsed.as_millis() as u64,
-                    timeout_secs = timeout.as_secs(),
-                    "Tool call timed out"
-                );
-            }
-        }
-
-        let result = result
-            .map_err(|_| crate::error::ToolError::Timeout {
-                name: tool_name.to_string(),
-                timeout,
-            })?
-            .map_err(|e| crate::error::ToolError::ExecutionFailed {
-                name: tool_name.to_string(),
-                reason: e.to_string(),
-            })?;
-
-        // Convert result to string
-        serde_json::to_string_pretty(&result.result).map_err(|e| {
-            crate::error::ToolError::ExecutionFailed {
-                name: tool_name.to_string(),
-                reason: format!("Failed to serialize result: {}", e),
-            }
-            .into()
-        })
+        execute_chat_tool_standalone(self.tools(), self.safety(), tool_name, params, job_ctx).await
     }
 }
 
@@ -656,7 +627,7 @@ impl Agent {
 /// This standalone function enables parallel invocation from spawned JoinSet
 /// tasks, which cannot borrow `&self`. It replicates the logic from
 /// `Agent::execute_chat_tool`.
-async fn execute_chat_tool_standalone(
+pub(super) async fn execute_chat_tool_standalone(
     tools: &crate::tools::ToolRegistry,
     safety: &crate::safety::SafetyLayer,
     tool_name: &str,
