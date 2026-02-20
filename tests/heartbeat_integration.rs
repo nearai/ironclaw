@@ -1,11 +1,12 @@
-//! Standalone heartbeat test.
+#![cfg(feature = "postgres")]
+//! Heartbeat integration test.
 //!
 //! Exercises the heartbeat system in isolation: connects to the real
 //! database, reads the real HEARTBEAT.md, calls the real LLM, and prints
 //! every step so you can see exactly where it breaks.
 //!
 //! Usage:
-//!   cargo run --example test_heartbeat
+//!   cargo test --test heartbeat_integration -- --ignored --nocapture
 
 use std::sync::Arc;
 
@@ -14,23 +15,23 @@ use ironclaw::{
     config::Config,
     history::Store,
     llm::{SessionConfig, create_llm_provider, create_session_manager},
+    safety::SafetyLayer,
     workspace::Workspace,
 };
 
-#[tokio::main]
-async fn main() -> anyhow::Result<()> {
+#[tokio::test]
+#[ignore] // Requires running database and LLM credentials
+async fn test_heartbeat_end_to_end() {
     // Load .env and set up logging
     let _ = dotenvy::dotenv();
-    tracing_subscriber::fmt()
+    let _ = tracing_subscriber::fmt()
         .with_env_filter("ironclaw=debug")
-        .init();
+        .try_init();
 
     println!("=== Heartbeat Integration Test ===\n");
 
     // 1. Load config
-    let config = Config::from_env()
-        .await
-        .map_err(|e| anyhow::anyhow!("Config: {}", e))?;
+    let config = Config::from_env().await.expect("Failed to load config");
     println!("[1/6] Config loaded");
     println!("  heartbeat.enabled = {}", config.heartbeat.enabled);
     println!(
@@ -47,8 +48,13 @@ async fn main() -> anyhow::Result<()> {
     );
 
     // 2. Connect to database
-    let store = Store::new(&config.database).await?;
-    store.run_migrations().await?;
+    let store = Store::new(&config.database)
+        .await
+        .expect("Failed to connect to database");
+    store
+        .run_migrations()
+        .await
+        .expect("Failed to run migrations");
     println!("[2/6] Database connected");
 
     // 3. Create workspace
@@ -83,14 +89,16 @@ async fn main() -> anyhow::Result<()> {
         session_path: config.llm.nearai.session_path.clone(),
     })
     .await;
-    let llm = create_llm_provider(&config.llm, session)?;
+    let llm = create_llm_provider(&config.llm, session).expect("Failed to create LLM provider");
     println!("[5/6] LLM provider created (model: {})", llm.model_name());
 
     // 6. Run heartbeat check
     println!("[6/6] Running check_heartbeat()...\n");
 
     let hb_config = ironclaw::agent::HeartbeatConfig::default();
-    let runner = HeartbeatRunner::new(hb_config, workspace, llm);
+    let hygiene_config = ironclaw::workspace::hygiene::HygieneConfig::default();
+    let safety = Arc::new(SafetyLayer::new(&config.safety));
+    let runner = HeartbeatRunner::new(hb_config, hygiene_config, workspace, llm, safety);
 
     let result = runner.check_heartbeat().await;
 
@@ -116,6 +124,4 @@ async fn main() -> anyhow::Result<()> {
             println!("  Error: {}", err);
         }
     }
-
-    Ok(())
 }

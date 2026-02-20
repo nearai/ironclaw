@@ -25,6 +25,7 @@ use crate::agent::routine::{
 use crate::channels::{IncomingMessage, OutgoingResponse};
 use crate::config::RoutineConfig;
 use crate::db::Database;
+use crate::error::RoutineError;
 use crate::llm::{ChatMessage, CompletionRequest, FinishReason, LlmProvider};
 use crate::workspace::Workspace;
 
@@ -174,23 +175,26 @@ impl RoutineEngine {
     }
 
     /// Fire a routine manually (from tool call or CLI).
-    pub async fn fire_manual(&self, routine_id: Uuid) -> Result<Uuid, String> {
+    pub async fn fire_manual(&self, routine_id: Uuid) -> Result<Uuid, RoutineError> {
         let routine = self
             .store
             .get_routine(routine_id)
             .await
-            .map_err(|e| format!("DB error: {e}"))?
-            .ok_or_else(|| format!("routine {routine_id} not found"))?;
+            .map_err(|e| RoutineError::Database {
+                reason: e.to_string(),
+            })?
+            .ok_or(RoutineError::NotFound { id: routine_id })?;
 
         if !routine.enabled {
-            return Err(format!("routine '{}' is disabled", routine.name));
+            return Err(RoutineError::Disabled {
+                name: routine.name.clone(),
+            });
         }
 
         if !self.check_concurrent(&routine).await {
-            return Err(format!(
-                "routine '{}' already at max concurrent runs",
-                routine.name
-            ));
+            return Err(RoutineError::MaxConcurrent {
+                name: routine.name.clone(),
+            });
         }
 
         let run_id = Uuid::new_v4();
@@ -209,7 +213,9 @@ impl RoutineEngine {
         };
 
         if let Err(e) = self.store.create_routine_run(&run).await {
-            return Err(format!("failed to create run record: {e}"));
+            return Err(RoutineError::Database {
+                reason: format!("failed to create run record: {e}"),
+            });
         }
 
         // Execute inline for manual triggers (caller wants to wait)
@@ -313,13 +319,27 @@ async fn execute_routine(ctx: EngineContext, routine: Routine, run: RoutineRun) 
             max_tokens,
         } => execute_lightweight(&ctx, &routine, prompt, context_paths, *max_tokens).await,
         RoutineAction::FullJob { description, .. } => {
-            // Full job mode: for now, execute as lightweight with the description
-            // as prompt. Full scheduler integration will come as a follow-up.
-            tracing::info!(
+            // Full job mode: scheduler integration not yet implemented.
+            // Execute as lightweight and prepend a warning to the summary.
+            tracing::warn!(
                 routine = %routine.name,
-                "FullJob mode executing as lightweight (scheduler integration pending)"
+                "FullJob mode not yet implemented; falling back to lightweight execution"
             );
-            execute_lightweight(&ctx, &routine, description, &[], ctx.max_lightweight_tokens).await
+            match execute_lightweight(&ctx, &routine, description, &[], ctx.max_lightweight_tokens)
+                .await
+            {
+                Ok((status, summary, tokens)) => {
+                    let warning = "[Note: FullJob mode is not yet implemented. This routine ran as \
+                         a single LLM call without tool access. Configure as 'lightweight' \
+                         or wait for full scheduler integration.]";
+                    let summary = match summary {
+                        Some(s) => Some(format!("{warning}\n\n{s}")),
+                        None => Some(warning.to_string()),
+                    };
+                    Ok((status, summary, tokens))
+                }
+                Err(e) => Err(e),
+            }
         }
     };
 
@@ -331,7 +351,7 @@ async fn execute_routine(ctx: EngineContext, routine: Routine, run: RoutineRun) 
         Ok(execution) => execution,
         Err(e) => {
             tracing::error!(routine = %routine.name, "Execution failed: {}", e);
-            (RunStatus::Failed, Some(e), None)
+            (RunStatus::Failed, Some(e.to_string()), None)
         }
     };
 
@@ -384,6 +404,20 @@ async fn execute_routine(ctx: EngineContext, routine: Routine, run: RoutineRun) 
     .await;
 }
 
+/// Sanitize a routine name for use in workspace paths.
+/// Only keeps alphanumeric, dash, and underscore characters; replaces everything else.
+fn sanitize_routine_name(name: &str) -> String {
+    name.chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect()
+}
+
 /// Execute a lightweight routine (single LLM call).
 async fn execute_lightweight(
     ctx: &EngineContext,
@@ -391,7 +425,7 @@ async fn execute_lightweight(
     prompt: &str,
     context_paths: &[String],
     max_tokens: u32,
-) -> Result<(RunStatus, Option<String>, Option<i32>), String> {
+) -> Result<(RunStatus, Option<String>, Option<i32>), RoutineError> {
     // Load context from workspace
     let mut context_parts = Vec::new();
     for path in context_paths {
@@ -408,8 +442,9 @@ async fn execute_lightweight(
         }
     }
 
-    // Load routine state from workspace
-    let state_path = format!("routines/{}/state.md", routine.name);
+    // Load routine state from workspace (name sanitized to prevent path traversal)
+    let safe_name = sanitize_routine_name(&routine.name);
+    let state_path = format!("routines/{safe_name}/state.md");
     let state_content = match ctx.workspace.read(&state_path).await {
         Ok(doc) => Some(doc.content),
         Err(_) => None,
@@ -469,7 +504,9 @@ async fn execute_lightweight(
         .llm
         .complete(request)
         .await
-        .map_err(|e| format!("LLM call failed: {e}"))?;
+        .map_err(|e| RoutineError::LlmFailed {
+            reason: e.to_string(),
+        })?;
 
     let content = response.content.trim();
     let tokens_used = Some((response.input_tokens + response.output_tokens) as i32);
@@ -477,13 +514,9 @@ async fn execute_lightweight(
     // Empty content guard (same as heartbeat)
     if content.is_empty() {
         return if response.finish_reason == FinishReason::Length {
-            Err(
-                "LLM response truncated (finish_reason=length) with no content. \
-                 Model may have exhausted token budget on reasoning."
-                    .to_string(),
-            )
+            Err(RoutineError::TruncatedResponse)
         } else {
-            Err("LLM returned empty content.".to_string())
+            Err(RoutineError::EmptyResponse)
         };
     }
 

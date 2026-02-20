@@ -106,6 +106,46 @@ fn is_disallowed_ip(ip: &IpAddr) -> bool {
     }
 }
 
+fn parse_headers_param(
+    headers: Option<&serde_json::Value>,
+) -> Result<Vec<(String, String)>, ToolError> {
+    match headers {
+        None => Ok(Vec::new()),
+        Some(serde_json::Value::Object(map)) => {
+            let mut out = Vec::with_capacity(map.len());
+            for (k, v) in map {
+                let value = v.as_str().ok_or_else(|| {
+                    ToolError::InvalidParameters(format!("header '{}' must have a string value", k))
+                })?;
+                out.push((k.clone(), value.to_string()));
+            }
+            Ok(out)
+        }
+        Some(serde_json::Value::Array(items)) => {
+            let mut out = Vec::with_capacity(items.len());
+            for (idx, item) in items.iter().enumerate() {
+                let obj = item.as_object().ok_or_else(|| {
+                    ToolError::InvalidParameters(format!(
+                        "headers[{}] must be an object with 'name' and 'value'",
+                        idx
+                    ))
+                })?;
+                let name = obj.get("name").and_then(|v| v.as_str()).ok_or_else(|| {
+                    ToolError::InvalidParameters(format!("headers[{}].name must be a string", idx))
+                })?;
+                let value = obj.get("value").and_then(|v| v.as_str()).ok_or_else(|| {
+                    ToolError::InvalidParameters(format!("headers[{}].value must be a string", idx))
+                })?;
+                out.push((name.to_string(), value.to_string()));
+            }
+            Ok(out)
+        }
+        Some(_) => Err(ToolError::InvalidParameters(
+            "'headers' must be an object or an array of {name, value}".to_string(),
+        )),
+    }
+}
+
 impl Default for HttpTool {
     fn default() -> Self {
         Self::new()
@@ -136,11 +176,20 @@ impl Tool for HttpTool {
                     "description": "The URL to request"
                 },
                 "headers": {
-                    "type": "object",
-                    "additionalProperties": { "type": "string" },
-                    "description": "HTTP headers to include"
+                    "type": "array",
+                    "description": "Optional headers as a list of {name, value} objects",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "name": { "type": "string" },
+                            "value": { "type": "string" }
+                        },
+                        "required": ["name", "value"],
+                        "additionalProperties": false
+                    }
                 },
                 "body": {
+                    "type": ["object", "array", "string", "number", "boolean", "null"],
                     "description": "Request body (for POST/PUT/PATCH)"
                 },
                 "timeout_secs": {
@@ -165,14 +214,7 @@ impl Tool for HttpTool {
         let parsed_url = validate_url(url)?;
 
         // Parse headers
-        let headers: HashMap<String, String> = params
-            .get("headers")
-            .and_then(|v| serde_json::from_value(v.clone()).ok())
-            .unwrap_or_default();
-        let headers_vec: Vec<(String, String)> = headers
-            .iter()
-            .map(|(k, v)| (k.clone(), v.clone()))
-            .collect();
+        let headers_vec = parse_headers_param(params.get("headers"))?;
 
         // Build request
         let mut request = match method.to_uppercase().as_str() {
@@ -190,16 +232,31 @@ impl Tool for HttpTool {
         };
 
         // Add headers
-        for (key, value) in headers {
-            request = request.header(&key, &value);
+        for (key, value) in &headers_vec {
+            request = request.header(key.as_str(), value.as_str());
         }
 
         // Add body if present
         let body_bytes = if let Some(body) = params.get("body") {
-            let bytes = serde_json::to_vec(body)
-                .map_err(|e| ToolError::InvalidParameters(format!("invalid body JSON: {}", e)))?;
-            request = request.json(body);
-            Some(bytes)
+            if let Some(body_str) = body.as_str() {
+                if let Ok(json_body) = serde_json::from_str::<serde_json::Value>(body_str) {
+                    let bytes = serde_json::to_vec(&json_body).map_err(|e| {
+                        ToolError::InvalidParameters(format!("invalid body JSON: {}", e))
+                    })?;
+                    request = request.json(&json_body);
+                    Some(bytes)
+                } else {
+                    let bytes = body_str.as_bytes().to_vec();
+                    request = request.body(body_str.to_string());
+                    Some(bytes)
+                }
+            } else {
+                let bytes = serde_json::to_vec(body).map_err(|e| {
+                    ToolError::InvalidParameters(format!("invalid body JSON: {}", e))
+                })?;
+                request = request.json(body);
+                Some(bytes)
+            }
         } else {
             None
         };
@@ -305,6 +362,13 @@ mod tests {
     use super::*;
 
     #[test]
+    fn test_http_tool_schema_headers_is_array() {
+        let tool = HttpTool::new();
+        let schema = tool.parameters_schema();
+        assert_eq!(schema["properties"]["headers"]["type"], "array");
+    }
+
+    #[test]
     fn test_validate_url_rejects_http() {
         let err = validate_url("http://example.com").unwrap_err();
         assert!(err.to_string().contains("https"));
@@ -362,5 +426,45 @@ mod tests {
     fn test_max_response_size_is_reasonable() {
         // MAX_RESPONSE_SIZE should be 5 MB to prevent OOM while allowing typical API responses.
         assert_eq!(MAX_RESPONSE_SIZE, 5 * 1024 * 1024);
+    }
+
+    #[test]
+    fn test_parse_headers_param_accepts_object_legacy_shape() {
+        let headers = serde_json::json!({"Authorization": "Bearer token"});
+        let parsed = parse_headers_param(Some(&headers)).unwrap();
+        assert_eq!(
+            parsed,
+            vec![("Authorization".to_string(), "Bearer token".to_string())]
+        );
+    }
+
+    #[test]
+    fn test_parse_headers_param_accepts_array_shape() {
+        let headers = serde_json::json!([
+            {"name": "Authorization", "value": "Bearer token"},
+            {"name": "X-Test", "value": "1"}
+        ]);
+        let parsed = parse_headers_param(Some(&headers)).unwrap();
+        assert_eq!(
+            parsed,
+            vec![
+                ("Authorization".to_string(), "Bearer token".to_string()),
+                ("X-Test".to_string(), "1".to_string())
+            ]
+        );
+    }
+
+    #[test]
+    fn test_http_tool_schema_body_has_type() {
+        let schema = HttpTool::new().parameters_schema();
+        let body = schema
+            .get("properties")
+            .and_then(|p| p.get("body"))
+            .expect("body schema missing");
+
+        assert!(
+            body.get("type").is_some(),
+            "body schema must include a type for OpenAI-compatible tool validation"
+        );
     }
 }

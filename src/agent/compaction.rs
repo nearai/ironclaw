@@ -12,7 +12,8 @@ use chrono::Utc;
 use crate::agent::context_monitor::{CompactionStrategy, ContextBreakdown};
 use crate::agent::session::Thread;
 use crate::error::Error;
-use crate::llm::{ChatMessage, CompletionRequest, LlmProvider};
+use crate::llm::{ChatMessage, CompletionRequest, LlmProvider, Reasoning};
+use crate::safety::SafetyLayer;
 use crate::workspace::Workspace;
 
 /// Result of a compaction operation.
@@ -33,12 +34,13 @@ pub struct CompactionResult {
 /// Compacts conversation context to stay within limits.
 pub struct ContextCompactor {
     llm: Arc<dyn LlmProvider>,
+    safety: Arc<SafetyLayer>,
 }
 
 impl ContextCompactor {
     /// Create a new context compactor.
-    pub fn new(llm: Arc<dyn LlmProvider>) -> Self {
-        Self { llm }
+    pub fn new(llm: Arc<dyn LlmProvider>, safety: Arc<SafetyLayer>) -> Self {
+        Self { llm, safety }
     }
 
     /// Compact a thread's context using the given strategy.
@@ -105,7 +107,16 @@ impl ContextCompactor {
 
         // Write to workspace if available
         let summary_written = if let Some(ws) = workspace {
-            self.write_summary_to_workspace(ws, &summary).await.is_ok()
+            match self.write_summary_to_workspace(ws, &summary).await {
+                Ok(()) => true,
+                Err(e) => {
+                    tracing::warn!(
+                        "Compaction summary write failed (turns will still be truncated): {}",
+                        e
+                    );
+                    false
+                }
+            }
         } else {
             false
         };
@@ -157,7 +168,16 @@ impl ContextCompactor {
         let content = format_turns_for_storage(old_turns);
 
         // Write to workspace
-        let written = self.write_context_to_workspace(ws, &content).await.is_ok();
+        let written = match self.write_context_to_workspace(ws, &content).await {
+            Ok(()) => true,
+            Err(e) => {
+                tracing::warn!(
+                    "Compaction context write failed (turns will still be truncated): {}",
+                    e
+                );
+                false
+            }
+        };
 
         // Truncate
         thread.truncate_turns(keep_recent);
@@ -213,8 +233,9 @@ Be brief but capture all important details. Use bullet points."#,
             .with_max_tokens(1024)
             .with_temperature(0.3);
 
-        let response = self.llm.complete(request).await?;
-        Ok(response.content)
+        let reasoning = Reasoning::new(self.llm.clone(), self.safety.clone());
+        let (text, _) = reasoning.complete(request).await?;
+        Ok(text)
     }
 
     /// Write a summary to the workspace daily log.

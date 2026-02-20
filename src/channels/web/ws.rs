@@ -477,6 +477,7 @@ mod tests {
             workspace: None,
             session_manager: None,
             log_broadcaster: None,
+            log_level_handle: None,
             extension_manager: None,
             tool_registry: None,
             store: None,
@@ -486,6 +487,8 @@ mod tests {
             shutdown_tx: tokio::sync::RwLock::new(None),
             ws_tracker: Some(Arc::new(WsConnectionTracker::new())),
             llm_provider: None,
+            skill_registry: None,
+            skill_catalog: None,
             chat_rate_limiter: crate::channels::web::server::RateLimiter::new(30, 60),
         }
     }

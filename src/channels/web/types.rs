@@ -137,6 +137,8 @@ pub enum SseEvent {
         tool_name: String,
         description: String,
         parameters: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        thread_id: Option<String>,
     },
     #[serde(rename = "auth_required")]
     AuthRequired {
@@ -404,6 +406,43 @@ impl ActionResponse {
             instructions: None,
         }
     }
+}
+
+// --- Skills ---
+
+#[derive(Debug, Serialize)]
+pub struct SkillInfo {
+    pub name: String,
+    pub description: String,
+    pub version: String,
+    pub trust: String,
+    pub source: String,
+    pub keywords: Vec<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct SkillListResponse {
+    pub skills: Vec<SkillInfo>,
+    pub count: usize,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct SkillSearchRequest {
+    pub query: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct SkillSearchResponse {
+    pub catalog: Vec<serde_json::Value>,
+    pub installed: Vec<SkillInfo>,
+    pub registry_url: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct SkillInstallRequest {
+    pub name: String,
+    pub url: Option<String>,
+    pub content: Option<String>,
 }
 
 // --- Auth Token ---
@@ -748,12 +787,14 @@ mod tests {
             tool_name: "shell".to_string(),
             description: "Run ls".to_string(),
             parameters: "{}".to_string(),
+            thread_id: Some("t1".to_string()),
         };
         let ws = WsServerMessage::from_sse_event(&sse);
         match ws {
             WsServerMessage::Event { event_type, data } => {
                 assert_eq!(event_type, "approval_needed");
                 assert_eq!(data["tool_name"], "shell");
+                assert_eq!(data["thread_id"], "t1");
             }
             _ => panic!("Expected Event variant"),
         }
