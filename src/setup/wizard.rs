@@ -142,11 +142,18 @@ impl SetupWizard {
             // Step 1: Database
             print_step(1, total_steps, "Database Connection");
             self.step_database().await?;
-            self.persist_after_step().await;
 
             // After establishing a DB connection, load any previously saved
             // settings so we recover progress from prior partial runs.
+            // We must load BEFORE persisting, otherwise persist_after_step()
+            // would overwrite prior settings with defaults.
+            // Save Step 1 choices first so they aren't clobbered by stale
+            // DB values (merge_from only applies non-default fields).
+            let step1_settings = self.settings.clone();
             self.try_load_existing_settings().await;
+            self.settings.merge_from(&step1_settings);
+
+            self.persist_after_step().await;
 
             // Step 2: Security
             print_step(2, total_steps, "Security");
@@ -1612,6 +1619,11 @@ impl SetupWizard {
     /// This enables recovery from partial onboarding runs: if the user
     /// completed steps 1-4 previously but step 5 failed, re-running
     /// the wizard will pre-populate settings from the database.
+    ///
+    /// **Callers must re-apply any wizard choices made before this call**
+    /// via `self.settings.merge_from(&step_settings)`, since `merge_from`
+    /// prefers the `other` argument's non-default values. Without this,
+    /// stale DB values would overwrite fresh user choices.
     async fn try_load_existing_settings(&mut self) {
         let loaded = false;
 

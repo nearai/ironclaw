@@ -365,6 +365,21 @@ database connection. It loads any previously saved settings from the
 database using `get_all_settings("default")` → `Settings::from_db_map()`
 → `merge_from()`. This recovers progress from prior partial wizard runs.
 
+**Ordering after Step 1 is critical:**
+
+```
+step_database()                        → sets DB fields in self.settings
+let step1 = self.settings.clone()      → snapshot Step 1 choices
+try_load_existing_settings()           → merge DB values into self.settings
+self.settings.merge_from(&step1)       → re-apply Step 1 (fresh wins over stale)
+persist_after_step()                   → save merged state
+```
+
+This ordering ensures:
+- Prior progress (steps 2-7 from a previous partial run) is recovered
+- Fresh Step 1 choices override stale DB values (not the reverse)
+- The first DB persist doesn't clobber prior settings with defaults
+
 ### save_and_summarize()
 
 Final step of the wizard:
