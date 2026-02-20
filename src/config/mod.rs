@@ -12,6 +12,7 @@ mod database;
 mod embeddings;
 mod heartbeat;
 pub(crate) mod helpers;
+mod hygiene;
 mod llm;
 mod routines;
 mod safety;
@@ -34,6 +35,7 @@ pub use self::channels::{ChannelsConfig, CliConfig, GatewayConfig, HttpConfig};
 pub use self::database::{DatabaseBackend, DatabaseConfig, default_libsql_path};
 pub use self::embeddings::EmbeddingsConfig;
 pub use self::heartbeat::HeartbeatConfig;
+pub use self::hygiene::HygieneConfig;
 pub use self::llm::{
     AnthropicDirectConfig, LlmBackend, LlmConfig, NearAiApiMode, NearAiConfig, OllamaConfig,
     OpenAiCompatibleConfig, OpenAiDirectConfig, TinfoilConfig,
@@ -67,6 +69,7 @@ pub struct Config {
     pub secrets: SecretsConfig,
     pub builder: BuilderModeConfig,
     pub heartbeat: HeartbeatConfig,
+    pub hygiene: HygieneConfig,
     pub routines: RoutineConfig,
     pub sandbox: SandboxModeConfig,
     pub claude_code: ClaudeCodeConfig,
@@ -190,6 +193,7 @@ impl Config {
             secrets: SecretsConfig::resolve().await?,
             builder: BuilderModeConfig::resolve()?,
             heartbeat: HeartbeatConfig::resolve(settings)?,
+            hygiene: HygieneConfig::resolve()?,
             routines: RoutineConfig::resolve()?,
             sandbox: SandboxModeConfig::resolve()?,
             claude_code: ClaudeCodeConfig::resolve()?,
