@@ -42,11 +42,13 @@ pub struct SearchConfig {
     pub pre_fusion_limit: usize,
     /// Fusion strategy to use when combining results.
     pub fusion_strategy: FusionStrategy,
-    /// Weight for FTS results in `WeightedScore` fusion.
-    /// Default depends on strategy: 0.5 for RRF, 0.3 for WeightedScore.
+    /// Weight for FTS results in `WeightedScore` fusion (default 0.5).
+    /// Ignored by `Rrf` fusion. For env-based config via
+    /// [`WorkspaceSearchConfig::resolve`], defaults are per-strategy.
     pub fts_weight: f32,
-    /// Weight for vector results in `WeightedScore` fusion.
-    /// Default depends on strategy: 0.5 for RRF, 0.7 for WeightedScore.
+    /// Weight for vector results in `WeightedScore` fusion (default 0.5).
+    /// Ignored by `Rrf` fusion. For env-based config via
+    /// [`WorkspaceSearchConfig::resolve`], defaults are per-strategy.
     pub vector_weight: f32,
 }
 
