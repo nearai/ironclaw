@@ -246,8 +246,8 @@ impl SessionManager {
         println!("╠════════════════════════════════════════════════════════════════╣");
         println!("║  Choose an authentication method:                              ║");
         println!("║                                                                ║");
-        println!("║    [1] GitHub            (requires localhost browser access)    ║");
-        println!("║    [2] Google            (requires localhost browser access)    ║");
+        println!("║    [1] GitHub            (requires localhost browser access)   ║");
+        println!("║    [2] Google            (requires localhost browser access)   ║");
         println!("║    [3] NEAR Wallet (coming soon)                               ║");
         println!("║    [4] NEAR AI Cloud API key                                   ║");
         println!("║                                                                ║");
@@ -411,7 +411,7 @@ impl SessionManager {
         }
 
         println!();
-        println!("✓ NEAR AI Cloud API key saved.");
+        crate::setup::print_success("NEAR AI Cloud API key saved.");
         println!();
 
         Ok(())
