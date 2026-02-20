@@ -116,7 +116,7 @@ classify_contributor() {
 
   # Count merged PRs by this author in this repo
   local count
-  count=$(gh api "search/issues" \
+  count=$(gh api "/search/issues" \
     -f q="repo:${REPO} is:pr is:merged author:${author}" \
     --jq '.total_count')
 
