@@ -492,4 +492,32 @@ INJECTED="pwned"#;
         assert_eq!(parsed.len(), 2);
         assert!(parsed.iter().all(|(k, _)| k != "DATABASE_URL"));
     }
+
+    #[test]
+    fn test_onboard_completed_round_trips_through_env() {
+        let dir = tempdir().unwrap();
+        let env_path = dir.path().join(".env");
+
+        // Simulate what the wizard writes: bootstrap vars + ONBOARD_COMPLETED
+        let vars = [
+            ("DATABASE_BACKEND", "libsql"),
+            ("ONBOARD_COMPLETED", "true"),
+        ];
+        let mut content = String::new();
+        for (key, value) in &vars {
+            let escaped = value.replace('\\', "\\\\").replace('"', "\\\"");
+            content.push_str(&format!("{}=\"{}\"\n", key, escaped));
+        }
+        std::fs::write(&env_path, &content).unwrap();
+
+        // Verify dotenvy parses ONBOARD_COMPLETED correctly
+        let parsed: Vec<(String, String)> = dotenvy::from_path_iter(&env_path)
+            .unwrap()
+            .filter_map(|r| r.ok())
+            .collect();
+        assert_eq!(parsed.len(), 2);
+        let onboard = parsed.iter().find(|(k, _)| k == "ONBOARD_COMPLETED");
+        assert!(onboard.is_some(), "ONBOARD_COMPLETED must be present");
+        assert_eq!(onboard.unwrap().1, "true");
+    }
 }

@@ -9,22 +9,45 @@ use crate::settings::Settings;
 pub struct EmbeddingsConfig {
     /// Whether embeddings are enabled.
     pub enabled: bool,
-    /// Provider to use: "openai" or "nearai"
+    /// Provider to use: "openai", "nearai", or "ollama"
     pub provider: String,
     /// OpenAI API key (for OpenAI provider).
     pub openai_api_key: Option<SecretString>,
     /// Model to use for embeddings.
     pub model: String,
+    /// Ollama base URL (for Ollama provider). Defaults to http://localhost:11434.
+    pub ollama_base_url: String,
+    /// Embedding vector dimension. Inferred from the model name when not set explicitly.
+    pub dimension: usize,
 }
 
 impl Default for EmbeddingsConfig {
     fn default() -> Self {
+        let model = "text-embedding-3-small".to_string();
+        let dimension = default_dimension_for_model(&model);
         Self {
             enabled: false,
             provider: "openai".to_string(),
             openai_api_key: None,
-            model: "text-embedding-3-small".to_string(),
+            model,
+            ollama_base_url: "http://localhost:11434".to_string(),
+            dimension,
         }
+    }
+}
+
+/// Infer the embedding dimension from a well-known model name.
+///
+/// Falls back to 1536 (OpenAI text-embedding-3-small default) for unknown models.
+fn default_dimension_for_model(model: &str) -> usize {
+    match model {
+        "text-embedding-3-small" => 1536,
+        "text-embedding-3-large" => 3072,
+        "text-embedding-ada-002" => 1536,
+        "nomic-embed-text" => 768,
+        "mxbai-embed-large" => 1024,
+        "all-minilm" => 384,
+        _ => 1536,
     }
 }
 
@@ -37,6 +60,19 @@ impl EmbeddingsConfig {
 
         let model =
             optional_env("EMBEDDING_MODEL")?.unwrap_or_else(|| settings.embeddings.model.clone());
+
+        let ollama_base_url = optional_env("OLLAMA_BASE_URL")?
+            .or_else(|| settings.ollama_base_url.clone())
+            .unwrap_or_else(|| "http://localhost:11434".to_string());
+
+        let dimension = optional_env("EMBEDDING_DIMENSION")?
+            .map(|s| s.parse::<usize>())
+            .transpose()
+            .map_err(|e| ConfigError::InvalidValue {
+                key: "EMBEDDING_DIMENSION".to_string(),
+                message: format!("must be a positive integer: {e}"),
+            })?
+            .unwrap_or_else(|| default_dimension_for_model(&model));
 
         let enabled = optional_env("EMBEDDING_ENABLED")?
             .map(|s| s.parse())
@@ -52,6 +88,8 @@ impl EmbeddingsConfig {
             provider,
             openai_api_key,
             model,
+            ollama_base_url,
+            dimension,
         })
     }
 

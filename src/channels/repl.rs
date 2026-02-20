@@ -330,7 +330,13 @@ impl Channel for ReplChannel {
                         // Handle local REPL commands (only commands that need
                         // immediate local handling stay here)
                         match line.to_lowercase().as_str() {
-                            "/quit" | "/exit" => break,
+                            "/quit" | "/exit" => {
+                                // Forward shutdown command so the agent loop exits even
+                                // when other channels (e.g. web gateway) are still active.
+                                let msg = IncomingMessage::new("repl", "default", "/quit");
+                                let _ = tx.blocking_send(msg);
+                                break;
+                            }
                             "/help" => {
                                 print_help();
                                 continue;

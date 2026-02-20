@@ -39,7 +39,22 @@ impl HookRegistry {
     /// Lower priority number = runs first.
     pub async fn register_with_priority(&self, hook: Arc<dyn Hook>, priority: u32) {
         let mut hooks = self.hooks.write().await;
-        hooks.push(HookEntry { hook, priority });
+        let hook_name = hook.name().to_string();
+
+        if let Some(existing) = hooks
+            .iter_mut()
+            .find(|entry| entry.hook.name() == hook_name)
+        {
+            tracing::warn!(
+                hook = %hook_name,
+                "Replacing existing hook registration with same name"
+            );
+            existing.hook = hook;
+            existing.priority = priority;
+        } else {
+            hooks.push(HookEntry { hook, priority });
+        }
+
         hooks.sort_by_key(|e| e.priority);
     }
 
@@ -344,6 +359,44 @@ mod tests {
 
         let names = registry.list().await;
         assert_eq!(names, vec!["hook-a", "hook-b"]);
+    }
+
+    #[tokio::test]
+    async fn test_register_duplicate_name_replaces_existing() {
+        let registry = HookRegistry::new();
+
+        registry
+            .register_with_priority(
+                Arc::new(ModifyHook {
+                    name: "dup".into(),
+                    suffix: "-A".into(),
+                    points: vec![HookPoint::BeforeInbound],
+                }),
+                100,
+            )
+            .await;
+
+        registry
+            .register_with_priority(
+                Arc::new(ModifyHook {
+                    name: "dup".into(),
+                    suffix: "-B".into(),
+                    points: vec![HookPoint::BeforeInbound],
+                }),
+                10,
+            )
+            .await;
+
+        let names = registry.list().await;
+        assert_eq!(names, vec!["dup"]);
+
+        let result = registry.run(&test_event()).await.unwrap();
+        match result {
+            HookOutcome::Continue {
+                modified: Some(value),
+            } => assert_eq!(value, "hello-B"),
+            other => panic!("expected modified output, got {other:?}"),
+        }
     }
 
     #[tokio::test]

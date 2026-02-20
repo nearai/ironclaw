@@ -1542,6 +1542,10 @@ impl SetupWizard {
                 env_vars.push(("OLLAMA_BASE_URL", url.clone()));
             }
 
+            // Always write ONBOARD_COMPLETED so that check_onboard_needed()
+            // (which runs before the DB is connected) knows to skip re-onboarding.
+            env_vars.push(("ONBOARD_COMPLETED", "true".to_string()));
+
             if !env_vars.is_empty() {
                 let pairs: Vec<(&str, &str)> =
                     env_vars.iter().map(|(k, v)| (*k, v.as_str())).collect();

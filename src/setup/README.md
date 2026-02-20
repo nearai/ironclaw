@@ -19,8 +19,9 @@ Explicit invocation. Loads `.env` files, runs the wizard, exits.
 ironclaw          (first run, no database configured)
 ```
 
-Auto-detection via `check_onboard_needed()` in `main.rs`. Triggers when
-none of these are true:
+Auto-detection via `check_onboard_needed()` in `main.rs`. Skips onboarding
+when `ONBOARD_COMPLETED` env var is set (written to `~/.ironclaw/.env` by
+the wizard). Otherwise triggers when no database is configured:
 - `DATABASE_URL` env var is set
 - `LIBSQL_PATH` env var is set
 - `~/.ironclaw/ironclaw.db` exists on disk
@@ -345,13 +346,14 @@ Final step of the wizard:
 1. Mark onboard_completed = true
 2. Write ALL settings to database (try postgres pool, then libSQL backend)
 3. Write bootstrap vars to ~/.ironclaw/.env:
-   - DATABASE_BACKEND (always)
-   - DATABASE_URL     (if postgres)
-   - LIBSQL_PATH      (if libsql)
-   - LIBSQL_URL       (if turso sync)
-   - LLM_BACKEND      (always, when set)
-   - LLM_BASE_URL     (if openai_compatible)
-   - OLLAMA_BASE_URL   (if ollama)
+   - DATABASE_BACKEND   (always)
+   - DATABASE_URL       (if postgres)
+   - LIBSQL_PATH        (if libsql)
+   - LIBSQL_URL         (if turso sync)
+   - LLM_BACKEND        (always, when set)
+   - LLM_BASE_URL       (if openai_compatible)
+   - OLLAMA_BASE_URL    (if ollama)
+   - ONBOARD_COMPLETED  (always, "true")
 4. Print configuration summary
 ```
 

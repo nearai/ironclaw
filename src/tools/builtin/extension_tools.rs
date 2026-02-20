@@ -570,6 +570,7 @@ mod tests {
             Arc::new(InMemorySecretsStore::new(crypto)),
             Arc::new(ToolRegistry::new()),
             None,
+            None,
             std::path::PathBuf::from("/tmp/ironclaw-test-tools"),
             std::path::PathBuf::from("/tmp/ironclaw-test-channels"),
             None,
