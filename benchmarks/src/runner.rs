@@ -402,7 +402,7 @@ async fn run_task_isolated(params: TaskRunParams<'_>) -> TaskResult {
     let mut channels = ChannelManager::new();
     channels.add(Box::new(bench_channel));
 
-    let agent = Agent::new(agent_config, deps, channels, None, None, None, None);
+    let agent = Agent::new(agent_config, deps, channels, None, None, None, None, None);
 
     // Build the full prompt with context
     let full_prompt = if let Some(ref ctx) = task.context {
