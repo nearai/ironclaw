@@ -584,19 +584,20 @@ impl SessionManager {
     }
 }
 
-/// Create a session manager from a config, migrating from env var if present.
+/// Create a session manager from a config, loading env var if present.
+///
+/// When `NEARAI_SESSION_TOKEN` is set, it takes precedence over file-based
+/// tokens. This supports hosting providers that inject the token via env var.
 pub async fn create_session_manager(config: SessionConfig) -> Arc<SessionManager> {
     let manager = SessionManager::new_async(config).await;
 
-    // Check for legacy env var and migrate if present and no file token
-    if !manager.has_token().await
-        && let Ok(token) = std::env::var("NEARAI_SESSION_TOKEN")
-        && !token.is_empty()
-    {
-        tracing::info!("Migrating session token from NEARAI_SESSION_TOKEN env var to file");
-        manager.set_token(SecretString::from(token.clone())).await;
-        if let Err(e) = manager.save_session(&token, None).await {
-            tracing::warn!("Failed to save migrated session: {}", e);
+    // NEARAI_SESSION_TOKEN env var always takes precedence over file-based
+    // tokens. Hosting providers set this env var and expect it to be used
+    // directly — no file persistence needed.
+    if let Ok(token) = std::env::var("NEARAI_SESSION_TOKEN") {
+        if !token.is_empty() {
+            tracing::info!("Using session token from NEARAI_SESSION_TOKEN env var");
+            manager.set_token(SecretString::from(token)).await;
         }
     }
 
