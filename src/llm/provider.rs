@@ -153,8 +153,6 @@ pub struct CompletionResponse {
     pub input_tokens: u32,
     pub output_tokens: u32,
     pub finish_reason: FinishReason,
-    /// Provider-specific response ID (e.g. for NEAR AI response chaining).
-    pub response_id: Option<String>,
 }
 
 /// Why the completion finished.
@@ -256,8 +254,6 @@ pub struct ToolCompletionResponse {
     pub input_tokens: u32,
     pub output_tokens: u32,
     pub finish_reason: FinishReason,
-    /// Provider-specific response ID (e.g. for NEAR AI response chaining).
-    pub response_id: Option<String>,
 }
 
 /// Metadata about a model returned by the provider's API.
@@ -325,31 +321,6 @@ pub trait LlmProvider: Send + Sync {
             provider: "unknown".to_string(),
             reason: "Runtime model switching not supported by this provider".to_string(),
         })
-    }
-
-    /// Seed a response chain for a thread (e.g. restoring from DB).
-    ///
-    /// Providers that support response chaining (e.g. NEAR AI `previous_response_id`)
-    /// store this so subsequent calls send only delta messages.
-    ///
-    /// `input_count` is the number of non-system input items that were part of
-    /// the conversation when the chain was last active. This enables accurate
-    /// delta calculation on the next call (only new messages since `input_count`
-    /// are sent). Pass `0` only when the count is unknown.
-    fn seed_response_chain(
-        &self,
-        _thread_id: &str,
-        _response_id: String,
-        _input_count: usize,
-    ) {
-    }
-
-    /// Get the last response chain ID for a thread.
-    ///
-    /// Returns `None` if the provider doesn't support chaining or has no
-    /// stored state for this thread.
-    fn get_response_chain_id(&self, _thread_id: &str) -> Option<String> {
-        None
     }
 
     /// Calculate cost for a completion.

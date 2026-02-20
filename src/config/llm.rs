@@ -121,37 +121,7 @@ pub struct LlmConfig {
     pub tinfoil: Option<TinfoilConfig>,
 }
 
-/// API mode for NEAR AI.
-///
-/// - `Responses` = **NEAR AI Chat** (`private.near.ai`, session token auth)
-/// - `ChatCompletions` = **NEAR AI Cloud** (`cloud-api.near.ai`, API key auth)
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum NearAiApiMode {
-    /// NEAR AI Chat: Responses API with session token auth
-    #[default]
-    Responses,
-    /// NEAR AI Cloud: Chat Completions API with API key auth
-    ChatCompletions,
-}
-
-impl std::str::FromStr for NearAiApiMode {
-    type Err = String;
-
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        match s.to_lowercase().as_str() {
-            "responses" | "response" => Ok(Self::Responses),
-            "chat_completions" | "chatcompletions" | "chat" | "completions" => {
-                Ok(Self::ChatCompletions)
-            }
-            _ => Err(format!(
-                "invalid API mode '{}', expected 'responses' or 'chat_completions'",
-                s
-            )),
-        }
-    }
-}
-
-/// NEAR AI configuration (shared by Chat and Cloud modes).
+/// NEAR AI configuration.
 #[derive(Debug, Clone)]
 pub struct NearAiConfig {
     /// Model to use (e.g., "claude-3-5-sonnet-20241022", "gpt-4o")
@@ -160,16 +130,13 @@ pub struct NearAiConfig {
     /// Falls back to the main model if not set.
     pub cheap_model: Option<String>,
     /// Base URL for the NEAR AI API.
-    /// Chat mode default: `https://private.near.ai`
-    /// Cloud mode default: `https://cloud-api.near.ai`
+    /// Default: `https://private.near.ai` (session token) or `https://cloud-api.near.ai` (API key)
     pub base_url: String,
     /// Base URL for auth/refresh endpoints (default: https://private.near.ai)
     pub auth_base_url: String,
     /// Path to session file (default: ~/.ironclaw/session.json)
     pub session_path: PathBuf,
-    /// API mode: NEAR AI Chat (Responses) or NEAR AI Cloud (ChatCompletions)
-    pub api_mode: NearAiApiMode,
-    /// API key for NEAR AI Cloud (required for ChatCompletions mode)
+    /// API key for NEAR AI Cloud. When set, uses API key auth; otherwise uses session token auth.
     pub api_key: Option<SecretString>,
     /// Optional fallback model for failover (default: None).
     /// When set, a secondary provider is created with this model and wrapped
@@ -229,17 +196,6 @@ impl LlmConfig {
         // Resolve NEAR AI config only when backend is NearAi (or when explicitly configured)
         let nearai_api_key = optional_env("NEARAI_API_KEY")?.map(SecretString::from);
 
-        let api_mode = if let Some(mode_str) = optional_env("NEARAI_API_MODE")? {
-            mode_str.parse().map_err(|e| ConfigError::InvalidValue {
-                key: "NEARAI_API_MODE".to_string(),
-                message: e,
-            })?
-        } else if nearai_api_key.is_some() {
-            NearAiApiMode::ChatCompletions
-        } else {
-            NearAiApiMode::Responses
-        };
-
         let nearai = NearAiConfig {
             model: optional_env("NEARAI_MODEL")?
                 .or_else(|| settings.selected_model.clone())
@@ -249,7 +205,7 @@ impl LlmConfig {
                 }),
             cheap_model: optional_env("NEARAI_CHEAP_MODEL")?,
             base_url: optional_env("NEARAI_BASE_URL")?.unwrap_or_else(|| {
-                if api_mode == NearAiApiMode::ChatCompletions {
+                if nearai_api_key.is_some() {
                     "https://cloud-api.near.ai".to_string()
                 } else {
                     "https://private.near.ai".to_string()
@@ -260,7 +216,6 @@ impl LlmConfig {
             session_path: optional_env("NEARAI_SESSION_PATH")?
                 .map(PathBuf::from)
                 .unwrap_or_else(default_session_path),
-            api_mode,
             api_key: nearai_api_key,
             fallback_model: optional_env("NEARAI_FALLBACK_MODEL")?,
             max_retries: parse_optional_env("NEARAI_MAX_RETRIES", 3)?,

@@ -359,15 +359,6 @@ impl LlmProvider for FailoverProvider {
             .await
     }
 
-    fn seed_response_chain(&self, thread_id: &str, response_id: String, input_count: usize) {
-        self.providers[self.last_used.load(Ordering::Relaxed)]
-            .seed_response_chain(thread_id, response_id, input_count);
-    }
-
-    fn get_response_chain_id(&self, thread_id: &str) -> Option<String> {
-        self.providers[self.last_used.load(Ordering::Relaxed)].get_response_chain_id(thread_id)
-    }
-
     fn calculate_cost(&self, input_tokens: u32, output_tokens: u32) -> Decimal {
         self.providers[self.last_used.load(Ordering::Relaxed)]
             .calculate_cost(input_tokens, output_tokens)
@@ -413,7 +404,7 @@ mod tests {
                     input_tokens: 10,
                     output_tokens: 5,
                     finish_reason: FinishReason::Stop,
-                    response_id: None,
+
                 }))),
                 tool_complete_result: Mutex::new(Some(Ok(ToolCompletionResponse {
                     content: Some(content.to_string()),
@@ -421,7 +412,7 @@ mod tests {
                     input_tokens: 10,
                     output_tokens: 5,
                     finish_reason: FinishReason::Stop,
-                    response_id: None,
+
                 }))),
             }
         }
@@ -803,7 +794,6 @@ mod tests {
                 input_tokens: 10,
                 output_tokens: 5,
                 finish_reason: FinishReason::Stop,
-                response_id: None,
             })
         }
 
@@ -829,7 +819,6 @@ mod tests {
                 input_tokens: 10,
                 output_tokens: 5,
                 finish_reason: FinishReason::Stop,
-                response_id: None,
             })
         }
 

@@ -71,7 +71,6 @@ impl LlmProvider for MockLlmProvider {
             input_tokens: 10,
             output_tokens: 5,
             finish_reason: FinishReason::Stop,
-            response_id: None,
         })
     }
 
@@ -97,8 +96,7 @@ impl LlmProvider for MockLlmProvider {
                 input_tokens: 15,
                 output_tokens: 8,
                 finish_reason: FinishReason::ToolUse,
-                response_id: None,
-            })
+                })
         } else {
             Ok(ToolCompletionResponse {
                 content: Some("No tools available".to_string()),
@@ -106,8 +104,7 @@ impl LlmProvider for MockLlmProvider {
                 input_tokens: 10,
                 output_tokens: 4,
                 finish_reason: FinishReason::Stop,
-                response_id: None,
-            })
+                })
         }
     }
 
@@ -145,7 +142,6 @@ impl LlmProvider for FixedModelProvider {
             input_tokens: 10,
             output_tokens: 5,
             finish_reason: FinishReason::Stop,
-            response_id: None,
         })
     }
 
@@ -159,7 +155,6 @@ impl LlmProvider for FixedModelProvider {
             input_tokens: 10,
             output_tokens: 5,
             finish_reason: FinishReason::Stop,
-            response_id: None,
         })
     }
 

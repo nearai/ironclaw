@@ -828,7 +828,6 @@ mod tests {
                 input_tokens: 0,
                 output_tokens: 0,
                 finish_reason: FinishReason::Stop,
-                response_id: None,
             })
         }
 
@@ -842,7 +841,6 @@ mod tests {
                 input_tokens: 0,
                 output_tokens: 0,
                 finish_reason: FinishReason::Stop,
-                response_id: None,
             })
         }
     }

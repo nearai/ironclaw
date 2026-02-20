@@ -210,15 +210,6 @@ impl LlmProvider for RetryProvider {
         self.inner.set_model(model)
     }
 
-    fn seed_response_chain(&self, thread_id: &str, response_id: String, input_count: usize) {
-        self.inner
-            .seed_response_chain(thread_id, response_id, input_count)
-    }
-
-    fn get_response_chain_id(&self, thread_id: &str) -> Option<String> {
-        self.inner.get_response_chain_id(thread_id)
-    }
-
     fn calculate_cost(&self, input_tokens: u32, output_tokens: u32) -> Decimal {
         self.inner.calculate_cost(input_tokens, output_tokens)
     }

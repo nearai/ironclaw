@@ -87,28 +87,6 @@ impl Agent {
             thread.restore_from_messages(chat_messages);
         }
 
-        // Restore response chain from conversation metadata.
-        // Pass the message count so the chaining delta calculation knows how
-        // many input items the server already has, avoiding re-sending the
-        // entire history on the next call.
-        if let Some(store) = self.store()
-            && let Ok(Some(metadata)) = store.get_conversation_metadata(thread_uuid).await
-            && let Some(rid) = metadata
-                .get("last_response_id")
-                .and_then(|v| v.as_str())
-                .map(String::from)
-        {
-            thread.last_response_id = Some(rid.clone());
-            let input_count = thread.messages().len();
-            self.llm()
-                .seed_response_chain(&thread_uuid.to_string(), rid, input_count);
-            tracing::debug!(
-                "Restored response chain for thread {} (input_count={})",
-                thread_uuid,
-                input_count
-            );
-        }
-
         // Insert into session and register with session manager
         {
             let mut sess = session.lock().await;
@@ -333,7 +311,6 @@ impl Agent {
                 };
 
                 thread.complete_turn(&response);
-                self.persist_response_chain(thread);
                 let _ = self
                     .channels
                     .send_status(
@@ -420,41 +397,6 @@ impl Agent {
         {
             tracing::warn!("Failed to persist assistant message: {}", e);
         }
-    }
-
-    /// Sync the provider's response chain ID to the thread and DB metadata.
-    ///
-    /// Call after a successful agentic loop to persist the latest
-    /// `previous_response_id` so chaining survives restarts.
-    pub(super) fn persist_response_chain(&self, thread: &mut crate::agent::session::Thread) {
-        let tid = thread.id.to_string();
-        let response_id = match self.llm().get_response_chain_id(&tid) {
-            Some(rid) => rid,
-            None => return,
-        };
-
-        // Update in-memory thread
-        thread.last_response_id = Some(response_id.clone());
-
-        // Fire-and-forget DB write
-        let store = match self.store() {
-            Some(s) => Arc::clone(s),
-            None => return,
-        };
-        let thread_id = thread.id;
-        tokio::spawn(async move {
-            let val = serde_json::json!(response_id);
-            if let Err(e) = store
-                .update_conversation_metadata_field(thread_id, "last_response_id", &val)
-                .await
-            {
-                tracing::warn!(
-                    "Failed to persist response chain for thread {}: {}",
-                    thread_id,
-                    e
-                );
-            }
-        });
     }
 
     pub(super) async fn process_undo(
@@ -1080,7 +1022,6 @@ impl Agent {
                         self.persist_turn(thread_id, &message.user_id, &input, Some(&response))
                             .await;
                     }
-                    self.persist_response_chain(thread);
                     let _ = self
                         .channels
                         .send_status(
@@ -1182,7 +1123,6 @@ impl Agent {
                     self.persist_turn(thread_id, &message.user_id, &input, Some(&instructions))
                         .await;
                 }
-                self.persist_response_chain(thread);
             }
         }
         let _ = self

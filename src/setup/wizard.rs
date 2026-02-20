@@ -1166,7 +1166,6 @@ impl SetupWizard {
                 base_url,
                 auth_base_url,
                 session_path: crate::llm::session::default_session_path(),
-                api_mode: crate::config::NearAiApiMode::Responses,
                 api_key: None,
                 fallback_model: None,
                 max_retries: 3,
