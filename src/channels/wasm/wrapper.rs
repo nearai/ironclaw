@@ -792,8 +792,7 @@ impl WasmChannel {
 
         let runtime = Arc::clone(&self.runtime);
         let prepared = Arc::clone(&self.prepared);
-        let capabilities =
-            Self::inject_workspace_reader(&self.capabilities, &self.workspace_store);
+        let capabilities = Self::inject_workspace_reader(&self.capabilities, &self.workspace_store);
         let config_json = self.config_json.read().await.clone();
         let timeout = self.runtime.config().callback_timeout;
         let channel_name = self.name.clone();
@@ -931,8 +930,7 @@ impl WasmChannel {
 
         let runtime = Arc::clone(&self.runtime);
         let prepared = Arc::clone(&self.prepared);
-        let capabilities =
-            Self::inject_workspace_reader(&self.capabilities, &self.workspace_store);
+        let capabilities = Self::inject_workspace_reader(&self.capabilities, &self.workspace_store);
         let timeout = self.runtime.config().callback_timeout;
         let credentials = self.get_credentials().await;
         let pairing_store = self.pairing_store.clone();
@@ -1030,8 +1028,7 @@ impl WasmChannel {
 
         let runtime = Arc::clone(&self.runtime);
         let prepared = Arc::clone(&self.prepared);
-        let capabilities =
-            Self::inject_workspace_reader(&self.capabilities, &self.workspace_store);
+        let capabilities = Self::inject_workspace_reader(&self.capabilities, &self.workspace_store);
         let timeout = self.runtime.config().callback_timeout;
         let channel_name = self.name.clone();
         let credentials = self.get_credentials().await;
@@ -1640,8 +1637,7 @@ impl WasmChannel {
 
         let runtime = Arc::clone(runtime);
         let prepared = Arc::clone(prepared);
-        let capabilities =
-            Self::inject_workspace_reader(capabilities, workspace_store);
+        let capabilities = Self::inject_workspace_reader(capabilities, workspace_store);
         let credentials_snapshot = credentials.read().await.clone();
         let channel_name_owned = channel_name.to_string();
         let workspace_store = Arc::clone(workspace_store);
@@ -2291,9 +2287,7 @@ mod tests {
         let credentials = Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new()));
         let timeout = std::time::Duration::from_secs(5);
 
-        let workspace_store = Arc::new(
-            crate::channels::wasm::host::ChannelWorkspaceStore::new(),
-        );
+        let workspace_store = Arc::new(crate::channels::wasm::host::ChannelWorkspaceStore::new());
 
         let result = WasmChannel::execute_poll(
             "poll-test",
