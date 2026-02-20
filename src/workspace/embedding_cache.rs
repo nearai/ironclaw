@@ -52,7 +52,12 @@ pub struct CachedEmbeddingProvider {
 
 impl CachedEmbeddingProvider {
     /// Wrap a provider with LRU caching.
+    ///
+    /// `config.max_entries` is clamped to at least 1.
     pub fn new(inner: Arc<dyn EmbeddingProvider>, config: EmbeddingCacheConfig) -> Self {
+        let config = EmbeddingCacheConfig {
+            max_entries: config.max_entries.max(1),
+        };
         Self {
             inner,
             cache: Mutex::new(HashMap::new()),
@@ -206,12 +211,13 @@ impl EmbeddingProvider for CachedEmbeddingProvider {
             "embedding batch: partial cache"
         );
 
-        // Store misses and assemble results
+        // Store misses and assemble results.
+        // Evict before each insert to keep peak memory bounded.
         {
             let mut guard = self.cache.lock().await;
             let now = Instant::now();
-            for (j, &orig_idx) in miss_indices.iter().enumerate() {
-                let emb = &new_embeddings[j];
+            for (orig_idx, emb) in miss_indices.iter().copied().zip(new_embeddings) {
+                Self::evict_lru(&mut guard, self.config.max_entries);
                 guard.insert(
                     keys[orig_idx].clone(),
                     CacheEntry {
@@ -219,10 +225,8 @@ impl EmbeddingProvider for CachedEmbeddingProvider {
                         last_accessed: now,
                     },
                 );
-                results[orig_idx] = Some(emb.clone());
+                results[orig_idx] = Some(emb);
             }
-            // Enforce capacity after batch insert
-            Self::evict_lru(&mut guard, self.config.max_entries.saturating_add(1));
         }
 
         Ok(results
@@ -413,5 +417,21 @@ mod tests {
         assert_eq!(results[0], expected_a);
         assert_eq!(results[1], expected_bb);
         assert_eq!(results[2], expected_ccc);
+    }
+
+    #[tokio::test]
+    async fn zero_max_entries_clamped_to_one() {
+        let inner = Arc::new(CountingMock::new(4, "test-model"));
+        let cached =
+            CachedEmbeddingProvider::new(inner.clone(), EmbeddingCacheConfig { max_entries: 0 });
+
+        // Should behave as max_entries=1 (clamped in constructor)
+        cached.embed("hello").await.unwrap();
+        assert_eq!(cached.len().await, 1);
+
+        // Second entry evicts the first
+        cached.embed("world").await.unwrap();
+        assert_eq!(cached.len().await, 1);
+        assert_eq!(inner.embed_calls(), 2);
     }
 }
