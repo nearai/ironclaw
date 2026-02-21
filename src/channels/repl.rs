@@ -296,8 +296,7 @@ impl Channel for ReplChannel {
         let single_message = self.single_message.clone();
         let debug_mode = Arc::clone(&self.debug_mode);
         let suppress_banner = Arc::clone(&self.suppress_banner);
-        let esc_interrupt_triggered = Arc::new(AtomicBool::new(false));
-        let esc_interrupt_triggered_for_thread = Arc::clone(&esc_interrupt_triggered);
+        let esc_interrupt_triggered_for_thread = Arc::new(AtomicBool::new(false));
 
         std::thread::spawn(move || {
             // Single message mode: send it and return
