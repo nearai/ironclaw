@@ -457,6 +457,10 @@ impl Tool for HttpTool {
         // Default: outbound HTTP still needs approval unless auto-approved
         ApprovalRequirement::UnlessAutoApproved
     }
+
+    fn rate_limit_config(&self) -> Option<crate::tools::tool::ToolRateLimitConfig> {
+        Some(crate::tools::tool::ToolRateLimitConfig::new(30, 500))
+    }
 }
 
 #[cfg(test)]
