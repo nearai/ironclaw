@@ -222,6 +222,7 @@ impl Agent {
                     &model_name,
                     output.usage.input_tokens,
                     output.usage.output_tokens,
+                    output.usage.cache_read_input_tokens,
                 )
                 .await;
             tracing::debug!(

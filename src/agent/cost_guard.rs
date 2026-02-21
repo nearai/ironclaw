@@ -151,16 +151,23 @@ impl CostGuard {
     /// Record a completed LLM action: its token costs and the action timestamp.
     ///
     /// Call this AFTER an LLM call completes so that costs are tracked.
+    /// `cache_read_input_tokens` are tokens served from the provider's prompt
+    /// cache (Anthropic) at 10% of the normal input rate.
     pub async fn record_llm_call(
         &self,
         model: &str,
         input_tokens: u32,
         output_tokens: u32,
+        cache_read_input_tokens: u32,
     ) -> Decimal {
         let (input_rate, output_rate) =
             costs::model_cost(model).unwrap_or_else(costs::default_cost);
+        // Cached tokens cost 10% of the input rate (Anthropic's 90% discount).
+        // When cache_read_input_tokens is 0 (non-Anthropic), this is a no-op.
+        let uncached_input = input_tokens.saturating_sub(cache_read_input_tokens);
+        let cached_cost = input_rate * Decimal::from(cache_read_input_tokens) / dec!(10);
         let cost =
-            input_rate * Decimal::from(input_tokens) + output_rate * Decimal::from(output_tokens);
+            input_rate * Decimal::from(uncached_input) + cached_cost + output_rate * Decimal::from(output_tokens);
 
         // Update daily cost (reset if new day)
         {
@@ -261,7 +268,7 @@ mod tests {
         assert!(guard.check_allowed().await.is_ok());
 
         // Record a big call, still allowed
-        guard.record_llm_call("gpt-4o", 100_000, 100_000).await;
+        guard.record_llm_call("gpt-4o", 100_000, 100_000, 0).await;
         assert!(guard.check_allowed().await.is_ok());
     }
 
@@ -278,7 +285,7 @@ mod tests {
         // Record a call that costs more than $0.01
         // gpt-4o: input=$0.0000025/tok, output=$0.00001/tok
         // 10000 input + 10000 output = $0.025 + $0.10 = $0.125
-        guard.record_llm_call("gpt-4o", 10_000, 10_000).await;
+        guard.record_llm_call("gpt-4o", 10_000, 10_000, 0).await;
 
         // Now should be blocked
         let result = guard.check_allowed().await;
@@ -301,7 +308,7 @@ mod tests {
         // First 3 actions allowed
         for _ in 0..3 {
             assert!(guard.check_allowed().await.is_ok());
-            guard.record_llm_call("gpt-4o", 10, 10).await;
+            guard.record_llm_call("gpt-4o", 10, 10, 0).await;
         }
 
         // 4th should be blocked
@@ -322,7 +329,7 @@ mod tests {
 
         assert_eq!(guard.daily_spend().await, Decimal::ZERO);
 
-        let cost = guard.record_llm_call("gpt-4o", 1000, 500).await;
+        let cost = guard.record_llm_call("gpt-4o", 1000, 500, 0).await;
         assert!(cost > Decimal::ZERO);
         assert_eq!(guard.daily_spend().await, cost);
     }
@@ -333,8 +340,8 @@ mod tests {
 
         assert_eq!(guard.actions_this_hour().await, 0);
 
-        guard.record_llm_call("gpt-4o", 10, 10).await;
-        guard.record_llm_call("gpt-4o", 10, 10).await;
+        guard.record_llm_call("gpt-4o", 10, 10, 0).await;
+        guard.record_llm_call("gpt-4o", 10, 10, 0).await;
 
         assert_eq!(guard.actions_this_hour().await, 2);
     }
@@ -371,10 +378,10 @@ mod tests {
         assert!(guard.model_usage().await.is_empty());
 
         // Record calls for two different models
-        guard.record_llm_call("gpt-4o", 1000, 500).await;
-        guard.record_llm_call("gpt-4o", 2000, 1000).await;
+        guard.record_llm_call("gpt-4o", 1000, 500, 0).await;
+        guard.record_llm_call("gpt-4o", 2000, 1000, 0).await;
         guard
-            .record_llm_call("claude-3-5-sonnet-20241022", 500, 200)
+            .record_llm_call("claude-3-5-sonnet-20241022", 500, 200, 0)
             .await;
 
         let usage = guard.model_usage().await;
@@ -394,5 +401,35 @@ mod tests {
 
         // Costs should differ since models have different pricing
         assert_ne!(gpt.cost, claude.cost);
+    }
+
+    #[tokio::test]
+    async fn test_cache_discount_reduces_cost() {
+        let guard = CostGuard::new(CostGuardConfig::default());
+
+        // Full price: 1000 input + 500 output, no cache
+        let full_cost = guard.record_llm_call("gpt-4o", 1000, 500, 0).await;
+
+        let guard2 = CostGuard::new(CostGuardConfig::default());
+
+        // Same tokens but all input cached (90% discount on input)
+        let cached_cost = guard2.record_llm_call("gpt-4o", 1000, 500, 1000).await;
+
+        // Cached cost must be strictly less than full cost
+        assert!(
+            cached_cost < full_cost,
+            "cached_cost ({}) should be less than full_cost ({})",
+            cached_cost,
+            full_cost
+        );
+
+        // The difference should be exactly 90% of the input cost
+        let (input_rate, _) = costs::model_cost("gpt-4o").unwrap();
+        let expected_savings = input_rate * Decimal::from(1000u32) * dec!(9) / dec!(10);
+        let actual_savings = full_cost - cached_cost;
+        assert_eq!(
+            actual_savings, expected_savings,
+            "savings should be 90% of input cost for fully-cached request"
+        );
     }
 }
