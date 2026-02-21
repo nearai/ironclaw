@@ -912,7 +912,8 @@ impl Tool for JobStatusTool {
                     "created_at": job_ctx.created_at.to_rfc3339(),
                     "started_at": job_ctx.started_at.map(|t| t.to_rfc3339()),
                     "completed_at": job_ctx.completed_at.map(|t| t.to_rfc3339()),
-                    "actual_cost": job_ctx.actual_cost.to_string()
+                    "actual_cost": job_ctx.actual_cost.to_string(),
+                    "fallback_deliverable": job_ctx.metadata.get("fallback_deliverable"),
                 });
                 Ok(ToolOutput::success(result, start.elapsed()))
             }
@@ -1367,6 +1368,38 @@ mod tests {
             result.result.get("title").unwrap().as_str().unwrap(),
             "Test Job"
         );
+    }
+
+    #[tokio::test]
+    async fn test_job_status_includes_fallback_deliverable() {
+        let manager = Arc::new(ContextManager::new(5));
+        let job_id = manager
+            .create_job("Failing Job", "Will fail")
+            .await
+            .unwrap();
+
+        // Inject a fallback_deliverable into the job metadata.
+        let fallback = serde_json::json!({
+            "completed": false,
+            "actions_total": 3,
+            "actions_succeeded": 2,
+        });
+        manager
+            .update_context(job_id, |ctx| {
+                ctx.metadata = serde_json::json!({ "fallback_deliverable": fallback.clone() });
+            })
+            .await
+            .unwrap();
+
+        let tool = JobStatusTool::new(manager);
+        let params = serde_json::json!({ "job_id": job_id.to_string() });
+        let ctx = JobContext::default();
+        let result = tool.execute(params, &ctx).await.unwrap();
+
+        let fb = result.result.get("fallback_deliverable").unwrap();
+        assert_eq!(fb.get("actions_total").unwrap(), 3);
+        assert_eq!(fb.get("actions_succeeded").unwrap(), 2);
+        assert_eq!(fb.get("completed").unwrap(), false);
     }
 
     #[test]
