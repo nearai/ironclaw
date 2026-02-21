@@ -132,8 +132,8 @@ impl SmartRoutingProvider {
     fn response_is_uncertain(response: &CompletionResponse) -> bool {
         let content = response.content.trim();
 
-        // Very short responses for non-trivial questions suggest the model is struggling
-        if content.len() < 20 {
+        // Empty response is always uncertain
+        if content.is_empty() {
             return true;
         }
 
@@ -492,14 +492,25 @@ mod tests {
     }
 
     #[test]
-    fn detects_very_short_response_as_uncertain() {
+    fn detects_empty_response_as_uncertain() {
         let response = CompletionResponse {
-            content: "ok".to_string(),
+            content: "".to_string(),
+            input_tokens: 10,
+            output_tokens: 0,
+            finish_reason: crate::llm::FinishReason::Stop,
+        };
+        assert!(SmartRoutingProvider::response_is_uncertain(&response));
+    }
+
+    #[test]
+    fn short_confident_response_is_not_uncertain() {
+        let response = CompletionResponse {
+            content: "Yes.".to_string(),
             input_tokens: 10,
             output_tokens: 1,
             finish_reason: crate::llm::FinishReason::Stop,
         };
-        assert!(SmartRoutingProvider::response_is_uncertain(&response));
+        assert!(!SmartRoutingProvider::response_is_uncertain(&response));
     }
 
     #[test]

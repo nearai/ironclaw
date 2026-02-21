@@ -290,6 +290,7 @@ pub fn create_cheap_llm_provider(
 ///
 /// This is the single source of truth for provider chain construction,
 /// called by both `main.rs` and `app.rs`.
+#[allow(clippy::type_complexity)]
 pub fn build_provider_chain(
     config: &LlmConfig,
     session: Arc<SessionManager>,
