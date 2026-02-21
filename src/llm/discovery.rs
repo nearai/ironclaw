@@ -147,19 +147,23 @@ impl ModelListFetcher for OpenAiModelFetcher {
                 reason: format!("Model metadata request failed: {}", e),
             })?;
 
-        if resp.status().is_success() {
+        let status = resp.status();
+        // Drain body so the connection can be reused (keep-alive).
+        let _ = resp.bytes().await;
+
+        if status.is_success() {
             Ok(Some(ModelMetadata {
                 id: model_id.to_string(),
                 context_length: None,
             }))
-        } else if resp.status() == reqwest::StatusCode::NOT_FOUND
-            || resp.status() == reqwest::StatusCode::METHOD_NOT_ALLOWED
+        } else if status == reqwest::StatusCode::NOT_FOUND
+            || status == reqwest::StatusCode::METHOD_NOT_ALLOWED
         {
             Ok(None)
         } else {
             Err(LlmError::RequestFailed {
                 provider: self.provider_name.clone(),
-                reason: format!("Model metadata request returned HTTP {}", resp.status()),
+                reason: format!("Model metadata request returned HTTP {}", status),
             })
         }
     }
@@ -243,17 +247,21 @@ impl ModelListFetcher for OllamaModelFetcher {
                 reason: format!("Model metadata request failed: {}", e),
             })?;
 
-        if resp.status().is_success() {
+        let status = resp.status();
+        // Drain body so the connection can be reused (keep-alive).
+        let _ = resp.bytes().await;
+
+        if status.is_success() {
             Ok(Some(ModelMetadata {
                 id: model_id.to_string(),
                 context_length: None,
             }))
-        } else if resp.status() == reqwest::StatusCode::NOT_FOUND {
+        } else if status == reqwest::StatusCode::NOT_FOUND {
             Ok(None)
         } else {
             Err(LlmError::RequestFailed {
                 provider: "ollama".to_string(),
-                reason: format!("Model metadata request returned HTTP {}", resp.status()),
+                reason: format!("Model metadata request returned HTTP {}", status),
             })
         }
     }
