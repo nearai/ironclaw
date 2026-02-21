@@ -504,60 +504,59 @@ async fn get_secrets_store() -> anyhow::Result<Arc<dyn SecretsStore + Send + Syn
         )
     })?;
 
-    let crypto = SecretsCrypto::new(master_key.clone())?;
+    let crypto = Arc::new(SecretsCrypto::new(master_key.clone())?);
 
-    #[cfg(feature = "postgres")]
-    {
-        let store = crate::history::Store::new(&config.database).await?;
-        store.run_migrations().await?;
-        Ok(Arc::new(PostgresSecretsStore::new(
-            store.pool(),
-            Arc::new(crypto),
-        )))
-    }
+    match config.database.backend {
+        #[cfg(feature = "libsql")]
+        crate::config::DatabaseBackend::LibSql => {
+            use crate::db::Database as _;
+            use crate::db::libsql::LibSqlBackend;
+            use secrecy::ExposeSecret as _;
 
-    #[cfg(all(feature = "libsql", not(feature = "postgres")))]
-    {
-        use crate::db::Database as _;
-        use crate::db::libsql::LibSqlBackend;
-        use secrecy::ExposeSecret as _;
+            let default_path = crate::config::default_libsql_path();
+            let db_path = config
+                .database
+                .libsql_path
+                .as_deref()
+                .unwrap_or(&default_path);
 
-        let default_path = crate::config::default_libsql_path();
-        let db_path = config
-            .database
-            .libsql_path
-            .as_deref()
-            .unwrap_or(&default_path);
-
-        let backend = if let Some(ref url) = config.database.libsql_url {
-            let token = config.database.libsql_auth_token.as_ref().ok_or_else(|| {
-                anyhow::anyhow!("LIBSQL_AUTH_TOKEN is required when LIBSQL_URL is set")
-            })?;
-            LibSqlBackend::new_remote_replica(db_path, url, token.expose_secret())
+            let backend = if let Some(ref url) = config.database.libsql_url {
+                let token = config.database.libsql_auth_token.as_ref().ok_or_else(|| {
+                    anyhow::anyhow!("LIBSQL_AUTH_TOKEN is required when LIBSQL_URL is set")
+                })?;
+                LibSqlBackend::new_remote_replica(db_path, url, token.expose_secret())
+                    .await
+                    .map_err(|e| anyhow::anyhow!("{}", e))?
+            } else {
+                LibSqlBackend::new_local(db_path)
+                    .await
+                    .map_err(|e| anyhow::anyhow!("{}", e))?
+            };
+            backend
+                .run_migrations()
                 .await
-                .map_err(|e| anyhow::anyhow!("{}", e))?
-        } else {
-            LibSqlBackend::new_local(db_path)
-                .await
-                .map_err(|e| anyhow::anyhow!("{}", e))?
-        };
-        backend
-            .run_migrations()
-            .await
-            .map_err(|e| anyhow::anyhow!("{}", e))?;
+                .map_err(|e| anyhow::anyhow!("{}", e))?;
 
-        return Ok(Arc::new(crate::secrets::LibSqlSecretsStore::new(
-            backend.shared_db(),
-            Arc::new(crypto),
-        )));
-    }
-
-    #[cfg(not(any(feature = "postgres", feature = "libsql")))]
-    {
-        let _ = crypto;
-        anyhow::bail!(
-            "No database backend available for secrets. Enable 'postgres' or 'libsql' feature."
-        );
+            Ok(Arc::new(crate::secrets::LibSqlSecretsStore::new(
+                backend.shared_db(),
+                Arc::clone(&crypto),
+            )))
+        }
+        #[cfg(feature = "postgres")]
+        crate::config::DatabaseBackend::Postgres => {
+            let store = crate::history::Store::new(&config.database).await?;
+            store.run_migrations().await?;
+            Ok(Arc::new(PostgresSecretsStore::new(
+                store.pool(),
+                Arc::clone(&crypto),
+            )))
+        }
+        #[allow(unreachable_patterns)]
+        _ => {
+            anyhow::bail!(
+                "No database backend available for secrets. Enable 'postgres' or 'libsql' feature."
+            );
+        }
     }
 }
 
