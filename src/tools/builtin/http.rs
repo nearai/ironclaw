@@ -15,6 +15,9 @@ use crate::secrets::SecretsStore;
 use crate::tools::tool::{ApprovalRequirement, Tool, ToolError, ToolOutput, require_str};
 use crate::tools::wasm::{InjectedCredentials, SharedCredentialRegistry, inject_credential};
 
+#[cfg(feature = "html-to-markdown")]
+use crate::tools::builtin::convert_html_to_markdown;
+
 /// Maximum response body size (5 MB).
 ///
 /// 5 MB is large enough for typical JSON API responses and moderate HTML pages,
@@ -124,6 +127,16 @@ fn is_disallowed_ip(ip: &IpAddr) -> bool {
                 || v6.is_unspecified()
         }
     }
+}
+
+#[cfg(feature = "html-to-markdown")]
+/// Heuristic: treat as HTML if the `Content-Type` header contains `text/html`.
+fn is_html_response(headers: &HashMap<String, String>) -> bool {
+    headers
+        .iter()
+        .find(|(k, _)| k.eq_ignore_ascii_case("content-type"))
+        .map(|(_, v)| v.to_lowercase().contains("text/html"))
+        .unwrap_or(false)
 }
 
 fn parse_headers_param(
@@ -394,6 +407,19 @@ impl Tool for HttpTool {
         let body_bytes = bytes::Bytes::from(body);
 
         let body_text = String::from_utf8_lossy(&body_bytes).into_owned();
+
+        #[cfg(feature = "html-to-markdown")]
+        let body_text = if is_html_response(&headers) {
+            match convert_html_to_markdown(&body_text, parsed_url.as_str()) {
+                Ok(md) => md,
+                Err(e) => {
+                    tracing::warn!(url = %parsed_url, error = %e, "HTML-to-markdown conversion failed, returning raw HTML");
+                    body_text
+                }
+            }
+        } else {
+            body_text
+        };
 
         // Try to parse as JSON, fall back to string
         let body: serde_json::Value = serde_json::from_str(&body_text)

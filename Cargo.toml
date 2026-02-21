@@ -149,6 +149,10 @@ bytes = "1"
 base64 = "0.22.1"
 mime_guess = "2.0.5"
 
+# HTML to Markdown conversion (feature gated)
+html-to-markdown-rs = { version = "2.3", optional = true }
+readabilityrs = { version = "0.1.2", optional = true }
+
 # macOS keychain
 [target.'cfg(target_os = "macos")'.dependencies]
 security-framework = "3"
@@ -166,7 +170,7 @@ pretty_assertions = "1"
 tempfile = "3"
 
 [features]
-default = ["postgres", "libsql"]
+default = ["postgres", "libsql", "html-to-markdown"]
 postgres = [
     "dep:deadpool-postgres",
     "dep:tokio-postgres",
@@ -177,6 +181,11 @@ postgres = [
 ]
 libsql = ["dep:libsql"]
 integration = []
+html-to-markdown = ["dep:html-to-markdown-rs", "dep:readabilityrs"]
+
+[[test]]
+name = "html_to_markdown"
+required-features = ["html-to-markdown"]
 
 # The profile that 'cargo dist' will build with
 [profile.dist]
