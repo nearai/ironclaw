@@ -1,20 +1,22 @@
 /* IronClaw Web Gateway */
 
 :root {
-  --bg: #0d1117;
-  --bg-secondary: #161b22;
-  --bg-tertiary: #21262d;
-  --border: #30363d;
-  --text: #e6edf3;
-  --text-secondary: #8b949e;
-  --accent: #58a6ff;
-  --accent-hover: #79c0ff;
-  --success: #3fb950;
-  --warning: #d29922;
-  --danger: #f85149;
-  --code-bg: #1b2028;
-  --radius: 6px;
-  --shadow: 0 1px 3px rgba(0, 0, 0, 0.3);
+  --bg: #09090b;
+  --bg-secondary: #0f0f11;
+  --bg-tertiary: #1a1a1e;
+  --border: rgba(255, 255, 255, 0.08);
+  --text: #fafafa;
+  --text-secondary: #a1a1aa;
+  --accent: #34d399;
+  --accent-hover: #2fc48d;
+  --success: #34d399;
+  --warning: #F5A623;
+  --danger: #E64C4C;
+  --code-bg: #111113;
+  --radius: 8px;
+  --radius-lg: 12px;
+  --shadow: 0 2px 8px rgba(0, 0, 0, 0.4);
+  --font-mono: 'IBM Plex Mono', 'SF Mono', 'Fira Code', Consolas, monospace;
 }
 
 * {
@@ -24,7 +26,7 @@
 }
 
 body {
-  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+  font-family: 'DM Sans', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
   background: var(--bg);
   color: var(--text);
   height: 100vh;
@@ -44,14 +46,14 @@ body {
 .auth-card-login {
   background: var(--bg-secondary);
   border: 1px solid var(--border);
-  border-radius: 12px;
+  border-radius: 16px;
   padding: 40px 36px 32px;
   width: 100%;
   max-width: 400px;
   display: flex;
   flex-direction: column;
   gap: 24px;
-  box-shadow: 0 4px 24px rgba(0, 0, 0, 0.3);
+  box-shadow: 0 4px 24px rgba(0, 0, 0, 0.4);
 }
 
 .auth-brand {
@@ -95,22 +97,29 @@ body {
 #auth-screen input:focus {
   outline: none;
   border-color: var(--accent);
+  box-shadow: 0 0 0 3px rgba(52, 211, 153, 0.3);
 }
 
 #auth-screen button {
   padding: 10px 16px;
   background: var(--accent);
-  color: #fff;
+  color: #09090b;
   border: none;
   border-radius: var(--radius);
   cursor: pointer;
   font-size: 14px;
-  font-weight: 500;
+  font-weight: 600;
   margin-top: 4px;
+  transition: background 0.2s, transform 0.2s;
 }
 
 #auth-screen button:hover {
   background: var(--accent-hover);
+  transform: translateY(-1px);
+}
+
+#auth-screen button:active {
+  transform: scale(0.98);
 }
 
 #auth-error {
@@ -137,14 +146,17 @@ body {
 /* Tab Bar */
 .tab-bar {
   display: flex;
-  background: var(--bg-secondary);
+  background: rgba(9, 9, 11, 0.75);
+  backdrop-filter: blur(16px);
+  -webkit-backdrop-filter: blur(16px);
+  will-change: backdrop-filter;
   border-bottom: 1px solid var(--border);
   padding: 0 16px;
   gap: 0;
   flex-shrink: 0;
 }
 
-.tab-bar button {
+.tab-bar button:not(.status-logs-btn) {
   padding: 10px 20px;
   background: none;
   border: none;
@@ -152,20 +164,45 @@ body {
   color: var(--text-secondary);
   cursor: pointer;
   font-size: 14px;
-  transition: color 0.15s, border-color 0.15s;
+  font-weight: 500;
+  transition: color 0.2s, border-color 0.2s;
 }
 
-.tab-bar button:hover {
+.tab-bar button:not(.status-logs-btn):hover {
   color: var(--text);
 }
 
-.tab-bar button.active {
+.tab-bar button:not(.status-logs-btn).active {
   color: var(--accent);
   border-bottom-color: var(--accent);
 }
 
 .tab-bar .spacer {
   flex: 1;
+}
+
+.tab-bar .status-logs-btn {
+  padding: 4px 10px;
+  background: none;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  color: var(--text-secondary);
+  cursor: pointer;
+  font-size: 11px;
+  align-self: center;
+  margin-right: 8px;
+  transition: color 0.2s, border-color 0.2s, background 0.2s;
+}
+
+.tab-bar .status-logs-btn:hover {
+  color: var(--text);
+  border-color: var(--text-secondary);
+}
+
+.tab-bar .status-logs-btn.active {
+  color: var(--accent);
+  border-color: var(--accent);
+  background: rgba(52, 211, 153, 0.1);
 }
 
 .tab-bar .status {
@@ -187,6 +224,128 @@ body {
 
 .tab-bar .status .dot.disconnected {
   background: var(--danger);
+}
+
+/* TEE Shield */
+.tee-shield {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--success);
+  padding: 4px 10px;
+  border-radius: 12px;
+  background: rgba(52, 211, 153, 0.1);
+  border: 1px solid rgba(52, 211, 153, 0.25);
+  cursor: pointer;
+  position: relative;
+  margin-right: 8px;
+  transition: background 0.2s;
+}
+
+.tee-shield:hover {
+  background: rgba(52, 211, 153, 0.18);
+}
+
+.tee-shield svg {
+  flex-shrink: 0;
+}
+
+#tee-shield-label {
+  font-weight: 500;
+  white-space: nowrap;
+}
+
+.tee-popover {
+  display: none;
+  position: absolute;
+  top: 100%;
+  right: 0;
+  margin-top: 8px;
+  background: rgba(15, 15, 17, 0.9);
+  backdrop-filter: blur(16px);
+  -webkit-backdrop-filter: blur(16px);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  padding: 16px;
+  min-width: 340px;
+  max-width: 420px;
+  z-index: 100;
+  box-shadow: var(--shadow);
+}
+
+.tee-popover.visible {
+  display: block;
+}
+
+.tee-popover-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text);
+  margin-bottom: 12px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.tee-popover-title svg {
+  color: var(--success);
+}
+
+.tee-field {
+  margin-bottom: 10px;
+}
+
+.tee-field:last-child {
+  margin-bottom: 0;
+}
+
+.tee-field-label {
+  font-size: 11px;
+  font-weight: 500;
+  color: var(--text-secondary);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  margin-bottom: 3px;
+}
+
+.tee-field-value {
+  font-size: 12px;
+  font-family: var(--font-mono);
+  color: var(--text);
+  word-break: break-all;
+  background: var(--bg);
+  padding: 4px 8px;
+  border-radius: var(--radius);
+  border: 1px solid var(--border);
+}
+
+.tee-popover-actions {
+  margin-top: 12px;
+  display: flex;
+  gap: 8px;
+}
+
+.tee-btn-copy {
+  padding: 4px 10px;
+  background: none;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  color: var(--text-secondary);
+  cursor: pointer;
+  font-size: 11px;
+  transition: color 0.2s, border-color 0.2s;
+}
+
+.tee-btn-copy:hover {
+  color: var(--text);
+  border-color: var(--text-secondary);
+}
+
+.tee-popover-loading {
+  font-size: 12px;
+  color: var(--text-secondary);
+  padding: 8px 0;
 }
 
 /* Tab Panels */
@@ -230,7 +389,7 @@ body {
 .message.user {
   align-self: flex-end;
   background: var(--accent);
-  color: #fff;
+  color: #09090b;
   border-bottom-right-radius: 2px;
   white-space: pre-wrap;
 }
@@ -349,11 +508,12 @@ body {
   max-width: 80%;
   background: var(--bg-secondary);
   border: 1px solid var(--warning);
-  border-radius: var(--radius);
+  border-radius: var(--radius-lg);
   padding: 14px;
   display: flex;
   flex-direction: column;
   gap: 8px;
+  transition: border-color 0.2s;
 }
 
 .approval-header {
@@ -368,7 +528,7 @@ body {
   font-size: 14px;
   font-weight: 600;
   color: var(--text);
-  font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+  font-family: var(--font-mono);
 }
 
 .approval-description {
@@ -396,7 +556,7 @@ body {
   padding: 8px 12px;
   border-radius: var(--radius);
   font-size: 12px;
-  font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+  font-family: var(--font-mono);
   line-height: 1.4;
   overflow-x: auto;
   color: var(--text-secondary);
@@ -429,13 +589,15 @@ body {
 .approval-card .approval-actions button.approve {
   background: var(--success);
   border-color: var(--success);
-  color: #fff;
+  color: #09090b;
+  font-weight: 600;
 }
 
 .approval-card .approval-actions button.always {
   background: var(--accent);
   border-color: var(--accent);
-  color: #fff;
+  color: #09090b;
+  font-weight: 600;
 }
 
 .approval-card .approval-actions button.deny {
@@ -457,12 +619,13 @@ body {
   max-width: 80%;
   background: var(--bg-secondary);
   border: 1px solid var(--accent);
-  border-radius: var(--radius);
+  border-radius: var(--radius-lg);
   padding: 12px 16px;
   margin: 8px 0;
   display: flex;
   flex-direction: column;
   gap: 8px;
+  transition: border-color 0.2s;
 }
 
 .auth-card .auth-header {
@@ -503,12 +666,13 @@ body {
   background: var(--bg);
   color: var(--text);
   font-size: 13px;
-  font-family: monospace;
+  font-family: var(--font-mono);
 }
 
 .auth-card .auth-token-input input:focus {
   outline: none;
   border-color: var(--accent);
+  box-shadow: 0 0 0 3px rgba(52, 211, 153, 0.1);
 }
 
 .auth-card .auth-actions {
@@ -535,7 +699,8 @@ body {
 .auth-card .auth-actions button.auth-submit {
   background: var(--accent);
   border-color: var(--accent);
-  color: #fff;
+  color: #09090b;
+  font-weight: 600;
 }
 
 .auth-card .auth-actions button.auth-cancel {
@@ -546,7 +711,8 @@ body {
 .auth-card .auth-actions button.auth-oauth {
   background: var(--success);
   border-color: var(--success);
-  color: #fff;
+  color: #09090b;
+  font-weight: 600;
 }
 
 .auth-card .auth-error {
@@ -580,21 +746,29 @@ body {
 .chat-input textarea:focus {
   outline: none;
   border-color: var(--accent);
+  box-shadow: 0 0 0 3px rgba(52, 211, 153, 0.1);
 }
 
 .chat-input button {
   padding: 8px 20px;
   background: var(--accent);
-  color: #fff;
+  color: #09090b;
   border: none;
   border-radius: var(--radius);
   cursor: pointer;
   font-size: 14px;
+  font-weight: 600;
   align-self: flex-end;
+  transition: background 0.2s, transform 0.2s;
 }
 
 .chat-input button:hover {
   background: var(--accent-hover);
+  transform: translateY(-1px);
+}
+
+.chat-input button:active {
+  transform: scale(0.98);
 }
 
 .chat-input button:disabled {
@@ -635,6 +809,7 @@ body {
 .memory-sidebar input:focus {
   outline: none;
   border-color: var(--accent);
+  box-shadow: 0 0 0 3px rgba(52, 211, 153, 0.1);
 }
 
 .memory-tree {
@@ -768,7 +943,7 @@ body {
   font-size: 14px;
   line-height: 1.6;
   white-space: pre-wrap;
-  font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+  font-family: var(--font-mono);
 }
 
 .memory-viewer .empty {
@@ -822,8 +997,13 @@ body {
   padding: 16px;
   background: var(--bg-secondary);
   border: 1px solid var(--border);
-  border-radius: var(--radius);
+  border-radius: var(--radius-lg);
   text-align: center;
+  transition: border-color 0.2s, transform 0.2s;
+}
+
+.summary-card:hover {
+  border-color: rgba(255, 255, 255, 0.15);
 }
 
 .summary-card .count {
@@ -867,24 +1047,24 @@ body {
 }
 
 .jobs-table tr:hover td {
-  background: var(--bg-secondary);
+  background: rgba(255, 255, 255, 0.03);
 }
 
 .badge {
   display: inline-block;
-  padding: 2px 8px;
-  border-radius: 10px;
+  padding: 3px 10px;
+  border-radius: 9999px;
   font-size: 11px;
   font-weight: 500;
 }
 
 .badge.pending { background: var(--bg-tertiary); color: var(--text-secondary); }
-.badge.in_progress { background: rgba(88, 166, 255, 0.15); color: var(--accent); }
-.badge.completed { background: rgba(63, 185, 80, 0.15); color: var(--success); }
-.badge.failed { background: rgba(248, 81, 73, 0.15); color: var(--danger); }
-.badge.stuck { background: rgba(210, 153, 34, 0.15); color: var(--warning); }
+.badge.in_progress { background: rgba(52, 211, 153, 0.15); color: var(--accent); }
+.badge.completed { background: rgba(52, 211, 153, 0.15); color: var(--success); }
+.badge.failed { background: rgba(230, 76, 76, 0.15); color: var(--danger); }
+.badge.stuck { background: rgba(245, 166, 35, 0.15); color: var(--warning); }
 .badge.cancelled { background: var(--bg-tertiary); color: var(--text-secondary); }
-.badge.interrupted { background: rgba(210, 153, 34, 0.15); color: var(--warning); }
+.badge.interrupted { background: rgba(245, 166, 35, 0.15); color: var(--warning); }
 .badge.source-sandbox { background: rgba(136, 132, 216, 0.15); color: #b4b0e8; }
 .badge.source-direct { background: var(--bg-tertiary); color: var(--text-secondary); }
 
@@ -899,7 +1079,7 @@ body {
 }
 
 .btn-cancel:hover {
-  background: rgba(248, 81, 73, 0.15);
+  background: rgba(230, 76, 76, 0.15);
 }
 
 .btn-restart {
@@ -913,7 +1093,7 @@ body {
 }
 
 .btn-restart:hover {
-  background: rgba(88, 166, 255, 0.15);
+  background: rgba(52, 211, 153, 0.15);
 }
 
 .btn-browse {
@@ -928,7 +1108,7 @@ body {
 }
 
 .btn-browse:hover {
-  background: rgba(63, 185, 80, 0.15);
+  background: rgba(52, 211, 153, 0.15);
 }
 
 /* Job started card in chat */
@@ -940,8 +1120,13 @@ body {
   margin: 8px 0;
   background: var(--bg-tertiary);
   border: 1px solid var(--border);
-  border-radius: var(--radius);
+  border-radius: var(--radius-lg);
   border-left: 3px solid var(--accent);
+  transition: border-color 0.2s, transform 0.2s;
+}
+
+.job-card:hover {
+  border-color: rgba(255, 255, 255, 0.15);
 }
 
 .job-card-icon {
@@ -960,7 +1145,7 @@ body {
 .job-card-id {
   font-size: 12px;
   color: var(--text-secondary);
-  font-family: monospace;
+  font-family: var(--font-mono);
 }
 
 .job-card-view, .job-card-browse {
@@ -978,7 +1163,7 @@ body {
 }
 
 .job-card-view:hover {
-  background: rgba(88, 166, 255, 0.15);
+  background: rgba(52, 211, 153, 0.15);
 }
 
 .job-card-browse {
@@ -988,7 +1173,7 @@ body {
 }
 
 .job-card-browse:hover {
-  background: rgba(63, 185, 80, 0.15);
+  background: rgba(52, 211, 153, 0.15);
 }
 
 /* Clickable job rows */
@@ -1194,7 +1379,7 @@ body {
 .action-tool {
   font-weight: 600;
   color: var(--text);
-  font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+  font-family: var(--font-mono);
 }
 
 .action-seq {
@@ -1239,7 +1424,7 @@ body {
   padding: 8px 12px;
   border-radius: var(--radius);
   font-size: 12px;
-  font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+  font-family: var(--font-mono);
   line-height: 1.4;
   overflow-x: auto;
   color: var(--text-secondary);
@@ -1251,11 +1436,11 @@ body {
 }
 
 .action-error {
-  background: rgba(248, 81, 73, 0.1);
+  background: rgba(230, 76, 76, 0.1);
   padding: 8px 12px;
   border-radius: var(--radius);
   font-size: 12px;
-  font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+  font-family: var(--font-mono);
   line-height: 1.4;
   color: var(--danger);
   margin: 0;
@@ -1293,8 +1478,8 @@ body {
 .conv-system .conv-body { color: var(--text-secondary); font-size: 13px; }
 
 .conv-user {
-  background: rgba(88, 166, 255, 0.08);
-  border: 1px solid rgba(88, 166, 255, 0.2);
+  background: rgba(52, 211, 153, 0.08);
+  border: 1px solid rgba(52, 211, 153, 0.2);
 }
 
 .conv-user .conv-role { color: var(--accent); }
@@ -1309,7 +1494,7 @@ body {
 .conv-tool {
   background: var(--bg-secondary);
   border: 1px solid var(--border);
-  font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+  font-family: var(--font-mono);
   font-size: 13px;
 }
 
@@ -1320,7 +1505,7 @@ body {
   font-size: 11px;
   color: var(--text-secondary);
   margin-bottom: 4px;
-  font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+  font-family: var(--font-mono);
 }
 
 .conv-tool-calls {
@@ -1337,7 +1522,7 @@ body {
   font-size: 12px;
   font-weight: 600;
   color: var(--accent);
-  font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+  font-family: var(--font-mono);
 }
 
 .conv-tc-args {
@@ -1345,7 +1530,7 @@ body {
   padding: 6px 10px;
   border-radius: var(--radius);
   font-size: 11px;
-  font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+  font-family: var(--font-mono);
   line-height: 1.4;
   margin: 4px 0 0;
   color: var(--text-secondary);
@@ -1385,12 +1570,12 @@ body {
   font-size: 12px;
   color: var(--accent);
   margin-bottom: 8px;
-  font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+  font-family: var(--font-mono);
 }
 
 .job-files-content {
   font-size: 13px;
-  font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+  font-family: var(--font-mono);
   line-height: 1.5;
   white-space: pre-wrap;
   word-break: break-all;
@@ -1440,7 +1625,7 @@ body {
 }
 
 .routines-table tr:hover td {
-  background: var(--bg-secondary);
+  background: rgba(255, 255, 255, 0.03);
 }
 
 .routine-row {
@@ -1451,9 +1636,9 @@ body {
   padding: 16px 0;
 }
 
-.badge.enabled { background: rgba(63, 185, 80, 0.15); color: var(--success); }
+.badge.enabled { background: rgba(52, 211, 153, 0.15); color: var(--success); }
 .badge.disabled { background: var(--bg-tertiary); color: var(--text-secondary); }
-.badge.failing { background: rgba(248, 81, 73, 0.15); color: var(--danger); }
+.badge.failing { background: rgba(230, 76, 76, 0.15); color: var(--danger); }
 
 .btn-trigger {
   padding: 4px 10px;
@@ -1466,7 +1651,7 @@ body {
 }
 
 .btn-trigger:hover {
-  background: rgba(88, 166, 255, 0.15);
+  background: rgba(52, 211, 153, 0.15);
 }
 
 .btn-toggle {
@@ -1480,7 +1665,7 @@ body {
 }
 
 .btn-toggle:hover {
-  background: rgba(210, 153, 34, 0.15);
+  background: rgba(245, 166, 35, 0.15);
 }
 
 /* Logs Tab */
@@ -1524,6 +1709,7 @@ body {
 .logs-toolbar input:focus {
   outline: none;
   border-color: var(--accent);
+  box-shadow: 0 0 0 3px rgba(52, 211, 153, 0.1);
 }
 
 .logs-checkbox {
@@ -1553,7 +1739,7 @@ body {
   flex: 1;
   overflow-y: auto;
   padding: 4px 0;
-  font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+  font-family: var(--font-mono);
   font-size: 12px;
   line-height: 1.5;
   background: var(--bg);
@@ -1638,6 +1824,13 @@ body {
   color: var(--text);
 }
 
+.extensions-section h4 {
+  font-size: 13px;
+  font-weight: 600;
+  margin: 16px 0 8px;
+  color: var(--text-secondary);
+}
+
 .extensions-list {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
@@ -1647,11 +1840,16 @@ body {
 .ext-card {
   background: var(--bg-secondary);
   border: 1px solid var(--border);
-  border-radius: var(--radius);
+  border-radius: var(--radius-lg);
   padding: 14px;
   display: flex;
   flex-direction: column;
   gap: 8px;
+  transition: border-color 0.2s, transform 0.2s;
+}
+
+.ext-card:hover {
+  border-color: rgba(255, 255, 255, 0.15);
 }
 
 .ext-header {
@@ -1676,17 +1874,17 @@ body {
 }
 
 .ext-kind.kind-mcp_server {
-  background: rgba(88, 166, 255, 0.15);
+  background: rgba(52, 211, 153, 0.15);
   color: var(--accent);
 }
 
 .ext-kind.kind-wasm_tool {
-  background: rgba(63, 185, 80, 0.15);
+  background: rgba(52, 211, 153, 0.15);
   color: var(--success);
 }
 
 .ext-kind.kind-wasm_channel {
-  background: rgba(210, 153, 34, 0.15);
+  background: rgba(245, 166, 35, 0.15);
   color: var(--warning);
 }
 
@@ -1714,7 +1912,7 @@ body {
 .ext-url {
   font-size: 12px;
   color: var(--text-secondary);
-  font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+  font-family: var(--font-mono);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -1758,7 +1956,7 @@ body {
 }
 
 .btn-ext.activate:hover {
-  background: rgba(88, 166, 255, 0.15);
+  background: rgba(52, 211, 153, 0.15);
 }
 
 .btn-ext.remove {
@@ -1767,7 +1965,31 @@ body {
 }
 
 .btn-ext.remove:hover {
-  background: rgba(248, 81, 73, 0.15);
+  background: rgba(230, 76, 76, 0.15);
+}
+
+.btn-ext.install {
+  border-color: var(--success);
+  color: var(--success);
+}
+
+.btn-ext.install:hover {
+  background: rgba(52, 211, 153, 0.15);
+}
+
+.btn-ext.install:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.ext-available {
+  border-style: dashed;
+}
+
+.ext-keywords {
+  font-size: 11px;
+  color: var(--text-secondary);
+  opacity: 0.7;
 }
 
 .tools-table {
@@ -1792,7 +2014,7 @@ body {
 }
 
 .tools-table tr:hover td {
-  background: var(--bg-secondary);
+  background: rgba(255, 255, 255, 0.03);
 }
 
 /* --- Activity tab (unified sandbox job events) --- */
@@ -1801,12 +2023,12 @@ body {
   flex: 1;
   overflow-y: auto;
   padding: 12px;
-  font-family: monospace;
+  font-family: var(--font-mono);
   font-size: 13px;
   line-height: 1.6;
   background: var(--bg);
   border: 1px solid var(--border);
-  border-radius: 6px;
+  border-radius: var(--radius);
   margin-bottom: 8px;
   max-height: calc(100vh - 320px);
 }
@@ -1900,7 +2122,7 @@ body {
   padding: 8px 12px;
   background: var(--bg-secondary);
   border: 1px solid var(--border);
-  border-radius: 6px;
+  border-radius: var(--radius);
   color: var(--text);
   font-size: 13px;
 }
@@ -1908,20 +2130,28 @@ body {
 .activity-input-bar input:focus {
   outline: none;
   border-color: var(--accent);
+  box-shadow: 0 0 0 3px rgba(52, 211, 153, 0.1);
 }
 
 .activity-input-bar button {
   padding: 8px 16px;
   background: var(--accent);
-  color: #fff;
+  color: #09090b;
   border: none;
-  border-radius: 6px;
+  border-radius: var(--radius);
   cursor: pointer;
   font-size: 13px;
+  font-weight: 600;
+  transition: background 0.2s, transform 0.2s;
 }
 
 .activity-input-bar button:hover {
   background: var(--accent-hover);
+  transform: translateY(-1px);
+}
+
+.activity-input-bar button:active {
+  transform: scale(0.98);
 }
 
 #activity-done-btn {
@@ -2011,7 +2241,7 @@ body {
 /* --- Memory search highlighting --- */
 
 mark {
-  background: rgba(88, 166, 255, 0.3);
+  background: rgba(52, 211, 153, 0.3);
   color: inherit;
   border-radius: 2px;
   padding: 0 1px;
@@ -2077,7 +2307,7 @@ mark {
 }
 
 .thread-new-btn:hover {
-  background: rgba(88, 166, 255, 0.15);
+  background: rgba(52, 211, 153, 0.15);
 }
 
 .assistant-item {
@@ -2098,7 +2328,7 @@ mark {
 }
 
 .assistant-item.active {
-  background: rgba(88, 166, 255, 0.08);
+  background: rgba(52, 211, 153, 0.08);
   color: var(--accent);
   border-left: 2px solid var(--accent);
 }
@@ -2165,7 +2395,7 @@ mark {
 }
 
 .thread-label {
-  font-family: monospace;
+  font-family: var(--font-mono);
   font-size: 12px;
 }
 
@@ -2212,7 +2442,7 @@ mark {
   border: 1px solid var(--border);
   border-radius: var(--radius);
   color: var(--text);
-  font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+  font-family: var(--font-mono);
   font-size: 13px;
   line-height: 1.5;
   resize: none;
@@ -2221,6 +2451,7 @@ mark {
 .memory-editor textarea:focus {
   outline: none;
   border-color: var(--accent);
+  box-shadow: 0 0 0 3px rgba(52, 211, 153, 0.1);
 }
 
 .memory-editor-actions {
@@ -2231,15 +2462,22 @@ mark {
 .btn-save {
   padding: 6px 16px;
   background: var(--accent);
-  color: #fff;
+  color: #09090b;
   border: none;
   border-radius: var(--radius);
   cursor: pointer;
   font-size: 13px;
+  font-weight: 600;
+  transition: background 0.2s, transform 0.2s;
 }
 
 .btn-save:hover {
   background: var(--accent-hover);
+  transform: translateY(-1px);
+}
+
+.btn-save:active {
+  transform: scale(0.98);
 }
 
 .btn-cancel-edit {
@@ -2305,9 +2543,11 @@ mark {
   top: 100%;
   right: 0;
   margin-top: 8px;
-  background: var(--bg-secondary);
+  background: rgba(15, 15, 17, 0.9);
+  backdrop-filter: blur(16px);
+  -webkit-backdrop-filter: blur(16px);
   border: 1px solid var(--border);
-  border-radius: var(--radius);
+  border-radius: var(--radius-lg);
   padding: 12px;
   min-width: 180px;
   box-shadow: var(--shadow);
@@ -2352,29 +2592,28 @@ mark {
 .ext-install-form input:focus {
   outline: none;
   border-color: var(--accent);
-}
-
-.ext-install-form select {
-  padding: 6px 10px;
-  background: var(--bg);
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
-  color: var(--text);
-  font-size: 13px;
+  box-shadow: 0 0 0 3px rgba(52, 211, 153, 0.1);
 }
 
 .ext-install-form button {
   padding: 6px 16px;
   background: var(--accent);
-  color: #fff;
+  color: #09090b;
   border: none;
   border-radius: var(--radius);
   cursor: pointer;
   font-size: 13px;
+  font-weight: 600;
+  transition: background 0.2s, transform 0.2s;
 }
 
 .ext-install-form button:hover {
   background: var(--accent-hover);
+  transform: translateY(-1px);
+}
+
+.ext-install-form button:active {
+  transform: scale(0.98);
 }
 
 /* --- Activity toolbar --- */
@@ -2398,6 +2637,7 @@ mark {
 .activity-toolbar select:focus {
   outline: none;
   border-color: var(--accent);
+  box-shadow: 0 0 0 3px rgba(52, 211, 153, 0.1);
 }
 
 /* --- Mobile responsive --- */
@@ -2410,7 +2650,7 @@ mark {
     padding: 0 8px;
   }
 
-  .tab-bar button {
+  .tab-bar button:not(.status-logs-btn) {
     padding: 8px 12px;
     font-size: 13px;
     white-space: nowrap;
@@ -2496,8 +2736,7 @@ mark {
     align-items: stretch;
   }
 
-  .ext-install-form input,
-  .ext-install-form select {
+  .ext-install-form input {
     width: 100%;
   }
 }

@@ -197,7 +197,7 @@ impl SkillRegistry {
                     let source = make_source(path.clone());
                     match self.load_skill_md(&skill_md, trust, source).await {
                         Ok((name, skill)) => {
-                            tracing::info!("Loaded skill: {}", name);
+                            tracing::debug!("Loaded skill: {}", name);
                             results.push((name, skill));
                         }
                         Err(e) => {

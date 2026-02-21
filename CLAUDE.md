@@ -120,8 +120,7 @@ src/
 ├── llm/                # LLM integration (multi-provider)
 │   ├── mod.rs          # Provider factory, LlmBackend enum
 │   ├── provider.rs     # LlmProvider trait, message types
-│   ├── nearai.rs       # NEAR AI Responses API provider
-│   ├── nearai_chat.rs  # NEAR AI Chat Completions fallback
+│   ├── nearai_chat.rs  # NEAR AI Chat Completions provider (session token + API key auth)
 │   ├── reasoning.rs    # Planning, tool selection, evaluation
 │   ├── session.rs      # Session token management with auto-renewal
 │   ├── circuit_breaker.rs # Circuit breaker for provider failures
@@ -339,13 +338,12 @@ LIBSQL_PATH=~/.ironclaw/ironclaw.db    # libSQL local path (default)
 # LIBSQL_AUTH_TOKEN=xxx                # Required with LIBSQL_URL
 
 # NEAR AI (when LLM_BACKEND=nearai, the default)
-# Two modes: "NEAR AI Chat" (session token) or "NEAR AI Cloud" (API key)
-# NEAR AI Chat (Responses API, default):
-NEARAI_SESSION_TOKEN=sess_...           # session token for chat-api
+# Two auth modes: session token (default) or API key
+# Session token auth (default): uses browser OAuth on first run
+NEARAI_SESSION_TOKEN=sess_...           # hosting providers: set this
 NEARAI_BASE_URL=https://private.near.ai
-# NEAR AI Cloud (Chat Completions API, auto-selected when API key is set):
+# API key auth: set NEARAI_API_KEY, base URL defaults to cloud-api.near.ai
 # NEARAI_API_KEY=...                    # API key from cloud.near.ai
-# NEARAI_BASE_URL=https://cloud-api.near.ai
 NEARAI_MODEL=claude-3-5-sonnet-20241022
 
 # Agent settings
@@ -408,13 +406,13 @@ TINFOIL_MODEL=kimi-k2-5               # Default model
 
 IronClaw supports multiple LLM backends via the `LLM_BACKEND` env var: `nearai` (default), `openai`, `anthropic`, `ollama`, `openai_compatible`, and `tinfoil`.
 
-**NEAR AI Chat** -- Uses the NEAR AI Responses API (`https://private.near.ai/v1/responses`). Authenticates with session tokens (`sess_xxx`) obtained via browser OAuth (GitHub/Google). Supports response chaining (delta-only follow-up messages) for efficient multi-turn conversations. This is the default mode when no `NEARAI_API_KEY` is set. Set `NEARAI_SESSION_TOKEN` env var for hosting providers that inject tokens via environment. Configure with `NEARAI_BASE_URL` (default: `https://private.near.ai`).
+**NEAR AI** -- Uses the Chat Completions API with dual auth support. Session token auth (default): authenticates with session tokens (`sess_xxx`) obtained via browser OAuth (GitHub/Google), base URL defaults to `https://private.near.ai`. API key auth: set `NEARAI_API_KEY` (from `cloud.near.ai`), base URL defaults to `https://cloud-api.near.ai`. Both modes use the same Chat Completions endpoint. Tool messages are flattened to plain text for compatibility. Set `NEARAI_SESSION_TOKEN` env var for hosting providers that inject tokens via environment.
 
 **NEAR AI Cloud** -- Uses the OpenAI-compatible Chat Completions API (`https://cloud-api.near.ai/v1/chat/completions`). Authenticates with API keys from `cloud.near.ai`. Auto-selected when `NEARAI_API_KEY` is set (or explicitly via `NEARAI_API_MODE=chat_completions`). Tool messages are flattened to plain text for compatibility. Configure with `NEARAI_API_KEY` and `NEARAI_BASE_URL` (default: `https://cloud-api.near.ai`).
 
 **OpenAI-compatible** -- Any endpoint that speaks the OpenAI API (vLLM, LiteLLM, OpenRouter, etc.). Configure with `LLM_BASE_URL`, `LLM_API_KEY` (optional), `LLM_MODEL`. Set `LLM_EXTRA_HEADERS` to inject custom HTTP headers into every request (format: `Key:Value,Key2:Value2`), useful for OpenRouter attribution headers like `HTTP-Referer` and `X-Title`.
 
-**Tinfoil** -- Private inference via `https://inference.tinfoil.sh/v1`. Runs models inside hardware-attested TEEs so neither Tinfoil nor the cloud provider can see prompts or responses. Uses the OpenAI-compatible Chat Completions API only (not the Responses API, so tool calls are adapted to chat format). Configure with `TINFOIL_API_KEY` and `TINFOIL_MODEL` (default: `kimi-k2-5`).
+**Tinfoil** -- Private inference via `https://inference.tinfoil.sh/v1`. Runs models inside hardware-attested TEEs so neither Tinfoil nor the cloud provider can see prompts or responses. Uses the OpenAI-compatible Chat Completions API. Configure with `TINFOIL_API_KEY` and `TINFOIL_MODEL` (default: `kimi-k2-5`).
 
 ## Database
 
