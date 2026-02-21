@@ -1473,6 +1473,7 @@ async fn main() -> anyhow::Result<()> {
             heartbeat_enabled: config.heartbeat.enabled,
             heartbeat_interval_secs: config.heartbeat.interval_secs,
             sandbox_enabled: config.sandbox.enabled,
+            docker_status: ironclaw::sandbox::DockerStatus::Disabled,
             claude_code_enabled: config.claude_code.enabled,
             routines_enabled: config.routines.enabled,
             channels: channel_names,
