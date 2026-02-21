@@ -972,10 +972,36 @@ async fn main() -> anyhow::Result<()> {
         tools.register_dev_tools();
     }
 
+    // Proactive Docker detection
+    let docker_status = if config.sandbox.enabled {
+        let detection = ironclaw::sandbox::check_docker().await;
+        match detection.status {
+            ironclaw::sandbox::DockerStatus::Available => {
+                tracing::info!("Docker is available");
+            }
+            ironclaw::sandbox::DockerStatus::NotInstalled => {
+                tracing::warn!(
+                    "Docker is not installed -- sandbox disabled for this session. {}",
+                    detection.platform.install_hint()
+                );
+            }
+            ironclaw::sandbox::DockerStatus::NotRunning => {
+                tracing::warn!(
+                    "Docker is installed but not running -- sandbox disabled for this session. {}",
+                    detection.platform.start_hint()
+                );
+            }
+            ironclaw::sandbox::DockerStatus::Disabled => {}
+        }
+        detection.status
+    } else {
+        ironclaw::sandbox::DockerStatus::Disabled
+    };
+
     // Shared state for job events (used by both orchestrator and web gateway)
     let job_event_tx: Option<
         tokio::sync::broadcast::Sender<(uuid::Uuid, ironclaw::channels::web::types::SseEvent)>,
-    > = if config.sandbox.enabled {
+    > = if config.sandbox.enabled && docker_status.is_ok() {
         let (tx, _) = tokio::sync::broadcast::channel(256);
         Some(tx)
     } else {
@@ -986,7 +1012,9 @@ async fn main() -> anyhow::Result<()> {
         std::collections::VecDeque<ironclaw::orchestrator::api::PendingPrompt>,
     >::new()));
 
-    let container_job_manager: Option<Arc<ContainerJobManager>> = if config.sandbox.enabled {
+    let container_job_manager: Option<Arc<ContainerJobManager>> = if config.sandbox.enabled
+        && docker_status.is_ok()
+    {
         let token_store = TokenStore::new();
         let job_config = ContainerJobConfig {
             image: config.sandbox.image.clone(),
@@ -1473,7 +1501,7 @@ async fn main() -> anyhow::Result<()> {
             heartbeat_enabled: config.heartbeat.enabled,
             heartbeat_interval_secs: config.heartbeat.interval_secs,
             sandbox_enabled: config.sandbox.enabled,
-            docker_status: ironclaw::sandbox::DockerStatus::Disabled,
+            docker_status,
             claude_code_enabled: config.claude_code.enabled,
             routines_enabled: config.routines.enabled,
             channels: channel_names,
