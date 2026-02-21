@@ -23,6 +23,10 @@ pub struct AgentConfig {
     pub max_cost_per_day_cents: Option<u64>,
     /// Maximum LLM/tool actions per hour. None = unlimited.
     pub max_actions_per_hour: Option<u64>,
+    /// Maximum tool-call iterations per agentic loop invocation. Default 50.
+    pub max_tool_iterations: usize,
+    /// When true, skip tool approval checks entirely. For benchmarks/CI.
+    pub auto_approve_tools: bool,
 }
 
 impl AgentConfig {
@@ -115,6 +119,22 @@ impl AgentConfig {
                     key: "MAX_ACTIONS_PER_HOUR".to_string(),
                     message: format!("must be a positive integer: {e}"),
                 })?,
+            max_tool_iterations: optional_env("AGENT_MAX_TOOL_ITERATIONS")?
+                .map(|s| s.parse())
+                .transpose()
+                .map_err(|e| ConfigError::InvalidValue {
+                    key: "AGENT_MAX_TOOL_ITERATIONS".to_string(),
+                    message: format!("must be a positive integer: {e}"),
+                })?
+                .unwrap_or(settings.agent.max_tool_iterations),
+            auto_approve_tools: optional_env("AGENT_AUTO_APPROVE_TOOLS")?
+                .map(|s| s.parse())
+                .transpose()
+                .map_err(|e| ConfigError::InvalidValue {
+                    key: "AGENT_AUTO_APPROVE_TOOLS".to_string(),
+                    message: format!("must be 'true' or 'false': {e}"),
+                })?
+                .unwrap_or(settings.agent.auto_approve_tools),
         })
     }
 }

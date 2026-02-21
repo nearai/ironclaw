@@ -108,21 +108,21 @@ impl Agent {
         // Create a JobContext for tool execution (chat doesn't have a real job)
         let job_ctx = JobContext::with_user(&message.user_id, "chat", "Interactive chat session");
 
-        const MAX_TOOL_ITERATIONS: usize = 10;
+        let max_tool_iterations = self.config.max_tool_iterations;
         // Force a text-only response on the last iteration to guarantee termination
         // instead of hard-erroring. The penultimate iteration also gets a nudge
         // message so the LLM knows it should wrap up.
-        const FORCE_TEXT_AT: usize = MAX_TOOL_ITERATIONS;
-        const NUDGE_AT: usize = MAX_TOOL_ITERATIONS - 1;
+        let force_text_at = max_tool_iterations;
+        let nudge_at = max_tool_iterations.saturating_sub(1);
         let mut iteration = 0;
         loop {
             iteration += 1;
             // Hard ceiling one past the forced-text iteration (should never be reached
-            // since FORCE_TEXT_AT guarantees a text response, but kept as a safety net).
-            if iteration > MAX_TOOL_ITERATIONS + 1 {
+            // since force_text_at guarantees a text response, but kept as a safety net).
+            if iteration > max_tool_iterations + 1 {
                 return Err(crate::error::LlmError::InvalidResponse {
                     provider: "agent".to_string(),
-                    reason: format!("Exceeded maximum tool iterations ({})", MAX_TOOL_ITERATIONS),
+                    reason: format!("Exceeded maximum tool iterations ({max_tool_iterations})"),
                 }
                 .into());
             }
@@ -152,7 +152,7 @@ impl Agent {
 
             // Inject a nudge message when approaching the iteration limit so the
             // LLM is aware it should produce a final answer on the next turn.
-            if iteration == NUDGE_AT {
+            if iteration == nudge_at {
                 context_messages.push(ChatMessage::system(
                     "You are approaching the tool call limit. \
                      Provide your best final answer on the next response \
@@ -161,7 +161,7 @@ impl Agent {
                 ));
             }
 
-            let force_text = iteration >= FORCE_TEXT_AT;
+            let force_text = iteration >= force_text_at;
 
             // Refresh tool definitions each iteration so newly built tools become visible
             let tool_defs = self.tools().tool_definitions().await;
@@ -284,8 +284,9 @@ impl Agent {
                     for (idx, original_tc) in tool_calls.iter().enumerate() {
                         let mut tc = original_tc.clone();
 
-                        // Check if tool requires approval
-                        if let Some(tool) = self.tools().get(&tc.name).await
+                        // Check if tool requires approval (skipped when auto_approve_tools is set)
+                        if !self.config.auto_approve_tools
+                            && let Some(tool) = self.tools().get(&tc.name).await
                             && tool.requires_approval()
                         {
                             let mut is_auto_approved = {
@@ -877,6 +878,8 @@ mod tests {
                 allow_local_tools: false,
                 max_cost_per_day_cents: None,
                 max_actions_per_hour: None,
+                max_tool_iterations: 50,
+                auto_approve_tools: false,
             },
             deps,
             ChannelManager::new(),
