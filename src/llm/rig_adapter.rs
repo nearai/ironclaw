@@ -34,6 +34,9 @@ pub struct RigAdapter<M: CompletionModel> {
     model_name: String,
     input_cost: Decimal,
     output_cost: Decimal,
+    /// When true, inject `cache_control` into requests for Anthropic prompt caching.
+    /// Only set for the direct Anthropic backend.
+    enable_prompt_cache: bool,
 }
 
 impl<M: CompletionModel> RigAdapter<M> {
@@ -47,7 +50,18 @@ impl<M: CompletionModel> RigAdapter<M> {
             model_name: name,
             input_cost,
             output_cost,
+            enable_prompt_cache: false,
         }
+    }
+
+    /// Enable Anthropic prompt caching.
+    ///
+    /// When enabled, `cache_control: {"type": "ephemeral"}` is injected into
+    /// every request so Anthropic caches the prompt prefix server-side.
+    /// Only call this for the direct Anthropic backend.
+    pub fn with_prompt_cache(mut self, enabled: bool) -> Self {
+        self.enable_prompt_cache = enabled;
+        self
     }
 }
 
@@ -360,13 +374,27 @@ fn saturate_u32(val: u64) -> u32 {
     val.min(u32::MAX as u64) as u32
 }
 
-/// Returns `true` if the model name indicates an Anthropic Claude model.
-fn is_anthropic_model(name: &str) -> bool {
+/// Returns `true` if the model supports Anthropic prompt caching.
+///
+/// Per Anthropic docs, only Claude 3+ models support prompt caching.
+/// Unsupported: claude-2, claude-2.1, claude-instant-*.
+fn supports_prompt_cache(name: &str) -> bool {
     let lower = name.to_lowercase();
-    lower.starts_with("claude") || lower.starts_with("anthropic/claude")
+    // Strip optional provider prefix (e.g. "anthropic/claude-...")
+    let model = lower.strip_prefix("anthropic/").unwrap_or(&lower);
+    // Must be a Claude model
+    if !model.starts_with("claude") {
+        return false;
+    }
+    // Exclude legacy models that predate caching support
+    if model.contains("claude-2") || model.contains("instant") {
+        return false;
+    }
+    true
 }
 
 /// Build a rig-core CompletionRequest from our internal types.
+#[allow(clippy::too_many_arguments)]
 fn build_rig_request(
     model_name: &str,
     preamble: Option<String>,
@@ -375,6 +403,7 @@ fn build_rig_request(
     tool_choice: Option<RigToolChoice>,
     temperature: Option<f32>,
     max_tokens: Option<u32>,
+    enable_prompt_cache: bool,
 ) -> Result<RigRequest, LlmError> {
     // rig-core requires at least one message in chat_history
     if history.is_empty() {
@@ -389,11 +418,19 @@ fn build_rig_request(
     // Enable Anthropic prompt caching via automatic cache_control.
     // Anthropic auto-places the cache breakpoint at the last cacheable block,
     // caching the prefix (tools → system → messages) for subsequent requests.
-    let additional_params = if is_anthropic_model(model_name) {
+    // Only Claude 3+ models support caching; older models (claude-2, instant)
+    // return 400 if cache_control is present.
+    let additional_params = if enable_prompt_cache && supports_prompt_cache(model_name) {
         tracing::debug!(model = model_name, "Injecting cache_control for Anthropic prompt caching");
         Some(serde_json::json!({
             "cache_control": {"type": "ephemeral"}
         }))
+    } else if enable_prompt_cache {
+        tracing::warn!(
+            model = model_name,
+            "Prompt caching enabled but model does not support it; skipping cache_control"
+        );
+        None
     } else {
         None
     };
@@ -447,6 +484,7 @@ where
             None,
             request.temperature,
             request.max_tokens,
+            self.enable_prompt_cache,
         )?;
 
         let response =
@@ -514,6 +552,7 @@ where
             tool_choice,
             request.temperature,
             request.max_tokens,
+            self.enable_prompt_cache,
         )?;
 
         let response =
@@ -921,33 +960,8 @@ mod tests {
         assert_eq!(normalize_tool_name("other_tool", &known), "other_tool");
     }
 
-    // -- is_anthropic_model tests --
-
     #[test]
-    fn test_is_anthropic_model_claude_variants() {
-        assert!(is_anthropic_model("claude-sonnet-4-6"));
-        assert!(is_anthropic_model("claude-opus-4-5"));
-        assert!(is_anthropic_model("claude-haiku-4-5"));
-        assert!(is_anthropic_model("claude-3-5-sonnet-20241022"));
-        assert!(is_anthropic_model("Claude-Sonnet-4-6")); // case-insensitive
-    }
-
-    #[test]
-    fn test_is_anthropic_model_with_provider_prefix() {
-        assert!(is_anthropic_model("anthropic/claude-sonnet-4-6"));
-        assert!(is_anthropic_model("Anthropic/Claude-Opus-4-5"));
-    }
-
-    #[test]
-    fn test_is_anthropic_model_non_claude() {
-        assert!(!is_anthropic_model("gpt-4o"));
-        assert!(!is_anthropic_model("llama3"));
-        assert!(!is_anthropic_model("gemini-2.5-flash"));
-        assert!(!is_anthropic_model("minimax-m2.5"));
-    }
-
-    #[test]
-    fn test_build_rig_request_injects_cache_control_for_claude() {
+    fn test_build_rig_request_injects_cache_control_when_enabled() {
         let req = build_rig_request(
             "claude-sonnet-4-6",
             Some("You are helpful.".to_string()),
@@ -956,33 +970,61 @@ mod tests {
             None,
             None,
             None,
+            true, // enable_prompt_cache
         )
         .unwrap();
 
-        let params = req.additional_params.expect("should have additional_params for Claude");
+        let params = req.additional_params.expect("should have additional_params when cache enabled");
         assert_eq!(
             params["cache_control"]["type"],
             "ephemeral",
-            "cache_control should be set to ephemeral for Anthropic models"
+            "cache_control should be set to ephemeral when prompt cache is enabled"
         );
     }
 
     #[test]
-    fn test_build_rig_request_no_cache_control_for_non_claude() {
+    fn test_build_rig_request_no_cache_control_when_disabled() {
         let req = build_rig_request(
-            "gpt-4o",
+            "claude-sonnet-4-6",
             Some("You are helpful.".to_string()),
             vec![RigMessage::user("Hello")],
             Vec::new(),
             None,
             None,
             None,
+            false, // enable_prompt_cache disabled
         )
         .unwrap();
 
         assert!(
             req.additional_params.is_none(),
-            "additional_params should be None for non-Anthropic models"
+            "additional_params should be None when prompt cache is disabled"
         );
+    }
+
+    // -- supports_prompt_cache tests --
+
+    #[test]
+    fn test_supports_prompt_cache_supported_models() {
+        // All Claude 3+ models per Anthropic docs
+        assert!(supports_prompt_cache("claude-opus-4-6"));
+        assert!(supports_prompt_cache("claude-sonnet-4-6"));
+        assert!(supports_prompt_cache("claude-sonnet-4"));
+        assert!(supports_prompt_cache("claude-haiku-4-5"));
+        assert!(supports_prompt_cache("claude-3-5-sonnet-20241022"));
+        assert!(supports_prompt_cache("claude-haiku-3"));
+        assert!(supports_prompt_cache("Claude-Opus-4-5")); // case-insensitive
+        assert!(supports_prompt_cache("anthropic/claude-sonnet-4-6")); // provider prefix
+    }
+
+    #[test]
+    fn test_supports_prompt_cache_unsupported_models() {
+        // Legacy Claude models that predate caching
+        assert!(!supports_prompt_cache("claude-2"));
+        assert!(!supports_prompt_cache("claude-2.1"));
+        assert!(!supports_prompt_cache("claude-instant-1.2"));
+        // Non-Claude models
+        assert!(!supports_prompt_cache("gpt-4o"));
+        assert!(!supports_prompt_cache("llama3"));
     }
 }
