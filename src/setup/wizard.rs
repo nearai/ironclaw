@@ -8,7 +8,8 @@
 //! 5. Embeddings
 //! 6. Channel configuration
 //! 7. Extensions (tool installation from registry)
-//! 8. Heartbeat (background tasks)
+//! 8. Docker sandbox
+//! 9. Heartbeat (background tasks)
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -140,7 +141,7 @@ impl SetupWizard {
             print_step(1, 1, "Channel Configuration");
             self.step_channels().await?;
         } else {
-            let total_steps = 8;
+            let total_steps = 9;
 
             // Step 1: Database
             print_step(1, total_steps, "Database Connection");
@@ -191,8 +192,13 @@ impl SetupWizard {
             print_step(7, total_steps, "Extensions");
             self.step_extensions().await?;
 
-            // Step 8: Heartbeat
-            print_step(8, total_steps, "Background Tasks");
+            // Step 8: Docker Sandbox
+            print_step(8, total_steps, "Docker Sandbox");
+            self.step_docker_sandbox().await?;
+            self.persist_after_step().await;
+
+            // Step 9: Heartbeat
+            print_step(9, total_steps, "Background Tasks");
             self.step_heartbeat()?;
             self.persist_after_step().await;
         }
@@ -1723,7 +1729,75 @@ impl SetupWizard {
         Ok(())
     }
 
-    /// Step 8: Heartbeat configuration.
+    /// Step 8: Docker Sandbox -- check Docker installation and availability.
+    async fn step_docker_sandbox(&mut self) -> Result<(), SetupError> {
+        print_info("The Docker sandbox provides isolated execution for code generation,");
+        print_info("builds, and untrusted commands. It requires Docker to be installed.");
+        println!();
+
+        if !confirm("Enable Docker sandbox?", false).map_err(SetupError::Io)? {
+            self.settings.sandbox.enabled = false;
+            print_info("Sandbox disabled. You can enable it later with SANDBOX_ENABLED=true.");
+            return Ok(());
+        }
+
+        // Check Docker availability
+        let detection = crate::sandbox::detect::check_docker().await;
+
+        match detection.status {
+            crate::sandbox::detect::DockerStatus::Available => {
+                self.settings.sandbox.enabled = true;
+                print_success("Docker is installed and running. Sandbox enabled.");
+            }
+            crate::sandbox::detect::DockerStatus::NotInstalled => {
+                println!();
+                print_error("Docker is not installed.");
+                print_info(detection.platform.install_hint());
+                println!();
+
+                if confirm("Retry after installing Docker?", false).map_err(SetupError::Io)? {
+                    let retry = crate::sandbox::detect::check_docker().await;
+                    if retry.status.is_ok() {
+                        self.settings.sandbox.enabled = true;
+                        print_success("Docker is now available. Sandbox enabled.");
+                    } else {
+                        self.settings.sandbox.enabled = false;
+                        print_info("Docker still not available. Sandbox disabled for now.");
+                    }
+                } else {
+                    self.settings.sandbox.enabled = false;
+                    print_info("Sandbox disabled. Install Docker and set SANDBOX_ENABLED=true later.");
+                }
+            }
+            crate::sandbox::detect::DockerStatus::NotRunning => {
+                println!();
+                print_error("Docker is installed but not running.");
+                print_info(detection.platform.start_hint());
+                println!();
+
+                if confirm("Retry after starting Docker?", false).map_err(SetupError::Io)? {
+                    let retry = crate::sandbox::detect::check_docker().await;
+                    if retry.status.is_ok() {
+                        self.settings.sandbox.enabled = true;
+                        print_success("Docker is now running. Sandbox enabled.");
+                    } else {
+                        self.settings.sandbox.enabled = false;
+                        print_info("Docker still not responding. Sandbox disabled for now.");
+                    }
+                } else {
+                    self.settings.sandbox.enabled = false;
+                    print_info("Sandbox disabled. Start Docker and set SANDBOX_ENABLED=true later.");
+                }
+            }
+            crate::sandbox::detect::DockerStatus::Disabled => {
+                self.settings.sandbox.enabled = false;
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Step 9: Heartbeat configuration.
     fn step_heartbeat(&mut self) -> Result<(), SetupError> {
         print_info("Heartbeat runs periodic background tasks (e.g., checking your calendar,");
         print_info("monitoring for notifications, running scheduled workflows).");
