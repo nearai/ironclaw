@@ -37,6 +37,12 @@ pub struct ThreadListResponse {
     /// Regular conversation threads.
     pub threads: Vec<ThreadInfo>,
     pub active_thread: Option<Uuid>,
+    /// Whether additional conversation pages are available.
+    #[serde(default)]
+    pub has_more: bool,
+    /// Offset cursor for the next page.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub next_offset: Option<usize>,
 }
 
 #[derive(Debug, Serialize)]

@@ -1,0 +1,57 @@
+[
+  {
+    "uuid": "web-1",
+    "name": "Rust lifetimes",
+    "created_at": "2025-01-15T10:00:00.000Z",
+    "updated_at": "2025-01-15T10:30:00.000Z",
+    "chat_messages": [
+      {
+        "uuid": "msg-001",
+        "sender": "human",
+        "text": "Can you explain lifetimes?",
+        "created_at": "2025-01-15T10:00:05.000Z",
+        "attachments": [{ "id": "att-1", "name": "snippet.rs" }],
+        "files": []
+      },
+      {
+        "uuid": "msg-002",
+        "sender": "assistant",
+        "text": "Lifetimes describe how long references are valid.",
+        "created_at": "2025-01-15T10:00:12.000Z"
+      }
+    ]
+  },
+  {
+    "uuid": "web-2",
+    "name": "CI flakes",
+    "created_at": "2025-01-16T09:00:00.000Z",
+    "updated_at": "2025-01-16T09:05:00.000Z",
+    "chat_messages": [
+      {
+        "sender": "human",
+        "text": "Why is this CI test flaky?",
+        "created_at": "2025-01-16T09:00:05.000Z",
+        "attachments": [],
+        "files": [{ "path": "logs/output.txt" }]
+      },
+      {
+        "sender": "assistant",
+        "text": "Likely timing/race conditions in setup.",
+        "created_at": "2025-01-16T09:00:10.000Z"
+      }
+    ]
+  },
+  {
+    "uuid": "web-3",
+    "name": "Release checklist",
+    "created_at": "2025-01-17T11:00:00.000Z",
+    "updated_at": "2025-01-17T11:01:00.000Z",
+    "chat_messages": [
+      {
+        "sender": "human",
+        "text": "Give me a release checklist",
+        "created_at": "2025-01-17T11:00:05.000Z"
+      }
+    ]
+  }
+]

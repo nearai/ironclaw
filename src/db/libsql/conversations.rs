@@ -5,7 +5,9 @@ use chrono::{DateTime, Utc};
 use libsql::params;
 use uuid::Uuid;
 
-use super::{LibSqlBackend, fmt_ts, get_i64, get_json, get_opt_text, get_text, get_ts, opt_text};
+use super::{
+    LibSqlBackend, fmt_opt_ts, fmt_ts, get_i64, get_json, get_opt_text, get_text, get_ts, opt_text,
+};
 use crate::db::ConversationStore;
 use crate::error::DatabaseError;
 use crate::history::{ConversationMessage, ConversationSummary};
@@ -60,6 +62,30 @@ impl ConversationStore for LibSqlBackend {
         Ok(id)
     }
 
+    async fn add_conversation_message_at(
+        &self,
+        conversation_id: Uuid,
+        role: &str,
+        content: &str,
+        created_at: DateTime<Utc>,
+    ) -> Result<Uuid, DatabaseError> {
+        let conn = self.connect().await?;
+        let id = Uuid::new_v4();
+        conn.execute(
+            "INSERT INTO conversation_messages (id, conversation_id, role, content, created_at) VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![
+                id.to_string(),
+                conversation_id.to_string(),
+                role,
+                content,
+                fmt_ts(&created_at)
+            ],
+        )
+        .await
+        .map_err(|e| DatabaseError::Query(e.to_string()))?;
+        Ok(id)
+    }
+
     async fn ensure_conversation(
         &self,
         id: Uuid,
@@ -86,6 +112,7 @@ impl ConversationStore for LibSqlBackend {
         &self,
         user_id: &str,
         channel: &str,
+        offset: i64,
         limit: i64,
     ) -> Result<Vec<ConversationSummary>, DatabaseError> {
         let conn = self.connect().await?;
@@ -98,18 +125,25 @@ impl ConversationStore for LibSqlBackend {
                     c.last_activity,
                     c.metadata,
                     (SELECT COUNT(*) FROM conversation_messages m WHERE m.conversation_id = c.id) AS message_count,
-                    (SELECT substr(m2.content, 1, 100)
-                     FROM conversation_messages m2
-                     WHERE m2.conversation_id = c.id AND m2.role = 'user'
+                    COALESCE(
+                        NULLIF(json_extract(c.metadata, '$.title'), ''),
+                        (SELECT substr(m2.content, 1, 100)
+                         FROM conversation_messages m2
+                         WHERE m2.conversation_id = c.id AND m2.role = 'user'
                      ORDER BY m2.created_at ASC, m2.rowid ASC
                      LIMIT 1
+                        )
                     ) AS title
                 FROM conversations c
                 WHERE c.user_id = ?1 AND c.channel = ?2
-                ORDER BY c.last_activity DESC
-                LIMIT ?3
+                  AND (
+                    json_extract(c.metadata, '$.thread_type') IS NULL
+                    OR json_extract(c.metadata, '$.thread_type') != 'assistant'
+                  )
+                ORDER BY c.last_activity DESC, c.id DESC
+                LIMIT ?3 OFFSET ?4
                 "#,
-                params![user_id, channel, limit],
+                params![user_id, channel, limit, offset],
             )
             .await
             .map_err(|e| DatabaseError::Query(e.to_string()))?;
@@ -199,6 +233,81 @@ impl ConversationStore for LibSqlBackend {
         .await
         .map_err(|e| DatabaseError::Query(e.to_string()))?;
         Ok(id)
+    }
+
+    async fn set_conversation_time_bounds(
+        &self,
+        id: Uuid,
+        started_at: Option<DateTime<Utc>>,
+        last_activity: Option<DateTime<Utc>>,
+    ) -> Result<(), DatabaseError> {
+        let conn = self.connect().await?;
+        conn.execute(
+            r#"
+            UPDATE conversations
+            SET started_at = COALESCE(?2, started_at),
+                last_activity = COALESCE(?3, last_activity)
+            WHERE id = ?1
+            "#,
+            params![
+                id.to_string(),
+                fmt_opt_ts(&started_at),
+                fmt_opt_ts(&last_activity)
+            ],
+        )
+        .await
+        .map_err(|e| DatabaseError::Query(e.to_string()))?;
+        Ok(())
+    }
+
+    async fn find_conversation_by_import_source(
+        &self,
+        user_id: &str,
+        channel: &str,
+        source: &str,
+        source_id: &str,
+    ) -> Result<Option<Uuid>, DatabaseError> {
+        let conn = self.connect().await?;
+        let mut rows = conn
+            .query(
+                r#"
+                SELECT id
+                FROM conversations
+                WHERE user_id = ?1
+                  AND channel = ?2
+                  AND json_extract(metadata, '$.import.source') = ?3
+                  AND json_extract(metadata, '$.import.source_id') = ?4
+                LIMIT 1
+                "#,
+                params![user_id, channel, source, source_id],
+            )
+            .await
+            .map_err(|e| DatabaseError::Query(e.to_string()))?;
+
+        if let Some(row) = rows
+            .next()
+            .await
+            .map_err(|e| DatabaseError::Query(e.to_string()))?
+        {
+            let id = get_text(&row, 0);
+            let parsed = id.parse().map_err(|e| {
+                DatabaseError::Serialization(format!("invalid conversation id '{}': {}", id, e))
+            })?;
+            return Ok(Some(parsed));
+        }
+
+        Ok(None)
+    }
+
+    async fn delete_conversation(&self, id: Uuid) -> Result<(), DatabaseError> {
+        let conn = self.connect().await?;
+        conn.execute(
+            "DELETE FROM conversations WHERE id = ?1",
+            params![id.to_string()],
+        )
+        .await
+        .map_err(|e| DatabaseError::Query(e.to_string()))?;
+        Ok(())
     }
 
     async fn list_conversation_messages_paginated(
@@ -331,6 +440,30 @@ impl ConversationStore for LibSqlBackend {
             });
         }
         Ok(messages)
+    }
+
+    async fn count_conversation_messages(
+        &self,
+        conversation_id: Uuid,
+    ) -> Result<i64, DatabaseError> {
+        let conn = self.connect().await?;
+        let mut rows = conn
+            .query(
+                "SELECT COUNT(*) FROM conversation_messages WHERE conversation_id = ?1",
+                params![conversation_id.to_string()],
+            )
+            .await
+            .map_err(|e| DatabaseError::Query(e.to_string()))?;
+
+        if let Some(row) = rows
+            .next()
+            .await
+            .map_err(|e| DatabaseError::Query(e.to_string()))?
+        {
+            return Ok(get_i64(&row, 0));
+        }
+
+        Ok(0)
     }
 
     async fn conversation_belongs_to_user(

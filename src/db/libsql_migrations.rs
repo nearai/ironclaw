@@ -41,6 +41,13 @@ CREATE TABLE IF NOT EXISTS conversations (
 CREATE INDEX IF NOT EXISTS idx_conversations_channel ON conversations(channel);
 CREATE INDEX IF NOT EXISTS idx_conversations_user ON conversations(user_id);
 CREATE INDEX IF NOT EXISTS idx_conversations_last_activity ON conversations(last_activity);
+CREATE INDEX IF NOT EXISTS idx_conversations_import_source_lookup
+    ON conversations(
+        user_id,
+        channel,
+        json_extract(metadata, '$.import.source'),
+        json_extract(metadata, '$.import.source_id')
+    );
 
 CREATE TABLE IF NOT EXISTS conversation_messages (
     id TEXT PRIMARY KEY,
