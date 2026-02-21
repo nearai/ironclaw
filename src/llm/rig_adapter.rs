@@ -35,7 +35,8 @@ pub struct RigAdapter<M: CompletionModel> {
     model_name: String,
     input_cost: Decimal,
     output_cost: Decimal,
-    /// When true, inject `cache_control` into requests for Anthropic prompt caching.
+    /// Prompt cache retention policy.
+    /// When not `CacheRetention::None`, injects `cache_control` into requests for Anthropic prompt caching.
     /// Only set for the direct Anthropic backend.
     cache_retention: CacheRetention,
 }
