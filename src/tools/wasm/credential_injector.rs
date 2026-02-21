@@ -79,41 +79,60 @@ impl SharedCredentialRegistry {
 
     /// Add credential mappings (called when WASM tools register).
     pub fn add_mappings(&self, mappings: impl IntoIterator<Item = CredentialMapping>) {
-        if let Ok(mut guard) = self.mappings.write() {
-            guard.extend(mappings);
+        match self.mappings.write() {
+            Ok(mut guard) => {
+                guard.extend(mappings);
+            }
+            Err(poisoned) => {
+                tracing::warn!(
+                    "SharedCredentialRegistry RwLock poisoned during add_mappings; recovering"
+                );
+                let mut guard = poisoned.into_inner();
+                guard.extend(mappings);
+            }
         }
     }
 
     /// Check if any credential mapping matches this host (sync, for requires_approval).
     pub fn has_credentials_for_host(&self, host: &str) -> bool {
-        if let Ok(guard) = self.mappings.read() {
-            guard.iter().any(|mapping| {
+        let guard = match self.mappings.read() {
+            Ok(guard) => guard,
+            Err(poisoned) => {
+                tracing::warn!(
+                    "SharedCredentialRegistry RwLock poisoned during has_credentials_for_host; recovering"
+                );
+                poisoned.into_inner()
+            }
+        };
+        guard.iter().any(|mapping| {
+            mapping
+                .host_patterns
+                .iter()
+                .any(|pattern| host_matches_pattern(host, pattern))
+        })
+    }
+
+    /// Get all credential mappings matching a host (for injection).
+    pub fn find_for_host(&self, host: &str) -> Vec<CredentialMapping> {
+        let guard = match self.mappings.read() {
+            Ok(guard) => guard,
+            Err(poisoned) => {
+                tracing::warn!(
+                    "SharedCredentialRegistry RwLock poisoned during find_for_host; recovering"
+                );
+                poisoned.into_inner()
+            }
+        };
+        guard
+            .iter()
+            .filter(|mapping| {
                 mapping
                     .host_patterns
                     .iter()
                     .any(|pattern| host_matches_pattern(host, pattern))
             })
-        } else {
-            false
-        }
-    }
-
-    /// Get all credential mappings matching a host (for injection).
-    pub fn find_for_host(&self, host: &str) -> Vec<CredentialMapping> {
-        if let Ok(guard) = self.mappings.read() {
-            guard
-                .iter()
-                .filter(|mapping| {
-                    mapping
-                        .host_patterns
-                        .iter()
-                        .any(|pattern| host_matches_pattern(host, pattern))
-                })
-                .cloned()
-                .collect()
-        } else {
-            Vec::new()
-        }
+            .cloned()
+            .collect()
     }
 }
 
@@ -233,7 +252,7 @@ impl CredentialInjector {
 }
 
 /// Inject a single credential into the result.
-pub fn inject_credential(
+pub(crate) fn inject_credential(
     result: &mut InjectedCredentials,
     location: &CredentialLocation,
     secret: &DecryptedSecret,
@@ -272,7 +291,7 @@ pub fn inject_credential(
 }
 
 /// Check if a host matches a pattern (supports wildcards).
-pub fn host_matches_pattern(host: &str, pattern: &str) -> bool {
+pub(crate) fn host_matches_pattern(host: &str, pattern: &str) -> bool {
     if pattern == host {
         return true;
     }

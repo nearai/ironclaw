@@ -311,6 +311,7 @@ impl Tool for HttpTool {
                         }
                         for (name, value) in &injected.query_params {
                             parsed_url.query_pairs_mut().append_pair(name, value);
+                            request = request.query(&[(name.as_str(), value.as_str())]);
                         }
                     }
                     Err(e) => {
