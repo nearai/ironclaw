@@ -557,9 +557,13 @@ pub async fn clear_auth_mode(state: &GatewayState) {
 async fn chat_events_handler(
     State(state): State<Arc<GatewayState>>,
 ) -> Result<impl IntoResponse, (StatusCode, String)> {
-    state.sse.subscribe().ok_or((
+    let sse = state.sse.subscribe().ok_or((
         StatusCode::SERVICE_UNAVAILABLE,
         "Too many connections".to_string(),
+    ))?;
+    Ok((
+        [("X-Accel-Buffering", "no"), ("Cache-Control", "no-cache")],
+        sse,
     ))
 }
 
@@ -1585,10 +1589,7 @@ async fn job_files_read_handler(
 
 async fn logs_events_handler(
     State(state): State<Arc<GatewayState>>,
-) -> Result<
-    Sse<impl futures::Stream<Item = Result<Event, Infallible>> + Send + 'static>,
-    (StatusCode, String),
-> {
+) -> Result<impl IntoResponse, (StatusCode, String)> {
     let broadcaster = state.log_broadcaster.as_ref().ok_or((
         StatusCode::SERVICE_UNAVAILABLE,
         "Log broadcaster not available".to_string(),
@@ -1601,22 +1602,25 @@ async fn logs_events_handler(
 
     let history_stream = futures::stream::iter(history).map(|entry| {
         let data = serde_json::to_string(&entry).unwrap_or_default();
-        Ok(Event::default().event("log").data(data))
+        Ok::<_, Infallible>(Event::default().event("log").data(data))
     });
 
     let live_stream = tokio_stream::wrappers::BroadcastStream::new(rx)
         .filter_map(|result| result.ok())
         .map(|entry| {
             let data = serde_json::to_string(&entry).unwrap_or_default();
-            Ok(Event::default().event("log").data(data))
+            Ok::<_, Infallible>(Event::default().event("log").data(data))
         });
 
     let stream = history_stream.chain(live_stream);
 
-    Ok(Sse::new(stream).keep_alive(
-        KeepAlive::new()
-            .interval(std::time::Duration::from_secs(30))
-            .text(""),
+    Ok((
+        [("X-Accel-Buffering", "no"), ("Cache-Control", "no-cache")],
+        Sse::new(stream).keep_alive(
+            KeepAlive::new()
+                .interval(std::time::Duration::from_secs(30))
+                .text(""),
+        ),
     ))
 }
 
