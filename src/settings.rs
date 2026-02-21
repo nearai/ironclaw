@@ -302,6 +302,14 @@ pub struct AgentSettings {
     /// longer than this are pruned from memory.
     #[serde(default = "default_session_idle_timeout")]
     pub session_idle_timeout_secs: u64,
+
+    /// Maximum tool-call iterations per agentic loop invocation (default: 50).
+    #[serde(default = "default_max_tool_iterations")]
+    pub max_tool_iterations: usize,
+
+    /// When true, skip tool approval checks entirely. For benchmarks/CI.
+    #[serde(default)]
+    pub auto_approve_tools: bool,
 }
 
 fn default_agent_name() -> String {
@@ -332,6 +340,10 @@ fn default_max_repair_attempts() -> u32 {
     3
 }
 
+fn default_max_tool_iterations() -> usize {
+    50
+}
+
 fn default_true() -> bool {
     true
 }
@@ -347,6 +359,8 @@ impl Default for AgentSettings {
             repair_check_interval_secs: default_repair_interval(),
             max_repair_attempts: default_max_repair_attempts(),
             session_idle_timeout_secs: default_session_idle_timeout(),
+            max_tool_iterations: default_max_tool_iterations(),
+            auto_approve_tools: false,
         }
     }
 }

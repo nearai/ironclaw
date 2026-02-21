@@ -300,6 +300,51 @@ impl ChannelHostState {
     }
 }
 
+/// In-memory workspace store for WASM channels.
+///
+/// Persists workspace writes across callback invocations within a single
+/// channel lifetime. This allows WASM channels to maintain state (e.g.,
+/// Telegram polling offsets) between poll ticks without requiring a
+/// full database-backed workspace.
+///
+/// Uses `std::sync::RwLock` (not tokio) because WASM execution runs
+/// inside `spawn_blocking`.
+pub struct ChannelWorkspaceStore {
+    data: std::sync::RwLock<std::collections::HashMap<String, String>>,
+}
+
+impl ChannelWorkspaceStore {
+    /// Create a new empty workspace store.
+    pub fn new() -> Self {
+        Self {
+            data: std::sync::RwLock::new(std::collections::HashMap::new()),
+        }
+    }
+
+    /// Commit pending writes from a callback execution into the store.
+    pub fn commit_writes(&self, writes: &[PendingWorkspaceWrite]) {
+        if writes.is_empty() {
+            return;
+        }
+        if let Ok(mut data) = self.data.write() {
+            for write in writes {
+                tracing::debug!(
+                    path = %write.path,
+                    content_len = write.content.len(),
+                    "Committing workspace write to channel store"
+                );
+                data.insert(write.path.clone(), write.content.clone());
+            }
+        }
+    }
+}
+
+impl crate::tools::wasm::WorkspaceReader for ChannelWorkspaceStore {
+    fn read(&self, path: &str) -> Option<String> {
+        self.data.read().ok()?.get(path).cloned()
+    }
+}
+
 /// Rate limiter for channel message emission.
 ///
 /// Tracks emission rates across multiple executions.
@@ -496,5 +541,57 @@ mod tests {
         let state = ChannelHostState::new("telegram", caps);
 
         assert_eq!(state.channel_name(), "telegram");
+    }
+
+    #[test]
+    fn test_channel_workspace_store_commit_and_read() {
+        use crate::channels::wasm::host::{ChannelWorkspaceStore, PendingWorkspaceWrite};
+        use crate::tools::wasm::WorkspaceReader;
+
+        let store = ChannelWorkspaceStore::new();
+
+        // Initially empty
+        assert!(store.read("channels/telegram/offset").is_none());
+
+        // Commit some writes
+        let writes = vec![
+            PendingWorkspaceWrite {
+                path: "channels/telegram/offset".to_string(),
+                content: "103".to_string(),
+            },
+            PendingWorkspaceWrite {
+                path: "channels/telegram/state.json".to_string(),
+                content: r#"{"ok":true}"#.to_string(),
+            },
+        ];
+        store.commit_writes(&writes);
+
+        // Should be readable
+        assert_eq!(
+            store.read("channels/telegram/offset"),
+            Some("103".to_string())
+        );
+        assert_eq!(
+            store.read("channels/telegram/state.json"),
+            Some(r#"{"ok":true}"#.to_string())
+        );
+
+        // Overwrite a value
+        let writes2 = vec![PendingWorkspaceWrite {
+            path: "channels/telegram/offset".to_string(),
+            content: "200".to_string(),
+        }];
+        store.commit_writes(&writes2);
+        assert_eq!(
+            store.read("channels/telegram/offset"),
+            Some("200".to_string())
+        );
+
+        // Empty writes are a no-op
+        store.commit_writes(&[]);
+        assert_eq!(
+            store.read("channels/telegram/offset"),
+            Some("200".to_string())
+        );
     }
 }

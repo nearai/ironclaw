@@ -71,7 +71,6 @@ impl LlmProvider for MockLlmProvider {
             input_tokens: 10,
             output_tokens: 5,
             finish_reason: FinishReason::Stop,
-            response_id: None,
         })
     }
 
@@ -97,7 +96,6 @@ impl LlmProvider for MockLlmProvider {
                 input_tokens: 15,
                 output_tokens: 8,
                 finish_reason: FinishReason::ToolUse,
-                response_id: None,
             })
         } else {
             Ok(ToolCompletionResponse {
@@ -106,7 +104,6 @@ impl LlmProvider for MockLlmProvider {
                 input_tokens: 10,
                 output_tokens: 4,
                 finish_reason: FinishReason::Stop,
-                response_id: None,
             })
         }
     }
@@ -145,7 +142,6 @@ impl LlmProvider for FixedModelProvider {
             input_tokens: 10,
             output_tokens: 5,
             finish_reason: FinishReason::Stop,
-            response_id: None,
         })
     }
 
@@ -159,7 +155,6 @@ impl LlmProvider for FixedModelProvider {
             input_tokens: 10,
             output_tokens: 5,
             finish_reason: FinishReason::Stop,
-            response_id: None,
         })
     }
 
@@ -190,6 +185,7 @@ async fn start_test_server_with_provider(
         workspace: None,
         session_manager: None,
         log_broadcaster: None,
+        log_level_handle: None,
         extension_manager: None,
         tool_registry: None,
         store: None,
@@ -202,6 +198,8 @@ async fn start_test_server_with_provider(
         skill_registry: None,
         skill_catalog: None,
         chat_rate_limiter: ironclaw::channels::web::server::RateLimiter::new(30, 60),
+        cost_guard: None,
+        startup_time: std::time::Instant::now(),
     });
 
     let addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
@@ -674,6 +672,7 @@ async fn test_no_llm_provider_returns_503() {
         workspace: None,
         session_manager: None,
         log_broadcaster: None,
+        log_level_handle: None,
         extension_manager: None,
         tool_registry: None,
         store: None,
@@ -686,6 +685,8 @@ async fn test_no_llm_provider_returns_503() {
         skill_registry: None,
         skill_catalog: None,
         chat_rate_limiter: ironclaw::channels::web::server::RateLimiter::new(30, 60),
+        cost_guard: None,
+        startup_time: std::time::Instant::now(),
     });
 
     let addr: SocketAddr = "127.0.0.1:0".parse().unwrap();

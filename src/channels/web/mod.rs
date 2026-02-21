@@ -41,7 +41,7 @@ use crate::skills::registry::SkillRegistry;
 use crate::tools::ToolRegistry;
 use crate::workspace::Workspace;
 
-use self::log_layer::LogBroadcaster;
+use self::log_layer::{LogBroadcaster, LogLevelHandle};
 
 use self::server::GatewayState;
 use self::sse::SseManager;
@@ -76,6 +76,7 @@ impl GatewayChannel {
             workspace: None,
             session_manager: None,
             log_broadcaster: None,
+            log_level_handle: None,
             extension_manager: None,
             tool_registry: None,
             store: None,
@@ -88,6 +89,8 @@ impl GatewayChannel {
             skill_registry: None,
             skill_catalog: None,
             chat_rate_limiter: server::RateLimiter::new(30, 60),
+            cost_guard: None,
+            startup_time: std::time::Instant::now(),
         });
 
         Self {
@@ -105,6 +108,7 @@ impl GatewayChannel {
             workspace: self.state.workspace.clone(),
             session_manager: self.state.session_manager.clone(),
             log_broadcaster: self.state.log_broadcaster.clone(),
+            log_level_handle: self.state.log_level_handle.clone(),
             extension_manager: self.state.extension_manager.clone(),
             tool_registry: self.state.tool_registry.clone(),
             store: self.state.store.clone(),
@@ -117,6 +121,8 @@ impl GatewayChannel {
             skill_registry: self.state.skill_registry.clone(),
             skill_catalog: self.state.skill_catalog.clone(),
             chat_rate_limiter: server::RateLimiter::new(30, 60),
+            cost_guard: self.state.cost_guard.clone(),
+            startup_time: self.state.startup_time,
         };
         mutate(&mut new_state);
         self.state = Arc::new(new_state);
@@ -137,6 +143,12 @@ impl GatewayChannel {
     /// Inject the log broadcaster for the logs SSE endpoint.
     pub fn with_log_broadcaster(mut self, lb: Arc<LogBroadcaster>) -> Self {
         self.rebuild_state(|s| s.log_broadcaster = Some(lb));
+        self
+    }
+
+    /// Inject the log level handle for runtime log level control.
+    pub fn with_log_level_handle(mut self, h: Arc<LogLevelHandle>) -> Self {
+        self.rebuild_state(|s| s.log_level_handle = Some(h));
         self
     }
 
@@ -195,6 +207,12 @@ impl GatewayChannel {
     /// Inject the LLM provider for OpenAI-compatible API proxy.
     pub fn with_llm_provider(mut self, llm: Arc<dyn crate::llm::LlmProvider>) -> Self {
         self.rebuild_state(|s| s.llm_provider = Some(llm));
+        self
+    }
+
+    /// Inject the cost guard for token/cost tracking in the status popover.
+    pub fn with_cost_guard(mut self, cg: Arc<crate::agent::cost_guard::CostGuard>) -> Self {
+        self.rebuild_state(|s| s.cost_guard = Some(cg));
         self
     }
 
