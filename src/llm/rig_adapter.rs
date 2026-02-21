@@ -3,6 +3,8 @@
 //! This lets us use any rig-core provider (OpenAI, Anthropic, Ollama, etc.) as an
 //! `Arc<dyn LlmProvider>` without changing any of the agent, reasoning, or tool code.
 
+use std::sync::Arc;
+
 use async_trait::async_trait;
 use rig::OneOrMany;
 use rig::completion::{
@@ -17,13 +19,15 @@ use rust_decimal::Decimal;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 use serde_json::Value as JsonValue;
+use tokio::sync::OnceCell;
 
 use std::collections::HashSet;
 
 use crate::error::LlmError;
 use crate::llm::costs;
+use crate::llm::discovery::ModelListFetcher;
 use crate::llm::provider::{
-    ChatMessage, CompletionRequest, CompletionResponse, FinishReason, LlmProvider,
+    ChatMessage, CompletionRequest, CompletionResponse, FinishReason, LlmProvider, ModelMetadata,
     ToolCall as IronToolCall, ToolCompletionRequest, ToolCompletionResponse,
     ToolDefinition as IronToolDefinition,
 };
@@ -34,6 +38,8 @@ pub struct RigAdapter<M: CompletionModel> {
     model_name: String,
     input_cost: Decimal,
     output_cost: Decimal,
+    discovery: Option<Arc<dyn ModelListFetcher>>,
+    metadata_cache: Arc<OnceCell<ModelMetadata>>,
 }
 
 impl<M: CompletionModel> RigAdapter<M> {
@@ -47,7 +53,15 @@ impl<M: CompletionModel> RigAdapter<M> {
             model_name: name,
             input_cost,
             output_cost,
+            discovery: None,
+            metadata_cache: Arc::new(OnceCell::new()),
         }
+    }
+
+    /// Attach a model list fetcher for auto-discovery.
+    pub(crate) fn with_discovery(mut self, fetcher: Arc<dyn ModelListFetcher>) -> Self {
+        self.discovery = Some(fetcher);
+        self
     }
 }
 
@@ -513,6 +527,32 @@ where
         })
     }
 
+    async fn list_models(&self) -> Result<Vec<String>, LlmError> {
+        match &self.discovery {
+            Some(fetcher) => fetcher.fetch_model_ids().await,
+            None => Ok(Vec::new()),
+        }
+    }
+
+    async fn model_metadata(&self) -> Result<ModelMetadata, LlmError> {
+        let model_name = self.model_name.clone();
+        let discovery = self.discovery.clone();
+        self.metadata_cache
+            .get_or_try_init(|| async move {
+                if let Some(fetcher) = &discovery
+                    && let Some(meta) = fetcher.fetch_model_entry(&model_name).await?
+                {
+                    return Ok(meta);
+                }
+                Ok(ModelMetadata {
+                    id: model_name,
+                    context_length: None,
+                })
+            })
+            .await
+            .cloned()
+    }
+
     fn active_model_name(&self) -> String {
         self.model_name.clone()
     }
@@ -868,5 +908,127 @@ mod tests {
     fn test_normalize_tool_name_unknown_passthrough() {
         let known = HashSet::from(["echo".to_string()]);
         assert_eq!(normalize_tool_name("other_tool", &known), "other_tool");
+    }
+
+    // -- ModelListFetcher delegation tests --
+
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use crate::llm::discovery::ModelListFetcher;
+
+    /// Mock fetcher that returns canned data and counts calls.
+    struct MockModelFetcher {
+        model_ids: Vec<String>,
+        model_entry: Option<ModelMetadata>,
+        fetch_entry_calls: AtomicUsize,
+    }
+
+    impl MockModelFetcher {
+        fn new(ids: Vec<&str>, entry: Option<ModelMetadata>) -> Self {
+            Self {
+                model_ids: ids.into_iter().map(String::from).collect(),
+                model_entry: entry,
+                fetch_entry_calls: AtomicUsize::new(0),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl ModelListFetcher for MockModelFetcher {
+        async fn fetch_model_ids(&self) -> Result<Vec<String>, LlmError> {
+            Ok(self.model_ids.clone())
+        }
+
+        async fn fetch_model_entry(
+            &self,
+            _model_id: &str,
+        ) -> Result<Option<ModelMetadata>, LlmError> {
+            self.fetch_entry_calls.fetch_add(1, Ordering::SeqCst);
+            Ok(self.model_entry.clone())
+        }
+    }
+
+    /// Minimal stub that satisfies `CompletionModel` for unit tests.
+    /// Only discovery-related methods are exercised; `completion`/`stream` panic.
+    #[derive(Clone)]
+    struct StubModel;
+
+    impl rig::completion::CompletionModel for StubModel {
+        type Response = ();
+        type StreamingResponse = ();
+        type Client = ();
+
+        fn make(_client: &(), _model: impl Into<String>) -> Self {
+            StubModel
+        }
+
+        async fn completion(
+            &self,
+            _request: rig::completion::CompletionRequest,
+        ) -> Result<rig::completion::CompletionResponse<()>, rig::completion::CompletionError>
+        {
+            unimplemented!("StubModel is only used for discovery tests")
+        }
+
+        async fn stream(
+            &self,
+            _request: rig::completion::CompletionRequest,
+        ) -> Result<rig::streaming::StreamingCompletionResponse<()>, rig::completion::CompletionError>
+        {
+            unimplemented!("StubModel is only used for discovery tests")
+        }
+    }
+
+    #[tokio::test]
+    async fn test_list_models_delegates_to_fetcher() {
+        let fetcher = Arc::new(MockModelFetcher::new(vec!["gpt-4o", "gpt-4o-mini"], None));
+        let adapter = RigAdapter::new(StubModel, "gpt-4o").with_discovery(fetcher);
+
+        let models = adapter.list_models().await.unwrap();
+        assert_eq!(models, vec!["gpt-4o", "gpt-4o-mini"]);
+    }
+
+    #[tokio::test]
+    async fn test_list_models_returns_empty_without_fetcher() {
+        let adapter = RigAdapter::new(StubModel, "gpt-4o");
+
+        let models = adapter.list_models().await.unwrap();
+        assert!(models.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_model_metadata_cached() {
+        let fetcher = Arc::new(MockModelFetcher::new(
+            vec![],
+            Some(ModelMetadata {
+                id: "gpt-4o".to_string(),
+                context_length: Some(128_000),
+            }),
+        ));
+        let adapter = RigAdapter::new(StubModel, "gpt-4o").with_discovery(fetcher.clone());
+
+        // First call populates the cache
+        let meta1 = adapter.model_metadata().await.unwrap();
+        assert_eq!(meta1.id, "gpt-4o");
+        assert_eq!(meta1.context_length, Some(128_000));
+
+        // Second call should return cached value without calling the fetcher again
+        let meta2 = adapter.model_metadata().await.unwrap();
+        assert_eq!(meta2.id, "gpt-4o");
+
+        assert_eq!(
+            fetcher.fetch_entry_calls.load(Ordering::SeqCst),
+            1,
+            "fetch_model_entry should only be called once due to caching"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_model_metadata_fallback_without_fetcher() {
+        let adapter = RigAdapter::new(StubModel, "my-model");
+
+        let meta = adapter.model_metadata().await.unwrap();
+        assert_eq!(meta.id, "my-model");
+        assert!(meta.context_length.is_none());
     }
 }
