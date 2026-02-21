@@ -715,6 +715,10 @@ impl Tool for CreateJobTool {
         }
     }
 
+    fn rate_limit_config(&self) -> Option<crate::tools::tool::ToolRateLimitConfig> {
+        Some(crate::tools::tool::ToolRateLimitConfig::new(5, 30))
+    }
+
     async fn execute(
         &self,
         params: serde_json::Value,
