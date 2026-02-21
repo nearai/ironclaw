@@ -360,8 +360,15 @@ fn saturate_u32(val: u64) -> u32 {
     val.min(u32::MAX as u64) as u32
 }
 
+/// Returns `true` if the model name indicates an Anthropic Claude model.
+fn is_anthropic_model(name: &str) -> bool {
+    let lower = name.to_lowercase();
+    lower.starts_with("claude") || lower.starts_with("anthropic/claude")
+}
+
 /// Build a rig-core CompletionRequest from our internal types.
 fn build_rig_request(
+    model_name: &str,
     preamble: Option<String>,
     mut history: Vec<RigMessage>,
     tools: Vec<RigToolDefinition>,
@@ -379,6 +386,18 @@ fn build_rig_request(
         reason: format!("Failed to build chat history: {}", e),
     })?;
 
+    // Enable Anthropic prompt caching via automatic cache_control.
+    // Anthropic auto-places the cache breakpoint at the last cacheable block,
+    // caching the prefix (tools → system → messages) for subsequent requests.
+    let additional_params = if is_anthropic_model(model_name) {
+        tracing::debug!(model = model_name, "Injecting cache_control for Anthropic prompt caching");
+        Some(serde_json::json!({
+            "cache_control": {"type": "ephemeral"}
+        }))
+    } else {
+        None
+    };
+
     Ok(RigRequest {
         preamble,
         chat_history,
@@ -387,7 +406,7 @@ fn build_rig_request(
         temperature: temperature.map(|t| t as f64),
         max_tokens: max_tokens.map(|t| t as u64),
         tool_choice,
-        additional_params: None,
+        additional_params,
     })
 }
 
@@ -421,6 +440,7 @@ where
         let (preamble, history) = convert_messages(&messages);
 
         let rig_req = build_rig_request(
+            &self.model_name,
             preamble,
             history,
             Vec::new(),
@@ -440,12 +460,27 @@ where
 
         let (text, _tool_calls, finish) = extract_response(&response.choice, &response.usage);
 
-        Ok(CompletionResponse {
+        let resp = CompletionResponse {
             content: text.unwrap_or_default(),
             input_tokens: saturate_u32(response.usage.input_tokens),
             output_tokens: saturate_u32(response.usage.output_tokens),
             finish_reason: finish,
-        })
+            cache_read_input_tokens: saturate_u32(response.usage.cached_input_tokens),
+            // cache_creation is not surfaced by rig-core's unified Usage yet.
+            cache_creation_input_tokens: 0,
+        };
+
+        if resp.cache_read_input_tokens > 0 {
+            tracing::debug!(
+                model = %self.model_name,
+                input = resp.input_tokens,
+                output = resp.output_tokens,
+                cache_read = resp.cache_read_input_tokens,
+                "prompt cache hit",
+            );
+        }
+
+        Ok(resp)
     }
 
     async fn complete_with_tools(
@@ -472,6 +507,7 @@ where
         let tool_choice = convert_tool_choice(request.tool_choice.as_deref());
 
         let rig_req = build_rig_request(
+            &self.model_name,
             preamble,
             history,
             tools,
@@ -504,13 +540,28 @@ where
             }
         }
 
-        Ok(ToolCompletionResponse {
+        let resp = ToolCompletionResponse {
             content: text,
             tool_calls,
             input_tokens: saturate_u32(response.usage.input_tokens),
             output_tokens: saturate_u32(response.usage.output_tokens),
             finish_reason: finish,
-        })
+            cache_read_input_tokens: saturate_u32(response.usage.cached_input_tokens),
+            // cache_creation is not surfaced by rig-core's unified Usage yet.
+            cache_creation_input_tokens: 0,
+        };
+
+        if resp.cache_read_input_tokens > 0 {
+            tracing::debug!(
+                model = %self.model_name,
+                input = resp.input_tokens,
+                output = resp.output_tokens,
+                cache_read = resp.cache_read_input_tokens,
+                "prompt cache hit",
+            );
+        }
+
+        Ok(resp)
     }
 
     fn active_model_name(&self) -> String {
@@ -868,5 +919,70 @@ mod tests {
     fn test_normalize_tool_name_unknown_passthrough() {
         let known = HashSet::from(["echo".to_string()]);
         assert_eq!(normalize_tool_name("other_tool", &known), "other_tool");
+    }
+
+    // -- is_anthropic_model tests --
+
+    #[test]
+    fn test_is_anthropic_model_claude_variants() {
+        assert!(is_anthropic_model("claude-sonnet-4-6"));
+        assert!(is_anthropic_model("claude-opus-4-5"));
+        assert!(is_anthropic_model("claude-haiku-4-5"));
+        assert!(is_anthropic_model("claude-3-5-sonnet-20241022"));
+        assert!(is_anthropic_model("Claude-Sonnet-4-6")); // case-insensitive
+    }
+
+    #[test]
+    fn test_is_anthropic_model_with_provider_prefix() {
+        assert!(is_anthropic_model("anthropic/claude-sonnet-4-6"));
+        assert!(is_anthropic_model("Anthropic/Claude-Opus-4-5"));
+    }
+
+    #[test]
+    fn test_is_anthropic_model_non_claude() {
+        assert!(!is_anthropic_model("gpt-4o"));
+        assert!(!is_anthropic_model("llama3"));
+        assert!(!is_anthropic_model("gemini-2.5-flash"));
+        assert!(!is_anthropic_model("minimax-m2.5"));
+    }
+
+    #[test]
+    fn test_build_rig_request_injects_cache_control_for_claude() {
+        let req = build_rig_request(
+            "claude-sonnet-4-6",
+            Some("You are helpful.".to_string()),
+            vec![RigMessage::user("Hello")],
+            Vec::new(),
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+
+        let params = req.additional_params.expect("should have additional_params for Claude");
+        assert_eq!(
+            params["cache_control"]["type"],
+            "ephemeral",
+            "cache_control should be set to ephemeral for Anthropic models"
+        );
+    }
+
+    #[test]
+    fn test_build_rig_request_no_cache_control_for_non_claude() {
+        let req = build_rig_request(
+            "gpt-4o",
+            Some("You are helpful.".to_string()),
+            vec![RigMessage::user("Hello")],
+            Vec::new(),
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+
+        assert!(
+            req.additional_params.is_none(),
+            "additional_params should be None for non-Anthropic models"
+        );
     }
 }

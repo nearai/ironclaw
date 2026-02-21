@@ -153,6 +153,12 @@ pub struct CompletionResponse {
     pub input_tokens: u32,
     pub output_tokens: u32,
     pub finish_reason: FinishReason,
+    /// Tokens read from the provider's server-side prompt cache (Anthropic).
+    /// Zero when caching is not supported or on a cache miss.
+    pub cache_read_input_tokens: u32,
+    /// Tokens written to the provider's server-side prompt cache (Anthropic).
+    /// Zero when caching is not supported or no new prefix was cached.
+    pub cache_creation_input_tokens: u32,
 }
 
 /// Why the completion finished.
@@ -254,6 +260,10 @@ pub struct ToolCompletionResponse {
     pub input_tokens: u32,
     pub output_tokens: u32,
     pub finish_reason: FinishReason,
+    /// Tokens read from the provider's server-side prompt cache (Anthropic).
+    pub cache_read_input_tokens: u32,
+    /// Tokens written to the provider's server-side prompt cache (Anthropic).
+    pub cache_creation_input_tokens: u32,
 }
 
 /// Metadata about a model returned by the provider's API.
