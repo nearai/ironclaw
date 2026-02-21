@@ -20,12 +20,13 @@
 9. [Safety Layer Pipeline](#9-safety-layer-pipeline)
 10. [Skills Trust Model](#10-skills-trust-model)
 11. [Docker Sandbox Policies](#11-docker-sandbox-policies)
-12. [Code Review Checklist](#12-code-review-checklist)
-13. [Bug Fix Patterns](#13-bug-fix-patterns)
-14. [Anti-Patterns](#14-anti-patterns)
-15. [Key Grep Queries](#15-key-grep-queries)
-16. [Feature Flag Testing](#16-feature-flag-testing)
-17. [Module Spec Files](#17-module-spec-files)
+12. [Worker and Claude Bridge Modes](#12-worker-and-claude-bridge-modes)
+13. [Code Review Checklist](#13-code-review-checklist)
+14. [Bug Fix Patterns](#14-bug-fix-patterns)
+15. [Anti-Patterns](#15-anti-patterns)
+16. [Key Grep Queries](#16-key-grep-queries)
+17. [Feature Flag Testing](#17-feature-flag-testing)
+18. [Module Spec Files](#18-module-spec-files)
 
 ---
 
@@ -732,7 +733,64 @@ Source: `src/sandbox/config.rs`
 
 ---
 
-## 12. Code Review Checklist
+## 12. Worker and Claude Bridge Modes
+
+IronClaw supports two internal execution modes that run inside Docker containers. These are not user-facing commands but are essential for understanding the sandbox architecture.
+
+### Worker Mode
+
+**Purpose**: Standard agentic execution inside a container.
+
+**Source**: `src/worker/runtime.rs`
+
+**Command** (internal, invoked by orchestrator):
+```bash
+ironclaw worker --job-id <uuid> --orchestrator-url <url>
+```
+
+**Characteristics**:
+- No TUI, no DB connection, no channels
+- Communicates with host via orchestrator HTTP API
+- LLM requests proxied through host (credential isolation)
+- Tools execute within container filesystem
+
+**Environment variables (set by orchestrator)**:
+| Variable | Purpose |
+|----------|---------|
+| `IRONCLAW_WORKER_TOKEN` | Bearer token for orchestrator auth |
+| `IRONCLAW_ORCHESTRATOR_URL` | Host-side API endpoint |
+
+### Claude Bridge Mode
+
+**Purpose**: Delegates execution to Anthropic's `claude` CLI inside a container.
+
+**Source**: `src/worker/claude_bridge.rs`
+
+**Command** (internal):
+```bash
+ironclaw claude-bridge --job-id <uuid> --orchestrator-url <url> [--model sonnet] [--max-turns 50]
+```
+
+**Enabling**:
+```bash
+CLAUDE_CODE_ENABLED=true
+CLAUDE_CODE_MODEL=sonnet      # or opus, haiku
+CLAUDE_CODE_MAX_TURNS=50
+CLAUDE_CONFIG_DIR=~/.claude   # host dir for credential extraction
+```
+
+**How it works**:
+1. Orchestrator starts container with Claude Bridge command
+2. Bridge extracts credentials from host's `~/.claude/` directory
+3. Spawns `claude` CLI with job prompt
+4. Streams output back to orchestrator
+5. Orchestrator forwards to user
+
+**Use case**: Leverage Claude Code's agentic capabilities with IronClaw's sandbox isolation.
+
+---
+
+## 13. Code Review Checklist
 
 From `src/CLAUDE.md` review discipline. Run these on every changed file set:
 
@@ -777,7 +835,7 @@ grep -rn '<the_pattern>' src/
 
 ---
 
-## 13. Bug Fix Patterns
+## 14. Bug Fix Patterns
 
 ### Pattern: "Tool schema 400 Bad Request from OpenAI"
 
@@ -838,7 +896,7 @@ grep -rn '<the_pattern>' src/
 
 ---
 
-## 14. Anti-Patterns
+## 15. Anti-Patterns
 
 ### Code Anti-Patterns
 
@@ -882,7 +940,7 @@ grep -rn '<the_pattern>' src/
 
 ---
 
-## 15. Key Grep Queries
+## 16. Key Grep Queries
 
 Pre-built search patterns for common review/debug tasks:
 
@@ -918,7 +976,7 @@ grep -rn '#\[cfg(feature' src/ --include="*.rs"
 grep -rnE '"https?://[^"]+\.(com|ai|io|dev)' src/ --include="*.rs" | grep -v test | grep -v doc
 
 # Find all credential/secret handling
-grep -rn 'api_key\|auth_token\|password\|secret' src/ --include="*.rs" -i | grep -v test | grep -v comment
+grep -rn 'api_key\|auth_token\|password\|secret' src/ --include="*.rs" -i | grep -v test | grep -vE '^\s*//'
 
 # Find all WASM tool registrations
 grep -rn 'wasm.*register\|register.*wasm' src/tools/ --include="*.rs"
@@ -935,7 +993,7 @@ diff <(grep 'CREATE INDEX' migrations/V1__initial.sql) <(grep 'CREATE INDEX' src
 
 ---
 
-## 16. Feature Flag Testing
+## 17. Feature Flag Testing
 
 **Required before any commit touching persistence, config, or feature-gated code:**
 
@@ -962,7 +1020,7 @@ cargo test --all-features
 
 ---
 
-## 17. Module Spec Files
+## 18. Module Spec Files
 
 Some modules have authoritative spec files. **Code must match spec** — spec is the tiebreaker when code and spec disagree.
 
