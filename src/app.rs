@@ -285,117 +285,14 @@ impl AppBuilder {
 
     /// Phase 3: Initialize LLM provider chain.
     ///
-    /// Creates the primary provider, then wraps with failover, circuit
-    /// breaker, and response cache as configured.
+    /// Delegates to `build_provider_chain` which applies all decorators
+    /// (retry, smart routing, failover, circuit breaker, response cache).
     #[allow(clippy::type_complexity)]
     pub fn init_llm(
         &self,
     ) -> Result<(Arc<dyn LlmProvider>, Option<Arc<dyn LlmProvider>>), anyhow::Error> {
-        use crate::llm::{
-            CachedProvider, CircuitBreakerConfig, CircuitBreakerProvider, CooldownConfig,
-            FailoverProvider, ResponseCacheConfig, SmartRoutingConfig, SmartRoutingProvider,
-            create_cheap_llm_provider, create_llm_provider, create_llm_provider_with_config,
-        };
-
-        let llm = create_llm_provider(&self.config.llm, self.session.clone())?;
-        tracing::info!("LLM provider initialized: {}", llm.model_name());
-
-        // Wrap in smart routing if cheap model is configured
-        let llm: Arc<dyn LlmProvider> =
-            if let Some(ref cheap_model) = self.config.llm.nearai.cheap_model {
-                let mut cheap_config = self.config.llm.nearai.clone();
-                cheap_config.model = cheap_model.clone();
-                let cheap = create_llm_provider_with_config(&cheap_config, self.session.clone())?;
-                tracing::info!(
-                    primary = %llm.model_name(),
-                    cheap = %cheap.model_name(),
-                    "Smart routing enabled"
-                );
-                Arc::new(SmartRoutingProvider::new(
-                    llm,
-                    cheap,
-                    SmartRoutingConfig {
-                        cascade_enabled: self.config.llm.nearai.smart_routing_cascade,
-                        ..SmartRoutingConfig::default()
-                    },
-                ))
-            } else {
-                llm
-            };
-
-        // Wrap in failover if a fallback model is configured
-        let llm: Arc<dyn LlmProvider> = if let Some(fallback_model) =
-            self.config.llm.nearai.fallback_model.as_ref()
-        {
-            if fallback_model == &self.config.llm.nearai.model {
-                tracing::warn!(
-                    "fallback_model is the same as primary model, failover may not be effective"
-                );
-            }
-            let mut fallback_config = self.config.llm.nearai.clone();
-            fallback_config.model = fallback_model.clone();
-            let fallback = create_llm_provider_with_config(&fallback_config, self.session.clone())?;
-            tracing::info!(
-                primary = %llm.model_name(),
-                fallback = %fallback.model_name(),
-                "LLM failover enabled"
-            );
-            let cooldown_config = CooldownConfig {
-                cooldown_duration: std::time::Duration::from_secs(
-                    self.config.llm.nearai.failover_cooldown_secs,
-                ),
-                failure_threshold: self.config.llm.nearai.failover_cooldown_threshold,
-            };
-            Arc::new(FailoverProvider::with_cooldown(
-                vec![llm, fallback],
-                cooldown_config,
-            )?)
-        } else {
-            llm
-        };
-
-        // Wrap in circuit breaker if configured
-        let llm: Arc<dyn LlmProvider> =
-            if let Some(threshold) = self.config.llm.nearai.circuit_breaker_threshold {
-                let cb_config = CircuitBreakerConfig {
-                    failure_threshold: threshold,
-                    recovery_timeout: std::time::Duration::from_secs(
-                        self.config.llm.nearai.circuit_breaker_recovery_secs,
-                    ),
-                    ..CircuitBreakerConfig::default()
-                };
-                tracing::info!(
-                    threshold,
-                    recovery_secs = self.config.llm.nearai.circuit_breaker_recovery_secs,
-                    "LLM circuit breaker enabled"
-                );
-                Arc::new(CircuitBreakerProvider::new(llm, cb_config))
-            } else {
-                llm
-            };
-
-        // Wrap in response cache if configured
-        let llm: Arc<dyn LlmProvider> = if self.config.llm.nearai.response_cache_enabled {
-            let rc_config = ResponseCacheConfig {
-                ttl: std::time::Duration::from_secs(self.config.llm.nearai.response_cache_ttl_secs),
-                max_entries: self.config.llm.nearai.response_cache_max_entries,
-            };
-            tracing::info!(
-                ttl_secs = self.config.llm.nearai.response_cache_ttl_secs,
-                max_entries = self.config.llm.nearai.response_cache_max_entries,
-                "LLM response cache enabled"
-            );
-            Arc::new(CachedProvider::new(llm, rc_config))
-        } else {
-            llm
-        };
-
-        // Cheap LLM for lightweight tasks
-        let cheap_llm = create_cheap_llm_provider(&self.config.llm, self.session.clone())?;
-        if let Some(ref cheap) = cheap_llm {
-            tracing::info!("Cheap LLM provider initialized: {}", cheap.model_name());
-        }
-
+        let (llm, cheap_llm) =
+            crate::llm::build_provider_chain(&self.config.llm, self.session.clone())?;
         Ok((llm, cheap_llm))
     }
 

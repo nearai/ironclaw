@@ -275,6 +275,146 @@ pub fn create_cheap_llm_provider(
     )?)))
 }
 
+/// Build the full LLM provider chain with all configured wrappers.
+///
+/// Applies decorators in this order:
+/// 1. Raw provider (from config)
+/// 2. RetryProvider (per-provider retry with exponential backoff)
+/// 3. SmartRoutingProvider (cheap/primary split when cheap model is configured)
+/// 4. FailoverProvider (fallback model when primary fails)
+/// 5. CircuitBreakerProvider (fast-fail when backend is degraded)
+/// 6. CachedProvider (in-memory response cache)
+///
+/// Also returns a separate cheap LLM provider for heartbeat/evaluation (not
+/// part of the chain — it's a standalone provider for explicitly cheap tasks).
+///
+/// This is the single source of truth for provider chain construction,
+/// called by both `main.rs` and `app.rs`.
+pub fn build_provider_chain(
+    config: &LlmConfig,
+    session: Arc<SessionManager>,
+) -> Result<(Arc<dyn LlmProvider>, Option<Arc<dyn LlmProvider>>), LlmError> {
+    let llm = create_llm_provider(config, session.clone())?;
+    tracing::info!("LLM provider initialized: {}", llm.model_name());
+
+    // 1. Retry
+    let retry_config = RetryConfig {
+        max_retries: config.nearai.max_retries,
+    };
+    let llm: Arc<dyn LlmProvider> = if retry_config.max_retries > 0 {
+        tracing::info!(
+            max_retries = retry_config.max_retries,
+            "LLM retry wrapper enabled"
+        );
+        Arc::new(RetryProvider::new(llm, retry_config.clone()))
+    } else {
+        llm
+    };
+
+    // 2. Smart routing (cheap/primary split)
+    let llm: Arc<dyn LlmProvider> = if let Some(ref cheap_model) = config.nearai.cheap_model {
+        let mut cheap_config = config.nearai.clone();
+        cheap_config.model = cheap_model.clone();
+        let cheap = create_llm_provider_with_config(&cheap_config, session.clone())?;
+        let cheap: Arc<dyn LlmProvider> = if retry_config.max_retries > 0 {
+            Arc::new(RetryProvider::new(cheap, retry_config.clone()))
+        } else {
+            cheap
+        };
+        tracing::info!(
+            primary = %llm.model_name(),
+            cheap = %cheap.model_name(),
+            "Smart routing enabled"
+        );
+        Arc::new(SmartRoutingProvider::new(
+            llm,
+            cheap,
+            SmartRoutingConfig {
+                cascade_enabled: config.nearai.smart_routing_cascade,
+                ..SmartRoutingConfig::default()
+            },
+        ))
+    } else {
+        llm
+    };
+
+    // 3. Failover
+    let llm: Arc<dyn LlmProvider> = if let Some(ref fallback_model) = config.nearai.fallback_model {
+        if fallback_model == &config.nearai.model {
+            tracing::warn!(
+                "fallback_model is the same as primary model, failover may not be effective"
+            );
+        }
+        let mut fallback_config = config.nearai.clone();
+        fallback_config.model = fallback_model.clone();
+        let fallback = create_llm_provider_with_config(&fallback_config, session.clone())?;
+        tracing::info!(
+            primary = %llm.model_name(),
+            fallback = %fallback.model_name(),
+            "LLM failover enabled"
+        );
+        let fallback: Arc<dyn LlmProvider> = if retry_config.max_retries > 0 {
+            Arc::new(RetryProvider::new(fallback, retry_config.clone()))
+        } else {
+            fallback
+        };
+        let cooldown_config = CooldownConfig {
+            cooldown_duration: std::time::Duration::from_secs(config.nearai.failover_cooldown_secs),
+            failure_threshold: config.nearai.failover_cooldown_threshold,
+        };
+        Arc::new(FailoverProvider::with_cooldown(
+            vec![llm, fallback],
+            cooldown_config,
+        )?)
+    } else {
+        llm
+    };
+
+    // 4. Circuit breaker
+    let llm: Arc<dyn LlmProvider> = if let Some(threshold) = config.nearai.circuit_breaker_threshold
+    {
+        let cb_config = CircuitBreakerConfig {
+            failure_threshold: threshold,
+            recovery_timeout: std::time::Duration::from_secs(
+                config.nearai.circuit_breaker_recovery_secs,
+            ),
+            ..CircuitBreakerConfig::default()
+        };
+        tracing::info!(
+            threshold,
+            recovery_secs = config.nearai.circuit_breaker_recovery_secs,
+            "LLM circuit breaker enabled"
+        );
+        Arc::new(CircuitBreakerProvider::new(llm, cb_config))
+    } else {
+        llm
+    };
+
+    // 5. Response cache
+    let llm: Arc<dyn LlmProvider> = if config.nearai.response_cache_enabled {
+        let rc_config = ResponseCacheConfig {
+            ttl: std::time::Duration::from_secs(config.nearai.response_cache_ttl_secs),
+            max_entries: config.nearai.response_cache_max_entries,
+        };
+        tracing::info!(
+            ttl_secs = config.nearai.response_cache_ttl_secs,
+            max_entries = config.nearai.response_cache_max_entries,
+            "LLM response cache enabled"
+        );
+        Arc::new(CachedProvider::new(llm, rc_config))
+    } else {
+        llm
+    };
+
+    // Standalone cheap LLM for heartbeat/evaluation (not part of the chain)
+    let cheap_llm = create_cheap_llm_provider(config, session)?;
+    if let Some(ref cheap) = cheap_llm {
+        tracing::info!("Cheap LLM provider initialized: {}", cheap.model_name());
+    }
+
+    Ok((llm, cheap_llm))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
