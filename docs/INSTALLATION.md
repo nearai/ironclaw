@@ -1,451 +1,399 @@
-# IronClaw Installation Guide
+# IronClaw Installation & Deployment Guide
 
-Practical installation guide based on real deployment experience.
-Covers two paths: **pre-built binary** (fastest) and **build from source** (required for customization or bug fixes).
+> Version: v0.9.0 | Tested on: macOS 15 (Apple Silicon), macOS 14 (Intel), Linux
+
+Complete guide for installing, configuring, and deploying IronClaw as a personal AI assistant.
 
 ---
 
 ## Table of Contents
 
-1. [Prerequisites](#1-prerequisites)
-2. [Path A: Pre-built Binary](#2-path-a-pre-built-binary)
-3. [Path B: Build from Source](#3-path-b-build-from-source)
-4. [Database Setup](#4-database-setup)
-5. [Configuration](#5-configuration)
-6. [LLM Provider Setup](#6-llm-provider-setup)
+1. [Quick Start (5 minutes)](#1-quick-start-5-minutes)
+2. [Prerequisites](#2-prerequisites)
+3. [Installation Options](#3-installation-options)
+4. [Configuration](#4-configuration)
+5. [LLM Backend Setup](#5-llm-backend-setup)
+6. [Embeddings (Semantic Memory)](#6-embeddings-semantic-memory)
 7. [Run Modes](#7-run-modes)
-8. [Service Mode: macOS (launchd)](#8-service-mode-macos-launchd)
-9. [Service Mode: Linux (systemd)](#9-service-mode-linux-systemd)
-10. [Verify the Installation](#10-verify-the-installation)
-11. [Updating IronClaw](#11-updating-ironclaw)
-12. [Known Issues and Gotchas](#12-known-issues-and-gotchas)
+8. [Service Setup: macOS (launchd)](#8-service-setup-macos-launchd)
+9. [Service Setup: Linux (systemd)](#9-service-setup-linux-systemd)
+10. [CLI Commands](#10-cli-commands)
+11. [Verify Your Installation](#11-verify-your-installation)
+12. [Known Issues & Workarounds](#12-known-issues--workarounds)
+13. [Troubleshooting](#13-troubleshooting)
+14. [Updating IronClaw](#14-updating-ironclaw)
 
 ---
 
-## 1. Prerequisites
+## 1. Quick Start (5 minutes)
 
-### All platforms
+Fastest way to get IronClaw running:
+
+```bash
+# 1. Install binary
+curl --proto '=https' --tlsv1.2 -LsSf \
+  https://github.com/nearai/ironclaw/releases/latest/download/ironclaw-installer.sh | sh
+
+# 2. Add to PATH
+export PATH="$HOME/.local/bin:$PATH"
+
+# 3. Create minimal config
+mkdir -p ~/.ironclaw
+cat > ~/.ironclaw/.env << 'EOF'
+DATABASE_BACKEND=libsql
+LLM_BACKEND=openai
+OPENAI_API_KEY=sk-proj-YOUR-KEY-HERE
+GATEWAY_PORT=3000
+CLI_ENABLED=false
+EOF
+
+# 4. Run
+ironclaw
+```
+
+Access the web UI at `http://localhost:3000`
+
+**That's it!** For detailed configuration and production setup, continue reading.
+
+---
+
+## 2. Prerequisites
+
+### Required
 
 | Requirement | Version | Notes |
 |-------------|---------|-------|
 | OS | macOS 13+ / Linux / Windows WSL | Native Windows supported via installer |
-| Database | PostgreSQL 15+ **or** none | libSQL/SQLite embedded mode needs no DB server |
-| LLM API | Any supported provider | See §6 |
+| LLM API key | — | OpenAI, Anthropic, NEAR AI, Ollama, or OpenAI-compatible |
 
-### Build from source only
+### Optional (feature-dependent)
 
-| Requirement | Version | Install |
-|-------------|---------|---------|
-| Rust | 1.92+ | `curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh` |
-| pgvector | latest | Only if using PostgreSQL backend |
-
-**macOS (Apple Silicon):** No extra steps — all dependencies via Cargo.
+| Requirement | When Needed |
+|-------------|-------------|
+| Rust 1.92+ | Building from source |
+| PostgreSQL 15+ with pgvector | PostgreSQL backend (default) |
+| Docker / Podman | Docker sandbox for shell tools |
 
 ---
 
-## 2. Path A: Pre-built Binary
+## 3. Installation Options
 
-The fastest way. Downloads a signed binary from the GitHub Releases page.
+### 3.1 Pre-built Binary (Recommended)
 
-### macOS / Linux / WSL
-
+**macOS / Linux / WSL:**
 ```bash
 curl --proto '=https' --tlsv1.2 -LsSf \
   https://github.com/nearai/ironclaw/releases/latest/download/ironclaw-installer.sh | sh
 ```
 
-The installer places the binary at `~/.local/bin/ironclaw`. Make sure `~/.local/bin` is in your `$PATH`:
-
-```bash
-# Add to ~/.zshrc or ~/.bashrc if not already present
-export PATH="$HOME/.local/bin:$PATH"
-```
-
-### Windows
-
+**Windows (PowerShell):**
 ```powershell
-# PowerShell installer
 irm https://github.com/nearai/ironclaw/releases/latest/download/ironclaw-installer.ps1 | iex
 ```
 
-Or download the [Windows MSI installer](https://github.com/nearai/ironclaw/releases/latest/download/ironclaw-x86_64-pc-windows-msvc.msi) directly.
-
-### Verify
-
+**Verify:**
 ```bash
 ironclaw --version
+# Expected: ironclaw 0.9.0
 ```
 
----
+### 3.2 Build from Source
 
-## 3. Path B: Build from Source
-
-Use this when you need to apply local patches, use a specific feature flag, or work with unreleased code.
-
-### 3.1 Clone the repository
+Use when you need local patches, specific features, or unreleased code.
 
 ```bash
+# Clone
 git clone https://github.com/nearai/ironclaw.git
 cd ironclaw
-```
 
-### 3.2 Choose your database backend (feature flag)
-
-IronClaw supports two backends selected at **compile time** via Cargo feature flags:
-
-| Backend | Feature flag | Use case |
-|---------|-------------|----------|
-| PostgreSQL | `postgres` (default) | Production, full feature set |
-| libSQL / SQLite | `libsql` | Zero-dependency local mode, no DB server needed |
-
-```bash
-# PostgreSQL (default) — requires PostgreSQL server
-cargo build --release
-
-# libSQL (SQLite embedded) — no external DB needed
+# Build with libSQL (zero-dependency, recommended for personal use)
 cargo build --release --no-default-features --features libsql
 
-# Both backends compiled in
-cargo build --release --features "postgres,libsql"
-```
+# Or build with PostgreSQL support (default)
+cargo build --release
 
-**Recommendation for local/personal use:** `--no-default-features --features libsql` — no database server to manage, data stored at `~/.ironclaw/ironclaw.db`.
-
-### 3.3 Install the binary
-
-**Important:** Use `install` rather than `cp`. The `install` command is atomic (writes to a temp file then renames) and never prompts for overwrite confirmation — essential when replacing a running binary.
-
-```bash
-# Install to ~/.local/bin (no sudo needed)
-mkdir -p ~/.local/bin
+# Install
 install -m 755 target/release/ironclaw ~/.local/bin/ironclaw
-
-# Or install to /usr/local/bin (requires sudo)
-sudo install -m 755 target/release/ironclaw /usr/local/bin/ironclaw
 ```
 
-Verify:
-```bash
-ironclaw --version
-which ironclaw
-```
+**Build options:**
+
+| Backend | Command | Use Case |
+|---------|---------|----------|
+| libSQL only | `--no-default-features --features libsql` | Zero-dependency, no DB server |
+| PostgreSQL + libSQL | (default) | Production, full features |
+| With WASM building | Add `rustup target add wasm32-wasip2` | Dynamic tool building |
+
+**Build stats:** ~9 min cold build, ~3 min incremental, ~49MB binary (macOS arm64)
 
 ---
 
-## 4. Database Setup
+## 4. Configuration
 
-### Option A: libSQL (recommended for personal use)
+### 4.1 Configuration Files
 
-No setup required. The database file is created automatically at `~/.ironclaw/ironclaw.db` on first run.
+IronClaw loads configuration in priority order (later overrides earlier):
 
-Set in your environment or `.env`:
+1. Shell environment variables
+2. `./.env` in current directory
+3. `~/.ironclaw/.env` (recommended location)
+4. `~/.ironclaw/config.toml` (optional TOML overlay)
+5. Database settings table
+6. Compiled-in defaults
+
+### 4.2 Minimal Configuration
+
+Create `~/.ironclaw/.env`:
+
 ```bash
+# Database (libSQL = zero-dependency, no server needed)
 DATABASE_BACKEND=libsql
-# LIBSQL_PATH=~/.ironclaw/ironclaw.db  # default, can be omitted
-```
 
-**libSQL limitations** (as of v0.9.0):
-- Workspace vector search not available (FTS keyword search only)
-- Secrets store requires PostgreSQL
-- No encryption at rest — use FileVault (macOS) or LUKS (Linux) for sensitive data
-
-### Option B: PostgreSQL
-
-```bash
-# Create database
-createdb ironclaw
-
-# Enable pgvector extension
-psql ironclaw -c "CREATE EXTENSION IF NOT EXISTS vector;"
-```
-
-Set in your environment or `.env`:
-```bash
-DATABASE_BACKEND=postgres
-DATABASE_URL=postgres://localhost/ironclaw
-```
-
-For Turso cloud (libSQL remote):
-```bash
-DATABASE_BACKEND=libsql
-LIBSQL_URL=libsql://your-db.turso.io
-LIBSQL_AUTH_TOKEN=your-token
-```
-
----
-
-## 5. Configuration
-
-### 5.1 Run the setup wizard (recommended for first run)
-
-```bash
-ironclaw onboard
-```
-
-The 7-step wizard handles:
-- Database connection verification
-- NEAR AI browser OAuth (GitHub or Google login)
-- LLM provider selection
-- Secrets encryption setup
-- Web gateway configuration
-
-Settings are persisted in the database. Bootstrap variables (`DATABASE_URL`, `LLM_BACKEND`) are written to `~/.ironclaw/.env` so they are available before the database connects.
-
-### 5.2 Manual configuration (.env file)
-
-Create `~/.ironclaw/.env` with your settings. The full reference with all options is in the repo at `.env.example`. Minimum working configuration:
-
-**With NEAR AI (default):**
-```bash
-DATABASE_BACKEND=libsql
-GATEWAY_ENABLED=true
-GATEWAY_PORT=3000
-GATEWAY_AUTH_TOKEN=<generate with: openssl rand -hex 32>
-CLI_ENABLED=false   # required for service/daemon mode
-```
-
-**With OpenAI:**
-```bash
-DATABASE_BACKEND=libsql
+# LLM Backend
 LLM_BACKEND=openai
-OPENAI_API_KEY=sk-...
-OPENAI_MODEL=gpt-4o
-EMBEDDING_ENABLED=true
-EMBEDDING_PROVIDER=openai
-EMBEDDING_MODEL=text-embedding-3-small
+OPENAI_API_KEY=sk-proj-YOUR-KEY-HERE
+
+# Web Gateway
 GATEWAY_ENABLED=true
 GATEWAY_PORT=3000
 GATEWAY_AUTH_TOKEN=<generate with: openssl rand -hex 32>
+
+# CRITICAL: Disable REPL for service/daemon mode
 CLI_ENABLED=false
 ```
 
-### 5.3 Configuration priority
+### 4.3 Full Configuration Reference
 
-Settings are loaded in this order (later overrides earlier):
+```bash
+##############################################
+# Database
+##############################################
+DATABASE_BACKEND=libsql          # libsql (local) or postgres
+# DATABASE_URL="postgres://user:pass@host/db"  # Required if postgres
+# LIBSQL_PATH="~/.ironclaw/ironclaw.db"        # Default location
 
+##############################################
+# LLM Backend
+##############################################
+LLM_BACKEND=openai               # openai, anthropic, nearai, ollama, openai_compatible, tinfoil
+
+# OpenAI
+OPENAI_API_KEY=sk-proj-...
+OPENAI_MODEL=gpt-4o              # or gpt-4-turbo, gpt-4o-mini, o1, o3-mini
+
+# Anthropic (alternative)
+# LLM_BACKEND=anthropic
+# ANTHROPIC_API_KEY=sk-ant-api03-...
+# ANTHROPIC_MODEL=claude-sonnet-4-20250514
+
+# NEAR AI (alternative)
+# LLM_BACKEND=nearai
+# NEARAI_API_KEY=your-nearai-key
+# NEARAI_MODEL=fireworks::accounts/fireworks/models/llama4-maverick-instruct-basic
+
+# Ollama (local, no API cost)
+# LLM_BACKEND=ollama
+# OLLAMA_BASE_URL=http://localhost:11434
+# OLLAMA_MODEL=llama3.2
+
+# OpenAI-compatible (vLLM, Together, Groq, OpenRouter, etc.)
+# LLM_BACKEND=openai_compatible
+# LLM_BASE_URL=https://api.groq.com/openai/v1
+# LLM_API_KEY=gsk_...
+# LLM_MODEL=llama-3.3-70b-versatile
+# LLM_EXTRA_HEADERS="HTTP-Referer:https://myapp.com,X-Title:MyApp"
+
+##############################################
+# Embeddings (Semantic Memory)
+##############################################
+EMBEDDING_ENABLED=true
+EMBEDDING_PROVIDER=openai
+EMBEDDING_MODEL=text-embedding-3-small   # 1536-dim, recommended
+
+##############################################
+# Agent
+##############################################
+AGENT_NAME=ironclaw
+AGENT_MAX_PARALLEL_JOBS=5
+AGENT_JOB_TIMEOUT_SECS=3600
+# AGENT_AUTO_APPROVE_TOOLS=false  # Skip tool approvals (CI/benchmarks)
+
+##############################################
+# Web Gateway
+##############################################
+GATEWAY_ENABLED=true
+GATEWAY_HOST=127.0.0.1
+GATEWAY_PORT=3000
+GATEWAY_AUTH_TOKEN=<your-32-byte-hex-token>
+
+##############################################
+# Docker Sandbox
+##############################################
+SANDBOX_ENABLED=true
+SANDBOX_POLICY=readonly            # readonly, workspace_write, full_access
+SANDBOX_TIMEOUT_SECS=120
+SANDBOX_MEMORY_LIMIT_MB=2048
+
+##############################################
+# Claude Code Mode (optional)
+##############################################
+# CLAUDE_CODE_ENABLED=false
+# CLAUDE_CODE_MODEL=sonnet
+# CLAUDE_CODE_MAX_TURNS=50
+
+##############################################
+# Logging
+##############################################
+RUST_LOG=ironclaw=info,tower_http=info
 ```
-compiled defaults
-  → ~/.ironclaw/.env
-  → ./.env (current directory)
-  → shell environment variables
-  → INJECTED_VARS (secrets injected at runtime)
-```
-
-Shell environment always wins. Variables set in the launchd plist or systemd unit override `.env` files.
 
 ---
 
-## 6. LLM Provider Setup
-
-IronClaw works with many LLM providers. Set `LLM_BACKEND` and the required credentials.
-
-| Provider | `LLM_BACKEND` | Required vars | Notes |
-|----------|---------------|---------------|-------|
-| NEAR AI | `nearai` (default) | OAuth on first run | Multi-model; browser login |
-| OpenAI | `openai` | `OPENAI_API_KEY` | GPT-4o, o3, etc. |
-| Anthropic | `anthropic` | `ANTHROPIC_API_KEY` | Claude models |
-| Ollama (local) | `ollama` | `OLLAMA_BASE_URL` (default: `http://localhost:11434`) | No API key |
-| OpenRouter | `openai_compatible` | `LLM_BASE_URL`, `LLM_API_KEY` | 300+ models |
-| Together AI | `openai_compatible` | `LLM_BASE_URL`, `LLM_API_KEY` | Fast inference |
-| vLLM / LiteLLM | `openai_compatible` | `LLM_BASE_URL` | Self-hosted |
-| Tinfoil (TEE) | `tinfoil` | `TINFOIL_API_KEY` | Private inference in hardware TEE |
-
-### NEAR AI (default)
-
-No config needed for basic use. On first run, `ironclaw onboard` opens a browser for OAuth.
-
-```bash
-# Optional overrides
-NEARAI_MODEL=zai-org/GLM-5-FP8
-NEARAI_BASE_URL=https://private.near.ai
-```
-
-For hosting/service mode where browser OAuth is not possible, use an API key:
-```bash
-NEARAI_API_KEY=<your-nearai-api-key>
-```
+## 5. LLM Backend Setup
 
 ### OpenAI
 
 ```bash
 LLM_BACKEND=openai
-OPENAI_API_KEY=sk-...
-OPENAI_MODEL=gpt-4o        # or gpt-4o-mini, o3-mini
+OPENAI_API_KEY=sk-proj-...
+OPENAI_MODEL=gpt-4o
 ```
 
-### Anthropic
+### Anthropic (Claude)
 
 ```bash
 LLM_BACKEND=anthropic
-ANTHROPIC_API_KEY=sk-ant-...
-# Default model: claude-sonnet-4-20250514
+ANTHROPIC_API_KEY=sk-ant-api03-...   # Standard API key ONLY
+ANTHROPIC_MODEL=claude-sonnet-4-20250514
 ```
 
-### Ollama (local inference)
+> **Important:** OAuth tokens (`sk-ant-oat01-*`) do NOT work. Use standard API keys from [console.anthropic.com](https://console.anthropic.com).
+
+### NEAR AI
 
 ```bash
-# Pull model first
-ollama pull llama3.2
+LLM_BACKEND=nearai
+# Option A: API key (headless)
+NEARAI_API_KEY=your-nearai-api-key
 
-LLM_BACKEND=ollama
-OLLAMA_MODEL=llama3.2
-# OLLAMA_BASE_URL=http://localhost:11434  # default
+# Option B: Interactive auth (run once)
+ironclaw onboard
 ```
 
-### OpenRouter (300+ models via one API key)
+### Ollama (Local, Free)
+
+```bash
+# Install and start Ollama
+brew install ollama
+ollama pull llama3.2
+ollama serve
+
+# IronClaw config
+LLM_BACKEND=ollama
+OLLAMA_MODEL=llama3.2
+```
+
+### OpenAI-Compatible (vLLM, Together, Groq, OpenRouter)
 
 ```bash
 LLM_BACKEND=openai_compatible
-LLM_BASE_URL=https://openrouter.ai/api/v1
-LLM_API_KEY=sk-or-...
-LLM_MODEL=anthropic/claude-sonnet-4   # see openrouter.ai/models
-# Optional: attribution headers
-LLM_EXTRA_HEADERS=HTTP-Referer:https://myapp.com,X-Title:MyApp
+LLM_BASE_URL=https://api.groq.com/openai/v1
+LLM_API_KEY=gsk_...
+LLM_MODEL=llama-3.3-70b-versatile
 ```
 
-Full provider guide: `docs/LLM_PROVIDERS.md` in the repository.
+---
+
+## 6. Embeddings (Semantic Memory)
+
+Embeddings enable hybrid FTS+vector memory search. Without embeddings, only keyword search is available.
+
+```bash
+EMBEDDING_ENABLED=true
+EMBEDDING_PROVIDER=openai
+EMBEDDING_MODEL=text-embedding-3-small   # 1536-dim
+```
+
+> **libSQL limitation:** Only supports 1536-dimension embeddings. Use `text-embedding-3-small`. The `text-embedding-3-large` model (3072 dims) requires PostgreSQL.
+
+Verify embeddings are active in logs:
+```
+INFO Embeddings enabled via OpenAI (model: text-embedding-3-small, dim: 1536)
+```
 
 ---
 
 ## 7. Run Modes
 
-### Interactive (CLI / REPL)
+### Interactive Mode (Development)
 
 ```bash
 ironclaw
+# REPL active, reads from stdin
 ```
 
-Launches the interactive terminal REPL. Use for interactive development and testing.
+### Service Mode (Production)
+
+Set `CLI_ENABLED=false` to prevent REPL from reading stdin (required for launchd/systemd).
 
 ```bash
-# Skip onboarding if already configured
-ironclaw --no-onboard
+# In ~/.ironclaw/.env:
+CLI_ENABLED=false
+
+# Run
+ironclaw
 ```
 
-### Service mode (headless)
-
-Set `CLI_ENABLED=false` to prevent the REPL from starting. **This is required when running as a background service** — without it, the REPL reads EOF from `/dev/null` stdin and triggers graceful shutdown immediately.
+### One-shot Mode
 
 ```bash
-CLI_ENABLED=false ironclaw --no-onboard
+ironclaw --oneshot "What is the capital of France?"
 ```
-
-Access via the web gateway: `http://localhost:3000` (or your configured `GATEWAY_PORT`)
-
-### REPL
-
-IronClaw's terminal interactive mode is the REPL started by `ironclaw`.
-
-### Memory Commands (CLI)
-
-IronClaw provides a CLI for direct workspace/memory operations without starting the agent:
-
-```bash
-# Search workspace (hybrid FTS + semantic with PostgreSQL, FTS-only with libSQL)
-ironclaw memory search "deployment notes"
-
-# Read a workspace file
-ironclaw memory read context/project.md
-
-# Write to workspace (creates directories as needed)
-ironclaw memory write notes/meeting.md "Key decisions:\n- Use PostgreSQL\n- Enable embeddings"
-
-# Append to existing file
-ironclaw memory write notes/log.md "2026-02-22: Deployed to production" --append
-
-# Show workspace directory tree
-ironclaw memory tree
-ironclaw memory tree context/
-
-# Show workspace statistics
-ironclaw memory status
-```
-
-**Note**: Memory commands require database connection. With libSQL, only keyword search is available (no semantic/vector search).
 
 ---
 
-## 8. Service Mode: macOS (launchd)
+## 8. Service Setup: macOS (launchd)
 
-Run IronClaw as a LaunchAgent so it starts automatically on login and restarts on crash.
+### 8.1 Create LaunchAgent
 
-### 8.1 Create the log directory
-
-```bash
-mkdir -p ~/.ironclaw/logs
-```
-
-### 8.2 Create the LaunchAgent plist
-
-Save as `~/Library/LaunchAgents/ai.ironclaw.plist`:
+Create `~/Library/LaunchAgents/ai.ironclaw.plist`:
 
 ```xml
 <?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
-  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
     <key>Label</key>
     <string>ai.ironclaw</string>
-
+    
     <key>ProgramArguments</key>
     <array>
         <string>/Users/YOUR_USERNAME/.local/bin/ironclaw</string>
-        <string>--no-onboard</string>
     </array>
-
-    <key>WorkingDirectory</key>
-    <string>/Users/YOUR_USERNAME/.ironclaw</string>
-
+    
     <key>EnvironmentVariables</key>
     <dict>
-        <!-- Database: libSQL (no server required) -->
-        <key>DATABASE_BACKEND</key><string>libsql</string>
-
-        <!-- LLM Provider -->
-        <key>LLM_BACKEND</key><string>openai</string>
-        <key>OPENAI_API_KEY</key><string>sk-...</string>
-        <key>OPENAI_MODEL</key><string>gpt-4o</string>
-
-        <!-- Embeddings (optional but recommended) -->
-        <key>EMBEDDING_ENABLED</key><string>true</string>
-        <key>EMBEDDING_PROVIDER</key><string>openai</string>
-        <key>EMBEDDING_MODEL</key><string>text-embedding-3-small</string>
-
-        <!-- Agent -->
-        <key>AGENT_NAME</key><string>ironclaw</string>
-        <key>AGENT_MAX_PARALLEL_JOBS</key><string>3</string>
-        <key>AGENT_JOB_TIMEOUT_SECS</key><string>3600</string>
-
-        <!-- Web gateway -->
-        <key>GATEWAY_ENABLED</key><string>true</string>
-        <key>GATEWAY_HOST</key><string>127.0.0.1</string>
-        <key>GATEWAY_PORT</key><string>3000</string>
-        <key>GATEWAY_AUTH_TOKEN</key><string>YOUR_TOKEN_HERE</string>
-
-        <!-- CRITICAL: must be false for service mode -->
-        <!-- Without this, REPL reads EOF from /dev/null and exits immediately -->
-        <key>CLI_ENABLED</key><string>false</string>
-
-        <!-- Sandbox enabled for security -->
-        <key>SANDBOX_ENABLED</key><string>true</string>
-
-        <!-- Logging -->
-        <key>RUST_LOG</key><string>ironclaw=info,tower_http=info</string>
-
-        <!-- Required for PATH and HOME resolution -->
-        <key>HOME</key><string>/Users/YOUR_USERNAME</string>
+        <key>HOME</key>
+        <string>/Users/YOUR_USERNAME</string>
         <key>PATH</key>
         <string>/Users/YOUR_USERNAME/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+        <key>CLI_ENABLED</key>
+        <string>false</string>
+        <key>GATEWAY_PORT</key>
+        <string>3000</string>
+        <key>GATEWAY_AUTH_TOKEN</key>
+        <string>YOUR_TOKEN_HERE</string>
+        <key>SANDBOX_ENABLED</key>
+        <string>true</string>
+        <key>RUST_LOG</key>
+        <string>ironclaw=info,tower_http=info</string>
     </dict>
-
-    <!-- Restart on crash -->
-    <key>KeepAlive</key><true/>
-    <!-- Start at login -->
-    <key>RunAtLoad</key><true/>
-    <!-- Minimum seconds between restarts -->
-    <key>ThrottleInterval</key><integer>10</integer>
-
+    
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
+    
     <key>StandardOutPath</key>
     <string>/Users/YOUR_USERNAME/.ironclaw/logs/stdout.log</string>
     <key>StandardErrorPath</key>
@@ -454,54 +402,40 @@ Save as `~/Library/LaunchAgents/ai.ironclaw.plist`:
 </plist>
 ```
 
-Replace `YOUR_USERNAME` and `YOUR_TOKEN_HERE` throughout. Generate a token with:
-```bash
-openssl rand -hex 32
-```
-
-### 8.3 Load and start the service
+### 8.2 Enable the Service
 
 ```bash
-# Load (registers with launchd, starts if RunAtLoad=true)
+# Create log directory
+mkdir -p ~/.ironclaw/logs
+
+# Load and start
 launchctl load ~/Library/LaunchAgents/ai.ironclaw.plist
 
-# Start manually (if not auto-started)
-launchctl start ai.ironclaw
-
-# Check status (PID > 0 = running)
+# Verify
 launchctl list | grep ironclaw
 ```
 
-### 8.4 Service management commands
+### 8.3 Manage the Service
 
 ```bash
 # Stop
-launchctl stop ai.ironclaw
-
-# Restart (stop + start)
-launchctl stop ai.ironclaw && launchctl start ai.ironclaw
-
-# Unload (remove from launchd entirely)
 launchctl unload ~/Library/LaunchAgents/ai.ironclaw.plist
 
-# View live logs
-tail -f ~/.ironclaw/logs/stdout.log
+# Restart
+launchctl unload ~/Library/LaunchAgents/ai.ironclaw.plist
+launchctl load ~/Library/LaunchAgents/ai.ironclaw.plist
+
+# View logs
 tail -f ~/.ironclaw/logs/stderr.log
 ```
 
 ---
 
-## 9. Service Mode: Linux (systemd)
+## 9. Service Setup: Linux (systemd)
 
-### 9.1 Create the log directory
+### 9.1 Create Service File
 
-```bash
-mkdir -p ~/.ironclaw/logs
-```
-
-### 9.2 Create the systemd unit file
-
-Save as `~/.config/systemd/user/ironclaw.service`:
+Create `~/.config/systemd/user/ironclaw.service`:
 
 ```ini
 [Unit]
@@ -510,30 +444,19 @@ After=network.target
 
 [Service]
 Type=simple
-ExecStart=%h/.local/bin/ironclaw --no-onboard
-WorkingDirectory=%h/.ironclaw
-Restart=always
-RestartSec=10
+ExecStart=%h/.local/bin/ironclaw
+WorkingDirectory=%h
 
-# CRITICAL: prevents REPL EOF crash
-Environment=CLI_ENABLED=false
-
-# Database
-Environment=DATABASE_BACKEND=libsql
-
-# LLM
-Environment=LLM_BACKEND=openai
-Environment=OPENAI_API_KEY=sk-...
-Environment=OPENAI_MODEL=gpt-4o
-
-# Gateway
+# Environment
 Environment=GATEWAY_ENABLED=true
 Environment=GATEWAY_HOST=127.0.0.1
 Environment=GATEWAY_PORT=3000
 Environment=GATEWAY_AUTH_TOKEN=YOUR_TOKEN_HERE
+Environment=CLI_ENABLED=false
+Environment=SANDBOX_ENABLED=true
+Environment=RUST_LOG=ironclaw=info
 
 # Logging
-Environment=RUST_LOG=ironclaw=info
 StandardOutput=append:%h/.ironclaw/logs/stdout.log
 StandardError=append:%h/.ironclaw/logs/stderr.log
 
@@ -541,231 +464,223 @@ StandardError=append:%h/.ironclaw/logs/stderr.log
 WantedBy=default.target
 ```
 
-### 9.3 Enable and start
+### 9.2 Enable the Service
 
 ```bash
-# Reload systemd after creating/editing the unit
+# Create log directory
+mkdir -p ~/.ironclaw/logs
+
+# Reload systemd
 systemctl --user daemon-reload
 
-# Enable to start at login
+# Enable and start
 systemctl --user enable ironclaw
-
-# Start now
 systemctl --user start ironclaw
 
 # Check status
 systemctl --user status ironclaw
 ```
 
-### 9.4 Service management
+---
+
+## 10. CLI Commands
+
+### Memory Commands
+
+Direct workspace operations without starting the agent:
 
 ```bash
-# Restart
-systemctl --user restart ironclaw
+# Search workspace (hybrid FTS + semantic with PostgreSQL, FTS-only with libSQL)
+ironclaw memory search "deployment notes"
 
-# Stop
-systemctl --user stop ironclaw
+# Read a workspace file
+ironclaw memory read context/project.md
 
-# Live logs
-journalctl --user -u ironclaw -f
-# Or from log files
-tail -f ~/.ironclaw/logs/stdout.log
+# Write to workspace
+ironclaw memory write notes/meeting.md "Key decisions..."
+ironclaw memory write notes/log.md "New entry" --append
+
+# Show workspace tree
+ironclaw memory tree
+ironclaw memory status
+```
+
+### Registry Commands
+
+Browse and install extensions:
+
+```bash
+# Search for extensions
+ironclaw registry search github
+
+# Get extension info
+ironclaw registry info github-tools
+
+# Install an extension
+ironclaw registry install github-tools
 ```
 
 ---
 
-## 10. Verify the Installation
+## 11. Verify Your Installation
 
-### Health check (web gateway)
+### Health Check
 
 ```bash
-curl -s \
-  -H "Authorization: Bearer $GATEWAY_AUTH_TOKEN" \
-  http://127.0.0.1:3001/api/health
+curl http://127.0.0.1:3000/api/health
+# Expected: {"status":"ok"}
 ```
 
-Expected response: `{"status":"ok",...}`
-
-### Send a test message
+### Send a Test Message
 
 ```bash
-curl -s -X POST \
-  -H "Authorization: Bearer $GATEWAY_AUTH_TOKEN" \
+TOKEN="your-gateway-token"
+
+curl -X POST http://127.0.0.1:3000/api/chat/send \
+  -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
-  -d '{"message": "hello, what time is it?"}' \
-  http://127.0.0.1:3001/api/chat
+  -d '{"content": "Say: INSTALLATION TEST PASSED"}'
 ```
 
-### Check process
+### Check Startup Logs
 
-```bash
-# macOS launchd
-launchctl list | grep ironclaw
-# Output: PID  0  ai.ironclaw  ← PID=0 means not running
+Healthy startup shows:
 
-# Linux systemd
-systemctl --user status ironclaw
 ```
-
-### Check logs for errors
-
-```bash
-tail -50 ~/.ironclaw/logs/stderr.log
+INFO LLM retry wrapper enabled max_retries=3
+INFO Safety layer initialized
+INFO Registered 4 built-in tools
+INFO Embeddings enabled via OpenAI (model: text-embedding-3-small, dim: 1536)
+INFO Tool registry initialized with 14 total tools
+INFO Web gateway enabled on 127.0.0.1:3000
+INFO Agent ironclaw ready and listening
 ```
 
 ---
 
-## 11. Updating IronClaw
+## 12. Known Issues & Workarounds
 
-### Pre-built binary update
+### Service exits immediately (REPL EOF crash)
+
+**Symptom:** Service stops right after starting.
+
+**Cause:** `CLI_ENABLED=true` (default) + stdin from `/dev/null` → REPL reads EOF → exits.
+
+**Fix:** Set `CLI_ENABLED=false` in your `.env` or service configuration.
+
+### OpenAI 400 Bad Request on tool calls
+
+**Symptom:** `400 Bad Request: "array schema missing items"`
+
+**Cause:** Tool schema uses `"type": ["string", "object"]` array syntax.
+
+**Fix:** This is fixed in v0.9.0. If you encounter it, update IronClaw.
+
+### Anthropic OAuth tokens rejected
+
+**Symptom:** `sk-ant-oat01-...` causes "invalid x-api-key" error.
+
+**Fix:** Use standard API keys (`sk-ant-api03-*`) from [console.anthropic.com](https://console.anthropic.com).
+
+### libSQL memory search returns no results
+
+**Symptom:** Semantic queries return empty results.
+
+**Cause:** libSQL uses FTS5 keyword search only; no vector search.
+
+**Fix:** Use keyword-rich queries, or switch to PostgreSQL for hybrid search.
+
+### libSQL embedding dimension mismatch
+
+**Symptom:** Embedding operations fail.
+
+**Cause:** libSQL schema uses `F32_BLOB(1536)` - only 1536 dims supported.
+
+**Fix:** Use `text-embedding-3-small` (1536 dims). `text-embedding-3-large` (3072 dims) requires PostgreSQL.
+
+---
+
+## 13. Troubleshooting
+
+### Service not starting
+
+```bash
+# Check service status (macOS)
+launchctl list | grep ironclaw
+
+# Check for errors
+tail -50 ~/.ironclaw/logs/stderr.log
+
+# Common issues:
+# "Shutdown command received" → CLI_ENABLED=false missing
+# "failed to connect to database" → DATABASE_URL misconfigured
+# "invalid API key" → Check API key
+# "Address already in use" → GATEWAY_PORT in use by another process
+```
+
+### Port already in use
+
+```bash
+lsof -i :3000
+# Kill the process or change GATEWAY_PORT
+```
+
+### Database errors
+
+```bash
+# libSQL: check file permissions
+ls -la ~/.ironclaw/
+
+# PostgreSQL: test connection
+psql "$DATABASE_URL" -c "SELECT 1"
+```
+
+### LLM connection errors
+
+```bash
+# Test OpenAI
+curl -H "Authorization: Bearer $OPENAI_API_KEY" \
+  https://api.openai.com/v1/models | head -c 200
+
+# Test Anthropic
+curl -H "x-api-key: $ANTHROPIC_API_KEY" \
+  -H "anthropic-version: 2023-06-01" \
+  https://api.anthropic.com/v1/models | head -c 200
+
+# Test Ollama
+curl http://localhost:11434/api/tags
+```
+
+### Enable debug logging
+
+```bash
+RUST_LOG=ironclaw=debug,tower_http=debug ironclaw --no-onboard
+```
+
+---
+
+## 14. Updating IronClaw
+
+### Pre-built Binary
 
 ```bash
 curl --proto '=https' --tlsv1.2 -LsSf \
   https://github.com/nearai/ironclaw/releases/latest/download/ironclaw-installer.sh | sh
 ```
 
-Then restart the service:
-```bash
-# macOS
-launchctl stop ai.ironclaw && launchctl start ai.ironclaw
-
-# Linux
-systemctl --user restart ironclaw
-```
-
-### Build from source update
+### Built from Source
 
 ```bash
 cd ~/src/ironclaw
-
-# Pull latest — check for local patches first
-git status
-git stash        # if you have local patches
-git pull origin main
-git stash pop    # reapply local patches (resolve any conflicts)
-
-# Rebuild
+git pull
 cargo build --release --no-default-features --features libsql
-
-# Stop service
-launchctl stop ai.ironclaw          # macOS
-# systemctl --user stop ironclaw    # Linux
-
-# Replace binary (atomic, no prompt)
 install -m 755 target/release/ironclaw ~/.local/bin/ironclaw
 
-# Restart service
-launchctl start ai.ironclaw         # macOS
-# systemctl --user start ironclaw   # Linux
-
-# Verify
-ironclaw --version
-curl -s -H "Authorization: Bearer $GATEWAY_AUTH_TOKEN" http://127.0.0.1:3001/api/health
+# Restart service (macOS)
+launchctl unload ~/Library/LaunchAgents/ai.ironclaw.plist
+launchctl load ~/Library/LaunchAgents/ai.ironclaw.plist
 ```
 
-**If you have local patches** that upstream hasn't merged, always `git stash` before pulling and `git stash pop` after. Check if your patch is still needed — upstream may have fixed it differently.
-
 ---
 
-## 12. Known Issues and Gotchas
-
-### `CLI_ENABLED=false` is mandatory for service mode
-
-**Symptom:** Service starts then exits immediately (within 1–2 seconds).
-
-**Cause:** When running as a launchd/systemd service, stdin is `/dev/null`. With `CLI_ENABLED=true` (default), IronClaw starts the REPL, reads EOF from `/dev/null`, interprets it as user disconnect, and initiates graceful shutdown.
-
-**Fix:** Always set `CLI_ENABLED=false` in your service environment.
-
----
-
-### Use `install` not `cp` for binary replacement
-
-**Symptom:** `cp` prompts `overwrite /usr/local/bin/ironclaw? (y/n)` and hangs in scripts.
-
-**Fix:** `install -m 755 src dst` — atomic write, never prompts.
-
----
-
-### OpenAI 400 Bad Request on tool calls
-
-**Symptom:** Tool calls fail with HTTP 400 from OpenAI; error mentions schema validation.
-
-**Cause:** IronClaw's HTTP tool schema (as of v0.9.0) uses the invalid `"type": ["object", "array", ...]` array syntax for the `body` field. OpenAI's API rejects array type values.
-
-**Fix:** Edit `src/tools/builtin/http.rs` and remove the `"type"` line from the `body` property:
-
-```rust
-// Before (broken)
-"body": {
-    "type": ["object", "array", "string", "number", "boolean", "null"],
-    "description": "Request body (for POST/PUT/PATCH)"
-},
-
-// After (fixed)
-"body": {
-    "description": "Request body (for POST/PUT/PATCH)"
-},
-```
-
-This fix must be re-applied after every `git pull` until upstream merges the fix.
-
----
-
-### `sudo` required for `/usr/local/bin`
-
-**Symptom:** `install: /usr/local/bin/...: Permission denied`
-
-**Fix options:**
-- Use `sudo install -m 755 ...` (requires interactive terminal for password)
-- Install to `~/.local/bin/` instead (no sudo needed):
-  ```bash
-  mkdir -p ~/.local/bin
-  install -m 755 target/release/ironclaw ~/.local/bin/ironclaw
-  ```
-  Then ensure `~/.local/bin` is in your `PATH` and update the `ProgramArguments` in your plist.
-
----
-
-### `PATH` and `HOME` must be explicit in launchd plist
-
-**Symptom:** IronClaw cannot find other binaries (e.g., `docker`, `claude`) when run as a launchd service.
-
-**Cause:** launchd does not inherit the user's shell environment.
-
-**Fix:** Set `HOME` and `PATH` explicitly in the `EnvironmentVariables` dict in the plist.
-
----
-
-### Podman instead of Docker
-
-If using Podman (rootless) instead of Docker, set:
-```bash
-DOCKER_HOST=unix:///run/user/$(id -u)/podman/podman.sock
-```
-
-in your plist or systemd unit. The sandbox module uses bollard which reads `DOCKER_HOST`.
-
----
-
-### libSQL does not support workspace vector search
-
-**Symptom:** `memory_search` returns no results for semantic queries even when documents exist.
-
-**Cause:** The libSQL backend implements FTS5 keyword search only; vector search (pgvector) is not yet wired in.
-
-**Fix:** Use keyword-rich queries with libSQL, or switch to PostgreSQL for full hybrid search.
-
----
-
-### libSQL embedding dimension must be 1536
-
-**Symptom:** Embedding operations fail or return errors about dimension mismatch.
-
-**Cause:** The libSQL schema uses `F32_BLOB(1536)` for vector storage, which requires exactly 1536 dimensions.
-
-**Fix:** Use `text-embedding-3-small` (1536 dims) or set `EMBEDDING_DIMENSION=1536`. The `text-embedding-3-large` model (3072 dims) is NOT compatible with libSQL backend.
-
----
-
-*Source: IronClaw v0.9.0 · Based on hands-on deployment experience · See also: DEPLOYMENT.md, ARCHITECTURE.md*
+*Source: IronClaw v0.9.0 · See also: [ARCHITECTURE.md](ARCHITECTURE.md), [DEVELOPER-REFERENCE.md](DEVELOPER-REFERENCE.md)*
