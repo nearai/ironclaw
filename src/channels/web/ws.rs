@@ -491,6 +491,8 @@ mod tests {
             skill_catalog: None,
             chat_rate_limiter: crate::channels::web::server::RateLimiter::new(30, 60),
             registry_entries: Vec::new(),
+            cost_guard: None,
+            startup_time: std::time::Instant::now(),
         }
     }
 }

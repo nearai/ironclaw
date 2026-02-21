@@ -1204,21 +1204,49 @@ function loadServerLogLevel() {
 
 function loadExtensions() {
   const extList = document.getElementById('extensions-list');
+  const wasmList = document.getElementById('available-wasm-list');
+  const mcpList = document.getElementById('mcp-servers-list');
   const toolsTbody = document.getElementById('tools-tbody');
   const toolsEmpty = document.getElementById('tools-empty');
 
-  // Fetch both in parallel
+  // Fetch all three in parallel
   Promise.all([
     apiFetch('/api/extensions').catch(() => ({ extensions: [] })),
     apiFetch('/api/extensions/tools').catch(() => ({ tools: [] })),
-  ]).then(([extData, toolData]) => {
-    // Render extensions
+    apiFetch('/api/extensions/registry').catch(function(err) { console.warn('registry fetch failed:', err); return { entries: [] }; }),
+  ]).then(([extData, toolData, registryData]) => {
+    // Render installed extensions
     if (extData.extensions.length === 0) {
       extList.innerHTML = '<div class="empty-state">No extensions installed</div>';
     } else {
       extList.innerHTML = '';
       for (const ext of extData.extensions) {
         extList.appendChild(renderExtensionCard(ext));
+      }
+    }
+
+    // Split registry entries by kind
+    var wasmEntries = registryData.entries.filter(function(e) { return e.kind !== 'mcp_server' && !e.installed; });
+    var mcpEntries = registryData.entries.filter(function(e) { return e.kind === 'mcp_server'; });
+
+    // Available WASM extensions
+    if (wasmEntries.length === 0) {
+      wasmList.innerHTML = '<div class="empty-state">No additional WASM extensions available</div>';
+    } else {
+      wasmList.innerHTML = '';
+      for (const entry of wasmEntries) {
+        wasmList.appendChild(renderAvailableExtensionCard(entry));
+      }
+    }
+
+    // MCP servers (show both installed and uninstalled)
+    if (mcpEntries.length === 0) {
+      mcpList.innerHTML = '<div class="empty-state">No MCP servers available</div>';
+    } else {
+      mcpList.innerHTML = '';
+      for (const entry of mcpEntries) {
+        var installedExt = extData.extensions.find(function(e) { return e.name === entry.name; });
+        mcpList.appendChild(renderMcpServerCard(entry, installedExt));
       }
     }
 
@@ -1233,6 +1261,148 @@ function loadExtensions() {
       ).join('');
     }
   });
+}
+
+function renderAvailableExtensionCard(entry) {
+  const card = document.createElement('div');
+  card.className = 'ext-card ext-available';
+
+  const header = document.createElement('div');
+  header.className = 'ext-header';
+
+  const name = document.createElement('span');
+  name.className = 'ext-name';
+  name.textContent = entry.display_name;
+  header.appendChild(name);
+
+  const kind = document.createElement('span');
+  kind.className = 'ext-kind kind-' + entry.kind;
+  kind.textContent = entry.kind;
+  header.appendChild(kind);
+
+  card.appendChild(header);
+
+  const desc = document.createElement('div');
+  desc.className = 'ext-desc';
+  desc.textContent = entry.description;
+  card.appendChild(desc);
+
+  if (entry.keywords && entry.keywords.length > 0) {
+    const kw = document.createElement('div');
+    kw.className = 'ext-keywords';
+    kw.textContent = entry.keywords.join(', ');
+    card.appendChild(kw);
+  }
+
+  const actions = document.createElement('div');
+  actions.className = 'ext-actions';
+
+  const installBtn = document.createElement('button');
+  installBtn.className = 'btn-ext install';
+  installBtn.textContent = 'Install';
+  installBtn.addEventListener('click', function() {
+    installBtn.disabled = true;
+    installBtn.textContent = 'Installing...';
+    apiFetch('/api/extensions/install', {
+      method: 'POST',
+      body: { name: entry.name, kind: entry.kind },
+    }).then(function(res) {
+      if (res.success) {
+        showToast('Installed ' + entry.display_name, 'success');
+      } else {
+        showToast('Install: ' + (res.message || 'unknown error'), 'error');
+      }
+      loadExtensions();
+    }).catch(function(err) {
+      showToast('Install failed: ' + err.message, 'error');
+      loadExtensions();
+    });
+  });
+  actions.appendChild(installBtn);
+
+  card.appendChild(actions);
+  return card;
+}
+
+function renderMcpServerCard(entry, installedExt) {
+  var card = document.createElement('div');
+  card.className = 'ext-card' + (installedExt ? '' : ' ext-available');
+
+  var header = document.createElement('div');
+  header.className = 'ext-header';
+
+  var name = document.createElement('span');
+  name.className = 'ext-name';
+  name.textContent = entry.display_name;
+  header.appendChild(name);
+
+  var kind = document.createElement('span');
+  kind.className = 'ext-kind kind-mcp_server';
+  kind.textContent = 'mcp_server';
+  header.appendChild(kind);
+
+  if (installedExt) {
+    var authDot = document.createElement('span');
+    authDot.className = 'ext-auth-dot ' + (installedExt.authenticated ? 'authed' : 'unauthed');
+    authDot.title = installedExt.authenticated ? 'Authenticated' : 'Not authenticated';
+    header.appendChild(authDot);
+  }
+
+  card.appendChild(header);
+
+  var desc = document.createElement('div');
+  desc.className = 'ext-desc';
+  desc.textContent = entry.description;
+  card.appendChild(desc);
+
+  var actions = document.createElement('div');
+  actions.className = 'ext-actions';
+
+  if (installedExt) {
+    if (!installedExt.active) {
+      var activateBtn = document.createElement('button');
+      activateBtn.className = 'btn-ext activate';
+      activateBtn.textContent = 'Activate';
+      activateBtn.addEventListener('click', function() { activateExtension(installedExt.name); });
+      actions.appendChild(activateBtn);
+    } else {
+      var activeLabel = document.createElement('span');
+      activeLabel.className = 'ext-active-label';
+      activeLabel.textContent = 'Active';
+      actions.appendChild(activeLabel);
+    }
+    var removeBtn = document.createElement('button');
+    removeBtn.className = 'btn-ext remove';
+    removeBtn.textContent = 'Remove';
+    removeBtn.addEventListener('click', function() { removeExtension(installedExt.name); });
+    actions.appendChild(removeBtn);
+  } else {
+    var installBtn = document.createElement('button');
+    installBtn.className = 'btn-ext install';
+    installBtn.textContent = 'Install';
+    installBtn.addEventListener('click', function() {
+      installBtn.disabled = true;
+      installBtn.textContent = 'Installing...';
+      apiFetch('/api/extensions/install', {
+        method: 'POST',
+        body: { name: entry.name, kind: entry.kind },
+      }).then(function(res) {
+        if (res.success) {
+          showToast('Installed ' + entry.display_name, 'success');
+        } else {
+          showToast('Install: ' + (res.message || 'unknown error'), 'error');
+        }
+        loadExtensions();
+      }).catch(function(err) {
+        showToast('Install failed: ' + err.message, 'error');
+        loadExtensions();
+      });
+    });
+    actions.appendChild(installBtn);
+  }
+
+  card.appendChild(actions);
+  return card;
 }
 
 function renderExtensionCard(ext) {
@@ -2082,13 +2252,72 @@ function startGatewayStatusPolling() {
   gatewayStatusInterval = setInterval(fetchGatewayStatus, 30000);
 }
 
+function formatTokenCount(n) {
+  if (n == null || n === 0) return '0';
+  if (n >= 1000000) return (n / 1000000).toFixed(1) + 'M';
+  if (n >= 1000) return (n / 1000).toFixed(1) + 'k';
+  return '' + n;
+}
+
+function formatCost(costStr) {
+  if (!costStr) return '$0.00';
+  var n = parseFloat(costStr);
+  if (n < 0.01) return '$' + n.toFixed(4);
+  return '$' + n.toFixed(2);
+}
+
+function shortModelName(model) {
+  // Strip provider prefix and shorten common model names
+  var m = model.indexOf('/') >= 0 ? model.split('/').pop() : model;
+  // Shorten dated suffixes
+  m = m.replace(/-20\d{6}$/, '');
+  return m;
+}
+
 function fetchGatewayStatus() {
-  apiFetch('/api/gateway/status').then((data) => {
-    const popover = document.getElementById('gateway-popover');
-    popover.innerHTML = '<div class="gw-stat"><span>SSE clients</span><span>' + (data.sse_clients || 0) + '</span></div>'
-      + '<div class="gw-stat"><span>Log clients</span><span>' + (data.log_clients || 0) + '</span></div>'
-      + '<div class="gw-stat"><span>Uptime</span><span>' + formatDuration(data.uptime_secs) + '</span></div>';
-  }).catch(() => {});
+  apiFetch('/api/gateway/status').then(function(data) {
+    var popover = document.getElementById('gateway-popover');
+    var html = '';
+
+    // Connection info
+    html += '<div class="gw-section-label">Connections</div>';
+    html += '<div class="gw-stat"><span>SSE</span><span>' + (data.sse_connections || 0) + '</span></div>';
+    html += '<div class="gw-stat"><span>WebSocket</span><span>' + (data.ws_connections || 0) + '</span></div>';
+    html += '<div class="gw-stat"><span>Uptime</span><span>' + formatDuration(data.uptime_secs) + '</span></div>';
+
+    // Cost tracker
+    if (data.daily_cost != null) {
+      html += '<div class="gw-divider"></div>';
+      html += '<div class="gw-section-label">Cost Today</div>';
+      html += '<div class="gw-stat"><span>Spent</span><span>' + formatCost(data.daily_cost) + '</span></div>';
+      if (data.actions_this_hour != null) {
+        html += '<div class="gw-stat"><span>Actions/hr</span><span>' + data.actions_this_hour + '</span></div>';
+      }
+    }
+
+    // Per-model token usage
+    if (data.model_usage && data.model_usage.length > 0) {
+      html += '<div class="gw-divider"></div>';
+      html += '<div class="gw-section-label">Token Usage</div>';
+      data.model_usage.sort(function(a, b) {
+        return (b.input_tokens + b.output_tokens) - (a.input_tokens + a.output_tokens);
+      });
+      for (var i = 0; i < data.model_usage.length; i++) {
+        var m = data.model_usage[i];
+        var name = escapeHtml(shortModelName(m.model));
+        html += '<div class="gw-model-row">'
+          + '<span class="gw-model-name">' + name + '</span>'
+          + '<span class="gw-model-cost">' + escapeHtml(formatCost(m.cost)) + '</span>'
+          + '</div>';
+        html += '<div class="gw-token-detail">'
+          + '<span>in: ' + formatTokenCount(m.input_tokens) + '</span>'
+          + '<span>out: ' + formatTokenCount(m.output_tokens) + '</span>'
+          + '</div>';
+      }
+    }
+
+    popover.innerHTML = html;
+  }).catch(function() {});
 }
 
 // Show/hide popover on hover
@@ -2195,29 +2424,61 @@ document.getElementById('tee-shield').addEventListener('mouseleave', function() 
 
 // --- Extension install ---
 
-function installExtension() {
-  const name = document.getElementById('ext-install-name').value.trim();
+function installWasmExtension() {
+  var name = document.getElementById('wasm-install-name').value.trim();
   if (!name) {
     showToast('Extension name is required', 'error');
     return;
   }
-  const url = document.getElementById('ext-install-url').value.trim();
-  const kind = document.getElementById('ext-install-kind').value;
+  var url = document.getElementById('wasm-install-url').value.trim();
+  if (!url) {
+    showToast('URL to .tar.gz bundle is required', 'error');
+    return;
+  }
 
   apiFetch('/api/extensions/install', {
     method: 'POST',
-    body: { name, url: url || undefined, kind },
-  }).then((res) => {
+    body: { name: name, url: url, kind: 'wasm_tool' },
+  }).then(function(res) {
     if (res.success) {
       showToast('Installed ' + name, 'success');
-      document.getElementById('ext-install-name').value = '';
-      document.getElementById('ext-install-url').value = '';
+      document.getElementById('wasm-install-name').value = '';
+      document.getElementById('wasm-install-url').value = '';
       loadExtensions();
     } else {
       showToast('Install failed: ' + (res.message || 'unknown error'), 'error');
     }
-  }).catch((err) => {
+  }).catch(function(err) {
     showToast('Install failed: ' + err.message, 'error');
+  });
+}
+
+function addMcpServer() {
+  var name = document.getElementById('mcp-install-name').value.trim();
+  if (!name) {
+    showToast('Server name is required', 'error');
+    return;
+  }
+  var url = document.getElementById('mcp-install-url').value.trim();
+  if (!url) {
+    showToast('MCP server URL is required', 'error');
+    return;
+  }
+
+  apiFetch('/api/extensions/install', {
+    method: 'POST',
+    body: { name: name, url: url, kind: 'mcp_server' },
+  }).then(function(res) {
+    if (res.success) {
+      showToast('Added MCP server ' + name, 'success');
+      document.getElementById('mcp-install-name').value = '';
+      document.getElementById('mcp-install-url').value = '';
+      loadExtensions();
+    } else {
+      showToast('Failed to add MCP server: ' + (res.message || 'unknown error'), 'error');
+    }
+  }).catch(function(err) {
+    showToast('Failed to add MCP server: ' + err.message, 'error');
   });
 }
 
@@ -2228,10 +2489,10 @@ document.addEventListener('keydown', (e) => {
   const tag = (e.target.tagName || '').toLowerCase();
   const inInput = tag === 'input' || tag === 'textarea';
 
-  // Mod+1-6: switch tabs
-  if (mod && e.key >= '1' && e.key <= '6') {
+  // Mod+1-5: switch tabs
+  if (mod && e.key >= '1' && e.key <= '5') {
     e.preventDefault();
-    const tabs = ['chat', 'memory', 'jobs', 'routines', 'logs', 'extensions'];
+    const tabs = ['chat', 'memory', 'jobs', 'routines', 'extensions'];
     const idx = parseInt(e.key) - 1;
     if (tabs[idx]) switchTab(tabs[idx]);
     return;

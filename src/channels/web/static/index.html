@@ -4,6 +4,9 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>IronClaw</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
   <link rel="stylesheet" href="/style.css">
   <script
     src="https://cdn.jsdelivr.net/npm/marked@17.0.2/lib/marked.umd.min.js"
@@ -36,10 +39,10 @@
       <button class="active" data-tab="chat">Chat</button>
       <button data-tab="memory">Memory</button>
       <button data-tab="jobs">Jobs</button>
-      <button data-tab="logs">Logs</button>
       <button data-tab="routines">Routines</button>
       <button data-tab="extensions">Extensions</button>
       <div class="spacer"></div>
+      <button class="status-logs-btn" data-tab="logs" title="Logs">Logs</button>
       <div class="tee-shield" id="tee-shield" style="display:none" title="Running in a Trusted Execution Environment">
         <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
           <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/>
@@ -186,33 +189,41 @@
     <div class="tab-panel" id="tab-extensions">
       <div class="extensions-container">
         <div class="extensions-section">
-          <h3>Install Extension</h3>
-          <div class="ext-install-form" id="ext-install-form">
-            <input type="text" id="ext-install-name" placeholder="Extension name (required)">
-            <input type="text" id="ext-install-url" placeholder="URL (optional)">
-            <select id="ext-install-kind">
-              <option value="mcp_server">MCP Server</option>
-              <option value="wasm_tool">WASM Tool</option>
-              <option value="wasm_channel">WASM Channel</option>
-            </select>
-            <button onclick="installExtension()">Install</button>
-          </div>
-        </div>
-        <div class="extensions-section">
           <h3>Installed Extensions</h3>
           <div class="extensions-list" id="extensions-list">
             <div class="empty-state">Loading extensions...</div>
           </div>
         </div>
+        <div class="extensions-section" id="available-wasm-section">
+          <h3>Available WASM Extensions</h3>
+          <div class="extensions-list" id="available-wasm-list">
+            <div class="empty-state">Loading...</div>
+          </div>
+        </div>
+        <div class="extensions-section">
+          <h3>Install WASM Extension</h3>
+          <div class="ext-install-form">
+            <input type="text" id="wasm-install-name" placeholder="Extension name">
+            <input type="text" id="wasm-install-url" placeholder="URL to .tar.gz bundle">
+            <button onclick="installWasmExtension()">Install</button>
+          </div>
+        </div>
+        <div class="extensions-section">
+          <h3>MCP Servers</h3>
+          <div class="extensions-list" id="mcp-servers-list">
+            <div class="empty-state">Loading...</div>
+          </div>
+          <h4>Add Custom MCP Server</h4>
+          <div class="ext-install-form">
+            <input type="text" id="mcp-install-name" placeholder="Server name">
+            <input type="text" id="mcp-install-url" placeholder="MCP server URL (https://...)">
+            <button onclick="addMcpServer()">Add</button>
+          </div>
+        </div>
         <div class="extensions-section">
           <h3>Registered Tools</h3>
           <table class="tools-table" id="tools-table">
-            <thead>
-              <tr>
-                <th>Name</th>
-                <th>Description</th>
-              </tr>
-            </thead>
+            <thead><tr><th>Name</th><th>Description</th></tr></thead>
             <tbody id="tools-tbody"></tbody>
           </table>
           <div class="empty-state" id="tools-empty" style="display:none">No tools registered</div>

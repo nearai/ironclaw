@@ -220,6 +220,25 @@ fn create_openai_compatible_provider(config: &LlmConfig) -> Result<Arc<dyn LlmPr
 
     use rig::providers::openai;
 
+    let mut extra_headers = reqwest::header::HeaderMap::new();
+    for (key, value) in &compat.extra_headers {
+        let name = match reqwest::header::HeaderName::from_bytes(key.as_bytes()) {
+            Ok(n) => n,
+            Err(e) => {
+                tracing::warn!(header = %key, error = %e, "Skipping LLM_EXTRA_HEADERS entry: invalid header name");
+                continue;
+            }
+        };
+        let val = match reqwest::header::HeaderValue::from_str(value) {
+            Ok(v) => v,
+            Err(e) => {
+                tracing::warn!(header = %key, error = %e, "Skipping LLM_EXTRA_HEADERS entry: invalid header value");
+                continue;
+            }
+        };
+        extra_headers.insert(name, val);
+    }
+
     let client: openai::CompletionsClient = openai::Client::builder()
         .base_url(&compat.base_url)
         .api_key(
@@ -229,6 +248,7 @@ fn create_openai_compatible_provider(config: &LlmConfig) -> Result<Arc<dyn LlmPr
                 .map(|k| k.expose_secret().to_string())
                 .unwrap_or_else(|| "no-key".to_string()),
         )
+        .http_headers(extra_headers)
         .build()
         .map_err(|e| LlmError::RequestFailed {
             provider: "openai_compatible".to_string(),
