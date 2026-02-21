@@ -1083,11 +1083,7 @@ impl SetupWizard {
                 // NEAR AI: use existing provider list_models()
                 let fetched = self.fetch_nearai_models().await;
                 let default_models: Vec<(String, String)> = vec![
-                    (
-                        "fireworks::accounts/fireworks/models/llama4-maverick-instruct-basic"
-                            .into(),
-                        "Llama 4 Maverick (default, fast)".into(),
-                    ),
+                    ("zai/GLM-latest".into(), "GLM Latest (default, fast)".into()),
                     (
                         "anthropic::claude-sonnet-4-20250514".into(),
                         "Claude Sonnet 4 (best quality)".into(),
