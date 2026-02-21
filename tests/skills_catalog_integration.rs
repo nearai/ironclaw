@@ -4,18 +4,18 @@
 //! the ClawHub registry API, then exercise the full search -> download -> install
 //! flow through the real `SkillCatalog` and `SkillRegistry` types.
 
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
+use axum::Router;
 use axum::extract::{Query, State};
 use axum::response::IntoResponse;
 use axum::routing::get;
-use axum::Router;
 use serde::Deserialize;
 
-use ironclaw::skills::catalog::{skill_download_url, SkillCatalog};
-use ironclaw::skills::registry::SkillRegistry;
 use ironclaw::skills::SkillTrust;
+use ironclaw::skills::catalog::{SkillCatalog, skill_download_url};
+use ironclaw::skills::registry::SkillRegistry;
 
 // ---------------------------------------------------------------------------
 // Shared test fixtures
@@ -181,7 +181,11 @@ async fn test_catalog_search_caches_results() {
 
     // First search -- should hit the server.
     let _results = catalog.search("deploy").await;
-    assert_eq!(counter.load(Ordering::SeqCst), 1, "First search should hit server");
+    assert_eq!(
+        counter.load(Ordering::SeqCst),
+        1,
+        "First search should hit server"
+    );
 
     // Second search with same query -- should come from cache.
     let _results = catalog.search("deploy").await;
@@ -244,7 +248,9 @@ async fn test_install_skill_from_mock_catalog() {
         .expect("Skill should be findable by name");
     assert_eq!(skill.trust, SkillTrust::Installed);
     assert!(
-        skill.prompt_content.contains("deployment automation assistant"),
+        skill
+            .prompt_content
+            .contains("deployment automation assistant"),
         "Prompt content should contain expected text"
     );
     assert!(
