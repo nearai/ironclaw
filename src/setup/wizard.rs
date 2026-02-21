@@ -1731,8 +1731,13 @@ impl SetupWizard {
 
     /// Step 8: Docker Sandbox -- check Docker installation and availability.
     async fn step_docker_sandbox(&mut self) -> Result<(), SetupError> {
-        print_info("The Docker sandbox provides isolated execution for code generation,");
-        print_info("builds, and untrusted commands. It requires Docker to be installed.");
+        print_info("IronClaw can execute code, run builds, and use tools inside Docker");
+        print_info("containers. This keeps your system safe -- commands from the LLM run");
+        print_info("in an isolated sandbox with no access to your credentials, limited");
+        print_info("filesystem access, and network traffic restricted to an allowlist.");
+        println!();
+        print_info("Without Docker, code execution tools (shell, file write) run directly");
+        print_info("on your machine with no isolation.");
         println!();
 
         if !confirm("Enable Docker sandbox?", false).map_err(SetupError::Io)? {

@@ -3,6 +3,23 @@
 //! Checks whether Docker is both installed (binary on PATH) and running
 //! (daemon responding to ping), and provides platform-appropriate
 //! installation or startup instructions when it is not.
+//!
+//! # Detection Limitations
+//!
+//! - **macOS**: High confidence. Detects both standard Docker Desktop socket
+//!   (`~/.docker/run/docker.sock`) and the default `/var/run/docker.sock`.
+//!
+//! - **Linux**: High confidence for standard installs. Rootless Docker uses
+//!   a different socket path (`/run/user/$UID/docker.sock`) which is not
+//!   checked by the fallback in `connect_docker()`. If `DOCKER_HOST` is set,
+//!   bollard's default connection will use it correctly.
+//!
+//! - **Windows**: Medium confidence. Binary detection uses `where.exe` which
+//!   works reliably. Daemon detection relies on bollard's default named pipe
+//!   connection (`//./pipe/docker_engine`) which works with Docker Desktop.
+//!   The Unix socket fallback in `connect_docker()` is a no-op on Windows.
+//!   If Docker Desktop is running but the named pipe is not available,
+//!   detection may report `NotRunning` even though Docker is functional.
 
 /// Docker daemon availability status.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
