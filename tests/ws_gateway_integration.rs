@@ -56,6 +56,8 @@ async fn start_test_server() -> (
         skill_registry: None,
         skill_catalog: None,
         chat_rate_limiter: ironclaw::channels::web::server::RateLimiter::new(30, 60),
+        cost_guard: None,
+        startup_time: std::time::Instant::now(),
     });
 
     let addr: SocketAddr = "127.0.0.1:0".parse().unwrap();

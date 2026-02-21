@@ -1319,6 +1319,14 @@ async fn main() -> anyhow::Result<()> {
         (None, None)
     };
 
+    // Create cost guard early so gateway can reference it.
+    let cost_guard = Arc::new(ironclaw::agent::cost_guard::CostGuard::new(
+        ironclaw::agent::cost_guard::CostGuardConfig {
+            max_cost_per_day_cents: config.agent.max_cost_per_day_cents,
+            max_actions_per_hour: config.agent.max_actions_per_hour,
+        },
+    ));
+
     // Add web gateway channel if configured
     let mut gateway_url: Option<String> = None;
     if let Some(ref gw_config) = config.channels.gateway {
@@ -1345,6 +1353,7 @@ async fn main() -> anyhow::Result<()> {
         if let Some(ref sc) = skill_catalog {
             gw = gw.with_skill_catalog(Arc::clone(sc));
         }
+        gw = gw.with_cost_guard(Arc::clone(&cost_guard));
         if config.sandbox.enabled {
             gw = gw.with_prompt_queue(Arc::clone(&prompt_queue));
 
@@ -1379,12 +1388,6 @@ async fn main() -> anyhow::Result<()> {
     let boot_cheap_model = cheap_llm.as_ref().map(|c| c.model_name().to_string());
 
     // Create and run the agent
-    let cost_guard = Arc::new(ironclaw::agent::cost_guard::CostGuard::new(
-        ironclaw::agent::cost_guard::CostGuardConfig {
-            max_cost_per_day_cents: config.agent.max_cost_per_day_cents,
-            max_actions_per_hour: config.agent.max_actions_per_hour,
-        },
-    ));
     let deps = AgentDeps {
         store: db,
         llm,

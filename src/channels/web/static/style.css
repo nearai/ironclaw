@@ -2549,13 +2549,27 @@ mark {
   border: 1px solid var(--border);
   border-radius: var(--radius-lg);
   padding: 12px;
-  min-width: 180px;
+  min-width: 220px;
   box-shadow: var(--shadow);
   z-index: 100;
 }
 
 .gateway-popover.visible {
   display: block;
+}
+
+.gw-section-label {
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--text-muted, var(--text-secondary));
+  margin-bottom: 4px;
+  font-weight: 600;
+}
+
+.gw-divider {
+  border-top: 1px solid var(--border);
+  margin: 8px 0;
 }
 
 .gw-stat {
@@ -2569,6 +2583,37 @@ mark {
 .gw-stat span:last-child {
   color: var(--text);
   font-weight: 500;
+}
+
+.gw-model-row {
+  display: flex;
+  justify-content: space-between;
+  font-size: 12px;
+  padding: 3px 0 0 0;
+}
+
+.gw-model-name {
+  color: var(--text);
+  font-weight: 500;
+  font-size: 11px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 140px;
+}
+
+.gw-model-cost {
+  color: var(--accent, var(--text));
+  font-weight: 500;
+  font-size: 11px;
+}
+
+.gw-token-detail {
+  display: flex;
+  gap: 12px;
+  font-size: 10px;
+  color: var(--text-secondary);
+  padding: 1px 0 4px 0;
 }
 
 /* --- Extension install form --- */

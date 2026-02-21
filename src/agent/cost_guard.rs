@@ -4,7 +4,7 @@
 //! to prevent runaway agents from burning through API credits. Especially
 //! important for daemon/heartbeat modes where the agent acts autonomously.
 
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Instant;
 
@@ -53,6 +53,14 @@ impl std::fmt::Display for CostLimitExceeded {
     }
 }
 
+/// Per-model token usage counters.
+#[derive(Debug, Clone, Default)]
+pub struct ModelTokens {
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    pub cost: Decimal,
+}
+
 /// Tracks costs and action rates, enforcing configurable limits.
 ///
 /// Thread-safe; designed to be shared via `Arc<CostGuard>`.
@@ -67,6 +75,9 @@ pub struct CostGuard {
 
     /// Flag set when daily budget is exceeded to short-circuit checks.
     budget_exceeded: AtomicBool,
+
+    /// Per-model token usage since startup.
+    model_tokens: Mutex<HashMap<String, ModelTokens>>,
 }
 
 struct DailyCost {
@@ -85,6 +96,7 @@ impl CostGuard {
             }),
             action_window: Mutex::new(VecDeque::new()),
             budget_exceeded: AtomicBool::new(false),
+            model_tokens: Mutex::new(HashMap::new()),
         }
     }
 
@@ -192,6 +204,15 @@ impl CostGuard {
             window.push_back(Instant::now());
         }
 
+        // Track per-model token usage
+        {
+            let mut tokens = self.model_tokens.lock().await;
+            let entry = tokens.entry(model.to_string()).or_default();
+            entry.input_tokens += u64::from(input_tokens);
+            entry.output_tokens += u64::from(output_tokens);
+            entry.cost += cost;
+        }
+
         cost
     }
 
@@ -214,6 +235,11 @@ impl CostGuard {
             window.pop_front();
         }
         window.len() as u64
+    }
+
+    /// Per-model token usage since startup.
+    pub async fn model_usage(&self) -> HashMap<String, ModelTokens> {
+        self.model_tokens.lock().await.clone()
     }
 }
 
