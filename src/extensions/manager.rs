@@ -521,9 +521,6 @@ impl ExtensionManager {
                         entry.name, entry.name
                     )))
                 }
-                ExtensionSource::Bundled { name } => {
-                    self.install_bundled_channel_from_artifacts(name).await
-                }
                 _ => Err(ExtensionError::InstallFailed(
                     "WASM channel entry has no download URL".to_string(),
                 )),
@@ -827,39 +824,6 @@ impl ExtensionManager {
         }
 
         Ok(())
-    }
-
-    async fn install_bundled_channel_from_artifacts(
-        &self,
-        name: &str,
-    ) -> Result<InstallResult, ExtensionError> {
-        // Check if already installed
-        let channel_wasm = self.wasm_channels_dir.join(format!("{}.wasm", name));
-        if channel_wasm.exists() {
-            return Err(ExtensionError::AlreadyInstalled(name.to_string()));
-        }
-
-        crate::channels::wasm::install_bundled_channel(name, &self.wasm_channels_dir, false)
-            .await
-            .map_err(ExtensionError::InstallFailed)?;
-
-        tracing::info!(
-            "Installed bundled channel '{}' to {}",
-            name,
-            self.wasm_channels_dir.display()
-        );
-
-        Ok(InstallResult {
-            name: name.to_string(),
-            kind: ExtensionKind::WasmChannel,
-            message: format!(
-                "Channel '{}' installed to {}. Restart IronClaw for the channel to activate. \
-                 Run tool_auth('{}') to configure authentication before restarting.",
-                name,
-                self.wasm_channels_dir.display(),
-                name,
-            ),
-        })
     }
 
     async fn auth_mcp(
