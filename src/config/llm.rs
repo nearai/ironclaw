@@ -90,6 +90,9 @@ pub struct OpenAiCompatibleConfig {
     pub base_url: String,
     pub api_key: Option<SecretString>,
     pub model: String,
+    /// Extra HTTP headers injected into every LLM request.
+    /// Parsed from `LLM_EXTRA_HEADERS` env var (format: `Key:Value,Key2:Value2`).
+    pub extra_headers: Vec<(String, String)>,
 }
 
 /// Configuration for Tinfoil private inference.
@@ -298,10 +301,15 @@ impl LlmConfig {
             let model = optional_env("LLM_MODEL")?
                 .or_else(|| settings.selected_model.clone())
                 .unwrap_or_else(|| "default".to_string());
+            let extra_headers = optional_env("LLM_EXTRA_HEADERS")?
+                .map(|val| parse_extra_headers(&val))
+                .transpose()?
+                .unwrap_or_default();
             Some(OpenAiCompatibleConfig {
                 base_url,
                 api_key,
                 model,
+                extra_headers,
             })
         } else {
             None
@@ -330,6 +338,40 @@ impl LlmConfig {
             tinfoil,
         })
     }
+}
+
+/// Parse `LLM_EXTRA_HEADERS` value into a list of (key, value) pairs.
+///
+/// Format: `Key1:Value1,Key2:Value2` — colon-separated key:value, comma-separated pairs.
+/// Colon is used as the separator (not `=`) because header values often contain `=`
+/// (e.g., base64 tokens).
+fn parse_extra_headers(val: &str) -> Result<Vec<(String, String)>, ConfigError> {
+    if val.trim().is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let mut headers = Vec::new();
+    for pair in val.split(',') {
+        let pair = pair.trim();
+        if pair.is_empty() {
+            continue;
+        }
+        let Some((key, value)) = pair.split_once(':') else {
+            return Err(ConfigError::InvalidValue {
+                key: "LLM_EXTRA_HEADERS".to_string(),
+                message: format!("malformed header entry '{}', expected Key:Value", pair),
+            });
+        };
+        let key = key.trim();
+        if key.is_empty() {
+            return Err(ConfigError::InvalidValue {
+                key: "LLM_EXTRA_HEADERS".to_string(),
+                message: format!("empty header name in entry '{}'", pair),
+            });
+        }
+        headers.push((key.to_string(), value.trim().to_string()));
+    }
+    Ok(headers)
 }
 
 /// Get the default session file path (~/.ironclaw/session.json).
@@ -403,5 +445,70 @@ mod tests {
         unsafe {
             std::env::remove_var("LLM_MODEL");
         }
+    }
+
+    #[test]
+    fn test_extra_headers_parsed() {
+        let result = parse_extra_headers("HTTP-Referer:https://myapp.com,X-Title:MyApp").unwrap();
+        assert_eq!(
+            result,
+            vec![
+                ("HTTP-Referer".to_string(), "https://myapp.com".to_string()),
+                ("X-Title".to_string(), "MyApp".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn test_extra_headers_empty_string() {
+        let result = parse_extra_headers("").unwrap();
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn test_extra_headers_whitespace_only() {
+        let result = parse_extra_headers("  ").unwrap();
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn test_extra_headers_malformed() {
+        let result = parse_extra_headers("NoColonHere");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_extra_headers_empty_key() {
+        let result = parse_extra_headers(":value");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_extra_headers_value_with_colons() {
+        // Values can contain colons (e.g., URLs)
+        let result = parse_extra_headers("Authorization:Bearer abc:def").unwrap();
+        assert_eq!(
+            result,
+            vec![("Authorization".to_string(), "Bearer abc:def".to_string())]
+        );
+    }
+
+    #[test]
+    fn test_extra_headers_trailing_comma() {
+        let result = parse_extra_headers("X-Title:MyApp,").unwrap();
+        assert_eq!(result, vec![("X-Title".to_string(), "MyApp".to_string())]);
+    }
+
+    #[test]
+    fn test_extra_headers_with_spaces() {
+        let result =
+            parse_extra_headers(" HTTP-Referer : https://myapp.com , X-Title : MyApp ").unwrap();
+        assert_eq!(
+            result,
+            vec![
+                ("HTTP-Referer".to_string(), "https://myapp.com".to_string()),
+                ("X-Title".to_string(), "MyApp".to_string()),
+            ]
+        );
     }
 }
