@@ -75,9 +75,7 @@ impl Platform {
             Platform::MacOS => {
                 "Install Docker Desktop: https://docs.docker.com/desktop/install/mac-install/"
             }
-            Platform::Linux => {
-                "Install Docker Engine: https://docs.docker.com/engine/install/"
-            }
+            Platform::Linux => "Install Docker Engine: https://docs.docker.com/engine/install/",
             Platform::Windows => {
                 "Install Docker Desktop: https://docs.docker.com/desktop/install/windows-install/"
             }

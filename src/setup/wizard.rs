@@ -1771,7 +1771,9 @@ impl SetupWizard {
                     }
                 } else {
                     self.settings.sandbox.enabled = false;
-                    print_info("Sandbox disabled. Install Docker and set SANDBOX_ENABLED=true later.");
+                    print_info(
+                        "Sandbox disabled. Install Docker and set SANDBOX_ENABLED=true later.",
+                    );
                 }
             }
             crate::sandbox::detect::DockerStatus::NotRunning => {
@@ -1791,7 +1793,9 @@ impl SetupWizard {
                     }
                 } else {
                     self.settings.sandbox.enabled = false;
-                    print_info("Sandbox disabled. Start Docker and set SANDBOX_ENABLED=true later.");
+                    print_info(
+                        "Sandbox disabled. Start Docker and set SANDBOX_ENABLED=true later.",
+                    );
                 }
             }
             crate::sandbox::detect::DockerStatus::Disabled => {
