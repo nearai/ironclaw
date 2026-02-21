@@ -5,10 +5,12 @@
 
 /// Check whether HTTP request parameters contain manually-provided credentials.
 ///
-/// Inspects both headers (name/value) and URL query parameters for patterns
-/// that indicate authentication data.
+/// Inspects headers (name/value), URL query parameters, and URL userinfo
+/// for patterns that indicate authentication data.
 pub fn params_contain_manual_credentials(params: &serde_json::Value) -> bool {
-    headers_contain_credentials(params) || url_contains_credential_params(params)
+    headers_contain_credentials(params)
+        || url_contains_credential_params(params)
+        || url_contains_userinfo(params)
 }
 
 /// Header names that are exact matches for credential-carrying headers (case-insensitive).
@@ -84,8 +86,7 @@ fn header_value_is_credential(value: &str) -> bool {
 fn headers_contain_credentials(params: &serde_json::Value) -> bool {
     match params.get("headers") {
         Some(serde_json::Value::Object(map)) => map.iter().any(|(k, v)| {
-            header_name_is_credential(k)
-                || v.as_str().is_some_and(header_value_is_credential)
+            header_name_is_credential(k) || v.as_str().is_some_and(header_value_is_credential)
         }),
         Some(serde_json::Value::Array(items)) => items.iter().any(|item| {
             let name_match = item
@@ -126,6 +127,22 @@ fn url_contains_credential_params(params: &serde_json::Value) -> bool {
     parsed
         .query_pairs()
         .any(|(name, _)| query_param_is_credential(&name))
+}
+
+/// Detect credentials embedded in URL userinfo (e.g., `https://user:pass@host/`).
+fn url_contains_userinfo(params: &serde_json::Value) -> bool {
+    let url_str = match params.get("url").and_then(|u| u.as_str()) {
+        Some(u) => u,
+        None => return false,
+    };
+
+    let parsed = match url::Url::parse(url_str) {
+        Ok(u) => u,
+        Err(_) => return false,
+    };
+
+    // Non-empty username or password in the URL indicates embedded credentials
+    !parsed.username().is_empty() || parsed.password().is_some()
 }
 
 #[cfg(test)]
@@ -331,5 +348,34 @@ mod tests {
             "url": "not a url"
         });
         assert!(!params_contain_manual_credentials(&params));
+    }
+
+    // ── URL userinfo detection ─────────────────────────────────────────
+
+    #[test]
+    fn test_url_userinfo_with_password_detected() {
+        let params = serde_json::json!({
+            "method": "GET",
+            "url": "https://user:pass@api.example.com/data"
+        });
+        assert!(params_contain_manual_credentials(&params));
+    }
+
+    #[test]
+    fn test_url_userinfo_username_only_detected() {
+        let params = serde_json::json!({
+            "method": "GET",
+            "url": "https://apikey@api.example.com/data"
+        });
+        assert!(params_contain_manual_credentials(&params));
+    }
+
+    #[test]
+    fn test_url_without_userinfo_not_detected_by_userinfo_check() {
+        // This specifically tests that url_contains_userinfo returns false
+        // for a normal URL (the broader function may still detect query params).
+        assert!(!url_contains_userinfo(&serde_json::json!({
+            "url": "https://api.example.com/data"
+        })));
     }
 }
