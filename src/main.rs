@@ -724,8 +724,15 @@ async fn main() -> anyhow::Result<()> {
     let safety = Arc::new(SafetyLayer::new(&config.safety));
     tracing::info!("Safety layer initialized");
 
-    // Initialize tool registry
-    let tools = Arc::new(ToolRegistry::new());
+    // Initialize tool registry with credential injection support
+    let credential_registry = Arc::new(ironclaw::tools::wasm::SharedCredentialRegistry::new());
+    let tools = if let Some(ref ss) = secrets_store {
+        Arc::new(
+            ToolRegistry::new().with_credentials(Arc::clone(&credential_registry), Arc::clone(ss)),
+        )
+    } else {
+        Arc::new(ToolRegistry::new())
+    };
     tools.register_builtin_tools();
 
     // Create embeddings provider if configured
