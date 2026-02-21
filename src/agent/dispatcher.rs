@@ -878,6 +878,8 @@ mod tests {
                 allow_local_tools: false,
                 max_cost_per_day_cents: None,
                 max_actions_per_hour: None,
+                max_tool_iterations: 50,
+                auto_approve_tools: false,
             },
             deps,
             ChannelManager::new(),
