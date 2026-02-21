@@ -47,9 +47,8 @@ If all automated checks pass, proceed with manual verification below.
 
 ### 2. Confinement (Installed)
 
-1. Install a skill via the `skill_install` tool, or simulate by placing a SKILL.md
-   and loading it with `SkillTrust::Installed` (the registry assigns Installed trust
-   to skills added via `install_skill()`).
+1. Install a skill via the `skill_install` tool (the registry assigns Installed trust
+   to skills added this way).
 
 2. Send a message matching the installed skill's keywords.
 3. Check logs for:
