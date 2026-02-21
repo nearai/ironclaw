@@ -346,6 +346,9 @@ pub struct ExtensionInfo {
     pub authenticated: bool,
     pub active: bool,
     pub tools: Vec<String>,
+    /// Whether this extension has configurable secrets (setup schema).
+    #[serde(default)]
+    pub needs_setup: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -369,6 +372,31 @@ pub struct InstallExtensionRequest {
     pub name: String,
     pub url: Option<String>,
     pub kind: Option<String>,
+}
+
+// --- Extension Setup ---
+
+#[derive(Debug, Serialize)]
+pub struct ExtensionSetupResponse {
+    pub name: String,
+    pub kind: String,
+    pub secrets: Vec<SecretFieldInfo>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct SecretFieldInfo {
+    pub name: String,
+    pub prompt: String,
+    pub optional: bool,
+    /// Whether this secret is already stored.
+    pub provided: bool,
+    /// Whether the secret will be auto-generated if left empty.
+    pub auto_generate: bool,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ExtensionSetupRequest {
+    pub secrets: std::collections::HashMap<String, String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -428,6 +456,28 @@ pub struct RegistrySearchResponse {
 #[derive(Debug, Deserialize)]
 pub struct RegistrySearchQuery {
     pub query: Option<String>,
+}
+
+// --- Pairing ---
+
+#[derive(Debug, Serialize)]
+pub struct PairingListResponse {
+    pub channel: String,
+    pub requests: Vec<PairingRequestInfo>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct PairingRequestInfo {
+    pub code: String,
+    pub sender_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub meta: Option<serde_json::Value>,
+    pub created_at: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct PairingApproveRequest {
+    pub code: String,
 }
 
 // --- Skills ---

@@ -85,6 +85,11 @@ pub enum ExtensionSource {
     },
     /// Discovered online (not yet validated for a specific source type).
     Discovered { url: String },
+    /// Bundled with the application (pre-built WASM, copied from build artifacts).
+    Bundled {
+        /// Channel or tool name used to locate build artifacts.
+        name: String,
+    },
 }
 
 /// Hint about what authentication method is needed.
@@ -184,6 +189,9 @@ pub struct InstalledExtension {
     /// Tool names if active.
     #[serde(default)]
     pub tools: Vec<String>,
+    /// Whether this extension has a setup schema (required_secrets) that can be configured.
+    #[serde(default)]
+    pub needs_setup: bool,
 }
 
 /// Error type for extension operations.

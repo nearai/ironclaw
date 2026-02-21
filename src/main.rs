@@ -1195,6 +1195,12 @@ async fn main() -> anyhow::Result<()> {
                             ));
                         }
 
+                        // Tell extension manager which channels are actually loaded
+                        if let Some(ref em) = extension_manager {
+                            em.set_active_channels(loaded_wasm_channel_names.clone())
+                                .await;
+                        }
+
                         for (path, err) in &results.errors {
                             tracing::warn!(
                                 "Failed to load WASM channel {}: {}",

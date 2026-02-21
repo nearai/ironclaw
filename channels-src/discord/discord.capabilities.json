@@ -2,6 +2,15 @@
   "type": "channel",
   "name": "discord",
   "description": "Discord Gateway/Webhook channel for handling slash commands, buttons, and messages",
+  "setup": {
+    "required_secrets": [
+      {
+        "name": "discord_bot_token",
+        "prompt": "Enter your Discord Bot Token (from Developer Portal)",
+        "optional": false
+      }
+    ]
+  },
   "capabilities": {
     "http": {
       "allowlist": [
@@ -10,7 +19,7 @@
       "credentials": {
         "discord_bot_token": {
           "secret_name": "discord_bot_token",
-          "location": { "type": "header", "header_name": "Authorization", "prefix": "Bot " },
+          "location": { "type": "header", "name": "Authorization", "prefix": "Bot " },
           "host_patterns": ["discord.com"]
         }
       },
@@ -34,6 +43,9 @@
     }
   },
   "config": {
-    "require_signature_verification": true
+    "require_signature_verification": true,
+    "owner_id": null,
+    "dm_policy": "pairing",
+    "allow_from": []
   }
 }

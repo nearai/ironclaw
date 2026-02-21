@@ -30,7 +30,7 @@ impl Tool for ToolSearchTool {
     }
 
     fn description(&self) -> &str {
-        "Search for available extensions (MCP servers, WASM tools) to add. \
+        "Search for available extensions (MCP servers, WASM tools, WASM channels) to add. \
          Use discover:true to search online if the built-in registry has no results."
     }
 
@@ -100,7 +100,7 @@ impl Tool for ToolInstallTool {
     }
 
     fn description(&self) -> &str {
-        "Install an extension (MCP server or WASM tool). \
+        "Install an extension (MCP server, WASM tool, or WASM channel). \
          Use the name from tool_search results, or provide an explicit URL."
     }
 
@@ -118,7 +118,7 @@ impl Tool for ToolInstallTool {
                 },
                 "kind": {
                     "type": "string",
-                    "enum": ["mcp_server", "wasm_tool"],
+                    "enum": ["mcp_server", "wasm_tool", "wasm_channel"],
                     "description": "Extension type (auto-detected if omitted)"
                 }
             },
@@ -143,6 +143,7 @@ impl Tool for ToolInstallTool {
             .and_then(|k| match k {
                 "mcp_server" => Some(ExtensionKind::McpServer),
                 "wasm_tool" => Some(ExtensionKind::WasmTool),
+                "wasm_channel" => Some(ExtensionKind::WasmChannel),
                 _ => None,
             });
 

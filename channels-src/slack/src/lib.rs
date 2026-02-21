@@ -104,15 +104,31 @@ struct SlackPostMessageResponse {
     ts: Option<String>,
 }
 
+/// Workspace path for persisting owner_id across WASM callbacks.
+const OWNER_ID_PATH: &str = "state/owner_id";
+/// Workspace path for persisting dm_policy across WASM callbacks.
+const DM_POLICY_PATH: &str = "state/dm_policy";
+/// Workspace path for persisting allow_from (JSON array) across WASM callbacks.
+const ALLOW_FROM_PATH: &str = "state/allow_from";
+/// Channel name for pairing store (used by pairing host APIs).
+const CHANNEL_NAME: &str = "slack";
+
 /// Channel configuration from capabilities file.
 #[derive(Debug, Deserialize)]
 struct SlackConfig {
     /// Name of secret containing signing secret (for verification by host).
-    /// Parsed from config for forward compatibility; not yet used in WASM
-    /// (host handles signature verification).
     #[serde(default = "default_signing_secret_name")]
     #[allow(dead_code)]
     signing_secret_name: String,
+
+    #[serde(default)]
+    owner_id: Option<String>,
+
+    #[serde(default)]
+    dm_policy: Option<String>,
+
+    #[serde(default)]
+    allow_from: Option<Vec<String>>,
 }
 
 fn default_signing_secret_name() -> String {
@@ -123,11 +139,29 @@ struct SlackChannel;
 
 impl Guest for SlackChannel {
     fn on_start(config_json: String) -> Result<ChannelConfig, String> {
-        // Parse configuration
-        let _config: SlackConfig = serde_json::from_str(&config_json)
+        let config: SlackConfig = serde_json::from_str(&config_json)
             .map_err(|e| format!("Failed to parse config: {}", e))?;
 
         channel_host::log(channel_host::LogLevel::Info, "Slack channel starting");
+
+        // Persist owner_id so subsequent callbacks can read it
+        if let Some(ref owner_id) = config.owner_id {
+            let _ = channel_host::workspace_write(OWNER_ID_PATH, owner_id);
+            channel_host::log(
+                channel_host::LogLevel::Info,
+                &format!("Owner restriction enabled: user {}", owner_id),
+            );
+        } else {
+            let _ = channel_host::workspace_write(OWNER_ID_PATH, "");
+        }
+
+        // Persist dm_policy and allow_from for DM pairing
+        let dm_policy = config.dm_policy.as_deref().unwrap_or("pairing");
+        let _ = channel_host::workspace_write(DM_POLICY_PATH, dm_policy);
+
+        let allow_from_json = serde_json::to_string(&config.allow_from.unwrap_or_default())
+            .unwrap_or_else(|_| "[]".to_string());
+        let _ = channel_host::workspace_write(ALLOW_FROM_PATH, &allow_from_json);
 
         Ok(ChannelConfig {
             display_name: "Slack".to_string(),
@@ -136,7 +170,7 @@ impl Guest for SlackChannel {
                 methods: vec!["POST".to_string()],
                 require_secret: true,
             }],
-            poll: None, // Slack uses push via webhooks, no polling needed
+            poll: None,
         })
     }
 
@@ -280,7 +314,7 @@ impl Guest for SlackChannel {
 /// Handle a Slack event and emit message if applicable.
 fn handle_slack_event(event: SlackEvent, team_id: Option<String>, _event_id: Option<String>) {
     match event.event_type.as_str() {
-        // Direct mention of the bot
+        // Direct mention of the bot (always in a channel, not a DM)
         "app_mention" => {
             if let (Some(user), Some(channel), Some(text), Some(ts)) = (
                 event.user,
@@ -288,6 +322,10 @@ fn handle_slack_event(event: SlackEvent, team_id: Option<String>, _event_id: Opt
                 event.text,
                 event.ts.clone(),
             ) {
+                // app_mention is always in a channel (not DM)
+                if !check_sender_permission(&user, &channel, false) {
+                    return;
+                }
                 emit_message(user, text, channel, event.thread_ts.or(Some(ts)), team_id);
             }
         }
@@ -307,6 +345,9 @@ fn handle_slack_event(event: SlackEvent, team_id: Option<String>, _event_id: Opt
             ) {
                 // Only process DMs (channel IDs starting with D)
                 if channel.starts_with('D') {
+                    if !check_sender_permission(&user, &channel, true) {
+                        return;
+                    }
                     emit_message(user, text, channel, event.thread_ts.or(Some(ts)), team_id);
                 }
             }
@@ -356,6 +397,126 @@ fn emit_message(
         thread_id: thread_ts,
         metadata_json,
     });
+}
+
+// ============================================================================
+// Permission & Pairing
+// ============================================================================
+
+/// Check if a sender is permitted. Returns true if allowed.
+/// For pairing mode, sends a pairing code DM if denied.
+fn check_sender_permission(user_id: &str, channel_id: &str, is_dm: bool) -> bool {
+    // 1. Owner check (highest priority, applies to all contexts)
+    let owner_id = channel_host::workspace_read(OWNER_ID_PATH).filter(|s| !s.is_empty());
+    if let Some(ref owner) = owner_id {
+        if user_id != owner {
+            channel_host::log(
+                channel_host::LogLevel::Debug,
+                &format!(
+                    "Dropping message from non-owner user {} (owner: {})",
+                    user_id, owner
+                ),
+            );
+            return false;
+        }
+        return true;
+    }
+
+    // 2. DM policy (only for DMs when no owner_id)
+    if !is_dm {
+        return true; // Channel messages bypass DM policy
+    }
+
+    let dm_policy =
+        channel_host::workspace_read(DM_POLICY_PATH).unwrap_or_else(|| "pairing".to_string());
+
+    if dm_policy == "open" {
+        return true;
+    }
+
+    // 3. Build merged allow list: config allow_from + pairing store
+    let mut allowed: Vec<String> = channel_host::workspace_read(ALLOW_FROM_PATH)
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or_default();
+
+    if let Ok(store_allowed) = channel_host::pairing_read_allow_from(CHANNEL_NAME) {
+        allowed.extend(store_allowed);
+    }
+
+    // 4. Check sender (Slack events only have user ID, not username)
+    let is_allowed =
+        allowed.contains(&"*".to_string()) || allowed.contains(&user_id.to_string());
+
+    if is_allowed {
+        return true;
+    }
+
+    // 5. Not allowed — handle by policy
+    if dm_policy == "pairing" {
+        let meta = serde_json::json!({
+            "user_id": user_id,
+            "channel_id": channel_id,
+        })
+        .to_string();
+
+        match channel_host::pairing_upsert_request(CHANNEL_NAME, user_id, &meta) {
+            Ok(result) => {
+                channel_host::log(
+                    channel_host::LogLevel::Info,
+                    &format!(
+                        "Pairing request for user {}: code {}",
+                        user_id, result.code
+                    ),
+                );
+                if result.created {
+                    let _ = send_pairing_reply(channel_id, &result.code);
+                }
+            }
+            Err(e) => {
+                channel_host::log(
+                    channel_host::LogLevel::Error,
+                    &format!("Pairing upsert failed: {}", e),
+                );
+            }
+        }
+    }
+    false
+}
+
+/// Send a pairing code message via Slack chat.postMessage.
+fn send_pairing_reply(channel_id: &str, code: &str) -> Result<(), String> {
+    let payload = serde_json::json!({
+        "channel": channel_id,
+        "text": format!(
+            "To pair with this bot, run: `ironclaw pairing approve slack {}`",
+            code
+        ),
+    });
+
+    let payload_bytes =
+        serde_json::to_vec(&payload).map_err(|e| format!("Failed to serialize: {}", e))?;
+
+    let headers = serde_json::json!({"Content-Type": "application/json"});
+
+    let result = channel_host::http_request(
+        "POST",
+        "https://slack.com/api/chat.postMessage",
+        &headers.to_string(),
+        Some(&payload_bytes),
+        None,
+    );
+
+    match result {
+        Ok(response) if response.status == 200 => Ok(()),
+        Ok(response) => {
+            let body_str = String::from_utf8_lossy(&response.body);
+            Err(format!(
+                "Slack API error: {} - {}",
+                response.status, body_str
+            ))
+        }
+        Err(e) => Err(format!("HTTP request failed: {}", e)),
+    }
 }
 
 /// Strip leading bot mention from text.
