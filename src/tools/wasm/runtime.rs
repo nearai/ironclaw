@@ -64,8 +64,8 @@ impl WasmRuntimeConfig {
 /// A compiled WASM component ready for instantiation.
 ///
 /// Contains the pre-compiled component plus cached metadata extracted
-/// from the component during preparation.
-#[derive(Debug)]
+/// from the component during preparation. Stores the compiled `Component`
+/// directly so instantiation doesn't require recompilation.
 pub struct PreparedModule {
     /// Tool name.
     pub name: String,
@@ -73,16 +73,26 @@ pub struct PreparedModule {
     pub description: String,
     /// Parameter schema JSON (cached from component).
     pub schema: serde_json::Value,
-    /// Compiled component bytes (can be serialized for caching).
-    component_bytes: Vec<u8>,
+    /// Pre-compiled component (cheaply cloneable via internal Arc).
+    component: wasmtime::component::Component,
     /// Resource limits for this tool.
     pub limits: ResourceLimits,
 }
 
 impl PreparedModule {
-    /// Get the compiled component bytes.
-    pub fn component_bytes(&self) -> &[u8] {
-        &self.component_bytes
+    /// Get the pre-compiled component for instantiation.
+    pub fn component(&self) -> &wasmtime::component::Component {
+        &self.component
+    }
+}
+
+impl std::fmt::Debug for PreparedModule {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PreparedModule")
+            .field("name", &self.name)
+            .field("description", &self.description)
+            .field("limits", &self.limits)
+            .finish()
     }
 }
 
@@ -122,6 +132,13 @@ impl WasmToolRuntime {
 
         // Disable debug info in production for smaller modules
         wasmtime_config.debug_info(false);
+
+        // Enable persistent compilation cache. Wasmtime serializes compiled native
+        // code to disk (~/.cache/wasmtime by default), so subsequent startups
+        // deserialize instead of recompiling — typically 10-50x faster.
+        if let Err(e) = wasmtime_config.cache_config_load_default() {
+            tracing::warn!("Failed to enable wasmtime compilation cache: {}", e);
+        }
 
         let engine = Engine::new(&wasmtime_config).map_err(|e| {
             WasmError::EngineCreationFailed(format!("Failed to create Wasmtime engine: {}", e))
@@ -199,7 +216,7 @@ impl WasmToolRuntime {
                 name: name.clone(),
                 description,
                 schema,
-                component_bytes: wasm_bytes,
+                component,
                 limits: limits.unwrap_or(default_limits),
             })
         })

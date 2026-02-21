@@ -157,14 +157,14 @@ impl SessionManager {
         }
 
         // Token exists, validate it by calling /v1/users/me
-        println!("Validating session...");
+        tracing::debug!("Validating session...");
         match self.validate_token().await {
             Ok(()) => {
-                println!("Session valid.");
+                tracing::debug!("Session valid");
                 Ok(())
             }
             Err(e) => {
-                println!("Session expired or invalid: {}", e);
+                tracing::info!("Session expired or invalid: {}", e);
                 self.initiate_login().await
             }
         }
