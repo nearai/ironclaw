@@ -63,6 +63,11 @@ pub struct Settings {
     #[serde(default)]
     pub embeddings: EmbeddingsSettings,
 
+    // === Transcription (STT) ===
+    /// Transcription configuration for voice notes.
+    #[serde(default)]
+    pub transcription: TranscriptionSettings,
+
     // === Step 6: Channels ===
     /// Tunnel configuration for public webhook endpoints.
     #[serde(default)]
@@ -142,6 +147,45 @@ impl Default for EmbeddingsSettings {
             enabled: false,
             provider: default_embeddings_provider(),
             model: default_embeddings_model(),
+        }
+    }
+}
+
+/// Transcription (STT) configuration for voice notes.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TranscriptionSettings {
+    /// Whether transcription is enabled.
+    #[serde(default)]
+    pub enabled: bool,
+
+    /// Provider to use: "openai".
+    #[serde(default = "default_transcription_provider")]
+    pub provider: String,
+
+    /// Model to use for transcription.
+    #[serde(default = "default_transcription_model")]
+    pub model: String,
+
+    /// Optional language hint (ISO-639-1, e.g., "en").
+    #[serde(default)]
+    pub language: Option<String>,
+}
+
+fn default_transcription_provider() -> String {
+    "openai".to_string()
+}
+
+fn default_transcription_model() -> String {
+    "whisper-1".to_string()
+}
+
+impl Default for TranscriptionSettings {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            provider: default_transcription_provider(),
+            model: default_transcription_model(),
+            language: None,
         }
     }
 }

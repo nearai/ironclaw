@@ -9,6 +9,32 @@ use uuid::Uuid;
 
 use crate::error::ChannelError;
 
+/// Kind of attachment carried on an incoming message.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AttachmentKind {
+    /// Audio content (voice notes, audio files).
+    Audio,
+    /// Image content (photos, screenshots).
+    Image,
+    /// Document content (PDFs, files).
+    Document,
+}
+
+/// Binary attachment on a message (e.g., voice note, photo).
+#[derive(Debug, Clone)]
+pub struct Attachment {
+    /// What kind of content this is.
+    pub kind: AttachmentKind,
+    /// MIME type (e.g., "audio/ogg", "image/jpeg").
+    pub mime_type: String,
+    /// Raw bytes of the attachment.
+    pub data: Vec<u8>,
+    /// Optional filename.
+    pub filename: Option<String>,
+    /// Duration in seconds (for audio/video).
+    pub duration_secs: Option<u32>,
+}
+
 /// A message received from an external channel.
 #[derive(Debug, Clone)]
 pub struct IncomingMessage {
@@ -28,6 +54,8 @@ pub struct IncomingMessage {
     pub received_at: DateTime<Utc>,
     /// Channel-specific metadata.
     pub metadata: serde_json::Value,
+    /// Binary attachments (voice notes, images, etc.).
+    pub attachments: Vec<Attachment>,
 }
 
 impl IncomingMessage {
@@ -46,6 +74,7 @@ impl IncomingMessage {
             thread_id: None,
             received_at: Utc::now(),
             metadata: serde_json::Value::Null,
+            attachments: Vec::new(),
         }
     }
 
@@ -64,6 +93,12 @@ impl IncomingMessage {
     /// Set user name.
     pub fn with_user_name(mut self, name: impl Into<String>) -> Self {
         self.user_name = Some(name.into());
+        self
+    }
+
+    /// Set attachments.
+    pub fn with_attachments(mut self, attachments: Vec<Attachment>) -> Self {
+        self.attachments = attachments;
         self
     }
 }

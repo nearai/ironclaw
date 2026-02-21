@@ -67,6 +67,7 @@ pub mod setup;
 pub mod skills;
 pub mod tools;
 pub mod tracing_fmt;
+pub mod transcription;
 pub mod tunnel;
 pub mod util;
 pub mod worker;

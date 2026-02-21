@@ -1028,6 +1028,32 @@ async fn main() -> anyhow::Result<()> {
     // Collect webhook route fragments; a single WebhookServer hosts them all.
     let mut webhook_routes: Vec<axum::Router> = Vec::new();
 
+    // Build transcription middleware if enabled.
+    let transcription_middleware: Option<Arc<ironclaw::transcription::TranscriptionMiddleware>> =
+        if config.transcription.enabled {
+            if let Some(ref api_key) = config.transcription.openai_api_key {
+                let provider = Arc::new(ironclaw::transcription::openai::OpenAiWhisper::new(
+                    api_key.clone(),
+                    config.transcription.model.clone(),
+                ));
+                let middleware = ironclaw::transcription::TranscriptionMiddleware::new(
+                    provider,
+                    config.transcription.language.clone(),
+                );
+                tracing::info!(
+                    provider = %config.transcription.provider,
+                    model = %config.transcription.model,
+                    "Audio transcription enabled"
+                );
+                Some(Arc::new(middleware))
+            } else {
+                tracing::warn!("Transcription enabled but OPENAI_API_KEY not set, disabling");
+                None
+            }
+        } else {
+            None
+        };
+
     // Load WASM channels and register their webhook routes.
     if config.channels.wasm_channels_enabled && config.channels.wasm_channels_dir.exists() {
         match WasmChannelRuntime::new(WasmChannelRuntimeConfig::default()) {
@@ -1072,7 +1098,11 @@ async fn main() -> anyhow::Result<()> {
                                 require_secret: webhook_secret.is_some(),
                             }];
 
-                            let channel_arc = Arc::new(loaded.channel);
+                            let mut channel = loaded.channel;
+                            if let Some(ref mw) = transcription_middleware {
+                                channel.set_transcription_middleware(Arc::clone(mw));
+                            }
+                            let channel_arc = Arc::new(channel);
 
                             {
                                 let mut config_updates = std::collections::HashMap::new();

@@ -35,7 +35,10 @@ pub mod wasm;
 pub mod web;
 mod webhook_server;
 
-pub use channel::{Channel, IncomingMessage, MessageStream, OutgoingResponse, StatusUpdate};
+pub use channel::{
+    Attachment, AttachmentKind, Channel, IncomingMessage, MessageStream, OutgoingResponse,
+    StatusUpdate,
+};
 pub use http::HttpChannel;
 pub use manager::ChannelManager;
 pub use repl::ReplChannel;

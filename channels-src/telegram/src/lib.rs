@@ -76,6 +76,9 @@ struct TelegramMessage {
     #[serde(default)]
     caption: Option<String>,
 
+    /// Voice message.
+    voice: Option<TelegramVoice>,
+
     /// Original message if this is a reply.
     reply_to_message: Option<Box<TelegramMessage>>,
 
@@ -137,6 +140,36 @@ struct MessageEntity {
 
     /// For "mention" type, the mentioned user.
     user: Option<TelegramUser>,
+}
+
+/// Telegram Voice object.
+/// https://core.telegram.org/bots/api#voice
+#[derive(Debug, Deserialize)]
+struct TelegramVoice {
+    /// Identifier for this file, which can be used to download the file.
+    file_id: String,
+
+    /// Duration of the audio in seconds.
+    duration: u32,
+
+    /// MIME type of the file.
+    #[serde(default)]
+    mime_type: Option<String>,
+
+    /// File size in bytes.
+    #[serde(default)]
+    file_size: Option<i64>,
+}
+
+/// Telegram File object returned by getFile.
+/// https://core.telegram.org/bots/api#file
+#[derive(Debug, Deserialize)]
+struct TelegramFile {
+    /// Identifier for this file.
+    file_id: String,
+
+    /// File path for downloading. Use https://api.telegram.org/file/bot<token>/<file_path>.
+    file_path: Option<String>,
 }
 
 /// Telegram API response wrapper.
@@ -868,6 +901,75 @@ fn send_pairing_reply(chat_id: i64, code: &str) -> Result<(), String> {
 }
 
 // ============================================================================
+// Voice File Download
+// ============================================================================
+
+/// Download a voice file from Telegram by file_id.
+///
+/// 1. Call getFile to get the file_path.
+/// 2. Download the file bytes from /file/bot{TOKEN}/{file_path}.
+fn download_voice_file(file_id: &str) -> Result<Vec<u8>, String> {
+    // Step 1: Call getFile to get file_path
+    // Double braces `{{...}}` produce a literal `{TELEGRAM_BOT_TOKEN}` placeholder
+    // in the URL, which the host-side credential injector replaces with the real token.
+    let get_file_url = format!(
+        "https://api.telegram.org/bot{{TELEGRAM_BOT_TOKEN}}/getFile?file_id={}",
+        file_id
+    );
+
+    let headers = serde_json::json!({});
+    let result = channel_host::http_request("GET", &get_file_url, &headers.to_string(), None, None);
+
+    let response = result.map_err(|e| format!("getFile request failed: {}", e))?;
+
+    if response.status != 200 {
+        let body_str = String::from_utf8_lossy(&response.body);
+        return Err(format!("getFile returned {}: {}", response.status, body_str));
+    }
+
+    let api_response: TelegramApiResponse<TelegramFile> =
+        serde_json::from_slice(&response.body)
+            .map_err(|e| format!("Failed to parse getFile response: {}", e))?;
+
+    if !api_response.ok {
+        return Err(format!(
+            "getFile API error: {}",
+            api_response
+                .description
+                .unwrap_or_else(|| "unknown".to_string())
+        ));
+    }
+
+    let file = api_response
+        .result
+        .ok_or_else(|| "getFile returned no result".to_string())?;
+
+    let file_path = file
+        .file_path
+        .ok_or_else(|| "getFile returned no file_path".to_string())?;
+
+    // Step 2: Download the actual file bytes
+    let download_url = format!(
+        "https://api.telegram.org/file/bot{{TELEGRAM_BOT_TOKEN}}/{}",
+        file_path
+    );
+
+    let result =
+        channel_host::http_request("GET", &download_url, &headers.to_string(), None, None);
+
+    let response = result.map_err(|e| format!("File download failed: {}", e))?;
+
+    if response.status != 200 {
+        return Err(format!(
+            "File download returned status {}",
+            response.status
+        ));
+    }
+
+    Ok(response.body)
+}
+
+// ============================================================================
 // Update Handling
 // ============================================================================
 
@@ -886,6 +988,9 @@ fn handle_update(update: TelegramUpdate) {
 
 /// Process a single message.
 fn handle_message(message: TelegramMessage) {
+    // Check for voice note first (voice-only messages have no text)
+    let is_voice = message.voice.is_some();
+
     // Use text or caption (for media messages)
     let content = message
         .text
@@ -893,7 +998,8 @@ fn handle_message(message: TelegramMessage) {
         .or_else(|| message.caption.filter(|c| !c.is_empty()))
         .unwrap_or_default();
 
-    if content.is_empty() {
+    // Allow voice notes through even when content is empty
+    if content.is_empty() && !is_voice {
         return;
     }
 
@@ -1038,19 +1144,65 @@ fn handle_message(message: TelegramMessage) {
         },
     );
 
+    // Handle voice notes: download and attach audio bytes.
+    // Note: download is synchronous (two HTTP roundtrips to Telegram API).
+    // This blocks the WASM execution for the current polling tick.
+    let mut attachments = Vec::new();
+    let mut voice_download_failed = false;
+    if let Some(ref voice) = message.voice {
+        channel_host::log(
+            channel_host::LogLevel::Info,
+            &format!(
+                "Voice note from user {} (duration: {}s, file_id: {})",
+                from.id, voice.duration, voice.file_id
+            ),
+        );
+
+        match download_voice_file(&voice.file_id) {
+            Ok(audio_bytes) => {
+                channel_host::log(
+                    channel_host::LogLevel::Info,
+                    &format!("Downloaded voice file: {} bytes", audio_bytes.len()),
+                );
+                attachments.push(channel_host::Attachment {
+                    kind: channel_host::AttachmentKind::Audio,
+                    mime_type: voice
+                        .mime_type
+                        .clone()
+                        .unwrap_or_else(|| "audio/ogg".to_string()),
+                    data: audio_bytes,
+                    filename: Some(format!("voice_{}.ogg", voice.file_id)),
+                    duration_secs: Some(voice.duration),
+                });
+            }
+            Err(e) => {
+                channel_host::log(
+                    channel_host::LogLevel::Error,
+                    &format!("Failed to download voice file: {}", e),
+                );
+                voice_download_failed = true;
+            }
+        }
+    }
+
     // Determine what to emit to the agent.
+    // - Voice notes: use "[Voice note]" as content (transcription happens host-side)
     // - `/start` (no args): emit a welcome placeholder so the agent greets the user
     // - Other bare `/commands` (e.g. /interrupt, /help): pass the raw command through
     //   so Submission::parse() can handle it
     // - Commands with args (e.g. `/start hello`): cleaned_text already has the args
     // - Plain text: pass through as-is
     let trimmed_content = content.trim();
-    let content_to_emit = if trimmed_content.eq_ignore_ascii_case("/start") {
+    let content_to_emit = if is_voice && voice_download_failed && content.is_empty() {
+        "[Voice note: download failed]".to_string()
+    } else if is_voice && content.is_empty() {
+        "[Voice note]".to_string()
+    } else if trimmed_content.eq_ignore_ascii_case("/start") {
         "[User started the bot]".to_string()
     } else if cleaned_text.is_empty() && trimmed_content.starts_with('/') {
         // Bare control command like /interrupt, /stop, /help — pass through raw
         trimmed_content.to_string()
-    } else if cleaned_text.is_empty() {
+    } else if cleaned_text.is_empty() && !is_voice {
         return;
     } else {
         cleaned_text
@@ -1063,6 +1215,7 @@ fn handle_message(message: TelegramMessage) {
         content: content_to_emit,
         thread_id: None, // Telegram doesn't have threads in the same way
         metadata_json,
+        attachments,
     });
 
     channel_host::log(
