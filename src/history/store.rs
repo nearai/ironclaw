@@ -1307,9 +1307,8 @@ impl Store {
 
     /// List conversations with a lightweight title preview.
     ///
-    /// Prefer the persisted metadata title because older/corrupted rows in
-    /// `conversation_messages.content` can fail UTF-8 decoding during preview
-    /// extraction and break pagination.
+    /// Prefer persisted metadata titles when available, with a fallback to the
+    /// first user message for older/non-imported conversations.
     pub async fn list_conversations_with_preview(
         &self,
         user_id: &str,
@@ -1327,18 +1326,19 @@ impl Store {
                     c.last_activity,
                     c.metadata,
                     (SELECT COUNT(*) FROM conversation_messages m WHERE m.conversation_id = c.id) AS message_count,
-                    NULLIF(c.metadata->>'title', '') AS title
+                    COALESCE(
+                        NULLIF(c.metadata->>'title', ''),
+                        (SELECT LEFT(m2.content, 100)
+                         FROM conversation_messages m2
+                         WHERE m2.conversation_id = c.id AND m2.role = 'user'
+                         ORDER BY m2.created_at ASC
+                         LIMIT 1
+                        )
+                    ) AS title
                 FROM conversations c
                 WHERE c.user_id = $1 AND c.channel = $2
                   AND (c.metadata->>'thread_type') IS DISTINCT FROM 'assistant'
-                ORDER BY COALESCE(
-                    (SELECT MAX(m3.created_at)
-                     FROM conversation_messages m3
-                     WHERE m3.conversation_id = c.id
-                    ),
-                    c.last_activity
-                ) DESC,
-                c.last_activity DESC
+                ORDER BY c.last_activity DESC, c.id DESC
                 OFFSET $3
                 LIMIT $4
                 "#,
@@ -1613,6 +1613,21 @@ impl Store {
                 created_at: r.get("created_at"),
             })
             .collect())
+    }
+
+    /// Count messages for a conversation.
+    pub async fn count_conversation_messages(
+        &self,
+        conversation_id: Uuid,
+    ) -> Result<i64, DatabaseError> {
+        let conn = self.conn().await?;
+        let row = conn
+            .query_one(
+                "SELECT COUNT(*) AS message_count FROM conversation_messages WHERE conversation_id = $1",
+                &[&conversation_id],
+            )
+            .await?;
+        Ok(row.get("message_count"))
     }
 }
 

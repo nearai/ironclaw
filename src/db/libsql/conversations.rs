@@ -124,11 +124,14 @@ impl ConversationStore for LibSqlBackend {
                     c.last_activity,
                     c.metadata,
                     (SELECT COUNT(*) FROM conversation_messages m WHERE m.conversation_id = c.id) AS message_count,
-                    (SELECT substr(m2.content, 1, 100)
-                     FROM conversation_messages m2
-                     WHERE m2.conversation_id = c.id AND m2.role = 'user'
-                     ORDER BY m2.created_at ASC
-                     LIMIT 1
+                    COALESCE(
+                        NULLIF(json_extract(c.metadata, '$.title'), ''),
+                        (SELECT substr(m2.content, 1, 100)
+                         FROM conversation_messages m2
+                         WHERE m2.conversation_id = c.id AND m2.role = 'user'
+                         ORDER BY m2.created_at ASC
+                         LIMIT 1
+                        )
                     ) AS title
                 FROM conversations c
                 WHERE c.user_id = ?1 AND c.channel = ?2
@@ -136,7 +139,7 @@ impl ConversationStore for LibSqlBackend {
                     json_extract(c.metadata, '$.thread_type') IS NULL
                     OR json_extract(c.metadata, '$.thread_type') != 'assistant'
                   )
-                ORDER BY c.last_activity DESC
+                ORDER BY c.last_activity DESC, c.id DESC
                 LIMIT ?3 OFFSET ?4
                 "#,
                 params![user_id, channel, limit, offset],
@@ -436,6 +439,30 @@ impl ConversationStore for LibSqlBackend {
             });
         }
         Ok(messages)
+    }
+
+    async fn count_conversation_messages(
+        &self,
+        conversation_id: Uuid,
+    ) -> Result<i64, DatabaseError> {
+        let conn = self.connect().await?;
+        let mut rows = conn
+            .query(
+                "SELECT COUNT(*) FROM conversation_messages WHERE conversation_id = ?1",
+                params![conversation_id.to_string()],
+            )
+            .await
+            .map_err(|e| DatabaseError::Query(e.to_string()))?;
+
+        if let Some(row) = rows
+            .next()
+            .await
+            .map_err(|e| DatabaseError::Query(e.to_string()))?
+        {
+            return Ok(get_i64(&row, 0));
+        }
+
+        Ok(0)
     }
 
     async fn conversation_belongs_to_user(

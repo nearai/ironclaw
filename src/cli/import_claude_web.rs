@@ -5,6 +5,7 @@
 use std::collections::HashSet;
 use std::fs;
 use std::fs::File;
+use std::io::Read;
 use std::path::Path;
 
 use serde::Deserialize;
@@ -89,7 +90,9 @@ impl Importer for ClaudeWebImporter {
                 MAX_CONVERSATIONS_JSON_BYTES
             )));
         }
-        parse_streamed_conversations(entry, on_conversation)
+        // Enforce an I/O read cap even if ZIP header size metadata is malformed.
+        let limited_reader = entry.take(MAX_CONVERSATIONS_JSON_BYTES);
+        parse_streamed_conversations(limited_reader, on_conversation)
     }
 }
 

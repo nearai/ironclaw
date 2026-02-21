@@ -442,12 +442,15 @@ pub async fn chat_threads_handler(
             .get_or_create_assistant_conversation(&state.user_id, "gateway")
             .await
             .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+        let assistant_message_count = store
+            .count_conversation_messages(assistant_id)
+            .await
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
         if let Ok(summaries) = store
             .list_conversations_with_preview(&state.user_id, "gateway", 0, 50)
             .await
         {
-            let mut assistant_thread = None;
             let mut threads = Vec::new();
 
             for s in &summaries {
@@ -460,29 +463,21 @@ pub async fn chat_threads_handler(
                     title: s.title.clone(),
                     thread_type: s.thread_type.clone(),
                 };
-
-                if s.id == assistant_id {
-                    assistant_thread = Some(info);
-                } else {
-                    threads.push(info);
-                }
+                threads.push(info);
             }
 
-            // If assistant wasn't in the list (0 messages), synthesize it
-            if assistant_thread.is_none() {
-                assistant_thread = Some(ThreadInfo {
-                    id: assistant_id,
-                    state: "Idle".to_string(),
-                    turn_count: 0,
-                    created_at: chrono::Utc::now().to_rfc3339(),
-                    updated_at: chrono::Utc::now().to_rfc3339(),
-                    title: None,
-                    thread_type: Some("assistant".to_string()),
-                });
-            }
+            let assistant_thread = ThreadInfo {
+                id: assistant_id,
+                state: "Idle".to_string(),
+                turn_count: (assistant_message_count / 2).max(0) as usize,
+                created_at: chrono::Utc::now().to_rfc3339(),
+                updated_at: chrono::Utc::now().to_rfc3339(),
+                title: None,
+                thread_type: Some("assistant".to_string()),
+            };
 
             return Ok(Json(ThreadListResponse {
-                assistant_thread,
+                assistant_thread: Some(assistant_thread),
                 threads,
                 active_thread: sess.active_thread,
             }));

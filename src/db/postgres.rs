@@ -213,6 +213,15 @@ impl ConversationStore for PgBackend {
         self.store.list_conversation_messages(conversation_id).await
     }
 
+    async fn count_conversation_messages(
+        &self,
+        conversation_id: Uuid,
+    ) -> Result<i64, DatabaseError> {
+        self.store
+            .count_conversation_messages(conversation_id)
+            .await
+    }
+
     async fn conversation_belongs_to_user(
         &self,
         conversation_id: Uuid,

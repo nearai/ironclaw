@@ -3,11 +3,9 @@
 //! Imports external chat exports into IronClaw conversations.
 
 use std::collections::HashSet;
-use std::collections::hash_map::DefaultHasher;
 use std::fmt::Write as _;
 use std::fs;
 use std::fs::{File, OpenOptions};
-use std::hash::{Hash, Hasher};
 use std::io::{BufRead, BufReader, IsTerminal, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -453,14 +451,19 @@ fn default_checkpoint_path(
         .map(|home| home.join(".ironclaw").join("import-checkpoints"))
         .unwrap_or_else(|| PathBuf::from(".ironclaw/import-checkpoints"));
 
-    let mut hasher = DefaultHasher::new();
-    source_key.hash(&mut hasher);
-    source_path.to_string_lossy().hash(&mut hasher);
-    channel.hash(&mut hasher);
-    user_id.hash(&mut hasher);
-    let fingerprint = hasher.finish();
+    let fingerprint_input = format!(
+        "{}\n{}\n{}\n{}",
+        source_key,
+        source_path.display(),
+        channel,
+        user_id
+    );
+    let digest = blake3::hash(fingerprint_input.as_bytes())
+        .to_hex()
+        .to_string();
+    let fingerprint = &digest[..16];
 
-    base_dir.join(format!("{source_key}-{fingerprint:016x}.json"))
+    base_dir.join(format!("{source_key}-{fingerprint}.json"))
 }
 
 /// Run an import command.

@@ -827,11 +827,13 @@ function loadThreads(options) {
 
     const list = document.getElementById('thread-list');
     const threads = data.threads || [];
+    let appendedCount = 0;
     for (const thread of threads) {
       const key = String(thread.id);
       if (threadSeenIds.has(key)) continue;
       threadSeenIds.add(key);
       list.appendChild(createThreadItem(thread));
+      appendedCount += 1;
     }
 
     threadListHasMore = !!data.has_more;
@@ -841,8 +843,10 @@ function loadThreads(options) {
       threadListOffset = offset + threads.length;
     }
 
-    if (threadListOffset > threadSeenIds.size) {
-      threadListOffset = threadSeenIds.size;
+    // Guard against repeated requests when a page yields only duplicates.
+    // Keep server offset progression, but pause auto-loading retries briefly.
+    if (append && threads.length > 0 && appendedCount === 0) {
+      threadListRetryAfterMs = Date.now() + THREAD_LOAD_RETRY_COOLDOWN_MS;
     }
 
     // Default to assistant thread on first load if no thread selected.
