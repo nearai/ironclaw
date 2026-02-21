@@ -40,9 +40,17 @@ impl Agent {
         thread_id: Uuid,
         initial_messages: Vec<ChatMessage>,
     ) -> Result<AgenticLoopResult, Error> {
+        // Detect group chat from channel metadata (needed before loading system prompt)
+        let is_group_chat = message
+            .metadata
+            .get("chat_type")
+            .and_then(|v| v.as_str())
+            .is_some_and(|t| t == "group" || t == "channel" || t == "supergroup");
+
         // Load workspace system prompt (identity files: AGENTS.md, SOUL.md, etc.)
+        // In group chats, MEMORY.md is excluded to prevent leaking personal context.
         let system_prompt = if let Some(ws) = self.workspace() {
-            match ws.system_prompt().await {
+            match ws.system_prompt_for_context(is_group_chat).await {
                 Ok(prompt) if !prompt.is_empty() => Some(prompt),
                 Ok(_) => None,
                 Err(e) => {
@@ -94,7 +102,10 @@ impl Agent {
             None
         };
 
-        let mut reasoning = Reasoning::new(self.llm().clone(), self.safety().clone());
+        let mut reasoning = Reasoning::new(self.llm().clone(), self.safety().clone())
+            .with_channel(message.channel.clone())
+            .with_model_name(self.llm().active_model_name())
+            .with_group_chat(is_group_chat);
         if let Some(prompt) = system_prompt {
             reasoning = reasoning.with_system_prompt(prompt);
         }
