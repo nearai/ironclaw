@@ -7,6 +7,7 @@
 
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use crate::channels::channel::Attachment;
 use crate::channels::wasm::capabilities::{ChannelCapabilities, EmitRateLimitConfig};
 use crate::channels::wasm::error::WasmChannelError;
 use crate::tools::wasm::{HostState, LogLevel};
@@ -16,6 +17,9 @@ const MAX_EMITS_PER_EXECUTION: usize = 100;
 
 /// Maximum message content size (64 KB).
 const MAX_MESSAGE_CONTENT_SIZE: usize = 64 * 1024;
+
+/// Maximum size for a single attachment (10 MB).
+const MAX_ATTACHMENT_SIZE: usize = 10 * 1024 * 1024;
 
 /// A message emitted by a WASM channel to be sent to the agent.
 #[derive(Debug, Clone)]
@@ -37,6 +41,9 @@ pub struct EmittedMessage {
 
     /// Timestamp when the message was emitted.
     pub emitted_at_millis: u64,
+
+    /// Binary attachments (voice notes, images, etc.).
+    pub attachments: Vec<Attachment>,
 }
 
 impl EmittedMessage {
@@ -52,6 +59,7 @@ impl EmittedMessage {
                 .duration_since(UNIX_EPOCH)
                 .map(|d| d.as_millis() as u64)
                 .unwrap_or(0),
+            attachments: Vec::new(),
         }
     }
 
@@ -70,6 +78,12 @@ impl EmittedMessage {
     /// Set metadata JSON.
     pub fn with_metadata(mut self, metadata_json: impl Into<String>) -> Self {
         self.metadata_json = metadata_json.into();
+        self
+    }
+
+    /// Set attachments.
+    pub fn with_attachments(mut self, attachments: Vec<Attachment>) -> Self {
+        self.attachments = attachments;
         self
     }
 }
@@ -168,7 +182,7 @@ impl ChannelHostState {
     ///
     /// Messages are queued and delivered after callback execution completes.
     /// Rate limiting is enforced per-execution and globally.
-    pub fn emit_message(&mut self, msg: EmittedMessage) -> Result<(), WasmChannelError> {
+    pub fn emit_message(&mut self, mut msg: EmittedMessage) -> Result<(), WasmChannelError> {
         // Check per-execution limit
         if !self.emit_enabled {
             self.emits_dropped += 1;
@@ -185,6 +199,22 @@ impl ChannelHostState {
             );
             return Ok(());
         }
+
+        // Validate attachment sizes — drop only oversized attachments, not the whole message
+        msg.attachments.retain(|attachment| {
+            if attachment.data.len() > MAX_ATTACHMENT_SIZE {
+                tracing::warn!(
+                    channel = %self.channel_name,
+                    size = attachment.data.len(),
+                    max = MAX_ATTACHMENT_SIZE,
+                    mime = %attachment.mime_type,
+                    "Attachment too large, dropping attachment (message still delivered)"
+                );
+                false
+            } else {
+                true
+            }
+        });
 
         // Validate message content size
         if msg.content.len() > MAX_MESSAGE_CONTENT_SIZE {

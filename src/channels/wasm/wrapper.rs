@@ -40,6 +40,7 @@ use wasmtime::Store;
 use wasmtime::component::Linker;
 use wasmtime_wasi::{ResourceTable, WasiCtx, WasiCtxBuilder, WasiView};
 
+use crate::channels::channel::{Attachment, AttachmentKind};
 use crate::channels::wasm::capabilities::ChannelCapabilities;
 use crate::channels::wasm::error::WasmChannelError;
 use crate::channels::wasm::host::{
@@ -436,6 +437,7 @@ impl near::agent::channel_host::Host for ChannelStoreData {
             user_id = %msg.user_id,
             user_name = ?msg.user_name,
             content_len = msg.content.len(),
+            attachment_count = msg.attachments.len(),
             "WASM emit_message called"
         );
 
@@ -447,6 +449,31 @@ impl near::agent::channel_host::Host for ChannelStoreData {
             emitted = emitted.with_thread_id(tid);
         }
         emitted = emitted.with_metadata(msg.metadata_json);
+
+        // Convert WIT attachments to Rust types
+        if !msg.attachments.is_empty() {
+            let attachments = msg
+                .attachments
+                .into_iter()
+                .map(|a| {
+                    let kind = match a.kind {
+                        near::agent::channel_host::AttachmentKind::Audio => AttachmentKind::Audio,
+                        near::agent::channel_host::AttachmentKind::Image => AttachmentKind::Image,
+                        near::agent::channel_host::AttachmentKind::Document => {
+                            AttachmentKind::Document
+                        }
+                    };
+                    Attachment {
+                        kind,
+                        mime_type: a.mime_type,
+                        data: a.data,
+                        filename: a.filename,
+                        duration_secs: a.duration_secs,
+                    }
+                })
+                .collect();
+            emitted = emitted.with_attachments(attachments);
+        }
 
         match self.host_state.emit_message(emitted) {
             Ok(()) => {
@@ -553,6 +580,9 @@ pub struct WasmChannel {
     /// In-memory workspace store persisting writes across callback invocations.
     /// Ensures WASM channels can maintain state (e.g., polling offsets) between ticks.
     workspace_store: Arc<ChannelWorkspaceStore>,
+
+    /// Optional transcription middleware for audio attachments.
+    transcription_middleware: Option<Arc<crate::transcription::TranscriptionMiddleware>>,
 }
 
 impl WasmChannel {
@@ -584,7 +614,16 @@ impl WasmChannel {
             typing_task: RwLock::new(None),
             pairing_store,
             workspace_store: Arc::new(ChannelWorkspaceStore::new()),
+            transcription_middleware: None,
         }
+    }
+
+    /// Set the transcription middleware for audio attachment processing.
+    pub fn set_transcription_middleware(
+        &mut self,
+        middleware: Arc<crate::transcription::TranscriptionMiddleware>,
+    ) {
+        self.transcription_middleware = Some(middleware);
     }
 
     /// Update the channel config before starting.
@@ -1494,27 +1533,18 @@ impl WasmChannel {
                 });
             }
 
-            // Convert to IncomingMessage
-            let mut msg = IncomingMessage::new(&self.name, &emitted.user_id, &emitted.content);
+            let msg = Self::convert_emitted_to_incoming(
+                &self.name,
+                emitted,
+                self.transcription_middleware.as_deref(),
+            )
+            .await;
 
-            if let Some(name) = emitted.user_name {
-                msg = msg.with_user_name(name);
-            }
-
-            if let Some(thread_id) = emitted.thread_id {
-                msg = msg.with_thread(thread_id);
-            }
-
-            // Parse metadata JSON
-            if let Ok(metadata) = serde_json::from_str(&emitted.metadata_json) {
-                msg = msg.with_metadata(metadata);
-            }
-
-            // Send to stream
+            // Send to stream (log post-transcription state intentionally)
             tracing::info!(
                 channel = %self.name,
-                user_id = %emitted.user_id,
-                content_len = emitted.content.len(),
+                user_id = %msg.user_id,
+                content_len = msg.content.len(),
                 "Sending emitted message to agent"
             );
 
@@ -1551,6 +1581,7 @@ impl WasmChannel {
         let pairing_store = self.pairing_store.clone();
         let callback_timeout = self.runtime.config().callback_timeout;
         let workspace_store = self.workspace_store.clone();
+        let transcription_middleware = self.transcription_middleware.clone();
 
         tokio::spawn(async move {
             let mut interval_timer = tokio::time::interval(interval);
@@ -1585,6 +1616,7 @@ impl WasmChannel {
                                         emitted_messages,
                                         &message_tx,
                                         &rate_limiter,
+                                        transcription_middleware.as_deref(),
                                     ).await {
                                         tracing::warn!(
                                             channel = %channel_name,
@@ -1708,6 +1740,7 @@ impl WasmChannel {
         messages: Vec<EmittedMessage>,
         message_tx: &RwLock<Option<mpsc::Sender<IncomingMessage>>>,
         rate_limiter: &RwLock<ChannelEmitRateLimiter>,
+        transcription_middleware: Option<&crate::transcription::TranscriptionMiddleware>,
     ) -> Result<(), WasmChannelError> {
         tracing::info!(
             channel = %channel_name,
@@ -1739,27 +1772,15 @@ impl WasmChannel {
                 });
             }
 
-            // Convert to IncomingMessage
-            let mut msg = IncomingMessage::new(channel_name, &emitted.user_id, &emitted.content);
+            let msg =
+                Self::convert_emitted_to_incoming(channel_name, emitted, transcription_middleware)
+                    .await;
 
-            if let Some(name) = emitted.user_name {
-                msg = msg.with_user_name(name);
-            }
-
-            if let Some(thread_id) = emitted.thread_id {
-                msg = msg.with_thread(thread_id);
-            }
-
-            // Parse metadata JSON
-            if let Ok(metadata) = serde_json::from_str(&emitted.metadata_json) {
-                msg = msg.with_metadata(metadata);
-            }
-
-            // Send to stream
+            // Send to stream (log post-transcription state intentionally)
             tracing::info!(
                 channel = %channel_name,
-                user_id = %emitted.user_id,
-                content_len = emitted.content.len(),
+                user_id = %msg.user_id,
+                content_len = msg.content.len(),
                 "Sending polled message to agent"
             );
 
@@ -1778,6 +1799,65 @@ impl WasmChannel {
         }
 
         Ok(())
+    }
+
+    /// Convert an `EmittedMessage` to an `IncomingMessage`, applying transcription
+    /// middleware with a timeout if available.
+    ///
+    /// Shared by both `process_emitted_messages` (HTTP callback path) and
+    /// `dispatch_emitted_messages` (polling path) to avoid duplication.
+    async fn convert_emitted_to_incoming(
+        channel_name: &str,
+        emitted: EmittedMessage,
+        transcription_middleware: Option<&crate::transcription::TranscriptionMiddleware>,
+    ) -> IncomingMessage {
+        // Save user_id before partial moves for potential timeout fallback
+        let user_id = emitted.user_id.clone();
+
+        let mut msg = IncomingMessage::new(channel_name, &emitted.user_id, &emitted.content);
+
+        if let Some(name) = emitted.user_name {
+            msg = msg.with_user_name(name);
+        }
+
+        if let Some(thread_id) = emitted.thread_id {
+            msg = msg.with_thread(thread_id);
+        }
+
+        // Parse metadata JSON
+        if let Ok(metadata) = serde_json::from_str(&emitted.metadata_json) {
+            msg = msg.with_metadata(metadata);
+        }
+
+        // Carry attachments through (moves emitted.attachments into msg)
+        if !emitted.attachments.is_empty() {
+            msg = msg.with_attachments(emitted.attachments);
+        }
+
+        // Apply transcription middleware with a 30-second timeout to prevent
+        // a slow/hanging provider from blocking the message pipeline indefinitely.
+        if let Some(middleware) = transcription_middleware {
+            match tokio::time::timeout(std::time::Duration::from_secs(30), middleware.process(msg))
+                .await
+            {
+                Ok(processed) => return processed,
+                Err(_) => {
+                    tracing::error!(
+                        channel = %channel_name,
+                        "Transcription timed out after 30s, delivering message without transcript"
+                    );
+                    // Timeout: `msg` was moved into the timed-out future, so
+                    // reconstruct a fallback message from the saved user_id.
+                    return IncomingMessage::new(
+                        channel_name,
+                        &user_id,
+                        "[Voice note: transcription timed out]",
+                    );
+                }
+            }
+        }
+
+        msg
     }
 }
 
@@ -2332,6 +2412,7 @@ mod tests {
             messages,
             &message_tx,
             &rate_limiter,
+            None,
         )
         .await;
 
@@ -2370,6 +2451,7 @@ mod tests {
             messages,
             &message_tx,
             &rate_limiter,
+            None,
         )
         .await;
 

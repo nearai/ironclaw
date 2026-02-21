@@ -113,6 +113,27 @@ interface channel-host {
 
     // ==================== Channel-Specific Capabilities ====================
 
+    /// Kind of attachment (audio, image, document).
+    enum attachment-kind {
+        audio,
+        image,
+        document,
+    }
+
+    /// Binary attachment on an emitted message (e.g., voice note, photo).
+    record attachment {
+        /// What kind of content this is.
+        kind: attachment-kind,
+        /// MIME type (e.g., "audio/ogg", "image/jpeg").
+        mime-type: string,
+        /// Raw bytes of the attachment.
+        data: list<u8>,
+        /// Optional filename.
+        filename: option<string>,
+        /// Duration in seconds (for audio/video).
+        duration-secs: option<u32>,
+    }
+
     /// A message to emit to the agent.
     record emitted-message {
         /// User identifier within the channel (e.g., Slack user ID).
@@ -125,6 +146,8 @@ interface channel-host {
         thread-id: option<string>,
         /// Channel-specific metadata as JSON string.
         metadata-json: string,
+        /// Optional binary attachments (voice notes, images, etc.).
+        attachments: list<attachment>,
     }
 
     /// Emit a message to the agent.

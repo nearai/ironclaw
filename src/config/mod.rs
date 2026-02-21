@@ -19,6 +19,7 @@ mod safety;
 mod sandbox;
 mod secrets;
 mod skills;
+mod transcription;
 mod tunnel;
 mod wasm;
 
@@ -45,6 +46,7 @@ pub use self::safety::SafetyConfig;
 pub use self::sandbox::{ClaudeCodeConfig, SandboxModeConfig};
 pub use self::secrets::SecretsConfig;
 pub use self::skills::SkillsConfig;
+pub use self::transcription::TranscriptionConfig;
 pub use self::tunnel::TunnelConfig;
 pub use self::wasm::WasmConfig;
 
@@ -74,6 +76,7 @@ pub struct Config {
     pub sandbox: SandboxModeConfig,
     pub claude_code: ClaudeCodeConfig,
     pub skills: SkillsConfig,
+    pub transcription: TranscriptionConfig,
     pub observability: crate::observability::ObservabilityConfig,
 }
 
@@ -198,6 +201,7 @@ impl Config {
             sandbox: SandboxModeConfig::resolve()?,
             claude_code: ClaudeCodeConfig::resolve()?,
             skills: SkillsConfig::resolve()?,
+            transcription: TranscriptionConfig::resolve(settings)?,
             observability: crate::observability::ObservabilityConfig {
                 backend: std::env::var("OBSERVABILITY_BACKEND").unwrap_or_else(|_| "none".into()),
             },

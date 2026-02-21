@@ -14,7 +14,8 @@
   "capabilities": {
     "http": {
       "allowlist": [
-        { "host": "api.telegram.org", "path_prefix": "/bot" }
+        { "host": "api.telegram.org", "path_prefix": "/bot" },
+        { "host": "api.telegram.org", "path_prefix": "/file/bot" }
       ],
       "credentials": {
         "telegram_bot": {
