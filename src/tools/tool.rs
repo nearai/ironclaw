@@ -9,6 +9,25 @@ use thiserror::Error;
 
 use crate::context::JobContext;
 
+/// How much approval a specific tool invocation requires.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ApprovalRequirement {
+    /// No approval needed.
+    Never,
+    /// Needs approval, but session auto-approve can bypass.
+    UnlessAutoApproved,
+    /// Always needs explicit approval (even if auto-approved).
+    Always,
+}
+
+impl ApprovalRequirement {
+    /// Whether this invocation requires approval in contexts where
+    /// auto-approve is irrelevant (e.g. autonomous worker/scheduler).
+    pub fn is_required(&self) -> bool {
+        !matches!(self, Self::Never)
+    }
+}
+
 /// Where a tool should execute: orchestrator process or inside a container.
 ///
 /// Orchestrator tools run in the main agent process (memory access, job mgmt, etc).
@@ -160,31 +179,14 @@ pub trait Tool: Send + Sync {
         true
     }
 
-    /// Whether this tool requires explicit user approval before execution.
+    /// Whether this tool invocation requires user approval.
     ///
-    /// Returns false by default since most tools run in a sandboxed/virtualized
-    /// environment. Only tools that make external network calls or perform
-    /// destructive operations should return true.
-    ///
-    /// When true, the agent will prompt the user for confirmation before
-    /// executing this tool.
-    fn requires_approval(&self) -> bool {
-        false
-    }
-
-    /// Whether this specific invocation should override auto-approval.
-    ///
-    /// This method is called after checking `requires_approval()` and finding that
-    /// the tool is auto-approved for this session. Return `true` to force approval
-    /// for this specific invocation despite auto-approval (for example, for
-    /// destructive operations like `rm -rf` or `git push --force`).
-    ///
-    /// Return `false` to allow auto-approval to proceed normally.
-    ///
-    /// The default returns `false`. Override only if you need parameter-aware
-    /// approval gating.
-    fn requires_approval_for(&self, _params: &serde_json::Value) -> bool {
-        false
+    /// Returns `Never` by default (most tools run in a sandboxed environment).
+    /// Override to return `UnlessAutoApproved` for tools that need approval
+    /// but can be session-auto-approved, or `Always` for invocations that
+    /// must always prompt (e.g. destructive shell commands, HTTP with auth).
+    fn requires_approval(&self, _params: &serde_json::Value) -> ApprovalRequirement {
+        ApprovalRequirement::Never
     }
 
     /// Maximum time this tool is allowed to run before the caller kills it.
@@ -347,9 +349,15 @@ mod tests {
     }
 
     #[test]
-    fn test_requires_approval_for_default() {
+    fn test_requires_approval_default() {
         let tool = EchoTool;
-        // Default requires_approval_for() returns false, allowing auto-approval.
-        assert!(!tool.requires_approval_for(&serde_json::json!({"message": "hi"})));
+        // Default requires_approval() returns Never.
+        assert_eq!(
+            tool.requires_approval(&serde_json::json!({"message": "hi"})),
+            ApprovalRequirement::Never
+        );
+        assert!(!ApprovalRequirement::Never.is_required());
+        assert!(ApprovalRequirement::UnlessAutoApproved.is_required());
+        assert!(ApprovalRequirement::Always.is_required());
     }
 }

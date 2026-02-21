@@ -13,14 +13,17 @@
 ### Features
 - **Multi-channel input**: TUI (Ratatui), HTTP webhooks, WASM channels (Telegram, Slack), web gateway
 - **Parallel job execution** with state machine and self-repair for stuck jobs
-- **Sandbox execution**: Docker container isolation with orchestrator/worker pattern
+- **Sandbox execution**: Docker container isolation with network proxy and credential injection
 - **Claude Code mode**: Delegate jobs to Claude CLI inside containers
+- **Skills system**: SKILL.md prompt extensions with trust model, tool attenuation, and ClawHub registry
 - **Routines**: Scheduled (cron) and reactive (event, webhook) task execution
 - **Web gateway**: Browser UI with SSE/WebSocket real-time streaming
 - **Extension management**: Install, auth, activate MCP/WASM extensions
 - **Extensible tools**: Built-in tools, WASM sandbox, MCP client, dynamic builder
 - **Persistent memory**: Workspace with hybrid search (FTS + vector via RRF)
-- **Prompt injection defense**: Sanitizer, validator, policy rules, leak detection
+- **Prompt injection defense**: Sanitizer, validator, policy rules, leak detection, shell env scrubbing
+- **Multi-provider LLM**: NEAR AI, OpenAI, Anthropic, Ollama, OpenAI-compatible, Tinfoil private inference
+- **Setup wizard**: 7-step interactive onboarding for first-run configuration
 - **Heartbeat system**: Proactive periodic execution with checklist
 
 ## Build & Test
@@ -29,7 +32,7 @@
 # Format code
 cargo fmt
 
-# Lint (address warnings before committing)
+# Lint (fix ALL warnings before committing, including pre-existing ones)
 cargo clippy --all --benches --tests --examples --all-features
 
 # Run all tests
@@ -64,6 +67,7 @@ src/
 │   ├── context_monitor.rs # Memory pressure detection
 │   ├── undo.rs         # Turn-based undo/redo with checkpoints
 │   ├── submission.rs   # Submission parsing (undo, redo, compact, clear, etc.)
+│   ├── dispatcher.rs   # Skill-aware job dispatching
 │   ├── task.rs         # Sub-task execution framework
 │   ├── routine.rs      # Routine types (Trigger, Action, Guardrails)
 │   └── routine_engine.rs # Routine execution (cron ticker, event matcher)
@@ -113,11 +117,18 @@ src/
 │   ├── policy.rs       # PolicyRule system with severity/actions
 │   └── leak_detector.rs # Secret detection (API keys, tokens, etc.)
 │
-├── llm/                # LLM integration (NEAR AI only)
+├── llm/                # LLM integration (multi-provider)
+│   ├── mod.rs          # Provider factory, LlmBackend enum
 │   ├── provider.rs     # LlmProvider trait, message types
-│   ├── nearai.rs       # NEAR AI chat-api implementation
+│   ├── nearai_chat.rs  # NEAR AI Chat Completions provider (session token + API key auth)
 │   ├── reasoning.rs    # Planning, tool selection, evaluation
-│   └── session.rs      # Session token management with auto-renewal
+│   ├── session.rs      # Session token management with auto-renewal
+│   ├── circuit_breaker.rs # Circuit breaker for provider failures
+│   ├── retry.rs        # Retry with exponential backoff
+│   ├── failover.rs     # Multi-provider failover chain
+│   ├── response_cache.rs # LLM response caching
+│   ├── costs.rs        # Token cost tracking
+│   └── rig_adapter.rs  # Rig framework adapter
 │
 ├── tools/              # Extensible tool system
 │   ├── tool.rs         # Tool trait, ToolOutput, ToolError
@@ -131,6 +142,7 @@ src/
 │   │   ├── job.rs      # CreateJob, ListJobs, JobStatus, CancelJob
 │   │   ├── routine.rs  # routine_create/list/update/delete/history
 │   │   ├── extension_tools.rs # Extension install/auth/activate/remove
+│   │   ├── skill_tools.rs # skill_list/search/install/remove tools
 │   │   └── marketplace.rs, ecommerce.rs, taskrabbit.rs, restaurant.rs (stubs)
 │   ├── builder/        # Dynamic tool building
 │   │   ├── core.rs     # BuildRequirement, SoftwareType, Language
@@ -180,10 +192,37 @@ src/
 │   ├── success.rs      # SuccessEvaluator trait, RuleBasedEvaluator, LlmEvaluator
 │   └── metrics.rs      # MetricsCollector, QualityMetrics
 │
+├── sandbox/            # Docker execution sandbox
+│   ├── mod.rs          # Public API, default allowlist
+│   ├── config.rs       # SandboxConfig, SandboxPolicy enum
+│   ├── manager.rs      # SandboxManager orchestration
+│   ├── container.rs    # ContainerRunner, Docker lifecycle
+│   ├── error.rs        # SandboxError types
+│   └── proxy/          # Network proxy for containers
+│       ├── mod.rs      # NetworkProxyBuilder
+│       ├── http.rs     # HttpProxy, CredentialResolver trait
+│       ├── policy.rs   # NetworkPolicyDecider trait
+│       └── allowlist.rs # DomainAllowlist validation
+│
 ├── secrets/            # Secrets management
 │   ├── crypto.rs       # AES-256-GCM encryption
 │   ├── store.rs        # Secret storage
 │   └── types.rs        # Credential types
+│
+├── setup/              # Onboarding wizard (spec: src/setup/README.md)
+│   ├── mod.rs          # Entry point, check_onboard_needed()
+│   ├── wizard.rs       # 7-step interactive wizard
+│   ├── channels.rs     # Channel setup helpers
+│   └── prompts.rs      # Terminal prompts (select, confirm, secret)
+│
+├── skills/             # SKILL.md prompt extension system
+│   ├── mod.rs          # Core types (SkillTrust, LoadedSkill)
+│   ├── registry.rs     # SkillRegistry: discover, install, remove
+│   ├── selector.rs     # Deterministic scoring prefilter
+│   ├── attenuation.rs  # Trust-based tool ceiling
+│   ├── gating.rs       # Requirement checks (bins, env, config)
+│   ├── parser.rs       # SKILL.md frontmatter + markdown parser
+│   └── catalog.rs      # ClawHub registry client
 │
 └── history/            # Persistence
     ├── store.rs        # PostgreSQL repositories
@@ -214,6 +253,7 @@ When designing new features or systems, always prefer generic/extensible archite
 - `LlmProvider` - Add new LLM backends
 - `SuccessEvaluator` - Custom evaluation logic
 - `EmbeddingProvider` - Add embedding backends (workspace search)
+- `NetworkPolicyDecider` - Custom network access policies for sandbox containers
 
 ### Tool Implementation
 ```rust
@@ -252,6 +292,43 @@ Pending -> InProgress -> Completed -> Submitted -> Accepted
                               \-> Failed
 ```
 
+### Code Style
+
+- Use `crate::` imports, not `super::`
+- No `pub use` re-exports unless exposing to downstream consumers
+- Prefer strong types over strings (enums, newtypes)
+- Keep functions focused, extract helpers when logic is reused
+- Comments for non-obvious logic only
+
+### Review & Fix Discipline
+
+Hard-won lessons from code review -- follow these when fixing bugs or addressing review feedback.
+
+**Fix the pattern, not just the instance:** When a reviewer flags a bug (e.g., TOCTOU race in INSERT + SELECT-back), search the entire codebase for all instances of that same pattern. A fix in `SecretsStore::create()` that doesn't also fix `WasmToolStore::store()` is half a fix.
+
+**Propagate architectural fixes to satellite types:** If a core type changes its concurrency model (e.g., `LibSqlBackend` switches to connection-per-operation), every type that was handed a resource from the old model (e.g., `LibSqlSecretsStore`, `LibSqlWasmToolStore` holding a single `Connection`) must also be updated. Grep for the old type across the codebase.
+
+**Schema translation is more than DDL:** When translating a database schema between backends (PostgreSQL to libSQL, etc.), check for:
+- **Indexes** -- diff `CREATE INDEX` statements between the two schemas
+- **Seed data** -- check for `INSERT INTO` in migrations (e.g., `leak_detection_patterns`)
+- **Semantic differences** -- document where SQL functions behave differently (e.g., `json_patch` vs `jsonb_set`)
+
+**Feature flag testing:** When adding feature-gated code, test compilation with each feature in isolation:
+```bash
+cargo check                                          # default features
+cargo check --no-default-features --features libsql  # libsql only
+cargo check --all-features                           # all features
+```
+Dead code behind the wrong `#[cfg]` gate will only show up when building with a single feature.
+
+**Zero clippy warnings policy:** Fix ALL clippy warnings before committing, including pre-existing ones in files you didn't change. Never leave warnings behind — treat `cargo clippy` output as a zero-tolerance gate.
+
+**Mechanical verification before committing:** Run these checks on changed files before committing:
+- `cargo clippy --all --benches --tests --examples --all-features` -- zero warnings
+- `grep -rnE '\.unwrap\(|\.expect\(' <files>` -- no panics in production
+- `grep -rn 'super::' <files>` -- use `crate::` imports
+- If you fixed a pattern bug, `grep` for other instances of that pattern across `src/`
+
 ## Configuration
 
 Environment variables (see `.env.example`):
@@ -263,10 +340,14 @@ LIBSQL_PATH=~/.ironclaw/ironclaw.db    # libSQL local path (default)
 # LIBSQL_URL=libsql://xxx.turso.io    # Turso cloud (optional)
 # LIBSQL_AUTH_TOKEN=xxx                # Required with LIBSQL_URL
 
-# NEAR AI (required)
-NEARAI_SESSION_TOKEN=sess_...
-NEARAI_MODEL=claude-3-5-sonnet-20241022
+# NEAR AI (when LLM_BACKEND=nearai, the default)
+# Two auth modes: session token (default) or API key
+# Session token auth (default): uses browser OAuth on first run
+NEARAI_SESSION_TOKEN=sess_...           # hosting providers: set this
 NEARAI_BASE_URL=https://private.near.ai
+# API key auth: set NEARAI_API_KEY, base URL defaults to cloud-api.near.ai
+# NEARAI_API_KEY=...                    # API key from cloud.near.ai
+NEARAI_MODEL=claude-3-5-sonnet-20241022
 
 # Agent settings
 AGENT_NAME=ironclaw
@@ -297,6 +378,10 @@ SANDBOX_ENABLED=true
 SANDBOX_IMAGE=ironclaw-worker:latest
 SANDBOX_MEMORY_LIMIT_MB=512
 SANDBOX_TIMEOUT_SECS=1800
+SANDBOX_CPU_LIMIT=1.0                  # CPU cores per container
+SANDBOX_NETWORK_PROXY=true             # Enable network proxy for containers
+SANDBOX_PROXY_PORT=8080                # Proxy listener port
+SANDBOX_DEFAULT_POLICY=workspace_write # ReadOnly, WorkspaceWrite, FullAccess
 
 # Claude Code mode (runs inside sandbox containers)
 CLAUDE_CODE_ENABLED=false
@@ -308,16 +393,29 @@ CLAUDE_CODE_CONFIG_DIR=/home/worker/.claude
 ROUTINES_ENABLED=true
 ROUTINES_CRON_INTERVAL=60            # Tick interval in seconds
 ROUTINES_MAX_CONCURRENT=3
+
+# Skills system
+SKILLS_ENABLED=true
+SKILLS_MAX_TOKENS=4000                 # Max prompt budget per turn
+SKILLS_CATALOG_URL=https://clawhub.dev # ClawHub registry URL
+SKILLS_AUTO_DISCOVER=true              # Scan skill directories on startup
+
+# Tinfoil private inference
+TINFOIL_API_KEY=...                    # Required when LLM_BACKEND=tinfoil
+TINFOIL_MODEL=kimi-k2-5               # Default model
 ```
 
-### NEAR AI Provider
+### LLM Providers
 
-Uses the NEAR AI chat-api (`https://api.near.ai/v1/responses`) which provides:
-- Unified access to multiple models (OpenAI, Anthropic, etc.)
-- User authentication via session tokens
-- Usage tracking and billing through NEAR AI
+IronClaw supports multiple LLM backends via the `LLM_BACKEND` env var: `nearai` (default), `openai`, `anthropic`, `ollama`, `openai_compatible`, and `tinfoil`.
 
-Session tokens have the format `sess_xxx` (37 characters). They are authenticated against the NEAR AI auth service.
+**NEAR AI** -- Uses the Chat Completions API with dual auth support. Session token auth (default): authenticates with session tokens (`sess_xxx`) obtained via browser OAuth (GitHub/Google), base URL defaults to `https://private.near.ai`. API key auth: set `NEARAI_API_KEY` (from `cloud.near.ai`), base URL defaults to `https://cloud-api.near.ai`. Both modes use the same Chat Completions endpoint. Tool messages are flattened to plain text for compatibility. Set `NEARAI_SESSION_TOKEN` env var for hosting providers that inject tokens via environment.
+
+**NEAR AI Cloud** -- Uses the OpenAI-compatible Chat Completions API (`https://cloud-api.near.ai/v1/chat/completions`). Authenticates with API keys from `cloud.near.ai`. Auto-selected when `NEARAI_API_KEY` is set (or explicitly via `NEARAI_API_MODE=chat_completions`). Tool messages are flattened to plain text for compatibility. Configure with `NEARAI_API_KEY` and `NEARAI_BASE_URL` (default: `https://cloud-api.near.ai`).
+
+**OpenAI-compatible** -- Any endpoint that speaks the OpenAI API (vLLM, LiteLLM, OpenRouter, etc.). Configure with `LLM_BASE_URL`, `LLM_API_KEY` (optional), `LLM_MODEL`. Set `LLM_EXTRA_HEADERS` to inject custom HTTP headers into every request (format: `Key:Value,Key2:Value2`), useful for OpenRouter attribution headers like `HTTP-Referer` and `X-Title`.
+
+**Tinfoil** -- Private inference via `https://inference.tinfoil.sh/v1`. Runs models inside hardware-attested TEEs so neither Tinfoil nor the cloud provider can see prompts or responses. Uses the OpenAI-compatible Chat Completions API. Configure with `TINFOIL_API_KEY` and `TINFOIL_MODEL` (default: `kimi-k2-5`).
 
 ## Database
 
@@ -386,22 +484,7 @@ Both backends implement this trait. PostgreSQL delegates to the existing `Store`
 - `tool_failures` - Self-repair tracking
 - `secrets`, `wasm_tools`, `tool_capabilities` - Extension infrastructure
 
-### Configuration
-
-```bash
-# Backend selection (default: postgres)
-DATABASE_BACKEND=libsql
-
-# PostgreSQL
-DATABASE_URL=postgres://user:pass@localhost/ironclaw
-
-# libSQL (embedded)
-LIBSQL_PATH=~/.ironclaw/ironclaw.db    # Default path
-
-# libSQL (Turso cloud sync)
-LIBSQL_URL=libsql://your-db.turso.io
-LIBSQL_AUTH_TOKEN=your-token            # Required when LIBSQL_URL is set
-```
+Database configuration: see Configuration section above.
 
 ### Current Limitations (libSQL backend)
 
@@ -419,6 +502,7 @@ All external tool output passes through `SafetyLayer`:
 1. **Sanitizer** - Detects injection patterns, escapes dangerous content
 2. **Validator** - Checks length, encoding, forbidden patterns
 3. **Policy** - Rules with severity (Critical/High/Medium/Low) and actions (Block/Warn/Review/Sanitize)
+4. **Leak Detector** - Scans for 15+ secret patterns (API keys, tokens, private keys, connection strings) at two points: tool output before it reaches the LLM, and LLM responses before they reach the user. Actions per pattern: Block (reject entirely), Redact (mask the secret), or Warn (flag but allow)
 
 Tool outputs are wrapped before reaching LLM:
 ```xml
@@ -426,6 +510,95 @@ Tool outputs are wrapped before reaching LLM:
 [escaped content]
 </tool_output>
 ```
+
+### Shell Environment Scrubbing
+
+The shell tool (`src/tools/builtin/shell.rs`) scrubs sensitive environment variables before executing commands, preventing secrets from leaking through `env`, `printenv`, or `$VAR` expansion. The sanitizer (`src/safety/sanitizer.rs`) also detects command injection patterns (chained commands, subshells, path traversal) and blocks or escapes them based on policy rules.
+
+## Skills System
+
+Skills are SKILL.md files that extend the agent's prompt with domain-specific instructions. Each skill is a YAML frontmatter block (metadata, activation criteria, required tools) followed by a markdown body that gets injected into the LLM context when the skill activates.
+
+### Trust Model
+
+| Trust Level | Source | Tool Access |
+|-------------|--------|-------------|
+| **Trusted** | User-placed in `~/.ironclaw/skills/` or workspace `skills/` | All tools available to the agent |
+| **Installed** | Downloaded from ClawHub registry | Read-only tools only (no shell, file write, HTTP) |
+
+### SKILL.md Format
+
+```yaml
+---
+name: my-skill
+version: 0.1.0
+description: Does something useful
+activation:
+  patterns:
+    - "deploy to.*production"
+  keywords:
+    - "deployment"
+  max_context_tokens: 2000
+metadata:
+  openclaw:
+    requires:
+      bins: [docker, kubectl]
+      env: [KUBECONFIG]
+---
+
+# Deployment Skill
+
+Instructions for the agent when this skill activates...
+```
+
+### Selection Pipeline
+
+1. **Gating** -- Check binary/env/config requirements; skip skills whose prerequisites are missing
+2. **Scoring** -- Deterministic scoring against message content using keywords, tags, and regex patterns
+3. **Budget** -- Select top-scoring skills that fit within `SKILLS_MAX_TOKENS` prompt budget
+4. **Attenuation** -- Apply trust-based tool ceiling; installed skills lose access to dangerous tools
+
+### Skill Tools
+
+Four built-in tools for managing skills at runtime:
+- **`skill_list`** -- List all discovered skills with trust level and status
+- **`skill_search`** -- Search ClawHub registry for available skills
+- **`skill_install`** -- Download and install a skill from ClawHub
+- **`skill_remove`** -- Remove an installed skill
+
+### Skill Directories
+
+- `~/.ironclaw/skills/` -- User's global skills (trusted)
+- `<workspace>/skills/` -- Per-workspace skills (trusted)
+- `~/.ironclaw/installed_skills/` -- Registry-installed skills (installed trust)
+
+Skills configuration: see Configuration section above.
+
+## Docker Sandbox
+
+The `src/sandbox/` module provides Docker-based isolation for job execution with a network proxy that controls outbound access and injects credentials.
+
+### Sandbox Policies
+
+| Policy | Filesystem | Network | Use Case |
+|--------|-----------|---------|----------|
+| **ReadOnly** | Read-only workspace mount | Allowlisted domains only | Analysis, code review |
+| **WorkspaceWrite** | Read-write workspace mount | Allowlisted domains only | Code generation, file edits |
+| **FullAccess** | Full filesystem | Unrestricted | Trusted admin tasks |
+
+### Network Proxy
+
+Containers route all HTTP/HTTPS traffic through a host-side proxy (`src/sandbox/proxy/`):
+- **Domain allowlist** -- Only allowlisted domains are reachable (default: package registries, docs sites, GitHub, common APIs)
+- **Credential injection** -- The `CredentialResolver` trait injects auth headers into proxied requests so secrets never enter the container environment
+- **CONNECT tunnel** -- HTTPS traffic uses CONNECT method; the proxy validates the target domain against the allowlist before establishing the tunnel
+- **Policy decisions** -- The `NetworkPolicyDecider` trait allows custom logic for allow/deny/inject decisions per request
+
+### Zero-Exposure Credential Model
+
+Secrets (API keys, tokens) are stored encrypted on the host and injected into HTTP requests by the proxy at transit time. Container processes never have access to raw credential values, preventing exfiltration even if container code is compromised.
+
+Sandbox configuration: see Configuration section above.
 
 ## Testing
 
@@ -451,164 +624,13 @@ Key test patterns:
 7. **Webhook trigger endpoint** - Routines webhook trigger not yet exposed in web gateway
 8. **Full channel status view** - Gateway status widget exists, but no per-channel connection dashboard
 
-### Completed
+## Tool Architecture
 
-- ✅ **Workspace integration** - Memory tools registered, workspace passed to Agent and heartbeat
-- ✅ **WASM sandboxing** - Full implementation in `tools/wasm/` with fuel metering, memory limits, capabilities
-- ✅ **Dynamic tool building** - `tools/builder/` has LlmSoftwareBuilder with iterative build loop
-- ✅ **HTTP webhook security** - Secret validation implemented, proper error handling (no panics)
-- ✅ **Embeddings integration** - OpenAI and NEAR AI providers wired to workspace for semantic search
-- ✅ **Workspace system prompt** - Identity files (AGENTS.md, SOUL.md, USER.md, IDENTITY.md) injected into LLM context
-- ✅ **Heartbeat notifications** - Route through channel manager (broadcast API) instead of logging-only
-- ✅ **Auto-context compaction** - Triggers automatically when context exceeds threshold
-- ✅ **Embedding backfill** - Runs on startup when embeddings provider is enabled
-- ✅ **Clippy clean** - All warnings addressed via config struct refactoring
-- ✅ **Tool approval enforcement** - Tools with `requires_approval()` (shell, http, file write/patch, build_software) now gate execution, track auto-approved tools per session
-- ✅ **Tool definition refresh** - Tool definitions refreshed each iteration so newly built tools become visible in same session
-- ✅ **Worker tool call handling** - Uses `respond_with_tools()` to properly execute tool calls when `select_tools()` returns empty
-- ✅ **Gateway control plane** - Web gateway with 40+ API endpoints, SSE/WebSocket
-- ✅ **Web Control UI** - Browser-based dashboard with chat, memory, jobs, logs, extensions, routines
-- ✅ **Slack/Telegram channels** - Implemented as WASM tools
-- ✅ **Docker sandbox** - Orchestrator/worker containers with per-job auth
-- ✅ **Claude Code mode** - Delegate jobs to Claude CLI inside containers
-- ✅ **Routines system** - Cron, event, webhook, and manual triggers with guardrails
-- ✅ **Extension management** - Install, auth, activate MCP/WASM extensions via CLI and web UI
-- ✅ **libSQL/Turso backend** - Database trait abstraction (`src/db/`), feature-gated dual backend support (postgres/libsql), embedded SQLite for zero-dependency local mode
+**Keep tool-specific logic out of the main agent codebase.** The main agent provides generic infrastructure; tools are self-contained units that declare their requirements through `capabilities.json` files (API endpoints, credentials, rate limits, auth setup). Service-specific auth flows, CLI commands, and configuration do not belong in the main agent.
 
-## Adding a New Tool
+Tools can be built as **WASM** (sandboxed, credential-injected, single binary) or **MCP servers** (ecosystem of pre-built servers, any language, but no sandbox). Both are first-class via `ironclaw tool install`. Auth is declared in capabilities files with OAuth and manual token entry support.
 
-### Built-in Tools (Rust)
-
-1. Create `src/tools/builtin/my_tool.rs`
-2. Implement the `Tool` trait
-3. Add `mod my_tool;` and `pub use` in `src/tools/builtin/mod.rs`
-4. Register in `ToolRegistry::register_builtin_tools()` in `registry.rs`
-5. Add tests
-
-### WASM Tools (Recommended)
-
-WASM tools are the preferred way to add new capabilities. They run in a sandboxed environment with explicit capabilities.
-
-1. Create a new crate in `tools-src/<name>/`
-2. Implement the WIT interface (`wit/tool.wit`)
-3. Create `<name>.capabilities.json` declaring required permissions
-4. Build with `cargo build --target wasm32-wasip2 --release`
-5. Install with `ironclaw tool install path/to/tool.wasm`
-
-See `tools-src/` for examples.
-
-## Tool Architecture Principles
-
-**CRITICAL: Keep tool-specific logic out of the main agent codebase.**
-
-The main agent provides generic infrastructure; tools are self-contained units that declare their requirements through capabilities files.
-
-### What Goes in Tools (capabilities.json)
-
-- API endpoints the tool needs (HTTP allowlist)
-- Credentials required (secret names, injection locations)
-- Rate limits and timeouts
-- Auth setup instructions (see below)
-- Workspace paths the tool can read
-
-### What Does NOT Go in Main Agent
-
-- Service-specific auth flows (OAuth for Notion, Slack, etc.)
-- Service-specific CLI commands (`auth notion`, `auth slack`)
-- Service-specific configuration handling
-- Hardcoded API URLs or token formats
-
-### Tool Authentication
-
-Tools declare their auth requirements in `<tool>.capabilities.json` under the `auth` section. Two methods are supported:
-
-#### OAuth (Browser-based login)
-
-For services that support OAuth, users just click through browser login:
-
-```json
-{
-  "auth": {
-    "secret_name": "notion_api_token",
-    "display_name": "Notion",
-    "oauth": {
-      "authorization_url": "https://api.notion.com/v1/oauth/authorize",
-      "token_url": "https://api.notion.com/v1/oauth/token",
-      "client_id_env": "NOTION_OAUTH_CLIENT_ID",
-      "client_secret_env": "NOTION_OAUTH_CLIENT_SECRET",
-      "scopes": [],
-      "use_pkce": false,
-      "extra_params": { "owner": "user" }
-    },
-    "env_var": "NOTION_TOKEN"
-  }
-}
-```
-
-To enable OAuth for a tool:
-1. Register a public OAuth app with the service (e.g., notion.so/my-integrations)
-2. Configure redirect URIs: `http://localhost:9876/callback` through `http://localhost:9886/callback`
-3. Set environment variables for client_id and client_secret
-
-#### Manual Token Entry (Fallback)
-
-For services without OAuth or when OAuth isn't configured:
-
-```json
-{
-  "auth": {
-    "secret_name": "openai_api_key",
-    "display_name": "OpenAI",
-    "instructions": "Get your API key from platform.openai.com/api-keys",
-    "setup_url": "https://platform.openai.com/api-keys",
-    "token_hint": "Starts with 'sk-'",
-    "env_var": "OPENAI_API_KEY"
-  }
-}
-```
-
-#### Auth Flow Priority
-
-When running `ironclaw tool auth <tool>`:
-
-1. Check `env_var` - if set in environment, use it directly
-2. Check `oauth` - if configured, open browser for OAuth flow
-3. Fall back to `instructions` + manual token entry
-
-The agent reads auth config from the tool's capabilities file and provides the appropriate flow. No service-specific code in the main agent.
-
-### WASM Tools vs MCP Servers: When to Use Which
-
-Both are first-class in the extension system (`ironclaw tool install` handles both), but they have different strengths.
-
-**WASM Tools (IronClaw native)**
-
-- Sandboxed: fuel metering, memory limits, no access except what's allowlisted
-- Credentials injected by host runtime, tool code never sees the actual token
-- Output scanned for secret leakage before returning to the LLM
-- Auth (OAuth/manual) declared in `capabilities.json`, agent handles the flow
-- Single binary, no process management, works offline
-- Cost: must build yourself in Rust, no ecosystem, synchronous only
-
-**MCP Servers (Model Context Protocol)**
-
-- Growing ecosystem of pre-built servers (GitHub, Notion, Postgres, etc.)
-- Any language (TypeScript/Python most common)
-- Can do websockets, streaming, background polling
-- Cost: external process with full system access (no sandbox), manages own credentials, IronClaw can't prevent leaks
-
-**Decision guide:**
-
-| Scenario | Use |
-|----------|-----|
-| Good MCP server already exists | **MCP** |
-| Handles sensitive credentials (email send, banking) | **WASM** |
-| Quick prototype or one-off integration | **MCP** |
-| Core capability you'll maintain long-term | **WASM** |
-| Needs background connections (websockets, polling) | **MCP** |
-| Multiple tools share one OAuth token (e.g., Google suite) | **WASM** |
-
-The LLM-facing interface is identical for both (tool name, schema, execute), so swapping between them is transparent to the agent.
+See `src/tools/README.md` for full tool architecture, adding new tools (built-in Rust and WASM), auth JSON examples, and WASM vs MCP decision guide.
 
 ## Adding a New Channel
 
@@ -645,154 +667,15 @@ for that module's behavior. When modifying code in a module that has a spec:
 | Module | Spec File |
 |--------|-----------|
 | `src/setup/` | `src/setup/README.md` |
-
-## Code Style
-
-- Use `crate::` imports, not `super::`
-- No `pub use` re-exports unless exposing to downstream consumers
-- Prefer strong types over strings (enums, newtypes)
-- Keep functions focused, extract helpers when logic is reused
-- Comments for non-obvious logic only
-
-## Review & Fix Discipline
-
-Hard-won lessons from code review -- follow these when fixing bugs or addressing review feedback.
-
-### Fix the pattern, not just the instance
-When a reviewer flags a bug (e.g., TOCTOU race in INSERT + SELECT-back), search the entire codebase for all instances of that same pattern. A fix in `SecretsStore::create()` that doesn't also fix `WasmToolStore::store()` is half a fix.
-
-### Propagate architectural fixes to satellite types
-If a core type changes its concurrency model (e.g., `LibSqlBackend` switches to connection-per-operation), every type that was handed a resource from the old model (e.g., `LibSqlSecretsStore`, `LibSqlWasmToolStore` holding a single `Connection`) must also be updated. Grep for the old type across the codebase.
-
-### Schema translation is more than DDL
-When translating a database schema between backends (PostgreSQL to libSQL, etc.), check for:
-- **Indexes** -- diff `CREATE INDEX` statements between the two schemas
-- **Seed data** -- check for `INSERT INTO` in migrations (e.g., `leak_detection_patterns`)
-- **Semantic differences** -- document where SQL functions behave differently (e.g., `json_patch` vs `jsonb_set`)
-
-### Feature flag testing
-When adding feature-gated code, test compilation with each feature in isolation:
-```bash
-cargo check                                          # default features
-cargo check --no-default-features --features libsql  # libsql only
-cargo check --all-features                           # all features
-```
-Dead code behind the wrong `#[cfg]` gate will only show up when building with a single feature.
-
-### Mechanical verification before committing
-Run these checks on changed files before committing:
-- `grep -rnE '\.unwrap\(|\.expect\(' <files>` -- no panics in production
-- `grep -rn 'super::' <files>` -- use `crate::` imports
-- If you fixed a pattern bug, `grep` for other instances of that pattern across `src/`
+| `src/workspace/` | `src/workspace/README.md` |
+| `src/tools/` | `src/tools/README.md` |
 
 ## Workspace & Memory System
 
-Inspired by [OpenClaw](https://github.com/openclaw/openclaw), the workspace provides persistent memory for agents with a flexible filesystem-like structure.
+OpenClaw-inspired persistent memory with a flexible filesystem-like structure. Principle: "Memory is database, not RAM" -- if you want to remember something, write it explicitly. Uses hybrid search combining FTS (keyword) + vector (semantic) via Reciprocal Rank Fusion.
 
-### Key Principles
+Four memory tools for LLM use: `memory_search` (hybrid search -- call before answering questions about prior work), `memory_write`, `memory_read`, `memory_tree`. Identity files (AGENTS.md, SOUL.md, USER.md, IDENTITY.md) are injected into the LLM system prompt.
 
-1. **"Memory is database, not RAM"** - If you want to remember something, write it explicitly
-2. **Flexible structure** - Create any directory/file hierarchy you need
-3. **Self-documenting** - Use README.md files to describe directory structure
-4. **Hybrid search** - Combines FTS (keyword) + vector (semantic) via Reciprocal Rank Fusion
+The heartbeat system runs proactive periodic execution (default: 30 minutes), reading `HEARTBEAT.md` and notifying via channel if findings are detected.
 
-### Filesystem Structure
-
-```
-workspace/
-├── README.md              <- Root runbook/index
-├── MEMORY.md              <- Long-term curated memory
-├── HEARTBEAT.md           <- Periodic checklist
-├── IDENTITY.md            <- Agent name, nature, vibe
-├── SOUL.md                <- Core values
-├── AGENTS.md              <- Behavior instructions
-├── USER.md                <- User context
-├── context/               <- Identity-related docs
-│   ├── vision.md
-│   └── priorities.md
-├── daily/                 <- Daily logs
-│   ├── 2024-01-15.md
-│   └── 2024-01-16.md
-├── projects/              <- Arbitrary structure
-│   └── alpha/
-│       ├── README.md
-│       └── notes.md
-└── ...
-```
-
-### Using the Workspace
-
-```rust
-use crate::workspace::{Workspace, OpenAiEmbeddings, paths};
-
-// Create workspace for a user
-let workspace = Workspace::new("user_123", pool)
-    .with_embeddings(Arc::new(OpenAiEmbeddings::new(api_key)));
-
-// Read/write any path
-let doc = workspace.read("projects/alpha/notes.md").await?;
-workspace.write("context/priorities.md", "# Priorities\n\n1. Feature X").await?;
-workspace.append("daily/2024-01-15.md", "Completed task X").await?;
-
-// Convenience methods for well-known files
-workspace.append_memory("User prefers dark mode").await?;
-workspace.append_daily_log("Session note").await?;
-
-// List directory contents
-let entries = workspace.list("projects/").await?;
-
-// Search (hybrid FTS + vector)
-let results = workspace.search("dark mode preference", 5).await?;
-
-// Get system prompt from identity files
-let prompt = workspace.system_prompt().await?;
-```
-
-### Memory Tools
-
-Four tools for LLM use:
-
-- **`memory_search`** - Hybrid search, MUST be called before answering questions about prior work
-- **`memory_write`** - Write to any path (memory, daily_log, or custom paths)
-- **`memory_read`** - Read any file by path
-- **`memory_tree`** - View workspace structure as a tree (depth parameter, default 1)
-
-### Hybrid Search (RRF)
-
-Combines full-text search and vector similarity using Reciprocal Rank Fusion:
-
-```
-score(d) = Σ 1/(k + rank(d)) for each method where d appears
-```
-
-Default k=60. Results from both methods are combined, with documents appearing in both getting boosted scores.
-
-**Backend differences:**
-- **PostgreSQL:** `ts_rank_cd` for FTS, pgvector cosine distance for vectors, full RRF
-- **libSQL:** FTS5 for keyword search only (vector search via `libsql_vector_idx` not yet wired)
-
-### Heartbeat System
-
-Proactive periodic execution (default: 30 minutes):
-
-1. Reads `HEARTBEAT.md` checklist
-2. Runs agent turn with checklist prompt
-3. If findings, notifies via channel
-4. If nothing, agent replies "HEARTBEAT_OK" (no notification)
-
-```rust
-use crate::agent::{HeartbeatConfig, spawn_heartbeat};
-
-let config = HeartbeatConfig::default()
-    .with_interval(Duration::from_secs(60 * 30))
-    .with_notify("user_123", "telegram");
-
-spawn_heartbeat(config, workspace, llm, response_tx);
-```
-
-### Chunking Strategy
-
-Documents are chunked for search indexing:
-- Default: 800 words per chunk (roughly 800 tokens for English)
-- 15% overlap between chunks for context preservation
-- Minimum chunk size: 50 words (tiny trailing chunks merge with previous)
+See `src/workspace/README.md` for full API documentation, filesystem structure, hybrid search details, chunking strategy, and heartbeat system.

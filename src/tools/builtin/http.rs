@@ -2,6 +2,7 @@
 
 use std::collections::HashMap;
 use std::net::{IpAddr, ToSocketAddrs};
+use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -10,7 +11,9 @@ use reqwest::Client;
 
 use crate::context::JobContext;
 use crate::safety::LeakDetector;
-use crate::tools::tool::{Tool, ToolError, ToolOutput, require_str};
+use crate::secrets::SecretsStore;
+use crate::tools::tool::{ApprovalRequirement, Tool, ToolError, ToolOutput, require_str};
+use crate::tools::wasm::{InjectedCredentials, SharedCredentialRegistry, inject_credential};
 
 #[cfg(feature = "html-to-markdown")]
 use crate::tools::builtin::convert_html_to_markdown;
@@ -25,6 +28,8 @@ const MAX_RESPONSE_SIZE: usize = 5 * 1024 * 1024;
 /// Tool for making HTTP requests.
 pub struct HttpTool {
     client: Client,
+    credential_registry: Option<Arc<SharedCredentialRegistry>>,
+    secrets_store: Option<Arc<dyn SecretsStore + Send + Sync>>,
 }
 
 impl HttpTool {
@@ -36,7 +41,22 @@ impl HttpTool {
             .build()
             .expect("Failed to create HTTP client");
 
-        Self { client }
+        Self {
+            client,
+            credential_registry: None,
+            secrets_store: None,
+        }
+    }
+
+    /// Attach a credential registry and secrets store for auto-injection.
+    pub fn with_credentials(
+        mut self,
+        registry: Arc<SharedCredentialRegistry>,
+        secrets_store: Arc<dyn SecretsStore + Send + Sync>,
+    ) -> Self {
+        self.credential_registry = Some(registry);
+        self.secrets_store = Some(secrets_store);
+        self
     }
 }
 
@@ -119,6 +139,55 @@ fn is_html_response(headers: &HashMap<String, String>) -> bool {
         .unwrap_or(false)
 }
 
+fn parse_headers_param(
+    headers: Option<&serde_json::Value>,
+) -> Result<Vec<(String, String)>, ToolError> {
+    match headers {
+        None => Ok(Vec::new()),
+        Some(serde_json::Value::Object(map)) => {
+            let mut out = Vec::with_capacity(map.len());
+            for (k, v) in map {
+                let value = v.as_str().ok_or_else(|| {
+                    ToolError::InvalidParameters(format!("header '{}' must have a string value", k))
+                })?;
+                out.push((k.clone(), value.to_string()));
+            }
+            Ok(out)
+        }
+        Some(serde_json::Value::Array(items)) => {
+            let mut out = Vec::with_capacity(items.len());
+            for (idx, item) in items.iter().enumerate() {
+                let obj = item.as_object().ok_or_else(|| {
+                    ToolError::InvalidParameters(format!(
+                        "headers[{}] must be an object with 'name' and 'value'",
+                        idx
+                    ))
+                })?;
+                let name = obj.get("name").and_then(|v| v.as_str()).ok_or_else(|| {
+                    ToolError::InvalidParameters(format!("headers[{}].name must be a string", idx))
+                })?;
+                let value = obj.get("value").and_then(|v| v.as_str()).ok_or_else(|| {
+                    ToolError::InvalidParameters(format!("headers[{}].value must be a string", idx))
+                })?;
+                out.push((name.to_string(), value.to_string()));
+            }
+            Ok(out)
+        }
+        Some(_) => Err(ToolError::InvalidParameters(
+            "'headers' must be an object or an array of {name, value}".to_string(),
+        )),
+    }
+}
+
+/// Extract host from URL in params (for approval checks).
+fn extract_host_from_params(params: &serde_json::Value) -> Option<String> {
+    params
+        .get("url")
+        .and_then(|u| u.as_str())
+        .and_then(|u| reqwest::Url::parse(u).ok())
+        .and_then(|u| u.host_str().map(|h| h.to_string()))
+}
+
 impl Default for HttpTool {
     fn default() -> Self {
         Self::new()
@@ -149,11 +218,20 @@ impl Tool for HttpTool {
                     "description": "The URL to request"
                 },
                 "headers": {
-                    "type": "object",
-                    "additionalProperties": { "type": "string" },
-                    "description": "HTTP headers to include"
+                    "type": "array",
+                    "description": "Optional headers as a list of {name, value} objects",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "name": { "type": "string" },
+                            "value": { "type": "string" }
+                        },
+                        "required": ["name", "value"],
+                        "additionalProperties": false
+                    }
                 },
                 "body": {
+                    "type": ["object", "array", "string", "number", "boolean", "null"],
                     "description": "Request body (for POST/PUT/PATCH)"
                 },
                 "timeout_secs": {
@@ -175,17 +253,10 @@ impl Tool for HttpTool {
         let method = require_str(&params, "method")?;
 
         let url = require_str(&params, "url")?;
-        let parsed_url = validate_url(url)?;
+        let mut parsed_url = validate_url(url)?;
 
         // Parse headers
-        let headers: HashMap<String, String> = params
-            .get("headers")
-            .and_then(|v| serde_json::from_value(v.clone()).ok())
-            .unwrap_or_default();
-        let headers_vec: Vec<(String, String)> = headers
-            .iter()
-            .map(|(k, v)| (k.clone(), v.clone()))
-            .collect();
+        let mut headers_vec = parse_headers_param(params.get("headers"))?;
 
         // Build request
         let mut request = match method.to_uppercase().as_str() {
@@ -203,19 +274,69 @@ impl Tool for HttpTool {
         };
 
         // Add headers
-        for (key, value) in headers {
-            request = request.header(&key, &value);
+        for (key, value) in &headers_vec {
+            request = request.header(key.as_str(), value.as_str());
         }
 
         // Add body if present
         let body_bytes = if let Some(body) = params.get("body") {
-            let bytes = serde_json::to_vec(body)
-                .map_err(|e| ToolError::InvalidParameters(format!("invalid body JSON: {}", e)))?;
-            request = request.json(body);
-            Some(bytes)
+            if let Some(body_str) = body.as_str() {
+                if let Ok(json_body) = serde_json::from_str::<serde_json::Value>(body_str) {
+                    let bytes = serde_json::to_vec(&json_body).map_err(|e| {
+                        ToolError::InvalidParameters(format!("invalid body JSON: {}", e))
+                    })?;
+                    request = request.json(&json_body);
+                    Some(bytes)
+                } else {
+                    let bytes = body_str.as_bytes().to_vec();
+                    request = request.body(body_str.to_string());
+                    Some(bytes)
+                }
+            } else {
+                let bytes = serde_json::to_vec(body).map_err(|e| {
+                    ToolError::InvalidParameters(format!("invalid body JSON: {}", e))
+                })?;
+                request = request.json(body);
+                Some(bytes)
+            }
         } else {
             None
         };
+
+        // Credential injection from shared registry
+        if let (Some(registry), Some(store)) = (
+            self.credential_registry.as_ref(),
+            self.secrets_store.as_ref(),
+        ) {
+            let host = parsed_url.host_str().unwrap_or("");
+            let matched: Vec<crate::secrets::CredentialMapping> = registry.find_for_host(host);
+            for mapping in &matched {
+                match store
+                    .get_decrypted(&_ctx.user_id, &mapping.secret_name)
+                    .await
+                {
+                    Ok(secret) => {
+                        let mut injected = InjectedCredentials::empty();
+                        inject_credential(&mut injected, &mapping.location, &secret);
+                        for (name, value) in &injected.headers {
+                            request = request.header(name.as_str(), value.as_str());
+                            headers_vec.push((name.clone(), value.clone()));
+                        }
+                        for (name, value) in &injected.query_params {
+                            parsed_url.query_pairs_mut().append_pair(name, value);
+                            request = request.query(&[(name.as_str(), value.as_str())]);
+                        }
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            secret = %mapping.secret_name,
+                            error = %e,
+                            "Failed to inject credential for HTTP tool"
+                        );
+                    }
+                }
+            }
+        }
 
         // Leak detection on outbound request (url/headers/body)
         let detector = LeakDetector::new();
@@ -321,14 +442,33 @@ impl Tool for HttpTool {
         true // External data always needs sanitization
     }
 
-    fn requires_approval(&self) -> bool {
-        true // HTTP requests go to external services, require user approval
+    fn requires_approval(&self, params: &serde_json::Value) -> ApprovalRequirement {
+        // 1. Manual auth headers/query params in LLM params
+        if crate::safety::params_contain_manual_credentials(params) {
+            return ApprovalRequirement::Always;
+        }
+        // 2. Target host has credential mappings (will be auto-injected)
+        if let Some(ref registry) = self.credential_registry
+            && let Some(host) = extract_host_from_params(params)
+            && registry.has_credentials_for_host(&host)
+        {
+            return ApprovalRequirement::Always;
+        }
+        // Default: outbound HTTP still needs approval unless auto-approved
+        ApprovalRequirement::UnlessAutoApproved
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_http_tool_schema_headers_is_array() {
+        let tool = HttpTool::new();
+        let schema = tool.parameters_schema();
+        assert_eq!(schema["properties"]["headers"]["type"], "array");
+    }
 
     #[test]
     fn test_validate_url_rejects_http() {
@@ -388,5 +528,273 @@ mod tests {
     fn test_max_response_size_is_reasonable() {
         // MAX_RESPONSE_SIZE should be 5 MB to prevent OOM while allowing typical API responses.
         assert_eq!(MAX_RESPONSE_SIZE, 5 * 1024 * 1024);
+    }
+
+    #[test]
+    fn test_parse_headers_param_accepts_object_legacy_shape() {
+        let headers = serde_json::json!({"Authorization": "Bearer token"});
+        let parsed = parse_headers_param(Some(&headers)).unwrap();
+        assert_eq!(
+            parsed,
+            vec![("Authorization".to_string(), "Bearer token".to_string())]
+        );
+    }
+
+    #[test]
+    fn test_parse_headers_param_accepts_array_shape() {
+        let headers = serde_json::json!([
+            {"name": "Authorization", "value": "Bearer token"},
+            {"name": "X-Test", "value": "1"}
+        ]);
+        let parsed = parse_headers_param(Some(&headers)).unwrap();
+        assert_eq!(
+            parsed,
+            vec![
+                ("Authorization".to_string(), "Bearer token".to_string()),
+                ("X-Test".to_string(), "1".to_string())
+            ]
+        );
+    }
+
+    #[test]
+    fn test_http_tool_schema_body_has_type() {
+        let schema = HttpTool::new().parameters_schema();
+        let body = schema
+            .get("properties")
+            .and_then(|p| p.get("body"))
+            .expect("body schema missing");
+
+        assert!(
+            body.get("type").is_some(),
+            "body schema must include a type for OpenAI-compatible tool validation"
+        );
+    }
+
+    // ── Approval requirement tests ──────────────────────────────────────
+
+    #[test]
+    fn test_no_auth_headers_returns_unless_auto_approved() {
+        let tool = HttpTool::new();
+        let params = serde_json::json!({
+            "method": "GET",
+            "url": "https://api.example.com/data"
+        });
+        assert_eq!(
+            tool.requires_approval(&params),
+            ApprovalRequirement::UnlessAutoApproved
+        );
+    }
+
+    #[test]
+    fn test_auth_header_object_format_returns_always() {
+        let tool = HttpTool::new();
+        let params = serde_json::json!({
+            "method": "GET",
+            "url": "https://api.example.com/data",
+            "headers": {"Authorization": "Bearer token123"}
+        });
+        assert_eq!(tool.requires_approval(&params), ApprovalRequirement::Always);
+    }
+
+    #[test]
+    fn test_auth_header_array_format_returns_always() {
+        let tool = HttpTool::new();
+        let params = serde_json::json!({
+            "method": "GET",
+            "url": "https://api.example.com/data",
+            "headers": [{"name": "Authorization", "value": "Bearer token123"}]
+        });
+        assert_eq!(tool.requires_approval(&params), ApprovalRequirement::Always);
+    }
+
+    #[test]
+    fn test_auth_header_case_insensitive() {
+        let tool = HttpTool::new();
+
+        // Object format with mixed case
+        let params = serde_json::json!({
+            "method": "GET",
+            "url": "https://example.com",
+            "headers": {"AUTHORIZATION": "Bearer x"}
+        });
+        assert_eq!(tool.requires_approval(&params), ApprovalRequirement::Always);
+
+        // Array format with mixed case
+        let params = serde_json::json!({
+            "method": "GET",
+            "url": "https://example.com",
+            "headers": [{"name": "X-Api-Key", "value": "key123"}]
+        });
+        assert_eq!(tool.requires_approval(&params), ApprovalRequirement::Always);
+    }
+
+    #[test]
+    fn test_all_auth_header_names_detected() {
+        let tool = HttpTool::new();
+        for header_name in [
+            "authorization",
+            "x-api-key",
+            "cookie",
+            "proxy-authorization",
+            "x-auth-token",
+            "api-key",
+            "x-token",
+            "x-access-token",
+            "x-session-token",
+            "x-csrf-token",
+            "x-secret",
+            "x-api-secret",
+        ] {
+            let mut headers = serde_json::Map::new();
+            headers.insert(header_name.to_string(), serde_json::json!("value"));
+            let params = serde_json::json!({
+                "method": "GET",
+                "url": "https://example.com",
+                "headers": headers
+            });
+            assert_eq!(
+                tool.requires_approval(&params),
+                ApprovalRequirement::Always,
+                "Header '{}' should trigger Always approval",
+                header_name
+            );
+        }
+    }
+
+    #[test]
+    fn test_non_auth_headers_return_unless_auto_approved() {
+        let tool = HttpTool::new();
+        let params = serde_json::json!({
+            "method": "GET",
+            "url": "https://example.com",
+            "headers": {"Content-Type": "application/json", "Accept": "text/html"}
+        });
+        assert_eq!(
+            tool.requires_approval(&params),
+            ApprovalRequirement::UnlessAutoApproved
+        );
+    }
+
+    #[test]
+    fn test_empty_headers_return_unless_auto_approved() {
+        let tool = HttpTool::new();
+
+        // Empty object
+        let params = serde_json::json!({
+            "method": "GET",
+            "url": "https://example.com",
+            "headers": {}
+        });
+        assert_eq!(
+            tool.requires_approval(&params),
+            ApprovalRequirement::UnlessAutoApproved
+        );
+
+        // Empty array
+        let params = serde_json::json!({
+            "method": "GET",
+            "url": "https://example.com",
+            "headers": []
+        });
+        assert_eq!(
+            tool.requires_approval(&params),
+            ApprovalRequirement::UnlessAutoApproved
+        );
+    }
+
+    // ── Credential registry approval tests ─────────────────────────────
+
+    #[test]
+    fn test_host_with_credential_mapping_returns_always() {
+        use crate::secrets::CredentialMapping;
+        use crate::tools::wasm::SharedCredentialRegistry;
+
+        let registry = Arc::new(SharedCredentialRegistry::new());
+        registry.add_mappings(vec![CredentialMapping::bearer(
+            "openai_key",
+            "api.openai.com",
+        )]);
+
+        let tool = HttpTool::new().with_credentials(
+            registry,
+            // secrets_store is not used in requires_approval, just needs to be present
+            Arc::new(crate::secrets::InMemorySecretsStore::new(Arc::new(
+                crate::secrets::SecretsCrypto::new(secrecy::SecretString::from(
+                    "0123456789abcdef0123456789abcdef".to_string(),
+                ))
+                .unwrap(),
+            ))),
+        );
+
+        let params = serde_json::json!({
+            "method": "GET",
+            "url": "https://api.openai.com/v1/models"
+        });
+        assert_eq!(tool.requires_approval(&params), ApprovalRequirement::Always);
+    }
+
+    #[test]
+    fn test_host_without_credential_mapping_returns_unless_auto_approved() {
+        use crate::tools::wasm::SharedCredentialRegistry;
+
+        let registry = Arc::new(SharedCredentialRegistry::new());
+        // Empty registry - no credential mappings
+
+        let tool = HttpTool::new().with_credentials(
+            registry,
+            Arc::new(crate::secrets::InMemorySecretsStore::new(Arc::new(
+                crate::secrets::SecretsCrypto::new(secrecy::SecretString::from(
+                    "0123456789abcdef0123456789abcdef".to_string(),
+                ))
+                .unwrap(),
+            ))),
+        );
+
+        let params = serde_json::json!({
+            "method": "GET",
+            "url": "https://api.example.com/data"
+        });
+        assert_eq!(
+            tool.requires_approval(&params),
+            ApprovalRequirement::UnlessAutoApproved
+        );
+    }
+
+    #[test]
+    fn test_url_query_param_credential_returns_always() {
+        let tool = HttpTool::new();
+        let params = serde_json::json!({
+            "method": "GET",
+            "url": "https://api.example.com/data?api_key=secret123"
+        });
+        assert_eq!(tool.requires_approval(&params), ApprovalRequirement::Always);
+    }
+
+    #[test]
+    fn test_bearer_value_in_custom_header_returns_always() {
+        let tool = HttpTool::new();
+        let params = serde_json::json!({
+            "method": "GET",
+            "url": "https://example.com",
+            "headers": {"X-Custom": "Bearer sk-test123"}
+        });
+        assert_eq!(tool.requires_approval(&params), ApprovalRequirement::Always);
+    }
+
+    #[test]
+    fn test_extract_host_from_params_valid() {
+        let params = serde_json::json!({
+            "url": "https://api.example.com/path"
+        });
+        assert_eq!(
+            extract_host_from_params(&params),
+            Some("api.example.com".to_string())
+        );
+    }
+
+    #[test]
+    fn test_extract_host_from_params_missing_url() {
+        let params = serde_json::json!({"method": "GET"});
+        assert_eq!(extract_host_from_params(&params), None);
     }
 }

@@ -13,7 +13,7 @@ use axum::{
     http::{StatusCode, header},
     middleware,
     response::{
-        Html, IntoResponse,
+        IntoResponse,
         sse::{Event, KeepAlive, Sse},
     },
     routing::{get, post},
@@ -22,6 +22,7 @@ use serde::Deserialize;
 use tokio::sync::{mpsc, oneshot};
 use tokio_stream::StreamExt;
 use tower_http::cors::{AllowHeaders, CorsLayer};
+use tower_http::set_header::SetResponseHeaderLayer;
 use uuid::Uuid;
 
 use crate::agent::SessionManager;
@@ -121,6 +122,8 @@ pub struct GatewayState {
     pub session_manager: Option<Arc<SessionManager>>,
     /// Log broadcaster for the logs SSE endpoint.
     pub log_broadcaster: Option<Arc<LogBroadcaster>>,
+    /// Handle for changing the tracing log level at runtime.
+    pub log_level_handle: Option<Arc<crate::channels::web::log_layer::LogLevelHandle>>,
     /// Extension manager for extension management API.
     pub extension_manager: Option<Arc<ExtensionManager>>,
     /// Tool registry for listing registered tools.
@@ -139,8 +142,19 @@ pub struct GatewayState {
     pub ws_tracker: Option<Arc<crate::channels::web::ws::WsConnectionTracker>>,
     /// LLM provider for OpenAI-compatible API proxy.
     pub llm_provider: Option<Arc<dyn crate::llm::LlmProvider>>,
+    /// Skill registry for skill management API.
+    pub skill_registry: Option<Arc<std::sync::RwLock<crate::skills::SkillRegistry>>>,
+    /// Skill catalog for searching the ClawHub registry.
+    pub skill_catalog: Option<Arc<crate::skills::catalog::SkillCatalog>>,
     /// Rate limiter for chat endpoints (30 messages per 60 seconds).
     pub chat_rate_limiter: RateLimiter,
+    /// Registry catalog entries for the available extensions API.
+    /// Populated at startup from `registry/` manifests, independent of extension manager.
+    pub registry_entries: Vec<crate::extensions::RegistryEntry>,
+    /// Cost guard for token/cost tracking.
+    pub cost_guard: Option<Arc<crate::agent::cost_guard::CostGuard>>,
+    /// Server startup time for uptime calculation.
+    pub startup_time: std::time::Instant,
 }
 
 /// Start the gateway HTTP server.
@@ -199,9 +213,15 @@ pub async fn start_server(
         .route("/api/jobs/{id}/files/read", get(job_files_read_handler))
         // Logs
         .route("/api/logs/events", get(logs_events_handler))
+        .route("/api/logs/level", get(logs_level_get_handler))
+        .route(
+            "/api/logs/level",
+            axum::routing::put(logs_level_set_handler),
+        )
         // Extensions
         .route("/api/extensions", get(extensions_list_handler))
         .route("/api/extensions/tools", get(extensions_tools_handler))
+        .route("/api/extensions/registry", get(extensions_registry_handler))
         .route("/api/extensions/install", post(extensions_install_handler))
         .route(
             "/api/extensions/{name}/activate",
@@ -222,6 +242,14 @@ pub async fn start_server(
             axum::routing::delete(routines_delete_handler),
         )
         .route("/api/routines/{id}/runs", get(routines_runs_handler))
+        // Skills
+        .route("/api/skills", get(skills_list_handler))
+        .route("/api/skills/search", post(skills_search_handler))
+        .route("/api/skills/install", post(skills_install_handler))
+        .route(
+            "/api/skills/{name}",
+            axum::routing::delete(skills_remove_handler),
+        )
         // Settings
         .route("/api/settings", get(settings_list_handler))
         .route("/api/settings/export", get(settings_export_handler))
@@ -292,8 +320,16 @@ pub async fn start_server(
         .merge(statics)
         .merge(projects)
         .merge(protected)
-        .layer(cors)
         .layer(DefaultBodyLimit::max(1024 * 1024)) // 1 MB max request body
+        .layer(cors)
+        .layer(SetResponseHeaderLayer::if_not_present(
+            header::X_CONTENT_TYPE_OPTIONS,
+            header::HeaderValue::from_static("nosniff"),
+        ))
+        .layer(SetResponseHeaderLayer::if_not_present(
+            header::X_FRAME_OPTIONS,
+            header::HeaderValue::from_static("DENY"),
+        ))
         .with_state(state.clone());
 
     let (shutdown_tx, shutdown_rx) = oneshot::channel();
@@ -316,20 +352,32 @@ pub async fn start_server(
 
 // --- Static file handlers ---
 
-async fn index_handler() -> Html<&'static str> {
-    Html(include_str!("static/index.html"))
+async fn index_handler() -> impl IntoResponse {
+    (
+        [
+            (header::CONTENT_TYPE, "text/html; charset=utf-8"),
+            (header::CACHE_CONTROL, "no-cache"),
+        ],
+        include_str!("static/index.html"),
+    )
 }
 
 async fn css_handler() -> impl IntoResponse {
     (
-        [(header::CONTENT_TYPE, "text/css")],
+        [
+            (header::CONTENT_TYPE, "text/css"),
+            (header::CACHE_CONTROL, "no-cache"),
+        ],
         include_str!("static/style.css"),
     )
 }
 
 async fn js_handler() -> impl IntoResponse {
     (
-        [(header::CONTENT_TYPE, "application/javascript")],
+        [
+            (header::CONTENT_TYPE, "application/javascript"),
+            (header::CACHE_CONTROL, "no-cache"),
+        ],
         include_str!("static/app.js"),
     )
 }
@@ -536,9 +584,13 @@ pub async fn clear_auth_mode(state: &GatewayState) {
 async fn chat_events_handler(
     State(state): State<Arc<GatewayState>>,
 ) -> Result<impl IntoResponse, (StatusCode, String)> {
-    state.sse.subscribe().ok_or((
+    let sse = state.sse.subscribe().ok_or((
         StatusCode::SERVICE_UNAVAILABLE,
         "Too many connections".to_string(),
+    ))?;
+    Ok((
+        [("X-Accel-Buffering", "no"), ("Cache-Control", "no-cache")],
+        sse,
     ))
 }
 
@@ -1281,6 +1333,7 @@ async fn jobs_restart_handler(
         created_at: now,
         started_at: None,
         completed_at: None,
+        credential_grants_json: old_job.credential_grants_json.clone(),
     };
     store
         .save_sandbox_job(&record)
@@ -1293,9 +1346,28 @@ async fn jobs_restart_handler(
         _ => crate::orchestrator::job_manager::JobMode::Worker,
     };
 
+    // Restore credential grants from the original job so the restarted container
+    // has access to the same secrets.
+    let credential_grants: Vec<crate::orchestrator::auth::CredentialGrant> =
+        serde_json::from_str(&old_job.credential_grants_json).unwrap_or_else(|e| {
+            tracing::warn!(
+                job_id = %old_job.id,
+                "Failed to deserialize credential grants from stored job: {}. \
+                 Restarted job will have no credentials.",
+                e
+            );
+            vec![]
+        });
+
     let project_dir = std::path::PathBuf::from(&old_job.project_dir);
     let _token = jm
-        .create_job(new_job_id, &old_job.task, Some(project_dir), mode)
+        .create_job(
+            new_job_id,
+            &old_job.task,
+            Some(project_dir),
+            mode,
+            credential_grants,
+        )
         .await
         .map_err(|e| {
             (
@@ -1391,7 +1463,7 @@ async fn jobs_events_handler(
     }
 
     let events = store
-        .list_job_events(job_id)
+        .list_job_events(job_id, None)
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
@@ -1544,10 +1616,7 @@ async fn job_files_read_handler(
 
 async fn logs_events_handler(
     State(state): State<Arc<GatewayState>>,
-) -> Result<
-    Sse<impl futures::Stream<Item = Result<Event, Infallible>> + Send + 'static>,
-    (StatusCode, String),
-> {
+) -> Result<impl IntoResponse, (StatusCode, String)> {
     let broadcaster = state.log_broadcaster.as_ref().ok_or((
         StatusCode::SERVICE_UNAVAILABLE,
         "Log broadcaster not available".to_string(),
@@ -1560,23 +1629,58 @@ async fn logs_events_handler(
 
     let history_stream = futures::stream::iter(history).map(|entry| {
         let data = serde_json::to_string(&entry).unwrap_or_default();
-        Ok(Event::default().event("log").data(data))
+        Ok::<_, Infallible>(Event::default().event("log").data(data))
     });
 
     let live_stream = tokio_stream::wrappers::BroadcastStream::new(rx)
         .filter_map(|result| result.ok())
         .map(|entry| {
             let data = serde_json::to_string(&entry).unwrap_or_default();
-            Ok(Event::default().event("log").data(data))
+            Ok::<_, Infallible>(Event::default().event("log").data(data))
         });
 
     let stream = history_stream.chain(live_stream);
 
-    Ok(Sse::new(stream).keep_alive(
-        KeepAlive::new()
-            .interval(std::time::Duration::from_secs(30))
-            .text(""),
+    Ok((
+        [("X-Accel-Buffering", "no"), ("Cache-Control", "no-cache")],
+        Sse::new(stream).keep_alive(
+            KeepAlive::new()
+                .interval(std::time::Duration::from_secs(30))
+                .text(""),
+        ),
     ))
+}
+
+async fn logs_level_get_handler(
+    State(state): State<Arc<GatewayState>>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let handle = state.log_level_handle.as_ref().ok_or((
+        StatusCode::SERVICE_UNAVAILABLE,
+        "Log level control not available".to_string(),
+    ))?;
+    Ok(Json(serde_json::json!({ "level": handle.current_level() })))
+}
+
+async fn logs_level_set_handler(
+    State(state): State<Arc<GatewayState>>,
+    Json(body): Json<serde_json::Value>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let handle = state.log_level_handle.as_ref().ok_or((
+        StatusCode::SERVICE_UNAVAILABLE,
+        "Log level control not available".to_string(),
+    ))?;
+
+    let level = body
+        .get("level")
+        .and_then(|v| v.as_str())
+        .ok_or((StatusCode::BAD_REQUEST, "missing 'level' field".to_string()))?;
+
+    handle
+        .set_level(level)
+        .map_err(|e| (StatusCode::BAD_REQUEST, e))?;
+
+    tracing::info!("Log level changed to '{}'", handle.current_level());
+    Ok(Json(serde_json::json!({ "level": handle.current_level() })))
 }
 
 // --- Extension handlers ---
@@ -1634,10 +1738,30 @@ async fn extensions_install_handler(
     State(state): State<Arc<GatewayState>>,
     Json(req): Json<InstallExtensionRequest>,
 ) -> Result<Json<ActionResponse>, (StatusCode, String)> {
-    let ext_mgr = state.extension_manager.as_ref().ok_or((
-        StatusCode::NOT_IMPLEMENTED,
-        "Extension manager not available (secrets store required)".to_string(),
-    ))?;
+    // When extension manager isn't available, check registry entries for a helpful message
+    let Some(ext_mgr) = state.extension_manager.as_ref() else {
+        // Look up the entry in the catalog to give a specific error
+        if let Some(entry) = state.registry_entries.iter().find(|e| e.name == req.name) {
+            let msg = match &entry.source {
+                crate::extensions::ExtensionSource::WasmBuildable { .. } => {
+                    format!(
+                        "'{}' requires building from source. \
+                         Run `ironclaw registry install {}` from the CLI.",
+                        req.name, req.name
+                    )
+                }
+                _ => format!(
+                    "Extension manager not available (secrets store required). \
+                     Configure DATABASE_URL or a secrets backend to enable installation of '{}'.",
+                    req.name
+                ),
+            };
+            return Ok(Json(ActionResponse::fail(msg)));
+        }
+        return Ok(Json(ActionResponse::fail(
+            "Extension manager not available (secrets store required)".to_string(),
+        )));
+    };
 
     let kind_hint = req.kind.as_deref().and_then(|k| match k {
         "mcp_server" => Some(crate::extensions::ExtensionKind::McpServer),
@@ -1782,6 +1906,315 @@ async fn extensions_remove_handler(
 
     match ext_mgr.remove(&name).await {
         Ok(message) => Ok(Json(ActionResponse::ok(message))),
+        Err(e) => Ok(Json(ActionResponse::fail(e.to_string()))),
+    }
+}
+
+async fn extensions_registry_handler(
+    State(state): State<Arc<GatewayState>>,
+    Query(params): Query<RegistrySearchQuery>,
+) -> Json<RegistrySearchResponse> {
+    let query = params.query.unwrap_or_default();
+    let query_lower = query.to_lowercase();
+    let tokens: Vec<&str> = query_lower.split_whitespace().collect();
+
+    // Filter registry entries by query (or return all if empty)
+    let matching: Vec<&crate::extensions::RegistryEntry> = if tokens.is_empty() {
+        state.registry_entries.iter().collect()
+    } else {
+        state
+            .registry_entries
+            .iter()
+            .filter(|e| {
+                let name = e.name.to_lowercase();
+                let display = e.display_name.to_lowercase();
+                let desc = e.description.to_lowercase();
+                tokens.iter().any(|t| {
+                    name.contains(t)
+                        || display.contains(t)
+                        || desc.contains(t)
+                        || e.keywords.iter().any(|k| k.to_lowercase().contains(t))
+                })
+            })
+            .collect()
+    };
+
+    // Cross-reference with installed extensions by (name, kind) to avoid
+    // false positives when the same name exists as different kinds.
+    let installed: std::collections::HashSet<(String, String)> =
+        if let Some(ext_mgr) = state.extension_manager.as_ref() {
+            ext_mgr
+                .list(None)
+                .await
+                .unwrap_or_default()
+                .into_iter()
+                .map(|ext| (ext.name, ext.kind.to_string()))
+                .collect()
+        } else {
+            std::collections::HashSet::new()
+        };
+
+    let entries = matching
+        .into_iter()
+        .map(|e| {
+            let kind_str = e.kind.to_string();
+            RegistryEntryInfo {
+                name: e.name.clone(),
+                display_name: e.display_name.clone(),
+                installed: installed.contains(&(e.name.clone(), kind_str.clone())),
+                kind: kind_str,
+                description: e.description.clone(),
+                keywords: e.keywords.clone(),
+            }
+        })
+        .collect();
+
+    Json(RegistrySearchResponse { entries })
+}
+
+// --- Skills handlers ---
+
+async fn skills_list_handler(
+    State(state): State<Arc<GatewayState>>,
+) -> Result<Json<super::types::SkillListResponse>, (StatusCode, String)> {
+    let registry = state.skill_registry.as_ref().ok_or((
+        StatusCode::NOT_IMPLEMENTED,
+        "Skills system not enabled".to_string(),
+    ))?;
+
+    let guard = registry.read().map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Skill registry lock poisoned: {}", e),
+        )
+    })?;
+
+    let skills: Vec<super::types::SkillInfo> = guard
+        .skills()
+        .iter()
+        .map(|s| super::types::SkillInfo {
+            name: s.manifest.name.clone(),
+            description: s.manifest.description.clone(),
+            version: s.manifest.version.clone(),
+            trust: s.trust.to_string(),
+            source: format!("{:?}", s.source),
+            keywords: s.manifest.activation.keywords.clone(),
+        })
+        .collect();
+
+    let count = skills.len();
+    Ok(Json(super::types::SkillListResponse { skills, count }))
+}
+
+async fn skills_search_handler(
+    State(state): State<Arc<GatewayState>>,
+    Json(req): Json<super::types::SkillSearchRequest>,
+) -> Result<Json<super::types::SkillSearchResponse>, (StatusCode, String)> {
+    let registry = state.skill_registry.as_ref().ok_or((
+        StatusCode::NOT_IMPLEMENTED,
+        "Skills system not enabled".to_string(),
+    ))?;
+
+    let catalog = state.skill_catalog.as_ref().ok_or((
+        StatusCode::NOT_IMPLEMENTED,
+        "Skill catalog not available".to_string(),
+    ))?;
+
+    // Search ClawHub catalog
+    let catalog_results = catalog.search(&req.query).await;
+    let catalog_json: Vec<serde_json::Value> = catalog_results
+        .into_iter()
+        .map(|e| {
+            serde_json::json!({
+                "slug": e.slug,
+                "name": e.name,
+                "description": e.description,
+                "version": e.version,
+                "score": e.score,
+            })
+        })
+        .collect();
+
+    // Search local skills
+    let query_lower = req.query.to_lowercase();
+    let installed: Vec<super::types::SkillInfo> = {
+        let guard = registry.read().map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Skill registry lock poisoned: {}", e),
+            )
+        })?;
+        guard
+            .skills()
+            .iter()
+            .filter(|s| {
+                s.manifest.name.to_lowercase().contains(&query_lower)
+                    || s.manifest.description.to_lowercase().contains(&query_lower)
+            })
+            .map(|s| super::types::SkillInfo {
+                name: s.manifest.name.clone(),
+                description: s.manifest.description.clone(),
+                version: s.manifest.version.clone(),
+                trust: s.trust.to_string(),
+                source: format!("{:?}", s.source),
+                keywords: s.manifest.activation.keywords.clone(),
+            })
+            .collect()
+    };
+
+    Ok(Json(super::types::SkillSearchResponse {
+        catalog: catalog_json,
+        installed,
+        registry_url: catalog.registry_url().to_string(),
+    }))
+}
+
+async fn skills_install_handler(
+    State(state): State<Arc<GatewayState>>,
+    headers: axum::http::HeaderMap,
+    Json(req): Json<super::types::SkillInstallRequest>,
+) -> Result<Json<ActionResponse>, (StatusCode, String)> {
+    // Require explicit confirmation header to prevent accidental installs.
+    // Chat tools have requires_approval(); this is the equivalent for the web API.
+    if headers
+        .get("x-confirm-action")
+        .and_then(|v| v.to_str().ok())
+        != Some("true")
+    {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "Skill install requires X-Confirm-Action: true header".to_string(),
+        ));
+    }
+
+    let registry = state.skill_registry.as_ref().ok_or((
+        StatusCode::NOT_IMPLEMENTED,
+        "Skills system not enabled".to_string(),
+    ))?;
+
+    let content = if let Some(ref raw) = req.content {
+        raw.clone()
+    } else if let Some(ref url) = req.url {
+        // Fetch from explicit URL (with SSRF protection)
+        crate::tools::builtin::skill_tools::fetch_skill_content(url)
+            .await
+            .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?
+    } else if let Some(ref catalog) = state.skill_catalog {
+        let url = crate::skills::catalog::skill_download_url(catalog.registry_url(), &req.name);
+        crate::tools::builtin::skill_tools::fetch_skill_content(&url)
+            .await
+            .map_err(|e| (StatusCode::BAD_GATEWAY, e.to_string()))?
+    } else {
+        return Ok(Json(ActionResponse::fail(
+            "Provide 'content' or 'url' to install a skill".to_string(),
+        )));
+    };
+
+    // Parse, check duplicates, and get user_dir under a brief read lock.
+    let (user_dir, skill_name_from_parse) = {
+        let guard = registry.read().map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Skill registry lock poisoned: {}", e),
+            )
+        })?;
+
+        let normalized = crate::skills::normalize_line_endings(&content);
+        let parsed = crate::skills::parser::parse_skill_md(&normalized)
+            .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
+        let skill_name = parsed.manifest.name.clone();
+
+        if guard.has(&skill_name) {
+            return Ok(Json(ActionResponse::fail(format!(
+                "Skill '{}' already exists",
+                skill_name
+            ))));
+        }
+
+        (guard.user_dir().to_path_buf(), skill_name)
+    };
+
+    // Perform async I/O (write to disk, load) with no lock held.
+    let normalized = crate::skills::normalize_line_endings(&content);
+    let (skill_name, loaded_skill) =
+        crate::skills::registry::SkillRegistry::prepare_install_to_disk(
+            &user_dir,
+            &skill_name_from_parse,
+            &normalized,
+        )
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    // Commit: brief write lock for in-memory addition
+    let mut guard = registry.write().map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Skill registry lock poisoned: {}", e),
+        )
+    })?;
+
+    match guard.commit_install(&skill_name, loaded_skill) {
+        Ok(()) => Ok(Json(ActionResponse::ok(format!(
+            "Skill '{}' installed",
+            skill_name
+        )))),
+        Err(e) => Ok(Json(ActionResponse::fail(e.to_string()))),
+    }
+}
+
+async fn skills_remove_handler(
+    State(state): State<Arc<GatewayState>>,
+    headers: axum::http::HeaderMap,
+    Path(name): Path<String>,
+) -> Result<Json<ActionResponse>, (StatusCode, String)> {
+    // Require explicit confirmation header to prevent accidental removals.
+    if headers
+        .get("x-confirm-action")
+        .and_then(|v| v.to_str().ok())
+        != Some("true")
+    {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "Skill removal requires X-Confirm-Action: true header".to_string(),
+        ));
+    }
+
+    let registry = state.skill_registry.as_ref().ok_or((
+        StatusCode::NOT_IMPLEMENTED,
+        "Skills system not enabled".to_string(),
+    ))?;
+
+    // Validate removal under a brief read lock
+    let skill_path = {
+        let guard = registry.read().map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Skill registry lock poisoned: {}", e),
+            )
+        })?;
+        guard
+            .validate_remove(&name)
+            .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?
+    };
+
+    // Delete files from disk (async I/O, no lock held)
+    crate::skills::registry::SkillRegistry::delete_skill_files(&skill_path)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    // Remove from in-memory registry under a brief write lock
+    let mut guard = registry.write().map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Skill registry lock poisoned: {}", e),
+        )
+    })?;
+
+    match guard.commit_remove(&name) {
+        Ok(()) => Ok(Json(ActionResponse::ok(format!(
+            "Skill '{}' removed",
+            name
+        )))),
         Err(e) => Ok(Json(ActionResponse::fail(e.to_string()))),
     }
 }
@@ -2238,11 +2671,43 @@ async fn gateway_status_handler(
         .map(|t| t.connection_count())
         .unwrap_or(0);
 
+    let uptime_secs = state.startup_time.elapsed().as_secs();
+
+    let (daily_cost, actions_this_hour, model_usage) = if let Some(ref cg) = state.cost_guard {
+        let cost = cg.daily_spend().await;
+        let actions = cg.actions_this_hour().await;
+        let usage = cg.model_usage().await;
+        let models: Vec<ModelUsageEntry> = usage
+            .into_iter()
+            .map(|(model, tokens)| ModelUsageEntry {
+                model,
+                input_tokens: tokens.input_tokens,
+                output_tokens: tokens.output_tokens,
+                cost: format!("{:.6}", tokens.cost),
+            })
+            .collect();
+        (Some(format!("{:.4}", cost)), Some(actions), Some(models))
+    } else {
+        (None, None, None)
+    };
+
     Json(GatewayStatusResponse {
         sse_connections,
         ws_connections,
         total_connections: sse_connections + ws_connections,
+        uptime_secs,
+        daily_cost,
+        actions_this_hour,
+        model_usage,
     })
+}
+
+#[derive(serde::Serialize)]
+struct ModelUsageEntry {
+    model: String,
+    input_tokens: u64,
+    output_tokens: u64,
+    cost: String,
 }
 
 #[derive(serde::Serialize)]
@@ -2250,6 +2715,13 @@ struct GatewayStatusResponse {
     sse_connections: u64,
     ws_connections: u64,
     total_connections: u64,
+    uptime_secs: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    daily_cost: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    actions_this_hour: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    model_usage: Option<Vec<ModelUsageEntry>>,
 }
 
 #[cfg(test)]

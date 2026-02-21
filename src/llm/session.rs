@@ -157,14 +157,14 @@ impl SessionManager {
         }
 
         // Token exists, validate it by calling /v1/users/me
-        println!("Validating session...");
+        tracing::debug!("Validating session...");
         match self.validate_token().await {
             Ok(()) => {
-                println!("Session valid.");
+                tracing::debug!("Session valid");
                 Ok(())
             }
             Err(e) => {
-                println!("Session expired or invalid: {}", e);
+                tracing::info!("Session expired or invalid: {}", e);
                 self.initiate_login().await
             }
         }
@@ -217,38 +217,43 @@ impl SessionManager {
         self.initiate_login().await
     }
 
-    /// Start the OAuth login flow.
+    /// Start the login flow.
     ///
-    /// 1. Bind the fixed callback port
+    /// Shows the auth method menu FIRST (before binding any listener), so
+    /// that the API-key path can skip network binding entirely. This is
+    /// important for remote/headless servers where `127.0.0.1` is
+    /// unreachable from the user's browser.
+    ///
+    /// For OAuth paths (GitHub, Google):
+    /// 1. Bind the callback listener
     /// 2. Print the auth URL and attempt to open browser
     /// 3. Wait for OAuth callback with session token
     /// 4. Save and return the token
+    ///
+    /// For NEAR AI Cloud API key:
+    /// 1. Prompt user for API key from cloud.near.ai
+    /// 2. Set NEARAI_API_KEY env var and save to bootstrap .env
+    /// 3. No session token saved (different auth model)
     async fn initiate_login(&self) -> Result<(), LlmError> {
-        use crate::cli::oauth_defaults::{self, OAUTH_CALLBACK_PORT};
+        use crate::cli::oauth_defaults;
 
-        let listener = oauth_defaults::bind_callback_listener()
-            .await
-            .map_err(|e| LlmError::SessionRenewalFailed {
-                provider: "nearai".to_string(),
-                reason: e.to_string(),
-            })?;
+        let cb_url = oauth_defaults::callback_url();
 
-        let callback_url = format!("http://127.0.0.1:{}", OAUTH_CALLBACK_PORT);
-
-        // Show auth provider menu
+        // Show auth provider menu BEFORE binding the listener
         println!();
         println!("╔════════════════════════════════════════════════════════════════╗");
         println!("║                    NEAR AI Authentication                      ║");
         println!("╠════════════════════════════════════════════════════════════════╣");
         println!("║  Choose an authentication method:                              ║");
         println!("║                                                                ║");
-        println!("║    [1] GitHub                                                  ║");
-        println!("║    [2] Google                                                  ║");
+        println!("║    [1] GitHub            (requires localhost browser access)   ║");
+        println!("║    [2] Google            (requires localhost browser access)   ║");
         println!("║    [3] NEAR Wallet (coming soon)                               ║");
+        println!("║    [4] NEAR AI Cloud API key                                   ║");
         println!("║                                                                ║");
         println!("╚════════════════════════════════════════════════════════════════╝");
         println!();
-        print!("Enter choice [1-3]: ");
+        print!("Enter choice [1-4]: ");
 
         // Flush stdout to ensure prompt is displayed
         use std::io::Write;
@@ -263,23 +268,8 @@ impl SessionManager {
                 reason: format!("Failed to read input: {}", e),
             })?;
 
-        let (auth_provider, auth_url) = match choice.trim() {
-            "1" | "" => {
-                let url = format!(
-                    "{}/v1/auth/github?frontend_callback={}",
-                    self.config.auth_base_url,
-                    urlencoding::encode(&callback_url)
-                );
-                ("github", url)
-            }
-            "2" => {
-                let url = format!(
-                    "{}/v1/auth/google?frontend_callback={}",
-                    self.config.auth_base_url,
-                    urlencoding::encode(&callback_url)
-                );
-                ("google", url)
-            }
+        match choice.trim() {
+            "4" => return self.api_key_login().await,
             "3" => {
                 println!();
                 println!("NEAR Wallet authentication is not yet implemented.");
@@ -289,11 +279,40 @@ impl SessionManager {
                     reason: "NEAR Wallet auth not yet implemented".to_string(),
                 });
             }
-            _ => {
+            "1" | "" | "2" => {} // handled below after listener bind
+            other => {
                 return Err(LlmError::SessionRenewalFailed {
                     provider: "nearai".to_string(),
-                    reason: format!("Invalid choice: {}", choice.trim()),
+                    reason: format!("Invalid choice: {}", other),
                 });
+            }
+        }
+
+        // OAuth paths: bind the callback listener now
+        let listener = oauth_defaults::bind_callback_listener()
+            .await
+            .map_err(|e| LlmError::SessionRenewalFailed {
+                provider: "nearai".to_string(),
+                reason: e.to_string(),
+            })?;
+
+        let (auth_provider, auth_url) = match choice.trim() {
+            "2" => {
+                let url = format!(
+                    "{}/v1/auth/google?frontend_callback={}",
+                    self.config.auth_base_url,
+                    urlencoding::encode(&cb_url)
+                );
+                ("google", url)
+            }
+            _ => {
+                // "1" or "" (default)
+                let url = format!(
+                    "{}/v1/auth/github?frontend_callback={}",
+                    self.config.auth_base_url,
+                    urlencoding::encode(&cb_url)
+                );
+                ("github", url)
             }
         };
 
@@ -336,6 +355,63 @@ impl SessionManager {
 
         println!();
         println!("✓ Authentication successful!");
+        println!();
+
+        Ok(())
+    }
+
+    /// NEAR AI Cloud API key entry flow.
+    ///
+    /// Prompts the user to enter a NEAR AI Cloud API key from
+    /// cloud.near.ai. The key is set as `NEARAI_API_KEY` env var so
+    /// `LlmConfig::resolve()` auto-selects ChatCompletions mode, and
+    /// saved to `~/.ironclaw/.env` for persistence across restarts.
+    /// No session token is saved and no `/v1/users/me` validation is
+    /// performed (different auth model).
+    async fn api_key_login(&self) -> Result<(), LlmError> {
+        println!();
+        println!("NEAR AI Cloud API key");
+        println!("─────────────────────");
+        println!();
+        println!("  1. Open https://cloud.near.ai in your browser");
+        println!("  2. Sign in and navigate to API Keys");
+        println!("  3. Create or copy an existing API key");
+        println!();
+
+        let key_secret =
+            crate::setup::secret_input("API key").map_err(|e| LlmError::SessionRenewalFailed {
+                provider: "nearai".to_string(),
+                reason: format!("Failed to read input: {}", e),
+            })?;
+
+        use secrecy::ExposeSecret;
+        let key = key_secret.expose_secret().to_string();
+        if key.is_empty() {
+            return Err(LlmError::SessionRenewalFailed {
+                provider: "nearai".to_string(),
+                reason: "API key cannot be empty".to_string(),
+            });
+        }
+
+        // Set env var so Config picks it up immediately
+        // (LlmConfig::resolve() auto-selects ChatCompletions mode when
+        // NEARAI_API_KEY is present).
+        //
+        // SAFETY: called during single-threaded interactive login flow.
+        #[allow(unused_unsafe)]
+        unsafe {
+            std::env::set_var("NEARAI_API_KEY", &key);
+        }
+
+        // Persist to ~/.ironclaw/.env so the key survives restarts
+        // (bootstrap layer — available before DB is connected).
+        // Uses upsert to avoid clobbering existing bootstrap vars.
+        if let Err(e) = crate::bootstrap::upsert_bootstrap_var("NEARAI_API_KEY", &key) {
+            tracing::warn!("Failed to save API key to bootstrap .env: {}", e);
+        }
+
+        println!();
+        crate::setup::print_success("NEAR AI Cloud API key saved.");
         println!();
 
         Ok(())
@@ -432,25 +508,35 @@ impl SessionManager {
             .get_setting(&user_id, "nearai.session_token")
             .await
             .map_err(|e| LlmError::SessionRenewalFailed {
-                provider: "nearai".to_string(),
-                reason: format!("DB query failed: {}", e),
-            })? {
+            provider: "nearai".to_string(),
+            reason: format!("DB query failed: {}", e),
+        })? {
             value
         } else {
-            tracing::warn!(
-                "nearai.session_token missing; falling back to legacy nearai.session for backwards compatibility"
-            );
-            store
+            // Try the legacy key. Only warn if it actually exists (real
+            // backwards-compat migration). When neither key is present
+            // (fresh install), just return the "No session in DB" error.
+            let legacy = store
                 .get_setting(&user_id, "nearai.session")
                 .await
                 .map_err(|e| LlmError::SessionRenewalFailed {
                     provider: "nearai".to_string(),
                     reason: format!("DB query failed: {}", e),
-                })?
-                .ok_or(LlmError::SessionRenewalFailed {
-                    provider: "nearai".to_string(),
-                    reason: "No session in DB".to_string(),
-                })?
+                })?;
+            match legacy {
+                Some(value) => {
+                    tracing::warn!(
+                        "nearai.session_token missing; falling back to legacy nearai.session for backwards compatibility"
+                    );
+                    value
+                }
+                None => {
+                    return Err(LlmError::SessionRenewalFailed {
+                        provider: "nearai".to_string(),
+                        reason: "No session in DB".to_string(),
+                    });
+                }
+            }
         };
 
         let session: SessionData =
@@ -508,20 +594,21 @@ impl SessionManager {
     }
 }
 
-/// Create a session manager from a config, migrating from env var if present.
+/// Create a session manager from a config, loading env var if present.
+///
+/// When `NEARAI_SESSION_TOKEN` is set, it takes precedence over file-based
+/// tokens. This supports hosting providers that inject the token via env var.
 pub async fn create_session_manager(config: SessionConfig) -> Arc<SessionManager> {
     let manager = SessionManager::new_async(config).await;
 
-    // Check for legacy env var and migrate if present and no file token
-    if !manager.has_token().await
-        && let Ok(token) = std::env::var("NEARAI_SESSION_TOKEN")
+    // NEARAI_SESSION_TOKEN env var always takes precedence over file-based
+    // tokens. Hosting providers set this env var and expect it to be used
+    // directly — no file persistence needed.
+    if let Ok(token) = std::env::var("NEARAI_SESSION_TOKEN")
         && !token.is_empty()
     {
-        tracing::info!("Migrating session token from NEARAI_SESSION_TOKEN env var to file");
-        manager.set_token(SecretString::from(token.clone())).await;
-        if let Err(e) = manager.save_session(&token, None).await {
-            tracing::warn!("Failed to save migrated session: {}", e);
-        }
+        tracing::info!("Using session token from NEARAI_SESSION_TOKEN env var");
+        manager.set_token(SecretString::from(token)).await;
     }
 
     Arc::new(manager)

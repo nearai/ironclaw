@@ -1,0 +1,31 @@
+{
+  "name": "slack",
+  "display_name": "Slack",
+  "kind": "tool",
+  "version": "0.1.0",
+  "description": "Post messages, read channels, and manage conversations via Slack API",
+  "keywords": ["messaging", "chat", "workspace"],
+
+  "source": {
+    "dir": "tools-src/slack",
+    "capabilities": "slack-tool.capabilities.json",
+    "crate_name": "slack-tool"
+  },
+
+  "artifacts": {
+    "wasm32-wasip2": {
+      "url": "https://github.com/nearai/ironclaw/releases/latest/download/slack-wasm32-wasip2.tar.gz",
+      "sha256": null
+    }
+  },
+
+  "auth_summary": {
+    "method": "oauth",
+    "provider": "Slack",
+    "secrets": ["slack_bot_token"],
+    "shared_auth": null,
+    "setup_url": "https://api.slack.com/apps"
+  },
+
+  "tags": ["default", "messaging"]
+}

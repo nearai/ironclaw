@@ -26,6 +26,26 @@ impl ExtensionRegistry {
         }
     }
 
+    /// Create a new registry merging builtin entries with catalog-provided entries.
+    ///
+    /// Deduplicates by `(name, kind)` pair -- a builtin MCP "slack" and a registry
+    /// WASM "slack" can coexist since they're different kinds.
+    pub fn new_with_catalog(catalog_entries: Vec<RegistryEntry>) -> Self {
+        let mut entries = builtin_entries();
+        for entry in catalog_entries {
+            if !entries
+                .iter()
+                .any(|e| e.name == entry.name && e.kind == entry.kind)
+            {
+                entries.push(entry);
+            }
+        }
+        Self {
+            entries,
+            discovery_cache: RwLock::new(Vec::new()),
+        }
+    }
+
     /// Search the registry by query string. Returns results sorted by relevance.
     ///
     /// Splits the query into lowercase tokens and scores each entry by matches
@@ -541,5 +561,77 @@ mod tests {
 
         let results = registry.search("dup").await;
         assert_eq!(results.len(), 1, "Should not duplicate cached entries");
+    }
+
+    #[tokio::test]
+    async fn test_new_with_catalog() {
+        let catalog_entries = vec![
+            RegistryEntry {
+                name: "telegram".to_string(),
+                display_name: "Telegram".to_string(),
+                kind: ExtensionKind::WasmChannel,
+                description: "Telegram Bot API channel".to_string(),
+                keywords: vec!["messaging".into(), "bot".into()],
+                source: ExtensionSource::WasmBuildable {
+                    repo_url: "channels-src/telegram".to_string(),
+                    build_dir: Some("channels-src/telegram".to_string()),
+                },
+                auth_hint: AuthHint::CapabilitiesAuth,
+            },
+            // This shares a name with a builtin but has a different kind, so both should appear
+            RegistryEntry {
+                name: "slack".to_string(),
+                display_name: "Slack WASM".to_string(),
+                kind: ExtensionKind::WasmTool,
+                description: "Slack WASM tool".to_string(),
+                keywords: vec!["messaging".into()],
+                source: ExtensionSource::WasmBuildable {
+                    repo_url: "tools-src/slack".to_string(),
+                    build_dir: Some("tools-src/slack".to_string()),
+                },
+                auth_hint: AuthHint::CapabilitiesAuth,
+            },
+        ];
+
+        let registry = ExtensionRegistry::new_with_catalog(catalog_entries);
+
+        // Should find the new telegram entry
+        let results = registry.search("telegram").await;
+        assert!(!results.is_empty(), "Should find telegram from catalog");
+        assert_eq!(results[0].entry.name, "telegram");
+
+        // Should have both builtin MCP slack and catalog WASM slack
+        let results = registry.search("slack").await;
+        let slack_mcp = results
+            .iter()
+            .any(|r| r.entry.name == "slack" && r.entry.kind == ExtensionKind::McpServer);
+        let slack_wasm = results
+            .iter()
+            .any(|r| r.entry.name == "slack" && r.entry.kind == ExtensionKind::WasmTool);
+        assert!(slack_mcp, "Should have builtin MCP slack");
+        assert!(slack_wasm, "Should have catalog WASM slack");
+    }
+
+    #[tokio::test]
+    async fn test_new_with_catalog_dedup_same_kind() {
+        // A catalog entry with same name AND kind as a builtin should be skipped
+        let catalog_entries = vec![RegistryEntry {
+            name: "slack".to_string(),
+            display_name: "Slack Override".to_string(),
+            kind: ExtensionKind::McpServer, // same kind as builtin
+            description: "Should be skipped".to_string(),
+            keywords: vec![],
+            source: ExtensionSource::McpUrl {
+                url: "https://other.slack.com".to_string(),
+            },
+            auth_hint: AuthHint::Dcr,
+        }];
+
+        let registry = ExtensionRegistry::new_with_catalog(catalog_entries);
+
+        let entry = registry.get("slack").await;
+        assert!(entry.is_some());
+        // Should still be the builtin, not the override
+        assert_eq!(entry.unwrap().display_name, "Slack");
     }
 }

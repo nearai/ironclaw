@@ -23,6 +23,7 @@
 //! ```
 
 use std::collections::HashMap;
+use std::sync::RwLock;
 
 use crate::secrets::{
     CredentialLocation, CredentialMapping, DecryptedSecret, SecretError, SecretsStore,
@@ -56,6 +57,88 @@ impl From<SecretError> for InjectionError {
             SecretError::DecryptionFailed(msg) => InjectionError::DecryptionFailed(msg),
             _ => InjectionError::DecryptionFailed(e.to_string()),
         }
+    }
+}
+
+/// Thread-safe, append-only registry of credential mappings from all installed tools.
+///
+/// Aggregates credential mappings from WASM tools so the built-in HTTP tool can
+/// auto-inject credentials for matching hosts. Uses `std::sync::RwLock` so
+/// `requires_approval` (sync) can query it without async.
+pub struct SharedCredentialRegistry {
+    mappings: RwLock<Vec<CredentialMapping>>,
+}
+
+impl SharedCredentialRegistry {
+    /// Create an empty registry.
+    pub fn new() -> Self {
+        Self {
+            mappings: RwLock::new(Vec::new()),
+        }
+    }
+
+    /// Add credential mappings (called when WASM tools register).
+    pub fn add_mappings(&self, mappings: impl IntoIterator<Item = CredentialMapping>) {
+        match self.mappings.write() {
+            Ok(mut guard) => {
+                guard.extend(mappings);
+            }
+            Err(poisoned) => {
+                tracing::warn!(
+                    "SharedCredentialRegistry RwLock poisoned during add_mappings; recovering"
+                );
+                let mut guard = poisoned.into_inner();
+                guard.extend(mappings);
+            }
+        }
+    }
+
+    /// Check if any credential mapping matches this host (sync, for requires_approval).
+    pub fn has_credentials_for_host(&self, host: &str) -> bool {
+        let guard = match self.mappings.read() {
+            Ok(guard) => guard,
+            Err(poisoned) => {
+                tracing::warn!(
+                    "SharedCredentialRegistry RwLock poisoned during has_credentials_for_host; recovering"
+                );
+                poisoned.into_inner()
+            }
+        };
+        guard.iter().any(|mapping| {
+            mapping
+                .host_patterns
+                .iter()
+                .any(|pattern| host_matches_pattern(host, pattern))
+        })
+    }
+
+    /// Get all credential mappings matching a host (for injection).
+    pub fn find_for_host(&self, host: &str) -> Vec<CredentialMapping> {
+        let guard = match self.mappings.read() {
+            Ok(guard) => guard,
+            Err(poisoned) => {
+                tracing::warn!(
+                    "SharedCredentialRegistry RwLock poisoned during find_for_host; recovering"
+                );
+                poisoned.into_inner()
+            }
+        };
+        guard
+            .iter()
+            .filter(|mapping| {
+                mapping
+                    .host_patterns
+                    .iter()
+                    .any(|pattern| host_matches_pattern(host, pattern))
+            })
+            .cloned()
+            .collect()
+    }
+}
+
+impl Default for SharedCredentialRegistry {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -430,5 +513,79 @@ mod tests {
         let result = injector.inject("user1", "api.test.com", &store).await;
 
         assert!(result.is_err());
+    }
+
+    // ── SharedCredentialRegistry tests ─────────────────────────────────
+
+    use crate::tools::wasm::credential_injector::SharedCredentialRegistry;
+
+    #[test]
+    fn test_shared_registry_empty() {
+        let registry = SharedCredentialRegistry::new();
+        assert!(!registry.has_credentials_for_host("api.example.com"));
+        assert!(registry.find_for_host("api.example.com").is_empty());
+    }
+
+    #[test]
+    fn test_shared_registry_add_and_find() {
+        let registry = SharedCredentialRegistry::new();
+        registry.add_mappings(vec![
+            CredentialMapping::bearer("openai_key", "api.openai.com"),
+            CredentialMapping::header("github_token", "X-GitHub-Token", "*.github.com"),
+        ]);
+
+        assert!(registry.has_credentials_for_host("api.openai.com"));
+        assert!(!registry.has_credentials_for_host("api.anthropic.com"));
+
+        let found = registry.find_for_host("api.openai.com");
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].secret_name, "openai_key");
+    }
+
+    #[test]
+    fn test_shared_registry_wildcard_host() {
+        let registry = SharedCredentialRegistry::new();
+        registry.add_mappings(vec![CredentialMapping::bearer("gh_token", "*.github.com")]);
+
+        assert!(registry.has_credentials_for_host("api.github.com"));
+        assert!(registry.has_credentials_for_host("uploads.github.com"));
+        assert!(!registry.has_credentials_for_host("github.com"));
+    }
+
+    #[test]
+    fn test_shared_registry_multiple_adds() {
+        let registry = SharedCredentialRegistry::new();
+        registry.add_mappings(vec![CredentialMapping::bearer("key1", "api.example.com")]);
+        registry.add_mappings(vec![CredentialMapping::bearer("key2", "api.example.com")]);
+
+        let found = registry.find_for_host("api.example.com");
+        assert_eq!(found.len(), 2);
+    }
+
+    #[test]
+    fn test_shared_registry_thread_safety() {
+        use std::sync::Arc;
+        use std::thread;
+
+        let registry = Arc::new(SharedCredentialRegistry::new());
+
+        let handles: Vec<_> = (0..4)
+            .map(|i| {
+                let r = Arc::clone(&registry);
+                thread::spawn(move || {
+                    r.add_mappings(vec![CredentialMapping::bearer(
+                        format!("key_{}", i),
+                        "api.example.com",
+                    )]);
+                })
+            })
+            .collect();
+
+        for h in handles {
+            h.join().unwrap();
+        }
+
+        let found = registry.find_for_host("api.example.com");
+        assert_eq!(found.len(), 4);
     }
 }

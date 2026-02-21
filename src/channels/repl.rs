@@ -15,6 +15,7 @@
 //! - `/compact` - Compact the context
 //! - `/new` - Start a new thread
 //! - `yes`/`no`/`always` - Respond to tool approval prompts
+//! - `Esc` - Interrupt current operation
 
 use std::borrow::Cow;
 use std::io::{self, Write};
@@ -28,7 +29,10 @@ use rustyline::error::ReadlineError;
 use rustyline::highlight::Highlighter;
 use rustyline::hint::Hinter;
 use rustyline::validate::Validator;
-use rustyline::{CompletionType, Editor, Helper};
+use rustyline::{
+    Cmd as ReadlineCmd, CompletionType, ConditionalEventHandler, Editor, Event, EventContext,
+    EventHandler, Helper, KeyCode, KeyEvent, Modifiers, RepeatCount,
+};
 use termimad::MadSkin;
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
@@ -120,6 +124,23 @@ impl Highlighter for ReplHelper {
 
 impl Validator for ReplHelper {}
 impl Helper for ReplHelper {}
+
+struct EscInterruptHandler {
+    triggered: Arc<AtomicBool>,
+}
+
+impl ConditionalEventHandler for EscInterruptHandler {
+    fn handle(
+        &self,
+        _evt: &Event,
+        _n: RepeatCount,
+        _positive: bool,
+        _ctx: &EventContext,
+    ) -> Option<ReadlineCmd> {
+        self.triggered.store(true, Ordering::Relaxed);
+        Some(ReadlineCmd::Interrupt)
+    }
+}
 
 /// Build a termimad skin with our color scheme.
 fn make_skin() -> MadSkin {
@@ -247,6 +268,7 @@ fn print_help() {
     println!("  {c}/compact{r}           {d}compact context window{r}");
     println!("  {c}/new{r}               {d}new conversation thread{r}");
     println!("  {c}/interrupt{r}         {d}stop current operation{r}");
+    println!("  {c}esc{r}                {d}stop current operation{r}");
     println!();
     println!("  {h}Approval responses{r}");
     println!("  {c}yes{r} ({c}y{r})            {d}approve tool execution{r}");
@@ -274,6 +296,7 @@ impl Channel for ReplChannel {
         let single_message = self.single_message.clone();
         let debug_mode = Arc::clone(&self.debug_mode);
         let suppress_banner = Arc::clone(&self.suppress_banner);
+        let esc_interrupt_triggered_for_thread = Arc::new(AtomicBool::new(false));
 
         std::thread::spawn(move || {
             // Single message mode: send it and return
@@ -300,6 +323,13 @@ impl Channel for ReplChannel {
             };
 
             rl.set_helper(Some(ReplHelper));
+
+            rl.bind_sequence(
+                KeyEvent(KeyCode::Esc, Modifiers::NONE),
+                EventHandler::Conditional(Box::new(EscInterruptHandler {
+                    triggered: Arc::clone(&esc_interrupt_triggered_for_thread),
+                })),
+            );
 
             // Load history
             let hist_path = history_path();
@@ -330,7 +360,13 @@ impl Channel for ReplChannel {
                         // Handle local REPL commands (only commands that need
                         // immediate local handling stay here)
                         match line.to_lowercase().as_str() {
-                            "/quit" | "/exit" => break,
+                            "/quit" | "/exit" => {
+                                // Forward shutdown command so the agent loop exits even
+                                // when other channels (e.g. web gateway) are still active.
+                                let msg = IncomingMessage::new("repl", "default", "/quit");
+                                let _ = tx.blocking_send(msg);
+                                break;
+                            }
                             "/help" => {
                                 print_help();
                                 continue;
@@ -354,9 +390,16 @@ impl Channel for ReplChannel {
                         }
                     }
                     Err(ReadlineError::Interrupted) => {
-                        // Ctrl+C: send /interrupt
-                        let msg = IncomingMessage::new("repl", "default", "/interrupt");
-                        if tx.blocking_send(msg).is_err() {
+                        if esc_interrupt_triggered_for_thread.swap(false, Ordering::Relaxed) {
+                            // Esc: interrupt current operation and keep REPL open.
+                            let msg = IncomingMessage::new("repl", "default", "/interrupt");
+                            if tx.blocking_send(msg).is_err() {
+                                break;
+                            }
+                        } else {
+                            // Ctrl+C (VINTR): request graceful shutdown.
+                            let msg = IncomingMessage::new("repl", "default", "/quit");
+                            let _ = tx.blocking_send(msg);
                             break;
                         }
                     }

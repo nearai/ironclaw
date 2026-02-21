@@ -7,6 +7,102 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.0](https://github.com/nearai/ironclaw/compare/v0.8.0...v0.9.0) - 2026-02-21
+
+### Added
+
+- add TEE attestation shield to web gateway UI ([#275](https://github.com/nearai/ironclaw/pull/275))
+- configurable tool iterations, auto-approve, and policy fix ([#251](https://github.com/nearai/ironclaw/pull/251))
+
+### Fixed
+
+- add X-Accel-Buffering header to SSE endpoints ([#277](https://github.com/nearai/ironclaw/pull/277))
+
+## [0.8.0](https://github.com/nearai/ironclaw/compare/ironclaw-v0.7.0...ironclaw-v0.8.0) - 2026-02-20
+
+### Added
+
+- extension registry with metadata catalog and onboarding integration ([#238](https://github.com/nearai/ironclaw/pull/238))
+- *(models)* add GPT-5.3 Codex, full GPT-5.x family, Claude 4.x series, o4-mini ([#197](https://github.com/nearai/ironclaw/pull/197))
+- wire memory hygiene into the heartbeat loop ([#195](https://github.com/nearai/ironclaw/pull/195))
+
+### Fixed
+
+- persist WASM channel workspace writes across callbacks ([#264](https://github.com/nearai/ironclaw/pull/264))
+- consolidate per-module ENV_MUTEX into crate-wide test lock ([#246](https://github.com/nearai/ironclaw/pull/246))
+- remove auto-proceed fake user message injection from agent loop ([#255](https://github.com/nearai/ironclaw/pull/255))
+- onboarding errors reset flow and remote server auth (#185, #186) ([#248](https://github.com/nearai/ironclaw/pull/248))
+- parallelize tool call execution via JoinSet ([#219](https://github.com/nearai/ironclaw/pull/219)) ([#252](https://github.com/nearai/ironclaw/pull/252))
+- prevent pipe deadlock in shell command execution ([#140](https://github.com/nearai/ironclaw/pull/140))
+- persist turns after approval and add agent-level tests ([#250](https://github.com/nearai/ironclaw/pull/250))
+
+### Other
+
+- add automated PR labeling system ([#253](https://github.com/nearai/ironclaw/pull/253))
+- update CLAUDE.md for recently merged features ([#183](https://github.com/nearai/ironclaw/pull/183))
+
+## [0.7.0](https://github.com/nearai/ironclaw/compare/ironclaw-v0.6.0...ironclaw-v0.7.0) - 2026-02-19
+
+### Added
+
+- extend lifecycle hooks with declarative bundles ([#176](https://github.com/nearai/ironclaw/pull/176))
+- support per-request model override in /v1/chat/completions ([#103](https://github.com/nearai/ironclaw/pull/103))
+
+### Fixed
+
+- harden openai-compatible provider, approval replay, and embeddings defaults ([#237](https://github.com/nearai/ironclaw/pull/237))
+- Network Security Findings ([#201](https://github.com/nearai/ironclaw/pull/201))
+
+### Added
+
+- Refactored OpenAI-compatible chat completion routing to use the rig adapter and `RetryProvider` composition for custom base URL usage.
+- Added Ollama embeddings provider support (`EMBEDDING_PROVIDER=ollama`, `OLLAMA_BASE_URL`) in workspace embeddings.
+- Added migration `V9__flexible_embedding_dimension.sql` for flexible embedding vector dimensions.
+
+### Changed
+
+- Changed default sandbox image to `ironclaw-worker:latest` in config/settings/sandbox defaults.
+- Improved tool-message sanitization and provider compatibility handling across NEAR AI, rig adapter, and shared LLM provider code.
+
+### Fixed
+
+- Fixed approval-input aliases (`a`, `/approve`, `/always`, `/deny`, etc.) in submission parsing.
+- Fixed multi-tool approval resume flow by preserving and replaying deferred tool calls so all prior `tool_use` IDs receive matching `tool_result` messages.
+- Fixed REPL quit/exit handling to route shutdown through the agent loop for graceful termination.
+
+## [0.6.0](https://github.com/nearai/ironclaw/compare/ironclaw-v0.5.0...ironclaw-v0.6.0) - 2026-02-19
+
+### Added
+
+- add issue triage skill ([#200](https://github.com/nearai/ironclaw/pull/200))
+- add PR triage dashboard skill ([#196](https://github.com/nearai/ironclaw/pull/196))
+- add OpenRouter usage examples ([#189](https://github.com/nearai/ironclaw/pull/189))
+- add Tinfoil private inference provider ([#62](https://github.com/nearai/ironclaw/pull/62))
+- shell env scrubbing and command injection detection ([#164](https://github.com/nearai/ironclaw/pull/164))
+- Add PR review tools, job monitor, and channel injection for E2E sandbox workflows ([#57](https://github.com/nearai/ironclaw/pull/57))
+- Secure prompt-based skills system (Phases 1-4) ([#51](https://github.com/nearai/ironclaw/pull/51))
+- Add benchmarking harness with spot suite ([#10](https://github.com/nearai/ironclaw/pull/10))
+- 10 infrastructure improvements from zeroclaw ([#126](https://github.com/nearai/ironclaw/pull/126))
+
+### Fixed
+
+- *(rig)* prevent OpenAI Responses API panic on tool call IDs ([#182](https://github.com/nearai/ironclaw/pull/182))
+- *(docs)* correct settings storage path in README ([#194](https://github.com/nearai/ironclaw/pull/194))
+- OpenAI tool calling — schema normalization, missing types, and Responses API panic ([#132](https://github.com/nearai/ironclaw/pull/132))
+- *(security)* prevent path traversal bypass in WASM HTTP allowlist ([#137](https://github.com/nearai/ironclaw/pull/137))
+- persist OpenAI-compatible provider and respect embeddings disable ([#177](https://github.com/nearai/ironclaw/pull/177))
+- remove .expect() calls in FailoverProvider::try_providers ([#156](https://github.com/nearai/ironclaw/pull/156))
+- sentinel value collision in FailoverProvider cooldown ([#125](https://github.com/nearai/ironclaw/pull/125)) ([#154](https://github.com/nearai/ironclaw/pull/154))
+- skills module audit cleanup ([#173](https://github.com/nearai/ironclaw/pull/173))
+
+### Other
+
+- Fix division by zero panic in ValueEstimator::is_profitable ([#139](https://github.com/nearai/ironclaw/pull/139))
+- audit feature parity matrix against codebase and recent commits ([#202](https://github.com/nearai/ironclaw/pull/202))
+- architecture improvements for contributor velocity ([#198](https://github.com/nearai/ironclaw/pull/198))
+- fix rustfmt formatting from PR #137
+- add .env.example examples for Ollama and OpenAI-compatible ([#110](https://github.com/nearai/ironclaw/pull/110))
+
 ## [0.5.0](https://github.com/nearai/ironclaw/compare/v0.4.0...v0.5.0) - 2026-02-17
 
 ### Added
@@ -60,6 +156,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Add review discipline guidelines to CLAUDE.md ([#68](https://github.com/nearai/ironclaw/pull/68))
 - Bump MSRV to 1.92, add GCP deployment files ([#40](https://github.com/nearai/ironclaw/pull/40))
 - Add OpenAI-compatible HTTP API (/v1/chat/completions, /v1/models)   ([#31](https://github.com/nearai/ironclaw/pull/31))
+
 
 ## [0.1.3](https://github.com/nearai/ironclaw/compare/v0.1.2...v0.1.3) - 2026-02-12
 

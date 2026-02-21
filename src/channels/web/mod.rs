@@ -36,10 +36,12 @@ use crate::db::Database;
 use crate::error::ChannelError;
 use crate::extensions::ExtensionManager;
 use crate::orchestrator::job_manager::ContainerJobManager;
+use crate::skills::catalog::SkillCatalog;
+use crate::skills::registry::SkillRegistry;
 use crate::tools::ToolRegistry;
 use crate::workspace::Workspace;
 
-use self::log_layer::LogBroadcaster;
+use self::log_layer::{LogBroadcaster, LogLevelHandle};
 
 use self::server::GatewayState;
 use self::sse::SseManager;
@@ -74,6 +76,7 @@ impl GatewayChannel {
             workspace: None,
             session_manager: None,
             log_broadcaster: None,
+            log_level_handle: None,
             extension_manager: None,
             tool_registry: None,
             store: None,
@@ -83,7 +86,12 @@ impl GatewayChannel {
             shutdown_tx: tokio::sync::RwLock::new(None),
             ws_tracker: Some(Arc::new(ws::WsConnectionTracker::new())),
             llm_provider: None,
+            skill_registry: None,
+            skill_catalog: None,
             chat_rate_limiter: server::RateLimiter::new(30, 60),
+            registry_entries: Vec::new(),
+            cost_guard: None,
+            startup_time: std::time::Instant::now(),
         });
 
         Self {
@@ -101,6 +109,7 @@ impl GatewayChannel {
             workspace: self.state.workspace.clone(),
             session_manager: self.state.session_manager.clone(),
             log_broadcaster: self.state.log_broadcaster.clone(),
+            log_level_handle: self.state.log_level_handle.clone(),
             extension_manager: self.state.extension_manager.clone(),
             tool_registry: self.state.tool_registry.clone(),
             store: self.state.store.clone(),
@@ -110,7 +119,12 @@ impl GatewayChannel {
             shutdown_tx: tokio::sync::RwLock::new(None),
             ws_tracker: self.state.ws_tracker.clone(),
             llm_provider: self.state.llm_provider.clone(),
+            skill_registry: self.state.skill_registry.clone(),
+            skill_catalog: self.state.skill_catalog.clone(),
             chat_rate_limiter: server::RateLimiter::new(30, 60),
+            registry_entries: self.state.registry_entries.clone(),
+            cost_guard: self.state.cost_guard.clone(),
+            startup_time: self.state.startup_time,
         };
         mutate(&mut new_state);
         self.state = Arc::new(new_state);
@@ -131,6 +145,12 @@ impl GatewayChannel {
     /// Inject the log broadcaster for the logs SSE endpoint.
     pub fn with_log_broadcaster(mut self, lb: Arc<LogBroadcaster>) -> Self {
         self.rebuild_state(|s| s.log_broadcaster = Some(lb));
+        self
+    }
+
+    /// Inject the log level handle for runtime log level control.
+    pub fn with_log_level_handle(mut self, h: Arc<LogLevelHandle>) -> Self {
+        self.rebuild_state(|s| s.log_level_handle = Some(h));
         self
     }
 
@@ -174,9 +194,33 @@ impl GatewayChannel {
         self
     }
 
+    /// Inject the skill registry for skill management API.
+    pub fn with_skill_registry(mut self, sr: Arc<std::sync::RwLock<SkillRegistry>>) -> Self {
+        self.rebuild_state(|s| s.skill_registry = Some(sr));
+        self
+    }
+
+    /// Inject the skill catalog for skill search API.
+    pub fn with_skill_catalog(mut self, sc: Arc<SkillCatalog>) -> Self {
+        self.rebuild_state(|s| s.skill_catalog = Some(sc));
+        self
+    }
+
     /// Inject the LLM provider for OpenAI-compatible API proxy.
     pub fn with_llm_provider(mut self, llm: Arc<dyn crate::llm::LlmProvider>) -> Self {
         self.rebuild_state(|s| s.llm_provider = Some(llm));
+        self
+    }
+
+    /// Inject registry catalog entries for the available extensions API.
+    pub fn with_registry_entries(mut self, entries: Vec<crate::extensions::RegistryEntry>) -> Self {
+        self.rebuild_state(|s| s.registry_entries = entries);
+        self
+    }
+
+    /// Inject the cost guard for token/cost tracking in the status popover.
+    pub fn with_cost_guard(mut self, cg: Arc<crate::agent::cost_guard::CostGuard>) -> Self {
+        self.rebuild_state(|s| s.cost_guard = Some(cg));
         self
     }
 
@@ -287,6 +331,7 @@ impl Channel for GatewayChannel {
                 description,
                 parameters: serde_json::to_string_pretty(&parameters)
                     .unwrap_or_else(|_| parameters.to_string()),
+                thread_id,
             },
             StatusUpdate::AuthRequired {
                 extension_name,

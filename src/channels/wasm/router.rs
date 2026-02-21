@@ -488,7 +488,7 @@ mod tests {
         let prepared = Arc::new(PreparedChannelModule {
             name: name.to_string(),
             description: format!("Test channel: {}", name),
-            component_bytes: Vec::new(),
+            component: None,
             limits: ResourceLimits::default(),
         });
 

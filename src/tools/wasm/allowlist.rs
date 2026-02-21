@@ -170,72 +170,87 @@ struct ParsedUrl {
     path: String,
 }
 
-/// Simple URL parser (avoids pulling in a full URL crate).
+/// Parse and normalize URL components for allowlist matching.
 fn parse_url(url: &str) -> Result<ParsedUrl, String> {
-    // Find scheme
-    let (scheme, rest) = url
-        .split_once("://")
-        .ok_or_else(|| "Missing scheme (expected http:// or https://)".to_string())?;
-
-    let scheme = scheme.to_lowercase();
+    let parsed = url::Url::parse(url).map_err(|e| format!("URL parse failed: {e}"))?;
+    let scheme = parsed.scheme().to_lowercase();
     if scheme != "http" && scheme != "https" {
         return Err(format!("Unsupported scheme: {}", scheme));
     }
 
-    // Reject URLs with userinfo (user:pass@host) to prevent allowlist bypass.
-    // A URL like https://api.openai.com@evil.com/ would match the allowlist
-    // for api.openai.com but actually send traffic to evil.com.
-    let authority = match rest.find('/') {
-        Some(idx) => &rest[..idx],
-        None => rest,
-    };
-    if authority.contains('@') {
+    // Reject URLs with userinfo (user:pass@host) to prevent host-confusion bypasses.
+    if !parsed.username().is_empty() || parsed.password().is_some() {
         return Err("URL contains userinfo (@) which is not allowed".to_string());
     }
 
-    // Split host from path
-    let (host_and_port, path) = match rest.find('/') {
-        Some(idx) => (&rest[..idx], &rest[idx..]),
-        None => (rest, "/"),
-    };
-
-    // Remove port from host
-    let host = match host_and_port.rfind(':') {
-        Some(idx) => {
-            // Make sure this isn't an IPv6 address
-            if host_and_port.starts_with('[') {
-                // IPv6: [::1]:8080 or [::1]
-                if let Some(bracket_idx) = host_and_port.find(']') {
-                    // Extract the IPv6 address without brackets
-                    &host_and_port[1..bracket_idx]
-                } else {
-                    return Err("Invalid IPv6 address".to_string());
-                }
-            } else {
-                &host_and_port[..idx]
-            }
-        }
-        None => host_and_port,
-    };
-
-    // Reject URLs with userinfo (user:pass@host).
-    // A URL like https://api.openai.com@evil.com/ confuses the parser into
-    // seeing "api.openai.com" as the host, but reqwest actually sends to
-    // "evil.com". Block any '@' in the authority section to prevent this.
-    if host.contains('@') || host_and_port.contains('@') {
-        return Err("URL contains userinfo (@) which is not allowed".to_string());
-    }
-
-    // Validate host
-    if host.is_empty() {
-        return Err("Empty host".to_string());
-    }
+    let host = parsed.host_str().ok_or_else(|| "Empty host".to_string())?;
+    let host = host
+        .strip_prefix('[')
+        .and_then(|h| h.strip_suffix(']'))
+        .unwrap_or(host)
+        .to_lowercase();
+    let normalized_path = normalize_path(parsed.path())?;
 
     Ok(ParsedUrl {
         scheme,
-        host: host.to_lowercase(),
-        path: path.to_string(),
+        host,
+        path: normalized_path,
     })
+}
+
+fn normalize_path(path: &str) -> Result<String, String> {
+    let mut segments: Vec<String> = Vec::new();
+    for raw_segment in path.split('/') {
+        if !has_valid_percent_encoding(raw_segment) {
+            return Err(format!(
+                "Invalid percent-encoding in path segment: {raw_segment}"
+            ));
+        }
+
+        let segment = urlencoding::decode(raw_segment)
+            .map_err(|_| format!("Invalid percent-encoding in path segment: {raw_segment}"))?;
+        let segment = segment.as_ref();
+
+        // Encoded separators introduce ambiguous semantics across downstream handlers.
+        if segment.contains('/') || segment.contains('\\') {
+            return Err("Path segment contains encoded path separator".to_string());
+        }
+
+        match segment {
+            "" | "." => {}
+            ".." => {
+                segments.pop();
+            }
+            _ => segments.push(segment.to_string()),
+        }
+    }
+
+    let mut result = String::with_capacity(path.len().max(1));
+    result.push('/');
+    result.push_str(&segments.join("/"));
+    if path.len() > 1 && path.ends_with('/') && !result.ends_with('/') {
+        result.push('/');
+    }
+    Ok(result)
+}
+
+fn has_valid_percent_encoding(segment: &str) -> bool {
+    let bytes = segment.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' {
+            if i + 2 >= bytes.len()
+                || !bytes[i + 1].is_ascii_hexdigit()
+                || !bytes[i + 2].is_ascii_hexdigit()
+            {
+                return false;
+            }
+            i += 3;
+        } else {
+            i += 1;
+        }
+    }
+    true
 }
 
 #[cfg(test)]
@@ -378,6 +393,88 @@ mod tests {
         } else {
             panic!("Expected denied");
         }
+    }
+
+    #[test]
+    fn test_path_traversal_blocked() {
+        let validator = validator_with_patterns();
+        assert!(
+            !validator
+                .validate("https://api.openai.com/v1/../admin", "GET")
+                .is_allowed()
+        );
+        assert!(
+            !validator
+                .validate("https://api.openai.com/v1/../../etc/passwd", "GET")
+                .is_allowed()
+        );
+        assert!(
+            !validator
+                .validate("https://api.openai.com/v1/%2E%2E/admin", "GET")
+                .is_allowed()
+        );
+        assert!(
+            !validator
+                .validate("https://api.openai.com/v1/%2e%2e/%2e%2e/root", "GET")
+                .is_allowed()
+        );
+        assert!(
+            validator
+                .validate("https://api.openai.com/v1/chat/completions", "POST")
+                .is_allowed()
+        );
+    }
+
+    #[test]
+    fn test_normalize_path() {
+        use super::normalize_path;
+        assert_eq!(normalize_path("/v1/../admin").unwrap(), "/admin");
+        assert_eq!(
+            normalize_path("/v1/chat/completions").unwrap(),
+            "/v1/chat/completions"
+        );
+        assert_eq!(normalize_path("/v1/./chat").unwrap(), "/v1/chat");
+        assert_eq!(
+            normalize_path("/v1/../../../etc/passwd").unwrap(),
+            "/etc/passwd"
+        );
+        assert_eq!(normalize_path("/v1/%2e%2e/admin").unwrap(), "/admin");
+        assert_eq!(normalize_path("/").unwrap(), "/");
+        assert_eq!(normalize_path("/v1/").unwrap(), "/v1/");
+    }
+
+    #[test]
+    fn test_invalid_encoded_path_rejected() {
+        let validator = validator_with_patterns();
+        let result = validator.validate("https://api.openai.com/v1/%ZZ/chat", "GET");
+        assert!(!result.is_allowed());
+        if let super::AllowlistResult::Denied(reason) = result {
+            assert!(matches!(reason, DenyReason::InvalidUrl(_)));
+        } else {
+            panic!("Expected denied");
+        }
+    }
+
+    #[test]
+    fn test_encoded_separator_rejected() {
+        let validator = validator_with_patterns();
+        let result = validator.validate("https://api.openai.com/v1/%2Fadmin", "GET");
+        assert!(!result.is_allowed());
+        if let super::AllowlistResult::Denied(reason) = result {
+            assert!(matches!(reason, DenyReason::InvalidUrl(_)));
+        } else {
+            panic!("Expected denied");
+        }
+    }
+
+    #[test]
+    fn test_percent_encoding_validator() {
+        use super::has_valid_percent_encoding;
+        assert!(has_valid_percent_encoding("%2F"));
+        assert!(has_valid_percent_encoding("hello%20world"));
+        assert!(!has_valid_percent_encoding("%"));
+        assert!(!has_valid_percent_encoding("%2"));
+        assert!(!has_valid_percent_encoding("%ZZ"));
     }
 
     #[test]

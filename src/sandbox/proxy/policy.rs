@@ -5,8 +5,8 @@
 
 use async_trait::async_trait;
 
-use crate::sandbox::config::{CredentialLocation, CredentialMapping};
 use crate::sandbox::proxy::allowlist::DomainAllowlist;
+use crate::secrets::{CredentialLocation, CredentialMapping};
 
 /// A network request to be evaluated.
 #[derive(Debug, Clone)]
@@ -24,8 +24,18 @@ pub struct NetworkRequest {
 impl NetworkRequest {
     /// Create from a URL string.
     pub fn from_url(method: &str, url: &str) -> Option<Self> {
-        let host = crate::sandbox::proxy::allowlist::extract_host(url)?;
-        let path = extract_path(url);
+        let parsed = url::Url::parse(url).ok()?;
+        if !matches!(parsed.scheme(), "http" | "https") {
+            return None;
+        }
+
+        let host = parsed.host_str()?;
+        let host = host
+            .strip_prefix('[')
+            .and_then(|v| v.strip_suffix(']'))
+            .unwrap_or(host)
+            .to_lowercase();
+        let path = parsed.path().to_string();
 
         Some(Self {
             method: method.to_uppercase(),
@@ -37,15 +47,15 @@ impl NetworkRequest {
 }
 
 /// Extract path from a URL.
+#[cfg(test)]
 fn extract_path(url: &str) -> String {
-    // Find the start of the path (after ://)
-    if let Some(idx) = url.find("://") {
-        let rest = &url[idx + 3..];
-        if let Some(path_start) = rest.find('/') {
-            return rest[path_start..].to_string();
-        }
+    let Ok(parsed) = url::Url::parse(url) else {
+        return "/".to_string();
+    };
+    if !matches!(parsed.scheme(), "http" | "https") {
+        return "/".to_string();
     }
-    "/".to_string()
+    parsed.path().to_string()
 }
 
 /// Decision for a network request.
@@ -95,12 +105,14 @@ impl DefaultPolicyDecider {
         }
     }
 
-    /// Find credential mapping for a domain.
+    /// Find credential mapping for a host (supports glob patterns like `*.example.com`).
     fn find_credential(&self, host: &str) -> Option<&CredentialMapping> {
         let host_lower = host.to_lowercase();
-        self.credential_mappings
-            .iter()
-            .find(|m| m.domain.to_lowercase() == host_lower)
+        self.credential_mappings.iter().find(|m| {
+            m.host_patterns
+                .iter()
+                .any(|pattern| host_matches_pattern(&host_lower, pattern))
+        })
     }
 }
 
@@ -126,6 +138,27 @@ impl NetworkPolicyDecider for DefaultPolicyDecider {
 
         NetworkDecision::Allow
     }
+}
+
+/// Check if a host matches a pattern (supports `*.example.com` wildcards).
+fn host_matches_pattern(host: &str, pattern: &str) -> bool {
+    let pattern_lower = pattern.to_lowercase();
+    if pattern_lower == host {
+        return true;
+    }
+
+    // Support wildcard: *.example.com matches sub.example.com
+    if let Some(suffix) = pattern_lower.strip_prefix("*.")
+        && host.ends_with(suffix)
+        && host.len() > suffix.len()
+    {
+        let prefix = &host[..host.len() - suffix.len()];
+        if prefix.ends_with('.') || prefix.is_empty() {
+            return true;
+        }
+    }
+
+    false
 }
 
 /// A policy decider that allows everything (use with FullAccess policy).
@@ -180,6 +213,11 @@ mod tests {
         );
         assert_eq!(extract_path("https://example.com"), "/".to_string());
         assert_eq!(extract_path("https://example.com/"), "/".to_string());
+        assert_eq!(
+            extract_path("https://example.com/path?q=1#frag"),
+            "/path".to_string()
+        );
+        assert_eq!(extract_path("ftp://example.com/path"), "/".to_string());
     }
 
     #[tokio::test]
@@ -207,11 +245,10 @@ mod tests {
     #[tokio::test]
     async fn test_credential_injection() {
         let allowlist = DomainAllowlist::new(&["api.openai.com".to_string()]);
-        let credentials = vec![CredentialMapping {
-            domain: "api.openai.com".to_string(),
-            secret_name: "OPENAI_API_KEY".to_string(),
-            location: CredentialLocation::AuthorizationBearer,
-        }];
+        let credentials = vec![CredentialMapping::bearer(
+            "OPENAI_API_KEY",
+            "api.openai.com",
+        )];
         let decider = DefaultPolicyDecider::new(allowlist, credentials);
 
         let req =
@@ -224,5 +261,46 @@ mod tests {
             }
             _ => panic!("Expected AllowWithCredentials"),
         }
+    }
+
+    #[tokio::test]
+    async fn test_credential_injection_with_wildcard_host_pattern() {
+        let allowlist =
+            DomainAllowlist::new(&["api.example.com".to_string(), "sub.example.com".to_string()]);
+        let credentials = vec![CredentialMapping {
+            secret_name: "EXAMPLE_KEY".to_string(),
+            location: CredentialLocation::AuthorizationBearer,
+            host_patterns: vec!["*.example.com".to_string()],
+        }];
+        let decider = DefaultPolicyDecider::new(allowlist, credentials);
+
+        let req = NetworkRequest::from_url("GET", "https://api.example.com/data").unwrap();
+        let decision = decider.decide(&req).await;
+
+        match decision {
+            NetworkDecision::AllowWithCredentials { secret_name, .. } => {
+                assert_eq!(secret_name, "EXAMPLE_KEY");
+            }
+            _ => panic!("Expected AllowWithCredentials for wildcard match"),
+        }
+
+        let req2 = NetworkRequest::from_url("GET", "https://sub.example.com/data").unwrap();
+        let decision2 = decider.decide(&req2).await;
+        assert!(
+            matches!(decision2, NetworkDecision::AllowWithCredentials { .. }),
+            "Wildcard pattern should match sub.example.com too"
+        );
+    }
+
+    #[test]
+    fn test_host_matches_pattern_exact() {
+        assert!(host_matches_pattern("api.openai.com", "api.openai.com"));
+        assert!(!host_matches_pattern("api.openai.com", "evil.com"));
+    }
+
+    #[test]
+    fn test_host_matches_pattern_wildcard() {
+        assert!(host_matches_pattern("api.example.com", "*.example.com"));
+        assert!(!host_matches_pattern("example.com", "*.example.com"));
     }
 }

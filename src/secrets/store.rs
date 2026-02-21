@@ -323,10 +323,15 @@ impl LibSqlSecretsStore {
         Self { db, crypto }
     }
 
-    fn connect(&self) -> Result<libsql::Connection, SecretError> {
-        self.db
+    async fn connect(&self) -> Result<libsql::Connection, SecretError> {
+        let conn = self
+            .db
             .connect()
-            .map_err(|e| SecretError::Database(format!("Connection failed: {}", e)))
+            .map_err(|e| SecretError::Database(format!("Connection failed: {}", e)))?;
+        conn.query("PRAGMA busy_timeout = 5000", ())
+            .await
+            .map_err(|e| SecretError::Database(format!("Failed to set busy_timeout: {}", e)))?;
+        Ok(conn)
     }
 }
 
@@ -349,7 +354,7 @@ impl SecretsStore for LibSqlSecretsStore {
             .map(|dt| dt.to_rfc3339_opts(chrono::SecondsFormat::Millis, true));
 
         // Start transaction for atomic upsert + read-back
-        let conn = self.connect()?;
+        let conn = self.connect().await?;
         let tx = conn
             .transaction()
             .await
@@ -410,7 +415,7 @@ impl SecretsStore for LibSqlSecretsStore {
     }
 
     async fn get(&self, user_id: &str, name: &str) -> Result<Secret, SecretError> {
-        let conn = self.connect()?;
+        let conn = self.connect().await?;
         let mut rows = conn
             .query(
                 r#"
@@ -455,7 +460,7 @@ impl SecretsStore for LibSqlSecretsStore {
     }
 
     async fn exists(&self, user_id: &str, name: &str) -> Result<bool, SecretError> {
-        let conn = self.connect()?;
+        let conn = self.connect().await?;
         let mut rows = conn
             .query(
                 "SELECT 1 FROM secrets WHERE user_id = ?1 AND name = ?2",
@@ -472,7 +477,7 @@ impl SecretsStore for LibSqlSecretsStore {
     }
 
     async fn list(&self, user_id: &str) -> Result<Vec<SecretRef>, SecretError> {
-        let conn = self.connect()?;
+        let conn = self.connect().await?;
         let mut rows = conn
             .query(
                 "SELECT name, provider FROM secrets WHERE user_id = ?1 ORDER BY name",
@@ -496,7 +501,7 @@ impl SecretsStore for LibSqlSecretsStore {
     }
 
     async fn delete(&self, user_id: &str, name: &str) -> Result<bool, SecretError> {
-        let conn = self.connect()?;
+        let conn = self.connect().await?;
         let affected = conn
             .execute(
                 "DELETE FROM secrets WHERE user_id = ?1 AND name = ?2",
@@ -510,7 +515,7 @@ impl SecretsStore for LibSqlSecretsStore {
 
     async fn record_usage(&self, secret_id: Uuid) -> Result<(), SecretError> {
         let now = Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
-        let conn = self.connect()?;
+        let conn = self.connect().await?;
 
         conn.execute(
             r#"
@@ -630,9 +635,10 @@ fn libsql_row_to_secret(row: &libsql::Row) -> Result<Secret, SecretError> {
     })
 }
 
-/// In-memory implementation for testing.
-#[cfg(test)]
-pub mod testing {
+/// In-memory secrets store. Used for testing and as a fallback when no
+/// persistent secrets backend is configured (extension listing/install still
+/// works, but stored secrets won't survive a restart).
+pub mod in_memory {
     use std::collections::HashMap;
     use std::sync::Arc;
 
@@ -789,7 +795,7 @@ mod tests {
 
     use crate::secrets::crypto::SecretsCrypto;
     use crate::secrets::store::SecretsStore;
-    use crate::secrets::store::testing::InMemorySecretsStore;
+    use crate::secrets::store::in_memory::InMemorySecretsStore;
     use crate::secrets::types::CreateSecretParams;
 
     fn test_store() -> InMemorySecretsStore {

@@ -3,7 +3,7 @@
 use std::sync::Arc;
 
 use clap::Parser;
-use tracing_subscriber::{EnvFilter, layer::SubscriberExt, util::SubscriberInitExt};
+use tracing_subscriber::EnvFilter;
 
 use ironclaw::{
     agent::{Agent, AgentDeps, SessionManager},
@@ -14,19 +14,17 @@ use ironclaw::{
             RegisteredEndpoint, SharedWasmChannel, WasmChannelLoader, WasmChannelRouter,
             WasmChannelRuntime, WasmChannelRuntimeConfig, create_wasm_channel_router,
         },
-        web::log_layer::{LogBroadcaster, WebLogLayer},
+        web::log_layer::LogBroadcaster,
     },
     cli::{
-        Cli, Command, run_mcp_command, run_pairing_command, run_status_command, run_tool_command,
+        Cli, Command, run_mcp_command, run_pairing_command, run_service_command,
+        run_status_command, run_tool_command,
     },
     config::Config,
     context::ContextManager,
     extensions::ExtensionManager,
-    hooks::HookRegistry,
-    llm::{
-        CooldownConfig, FailoverProvider, LlmProvider, SessionConfig, create_cheap_llm_provider,
-        create_llm_provider, create_llm_provider_with_config, create_session_manager,
-    },
+    hooks::{HookRegistry, bootstrap_hooks},
+    llm::{SessionConfig, build_provider_chain, create_session_manager},
     orchestrator::{
         ContainerJobConfig, ContainerJobManager, OrchestratorApi, TokenStore,
         api::OrchestratorState,
@@ -39,7 +37,9 @@ use ironclaw::{
         mcp::{McpClient, McpSessionManager, config::load_mcp_servers_from_db, is_authenticated},
         wasm::{WasmToolLoader, WasmToolRuntime, load_dev_tools},
     },
-    workspace::{EmbeddingProvider, NearAiEmbeddings, OpenAiEmbeddings, Workspace},
+    workspace::{
+        EmbeddingProvider, NearAiEmbeddings, OllamaEmbeddings, OpenAiEmbeddings, Workspace,
+    },
 };
 
 #[cfg(feature = "libsql")]
@@ -74,6 +74,15 @@ async fn main() -> anyhow::Result<()> {
                 .init();
 
             return ironclaw::cli::run_config_command(config_cmd.clone()).await;
+        }
+        Some(Command::Registry(registry_cmd)) => {
+            tracing_subscriber::fmt()
+                .with_env_filter(
+                    EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("warn")),
+                )
+                .init();
+
+            return ironclaw::cli::run_registry_command(registry_cmd.clone()).await;
         }
         Some(Command::Mcp(mcp_cmd)) => {
             // Simple logging for MCP commands
@@ -112,18 +121,20 @@ async fn main() -> anyhow::Result<()> {
                                 &config.llm.nearai.base_url,
                                 session,
                             )
-                            .with_model(&config.embeddings.model, 1536),
+                            .with_model(&config.embeddings.model, config.embeddings.dimension),
+                        )),
+                        "ollama" => Some(Arc::new(
+                            ironclaw::workspace::OllamaEmbeddings::new(
+                                &config.embeddings.ollama_base_url,
+                            )
+                            .with_model(&config.embeddings.model, config.embeddings.dimension),
                         )),
                         _ => {
                             if let Some(api_key) = config.embeddings.openai_api_key() {
-                                let dim = match config.embeddings.model.as_str() {
-                                    "text-embedding-3-large" => 3072,
-                                    _ => 1536,
-                                };
                                 Some(Arc::new(ironclaw::workspace::OpenAiEmbeddings::with_model(
                                     api_key,
                                     &config.embeddings.model,
-                                    dim,
+                                    config.embeddings.dimension,
                                 )))
                             } else {
                                 None
@@ -133,6 +144,23 @@ async fn main() -> anyhow::Result<()> {
                 } else {
                     None
                 };
+
+            // Warn if libSQL backend is used with non-1536 embedding dimension.
+            // libSQL schema uses F32_BLOB(1536) which cannot be altered without a
+            // table rebuild, so non-1536 embeddings will cause storage failures.
+            if config.database.backend == ironclaw::config::DatabaseBackend::LibSql
+                && config.embeddings.enabled
+                && config.embeddings.dimension != 1536
+            {
+                tracing::warn!(
+                    configured_dimension = config.embeddings.dimension,
+                    "Embedding dimension {} is not 1536. The libSQL schema uses \
+                     F32_BLOB(1536) which requires exactly 1536 dimensions. \
+                     Embedding storage will fail. Use PostgreSQL or set \
+                     EMBEDDING_DIMENSION=1536.",
+                    config.embeddings.dimension
+                );
+            }
 
             // Create a Database-trait-backed workspace for the memory command
             let db: Arc<dyn ironclaw::db::Database> =
@@ -152,12 +180,36 @@ async fn main() -> anyhow::Result<()> {
 
             return run_pairing_command(pairing_cmd.clone()).map_err(|e| anyhow::anyhow!("{}", e));
         }
+        Some(Command::Service(service_cmd)) => {
+            tracing_subscriber::fmt()
+                .with_env_filter(
+                    EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("warn")),
+                )
+                .init();
+
+            return run_service_command(service_cmd);
+        }
+        Some(Command::Doctor) => {
+            tracing_subscriber::fmt()
+                .with_env_filter(
+                    EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("warn")),
+                )
+                .init();
+
+            let _ = dotenvy::dotenv();
+            ironclaw::bootstrap::load_ironclaw_env();
+
+            return ironclaw::cli::run_doctor_command().await;
+        }
         Some(Command::Status) => {
             tracing_subscriber::fmt()
                 .with_env_filter(
                     EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("warn")),
                 )
                 .init();
+
+            let _ = dotenvy::dotenv();
+            ironclaw::bootstrap::load_ironclaw_env();
 
             return run_status_command().await;
         }
@@ -226,7 +278,7 @@ async fn main() -> anyhow::Result<()> {
                 max_turns: *max_turns,
                 model: model.clone(),
                 timeout: std::time::Duration::from_secs(1800),
-                allowed_tools: Vec::new(),
+                allowed_tools: ironclaw::config::ClaudeCodeConfig::from_env().allowed_tools,
             };
 
             let runtime = ironclaw::worker::ClaudeBridgeRuntime::new(config)
@@ -286,8 +338,9 @@ async fn main() -> anyhow::Result<()> {
         wizard.run().await?;
     }
 
-    // Load initial config from env + disk (before DB is available)
-    let mut config = match Config::from_env().await {
+    // Load initial config from env + disk + optional TOML (before DB is available)
+    let toml_path = cli.config.as_deref();
+    let mut config = match Config::from_env_with_toml(toml_path).await {
         Ok(c) => c,
         Err(ironclaw::error::ConfigError::MissingRequired { key, hint }) => {
             eprintln!("Configuration error: Missing required setting '{}'", key);
@@ -308,31 +361,14 @@ async fn main() -> anyhow::Result<()> {
     };
     let session = create_session_manager(session_config).await;
 
-    // Session-based auth is only needed for NEAR AI backend without an API key.
-    // ChatCompletions mode with an API key skips session auth entirely.
-    if config.llm.backend == ironclaw::config::LlmBackend::NearAi
-        && config.llm.nearai.api_key.is_none()
-    {
-        session.ensure_authenticated().await?;
-    }
-
-    // Initialize tracing
-    let env_filter = EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| EnvFilter::new("ironclaw=info,tower_http=warn"));
-
     // Create log broadcaster before tracing init so the WebLogLayer can capture all events.
     // This gets wired to the gateway's /api/logs/events SSE endpoint later.
     let log_broadcaster = Arc::new(LogBroadcaster::new());
 
-    tracing_subscriber::registry()
-        .with(env_filter)
-        .with(
-            tracing_subscriber::fmt::layer()
-                .with_target(false)
-                .with_writer(ironclaw::tracing_fmt::TruncatingStderr::default()),
-        )
-        .with(WebLogLayer::new(Arc::clone(&log_broadcaster)))
-        .init();
+    // Initialize tracing with a reloadable EnvFilter so the gateway can switch
+    // log levels (e.g. ironclaw=debug) at runtime without restarting.
+    let log_level_handle =
+        ironclaw::channels::web::log_layer::init_tracing(Arc::clone(&log_broadcaster));
 
     // Create CLI channel
     let repl_channel = if let Some(ref msg) = cli.message {
@@ -372,7 +408,7 @@ async fn main() -> anyhow::Result<()> {
             #[cfg(feature = "libsql")]
             ironclaw::config::DatabaseBackend::LibSql => {
                 use ironclaw::db::Database as _;
-                use ironclaw::db::libsql_backend::LibSqlBackend;
+                use ironclaw::db::libsql::LibSqlBackend;
                 use secrecy::ExposeSecret as _;
 
                 let default_path = ironclaw::config::default_libsql_path();
@@ -429,7 +465,7 @@ async fn main() -> anyhow::Result<()> {
         }
 
         // Reload config from DB now that we have a connection.
-        match Config::from_db(db.as_ref(), "default").await {
+        match Config::from_db_with_toml(db.as_ref(), "default", toml_path).await {
             Ok(db_config) => {
                 config = db_config;
                 tracing::info!("Configuration reloaded from database");
@@ -446,9 +482,13 @@ async fn main() -> anyhow::Result<()> {
         session.attach_store(Arc::clone(db), "default").await;
 
         // Mark any jobs left in "running" or "creating" state as "interrupted".
-        if let Err(e) = db.cleanup_stale_sandbox_jobs().await {
-            tracing::warn!("Failed to cleanup stale sandbox jobs: {}", e);
-        }
+        // Fire-and-forget housekeeping — no need to block startup.
+        let db_cleanup = Arc::clone(db);
+        tokio::spawn(async move {
+            if let Err(e) = db_cleanup.cleanup_stale_sandbox_jobs().await {
+                tracing::warn!("Failed to cleanup stale sandbox jobs: {}", e);
+            }
+        });
     }
 
     // Create secrets store early: needed for injecting LLM API keys from encrypted
@@ -504,7 +544,7 @@ async fn main() -> anyhow::Result<()> {
 
         // Re-resolve LlmConfig now that secrets overlay has been populated
         if let Some(ref db_ref) = db {
-            match Config::from_db(db_ref.as_ref(), "default").await {
+            match Config::from_db_with_toml(db_ref.as_ref(), "default", toml_path).await {
                 Ok(refreshed) => {
                     config = refreshed;
                     tracing::debug!("LlmConfig re-resolved after secret injection");
@@ -516,82 +556,127 @@ async fn main() -> anyhow::Result<()> {
         }
     }
 
-    // Initialize LLM provider (clone session so we can reuse it for embeddings)
-    let llm = create_llm_provider(&config.llm, session.clone())?;
-    tracing::info!("LLM provider initialized: {}", llm.model_name());
+    // Session-based auth is only needed for NEAR AI backend without an API key.
+    // Do this after DB-backed config reload so provider selection from onboarding
+    // is respected (e.g. OpenAI/OpenAI-compatible should not trigger NEAR auth).
+    if config.llm.backend == ironclaw::config::LlmBackend::NearAi
+        && config.llm.nearai.api_key.is_none()
+    {
+        session.ensure_authenticated().await?;
+    }
 
-    // Wrap in failover if a fallback model is configured
-    let llm: Arc<dyn LlmProvider> =
-        if let Some(fallback_model) = config.llm.nearai.fallback_model.as_ref() {
-            if fallback_model == &config.llm.nearai.model {
-                tracing::warn!(
-                    "fallback_model is the same as primary model, failover may not be effective"
-                );
-            }
-            let mut fallback_config = config.llm.nearai.clone();
-            fallback_config.model = fallback_model.clone();
-            let fallback = create_llm_provider_with_config(&fallback_config, session.clone())?;
+    // Start managed tunnel if configured and no static URL is already set.
+    //
+    // The tunnel process runs in the background, exposing the local gateway
+    // port to the internet. The resulting public URL is injected into
+    // config.tunnel.public_url so channels and extensions pick it up.
+    let active_tunnel: Option<Box<dyn ironclaw::tunnel::Tunnel>> =
+        if config.tunnel.public_url.is_some() {
             tracing::info!(
-                primary = %llm.model_name(),
-                fallback = %fallback.model_name(),
-                "LLM failover enabled"
+                "Static tunnel URL in use: {}",
+                config.tunnel.public_url.as_deref().unwrap_or("?")
             );
-            let cooldown_config = CooldownConfig {
-                cooldown_duration: std::time::Duration::from_secs(
-                    config.llm.nearai.failover_cooldown_secs,
-                ),
-                failure_threshold: config.llm.nearai.failover_cooldown_threshold,
-            };
-            Arc::new(FailoverProvider::with_cooldown(
-                vec![llm, fallback],
-                cooldown_config,
-            )?)
+            None
+        } else if let Some(ref provider_config) = config.tunnel.provider {
+            let gateway_port = config
+                .channels
+                .gateway
+                .as_ref()
+                .map(|g| g.port)
+                .unwrap_or(3000);
+            let gateway_host = config
+                .channels
+                .gateway
+                .as_ref()
+                .map(|g| g.host.as_str())
+                .unwrap_or("127.0.0.1");
+
+            match ironclaw::tunnel::create_tunnel(provider_config) {
+                Ok(Some(tunnel)) => {
+                    tracing::info!(
+                        "Starting {} tunnel on {}:{}...",
+                        tunnel.name(),
+                        gateway_host,
+                        gateway_port
+                    );
+                    match tunnel.start(gateway_host, gateway_port).await {
+                        Ok(url) => {
+                            tracing::info!("Tunnel started: {}", url);
+                            config.tunnel.public_url = Some(url);
+                            Some(tunnel)
+                        }
+                        Err(e) => {
+                            tracing::error!("Failed to start tunnel: {}", e);
+                            None
+                        }
+                    }
+                }
+                Ok(None) => None,
+                Err(e) => {
+                    tracing::error!("Failed to create tunnel: {}", e);
+                    None
+                }
+            }
         } else {
-            llm
+            None
         };
 
-    // Initialize cheap LLM provider for lightweight tasks (heartbeat, evaluation)
-    let cheap_llm = create_cheap_llm_provider(&config.llm, session.clone())?;
-    if let Some(ref cheap) = cheap_llm {
-        tracing::info!("Cheap LLM provider initialized: {}", cheap.model_name());
-    }
+    // Build the full LLM provider chain (retry → smart routing → failover → circuit breaker → cache)
+    let (llm, cheap_llm) = build_provider_chain(&config.llm, session.clone())?;
 
     // Initialize safety layer
     let safety = Arc::new(SafetyLayer::new(&config.safety));
     tracing::info!("Safety layer initialized");
 
-    // Initialize tool registry
-    let tools = Arc::new(ToolRegistry::new());
+    // Initialize tool registry with credential injection support
+    let credential_registry = Arc::new(ironclaw::tools::wasm::SharedCredentialRegistry::new());
+    let tools = if let Some(ref ss) = secrets_store {
+        Arc::new(
+            ToolRegistry::new().with_credentials(Arc::clone(&credential_registry), Arc::clone(ss)),
+        )
+    } else {
+        Arc::new(ToolRegistry::new())
+    };
     tools.register_builtin_tools();
-    tracing::info!("Registered {} built-in tools", tools.count());
 
     // Create embeddings provider if configured
     let embeddings: Option<Arc<dyn EmbeddingProvider>> = if config.embeddings.enabled {
         match config.embeddings.provider.as_str() {
             "nearai" => {
                 tracing::info!(
-                    "Embeddings enabled via NEAR AI (model: {})",
-                    config.embeddings.model
+                    "Embeddings enabled via NEAR AI (model: {}, dim: {})",
+                    config.embeddings.model,
+                    config.embeddings.dimension,
                 );
                 Some(Arc::new(
                     NearAiEmbeddings::new(&config.llm.nearai.base_url, session.clone())
-                        .with_model(&config.embeddings.model, 1536),
+                        .with_model(&config.embeddings.model, config.embeddings.dimension),
+                ))
+            }
+            "ollama" => {
+                tracing::info!(
+                    "Embeddings enabled via Ollama (model: {}, url: {}, dim: {})",
+                    config.embeddings.model,
+                    config.embeddings.ollama_base_url,
+                    config.embeddings.dimension,
+                );
+                Some(Arc::new(
+                    OllamaEmbeddings::new(&config.embeddings.ollama_base_url)
+                        .with_model(&config.embeddings.model, config.embeddings.dimension),
                 ))
             }
             _ => {
                 // Default to OpenAI for unknown providers
                 if let Some(api_key) = config.embeddings.openai_api_key() {
                     tracing::info!(
-                        "Embeddings enabled via OpenAI (model: {})",
-                        config.embeddings.model
+                        "Embeddings enabled via OpenAI (model: {}, dim: {})",
+                        config.embeddings.model,
+                        config.embeddings.dimension,
                     );
                     Some(Arc::new(OpenAiEmbeddings::with_model(
                         api_key,
                         &config.embeddings.model,
-                        match config.embeddings.model.as_str() {
-                            "text-embedding-3-large" => 3072,
-                            _ => 1536, // text-embedding-3-small and ada-002
-                        },
+                        config.embeddings.dimension,
                     )))
                 } else {
                     tracing::warn!("Embeddings configured but OPENAI_API_KEY not set");
@@ -604,14 +689,35 @@ async fn main() -> anyhow::Result<()> {
         None
     };
 
-    // Register memory tools if database is available
-    if let Some(ref db) = db {
-        let mut workspace = Workspace::new_with_db("default", Arc::clone(db));
+    // Warn if libSQL backend is used with non-1536 embedding dimension.
+    if config.database.backend == ironclaw::config::DatabaseBackend::LibSql
+        && config.embeddings.enabled
+        && config.embeddings.dimension != 1536
+    {
+        tracing::warn!(
+            configured_dimension = config.embeddings.dimension,
+            "Embedding dimension {} is not 1536. The libSQL schema uses \
+             F32_BLOB(1536) which requires exactly 1536 dimensions. \
+             Embedding storage will fail. Use PostgreSQL or set \
+             EMBEDDING_DIMENSION=1536.",
+            config.embeddings.dimension
+        );
+    }
+
+    // Create workspace once, reused for memory tools and agent
+    let workspace: Option<Arc<Workspace>> = if let Some(ref db) = db {
+        let mut ws = Workspace::new_with_db("default", Arc::clone(db));
         if let Some(ref emb) = embeddings {
-            workspace = workspace.with_embeddings(emb.clone());
+            ws = ws.with_embeddings(emb.clone());
         }
-        let workspace = Arc::new(workspace);
-        tools.register_memory_tools(workspace);
+        Some(Arc::new(ws))
+    } else {
+        None
+    };
+
+    // Register memory tools if workspace is available
+    if let Some(ref ws) = workspace {
+        tools.register_memory_tools(Arc::clone(ws));
     }
 
     // Register builder tool if enabled.
@@ -631,6 +737,9 @@ async fn main() -> anyhow::Result<()> {
 
     let mcp_session_manager = Arc::new(McpSessionManager::new());
 
+    // Create hook registry early so runtime extension activation can register hooks.
+    let hooks = Arc::new(HookRegistry::new());
+
     // Create WASM tool runtime (sync, just builds the wasmtime engine)
     let wasm_tool_runtime: Option<Arc<WasmToolRuntime>> =
         if config.wasm.enabled && config.wasm.tools_dir.exists() {
@@ -648,6 +757,8 @@ async fn main() -> anyhow::Result<()> {
     // Load WASM tools and MCP servers concurrently.
     // Both register into the shared ToolRegistry (RwLock-based) so concurrent writes are safe.
     let wasm_tools_future = async {
+        let mut dev_loaded_tool_names: Vec<String> = Vec::new();
+
         if let Some(ref runtime) = wasm_tool_runtime {
             let mut loader = WasmToolLoader::new(Arc::clone(runtime), Arc::clone(&tools));
             if let Some(ref secrets) = secrets_store {
@@ -676,6 +787,7 @@ async fn main() -> anyhow::Result<()> {
             // Load dev tools from build artifacts (overrides installed if newer)
             match load_dev_tools(&loader, &config.wasm.tools_dir).await {
                 Ok(results) => {
+                    dev_loaded_tool_names.extend(results.loaded.iter().cloned());
                     if !results.loaded.is_empty() {
                         tracing::info!(
                             "Loaded {} dev WASM tools from build artifacts",
@@ -688,6 +800,8 @@ async fn main() -> anyhow::Result<()> {
                 }
             }
         }
+
+        dev_loaded_tool_names
     };
 
     let mcp_servers_future = async {
@@ -793,40 +907,69 @@ async fn main() -> anyhow::Result<()> {
         }
     };
 
-    tokio::join!(wasm_tools_future, mcp_servers_future);
+    let (dev_loaded_tool_names, _) = tokio::join!(wasm_tools_future, mcp_servers_future);
 
-    // Create extension manager for in-chat discovery/install/auth/activate
-    let extension_manager = if let Some(ref secrets) = secrets_store {
+    // Load registry catalog entries for in-chat extension discovery
+    let catalog_entries = match ironclaw::registry::RegistryCatalog::load_or_embedded() {
+        Ok(catalog) => {
+            let entries: Vec<ironclaw::extensions::RegistryEntry> = catalog
+                .all()
+                .iter()
+                .map(|m| m.to_registry_entry())
+                .collect();
+            tracing::info!(
+                count = entries.len(),
+                "Loaded registry catalog entries for extension discovery"
+            );
+            entries
+        }
+        Err(e) => {
+            tracing::warn!("Failed to load registry catalog: {}", e);
+            Vec::new()
+        }
+    };
+
+    // Create extension manager for in-chat discovery/install/auth/activate.
+    // If no persistent secrets store is available, use an ephemeral in-memory store
+    // so that listing/installing/activating extensions still works (auth won't persist).
+    let ext_secrets: Arc<dyn SecretsStore + Send + Sync> = if let Some(ref s) = secrets_store {
+        Arc::clone(s)
+    } else {
+        use ironclaw::secrets::{InMemorySecretsStore, SecretsCrypto};
+        let ephemeral_key =
+            secrecy::SecretString::from(ironclaw::secrets::keychain::generate_master_key_hex());
+        let crypto = Arc::new(SecretsCrypto::new(ephemeral_key).expect("ephemeral crypto"));
+        tracing::debug!("Using ephemeral in-memory secrets store for extension manager");
+        Arc::new(InMemorySecretsStore::new(crypto))
+    };
+    let extension_manager = {
         let manager = Arc::new(ExtensionManager::new(
             Arc::clone(&mcp_session_manager),
-            Arc::clone(secrets),
+            ext_secrets,
             Arc::clone(&tools),
+            Some(Arc::clone(&hooks)),
             wasm_tool_runtime.clone(),
             config.wasm.tools_dir.clone(),
             config.channels.wasm_channels_dir.clone(),
             config.tunnel.public_url.clone(),
             "default".to_string(),
             db.clone(),
+            catalog_entries.clone(),
         ));
         tools.register_extension_tools(Arc::clone(&manager));
         tracing::info!("Extension manager initialized with in-chat discovery tools");
         Some(manager)
-    } else {
-        tracing::debug!(
-            "Extension manager not available (no secrets store). \
-             Extension tools won't be registered."
-        );
-        None
     };
 
     // Set up orchestrator for sandboxed job execution
     // When allow_local_tools is false (default), the LLM uses create_job for FS/shell work.
     // When allow_local_tools is true, dev tools are also registered directly (current behavior).
-    if config.agent.allow_local_tools {
+    // register_builder_tool() already calls register_dev_tools() internally,
+    // so only register them here when the builder didn't already do it.
+    let builder_registered_dev_tools =
+        config.builder.enabled && (config.agent.allow_local_tools || !config.sandbox.enabled);
+    if config.agent.allow_local_tools && !builder_registered_dev_tools {
         tools.register_dev_tools();
-        tracing::info!(
-            "Local tools enabled (allow_local_tools=true), dev tools registered directly"
-        );
     }
 
     // Shared state for job events (used by both orchestrator and web gateway)
@@ -850,11 +993,8 @@ async fn main() -> anyhow::Result<()> {
             memory_limit_mb: config.sandbox.memory_limit_mb,
             cpu_shares: config.sandbox.cpu_shares,
             orchestrator_port: 50051,
-            claude_config_dir: if config.claude_code.enabled {
-                Some(config.claude_code.config_dir.clone())
-            } else {
-                None
-            },
+            claude_code_api_key: std::env::var("ANTHROPIC_API_KEY").ok(),
+            claude_code_oauth_token: ironclaw::config::ClaudeCodeConfig::extract_oauth_token(),
             claude_code_model: config.claude_code.model.clone(),
             claude_code_max_turns: config.claude_code.max_turns,
             claude_code_memory_limit_mb: config.claude_code.memory_limit_mb,
@@ -870,6 +1010,8 @@ async fn main() -> anyhow::Result<()> {
             job_event_tx: job_event_tx.clone(),
             prompt_queue: Arc::clone(&prompt_queue),
             store: db.clone(),
+            secrets_store: secrets_store.clone(),
+            user_id: "default".to_string(),
         };
 
         tokio::spawn(async move {
@@ -878,7 +1020,6 @@ async fn main() -> anyhow::Result<()> {
             }
         });
 
-        tracing::info!("Orchestrator API started on :50051, sandbox delegation enabled");
         if config.claude_code.enabled {
             tracing::info!(
                 "Claude Code sandbox mode available (model: {}, max_turns: {})",
@@ -899,6 +1040,7 @@ async fn main() -> anyhow::Result<()> {
     // Initialize channel manager
     let mut channels = ChannelManager::new();
     let mut channel_names: Vec<String> = Vec::new();
+    let mut loaded_wasm_channel_names: Vec<String> = Vec::new();
 
     if let Some(repl) = repl_channel {
         channels.add(Box::new(repl));
@@ -931,6 +1073,7 @@ async fn main() -> anyhow::Result<()> {
 
                         for loaded in results.loaded {
                             let channel_name = loaded.name().to_string();
+                            loaded_wasm_channel_names.push(channel_name.clone());
                             tracing::info!("Loaded WASM channel: {}", channel_name);
 
                             let secret_name = loaded.webhook_secret_name();
@@ -1099,6 +1242,13 @@ async fn main() -> anyhow::Result<()> {
     let mut webhook_server = if !webhook_routes.is_empty() {
         let addr =
             webhook_server_addr.unwrap_or_else(|| std::net::SocketAddr::from(([0, 0, 0, 0], 8080)));
+        if addr.ip().is_unspecified() {
+            tracing::warn!(
+                "Webhook server is binding to {} — it will be reachable from all network interfaces. \
+                 Set HTTP_HOST=127.0.0.1 to restrict to localhost.",
+                addr.ip()
+            );
+        }
         let mut server = WebhookServer::new(WebhookServerConfig { addr });
         for routes in webhook_routes {
             server.add_routes(routes);
@@ -1109,23 +1259,9 @@ async fn main() -> anyhow::Result<()> {
         None
     };
 
-    // Create workspace for agent (shared with memory tools)
-    let workspace = if let Some(ref db_ref) = db {
-        let mut ws = Workspace::new_with_db("default", Arc::clone(db_ref));
-        if let Some(ref emb) = embeddings {
-            ws = ws.with_embeddings(emb.clone());
-        }
-        Some(Arc::new(ws))
-    } else {
-        None
-    };
-
     // Seed workspace with core identity files on first boot
     if let Some(ref ws) = workspace {
         match ws.seed_if_empty().await {
-            Ok(count) if count > 0 => {
-                tracing::info!("Workspace seeded with {} core files", count);
-            }
             Ok(_) => {}
             Err(e) => {
                 tracing::warn!("Failed to seed workspace: {}", e);
@@ -1133,24 +1269,46 @@ async fn main() -> anyhow::Result<()> {
         }
     }
 
-    // Backfill embeddings if we just enabled the provider
+    // Backfill embeddings in background (fire-and-forget housekeeping)
     if let (Some(ws), Some(_)) = (&workspace, &embeddings) {
-        match ws.backfill_embeddings().await {
-            Ok(count) if count > 0 => {
-                tracing::info!("Backfilled embeddings for {} chunks", count);
+        let ws_bg = Arc::clone(ws);
+        tokio::spawn(async move {
+            match ws_bg.backfill_embeddings().await {
+                Ok(count) if count > 0 => {
+                    tracing::info!("Backfilled embeddings for {} chunks", count);
+                }
+                Ok(_) => {}
+                Err(e) => {
+                    tracing::warn!("Failed to backfill embeddings: {}", e);
+                }
             }
-            Ok(_) => {}
-            Err(e) => {
-                tracing::warn!("Failed to backfill embeddings: {}", e);
-            }
-        }
+        });
     }
 
     // Create context manager (shared between job tools and agent)
     let context_manager = Arc::new(ContextManager::new(config.agent.max_parallel_jobs));
 
-    // Create hook registry
-    let hooks = Arc::new(HookRegistry::new());
+    // Register bundled/plugin/workspace hooks.
+    let active_tool_names = tools.list().await;
+
+    let hook_bootstrap = bootstrap_hooks(
+        &hooks,
+        workspace.as_ref(),
+        &config.wasm.tools_dir,
+        &config.channels.wasm_channels_dir,
+        &active_tool_names,
+        &loaded_wasm_channel_names,
+        &dev_loaded_tool_names,
+    )
+    .await;
+    tracing::info!(
+        bundled = hook_bootstrap.bundled_hooks,
+        plugin = hook_bootstrap.plugin_hooks,
+        workspace = hook_bootstrap.workspace_hooks,
+        outbound_webhooks = hook_bootstrap.outbound_webhooks,
+        errors = hook_bootstrap.errors,
+        "Lifecycle hooks initialized"
+    );
 
     // Create session manager (shared between agent and web gateway)
     let session_manager = Arc::new(SessionManager::new().with_hooks(hooks.clone()));
@@ -1160,20 +1318,58 @@ async fn main() -> anyhow::Result<()> {
         Arc::clone(&context_manager),
         container_job_manager.clone(),
         db.clone(),
+        job_event_tx.clone(),
+        Some(channels.inject_sender()),
+        if config.sandbox.enabled {
+            Some(Arc::clone(&prompt_queue))
+        } else {
+            None
+        },
+        secrets_store.clone(),
     );
+
+    // Initialize skills system (before gateway so we can wire into GatewayState)
+    let (skill_registry, skill_catalog) = if config.skills.enabled {
+        let mut registry = ironclaw::skills::SkillRegistry::new(config.skills.local_dir.clone());
+        let loaded = registry.discover_all().await;
+        if !loaded.is_empty() {
+            tracing::info!("Loaded {} skill(s): {}", loaded.len(), loaded.join(", "));
+        }
+        let registry = Arc::new(std::sync::RwLock::new(registry));
+
+        // Register skill management tools
+        let catalog = ironclaw::skills::catalog::shared_catalog();
+        tools.register_skill_tools(Arc::clone(&registry), Arc::clone(&catalog));
+
+        (Some(registry), Some(catalog))
+    } else {
+        (None, None)
+    };
+
+    // Create cost guard early so gateway can reference it.
+    let cost_guard = Arc::new(ironclaw::agent::cost_guard::CostGuard::new(
+        ironclaw::agent::cost_guard::CostGuardConfig {
+            max_cost_per_day_cents: config.agent.max_cost_per_day_cents,
+            max_actions_per_hour: config.agent.max_actions_per_hour,
+        },
+    ));
 
     // Add web gateway channel if configured
     let mut gateway_url: Option<String> = None;
     if let Some(ref gw_config) = config.channels.gateway {
-        let mut gw = GatewayChannel::new(gw_config.clone());
+        let mut gw = GatewayChannel::new(gw_config.clone()).with_llm_provider(Arc::clone(&llm));
         if let Some(ref ws) = workspace {
             gw = gw.with_workspace(Arc::clone(ws));
         }
         gw = gw.with_session_manager(Arc::clone(&session_manager));
         gw = gw.with_log_broadcaster(Arc::clone(&log_broadcaster));
+        gw = gw.with_log_level_handle(Arc::clone(&log_level_handle));
         gw = gw.with_tool_registry(Arc::clone(&tools));
         if let Some(ref ext_mgr) = extension_manager {
             gw = gw.with_extension_manager(Arc::clone(ext_mgr));
+        }
+        if !catalog_entries.is_empty() {
+            gw = gw.with_registry_entries(catalog_entries.clone());
         }
         if let Some(ref d) = db {
             gw = gw.with_store(Arc::clone(d));
@@ -1181,6 +1377,13 @@ async fn main() -> anyhow::Result<()> {
         if let Some(ref jm) = container_job_manager {
             gw = gw.with_job_manager(Arc::clone(jm));
         }
+        if let Some(ref sr) = skill_registry {
+            gw = gw.with_skill_registry(Arc::clone(sr));
+        }
+        if let Some(ref sc) = skill_catalog {
+            gw = gw.with_skill_catalog(Arc::clone(sc));
+        }
+        gw = gw.with_cost_guard(Arc::clone(&cost_guard));
         if config.sandbox.enabled {
             gw = gw.with_prompt_queue(Arc::clone(&prompt_queue));
 
@@ -1203,11 +1406,6 @@ async fn main() -> anyhow::Result<()> {
             gw.auth_token()
         ));
 
-        tracing::info!(
-            "Web gateway enabled on {}:{}",
-            gw_config.host,
-            gw_config.port
-        );
         tracing::info!("Web UI: http://{}:{}/", gw_config.host, gw_config.port);
 
         channel_names.push("gateway".to_string());
@@ -1228,19 +1426,21 @@ async fn main() -> anyhow::Result<()> {
         tools,
         workspace,
         extension_manager,
+        skill_registry,
+        skills_config: config.skills.clone(),
         hooks,
+        cost_guard,
     };
     let agent = Agent::new(
         config.agent.clone(),
         deps,
         channels,
         Some(config.heartbeat.clone()),
+        Some(config.hygiene.clone()),
         Some(config.routines.clone()),
         Some(context_manager),
         Some(session_manager),
     );
-
-    tracing::info!("Agent initialized, starting main loop...");
 
     // Print boot screen for interactive CLI mode (not single-message mode).
     if config.channels.cli.enabled && cli.message.is_none() {
@@ -1270,6 +1470,11 @@ async fn main() -> anyhow::Result<()> {
             claude_code_enabled: config.claude_code.enabled,
             routines_enabled: config.routines.enabled,
             channels: channel_names,
+            tunnel_url: active_tunnel
+                .as_ref()
+                .and_then(|t| t.public_url())
+                .or_else(|| config.tunnel.public_url.clone()),
+            tunnel_provider: active_tunnel.as_ref().map(|t| t.name().to_string()),
         };
         ironclaw::boot_screen::print_boot_screen(&boot_info);
     }
@@ -1280,6 +1485,14 @@ async fn main() -> anyhow::Result<()> {
     // Shut down the webhook server if one was started
     if let Some(ref mut server) = webhook_server {
         server.shutdown().await;
+    }
+
+    // Stop managed tunnel if one was started
+    if let Some(tunnel) = active_tunnel {
+        tracing::info!("Stopping {} tunnel...", tunnel.name());
+        if let Err(e) = tunnel.stop().await {
+            tracing::warn!("Failed to stop tunnel cleanly: {}", e);
+        }
     }
 
     tracing::info!("Agent shutdown complete");
@@ -1301,14 +1514,21 @@ fn check_onboard_needed() -> Option<&'static str> {
         return Some("Database not configured");
     }
 
+    // The wizard writes ONBOARD_COMPLETED=true to ~/.ironclaw/.env,
+    // which load_ironclaw_env() loads before this function runs.
+    if std::env::var("ONBOARD_COMPLETED")
+        .map(|v| v == "true")
+        .unwrap_or(false)
+    {
+        return None;
+    }
+
     // First run (onboarding never completed and no session).
-    // Reads NEARAI_API_KEY env var directly because this function runs
-    // before Config is loaded -- Config::from_env() may fail without a
-    // database URL, which is what triggers onboarding in the first place.
+    // Check for a NEAR AI API key or session file as a fallback
+    // for users who configured credentials manually (no wizard).
     if std::env::var("NEARAI_API_KEY").is_err() {
-        let settings = ironclaw::settings::Settings::load();
         let session_path = ironclaw::llm::session::default_session_path();
-        if !settings.onboard_completed && !session_path.exists() {
+        if !session_path.exists() {
             return Some("First run");
         }
     }

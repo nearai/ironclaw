@@ -48,6 +48,9 @@ pub enum Error {
 
     #[error("Worker error: {0}")]
     Worker(#[from] WorkerError),
+
+    #[error("Routine error: {0}")]
+    Routine(#[from] RoutineError),
 }
 
 /// Configuration-related errors.
@@ -336,17 +339,11 @@ pub enum OrchestratorError {
     #[error("Container for job {job_id} is in unexpected state: {state}")]
     InvalidContainerState { job_id: Uuid, state: String },
 
-    #[error("Worker authentication failed: {reason}")]
-    AuthFailed { reason: String },
-
     #[error("Internal API error: {reason}")]
     ApiError { reason: String },
 
     #[error("Docker error: {reason}")]
     Docker { reason: String },
-
-    #[error("Job {job_id} timed out in container")]
-    ContainerTimeout { job_id: Uuid },
 }
 
 /// Worker errors (container-side execution).
@@ -369,6 +366,46 @@ pub enum WorkerError {
 
     #[error("Missing worker token (IRONCLAW_WORKER_TOKEN not set)")]
     MissingToken,
+}
+
+/// Routine-related errors.
+#[derive(Debug, thiserror::Error)]
+pub enum RoutineError {
+    #[error("Unknown trigger type: {trigger_type}")]
+    UnknownTriggerType { trigger_type: String },
+
+    #[error("Unknown action type: {action_type}")]
+    UnknownActionType { action_type: String },
+
+    #[error("Missing field in {context}: {field}")]
+    MissingField { context: String, field: String },
+
+    #[error("Invalid cron expression: {reason}")]
+    InvalidCron { reason: String },
+
+    #[error("Unknown run status: {status}")]
+    UnknownRunStatus { status: String },
+
+    #[error("Routine {name} is disabled")]
+    Disabled { name: String },
+
+    #[error("Routine not found: {id}")]
+    NotFound { id: Uuid },
+
+    #[error("Routine {name} at max concurrent runs")]
+    MaxConcurrent { name: String },
+
+    #[error("Database error: {reason}")]
+    Database { reason: String },
+
+    #[error("LLM call failed: {reason}")]
+    LlmFailed { reason: String },
+
+    #[error("LLM returned empty content")]
+    EmptyResponse,
+
+    #[error("LLM response truncated (finish_reason=length) with no content")]
+    TruncatedResponse,
 }
 
 /// Result type alias for the agent.
