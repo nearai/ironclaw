@@ -213,12 +213,21 @@ impl RegistryInstaller {
             // 1. Separate capabilities_url in the artifact
             // 2. Source tree (legacy, requires repo)
             if let Some(ref caps_url) = artifact.capabilities_url {
+                const MAX_CAPS_SIZE: usize = 1024 * 1024; // 1 MB
                 match download_artifact(caps_url).await {
-                    Ok(caps_bytes) => {
+                    Ok(caps_bytes) if caps_bytes.len() <= MAX_CAPS_SIZE => {
                         fs::write(&target_caps, &caps_bytes)
                             .await
                             .map_err(RegistryError::Io)?;
                         true
+                    }
+                    Ok(caps_bytes) => {
+                        tracing::warn!(
+                            "Capabilities file too large ({} bytes, max {}), skipping",
+                            caps_bytes.len(),
+                            MAX_CAPS_SIZE
+                        );
+                        false
                     }
                     Err(e) => {
                         tracing::warn!("Failed to download capabilities from {}: {}", caps_url, e);

@@ -1939,15 +1939,16 @@ async fn extensions_registry_handler(
             .collect()
     };
 
-    // Cross-reference with installed extensions (if extension manager is available)
-    let installed_names: std::collections::HashSet<String> =
+    // Cross-reference with installed extensions by (name, kind) to avoid
+    // false positives when the same name exists as different kinds.
+    let installed: std::collections::HashSet<(String, String)> =
         if let Some(ext_mgr) = state.extension_manager.as_ref() {
             ext_mgr
                 .list(None)
                 .await
                 .unwrap_or_default()
                 .into_iter()
-                .map(|ext| ext.name)
+                .map(|ext| (ext.name, ext.kind.to_string()))
                 .collect()
         } else {
             std::collections::HashSet::new()
@@ -1955,13 +1956,16 @@ async fn extensions_registry_handler(
 
     let entries = matching
         .into_iter()
-        .map(|e| RegistryEntryInfo {
-            name: e.name.clone(),
-            display_name: e.display_name.clone(),
-            kind: e.kind.to_string(),
-            description: e.description.clone(),
-            keywords: e.keywords.clone(),
-            installed: installed_names.contains(&e.name),
+        .map(|e| {
+            let kind_str = e.kind.to_string();
+            RegistryEntryInfo {
+                name: e.name.clone(),
+                display_name: e.display_name.clone(),
+                installed: installed.contains(&(e.name.clone(), kind_str.clone())),
+                kind: kind_str,
+                description: e.description.clone(),
+                keywords: e.keywords.clone(),
+            }
         })
         .collect();
 

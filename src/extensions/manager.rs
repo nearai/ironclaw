@@ -666,12 +666,30 @@ impl ExtensionManager {
 
             // Download capabilities separately if URL provided
             if let Some(caps_url) = capabilities_url {
+                const MAX_CAPS_SIZE: usize = 1024 * 1024; // 1 MB
                 match client.get(caps_url).send().await {
-                    Ok(resp) if resp.status().is_success() => {
-                        if let Ok(caps_bytes) = resp.bytes().await {
-                            let _ = tokio::fs::write(&caps_path, &caps_bytes).await;
+                    Ok(resp) if resp.status().is_success() => match resp.bytes().await {
+                        Ok(caps_bytes) if caps_bytes.len() <= MAX_CAPS_SIZE => {
+                            if let Err(e) = tokio::fs::write(&caps_path, &caps_bytes).await {
+                                tracing::warn!(
+                                    "Failed to write capabilities for '{}': {}",
+                                    name,
+                                    e
+                                );
+                            }
                         }
-                    }
+                        Ok(caps_bytes) => {
+                            tracing::warn!(
+                                "Capabilities file for '{}' too large ({} bytes, max {})",
+                                name,
+                                caps_bytes.len(),
+                                MAX_CAPS_SIZE
+                            );
+                        }
+                        Err(e) => {
+                            tracing::warn!("Failed to download capabilities for '{}': {}", name, e);
+                        }
+                    },
                     _ => {
                         tracing::warn!(
                             "Failed to download capabilities for '{}' from {}",

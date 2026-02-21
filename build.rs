@@ -121,9 +121,8 @@ fn embed_registry_catalog(root: &Path) {
 
     let registry_dir = root.join("registry");
 
-    // Rerun if any registry file changes
-    println!("cargo:rerun-if-changed=registry/tools");
-    println!("cargo:rerun-if-changed=registry/channels");
+    // Rerun if the bundles file changes (per-file watches for tools/channels
+    // are emitted inside collect_json_files to track content changes reliably).
     println!("cargo:rerun-if-changed=registry/_bundles.json");
 
     let out_dir = PathBuf::from(env::var("OUT_DIR").unwrap());
@@ -131,7 +130,11 @@ fn embed_registry_catalog(root: &Path) {
 
     if !registry_dir.is_dir() {
         // No registry dir: write empty catalog
-        fs::write(&out_path, r#"{"tools":[],"channels":[],"bundles":{}}"#).unwrap();
+        fs::write(
+            &out_path,
+            r#"{"tools":[],"channels":[],"bundles":{"bundles":{}}}"#,
+        )
+        .unwrap();
         return;
     }
 
@@ -153,9 +156,9 @@ fn embed_registry_catalog(root: &Path) {
     // Read bundles
     let bundles_path = registry_dir.join("_bundles.json");
     let bundles_raw = if bundles_path.is_file() {
-        fs::read_to_string(&bundles_path).unwrap_or_else(|_| "{}".to_string())
+        fs::read_to_string(&bundles_path).unwrap_or_else(|_| r#"{"bundles":{}}"#.to_string())
     } else {
-        "{}".to_string()
+        r#"{"bundles":{}}"#.to_string()
     };
 
     // Build the combined JSON
@@ -185,6 +188,8 @@ fn collect_json_files(dir: &Path, out: &mut Vec<String>) {
     entries.sort_by_key(|e| e.file_name());
 
     for entry in entries {
+        // Emit per-file watch so Cargo reruns when file contents change
+        println!("cargo:rerun-if-changed={}", entry.path().display());
         if let Ok(content) = fs::read_to_string(entry.path()) {
             out.push(content);
         }
