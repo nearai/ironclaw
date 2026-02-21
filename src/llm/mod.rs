@@ -17,6 +17,7 @@ pub mod response_cache;
 pub mod retry;
 mod rig_adapter;
 pub mod session;
+pub mod smart_routing;
 
 pub use circuit_breaker::{CircuitBreakerConfig, CircuitBreakerProvider};
 pub use failover::{CooldownConfig, FailoverProvider};
@@ -33,6 +34,7 @@ pub use response_cache::{CachedProvider, ResponseCacheConfig};
 pub use retry::{RetryConfig, RetryProvider};
 pub use rig_adapter::RigAdapter;
 pub use session::{SessionConfig, SessionManager, create_session_manager};
+pub use smart_routing::{SmartRoutingConfig, SmartRoutingProvider, TaskComplexity};
 
 use std::sync::Arc;
 
@@ -296,6 +298,7 @@ mod tests {
             response_cache_max_entries: 1000,
             failover_cooldown_secs: 300,
             failover_cooldown_threshold: 3,
+            smart_routing_cascade: true,
         }
     }
 

@@ -27,8 +27,8 @@ use ironclaw::{
     llm::{
         CachedProvider, CircuitBreakerConfig, CircuitBreakerProvider, CooldownConfig,
         FailoverProvider, LlmProvider, ResponseCacheConfig, RetryConfig, RetryProvider,
-        SessionConfig, create_cheap_llm_provider, create_llm_provider,
-        create_llm_provider_with_config, create_session_manager,
+        SessionConfig, SmartRoutingConfig, SmartRoutingProvider, create_cheap_llm_provider,
+        create_llm_provider, create_llm_provider_with_config, create_session_manager,
     },
     orchestrator::{
         ContainerJobConfig, ContainerJobManager, OrchestratorApi, TokenStore,
@@ -641,6 +641,34 @@ async fn main() -> anyhow::Result<()> {
     } else {
         llm
     };
+
+    // Wrap in smart routing if cheap model is configured
+    let llm: Arc<dyn LlmProvider> =
+        if let Some(ref cheap_model) = config.llm.nearai.cheap_model {
+            let mut cheap_config = config.llm.nearai.clone();
+            cheap_config.model = cheap_model.clone();
+            let cheap = create_llm_provider_with_config(&cheap_config, session.clone())?;
+            let cheap: Arc<dyn LlmProvider> = if retry_config.max_retries > 0 {
+                Arc::new(RetryProvider::new(cheap, retry_config.clone()))
+            } else {
+                cheap
+            };
+            tracing::info!(
+                primary = %llm.model_name(),
+                cheap = %cheap.model_name(),
+                "Smart routing enabled"
+            );
+            Arc::new(SmartRoutingProvider::new(
+                llm,
+                cheap,
+                SmartRoutingConfig {
+                    cascade_enabled: config.llm.nearai.smart_routing_cascade,
+                    ..SmartRoutingConfig::default()
+                },
+            ))
+        } else {
+            llm
+        };
 
     // Wrap in failover if a fallback model is configured
     let llm: Arc<dyn LlmProvider> =

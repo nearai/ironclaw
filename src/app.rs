@@ -293,12 +293,36 @@ impl AppBuilder {
     ) -> Result<(Arc<dyn LlmProvider>, Option<Arc<dyn LlmProvider>>), anyhow::Error> {
         use crate::llm::{
             CachedProvider, CircuitBreakerConfig, CircuitBreakerProvider, CooldownConfig,
-            FailoverProvider, ResponseCacheConfig, create_cheap_llm_provider, create_llm_provider,
-            create_llm_provider_with_config,
+            FailoverProvider, ResponseCacheConfig, SmartRoutingConfig, SmartRoutingProvider,
+            create_cheap_llm_provider, create_llm_provider, create_llm_provider_with_config,
         };
 
         let llm = create_llm_provider(&self.config.llm, self.session.clone())?;
         tracing::info!("LLM provider initialized: {}", llm.model_name());
+
+        // Wrap in smart routing if cheap model is configured
+        let llm: Arc<dyn LlmProvider> =
+            if let Some(ref cheap_model) = self.config.llm.nearai.cheap_model {
+                let mut cheap_config = self.config.llm.nearai.clone();
+                cheap_config.model = cheap_model.clone();
+                let cheap =
+                    create_llm_provider_with_config(&cheap_config, self.session.clone())?;
+                tracing::info!(
+                    primary = %llm.model_name(),
+                    cheap = %cheap.model_name(),
+                    "Smart routing enabled"
+                );
+                Arc::new(SmartRoutingProvider::new(
+                    llm,
+                    cheap,
+                    SmartRoutingConfig {
+                        cascade_enabled: self.config.llm.nearai.smart_routing_cascade,
+                        ..SmartRoutingConfig::default()
+                    },
+                ))
+            } else {
+                llm
+            };
 
         // Wrap in failover if a fallback model is configured
         let llm: Arc<dyn LlmProvider> = if let Some(fallback_model) =
