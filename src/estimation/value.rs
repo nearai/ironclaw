@@ -40,6 +40,11 @@ impl ValueEstimator {
 
     /// Check if a job is profitable at a given price.
     pub fn is_profitable(&self, price: Decimal, estimated_cost: Decimal) -> bool {
+        if price.is_zero() {
+            // With a zero price, the job is only profitable if the cost is negative.
+            // This results in a positive profit and an effectively infinite margin.
+            return estimated_cost < Decimal::ZERO;
+        }
         let margin = (price - estimated_cost) / price;
         margin >= self.min_margin
     }
@@ -103,5 +108,16 @@ mod tests {
 
         let margin = estimator.calculate_margin(dec!(100.0), dec!(70.0));
         assert_eq!(margin, dec!(0.30)); // 30%
+    }
+
+    #[test]
+    fn test_profitability_zero_price() {
+        let estimator = ValueEstimator::new();
+
+        // Zero price should return false, not panic
+        assert!(!estimator.is_profitable(Decimal::ZERO, dec!(10.0)));
+        assert!(!estimator.is_profitable(Decimal::ZERO, Decimal::ZERO));
+        // Negative cost with zero price is profitable (we get paid to do it)
+        assert!(estimator.is_profitable(Decimal::ZERO, dec!(-10.0)));
     }
 }

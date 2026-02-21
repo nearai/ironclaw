@@ -64,6 +64,8 @@ impl std::fmt::Display for LlmBackend {
 pub struct OpenAiDirectConfig {
     pub api_key: SecretString,
     pub model: String,
+    /// Optional base URL override (e.g. for proxies like VibeProxy).
+    pub base_url: Option<String>,
 }
 
 /// Configuration for direct Anthropic API access.
@@ -71,6 +73,8 @@ pub struct OpenAiDirectConfig {
 pub struct AnthropicDirectConfig {
     pub api_key: SecretString,
     pub model: String,
+    /// Optional base URL override (e.g. for proxies like VibeProxy).
+    pub base_url: Option<String>,
 }
 
 /// Configuration for local Ollama.
@@ -86,6 +90,9 @@ pub struct OpenAiCompatibleConfig {
     pub base_url: String,
     pub api_key: Option<SecretString>,
     pub model: String,
+    /// Extra HTTP headers injected into every LLM request.
+    /// Parsed from `LLM_EXTRA_HEADERS` env var (format: `Key:Value,Key2:Value2`).
+    pub extra_headers: Vec<(String, String)>,
 }
 
 /// Configuration for Tinfoil private inference.
@@ -117,34 +124,7 @@ pub struct LlmConfig {
     pub tinfoil: Option<TinfoilConfig>,
 }
 
-/// API mode for NEAR AI.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum NearAiApiMode {
-    /// Use the Responses API (chat-api proxy) - session-based auth
-    #[default]
-    Responses,
-    /// Use the Chat Completions API (cloud-api) - API key auth
-    ChatCompletions,
-}
-
-impl std::str::FromStr for NearAiApiMode {
-    type Err = String;
-
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        match s.to_lowercase().as_str() {
-            "responses" | "response" => Ok(Self::Responses),
-            "chat_completions" | "chatcompletions" | "chat" | "completions" => {
-                Ok(Self::ChatCompletions)
-            }
-            _ => Err(format!(
-                "invalid API mode '{}', expected 'responses' or 'chat_completions'",
-                s
-            )),
-        }
-    }
-}
-
-/// NEAR AI chat-api configuration.
+/// NEAR AI configuration.
 #[derive(Debug, Clone)]
 pub struct NearAiConfig {
     /// Model to use (e.g., "claude-3-5-sonnet-20241022", "gpt-4o")
@@ -152,15 +132,14 @@ pub struct NearAiConfig {
     /// Cheap/fast model for lightweight tasks (heartbeat, routing, evaluation).
     /// Falls back to the main model if not set.
     pub cheap_model: Option<String>,
-    /// Base URL for the NEAR AI API (default: https://private.near.ai).
+    /// Base URL for the NEAR AI API.
+    /// Default: `https://private.near.ai` (session token) or `https://cloud-api.near.ai` (API key)
     pub base_url: String,
     /// Base URL for auth/refresh endpoints (default: https://private.near.ai)
     pub auth_base_url: String,
     /// Path to session file (default: ~/.ironclaw/session.json)
     pub session_path: PathBuf,
-    /// API mode: "responses" (chat-api) or "chat_completions" (cloud-api)
-    pub api_mode: NearAiApiMode,
-    /// API key for cloud-api (required for chat_completions mode)
+    /// API key for NEAR AI Cloud. When set, uses API key auth; otherwise uses session token auth.
     pub api_key: Option<SecretString>,
     /// Optional fallback model for failover (default: None).
     /// When set, a secondary provider is created with this model and wrapped
@@ -191,6 +170,10 @@ pub struct NearAiConfig {
     /// Number of consecutive retryable failures before a provider enters
     /// cooldown (default: 3).
     pub failover_cooldown_threshold: u32,
+    /// Enable cascade mode for smart routing: when a moderate-complexity task
+    /// gets an uncertain response from the cheap model, re-send to primary.
+    /// Default: true.
+    pub smart_routing_cascade: bool,
 }
 
 impl LlmConfig {
@@ -220,17 +203,6 @@ impl LlmConfig {
         // Resolve NEAR AI config only when backend is NearAi (or when explicitly configured)
         let nearai_api_key = optional_env("NEARAI_API_KEY")?.map(SecretString::from);
 
-        let api_mode = if let Some(mode_str) = optional_env("NEARAI_API_MODE")? {
-            mode_str.parse().map_err(|e| ConfigError::InvalidValue {
-                key: "NEARAI_API_MODE".to_string(),
-                message: e,
-            })?
-        } else if nearai_api_key.is_some() {
-            NearAiApiMode::ChatCompletions
-        } else {
-            NearAiApiMode::Responses
-        };
-
         let nearai = NearAiConfig {
             model: optional_env("NEARAI_MODEL")?
                 .or_else(|| settings.selected_model.clone())
@@ -239,14 +211,18 @@ impl LlmConfig {
                         .to_string()
                 }),
             cheap_model: optional_env("NEARAI_CHEAP_MODEL")?,
-            base_url: optional_env("NEARAI_BASE_URL")?
-                .unwrap_or_else(|| "https://private.near.ai".to_string()),
+            base_url: optional_env("NEARAI_BASE_URL")?.unwrap_or_else(|| {
+                if nearai_api_key.is_some() {
+                    "https://cloud-api.near.ai".to_string()
+                } else {
+                    "https://private.near.ai".to_string()
+                }
+            }),
             auth_base_url: optional_env("NEARAI_AUTH_URL")?
                 .unwrap_or_else(|| "https://private.near.ai".to_string()),
             session_path: optional_env("NEARAI_SESSION_PATH")?
                 .map(PathBuf::from)
                 .unwrap_or_else(default_session_path),
-            api_mode,
             api_key: nearai_api_key,
             fallback_model: optional_env("NEARAI_FALLBACK_MODEL")?,
             max_retries: parse_optional_env("NEARAI_MAX_RETRIES", 3)?,
@@ -263,6 +239,7 @@ impl LlmConfig {
             response_cache_max_entries: parse_optional_env("RESPONSE_CACHE_MAX_ENTRIES", 1000)?,
             failover_cooldown_secs: parse_optional_env("LLM_FAILOVER_COOLDOWN_SECS", 300)?,
             failover_cooldown_threshold: parse_optional_env("LLM_FAILOVER_THRESHOLD", 3)?,
+            smart_routing_cascade: parse_optional_env("SMART_ROUTING_CASCADE", true)?,
         };
 
         // Resolve provider-specific configs based on backend
@@ -274,7 +251,12 @@ impl LlmConfig {
                     hint: "Set OPENAI_API_KEY when LLM_BACKEND=openai".to_string(),
                 })?;
             let model = optional_env("OPENAI_MODEL")?.unwrap_or_else(|| "gpt-4o".to_string());
-            Some(OpenAiDirectConfig { api_key, model })
+            let base_url = optional_env("OPENAI_BASE_URL")?;
+            Some(OpenAiDirectConfig {
+                api_key,
+                model,
+                base_url,
+            })
         } else {
             None
         };
@@ -288,7 +270,12 @@ impl LlmConfig {
                 })?;
             let model = optional_env("ANTHROPIC_MODEL")?
                 .unwrap_or_else(|| "claude-sonnet-4-20250514".to_string());
-            Some(AnthropicDirectConfig { api_key, model })
+            let base_url = optional_env("ANTHROPIC_BASE_URL")?;
+            Some(AnthropicDirectConfig {
+                api_key,
+                model,
+                base_url,
+            })
         } else {
             None
         };
@@ -314,10 +301,15 @@ impl LlmConfig {
             let model = optional_env("LLM_MODEL")?
                 .or_else(|| settings.selected_model.clone())
                 .unwrap_or_else(|| "default".to_string());
+            let extra_headers = optional_env("LLM_EXTRA_HEADERS")?
+                .map(|val| parse_extra_headers(&val))
+                .transpose()?
+                .unwrap_or_default();
             Some(OpenAiCompatibleConfig {
                 base_url,
                 api_key,
                 model,
+                extra_headers,
             })
         } else {
             None
@@ -348,6 +340,40 @@ impl LlmConfig {
     }
 }
 
+/// Parse `LLM_EXTRA_HEADERS` value into a list of (key, value) pairs.
+///
+/// Format: `Key1:Value1,Key2:Value2` — colon-separated key:value, comma-separated pairs.
+/// Colon is used as the separator (not `=`) because header values often contain `=`
+/// (e.g., base64 tokens).
+fn parse_extra_headers(val: &str) -> Result<Vec<(String, String)>, ConfigError> {
+    if val.trim().is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let mut headers = Vec::new();
+    for pair in val.split(',') {
+        let pair = pair.trim();
+        if pair.is_empty() {
+            continue;
+        }
+        let Some((key, value)) = pair.split_once(':') else {
+            return Err(ConfigError::InvalidValue {
+                key: "LLM_EXTRA_HEADERS".to_string(),
+                message: format!("malformed header entry '{}', expected Key:Value", pair),
+            });
+        };
+        let key = key.trim();
+        if key.is_empty() {
+            return Err(ConfigError::InvalidValue {
+                key: "LLM_EXTRA_HEADERS".to_string(),
+                message: format!("empty header name in entry '{}'", pair),
+            });
+        }
+        headers.push((key.to_string(), value.trim().to_string()));
+    }
+    Ok(headers)
+}
+
 /// Get the default session file path (~/.ironclaw/session.json).
 fn default_session_path() -> PathBuf {
     dirs::home_dir()
@@ -359,11 +385,8 @@ fn default_session_path() -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::helpers::ENV_MUTEX;
     use crate::settings::Settings;
-    use std::sync::Mutex;
-
-    /// Serializes env-mutating tests to prevent parallel races.
-    static ENV_MUTEX: Mutex<()> = Mutex::new(());
 
     /// Clear all openai-compatible-related env vars.
     fn clear_openai_compatible_env() {
@@ -422,5 +445,70 @@ mod tests {
         unsafe {
             std::env::remove_var("LLM_MODEL");
         }
+    }
+
+    #[test]
+    fn test_extra_headers_parsed() {
+        let result = parse_extra_headers("HTTP-Referer:https://myapp.com,X-Title:MyApp").unwrap();
+        assert_eq!(
+            result,
+            vec![
+                ("HTTP-Referer".to_string(), "https://myapp.com".to_string()),
+                ("X-Title".to_string(), "MyApp".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn test_extra_headers_empty_string() {
+        let result = parse_extra_headers("").unwrap();
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn test_extra_headers_whitespace_only() {
+        let result = parse_extra_headers("  ").unwrap();
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn test_extra_headers_malformed() {
+        let result = parse_extra_headers("NoColonHere");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_extra_headers_empty_key() {
+        let result = parse_extra_headers(":value");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_extra_headers_value_with_colons() {
+        // Values can contain colons (e.g., URLs)
+        let result = parse_extra_headers("Authorization:Bearer abc:def").unwrap();
+        assert_eq!(
+            result,
+            vec![("Authorization".to_string(), "Bearer abc:def".to_string())]
+        );
+    }
+
+    #[test]
+    fn test_extra_headers_trailing_comma() {
+        let result = parse_extra_headers("X-Title:MyApp,").unwrap();
+        assert_eq!(result, vec![("X-Title".to_string(), "MyApp".to_string())]);
+    }
+
+    #[test]
+    fn test_extra_headers_with_spaces() {
+        let result =
+            parse_extra_headers(" HTTP-Referer : https://myapp.com , X-Title : MyApp ").unwrap();
+        assert_eq!(
+            result,
+            vec![
+                ("HTTP-Referer".to_string(), "https://myapp.com".to_string()),
+                ("X-Title".to_string(), "MyApp".to_string()),
+            ]
+        );
     }
 }

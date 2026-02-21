@@ -26,6 +26,8 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+use crate::error::RoutineError;
+
 /// A routine is a named, persistent, user-owned task with a trigger and an action.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Routine {
@@ -86,13 +88,16 @@ impl Trigger {
     }
 
     /// Parse a trigger from its DB representation.
-    pub fn from_db(trigger_type: &str, config: serde_json::Value) -> Result<Self, String> {
+    pub fn from_db(trigger_type: &str, config: serde_json::Value) -> Result<Self, RoutineError> {
         match trigger_type {
             "cron" => {
                 let schedule = config
                     .get("schedule")
                     .and_then(|v| v.as_str())
-                    .ok_or("cron trigger missing 'schedule'")?
+                    .ok_or_else(|| RoutineError::MissingField {
+                        context: "cron trigger".into(),
+                        field: "schedule".into(),
+                    })?
                     .to_string();
                 Ok(Trigger::Cron { schedule })
             }
@@ -100,7 +105,10 @@ impl Trigger {
                 let pattern = config
                     .get("pattern")
                     .and_then(|v| v.as_str())
-                    .ok_or("event trigger missing 'pattern'")?
+                    .ok_or_else(|| RoutineError::MissingField {
+                        context: "event trigger".into(),
+                        field: "pattern".into(),
+                    })?
                     .to_string();
                 let channel = config
                     .get("channel")
@@ -120,7 +128,9 @@ impl Trigger {
                 Ok(Trigger::Webhook { path, secret })
             }
             "manual" => Ok(Trigger::Manual),
-            other => Err(format!("unknown trigger type: {other}")),
+            other => Err(RoutineError::UnknownTriggerType {
+                trigger_type: other.to_string(),
+            }),
         }
     }
 
@@ -186,13 +196,16 @@ impl RoutineAction {
     }
 
     /// Parse an action from its DB representation.
-    pub fn from_db(action_type: &str, config: serde_json::Value) -> Result<Self, String> {
+    pub fn from_db(action_type: &str, config: serde_json::Value) -> Result<Self, RoutineError> {
         match action_type {
             "lightweight" => {
                 let prompt = config
                     .get("prompt")
                     .and_then(|v| v.as_str())
-                    .ok_or("lightweight action missing 'prompt'")?
+                    .ok_or_else(|| RoutineError::MissingField {
+                        context: "lightweight action".into(),
+                        field: "prompt".into(),
+                    })?
                     .to_string();
                 let context_paths = config
                     .get("context_paths")
@@ -217,12 +230,18 @@ impl RoutineAction {
                 let title = config
                     .get("title")
                     .and_then(|v| v.as_str())
-                    .ok_or("full_job action missing 'title'")?
+                    .ok_or_else(|| RoutineError::MissingField {
+                        context: "full_job action".into(),
+                        field: "title".into(),
+                    })?
                     .to_string();
                 let description = config
                     .get("description")
                     .and_then(|v| v.as_str())
-                    .ok_or("full_job action missing 'description'")?
+                    .ok_or_else(|| RoutineError::MissingField {
+                        context: "full_job action".into(),
+                        field: "description".into(),
+                    })?
                     .to_string();
                 let max_iterations = config
                     .get("max_iterations")
@@ -235,7 +254,9 @@ impl RoutineAction {
                     max_iterations,
                 })
             }
-            other => Err(format!("unknown action type: {other}")),
+            other => Err(RoutineError::UnknownActionType {
+                action_type: other.to_string(),
+            }),
         }
     }
 
@@ -334,14 +355,16 @@ impl std::fmt::Display for RunStatus {
 }
 
 impl FromStr for RunStatus {
-    type Err = String;
+    type Err = RoutineError;
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s {
             "running" => Ok(RunStatus::Running),
             "ok" => Ok(RunStatus::Ok),
             "attention" => Ok(RunStatus::Attention),
             "failed" => Ok(RunStatus::Failed),
-            other => Err(format!("unknown run status: {other}")),
+            other => Err(RoutineError::UnknownRunStatus {
+                status: other.to_string(),
+            }),
         }
     }
 }
@@ -370,9 +393,11 @@ pub fn content_hash(content: &str) -> u64 {
 }
 
 /// Parse a cron expression and compute the next fire time from now.
-pub fn next_cron_fire(schedule: &str) -> Result<Option<DateTime<Utc>>, String> {
+pub fn next_cron_fire(schedule: &str) -> Result<Option<DateTime<Utc>>, RoutineError> {
     let cron_schedule =
-        cron::Schedule::from_str(schedule).map_err(|e| format!("invalid cron: {e}"))?;
+        cron::Schedule::from_str(schedule).map_err(|e| RoutineError::InvalidCron {
+            reason: e.to_string(),
+        })?;
     Ok(cron_schedule.upcoming(Utc).next())
 }
 

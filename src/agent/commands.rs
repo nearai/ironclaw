@@ -13,7 +13,7 @@ use crate::agent::submission::SubmissionResult;
 use crate::agent::{Agent, MessageIntent};
 use crate::channels::{IncomingMessage, StatusUpdate};
 use crate::error::Error;
-use crate::llm::ChatMessage;
+use crate::llm::{ChatMessage, Reasoning};
 
 impl Agent {
     /// Handle job-related intents without turn tracking.
@@ -232,8 +232,10 @@ impl Agent {
 
         let runner = crate::agent::HeartbeatRunner::new(
             crate::agent::HeartbeatConfig::default(),
+            crate::workspace::hygiene::HygieneConfig::default(),
             workspace.clone(),
             self.llm().clone(),
+            self.safety().clone(),
         );
 
         match runner.check_heartbeat().await {
@@ -294,10 +296,11 @@ impl Agent {
             .with_max_tokens(512)
             .with_temperature(0.3);
 
-        match self.llm().complete(request).await {
-            Ok(response) => Ok(SubmissionResult::response(format!(
+        let reasoning = Reasoning::new(self.llm().clone(), self.safety().clone());
+        match reasoning.complete(request).await {
+            Ok((text, _usage)) => Ok(SubmissionResult::response(format!(
                 "Thread Summary:\n\n{}",
-                response.content.trim()
+                text.trim()
             ))),
             Err(e) => Ok(SubmissionResult::error(format!("Summarize failed: {}", e))),
         }
@@ -341,10 +344,11 @@ impl Agent {
             .with_max_tokens(512)
             .with_temperature(0.5);
 
-        match self.llm().complete(request).await {
-            Ok(response) => Ok(SubmissionResult::response(format!(
+        let reasoning = Reasoning::new(self.llm().clone(), self.safety().clone());
+        match reasoning.complete(request).await {
+            Ok((text, _usage)) => Ok(SubmissionResult::response(format!(
                 "Suggested Next Steps:\n\n{}",
-                response.content.trim()
+                text.trim()
             ))),
             Err(e) => Ok(SubmissionResult::error(format!("Suggest failed: {}", e))),
         }

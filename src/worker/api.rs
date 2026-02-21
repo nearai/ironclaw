@@ -40,6 +40,7 @@ pub struct JobDescription {
 #[derive(Debug, Serialize, Deserialize)]
 pub struct ProxyCompletionRequest {
     pub messages: Vec<ChatMessage>,
+    pub model: Option<String>,
     pub max_tokens: Option<u32>,
     pub temperature: Option<f32>,
     pub stop_sequences: Option<Vec<String>>,
@@ -57,6 +58,7 @@ pub struct ProxyCompletionResponse {
 pub struct ProxyToolCompletionRequest {
     pub messages: Vec<ChatMessage>,
     pub tools: Vec<ToolDefinition>,
+    pub model: Option<String>,
     pub max_tokens: Option<u32>,
     pub temperature: Option<f32>,
     pub tool_choice: Option<String>,
@@ -210,6 +212,7 @@ impl WorkerHttpClient {
     ) -> Result<CompletionResponse, WorkerError> {
         let proxy_req = ProxyCompletionRequest {
             messages: request.messages.clone(),
+            model: request.model.clone(),
             max_tokens: request.max_tokens,
             temperature: request.temperature,
             stop_sequences: request.stop_sequences.clone(),
@@ -224,7 +227,6 @@ impl WorkerHttpClient {
             input_tokens: proxy_resp.input_tokens,
             output_tokens: proxy_resp.output_tokens,
             finish_reason: parse_finish_reason(&proxy_resp.finish_reason),
-            response_id: None,
         })
     }
 
@@ -236,6 +238,7 @@ impl WorkerHttpClient {
         let proxy_req = ProxyToolCompletionRequest {
             messages: request.messages.clone(),
             tools: request.tools.clone(),
+            model: request.model.clone(),
             max_tokens: request.max_tokens,
             temperature: request.temperature,
             tool_choice: request.tool_choice.clone(),
@@ -251,7 +254,6 @@ impl WorkerHttpClient {
             input_tokens: proxy_resp.input_tokens,
             output_tokens: proxy_resp.output_tokens,
             finish_reason: parse_finish_reason(&proxy_resp.finish_reason),
-            response_id: None,
         })
     }
 

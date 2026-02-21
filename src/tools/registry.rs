@@ -24,8 +24,8 @@ use crate::tools::builtin::{
 };
 use crate::tools::tool::{Tool, ToolDomain};
 use crate::tools::wasm::{
-    Capabilities, OAuthRefreshConfig, ResourceLimits, WasmError, WasmStorageError, WasmToolRuntime,
-    WasmToolStore, WasmToolWrapper,
+    Capabilities, OAuthRefreshConfig, ResourceLimits, SharedCredentialRegistry, WasmError,
+    WasmStorageError, WasmToolRuntime, WasmToolStore, WasmToolWrapper,
 };
 use crate::workspace::Workspace;
 
@@ -73,6 +73,10 @@ pub struct ToolRegistry {
     tools: RwLock<HashMap<String, Arc<dyn Tool>>>,
     /// Tracks which names were registered as built-in (protected from shadowing).
     builtin_names: RwLock<std::collections::HashSet<String>>,
+    /// Shared credential registry populated by WASM tools, consumed by HTTP tool.
+    credential_registry: Option<Arc<SharedCredentialRegistry>>,
+    /// Secrets store for credential injection (shared with HTTP tool).
+    secrets_store: Option<Arc<dyn SecretsStore + Send + Sync>>,
 }
 
 impl ToolRegistry {
@@ -81,7 +85,25 @@ impl ToolRegistry {
         Self {
             tools: RwLock::new(HashMap::new()),
             builtin_names: RwLock::new(std::collections::HashSet::new()),
+            credential_registry: None,
+            secrets_store: None,
         }
+    }
+
+    /// Create a registry with credential injection support.
+    pub fn with_credentials(
+        mut self,
+        credential_registry: Arc<SharedCredentialRegistry>,
+        secrets_store: Arc<dyn SecretsStore + Send + Sync>,
+    ) -> Self {
+        self.credential_registry = Some(credential_registry);
+        self.secrets_store = Some(secrets_store);
+        self
+    }
+
+    /// Get a reference to the shared credential registry.
+    pub fn credential_registry(&self) -> Option<&Arc<SharedCredentialRegistry>> {
+        self.credential_registry.as_ref()
     }
 
     /// Register a tool. Rejects dynamic tools that try to shadow a built-in name.
@@ -176,7 +198,12 @@ impl ToolRegistry {
         self.register_sync(Arc::new(EchoTool));
         self.register_sync(Arc::new(TimeTool));
         self.register_sync(Arc::new(JsonTool));
-        self.register_sync(Arc::new(HttpTool::new()));
+
+        let mut http = HttpTool::new();
+        if let (Some(cr), Some(ss)) = (&self.credential_registry, &self.secrets_store) {
+            http = http.with_credentials(Arc::clone(cr), Arc::clone(ss));
+        }
+        self.register_sync(Arc::new(http));
 
         tracing::info!("Registered {} built-in tools", self.count());
     }
@@ -419,6 +446,14 @@ impl ToolRegistry {
             .prepare(reg.name, reg.wasm_bytes, reg.limits)
             .await?;
 
+        // Extract credential mappings before capabilities are moved into the wrapper
+        let credential_mappings: Vec<crate::secrets::CredentialMapping> = reg
+            .capabilities
+            .http
+            .as_ref()
+            .map(|http| http.credentials.values().cloned().collect())
+            .unwrap_or_default();
+
         // Create the wrapper
         let mut wrapper = WasmToolWrapper::new(Arc::clone(reg.runtime), prepared, reg.capabilities);
 
@@ -438,6 +473,19 @@ impl ToolRegistry {
 
         // Register the tool
         self.register(Arc::new(wrapper)).await;
+
+        // Add credential mappings to the shared registry (for HTTP tool injection)
+        if let Some(cr) = &self.credential_registry
+            && !credential_mappings.is_empty()
+        {
+            let count = credential_mappings.len();
+            cr.add_mappings(credential_mappings);
+            tracing::debug!(
+                name = reg.name,
+                credential_count = count,
+                "Added credential mappings from WASM tool"
+            );
+        }
 
         tracing::info!(name = reg.name, "Registered WASM tool");
         Ok(())

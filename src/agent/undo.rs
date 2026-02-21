@@ -67,6 +67,7 @@ impl UndoManager {
     }
 
     /// Create with a custom checkpoint limit.
+    #[cfg(test)]
     pub fn with_max_checkpoints(mut self, max: usize) -> Self {
         self.max_checkpoints = max;
         self
@@ -126,6 +127,7 @@ impl UndoManager {
     }
 
     /// Pop the last checkpoint from the undo stack.
+    #[cfg(test)]
     pub fn pop_undo(&mut self) -> Option<Checkpoint> {
         self.undo_stack.pop_back()
     }
@@ -178,6 +180,7 @@ impl UndoManager {
     }
 
     /// Get a checkpoint by ID.
+    #[cfg(test)]
     pub fn get_checkpoint(&self, id: Uuid) -> Option<&Checkpoint> {
         self.undo_stack
             .iter()
@@ -186,6 +189,7 @@ impl UndoManager {
     }
 
     /// List all available checkpoints (for UI display).
+    #[cfg(test)]
     pub fn list_checkpoints(&self) -> Vec<&Checkpoint> {
         self.undo_stack.iter().collect()
     }

@@ -62,6 +62,18 @@ pub fn builtin_credentials(secret_name: &str) -> Option<OAuthCredentials> {
 /// `http://localhost:9876/callback` (or `/auth/callback` for NEAR AI).
 pub const OAUTH_CALLBACK_PORT: u16 = 9876;
 
+/// Returns the OAuth callback base URL.
+///
+/// Checks `IRONCLAW_OAUTH_CALLBACK_URL` env var first (useful for remote/VPS
+/// deployments where `127.0.0.1` is unreachable from the user's browser),
+/// then falls back to `http://127.0.0.1:{OAUTH_CALLBACK_PORT}`.
+pub fn callback_url() -> String {
+    std::env::var("IRONCLAW_OAUTH_CALLBACK_URL")
+        .ok()
+        .filter(|v| !v.is_empty())
+        .unwrap_or_else(|| format!("http://127.0.0.1:{}", OAUTH_CALLBACK_PORT))
+}
+
 /// Error from the OAuth callback listener.
 #[derive(Debug, thiserror::Error)]
 pub enum OAuthCallbackError {
@@ -297,7 +309,54 @@ pub fn landing_html(provider_name: &str, success: bool) -> String {
 
 #[cfg(test)]
 mod tests {
-    use crate::cli::oauth_defaults::{builtin_credentials, landing_html};
+    use std::sync::Mutex;
+
+    use crate::cli::oauth_defaults::{builtin_credentials, callback_url, landing_html};
+
+    /// Serializes env-mutating tests to prevent parallel races.
+    static ENV_MUTEX: Mutex<()> = Mutex::new(());
+
+    #[test]
+    fn test_callback_url_default() {
+        let _guard = ENV_MUTEX.lock().expect("env mutex poisoned");
+        // Clear the env var to test default behavior
+        let original = std::env::var("IRONCLAW_OAUTH_CALLBACK_URL").ok();
+        // SAFETY: Under ENV_MUTEX, no concurrent env access.
+        unsafe {
+            std::env::remove_var("IRONCLAW_OAUTH_CALLBACK_URL");
+        }
+        let url = callback_url();
+        assert_eq!(url, "http://127.0.0.1:9876");
+        // Restore
+        unsafe {
+            if let Some(val) = original {
+                std::env::set_var("IRONCLAW_OAUTH_CALLBACK_URL", val);
+            }
+        }
+    }
+
+    #[test]
+    fn test_callback_url_env_override() {
+        let _guard = ENV_MUTEX.lock().expect("env mutex poisoned");
+        let original = std::env::var("IRONCLAW_OAUTH_CALLBACK_URL").ok();
+        // SAFETY: Under ENV_MUTEX, no concurrent env access.
+        unsafe {
+            std::env::set_var(
+                "IRONCLAW_OAUTH_CALLBACK_URL",
+                "https://myserver.example.com:9876",
+            );
+        }
+        let url = callback_url();
+        assert_eq!(url, "https://myserver.example.com:9876");
+        // Restore
+        unsafe {
+            if let Some(val) = original {
+                std::env::set_var("IRONCLAW_OAUTH_CALLBACK_URL", val);
+            } else {
+                std::env::remove_var("IRONCLAW_OAUTH_CALLBACK_URL");
+            }
+        }
+    }
 
     #[test]
     fn test_unknown_provider_returns_none() {

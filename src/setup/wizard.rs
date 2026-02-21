@@ -7,7 +7,8 @@
 //! 4. Model selection
 //! 5. Embeddings
 //! 6. Channel configuration
-//! 7. Heartbeat (background tasks)
+//! 7. Extensions (tool installation from registry)
+//! 8. Heartbeat (background tasks)
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -124,23 +125,43 @@ impl SetupWizard {
     }
 
     /// Run the setup wizard.
+    ///
+    /// Settings are persisted incrementally after each successful step so
+    /// that progress is not lost if a later step fails. On re-run, existing
+    /// settings are loaded from the database after Step 1 establishes a
+    /// connection, so users don't have to re-enter everything.
     pub async fn run(&mut self) -> Result<(), SetupError> {
         print_header("IronClaw Setup Wizard");
 
         if self.config.channels_only {
-            // Channels-only mode: just step 6
+            // Channels-only mode: reconnect to existing DB and load settings
+            // before running the channel step, so secrets and save work.
+            self.reconnect_existing_db().await?;
             print_step(1, 1, "Channel Configuration");
             self.step_channels().await?;
         } else {
-            let total_steps = 7;
+            let total_steps = 8;
 
             // Step 1: Database
             print_step(1, total_steps, "Database Connection");
             self.step_database().await?;
 
+            // After establishing a DB connection, load any previously saved
+            // settings so we recover progress from prior partial runs.
+            // We must load BEFORE persisting, otherwise persist_after_step()
+            // would overwrite prior settings with defaults.
+            // Save Step 1 choices first so they aren't clobbered by stale
+            // DB values (merge_from only applies non-default fields).
+            let step1_settings = self.settings.clone();
+            self.try_load_existing_settings().await;
+            self.settings.merge_from(&step1_settings);
+
+            self.persist_after_step().await;
+
             // Step 2: Security
             print_step(2, total_steps, "Security");
             self.step_security().await?;
+            self.persist_after_step().await;
 
             // Step 3: Inference provider selection (unless skipped)
             if !self.config.skip_auth {
@@ -149,26 +170,128 @@ impl SetupWizard {
             } else {
                 print_info("Skipping inference provider setup (using existing config)");
             }
+            self.persist_after_step().await;
 
             // Step 4: Model selection
             print_step(4, total_steps, "Model Selection");
             self.step_model_selection().await?;
+            self.persist_after_step().await;
 
             // Step 5: Embeddings
             print_step(5, total_steps, "Embeddings (Semantic Search)");
             self.step_embeddings()?;
+            self.persist_after_step().await;
 
             // Step 6: Channel configuration
             print_step(6, total_steps, "Channel Configuration");
             self.step_channels().await?;
+            self.persist_after_step().await;
 
-            // Step 7: Heartbeat
-            print_step(7, total_steps, "Background Tasks");
+            // Step 7: Extensions (tools)
+            print_step(7, total_steps, "Extensions");
+            self.step_extensions().await?;
+
+            // Step 8: Heartbeat
+            print_step(8, total_steps, "Background Tasks");
             self.step_heartbeat()?;
+            self.persist_after_step().await;
         }
 
         // Save settings and print summary
         self.save_and_summarize().await?;
+
+        Ok(())
+    }
+
+    /// Reconnect to the existing database and load settings.
+    ///
+    /// Used by channels-only mode (and future single-step modes) so that
+    /// `init_secrets_context()` and `save_and_summarize()` have a live
+    /// database connection and the wizard's `self.settings` reflects the
+    /// previously saved configuration.
+    async fn reconnect_existing_db(&mut self) -> Result<(), SetupError> {
+        // Determine backend from env (set by bootstrap .env loaded in main).
+        let backend = std::env::var("DATABASE_BACKEND").unwrap_or_else(|_| "postgres".to_string());
+
+        // Try libsql first if that's the configured backend.
+        #[cfg(feature = "libsql")]
+        if backend == "libsql" || backend == "turso" || backend == "sqlite" {
+            return self.reconnect_libsql().await;
+        }
+
+        // Try postgres (either explicitly configured or as default).
+        #[cfg(feature = "postgres")]
+        {
+            let _ = &backend;
+            return self.reconnect_postgres().await;
+        }
+
+        #[allow(unreachable_code)]
+        Err(SetupError::Database(
+            "No database configured. Run full setup first (ironclaw onboard).".to_string(),
+        ))
+    }
+
+    /// Reconnect to an existing PostgreSQL database and load settings.
+    #[cfg(feature = "postgres")]
+    async fn reconnect_postgres(&mut self) -> Result<(), SetupError> {
+        let url = std::env::var("DATABASE_URL").map_err(|_| {
+            SetupError::Database(
+                "DATABASE_URL not set. Run full setup first (ironclaw onboard).".to_string(),
+            )
+        })?;
+
+        self.test_database_connection_postgres(&url).await?;
+        self.settings.database_backend = Some("postgres".to_string());
+        self.settings.database_url = Some(url.clone());
+
+        // Load existing settings from DB, then restore connection fields that
+        // may not be persisted in the settings map.
+        if let Some(ref pool) = self.db_pool {
+            let store = crate::history::Store::from_pool(pool.clone());
+            if let Ok(map) = store.get_all_settings("default").await {
+                self.settings = Settings::from_db_map(&map);
+                self.settings.database_backend = Some("postgres".to_string());
+                self.settings.database_url = Some(url);
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Reconnect to an existing libSQL database and load settings.
+    #[cfg(feature = "libsql")]
+    async fn reconnect_libsql(&mut self) -> Result<(), SetupError> {
+        let path = std::env::var("LIBSQL_PATH").unwrap_or_else(|_| {
+            crate::config::default_libsql_path()
+                .to_string_lossy()
+                .to_string()
+        });
+        let turso_url = std::env::var("LIBSQL_URL").ok();
+        let turso_token = std::env::var("LIBSQL_AUTH_TOKEN").ok();
+
+        self.test_database_connection_libsql(&path, turso_url.as_deref(), turso_token.as_deref())
+            .await?;
+
+        self.settings.database_backend = Some("libsql".to_string());
+        self.settings.libsql_path = Some(path.clone());
+        if let Some(ref url) = turso_url {
+            self.settings.libsql_url = Some(url.clone());
+        }
+
+        // Load existing settings from DB, then restore connection fields that
+        // may not be persisted in the settings map.
+        if let Some(ref db) = self.db_backend {
+            use crate::db::SettingsStore as _;
+            if let Ok(map) = db.get_all_settings("default").await {
+                self.settings = Settings::from_db_map(&map);
+                self.settings.database_backend = Some("libsql".to_string());
+                self.settings.libsql_path = Some(path);
+                if let Some(url) = turso_url {
+                    self.settings.libsql_url = Some(url);
+                }
+            }
+        }
 
         Ok(())
     }
@@ -702,6 +825,26 @@ impl SetupWizard {
             .map_err(|e| SetupError::Auth(e.to_string()))?;
 
         self.session_manager = Some(session);
+
+        // Persist session token to the database so the runtime can load it
+        // via `attach_store()` → `load_session_from_db()` without the
+        // backwards-compat fallback. The session manager saved to disk but
+        // doesn't have a DB store attached during onboarding.
+        self.persist_session_to_db().await;
+
+        // If the user chose the API key path, NEARAI_API_KEY is now set
+        // in the environment. Persist it to the encrypted secrets store
+        // so inject_llm_keys_from_secrets() can load it on future runs.
+        if let Ok(api_key) = std::env::var("NEARAI_API_KEY")
+            && !api_key.is_empty()
+            && let Ok(ctx) = self.init_secrets_context().await
+        {
+            let key = SecretString::from(api_key);
+            if let Err(e) = ctx.save_secret("llm_nearai_api_key", &key).await {
+                tracing::warn!("Failed to persist NEARAI_API_KEY to secrets: {}", e);
+            }
+        }
+
         print_success("NEAR AI configured");
         Ok(())
     }
@@ -949,6 +1092,11 @@ impl SetupWizard {
                         "anthropic::claude-sonnet-4-20250514".into(),
                         "Claude Sonnet 4 (best quality)".into(),
                     ),
+                    (
+                        "openai::gpt-5.3-codex".into(),
+                        "GPT-5.3 Codex (flagship)".into(),
+                    ),
+                    ("openai::gpt-5.2".into(), "GPT-5.2".into()),
                     ("openai::gpt-4o".into(), "GPT-4o".into()),
                 ];
 
@@ -1018,7 +1166,6 @@ impl SetupWizard {
                 base_url,
                 auth_base_url,
                 session_path: crate::llm::session::default_session_path(),
-                api_mode: crate::config::NearAiApiMode::Responses,
                 api_key: None,
                 fallback_model: None,
                 max_retries: 3,
@@ -1029,6 +1176,7 @@ impl SetupWizard {
                 response_cache_max_entries: 1000,
                 failover_cooldown_secs: 300,
                 failover_cooldown_threshold: 3,
+                smart_routing_cascade: true,
             },
             openai: None,
             anthropic: None,
@@ -1279,7 +1427,9 @@ impl SetupWizard {
             .iter()
             .map(|(name, _)| name.clone())
             .collect();
-        let wasm_channel_names = wasm_channel_option_names(&discovered_channels);
+
+        // Build channel list from registry (if available) + bundled + discovered
+        let wasm_channel_names = build_channel_options(&discovered_channels);
 
         // Build options list dynamically
         let mut options: Vec<(String, bool)> = vec![
@@ -1290,11 +1440,15 @@ impl SetupWizard {
             ),
         ];
 
-        // Add available WASM channels (installed + bundled)
+        // Add available WASM channels (installed + bundled + registry)
         for name in &wasm_channel_names {
             let is_enabled = self.settings.channels.wasm_channels.contains(name);
-            let display_name = format!("{} (WASM)", capitalize_first(name));
-            options.push((display_name, is_enabled));
+            let label = if installed_names.contains(name) {
+                format!("{} (installed)", capitalize_first(name))
+            } else {
+                format!("{} (will install)", capitalize_first(name))
+            };
+            options.push((label, is_enabled));
         }
 
         let options_refs: Vec<(&str, bool)> =
@@ -1315,6 +1469,10 @@ impl SetupWizard {
             })
             .collect();
 
+        // Install selected channels that aren't already on disk
+        let mut any_installed = false;
+
+        // Try bundled channels first (pre-compiled artifacts from channels-src/)
         if let Some(installed) = install_selected_bundled_channels(
             &channels_dir,
             &selected_wasm_channels,
@@ -1323,7 +1481,31 @@ impl SetupWizard {
         .await?
             && !installed.is_empty()
         {
-            print_success(&format!("Installed channels: {}", installed.join(", ")));
+            print_success(&format!(
+                "Installed bundled channels: {}",
+                installed.join(", ")
+            ));
+            any_installed = true;
+        }
+
+        // Then try registry channels (build from source for any still missing)
+        let installed_from_registry = install_selected_registry_channels(
+            &channels_dir,
+            &selected_wasm_channels,
+            &installed_names,
+        )
+        .await;
+
+        if !installed_from_registry.is_empty() {
+            print_success(&format!(
+                "Built from registry: {}",
+                installed_from_registry.join(", ")
+            ));
+            any_installed = true;
+        }
+
+        // Re-discover after installs
+        if any_installed {
             discovered_channels = discover_wasm_channels(&channels_dir).await;
         }
 
@@ -1414,7 +1596,134 @@ impl SetupWizard {
         Ok(())
     }
 
-    /// Step 7: Heartbeat configuration.
+    /// Step 7: Extensions (tools) installation from registry.
+    async fn step_extensions(&mut self) -> Result<(), SetupError> {
+        let catalog = match load_registry_catalog() {
+            Some(c) => c,
+            None => {
+                print_info("Extension registry not found. Skipping tool installation.");
+                print_info("Install tools manually with: ironclaw tool install <path>");
+                return Ok(());
+            }
+        };
+
+        let tools: Vec<_> = catalog
+            .list(Some(crate::registry::manifest::ManifestKind::Tool), None)
+            .into_iter()
+            .cloned()
+            .collect();
+
+        if tools.is_empty() {
+            print_info("No tools found in registry.");
+            return Ok(());
+        }
+
+        print_info("Available tools from the extension registry:");
+        print_info("Select which tools to install. You can install more later with:");
+        print_info("  ironclaw registry install <name>");
+        println!();
+
+        // Check which tools are already installed
+        let tools_dir = dirs::home_dir()
+            .ok_or_else(|| SetupError::Config("Could not determine home directory".into()))?
+            .join(".ironclaw/tools");
+
+        let installed_tools = discover_installed_tools(&tools_dir).await;
+
+        // Build options: show display_name + description, pre-check "default" tagged + already installed
+        let mut options: Vec<(String, bool)> = Vec::new();
+        for tool in &tools {
+            let is_installed = installed_tools.contains(&tool.name);
+            let is_default = tool.tags.contains(&"default".to_string());
+            let status = if is_installed { " (installed)" } else { "" };
+            let auth_hint = tool
+                .auth_summary
+                .as_ref()
+                .and_then(|a| a.method.as_deref())
+                .map(|m| format!(" [{}]", m))
+                .unwrap_or_default();
+
+            let label = format!(
+                "{}{}{} - {}",
+                tool.display_name, auth_hint, status, tool.description
+            );
+            options.push((label, is_default || is_installed));
+        }
+
+        let options_refs: Vec<(&str, bool)> =
+            options.iter().map(|(s, b)| (s.as_str(), *b)).collect();
+
+        let selected = select_many("Which tools do you want to install?", &options_refs)
+            .map_err(SetupError::Io)?;
+
+        if selected.is_empty() {
+            print_info("No tools selected.");
+            return Ok(());
+        }
+
+        // Install selected tools that aren't already on disk
+        let repo_root = catalog.root().parent().unwrap_or(catalog.root());
+        let installer = crate::registry::installer::RegistryInstaller::new(
+            repo_root.to_path_buf(),
+            tools_dir.clone(),
+            dirs::home_dir()
+                .unwrap_or_default()
+                .join(".ironclaw/channels"),
+        );
+
+        let mut installed_count = 0;
+        let mut auth_needed: Vec<String> = Vec::new();
+
+        for idx in &selected {
+            let tool = &tools[*idx];
+            if installed_tools.contains(&tool.name) {
+                continue; // Already installed, skip
+            }
+
+            match installer.install_from_source(tool, false).await {
+                Ok(outcome) => {
+                    print_success(&format!("Installed {}", outcome.name));
+                    installed_count += 1;
+
+                    // Track auth needs
+                    if let Some(auth) = &tool.auth_summary
+                        && auth.method.as_deref() != Some("none")
+                        && auth.method.is_some()
+                    {
+                        let provider = auth.provider.as_deref().unwrap_or(&tool.name);
+                        // Only mention unique providers (Google tools share auth)
+                        let hint = format!("  {} - ironclaw tool auth {}", provider, tool.name);
+                        if !auth_needed
+                            .iter()
+                            .any(|h| h.starts_with(&format!("  {} -", provider)))
+                        {
+                            auth_needed.push(hint);
+                        }
+                    }
+                }
+                Err(e) => {
+                    print_error(&format!("Failed to install {}: {}", tool.display_name, e));
+                }
+            }
+        }
+
+        if installed_count > 0 {
+            println!();
+            print_success(&format!("{} tool(s) installed.", installed_count));
+        }
+
+        if !auth_needed.is_empty() {
+            println!();
+            print_info("Some tools need authentication. Run after setup:");
+            for hint in &auth_needed {
+                print_info(hint);
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Step 8: Heartbeat configuration.
     fn step_heartbeat(&mut self) -> Result<(), SetupError> {
         print_info("Heartbeat runs periodic background tasks (e.g., checking your calendar,");
         print_info("monitoring for notifications, running scheduled workflows).");
@@ -1453,106 +1762,259 @@ impl SetupWizard {
         Ok(())
     }
 
+    /// Persist current settings to the database.
+    ///
+    /// Returns `Ok(true)` if settings were saved, `Ok(false)` if no database
+    /// connection is available yet (e.g., before Step 1 completes).
+    async fn persist_settings(&self) -> Result<bool, SetupError> {
+        let db_map = self.settings.to_db_map();
+        let saved = false;
+
+        #[cfg(feature = "postgres")]
+        let saved = if !saved {
+            if let Some(ref pool) = self.db_pool {
+                let store = crate::history::Store::from_pool(pool.clone());
+                store
+                    .set_all_settings("default", &db_map)
+                    .await
+                    .map_err(|e| {
+                        SetupError::Database(format!("Failed to save settings to database: {}", e))
+                    })?;
+                true
+            } else {
+                false
+            }
+        } else {
+            saved
+        };
+
+        #[cfg(feature = "libsql")]
+        let saved = if !saved {
+            if let Some(ref backend) = self.db_backend {
+                use crate::db::SettingsStore as _;
+                backend
+                    .set_all_settings("default", &db_map)
+                    .await
+                    .map_err(|e| {
+                        SetupError::Database(format!("Failed to save settings to database: {}", e))
+                    })?;
+                true
+            } else {
+                false
+            }
+        } else {
+            saved
+        };
+
+        Ok(saved)
+    }
+
+    /// Write bootstrap environment variables to `~/.ironclaw/.env`.
+    ///
+    /// These are the chicken-and-egg settings needed before the database is
+    /// connected (DATABASE_BACKEND, DATABASE_URL, LLM_BACKEND, etc.).
+    fn write_bootstrap_env(&self) -> Result<(), SetupError> {
+        let mut env_vars: Vec<(&str, String)> = Vec::new();
+
+        if let Some(ref backend) = self.settings.database_backend {
+            env_vars.push(("DATABASE_BACKEND", backend.clone()));
+        }
+        if let Some(ref url) = self.settings.database_url {
+            env_vars.push(("DATABASE_URL", url.clone()));
+        }
+        if let Some(ref path) = self.settings.libsql_path {
+            env_vars.push(("LIBSQL_PATH", path.clone()));
+        }
+        if let Some(ref url) = self.settings.libsql_url {
+            env_vars.push(("LIBSQL_URL", url.clone()));
+        }
+
+        // LLM bootstrap vars: same chicken-and-egg problem as DATABASE_BACKEND.
+        // Config::from_env() needs the backend before the DB is connected.
+        if let Some(ref backend) = self.settings.llm_backend {
+            env_vars.push(("LLM_BACKEND", backend.clone()));
+        }
+        if let Some(ref url) = self.settings.openai_compatible_base_url {
+            env_vars.push(("LLM_BASE_URL", url.clone()));
+        }
+        if let Some(ref url) = self.settings.ollama_base_url {
+            env_vars.push(("OLLAMA_BASE_URL", url.clone()));
+        }
+
+        // Preserve NEARAI_API_KEY if present (set by API key auth flow)
+        if let Ok(api_key) = std::env::var("NEARAI_API_KEY")
+            && !api_key.is_empty()
+        {
+            env_vars.push(("NEARAI_API_KEY", api_key));
+        }
+
+        // Always write ONBOARD_COMPLETED so that check_onboard_needed()
+        // (which runs before the DB is connected) knows to skip re-onboarding.
+        if self.settings.onboard_completed {
+            env_vars.push(("ONBOARD_COMPLETED", "true".to_string()));
+        }
+
+        if !env_vars.is_empty() {
+            let pairs: Vec<(&str, &str)> = env_vars.iter().map(|(k, v)| (*k, v.as_str())).collect();
+            crate::bootstrap::save_bootstrap_env(&pairs).map_err(|e| {
+                SetupError::Io(std::io::Error::other(format!(
+                    "Failed to save bootstrap env to .env: {}",
+                    e
+                )))
+            })?;
+        }
+
+        Ok(())
+    }
+
+    /// Persist the NEAR AI session token to the database.
+    ///
+    /// The session manager writes to disk during `ensure_authenticated()` but
+    /// doesn't have a DB store attached during onboarding. This reads the
+    /// session file from disk and stores it under the `nearai.session_token`
+    /// key so the runtime's `attach_store()` finds it without fallback.
+    ///
+    /// Best-effort: silently ignores errors (no DB connection yet, no
+    /// session file, etc.).
+    async fn persist_session_to_db(&self) {
+        let session_path = crate::llm::session::default_session_path();
+        let data = match std::fs::read_to_string(&session_path) {
+            Ok(d) if !d.trim().is_empty() => d,
+            _ => return,
+        };
+        let value: serde_json::Value = match serde_json::from_str(&data) {
+            Ok(v) => v,
+            Err(_) => return,
+        };
+
+        #[cfg(feature = "postgres")]
+        if let Some(ref pool) = self.db_pool {
+            let store = crate::history::Store::from_pool(pool.clone());
+            if let Err(e) = store
+                .set_setting("default", "nearai.session_token", &value)
+                .await
+            {
+                tracing::debug!("Could not persist session token to postgres: {}", e);
+            } else {
+                tracing::debug!("Session token persisted to database");
+                return;
+            }
+        }
+
+        #[cfg(feature = "libsql")]
+        if let Some(ref backend) = self.db_backend {
+            use crate::db::SettingsStore as _;
+            if let Err(e) = backend
+                .set_setting("default", "nearai.session_token", &value)
+                .await
+            {
+                tracing::debug!("Could not persist session token to libsql: {}", e);
+            } else {
+                tracing::debug!("Session token persisted to database");
+            }
+        }
+    }
+
+    /// Persist settings to DB and bootstrap .env after each step.
+    ///
+    /// Silently ignores errors (e.g., DB not connected yet before step 1
+    /// completes). This is best-effort incremental persistence.
+    async fn persist_after_step(&self) {
+        // Write bootstrap .env (always possible)
+        if let Err(e) = self.write_bootstrap_env() {
+            tracing::debug!("Could not write bootstrap env after step: {}", e);
+        }
+
+        // Persist to DB
+        match self.persist_settings().await {
+            Ok(true) => tracing::debug!("Settings persisted to database after step"),
+            Ok(false) => tracing::debug!("No DB connection yet, skipping settings persist"),
+            Err(e) => tracing::debug!("Could not persist settings after step: {}", e),
+        }
+    }
+
+    /// Load previously saved settings from the database after Step 1
+    /// establishes a connection.
+    ///
+    /// This enables recovery from partial onboarding runs: if the user
+    /// completed steps 1-4 previously but step 5 failed, re-running
+    /// the wizard will pre-populate settings from the database.
+    ///
+    /// **Callers must re-apply any wizard choices made before this call**
+    /// via `self.settings.merge_from(&step_settings)`, since `merge_from`
+    /// prefers the `other` argument's non-default values. Without this,
+    /// stale DB values would overwrite fresh user choices.
+    async fn try_load_existing_settings(&mut self) {
+        let loaded = false;
+
+        #[cfg(feature = "postgres")]
+        let loaded = if !loaded {
+            if let Some(ref pool) = self.db_pool {
+                let store = crate::history::Store::from_pool(pool.clone());
+                match store.get_all_settings("default").await {
+                    Ok(db_map) if !db_map.is_empty() => {
+                        let existing = Settings::from_db_map(&db_map);
+                        self.settings.merge_from(&existing);
+                        tracing::info!("Loaded {} existing settings from database", db_map.len());
+                        true
+                    }
+                    Ok(_) => false,
+                    Err(e) => {
+                        tracing::debug!("Could not load existing settings: {}", e);
+                        false
+                    }
+                }
+            } else {
+                false
+            }
+        } else {
+            loaded
+        };
+
+        #[cfg(feature = "libsql")]
+        let loaded = if !loaded {
+            if let Some(ref backend) = self.db_backend {
+                use crate::db::SettingsStore as _;
+                match backend.get_all_settings("default").await {
+                    Ok(db_map) if !db_map.is_empty() => {
+                        let existing = Settings::from_db_map(&db_map);
+                        self.settings.merge_from(&existing);
+                        tracing::info!("Loaded {} existing settings from database", db_map.len());
+                        true
+                    }
+                    Ok(_) => false,
+                    Err(e) => {
+                        tracing::debug!("Could not load existing settings: {}", e);
+                        false
+                    }
+                }
+            } else {
+                false
+            }
+        } else {
+            loaded
+        };
+
+        // Suppress unused variable warning when only one backend is compiled.
+        let _ = loaded;
+    }
+
     /// Save settings to the database and `~/.ironclaw/.env`, then print summary.
     async fn save_and_summarize(&mut self) -> Result<(), SetupError> {
         self.settings.onboard_completed = true;
 
-        // Write all settings to the database (whichever backend is active).
-        {
-            let db_map = self.settings.to_db_map();
-            let saved = false;
+        // Final persist (idempotent — earlier incremental saves already wrote
+        // most settings, but this ensures onboard_completed is saved).
+        let saved = self.persist_settings().await?;
 
-            #[cfg(feature = "postgres")]
-            let saved = if !saved {
-                if let Some(ref pool) = self.db_pool {
-                    let store = crate::history::Store::from_pool(pool.clone());
-                    store
-                        .set_all_settings("default", &db_map)
-                        .await
-                        .map_err(|e| {
-                            SetupError::Database(format!(
-                                "Failed to save settings to database: {}",
-                                e
-                            ))
-                        })?;
-                    true
-                } else {
-                    false
-                }
-            } else {
-                saved
-            };
-
-            #[cfg(feature = "libsql")]
-            let saved = if !saved {
-                if let Some(ref backend) = self.db_backend {
-                    use crate::db::SettingsStore as _;
-                    backend
-                        .set_all_settings("default", &db_map)
-                        .await
-                        .map_err(|e| {
-                            SetupError::Database(format!(
-                                "Failed to save settings to database: {}",
-                                e
-                            ))
-                        })?;
-                    true
-                } else {
-                    false
-                }
-            } else {
-                saved
-            };
-
-            if !saved {
-                return Err(SetupError::Database(
-                    "No database connection, cannot save settings".to_string(),
-                ));
-            }
+        if !saved {
+            return Err(SetupError::Database(
+                "No database connection, cannot save settings".to_string(),
+            ));
         }
 
-        // Persist database bootstrap vars to ~/.ironclaw/.env.
-        // These are the chicken-and-egg settings: we need them to decide
-        // which database to connect to, so they can't live in the database.
-        {
-            let mut env_vars: Vec<(&str, String)> = Vec::new();
-
-            if let Some(ref backend) = self.settings.database_backend {
-                env_vars.push(("DATABASE_BACKEND", backend.clone()));
-            }
-            if let Some(ref url) = self.settings.database_url {
-                env_vars.push(("DATABASE_URL", url.clone()));
-            }
-            if let Some(ref path) = self.settings.libsql_path {
-                env_vars.push(("LIBSQL_PATH", path.clone()));
-            }
-            if let Some(ref url) = self.settings.libsql_url {
-                env_vars.push(("LIBSQL_URL", url.clone()));
-            }
-
-            // LLM bootstrap vars: same chicken-and-egg problem as DATABASE_BACKEND.
-            // Config::from_env() needs the backend before the DB is connected.
-            if let Some(ref backend) = self.settings.llm_backend {
-                env_vars.push(("LLM_BACKEND", backend.clone()));
-            }
-            if let Some(ref url) = self.settings.openai_compatible_base_url {
-                env_vars.push(("LLM_BASE_URL", url.clone()));
-            }
-            if let Some(ref url) = self.settings.ollama_base_url {
-                env_vars.push(("OLLAMA_BASE_URL", url.clone()));
-            }
-
-            if !env_vars.is_empty() {
-                let pairs: Vec<(&str, &str)> =
-                    env_vars.iter().map(|(k, v)| (*k, v.as_str())).collect();
-                crate::bootstrap::save_bootstrap_env(&pairs).map_err(|e| {
-                    SetupError::Io(std::io::Error::other(format!(
-                        "Failed to save bootstrap env to .env: {}",
-                        e
-                    )))
-                })?;
-            }
-        }
+        // Write bootstrap env (also idempotent)
+        self.write_bootstrap_env()?;
 
         println!();
         print_success("Configuration saved to database");
@@ -1710,12 +2172,14 @@ fn mask_password_in_url(url: &str) -> String {
 /// Returns `(model_id, display_label)` pairs. Falls back to static defaults on error.
 async fn fetch_anthropic_models(cached_key: Option<&str>) -> Vec<(String, String)> {
     let static_defaults = vec![
-        ("claude-sonnet-4-20250514".into(), "Claude Sonnet 4".into()),
-        ("claude-opus-4-20250514".into(), "Claude Opus 4".into()),
         (
-            "claude-3-5-haiku-20241022".into(),
-            "Claude 3.5 Haiku (fast)".into(),
+            "claude-opus-4-6".into(),
+            "Claude Opus 4.6 (latest flagship)".into(),
         ),
+        ("claude-sonnet-4-6".into(), "Claude Sonnet 4.6".into()),
+        ("claude-opus-4-5".into(), "Claude Opus 4.5".into()),
+        ("claude-sonnet-4-5".into(), "Claude Sonnet 4.5".into()),
+        ("claude-haiku-4-5".into(), "Claude Haiku 4.5 (fast)".into()),
     ];
 
     let api_key = cached_key
@@ -1776,10 +2240,21 @@ async fn fetch_anthropic_models(cached_key: Option<&str>) -> Vec<(String, String
 /// Returns `(model_id, display_label)` pairs. Falls back to static defaults on error.
 async fn fetch_openai_models(cached_key: Option<&str>) -> Vec<(String, String)> {
     let static_defaults = vec![
-        ("gpt-5".into(), "GPT-5 (flagship)".into()),
-        ("gpt-5-mini".into(), "GPT-5 Mini (fast)".into()),
+        (
+            "gpt-5.3-codex".into(),
+            "GPT-5.3 Codex (latest flagship)".into(),
+        ),
+        ("gpt-5.2-codex".into(), "GPT-5.2 Codex".into()),
+        ("gpt-5.2".into(), "GPT-5.2".into()),
+        (
+            "gpt-5.1-codex-mini".into(),
+            "GPT-5.1 Codex Mini (fast)".into(),
+        ),
+        ("gpt-5".into(), "GPT-5".into()),
+        ("gpt-5-mini".into(), "GPT-5 Mini".into()),
         ("gpt-4.1".into(), "GPT-4.1".into()),
-        ("gpt-4o".into(), "GPT-4o".into()),
+        ("gpt-4.1-mini".into(), "GPT-4.1 Mini".into()),
+        ("o4-mini".into(), "o4-mini (fast reasoning)".into()),
         ("o3".into(), "o3 (reasoning)".into()),
     ];
 
@@ -1860,11 +2335,15 @@ fn openai_model_priority(model_id: &str) -> usize {
     let id = model_id.to_ascii_lowercase();
 
     const EXACT_PRIORITY: &[&str] = &[
+        "gpt-5.3-codex",
+        "gpt-5.2-codex",
+        "gpt-5.2",
+        "gpt-5.1-codex-mini",
         "gpt-5",
         "gpt-5-mini",
         "gpt-5-nano",
-        "o3",
         "o4-mini",
+        "o3",
         "o1",
         "gpt-4.1",
         "gpt-4.1-mini",
@@ -1876,7 +2355,7 @@ fn openai_model_priority(model_id: &str) -> usize {
     }
 
     const PREFIX_PRIORITY: &[&str] = &[
-        "gpt-5-", "o3-", "o4-", "o1-", "gpt-4.1-", "gpt-4o-", "gpt-3.5-", "chatgpt-",
+        "gpt-5.", "gpt-5-", "o3-", "o4-", "o1-", "gpt-4.1-", "gpt-4o-", "gpt-3.5-", "chatgpt-",
     ];
     if let Some(pos) = PREFIX_PRIORITY
         .iter()
@@ -2061,12 +2540,128 @@ async fn install_missing_bundled_channels(
     Ok(installed)
 }
 
-fn wasm_channel_option_names(discovered: &[(String, ChannelCapabilitiesFile)]) -> Vec<String> {
+/// Build channel options from discovered channels + bundled + registry catalog.
+///
+/// Returns a deduplicated, sorted list of channel names available for selection.
+fn build_channel_options(discovered: &[(String, ChannelCapabilitiesFile)]) -> Vec<String> {
     let mut names: Vec<String> = discovered.iter().map(|(name, _)| name.clone()).collect();
 
+    // Add bundled channels
     for bundled in available_channel_names().iter().copied() {
         if !names.iter().any(|name| name == bundled) {
             names.push(bundled.to_string());
+        }
+    }
+
+    // Add registry channels
+    if let Some(catalog) = load_registry_catalog() {
+        for manifest in catalog.list(Some(crate::registry::manifest::ManifestKind::Channel), None) {
+            if !names.iter().any(|n| n == &manifest.name) {
+                names.push(manifest.name.clone());
+            }
+        }
+    }
+
+    names.sort();
+    names
+}
+
+/// Try to load the registry catalog. Falls back to embedded manifests when
+/// the `registry/` directory cannot be found (e.g. running from an installed binary).
+fn load_registry_catalog() -> Option<crate::registry::catalog::RegistryCatalog> {
+    crate::registry::catalog::RegistryCatalog::load_or_embedded().ok()
+}
+
+/// Install selected channels from the registry that aren't already on disk
+/// and weren't handled by the bundled installer.
+///
+/// This builds channels from source using `cargo component build`.
+async fn install_selected_registry_channels(
+    channels_dir: &std::path::Path,
+    selected_channels: &[String],
+    already_installed: &HashSet<String>,
+) -> Vec<String> {
+    let catalog = match load_registry_catalog() {
+        Some(c) => c,
+        None => return Vec::new(),
+    };
+
+    let repo_root = catalog
+        .root()
+        .parent()
+        .unwrap_or(catalog.root())
+        .to_path_buf();
+
+    let bundled: HashSet<&str> = available_channel_names().iter().copied().collect();
+    let mut installed = Vec::new();
+
+    for name in selected_channels {
+        // Skip if already installed or handled by bundled installer
+        if already_installed.contains(name) || bundled.contains(name.as_str()) {
+            continue;
+        }
+
+        // Check if already on disk (may have been installed between bundled and here)
+        let wasm_on_disk = channels_dir.join(format!("{}.wasm", name)).exists()
+            || channels_dir.join(format!("{}-channel.wasm", name)).exists();
+        if wasm_on_disk {
+            continue;
+        }
+
+        // Look up in registry
+        let manifest = match catalog.get(&format!("channels/{}", name)) {
+            Some(m) => m,
+            None => continue,
+        };
+
+        let installer = crate::registry::installer::RegistryInstaller::new(
+            repo_root.clone(),
+            dirs::home_dir().unwrap_or_default().join(".ironclaw/tools"),
+            channels_dir.to_path_buf(),
+        );
+
+        match installer.install_from_source(manifest, false).await {
+            Ok(_) => {
+                installed.push(name.clone());
+            }
+            Err(e) => {
+                tracing::warn!(
+                    channel = %name,
+                    error = %e,
+                    "Failed to install channel from registry"
+                );
+                crate::setup::prompts::print_error(&format!(
+                    "Failed to install channel '{}': {}",
+                    name, e
+                ));
+            }
+        }
+    }
+
+    installed
+}
+
+/// Discover which tools are already installed in the tools directory.
+///
+/// Returns a set of tool names (the stem of .wasm files).
+async fn discover_installed_tools(tools_dir: &std::path::Path) -> HashSet<String> {
+    let mut names = HashSet::new();
+
+    if !tools_dir.is_dir() {
+        return names;
+    }
+
+    let mut entries = match tokio::fs::read_dir(tools_dir).await {
+        Ok(e) => e,
+        Err(_) => return names,
+    };
+
+    while let Ok(Some(entry)) = entries.next_entry().await {
+        let path = entry.path();
+        if path.extension().and_then(|e| e.to_str()) == Some("wasm")
+            && let Some(stem) = path.file_stem().and_then(|s| s.to_str())
+        {
+            names.insert(stem.to_string());
         }
     }
 
@@ -2183,9 +2778,9 @@ mod tests {
     }
 
     #[test]
-    fn test_wasm_channel_option_names_includes_available_when_missing() {
+    fn test_build_channel_options_includes_available_when_missing() {
         let discovered = Vec::new();
-        let options = wasm_channel_option_names(&discovered);
+        let options = build_channel_options(&discovered);
         let available = available_channel_names();
         // All available (built) channels should appear
         for name in &available {
@@ -2198,9 +2793,9 @@ mod tests {
     }
 
     #[test]
-    fn test_wasm_channel_option_names_dedupes_available() {
+    fn test_build_channel_options_dedupes_available() {
         let discovered = vec![(String::from("telegram"), ChannelCapabilitiesFile::default())];
-        let options = wasm_channel_option_names(&discovered);
+        let options = build_channel_options(&discovered);
         // telegram should appear exactly once despite being both discovered and available
         assert_eq!(
             options.iter().filter(|n| *n == "telegram").count(),
@@ -2226,7 +2821,7 @@ mod tests {
         let _guard = EnvGuard::clear("OPENAI_API_KEY");
         let models = fetch_openai_models(None).await;
         assert!(!models.is_empty());
-        assert_eq!(models[0].0, "gpt-5");
+        assert_eq!(models[0].0, "gpt-5.3-codex");
         assert!(
             models.iter().any(|(id, _)| id.contains("gpt")),
             "static defaults should include a GPT model"

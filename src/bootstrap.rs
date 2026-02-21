@@ -103,7 +103,67 @@ pub fn save_bootstrap_env(vars: &[(&str, &str)]) -> std::io::Result<()> {
         let escaped = value.replace('\\', "\\\\").replace('"', "\\\"");
         content.push_str(&format!("{}=\"{}\"\n", key, escaped));
     }
-    std::fs::write(&path, content)
+    std::fs::write(&path, &content)?;
+    restrict_file_permissions(&path)?;
+    Ok(())
+}
+
+/// Update or add a single variable in `~/.ironclaw/.env`, preserving existing content.
+///
+/// Unlike `save_bootstrap_env` (which overwrites the entire file), this
+/// reads the current `.env`, replaces the line for `key` if it exists,
+/// or appends it otherwise. Use this when writing a single bootstrap var
+/// outside the wizard (which manages the full set via `save_bootstrap_env`).
+pub fn upsert_bootstrap_var(key: &str, value: &str) -> std::io::Result<()> {
+    let path = ironclaw_env_path();
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+
+    let escaped = value.replace('\\', "\\\\").replace('"', "\\\"");
+    let new_line = format!("{}=\"{}\"", key, escaped);
+    let prefix = format!("{}=", key);
+
+    let existing = std::fs::read_to_string(&path).unwrap_or_default();
+
+    let mut found = false;
+    let mut result = String::new();
+    for line in existing.lines() {
+        if line.starts_with(&prefix) {
+            if !found {
+                result.push_str(&new_line);
+                result.push('\n');
+                found = true;
+            }
+            // Skip duplicate lines for this key
+            continue;
+        }
+        result.push_str(line);
+        result.push('\n');
+    }
+
+    if !found {
+        result.push_str(&new_line);
+        result.push('\n');
+    }
+
+    std::fs::write(&path, result)?;
+    restrict_file_permissions(&path)?;
+    Ok(())
+}
+
+/// Set restrictive file permissions (0o600) on Unix systems.
+///
+/// The `.env` file may contain database credentials and API keys,
+/// so it should only be readable by the owner.
+fn restrict_file_permissions(_path: &std::path::Path) -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let perms = std::fs::Permissions::from_mode(0o600);
+        std::fs::set_permissions(_path, perms)?;
+    }
+    Ok(())
 }
 
 /// Write `DATABASE_URL` to `~/.ironclaw/.env`.
@@ -491,5 +551,33 @@ INJECTED="pwned"#;
         // Old DATABASE_URL should be gone
         assert_eq!(parsed.len(), 2);
         assert!(parsed.iter().all(|(k, _)| k != "DATABASE_URL"));
+    }
+
+    #[test]
+    fn test_onboard_completed_round_trips_through_env() {
+        let dir = tempdir().unwrap();
+        let env_path = dir.path().join(".env");
+
+        // Simulate what the wizard writes: bootstrap vars + ONBOARD_COMPLETED
+        let vars = [
+            ("DATABASE_BACKEND", "libsql"),
+            ("ONBOARD_COMPLETED", "true"),
+        ];
+        let mut content = String::new();
+        for (key, value) in &vars {
+            let escaped = value.replace('\\', "\\\\").replace('"', "\\\"");
+            content.push_str(&format!("{}=\"{}\"\n", key, escaped));
+        }
+        std::fs::write(&env_path, &content).unwrap();
+
+        // Verify dotenvy parses ONBOARD_COMPLETED correctly
+        let parsed: Vec<(String, String)> = dotenvy::from_path_iter(&env_path)
+            .unwrap()
+            .filter_map(|r| r.ok())
+            .collect();
+        assert_eq!(parsed.len(), 2);
+        let onboard = parsed.iter().find(|(k, _)| k == "ONBOARD_COMPLETED");
+        assert!(onboard.is_some(), "ONBOARD_COMPLETED must be present");
+        assert_eq!(onboard.unwrap().1, "true");
     }
 }

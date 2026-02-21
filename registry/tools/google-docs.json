@@ -1,0 +1,31 @@
+{
+  "name": "google-docs",
+  "display_name": "Google Docs",
+  "kind": "tool",
+  "version": "0.1.0",
+  "description": "Create and edit Google Docs documents",
+  "keywords": ["documents", "google", "writing", "docs"],
+
+  "source": {
+    "dir": "tools-src/google-docs",
+    "capabilities": "google-docs-tool.capabilities.json",
+    "crate_name": "google-docs-tool"
+  },
+
+  "artifacts": {
+    "wasm32-wasip2": {
+      "url": "https://github.com/nearai/ironclaw/releases/latest/download/google-docs-wasm32-wasip2.tar.gz",
+      "sha256": null
+    }
+  },
+
+  "auth_summary": {
+    "method": "oauth",
+    "provider": "Google",
+    "secrets": ["google_oauth_token"],
+    "shared_auth": "google_oauth_token",
+    "setup_url": "https://console.cloud.google.com/apis/credentials"
+  },
+
+  "tags": ["google", "productivity"]
+}

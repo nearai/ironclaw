@@ -22,7 +22,7 @@ use crate::history::SandboxJobRecord;
 use crate::orchestrator::auth::CredentialGrant;
 use crate::orchestrator::job_manager::{ContainerJobManager, JobMode};
 use crate::secrets::SecretsStore;
-use crate::tools::tool::{Tool, ToolError, ToolOutput, require_str};
+use crate::tools::tool::{ApprovalRequirement, Tool, ToolError, ToolOutput, require_str};
 
 /// Resolve a job ID from a full UUID or a short prefix (like git short SHAs).
 ///
@@ -1005,8 +1005,8 @@ impl Tool for CancelJobTool {
         }
     }
 
-    fn requires_approval(&self) -> bool {
-        true // Canceling a job should require approval
+    fn requires_approval(&self, _params: &serde_json::Value) -> ApprovalRequirement {
+        ApprovalRequirement::UnlessAutoApproved
     }
 
     fn requires_sanitization(&self) -> bool {
@@ -1268,8 +1268,8 @@ impl Tool for JobPromptTool {
         Ok(ToolOutput::success(result, start.elapsed()))
     }
 
-    fn requires_approval(&self) -> bool {
-        true
+    fn requires_approval(&self, _params: &serde_json::Value) -> ApprovalRequirement {
+        ApprovalRequirement::UnlessAutoApproved
     }
 
     fn requires_sanitization(&self) -> bool {
@@ -1611,10 +1611,14 @@ mod tests {
 
     #[tokio::test]
     async fn test_job_prompt_tool_requires_approval() {
+        use crate::tools::tool::ApprovalRequirement;
         let queue: PromptQueue =
             Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new()));
         let tool = test_prompt_tool(queue);
-        assert!(tool.requires_approval());
+        assert_eq!(
+            tool.requires_approval(&serde_json::json!({})),
+            ApprovalRequirement::UnlessAutoApproved
+        );
     }
 
     #[tokio::test]

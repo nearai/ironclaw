@@ -118,19 +118,19 @@ impl SubmissionParser {
         // Approval responses (simple yes/no/always for pending approvals)
         // These are short enough to check explicitly
         match lower.as_str() {
-            "yes" | "y" | "approve" | "ok" => {
+            "yes" | "y" | "approve" | "ok" | "/approve" | "/yes" | "/y" => {
                 return Submission::ApprovalResponse {
                     approved: true,
                     always: false,
                 };
             }
-            "always" | "yes always" | "approve always" => {
+            "always" | "a" | "yes always" | "approve always" | "/always" | "/a" => {
                 return Submission::ApprovalResponse {
                     approved: true,
                     always: true,
                 };
             }
-            "no" | "n" | "deny" | "reject" | "cancel" => {
+            "no" | "n" | "deny" | "reject" | "cancel" | "/deny" | "/no" | "/n" => {
                 return Submission::ApprovalResponse {
                     approved: false,
                     always: false,
@@ -234,6 +234,7 @@ impl Submission {
     }
 
     /// Create an approval submission.
+    #[cfg(test)]
     pub fn approval(request_id: Uuid, approved: bool) -> Self {
         Self::ExecApproval {
             request_id,
@@ -243,6 +244,7 @@ impl Submission {
     }
 
     /// Create an "always approve" submission.
+    #[cfg(test)]
     pub fn always_approve(request_id: Uuid) -> Self {
         Self::ExecApproval {
             request_id,
@@ -252,26 +254,31 @@ impl Submission {
     }
 
     /// Create an interrupt submission.
+    #[cfg(test)]
     pub fn interrupt() -> Self {
         Self::Interrupt
     }
 
     /// Create a compact submission.
+    #[cfg(test)]
     pub fn compact() -> Self {
         Self::Compact
     }
 
     /// Create an undo submission.
+    #[cfg(test)]
     pub fn undo() -> Self {
         Self::Undo
     }
 
     /// Create a redo submission.
+    #[cfg(test)]
     pub fn redo() -> Self {
         Self::Redo
     }
 
     /// Check if this submission starts a new turn.
+    #[cfg(test)]
     pub fn starts_turn(&self) -> bool {
         matches!(self, Self::UserInput { .. })
     }
@@ -340,6 +347,7 @@ impl SubmissionResult {
     }
 
     /// Create an OK result.
+    #[cfg(test)]
     pub fn ok() -> Self {
         Self::Ok { message: None }
     }
@@ -473,6 +481,57 @@ mod tests {
         // Unknown command should become user input
         let submission = SubmissionParser::parse("/unknown");
         assert!(matches!(submission, Submission::UserInput { content } if content == "/unknown"));
+    }
+
+    #[test]
+    fn test_parser_approval_response_aliases() {
+        // approve once
+        assert!(matches!(
+            SubmissionParser::parse("y"),
+            Submission::ApprovalResponse {
+                approved: true,
+                always: false
+            }
+        ));
+        assert!(matches!(
+            SubmissionParser::parse("/approve"),
+            Submission::ApprovalResponse {
+                approved: true,
+                always: false
+            }
+        ));
+
+        // approve always
+        assert!(matches!(
+            SubmissionParser::parse("a"),
+            Submission::ApprovalResponse {
+                approved: true,
+                always: true
+            }
+        ));
+        assert!(matches!(
+            SubmissionParser::parse("/always"),
+            Submission::ApprovalResponse {
+                approved: true,
+                always: true
+            }
+        ));
+
+        // deny
+        assert!(matches!(
+            SubmissionParser::parse("n"),
+            Submission::ApprovalResponse {
+                approved: false,
+                always: false
+            }
+        ));
+        assert!(matches!(
+            SubmissionParser::parse("/deny"),
+            Submission::ApprovalResponse {
+                approved: false,
+                always: false
+            }
+        ));
     }
 
     #[test]

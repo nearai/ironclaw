@@ -1,0 +1,31 @@
+{
+  "name": "github",
+  "display_name": "GitHub",
+  "kind": "tool",
+  "version": "0.1.0",
+  "description": "GitHub integration for issues, PRs, repos, and code search",
+  "keywords": ["git", "code", "issues", "pull-requests", "repositories"],
+
+  "source": {
+    "dir": "tools-src/github",
+    "capabilities": "github-tool.capabilities.json",
+    "crate_name": "github-tool"
+  },
+
+  "artifacts": {
+    "wasm32-wasip2": {
+      "url": "https://github.com/nearai/ironclaw/releases/latest/download/github-wasm32-wasip2.tar.gz",
+      "sha256": null
+    }
+  },
+
+  "auth_summary": {
+    "method": "manual",
+    "provider": "GitHub",
+    "secrets": ["github_token"],
+    "shared_auth": null,
+    "setup_url": "https://github.com/settings/tokens"
+  },
+
+  "tags": ["default", "development"]
+}

@@ -29,8 +29,10 @@ use std::time::Duration;
 use tokio::sync::mpsc;
 
 use crate::channels::OutgoingResponse;
-use crate::llm::{ChatMessage, CompletionRequest, FinishReason, LlmProvider};
+use crate::llm::{ChatMessage, CompletionRequest, LlmProvider, Reasoning};
+use crate::safety::SafetyLayer;
 use crate::workspace::Workspace;
+use crate::workspace::hygiene::HygieneConfig;
 
 /// Configuration for the heartbeat runner.
 #[derive(Debug, Clone)]
@@ -96,8 +98,10 @@ pub enum HeartbeatResult {
 /// Heartbeat runner for proactive periodic execution.
 pub struct HeartbeatRunner {
     config: HeartbeatConfig,
+    hygiene_config: HygieneConfig,
     workspace: Arc<Workspace>,
     llm: Arc<dyn LlmProvider>,
+    safety: Arc<SafetyLayer>,
     response_tx: Option<mpsc::Sender<OutgoingResponse>>,
     consecutive_failures: u32,
 }
@@ -106,13 +110,17 @@ impl HeartbeatRunner {
     /// Create a new heartbeat runner.
     pub fn new(
         config: HeartbeatConfig,
+        hygiene_config: HygieneConfig,
         workspace: Arc<Workspace>,
         llm: Arc<dyn LlmProvider>,
+        safety: Arc<SafetyLayer>,
     ) -> Self {
         Self {
             config,
+            hygiene_config,
             workspace,
             llm,
+            safety,
             response_tx: None,
             consecutive_failures: 0,
         }
@@ -144,6 +152,22 @@ impl HeartbeatRunner {
 
         loop {
             interval.tick().await;
+
+            // Run memory hygiene in the background so it never delays the
+            // heartbeat checklist. Failures are logged inside run_if_due.
+            let hygiene_workspace = Arc::clone(&self.workspace);
+            let hygiene_config = self.hygiene_config.clone();
+            tokio::spawn(async move {
+                let report =
+                    crate::workspace::hygiene::run_if_due(&hygiene_workspace, &hygiene_config)
+                        .await;
+                if report.had_work() {
+                    tracing::info!(
+                        daily_logs_deleted = report.daily_logs_deleted,
+                        "heartbeat: memory hygiene deleted stale documents"
+                    );
+                }
+            });
 
             match self.check_heartbeat().await {
                 HeartbeatResult::Ok => {
@@ -238,25 +262,18 @@ impl HeartbeatRunner {
             .with_max_tokens(max_tokens)
             .with_temperature(0.3);
 
-        let response = match self.llm.complete(request).await {
+        let reasoning = Reasoning::new(self.llm.clone(), self.safety.clone());
+        let (content, _usage) = match reasoning.complete(request).await {
             Ok(r) => r,
             Err(e) => return HeartbeatResult::Failed(format!("LLM call failed: {}", e)),
         };
 
-        let content = response.content.trim();
+        let content = content.trim();
 
         // Guard against empty content. Reasoning models (e.g. GLM-4.7) may
         // burn all output tokens on chain-of-thought and return content: null.
         if content.is_empty() {
-            return if response.finish_reason == FinishReason::Length {
-                HeartbeatResult::Failed(
-                    "LLM response was truncated (finish_reason=length) with no content. \
-                     The model may have exhausted its token budget on reasoning."
-                        .to_string(),
-                )
-            } else {
-                HeartbeatResult::Failed("LLM returned empty content.".to_string())
-            };
+            return HeartbeatResult::Failed("LLM returned empty content.".to_string());
         }
 
         // Check if nothing needs attention
@@ -332,11 +349,13 @@ fn strip_html_comments(content: &str) -> String {
 /// Returns a handle that can be used to stop the runner.
 pub fn spawn_heartbeat(
     config: HeartbeatConfig,
+    hygiene_config: HygieneConfig,
     workspace: Arc<Workspace>,
     llm: Arc<dyn LlmProvider>,
+    safety: Arc<SafetyLayer>,
     response_tx: Option<mpsc::Sender<OutgoingResponse>>,
 ) -> tokio::task::JoinHandle<()> {
-    let mut runner = HeartbeatRunner::new(config, workspace, llm);
+    let mut runner = HeartbeatRunner::new(config, hygiene_config, workspace, llm, safety);
     if let Some(tx) = response_tx {
         runner = runner.with_response_channel(tx);
     }

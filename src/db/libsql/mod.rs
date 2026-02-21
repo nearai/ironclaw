@@ -320,10 +320,10 @@ pub(crate) fn row_to_routine_libsql(row: &libsql::Row) -> Result<Routine, Databa
     let max_concurrent = get_i64(row, 10);
     let dedup_window_secs: Option<i64> = row.get::<i64>(11).ok();
 
-    let trigger =
-        Trigger::from_db(&trigger_type, trigger_config).map_err(DatabaseError::Serialization)?;
+    let trigger = Trigger::from_db(&trigger_type, trigger_config)
+        .map_err(|e| DatabaseError::Serialization(e.to_string()))?;
     let action = RoutineAction::from_db(&action_type, action_config)
-        .map_err(DatabaseError::Serialization)?;
+        .map_err(|e| DatabaseError::Serialization(e.to_string()))?;
 
     Ok(Routine {
         id: get_text(row, 0).parse().unwrap_or_default(),
@@ -359,7 +359,7 @@ pub(crate) fn row_to_routine_run_libsql(row: &libsql::Row) -> Result<RoutineRun,
     let status_str = get_text(row, 5);
     let status: RunStatus = status_str
         .parse()
-        .map_err(|e: String| DatabaseError::Serialization(e))?;
+        .map_err(|e: crate::error::RoutineError| DatabaseError::Serialization(e.to_string()))?;
 
     Ok(RoutineRun {
         id: get_text(row, 0).parse().unwrap_or_default(),

@@ -123,7 +123,11 @@ impl CircuitBreakerProvider {
                         );
                         Ok(())
                     } else {
-                        let remaining = self.config.recovery_timeout - opened_at.elapsed();
+                        let remaining = self
+                            .config
+                            .recovery_timeout
+                            .checked_sub(opened_at.elapsed())
+                            .unwrap_or(Duration::ZERO);
                         Err(LlmError::RequestFailed {
                             provider: self.inner.model_name().to_string(),
                             reason: format!(
@@ -208,8 +212,16 @@ impl CircuitBreakerProvider {
 /// Returns `true` for errors that indicate the provider is degraded
 /// (server errors, rate limits, network failures, auth infrastructure down).
 ///
-/// Client errors (wrong model, bad credentials, context overflow) are NOT
-/// transient: they are the caller's problem, not a sign of backend trouble.
+/// This answers: "should this error count toward tripping the circuit breaker?"
+///
+/// Includes `SessionExpired` because repeated session failures signal backend
+/// auth infrastructure trouble.
+///
+/// Excludes client errors that are the caller's problem, not backend trouble:
+/// `AuthFailed`, `ContextLengthExceeded`, `ModelNotAvailable`, `Json`.
+///
+/// See also `retry::is_retryable()` which answers a different question:
+/// "could retrying this exact request succeed?"
 fn is_transient(err: &LlmError) -> bool {
     matches!(
         err,
@@ -219,7 +231,6 @@ fn is_transient(err: &LlmError) -> bool {
             | LlmError::SessionExpired { .. }
             | LlmError::SessionRenewalFailed { .. }
             | LlmError::Http(_)
-            | LlmError::Json(_)
             | LlmError::Io(_)
     )
 }
@@ -273,20 +284,16 @@ impl LlmProvider for CircuitBreakerProvider {
         self.inner.model_metadata().await
     }
 
+    fn effective_model_name(&self, requested_model: Option<&str>) -> String {
+        self.inner.effective_model_name(requested_model)
+    }
+
     fn active_model_name(&self) -> String {
         self.inner.active_model_name()
     }
 
     fn set_model(&self, model: &str) -> Result<(), LlmError> {
         self.inner.set_model(model)
-    }
-
-    fn seed_response_chain(&self, thread_id: &str, response_id: String) {
-        self.inner.seed_response_chain(thread_id, response_id)
-    }
-
-    fn get_response_chain_id(&self, thread_id: &str) -> Option<String> {
-        self.inner.get_response_chain_id(thread_id)
     }
 
     fn calculate_cost(&self, input_tokens: u32, output_tokens: u32) -> Decimal {
@@ -543,6 +550,9 @@ mod tests {
             provider: "p".into(),
             model: "m".into(),
         }));
+        assert!(!is_transient(&LlmError::Json(
+            serde_json::from_str::<String>("bad").unwrap_err()
+        )));
     }
 
     // -- Passthrough delegation tests --
