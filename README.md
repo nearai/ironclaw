@@ -143,6 +143,23 @@ and secrets encryption (using your system keychain). Settings are persisted in t
 connected database; bootstrap variables (e.g. `DATABASE_URL`, `LLM_BACKEND`) are
 written to `~/.ironclaw/.env` so they are available before the database connects.
 
+### Alternative LLM Providers
+
+IronClaw defaults to NEAR AI but works with any OpenAI-compatible endpoint.
+Popular options include **OpenRouter** (300+ models), **Together AI**, **Fireworks AI**,
+**Ollama** (local), and self-hosted servers like **vLLM** or **LiteLLM**.
+
+Select *"OpenAI-compatible"* in the wizard, or set environment variables directly:
+
+```env
+LLM_BACKEND=openai_compatible
+LLM_BASE_URL=https://openrouter.ai/api/v1
+LLM_API_KEY=sk-or-...
+LLM_MODEL=anthropic/claude-sonnet-4
+```
+
+See [docs/LLM_PROVIDERS.md](docs/LLM_PROVIDERS.md) for a full provider guide.
+
 ## Security
 
 IronClaw implements defense in depth to protect your data and prevent misuse.
