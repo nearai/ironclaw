@@ -27,6 +27,49 @@ pub enum LlmBackend {
     Tinfoil,
 }
 
+/// Prompt cache retention policy for Anthropic.
+///
+/// Controls whether `cache_control` is injected into requests and the TTL.
+/// - `None` — caching disabled, no `cache_control` injected.
+/// - `Short` — 5-minute TTL (default), `{"type": "ephemeral"}`.
+/// - `Long` — 1-hour TTL at 2× write cost, `{"type": "ephemeral", "ttl": "1h"}`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum CacheRetention {
+    /// No prompt caching.
+    None,
+    /// 5-minute TTL (default). Write cost: 1.25× base input.
+    #[default]
+    Short,
+    /// 1-hour TTL. Write cost: 2× base input.
+    Long,
+}
+
+impl std::str::FromStr for CacheRetention {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.to_lowercase().as_str() {
+            "none" | "off" | "disabled" => Ok(Self::None),
+            "short" | "5m" | "ephemeral" => Ok(Self::Short),
+            "long" | "1h" => Ok(Self::Long),
+            _ => Err(format!(
+                "invalid cache retention '{}', expected one of: none, short, long",
+                s
+            )),
+        }
+    }
+}
+
+impl std::fmt::Display for CacheRetention {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::None => write!(f, "none"),
+            Self::Short => write!(f, "short"),
+            Self::Long => write!(f, "long"),
+        }
+    }
+}
+
 impl std::str::FromStr for LlmBackend {
     type Err = String;
 
@@ -75,6 +118,8 @@ pub struct AnthropicDirectConfig {
     pub model: String,
     /// Optional base URL override (e.g. for proxies like VibeProxy).
     pub base_url: Option<String>,
+    /// Prompt cache retention: none, short (5m, default), or long (1h).
+    pub cache_retention: CacheRetention,
 }
 
 /// Configuration for local Ollama.
@@ -271,10 +316,20 @@ impl LlmConfig {
             let model = optional_env("ANTHROPIC_MODEL")?
                 .unwrap_or_else(|| "claude-sonnet-4-20250514".to_string());
             let base_url = optional_env("ANTHROPIC_BASE_URL")?;
+            let cache_retention: CacheRetention =
+                if let Some(val) = optional_env("ANTHROPIC_CACHE_RETENTION")? {
+                    val.parse().map_err(|e| ConfigError::InvalidValue {
+                        key: "ANTHROPIC_CACHE_RETENTION".to_string(),
+                        message: e,
+                    })?
+                } else {
+                    CacheRetention::Short
+                };
             Some(AnthropicDirectConfig {
                 api_key,
                 model,
                 base_url,
+                cache_retention,
             })
         } else {
             None

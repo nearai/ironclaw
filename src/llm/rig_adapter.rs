@@ -4,6 +4,7 @@
 //! `Arc<dyn LlmProvider>` without changing any of the agent, reasoning, or tool code.
 
 use async_trait::async_trait;
+use crate::config::CacheRetention;
 use rig::OneOrMany;
 use rig::completion::{
     AssistantContent, CompletionModel, CompletionRequest as RigRequest,
@@ -36,7 +37,7 @@ pub struct RigAdapter<M: CompletionModel> {
     output_cost: Decimal,
     /// When true, inject `cache_control` into requests for Anthropic prompt caching.
     /// Only set for the direct Anthropic backend.
-    enable_prompt_cache: bool,
+    cache_retention: CacheRetention,
 }
 
 impl<M: CompletionModel> RigAdapter<M> {
@@ -50,27 +51,28 @@ impl<M: CompletionModel> RigAdapter<M> {
             model_name: name,
             input_cost,
             output_cost,
-            enable_prompt_cache: false,
+            cache_retention: CacheRetention::None,
         }
     }
 
-    /// Enable Anthropic prompt caching.
+    /// Set Anthropic prompt cache retention policy.
     ///
-    /// When enabled, `cache_control: {"type": "ephemeral"}` is injected into
-    /// every request so Anthropic caches the prompt prefix server-side.
-    /// Only call this for the direct Anthropic backend.
+    /// Controls `cache_control` injection:
+    /// - `None` — no caching.
+    /// - `Short` — 5-minute TTL, `{"type": "ephemeral"}`.
+    /// - `Long` — 1-hour TTL, `{"type": "ephemeral", "ttl": "1h"}`.
     ///
     /// If the configured model does not support caching (e.g. claude-2),
     /// a warning is logged once at construction and caching is disabled.
-    pub fn with_prompt_cache(mut self, enabled: bool) -> Self {
-        if enabled && !supports_prompt_cache(&self.model_name) {
+    pub fn with_cache_retention(mut self, retention: CacheRetention) -> Self {
+        if retention != CacheRetention::None && !supports_prompt_cache(&self.model_name) {
             tracing::warn!(
                 model = %self.model_name,
                 "Prompt caching requested but model does not support it; disabling"
             );
-            self.enable_prompt_cache = false;
+            self.cache_retention = CacheRetention::None;
         } else {
-            self.enable_prompt_cache = enabled;
+            self.cache_retention = retention;
         }
         self
     }
@@ -404,6 +406,18 @@ fn supports_prompt_cache(name: &str) -> bool {
     true
 }
 
+/// Extract `cache_creation_input_tokens` from the raw provider response.
+///
+/// Rig-core's unified `Usage` does not surface this field, but Anthropic's raw
+/// response includes it at `usage.cache_creation_input_tokens`. We serialize the
+/// raw response to JSON and attempt to read the value.
+fn extract_cache_creation<T: Serialize>(raw: &T) -> u32 {
+    serde_json::to_value(raw)
+        .ok()
+        .and_then(|v| v.get("usage")?.get("cache_creation_input_tokens")?.as_u64())
+        .map(|n| n.min(u32::MAX as u64) as u32)
+        .unwrap_or(0)
+}
 /// Build a rig-core CompletionRequest from our internal types.
 #[allow(clippy::too_many_arguments)]
 fn build_rig_request(
@@ -414,7 +428,7 @@ fn build_rig_request(
     tool_choice: Option<RigToolChoice>,
     temperature: Option<f32>,
     max_tokens: Option<u32>,
-    enable_prompt_cache: bool,
+    cache_retention: CacheRetention,
 ) -> Result<RigRequest, LlmError> {
     // rig-core requires at least one message in chat_history
     if history.is_empty() {
@@ -429,14 +443,21 @@ fn build_rig_request(
     // Enable Anthropic prompt caching via automatic cache_control.
     // Anthropic auto-places the cache breakpoint at the last cacheable block,
     // caching the prefix (tools → system → messages) for subsequent requests.
-    // Model validation happens once in with_prompt_cache(); here we just check the flag.
-    let additional_params = if enable_prompt_cache {
-        tracing::debug!(model = model_name, "Injecting cache_control for Anthropic prompt caching");
-        Some(serde_json::json!({
-            "cache_control": {"type": "ephemeral"}
-        }))
-    } else {
-        None
+    // Model validation happens once in with_cache_retention(); here we just check the level.
+    let additional_params = match cache_retention {
+        CacheRetention::None => None,
+        CacheRetention::Short => {
+            tracing::debug!(model = model_name, ttl = "5m", "Injecting cache_control for Anthropic prompt caching");
+            Some(serde_json::json!({
+                "cache_control": {"type": "ephemeral"}
+            }))
+        }
+        CacheRetention::Long => {
+            tracing::debug!(model = model_name, ttl = "1h", "Injecting cache_control for Anthropic prompt caching");
+            Some(serde_json::json!({
+                "cache_control": {"type": "ephemeral", "ttl": "1h"}
+            }))
+        }
     };
 
     Ok(RigRequest {
@@ -465,6 +486,14 @@ where
         (self.input_cost, self.output_cost)
     }
 
+    fn cache_write_multiplier(&self) -> Decimal {
+        match self.cache_retention {
+            CacheRetention::None => Decimal::ONE,
+            CacheRetention::Short => Decimal::new(125, 2), // 1.25× (125% of input rate)
+            CacheRetention::Long => Decimal::TWO,          // 2.0×  (200% of input rate)
+        }
+    }
+
     async fn complete(&self, request: CompletionRequest) -> Result<CompletionResponse, LlmError> {
         if let Some(requested_model) = request.model.as_deref()
             && requested_model != self.model_name.as_str()
@@ -488,7 +517,7 @@ where
             None,
             request.temperature,
             request.max_tokens,
-            self.enable_prompt_cache,
+            self.cache_retention,
         )?;
 
         let response =
@@ -508,8 +537,7 @@ where
             output_tokens: saturate_u32(response.usage.output_tokens),
             finish_reason: finish,
             cache_read_input_tokens: saturate_u32(response.usage.cached_input_tokens),
-            // cache_creation is not surfaced by rig-core's unified Usage yet.
-            cache_creation_input_tokens: 0,
+            cache_creation_input_tokens: extract_cache_creation(&response.raw_response),
         };
 
         if resp.cache_read_input_tokens > 0 {
@@ -556,7 +584,7 @@ where
             tool_choice,
             request.temperature,
             request.max_tokens,
-            self.enable_prompt_cache,
+            self.cache_retention,
         )?;
 
         let response =
@@ -590,8 +618,7 @@ where
             output_tokens: saturate_u32(response.usage.output_tokens),
             finish_reason: finish,
             cache_read_input_tokens: saturate_u32(response.usage.cached_input_tokens),
-            // cache_creation is not surfaced by rig-core's unified Usage yet.
-            cache_creation_input_tokens: 0,
+            cache_creation_input_tokens: extract_cache_creation(&response.raw_response),
         };
 
         if resp.cache_read_input_tokens > 0 {
@@ -974,7 +1001,7 @@ mod tests {
             None,
             None,
             None,
-            true, // enable_prompt_cache
+            CacheRetention::Short,
         )
         .unwrap();
 
@@ -983,6 +1010,10 @@ mod tests {
             params["cache_control"]["type"],
             "ephemeral",
             "cache_control should be set to ephemeral when prompt cache is enabled"
+        );
+        assert!(
+            params["cache_control"].get("ttl").is_none(),
+            "Short retention should not include ttl"
         );
     }
 
@@ -996,7 +1027,7 @@ mod tests {
             None,
             None,
             None,
-            false, // enable_prompt_cache disabled
+            CacheRetention::None,
         )
         .unwrap();
 
@@ -1004,6 +1035,25 @@ mod tests {
             req.additional_params.is_none(),
             "additional_params should be None when prompt cache is disabled"
         );
+    }
+
+    #[test]
+    fn test_build_rig_request_injects_1h_ttl_for_long_retention() {
+        let req = build_rig_request(
+            "claude-sonnet-4-6",
+            Some("You are helpful.".to_string()),
+            vec![RigMessage::user("Hello")],
+            Vec::new(),
+            None,
+            None,
+            None,
+            CacheRetention::Long,
+        )
+        .unwrap();
+
+        let params = req.additional_params.expect("should have additional_params for long retention");
+        assert_eq!(params["cache_control"]["type"], "ephemeral");
+        assert_eq!(params["cache_control"]["ttl"], "1h", "Long retention should include ttl=1h");
     }
 
     // -- supports_prompt_cache tests --

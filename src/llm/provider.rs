@@ -338,6 +338,14 @@ pub trait LlmProvider: Send + Sync {
         let (input_cost, output_cost) = self.cost_per_token();
         input_cost * Decimal::from(input_tokens) + output_cost * Decimal::from(output_tokens)
     }
+
+    /// Cost multiplier for cache-creation tokens (Anthropic prompt caching).
+    ///
+    /// Returns `1.0` by default (no surcharge). Anthropic providers return
+    /// `1.25` for 5-minute TTL or `2.0` for 1-hour TTL.
+    fn cache_write_multiplier(&self) -> Decimal {
+        Decimal::ONE
+    }
 }
 
 /// Sanitize a message list to ensure tool_use / tool_result integrity.
