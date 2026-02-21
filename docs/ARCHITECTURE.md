@@ -861,7 +861,7 @@ The `tools` module is one of the largest modules, reflecting the breadth of the 
 | `termimad` | 0.34 | Markdown rendering in terminal REPL |
 | `pgvector` | 0.4 | PostgreSQL vector type support for semantic search |
 | `regex` | 1.x | Pattern matching for safety layer and skill scoring |
-| `serde_yml` | 0.0.12 | YAML parsing for SKILL.md frontmatter |
+| `serde_yaml` | 0.9.x | YAML parsing for SKILL.md frontmatter |
 | `dotenvy` | 0.15 | `.env` file loading |
 | `hyper` | 1.5 | HTTP/1.1 and HTTP/2 server for network proxy |
 | `subtle` | 2.x | Constant-time comparison for auth token validation |

@@ -247,8 +247,8 @@ GATEWAY_ENABLED=true
 # Listen address (127.0.0.1 = localhost only, 0.0.0.0 = all interfaces)
 GATEWAY_HOST=127.0.0.1
 
-# Port for the web gateway
-GATEWAY_PORT=3002
+# Port for the web gateway (default: 3000)
+GATEWAY_PORT=3000
 
 # Bearer auth token — ALL API requests require: Authorization: Bearer <token>
 # Generate a secure random token: openssl rand -hex 32
@@ -607,6 +607,9 @@ LLM_MODEL=llama-3.3-70b-versatile
 LLM_BASE_URL=http://localhost:8000/v1
 LLM_API_KEY=EMPTY
 LLM_MODEL=meta-llama/Llama-3-8B-Instruct
+
+# Optional: Extra HTTP headers (e.g., OpenRouter attribution)
+LLM_EXTRA_HEADERS="HTTP-Referer:https://myapp.com,X-Title:MyApp"
 ```
 
 ---
@@ -623,6 +626,9 @@ EMBEDDING_MODEL=text-embedding-3-small   # 1536-dim, recommended
 # EMBEDDING_MODEL=text-embedding-3-large  # 3072-dim, more accurate, 5x cost
 ```
 
+> **libSQL limitation:** The libSQL backend only supports 1536-dimension embeddings.
+> Use `text-embedding-3-small`. The `text-embedding-3-large` model (3072 dims) requires PostgreSQL backend.
+
 The OpenAI API key for embeddings is read from `OPENAI_API_KEY` (same as LLM
 if using OpenAI backend, or set independently otherwise).
 
@@ -636,7 +642,44 @@ INFO Embeddings enabled via OpenAI (model: text-embedding-3-small, dim: 1536)
 
 ---
 
-## 10. Testing Your Deployment
+## 10. CLI Commands (Memory, Registry)
+
+### Memory Commands
+
+IronClaw provides CLI commands for direct workspace operations:
+
+```bash
+# Search workspace
+ironclaw memory search "deployment notes"
+
+# Read/write workspace files
+ironclaw memory read context/project.md
+ironclaw memory write notes/meeting.md "Key decisions..."
+ironclaw memory write notes/log.md "New entry" --append
+
+# Directory tree and status
+ironclaw memory tree
+ironclaw memory status
+```
+
+### Registry Commands
+
+Browse and install extensions from ClawHub registry:
+
+```bash
+# Search for extensions
+ironclaw registry search github
+
+# Get extension details
+ironclaw registry info github-tools
+
+# Install an extension
+ironclaw registry install github-tools
+```
+
+---
+
+## 11. Testing Your Deployment
 
 ### Health check (no auth required)
 
