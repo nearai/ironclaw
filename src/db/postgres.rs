@@ -622,6 +622,10 @@ impl WorkspaceStore for PgBackend {
             .await
     }
 
+    async fn mark_document_for_reindex(&self, document_id: Uuid) -> Result<(), WorkspaceError> {
+        self.repo.mark_document_for_reindex(document_id).await
+    }
+
     async fn update_chunk_embedding(
         &self,
         chunk_id: Uuid,

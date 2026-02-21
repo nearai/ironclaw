@@ -478,6 +478,24 @@ impl WorkspaceStore for LibSqlBackend {
         Ok(doc_ids)
     }
 
+    async fn mark_document_for_reindex(&self, document_id: Uuid) -> Result<(), WorkspaceError> {
+        let conn = self.connect().await.map_err(|e| WorkspaceError::SearchFailed {
+            reason: e.to_string(),
+        })?;
+
+        // Reset chunk versions to 0 so the document is picked up by the next hygiene pass
+        conn.execute(
+            "UPDATE memory_chunks SET chunk_version = 0 WHERE document_id = ?1",
+            params![document_id.to_string()],
+        )
+        .await
+        .map_err(|e| WorkspaceError::SearchFailed {
+            reason: format!("Failed to mark document for reindex: {}", e),
+        })?;
+
+        Ok(())
+    }
+
     async fn update_chunk_embedding(
         &self,
         chunk_id: Uuid,

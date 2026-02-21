@@ -358,6 +358,22 @@ impl Repository {
         Ok(rows.iter().map(|row| row.get("document_id")).collect())
     }
 
+    /// Mark a document for re-indexing by resetting its chunk versions to 0.
+    ///
+    /// Used for recovery when `reindex_document` fails mid-way.
+    pub async fn mark_document_for_reindex(&self, document_id: Uuid) -> Result<(), WorkspaceError> {
+        let conn = self.conn().await?;
+        conn.execute(
+            "UPDATE memory_chunks SET chunk_version = 0 WHERE document_id = $1",
+            &[&document_id],
+        )
+        .await
+        .map_err(|e| WorkspaceError::SearchFailed {
+            reason: format!("Failed to mark document for reindex: {}", e),
+        })?;
+        Ok(())
+    }
+
     /// Update a chunk's embedding.
     pub async fn update_chunk_embedding(
         &self,

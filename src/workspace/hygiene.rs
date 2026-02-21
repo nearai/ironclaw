@@ -51,7 +51,11 @@ impl Default for HygieneConfig {
             retention_days: 30,
             cadence_hours: 12,
             state_dir,
-            reindex_batch_size: 20, // Process 20 docs per pass (~2 seconds with 100ms throttle)
+            // Process 20 docs per pass. Actual duration depends on document sizes and
+            // embedding API latency (100ms throttle between docs, plus embedding time
+            // per chunk). A document with 1000 words at 300 words/chunk ≈ 4 chunks ×
+            // ~200ms API latency = ~800ms per doc. 20 documents could take 16-20+ seconds.
+            reindex_batch_size: 20,
         }
     }
 }

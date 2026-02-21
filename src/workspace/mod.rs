@@ -58,6 +58,7 @@ pub use repository::Repository;
 pub use search::{RankedResult, SearchConfig, SearchResult, reciprocal_rank_fusion};
 
 use std::sync::Arc;
+use tokio::sync::Mutex;
 
 /// Report from a stale chunk re-indexing pass.
 #[derive(Debug, Default)]
@@ -236,6 +237,14 @@ impl WorkspaceStorage {
         }
     }
 
+    async fn mark_document_for_reindex(&self, document_id: Uuid) -> Result<(), WorkspaceError> {
+        match self {
+            #[cfg(feature = "postgres")]
+            Self::Repo(repo) => repo.mark_document_for_reindex(document_id).await,
+            Self::Db(db) => db.mark_document_for_reindex(document_id).await,
+        }
+    }
+
     async fn update_chunk_embedding(
         &self,
         chunk_id: Uuid,
@@ -320,6 +329,12 @@ pub struct Workspace {
     storage: WorkspaceStorage,
     /// Embedding provider for semantic search.
     embeddings: Option<Arc<dyn EmbeddingProvider>>,
+    /// Guard against concurrent reindex operations.
+    ///
+    /// Multiple calls to `reindex_stale_chunks` could race on the same
+    /// documents, causing duplicate work or constraint violations. This
+    /// mutex ensures only one reindex operation runs at a time per Workspace.
+    reindex_mutex: Mutex<()>,
 }
 
 impl Workspace {
@@ -331,6 +346,7 @@ impl Workspace {
             agent_id: None,
             storage: WorkspaceStorage::Repo(Repository::new(pool)),
             embeddings: None,
+            reindex_mutex: Mutex::new(()),
         }
     }
 
@@ -343,6 +359,7 @@ impl Workspace {
             agent_id: None,
             storage: WorkspaceStorage::Db(db),
             embeddings: None,
+            reindex_mutex: Mutex::new(()),
         }
     }
 
@@ -654,6 +671,11 @@ impl Workspace {
     // ==================== Indexing ====================
 
     /// Re-index a document (chunk and generate embeddings).
+    ///
+    /// If re-indexing fails mid-way (after chunks are deleted), we insert a
+    /// placeholder chunk with version 0 to ensure the document remains
+    /// detectable as stale for the next hygiene pass. This prevents permanent
+    /// data loss from partial reindex failures.
     async fn reindex_document(&self, document_id: Uuid) -> Result<(), WorkspaceError> {
         // Get the document
         let doc = self.storage.get_document_by_id(document_id).await?;
@@ -661,10 +683,51 @@ impl Workspace {
         // Chunk the content with current parameters
         let chunks = chunk_document(&doc.content, ChunkConfig::default());
 
-        // Delete old chunks
+        // Delete old chunks first
         self.storage.delete_chunks(document_id).await?;
 
-        // Insert new chunks with current CHUNK_VERSION
+        // Insert new chunks with current CHUNK_VERSION.
+        // If this fails, we'll insert a placeholder to mark for retry.
+        let insert_result = self.insert_chunks_for_document(document_id, chunks).await;
+
+        if let Err(ref e) = insert_result {
+            tracing::warn!(
+                "Chunk insert failed for document {}, inserting placeholder for retry: {}",
+                document_id,
+                e
+            );
+            // Recovery: insert a placeholder chunk with version 0.
+            // This ensures get_documents_with_stale_chunks will find the document
+            // on the next hygiene pass, even though real chunks were lost.
+            // The placeholder content describes the situation for debugging.
+            if let Err(recovery_err) = self
+                .storage
+                .insert_chunk(
+                    document_id,
+                    0, // chunk_index
+                    "[REINDEX_PLACEHOLDER] Reindex failed mid-way. Will retry on next hygiene pass.",
+                    None, // no embedding
+                    0,    // version 0 = stale, triggers retry
+                )
+                .await
+            {
+                tracing::error!(
+                    "Failed to insert recovery placeholder for document {}: {}",
+                    document_id,
+                    recovery_err
+                );
+            }
+        }
+
+        insert_result
+    }
+
+    /// Insert chunks for a document.
+    async fn insert_chunks_for_document(
+        &self,
+        document_id: Uuid,
+        chunks: Vec<String>,
+    ) -> Result<(), WorkspaceError> {
         for (index, content) in chunks.into_iter().enumerate() {
             // Generate embedding if provider available
             let embedding = if let Some(ref provider) = self.embeddings {
@@ -710,8 +773,16 @@ impl Workspace {
     /// - During hygiene passes (automatic, with throttling)
     /// - After upgrading IronClaw to a version with new chunk parameters
     ///
+    /// ## Concurrency
+    /// Uses a mutex to prevent concurrent reindex operations on the same Workspace.
+    /// Without this guard, two overlapping calls could race on the same documents,
+    /// causing duplicate work or UNIQUE constraint violations.
+    ///
     /// Returns `ReindexReport` with progress and whether more documents remain.
     pub async fn reindex_stale_chunks(&self, batch_size: usize) -> Result<ReindexReport, WorkspaceError> {
+        // Acquire mutex to prevent concurrent reindex operations
+        let _guard = self.reindex_mutex.lock().await;
+
         // Find documents with stale chunks
         let stale_doc_ids = self
             .storage
@@ -947,5 +1018,136 @@ mod tests {
         assert_eq!(normalize_directory("foo/bar"), "foo/bar");
         assert_eq!(normalize_directory("/"), "");
         assert_eq!(normalize_directory(""), "");
+    }
+
+    #[tokio::test]
+    async fn test_reindex_stale_chunks_upgrades_version() {
+        use crate::db::libsql::LibSqlBackend;
+
+        // Setup test database
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("test_reindex.db");
+        let backend = LibSqlBackend::new_local(&db_path).await.unwrap();
+        backend.run_migrations().await.unwrap();
+
+        let user_id = "test_user";
+        let workspace = Workspace::new_with_db(user_id, Arc::new(backend.clone()));
+
+        // Write a document (creates chunks with current CHUNK_VERSION)
+        let test_content = "This is a test document with enough words to create at least one chunk. \
+            We need sufficient content here to ensure the chunking algorithm produces output. \
+            Adding more words to make this document substantial enough for testing purposes. \
+            The chunker has a minimum size requirement so we pad with additional text.";
+        workspace.write("test.md", test_content).await.unwrap();
+
+        // Manually downgrade chunk versions to V1 (simulating pre-upgrade state)
+        let conn = backend.connect().await.unwrap();
+        conn.execute(
+            "UPDATE memory_chunks SET chunk_version = 1 WHERE document_id IN \
+             (SELECT id FROM memory_documents WHERE user_id = ?1)",
+            libsql::params![user_id],
+        )
+        .await
+        .unwrap();
+
+        // Verify chunks are now stale
+        let stale_before = backend
+            .get_documents_with_stale_chunks(user_id, None, CHUNK_VERSION, 100)
+            .await
+            .unwrap();
+        assert_eq!(stale_before.len(), 1, "Should find 1 document with stale chunks");
+
+        // Run reindex
+        let report = workspace.reindex_stale_chunks(10).await.unwrap();
+        assert_eq!(report.processed, 1, "Should process 1 document");
+        assert_eq!(report.failed, 0, "Should have no failures");
+        assert!(!report.has_more, "Should have no more to process");
+
+        // Verify all chunks are now current version
+        let stale_after = backend
+            .get_documents_with_stale_chunks(user_id, None, CHUNK_VERSION, 100)
+            .await
+            .unwrap();
+        assert!(stale_after.is_empty(), "Should find no stale documents after reindex");
+
+        // Verify chunks actually exist with correct version
+        let mut rows = conn
+            .query(
+                "SELECT chunk_version FROM memory_chunks WHERE document_id IN \
+                 (SELECT id FROM memory_documents WHERE user_id = ?1)",
+                libsql::params![user_id],
+            )
+            .await
+            .unwrap();
+
+        let mut chunk_count = 0;
+        while let Some(row) = rows.next().await.unwrap() {
+            let version: i64 = row.get(0).unwrap();
+            assert_eq!(
+                version,
+                CHUNK_VERSION as i64,
+                "Chunk should have current version"
+            );
+            chunk_count += 1;
+        }
+        assert!(chunk_count > 0, "Should have at least one chunk");
+    }
+
+    #[tokio::test]
+    async fn test_mark_document_for_reindex_recovery() {
+        use crate::db::libsql::LibSqlBackend;
+
+        // Setup test database
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("test_recovery.db");
+        let backend = LibSqlBackend::new_local(&db_path).await.unwrap();
+        backend.run_migrations().await.unwrap();
+
+        let user_id = "test_user";
+        let conn = backend.connect().await.unwrap();
+
+        // Create a test document
+        let doc_id = uuid::Uuid::new_v4();
+        conn.execute(
+            r#"INSERT INTO memory_documents (id, user_id, path, content, metadata)
+               VALUES (?1, ?2, ?3, ?4, '{}')"#,
+            libsql::params![doc_id.to_string(), user_id, "test.md", "Test content"],
+        )
+        .await
+        .unwrap();
+
+        // Insert a chunk with current version
+        let chunk_id = uuid::Uuid::new_v4();
+        conn.execute(
+            r#"INSERT INTO memory_chunks (id, document_id, chunk_index, content, chunk_version)
+               VALUES (?1, ?2, ?3, ?4, ?5)"#,
+            libsql::params![
+                chunk_id.to_string(),
+                doc_id.to_string(),
+                0i64,
+                "Chunk content",
+                CHUNK_VERSION as i64
+            ],
+        )
+        .await
+        .unwrap();
+
+        // Verify document is NOT stale (has current version)
+        let stale_before = backend
+            .get_documents_with_stale_chunks(user_id, None, CHUNK_VERSION, 100)
+            .await
+            .unwrap();
+        assert!(stale_before.is_empty(), "Document should not be stale initially");
+
+        // Mark document for reindex (simulating recovery after failure)
+        backend.mark_document_for_reindex(doc_id).await.unwrap();
+
+        // Verify document IS now stale (version reset to 0)
+        let stale_after = backend
+            .get_documents_with_stale_chunks(user_id, None, CHUNK_VERSION, 100)
+            .await
+            .unwrap();
+        assert_eq!(stale_after.len(), 1, "Document should be marked for reindex");
+        assert_eq!(stale_after[0], doc_id);
     }
 }

@@ -380,6 +380,13 @@ pub trait WorkspaceStore: Send + Sync {
         limit: usize,
     ) -> Result<Vec<Uuid>, WorkspaceError>;
 
+    /// Mark a document for re-indexing by resetting its chunk versions to 0.
+    ///
+    /// Used for recovery when `reindex_document` fails mid-way: ensures the
+    /// document will be picked up by `get_documents_with_stale_chunks` on
+    /// the next hygiene pass.
+    async fn mark_document_for_reindex(&self, document_id: Uuid) -> Result<(), WorkspaceError>;
+
     async fn update_chunk_embedding(
         &self,
         chunk_id: Uuid,
