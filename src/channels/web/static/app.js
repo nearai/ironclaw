@@ -1455,16 +1455,31 @@ function renderExtensionCard(ext) {
   actions.className = 'ext-actions';
 
   if (!ext.active) {
-    const activateBtn = document.createElement('button');
-    activateBtn.className = 'btn-ext activate';
-    activateBtn.textContent = 'Activate';
-    activateBtn.addEventListener('click', () => activateExtension(ext.name));
-    actions.appendChild(activateBtn);
+    if (ext.kind === 'wasm_channel') {
+      const restartLabel = document.createElement('span');
+      restartLabel.className = 'ext-restart-label';
+      restartLabel.textContent = 'Restart to activate';
+      actions.appendChild(restartLabel);
+    } else {
+      const activateBtn = document.createElement('button');
+      activateBtn.className = 'btn-ext activate';
+      activateBtn.textContent = 'Activate';
+      activateBtn.addEventListener('click', () => activateExtension(ext.name));
+      actions.appendChild(activateBtn);
+    }
   } else {
     const activeLabel = document.createElement('span');
     activeLabel.className = 'ext-active-label';
     activeLabel.textContent = 'Active';
     actions.appendChild(activeLabel);
+  }
+
+  if (ext.needs_setup) {
+    const configBtn = document.createElement('button');
+    configBtn.className = 'btn-ext configure';
+    configBtn.textContent = ext.authenticated ? 'Reconfigure' : 'Configure';
+    configBtn.addEventListener('click', () => showConfigureModal(ext.name));
+    actions.appendChild(configBtn);
   }
 
   const removeBtn = document.createElement('button');
@@ -1474,6 +1489,15 @@ function renderExtensionCard(ext) {
   actions.appendChild(removeBtn);
 
   card.appendChild(actions);
+
+  // For active WASM channels, check for pending pairing requests
+  if (ext.active && ext.kind === 'wasm_channel') {
+    const pairingSection = document.createElement('div');
+    pairingSection.className = 'ext-pairing';
+    card.appendChild(pairingSection);
+    loadPairingRequests(ext.name, pairingSection);
+  }
+
   return card;
 }
 
@@ -1489,7 +1513,7 @@ function activateExtension(name) {
         showToast('Opening authentication for ' + name, 'info');
         window.open(res.auth_url, '_blank');
       } else if (res.awaiting_token) {
-        showToast(res.instructions || 'Please provide an API token for ' + name, 'info');
+        showConfigureModal(name);
       } else {
         showToast('Activate failed: ' + res.message, 'error');
       }
@@ -1510,6 +1534,189 @@ function removeExtension(name) {
       loadExtensions();
     })
     .catch((err) => showToast('Remove failed: ' + err.message, 'error'));
+}
+
+function showConfigureModal(name) {
+  apiFetch('/api/extensions/' + encodeURIComponent(name) + '/setup')
+    .then((setup) => {
+      if (!setup.secrets || setup.secrets.length === 0) {
+        showToast('No configuration needed for ' + name, 'info');
+        return;
+      }
+      renderConfigureModal(name, setup.secrets);
+    })
+    .catch((err) => showToast('Failed to load setup: ' + err.message, 'error'));
+}
+
+function renderConfigureModal(name, secrets) {
+  closeConfigureModal();
+  const overlay = document.createElement('div');
+  overlay.className = 'configure-overlay';
+  overlay.addEventListener('click', (e) => {
+    if (e.target === overlay) closeConfigureModal();
+  });
+
+  const modal = document.createElement('div');
+  modal.className = 'configure-modal';
+
+  const header = document.createElement('h3');
+  header.textContent = 'Configure ' + name;
+  modal.appendChild(header);
+
+  const form = document.createElement('div');
+  form.className = 'configure-form';
+
+  const fields = [];
+  for (const secret of secrets) {
+    const field = document.createElement('div');
+    field.className = 'configure-field';
+
+    const label = document.createElement('label');
+    label.textContent = secret.prompt;
+    if (secret.optional) {
+      const opt = document.createElement('span');
+      opt.className = 'field-optional';
+      opt.textContent = ' (optional)';
+      label.appendChild(opt);
+    }
+    field.appendChild(label);
+
+    const inputRow = document.createElement('div');
+    inputRow.className = 'configure-input-row';
+
+    const input = document.createElement('input');
+    input.type = 'password';
+    input.name = secret.name;
+    input.placeholder = secret.provided ? '(already set — leave empty to keep)' : '';
+    input.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') submitConfigureModal(name, fields);
+    });
+    inputRow.appendChild(input);
+
+    if (secret.provided) {
+      const badge = document.createElement('span');
+      badge.className = 'field-provided';
+      badge.textContent = 'Set';
+      inputRow.appendChild(badge);
+    }
+    if (secret.auto_generate && !secret.provided) {
+      const hint = document.createElement('span');
+      hint.className = 'field-autogen';
+      hint.textContent = 'Auto-generated if empty';
+      inputRow.appendChild(hint);
+    }
+
+    field.appendChild(inputRow);
+    form.appendChild(field);
+    fields.push({ name: secret.name, input: input });
+  }
+
+  modal.appendChild(form);
+
+  const actions = document.createElement('div');
+  actions.className = 'configure-actions';
+
+  const submitBtn = document.createElement('button');
+  submitBtn.className = 'btn-ext activate';
+  submitBtn.textContent = 'Save';
+  submitBtn.addEventListener('click', () => submitConfigureModal(name, fields));
+  actions.appendChild(submitBtn);
+
+  const cancelBtn = document.createElement('button');
+  cancelBtn.className = 'btn-ext remove';
+  cancelBtn.textContent = 'Cancel';
+  cancelBtn.addEventListener('click', closeConfigureModal);
+  actions.appendChild(cancelBtn);
+
+  modal.appendChild(actions);
+  overlay.appendChild(modal);
+  document.body.appendChild(overlay);
+
+  if (fields.length > 0) fields[0].input.focus();
+}
+
+function submitConfigureModal(name, fields) {
+  const secrets = {};
+  for (const f of fields) {
+    if (f.input.value.trim()) {
+      secrets[f.name] = f.input.value.trim();
+    }
+  }
+
+  apiFetch('/api/extensions/' + encodeURIComponent(name) + '/setup', {
+    method: 'POST',
+    body: { secrets },
+  })
+    .then((res) => {
+      closeConfigureModal();
+      if (res.success) {
+        showToast(res.message, 'success');
+      } else {
+        showToast(res.message || 'Configuration failed', 'error');
+      }
+      loadExtensions();
+    })
+    .catch((err) => {
+      showToast('Configuration failed: ' + err.message, 'error');
+    });
+}
+
+function closeConfigureModal() {
+  const existing = document.querySelector('.configure-overlay');
+  if (existing) existing.remove();
+}
+
+// --- Pairing ---
+
+function loadPairingRequests(channel, container) {
+  apiFetch('/api/pairing/' + encodeURIComponent(channel))
+    .then(data => {
+      container.innerHTML = '';
+      if (!data.requests || data.requests.length === 0) return;
+
+      const heading = document.createElement('div');
+      heading.className = 'pairing-heading';
+      heading.textContent = 'Pending pairing requests';
+      container.appendChild(heading);
+
+      data.requests.forEach(req => {
+        const row = document.createElement('div');
+        row.className = 'pairing-row';
+
+        const code = document.createElement('span');
+        code.className = 'pairing-code';
+        code.textContent = req.code;
+        row.appendChild(code);
+
+        const sender = document.createElement('span');
+        sender.className = 'pairing-sender';
+        sender.textContent = 'from ' + req.sender_id;
+        row.appendChild(sender);
+
+        const btn = document.createElement('button');
+        btn.className = 'btn-ext activate';
+        btn.textContent = 'Approve';
+        btn.addEventListener('click', () => approvePairing(channel, req.code, container));
+        row.appendChild(btn);
+
+        container.appendChild(row);
+      });
+    })
+    .catch(() => {});
+}
+
+function approvePairing(channel, code, container) {
+  apiFetch('/api/pairing/' + encodeURIComponent(channel) + '/approve', {
+    method: 'POST',
+    body: { code },
+  }).then(res => {
+    if (res.success) {
+      showToast('Pairing approved', 'success');
+      loadPairingRequests(channel, container);
+    } else {
+      showToast(res.message || 'Approve failed', 'error');
+    }
+  }).catch(err => showToast('Error: ' + err.message, 'error'));
 }
 
 // --- Jobs ---
