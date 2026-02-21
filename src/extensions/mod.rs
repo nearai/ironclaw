@@ -85,11 +85,6 @@ pub enum ExtensionSource {
     },
     /// Discovered online (not yet validated for a specific source type).
     Discovered { url: String },
-    /// Bundled with the application (pre-built WASM, copied from build artifacts).
-    Bundled {
-        /// Channel or tool name used to locate build artifacts.
-        name: String,
-    },
 }
 
 /// Hint about what authentication method is needed.
