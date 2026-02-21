@@ -28,7 +28,7 @@ pub struct SandboxConfig {
 impl Default for SandboxConfig {
     fn default() -> Self {
         Self {
-            enabled: false, // Disabled by default until Docker is confirmed available
+            enabled: true, // Startup check disables gracefully if Docker unavailable
             policy: SandboxPolicy::ReadOnly,
             timeout: Duration::from_secs(120),
             memory_limit_mb: 2048,

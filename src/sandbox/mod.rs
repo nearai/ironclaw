@@ -87,12 +87,14 @@
 
 pub mod config;
 pub mod container;
+pub mod detect;
 pub mod error;
 pub mod manager;
 pub mod proxy;
 
 pub use config::{ResourceLimits, SandboxConfig, SandboxPolicy};
 pub use container::{ContainerOutput, ContainerRunner, connect_docker};
+pub use detect::{DockerDetection, DockerStatus, Platform, check_docker};
 pub use error::{Result, SandboxError};
 pub use manager::{ExecOutput, SandboxManager, SandboxManagerBuilder};
 pub use proxy::{
