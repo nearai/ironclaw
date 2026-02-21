@@ -149,6 +149,7 @@ body {
   background: rgba(9, 9, 11, 0.75);
   backdrop-filter: blur(16px);
   -webkit-backdrop-filter: blur(16px);
+  will-change: backdrop-filter;
   border-bottom: 1px solid var(--border);
   padding: 0 16px;
   gap: 0;
