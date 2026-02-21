@@ -104,7 +104,10 @@ pub use capabilities::{
 
 // Security components (V2)
 pub use allowlist::{AllowlistResult, AllowlistValidator, DenyReason};
-pub use credential_injector::{CredentialInjector, InjectedCredentials, InjectionError};
+pub(crate) use credential_injector::inject_credential;
+pub use credential_injector::{
+    CredentialInjector, InjectedCredentials, InjectionError, SharedCredentialRegistry,
+};
 pub use rate_limiter::{LimitType, RateLimitError, RateLimitResult, RateLimiter};
 
 // Storage (V2)

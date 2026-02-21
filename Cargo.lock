@@ -2490,7 +2490,7 @@ dependencies = [
 
 [[package]]
 name = "ironclaw"
-version = "0.8.0"
+version = "0.9.0"
 dependencies = [
  "aes-gcm",
  "aho-corasick",
@@ -2557,30 +2557,6 @@ dependencies = [
  "wasmtime",
  "wasmtime-wasi",
  "zbus",
-]
-
-[[package]]
-name = "ironclaw-bench"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "async-trait",
- "chrono",
- "clap",
- "futures",
- "ironclaw",
- "regex",
- "rust_decimal",
- "serde",
- "serde_json",
- "tempfile",
- "thiserror 2.0.18",
- "tokio",
- "tokio-stream",
- "toml",
- "tracing",
- "tracing-subscriber",
- "uuid",
 ]
 
 [[package]]

@@ -1,8 +1,0 @@
-task_timeout = "120s"
-parallelism = 1
-
-[[matrix]]
-label = "default"
-
-[suite_config]
-dataset_path = "benchmarks/data/spot.jsonl"

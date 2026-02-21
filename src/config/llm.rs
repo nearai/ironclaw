@@ -167,6 +167,10 @@ pub struct NearAiConfig {
     /// Number of consecutive retryable failures before a provider enters
     /// cooldown (default: 3).
     pub failover_cooldown_threshold: u32,
+    /// Enable cascade mode for smart routing: when a moderate-complexity task
+    /// gets an uncertain response from the cheap model, re-send to primary.
+    /// Default: true.
+    pub smart_routing_cascade: bool,
 }
 
 impl LlmConfig {
@@ -232,6 +236,7 @@ impl LlmConfig {
             response_cache_max_entries: parse_optional_env("RESPONSE_CACHE_MAX_ENTRIES", 1000)?,
             failover_cooldown_secs: parse_optional_env("LLM_FAILOVER_COOLDOWN_SECS", 300)?,
             failover_cooldown_threshold: parse_optional_env("LLM_FAILOVER_THRESHOLD", 3)?,
+            smart_routing_cascade: parse_optional_env("SMART_ROUTING_CASCADE", true)?,
         };
 
         // Resolve provider-specific configs based on backend

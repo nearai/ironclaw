@@ -225,6 +225,128 @@ body {
   background: var(--danger);
 }
 
+/* TEE Shield */
+.tee-shield {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--success);
+  padding: 4px 10px;
+  border-radius: 12px;
+  background: rgba(52, 211, 153, 0.1);
+  border: 1px solid rgba(52, 211, 153, 0.25);
+  cursor: pointer;
+  position: relative;
+  margin-right: 8px;
+  transition: background 0.2s;
+}
+
+.tee-shield:hover {
+  background: rgba(52, 211, 153, 0.18);
+}
+
+.tee-shield svg {
+  flex-shrink: 0;
+}
+
+#tee-shield-label {
+  font-weight: 500;
+  white-space: nowrap;
+}
+
+.tee-popover {
+  display: none;
+  position: absolute;
+  top: 100%;
+  right: 0;
+  margin-top: 8px;
+  background: rgba(15, 15, 17, 0.9);
+  backdrop-filter: blur(16px);
+  -webkit-backdrop-filter: blur(16px);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  padding: 16px;
+  min-width: 340px;
+  max-width: 420px;
+  z-index: 100;
+  box-shadow: var(--shadow);
+}
+
+.tee-popover.visible {
+  display: block;
+}
+
+.tee-popover-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text);
+  margin-bottom: 12px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.tee-popover-title svg {
+  color: var(--success);
+}
+
+.tee-field {
+  margin-bottom: 10px;
+}
+
+.tee-field:last-child {
+  margin-bottom: 0;
+}
+
+.tee-field-label {
+  font-size: 11px;
+  font-weight: 500;
+  color: var(--text-secondary);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  margin-bottom: 3px;
+}
+
+.tee-field-value {
+  font-size: 12px;
+  font-family: var(--font-mono);
+  color: var(--text);
+  word-break: break-all;
+  background: var(--bg);
+  padding: 4px 8px;
+  border-radius: var(--radius);
+  border: 1px solid var(--border);
+}
+
+.tee-popover-actions {
+  margin-top: 12px;
+  display: flex;
+  gap: 8px;
+}
+
+.tee-btn-copy {
+  padding: 4px 10px;
+  background: none;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  color: var(--text-secondary);
+  cursor: pointer;
+  font-size: 11px;
+  transition: color 0.2s, border-color 0.2s;
+}
+
+.tee-btn-copy:hover {
+  color: var(--text);
+  border-color: var(--text-secondary);
+}
+
+.tee-popover-loading {
+  font-size: 12px;
+  color: var(--text-secondary);
+  padding: 8px 0;
+}
+
 /* Tab Panels */
 .tab-panel {
   display: none;

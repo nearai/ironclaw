@@ -24,12 +24,7 @@ use ironclaw::{
     context::ContextManager,
     extensions::ExtensionManager,
     hooks::{HookRegistry, bootstrap_hooks},
-    llm::{
-        CachedProvider, CircuitBreakerConfig, CircuitBreakerProvider, CooldownConfig,
-        FailoverProvider, LlmProvider, ResponseCacheConfig, RetryConfig, RetryProvider,
-        SessionConfig, create_cheap_llm_provider, create_llm_provider,
-        create_llm_provider_with_config, create_session_manager,
-    },
+    llm::{SessionConfig, build_provider_chain, create_session_manager},
     orchestrator::{
         ContainerJobConfig, ContainerJobManager, OrchestratorApi, TokenStore,
         api::OrchestratorState,
@@ -487,9 +482,13 @@ async fn main() -> anyhow::Result<()> {
         session.attach_store(Arc::clone(db), "default").await;
 
         // Mark any jobs left in "running" or "creating" state as "interrupted".
-        if let Err(e) = db.cleanup_stale_sandbox_jobs().await {
-            tracing::warn!("Failed to cleanup stale sandbox jobs: {}", e);
-        }
+        // Fire-and-forget housekeeping — no need to block startup.
+        let db_cleanup = Arc::clone(db);
+        tokio::spawn(async move {
+            if let Err(e) = db_cleanup.cleanup_stale_sandbox_jobs().await {
+                tracing::warn!("Failed to cleanup stale sandbox jobs: {}", e);
+            }
+        });
     }
 
     // Create secrets store early: needed for injecting LLM API keys from encrypted
@@ -622,110 +621,22 @@ async fn main() -> anyhow::Result<()> {
             None
         };
 
-    // Initialize LLM provider (clone session so we can reuse it for embeddings)
-    let llm = create_llm_provider(&config.llm, session.clone())?;
-    tracing::info!("LLM provider initialized: {}", llm.model_name());
-
-    // Wrap each provider with RetryProvider for automatic retries on transient errors.
-    // RetryProvider sits inside FailoverProvider so each provider in the failover chain
-    // gets its own retry attempts before the failover moves to the next provider.
-    let retry_config = RetryConfig {
-        max_retries: config.llm.nearai.max_retries,
-    };
-    let llm: Arc<dyn LlmProvider> = if retry_config.max_retries > 0 {
-        tracing::info!(
-            max_retries = retry_config.max_retries,
-            "LLM retry wrapper enabled"
-        );
-        Arc::new(RetryProvider::new(llm, retry_config.clone()))
-    } else {
-        llm
-    };
-
-    // Wrap in failover if a fallback model is configured
-    let llm: Arc<dyn LlmProvider> =
-        if let Some(fallback_model) = config.llm.nearai.fallback_model.as_ref() {
-            if fallback_model == &config.llm.nearai.model {
-                tracing::warn!(
-                    "fallback_model is the same as primary model, failover may not be effective"
-                );
-            }
-            let mut fallback_config = config.llm.nearai.clone();
-            fallback_config.model = fallback_model.clone();
-            let fallback = create_llm_provider_with_config(&fallback_config, session.clone())?;
-            tracing::info!(
-                primary = %llm.model_name(),
-                fallback = %fallback.model_name(),
-                "LLM failover enabled"
-            );
-            // Wrap fallback with retry too
-            let fallback: Arc<dyn LlmProvider> = if retry_config.max_retries > 0 {
-                Arc::new(RetryProvider::new(fallback, retry_config.clone()))
-            } else {
-                fallback
-            };
-            let cooldown_config = CooldownConfig {
-                cooldown_duration: std::time::Duration::from_secs(
-                    config.llm.nearai.failover_cooldown_secs,
-                ),
-                failure_threshold: config.llm.nearai.failover_cooldown_threshold,
-            };
-            Arc::new(FailoverProvider::with_cooldown(
-                vec![llm, fallback],
-                cooldown_config,
-            )?)
-        } else {
-            llm
-        };
-
-    // Wrap in circuit breaker if configured
-    let llm: Arc<dyn LlmProvider> =
-        if let Some(threshold) = config.llm.nearai.circuit_breaker_threshold {
-            let cb_config = CircuitBreakerConfig {
-                failure_threshold: threshold,
-                recovery_timeout: std::time::Duration::from_secs(
-                    config.llm.nearai.circuit_breaker_recovery_secs,
-                ),
-                ..CircuitBreakerConfig::default()
-            };
-            tracing::info!(
-                threshold,
-                recovery_secs = config.llm.nearai.circuit_breaker_recovery_secs,
-                "LLM circuit breaker enabled"
-            );
-            Arc::new(CircuitBreakerProvider::new(llm, cb_config))
-        } else {
-            llm
-        };
-
-    // Wrap in response cache if configured
-    let llm: Arc<dyn LlmProvider> = if config.llm.nearai.response_cache_enabled {
-        let rc_config = ResponseCacheConfig {
-            ttl: std::time::Duration::from_secs(config.llm.nearai.response_cache_ttl_secs),
-            max_entries: config.llm.nearai.response_cache_max_entries,
-        };
-        tracing::info!(
-            ttl_secs = config.llm.nearai.response_cache_ttl_secs,
-            max_entries = config.llm.nearai.response_cache_max_entries,
-            "LLM response cache enabled"
-        );
-        Arc::new(CachedProvider::new(llm, rc_config))
-    } else {
-        llm
-    };
-
-    // Initialize cheap LLM provider for lightweight tasks (heartbeat, evaluation)
-    let cheap_llm = create_cheap_llm_provider(&config.llm, session.clone())?;
-    if let Some(ref cheap) = cheap_llm {
-        tracing::info!("Cheap LLM provider initialized: {}", cheap.model_name());
-    }
+    // Build the full LLM provider chain (retry → smart routing → failover → circuit breaker → cache)
+    let (llm, cheap_llm) = build_provider_chain(&config.llm, session.clone())?;
 
     // Initialize safety layer
     let safety = Arc::new(SafetyLayer::new(&config.safety));
     tracing::info!("Safety layer initialized");
 
-    // Initialize tool registry
-    let tools = Arc::new(ToolRegistry::new());
+    // Initialize tool registry with credential injection support
+    let credential_registry = Arc::new(ironclaw::tools::wasm::SharedCredentialRegistry::new());
+    let tools = if let Some(ref ss) = secrets_store {
+        Arc::new(
+            ToolRegistry::new().with_credentials(Arc::clone(&credential_registry), Arc::clone(ss)),
+        )
+    } else {
+        Arc::new(ToolRegistry::new())
+    };
     tools.register_builtin_tools();
 
     // Create embeddings provider if configured
@@ -793,14 +704,20 @@ async fn main() -> anyhow::Result<()> {
         );
     }
 
-    // Register memory tools if database is available
-    if let Some(ref db) = db {
-        let mut workspace = Workspace::new_with_db("default", Arc::clone(db));
+    // Create workspace once, reused for memory tools and agent
+    let workspace: Option<Arc<Workspace>> = if let Some(ref db) = db {
+        let mut ws = Workspace::new_with_db("default", Arc::clone(db));
         if let Some(ref emb) = embeddings {
-            workspace = workspace.with_embeddings(emb.clone());
+            ws = ws.with_embeddings(emb.clone());
         }
-        let workspace = Arc::new(workspace);
-        tools.register_memory_tools(workspace);
+        Some(Arc::new(ws))
+    } else {
+        None
+    };
+
+    // Register memory tools if workspace is available
+    if let Some(ref ws) = workspace {
+        tools.register_memory_tools(Arc::clone(ws));
     }
 
     // Register builder tool if enabled.
@@ -1315,17 +1232,6 @@ async fn main() -> anyhow::Result<()> {
         None
     };
 
-    // Create workspace for agent (shared with memory tools)
-    let workspace = if let Some(ref db_ref) = db {
-        let mut ws = Workspace::new_with_db("default", Arc::clone(db_ref));
-        if let Some(ref emb) = embeddings {
-            ws = ws.with_embeddings(emb.clone());
-        }
-        Some(Arc::new(ws))
-    } else {
-        None
-    };
-
     // Seed workspace with core identity files on first boot
     if let Some(ref ws) = workspace {
         match ws.seed_if_empty().await {
@@ -1336,17 +1242,20 @@ async fn main() -> anyhow::Result<()> {
         }
     }
 
-    // Backfill embeddings if we just enabled the provider
+    // Backfill embeddings in background (fire-and-forget housekeeping)
     if let (Some(ws), Some(_)) = (&workspace, &embeddings) {
-        match ws.backfill_embeddings().await {
-            Ok(count) if count > 0 => {
-                tracing::info!("Backfilled embeddings for {} chunks", count);
+        let ws_bg = Arc::clone(ws);
+        tokio::spawn(async move {
+            match ws_bg.backfill_embeddings().await {
+                Ok(count) if count > 0 => {
+                    tracing::info!("Backfilled embeddings for {} chunks", count);
+                }
+                Ok(_) => {}
+                Err(e) => {
+                    tracing::warn!("Failed to backfill embeddings: {}", e);
+                }
             }
-            Ok(_) => {}
-            Err(e) => {
-                tracing::warn!("Failed to backfill embeddings: {}", e);
-            }
-        }
+        });
     }
 
     // Create context manager (shared between job tools and agent)
