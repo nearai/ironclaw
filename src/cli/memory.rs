@@ -21,8 +21,10 @@ pub async fn run_memory_command_with_db(
     }
 
     match cmd {
-        MemoryCommand::Search { query, limit } => search(&workspace, &query, limit).await,
-        MemoryCommand::Read { path } => read(&workspace, &path).await,
+        MemoryCommand::Search { query, limit, full } => {
+            search(&workspace, &query, limit, full).await
+        }
+        MemoryCommand::Read { path, from, lines } => read(&workspace, &path, from, lines).await,
         MemoryCommand::Write {
             path,
             content,
@@ -30,6 +32,7 @@ pub async fn run_memory_command_with_db(
         } => write(&workspace, &path, content, append).await,
         MemoryCommand::Tree { path, depth } => tree(&workspace, &path, depth).await,
         MemoryCommand::Status => status(&workspace).await,
+        MemoryCommand::Index => index(&workspace).await,
     }
 }
 
@@ -43,12 +46,24 @@ pub enum MemoryCommand {
         /// Maximum number of results
         #[arg(short, long, default_value = "5")]
         limit: usize,
+
+        /// Show full content instead of preview
+        #[arg(long)]
+        full: bool,
     },
 
     /// Read a file from the workspace
     Read {
         /// File path (e.g., "MEMORY.md", "daily/2024-01-15.md")
         path: String,
+
+        /// Line number to start from (1-based)
+        #[arg(long)]
+        from: Option<u32>,
+
+        /// Number of lines to show
+        #[arg(long)]
+        lines: Option<u32>,
     },
 
     /// Write content to a workspace file
@@ -77,6 +92,9 @@ pub enum MemoryCommand {
 
     /// Show workspace status (document count, index health)
     Status,
+
+    /// Backfill missing embeddings for all documents
+    Index,
 }
 
 /// Run a memory command (PostgreSQL backend).
@@ -92,8 +110,10 @@ pub async fn run_memory_command(
     }
 
     match cmd {
-        MemoryCommand::Search { query, limit } => search(&workspace, &query, limit).await,
-        MemoryCommand::Read { path } => read(&workspace, &path).await,
+        MemoryCommand::Search { query, limit, full } => {
+            search(&workspace, &query, limit, full).await
+        }
+        MemoryCommand::Read { path, from, lines } => read(&workspace, &path, from, lines).await,
         MemoryCommand::Write {
             path,
             content,
@@ -101,10 +121,16 @@ pub async fn run_memory_command(
         } => write(&workspace, &path, content, append).await,
         MemoryCommand::Tree { path, depth } => tree(&workspace, &path, depth).await,
         MemoryCommand::Status => status(&workspace).await,
+        MemoryCommand::Index => index(&workspace).await,
     }
 }
 
-async fn search(workspace: &Workspace, query: &str, limit: usize) -> anyhow::Result<()> {
+async fn search(
+    workspace: &Workspace,
+    query: &str,
+    limit: usize,
+    full: bool,
+) -> anyhow::Result<()> {
     let config = SearchConfig::default().with_limit(limit.min(50));
     let results = workspace.search_with_config(query, config).await?;
 
@@ -117,11 +143,17 @@ async fn search(workspace: &Workspace, query: &str, limit: usize) -> anyhow::Res
 
     for (i, result) in results.iter().enumerate() {
         let score_bar = score_indicator(result.score);
-        println!("{}. [{}] (score: {:.3})", i + 1, score_bar, result.score);
 
-        // Show a content preview (first 200 chars)
-        let preview = truncate_content(&result.content, 200);
-        for line in preview.lines() {
+        println!("{}. [{}] (score: {:.3})", i + 1, score_bar, result.score);
+        println!("   Source: {}", result.citation());
+
+        // Show content (full or preview)
+        let content = if full {
+            result.content.clone()
+        } else {
+            truncate_content(&result.content, 200)
+        };
+        for line in content.lines() {
             println!("   {}", line);
         }
         println!();
@@ -130,10 +162,33 @@ async fn search(workspace: &Workspace, query: &str, limit: usize) -> anyhow::Res
     Ok(())
 }
 
-async fn read(workspace: &Workspace, path: &str) -> anyhow::Result<()> {
+async fn read(
+    workspace: &Workspace,
+    path: &str,
+    from: Option<u32>,
+    lines: Option<u32>,
+) -> anyhow::Result<()> {
     match workspace.read(path).await {
         Ok(doc) => {
-            println!("{}", doc.content);
+            let content_lines: Vec<&str> = doc.content.lines().collect();
+
+            // Apply line range if specified
+            let start_idx = from.map_or(0, |f| f.saturating_sub(1) as usize);
+            let lines_to_take = lines.map_or(content_lines.len(), |l| l as usize);
+
+            // Print with line numbers if range was specified
+            if from.is_some() || lines.is_some() {
+                for (i, line) in content_lines
+                    .iter()
+                    .skip(start_idx)
+                    .take(lines_to_take)
+                    .enumerate()
+                {
+                    println!("{:4} | {}", start_idx + i + 1, line);
+                }
+            } else {
+                println!("{}", doc.content);
+            }
         }
         Err(crate::error::WorkspaceError::DocumentNotFound { .. }) => {
             anyhow::bail!("File not found: {}", path);
@@ -247,6 +302,28 @@ async fn status(workspace: &Workspace) -> anyhow::Result<()> {
         println!("    [{}] {}", marker, path);
     }
 
+    Ok(())
+}
+
+async fn index(workspace: &Workspace) -> anyhow::Result<()> {
+    if !workspace.has_embeddings() {
+        anyhow::bail!(
+            "No embedding provider configured. Set OPENAI_API_KEY or configure embeddings."
+        );
+    }
+
+    println!("Backfilling missing embeddings...");
+
+    // Backfill missing embeddings
+    let count = workspace.backfill_embeddings().await?;
+
+    if count > 0 {
+        println!("  Indexed {} chunk(s) with embeddings.", count);
+    } else {
+        println!("  All chunks already have embeddings.");
+    }
+
+    println!("Done.");
     Ok(())
 }
 

@@ -222,6 +222,8 @@ CREATE TABLE IF NOT EXISTS memory_chunks (
     chunk_index INTEGER NOT NULL,
     content TEXT NOT NULL,
     embedding F32_BLOB(1536),
+    line_start INTEGER,
+    line_end INTEGER,
     created_at TEXT NOT NULL DEFAULT (datetime('now')),
     UNIQUE (document_id, chunk_index)
 );

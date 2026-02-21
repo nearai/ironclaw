@@ -83,6 +83,8 @@ pub struct SearchResult {
     pub document_id: Uuid,
     /// Chunk ID.
     pub chunk_id: Uuid,
+    /// Document path (e.g., "daily/2024-01-15.md").
+    pub path: String,
     /// Chunk content.
     pub content: String,
     /// Combined RRF score (0.0-1.0 normalized).
@@ -91,6 +93,10 @@ pub struct SearchResult {
     pub fts_rank: Option<u32>,
     /// Rank in vector results (1-based, None if not in vector results).
     pub vector_rank: Option<u32>,
+    /// Starting line number in the original document (1-based).
+    pub line_start: Option<u32>,
+    /// Ending line number in the original document (1-based).
+    pub line_end: Option<u32>,
 }
 
 impl SearchResult {
@@ -108,6 +114,21 @@ impl SearchResult {
     pub fn is_hybrid(&self) -> bool {
         self.fts_rank.is_some() && self.vector_rank.is_some()
     }
+
+    /// Generate a citation string for this result.
+    ///
+    /// Format: `path#lines X-Y` or `path#line X` or just `path` if no line info.
+    pub fn citation(&self) -> String {
+        match (self.line_start, self.line_end) {
+            (Some(start), Some(end)) if start == end => {
+                format!("{}#line {}", self.path, start)
+            }
+            (Some(start), Some(end)) => {
+                format!("{}#lines {}-{}", self.path, start, end)
+            }
+            _ => self.path.clone(),
+        }
+    }
 }
 
 /// Raw result from a single search method.
@@ -115,8 +136,11 @@ impl SearchResult {
 pub struct RankedResult {
     pub chunk_id: Uuid,
     pub document_id: Uuid,
+    pub path: String,
     pub content: String,
     pub rank: u32, // 1-based rank
+    pub line_start: Option<u32>,
+    pub line_end: Option<u32>,
 }
 
 /// Reciprocal Rank Fusion algorithm.
@@ -143,10 +167,13 @@ pub fn reciprocal_rank_fusion(
     // Track scores and metadata for each chunk
     struct ChunkInfo {
         document_id: Uuid,
+        path: String,
         content: String,
         score: f32,
         fts_rank: Option<u32>,
         vector_rank: Option<u32>,
+        line_start: Option<u32>,
+        line_end: Option<u32>,
     }
 
     let mut chunk_scores: HashMap<Uuid, ChunkInfo> = HashMap::new();
@@ -162,10 +189,13 @@ pub fn reciprocal_rank_fusion(
             })
             .or_insert(ChunkInfo {
                 document_id: result.document_id,
+                path: result.path,
                 content: result.content,
                 score: rrf_score,
                 fts_rank: Some(result.rank),
                 vector_rank: None,
+                line_start: result.line_start,
+                line_end: result.line_end,
             });
     }
 
@@ -180,10 +210,13 @@ pub fn reciprocal_rank_fusion(
             })
             .or_insert(ChunkInfo {
                 document_id: result.document_id,
+                path: result.path,
                 content: result.content,
                 score: rrf_score,
                 fts_rank: None,
                 vector_rank: Some(result.rank),
+                line_start: result.line_start,
+                line_end: result.line_end,
             });
     }
 
@@ -193,10 +226,13 @@ pub fn reciprocal_rank_fusion(
         .map(|(chunk_id, info)| SearchResult {
             document_id: info.document_id,
             chunk_id,
+            path: info.path,
             content: info.content,
             score: info.score,
             fts_rank: info.fts_rank,
             vector_rank: info.vector_rank,
+            line_start: info.line_start,
+            line_end: info.line_end,
         })
         .collect();
 
@@ -235,8 +271,11 @@ mod tests {
         RankedResult {
             chunk_id,
             document_id: doc_id,
+            path: "test/document.md".to_string(),
             content: format!("content for chunk {}", chunk_id),
             rank,
+            line_start: Some(1),
+            line_end: Some(10),
         }
     }
 
