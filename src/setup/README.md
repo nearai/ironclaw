@@ -124,9 +124,12 @@ SECRETS_MASTER_KEY env var set?
    │  └─ No  → clear cache, fall through to options
    └─ Err   → fall through to options
               ├─ OS Keychain: generate + store + build SecretsCrypto
-              ├─ Env variable: generate + print export command
+              ├─ Env variable: generate + set process env + cache SecretsCrypto
               └─ Skip: disable secrets features
 ```
+
+When the user selects **Env variable**, the generated key is also persisted
+to `~/.ironclaw/.env` via `write_bootstrap_env()`.
 
 **CRITICAL CAVEAT: macOS Keychain Dialogs**
 
@@ -169,8 +172,8 @@ env-var mode or skipped secrets.
 |----------|-------------|-------------|---------|
 | NEAR AI Chat | Browser OAuth or session token | - | `NEARAI_SESSION_TOKEN` |
 | NEAR AI Cloud | API key | `llm_nearai_api_key` | `NEARAI_API_KEY` |
-| Anthropic | API key | `anthropic_api_key` | `ANTHROPIC_API_KEY` |
-| OpenAI | API key | `openai_api_key` | `OPENAI_API_KEY` |
+| Anthropic | API key | `llm_anthropic_api_key` | `ANTHROPIC_API_KEY` |
+| OpenAI | API key | `llm_openai_api_key` | `OPENAI_API_KEY` |
 | Ollama | None | - | - |
 | OpenAI-compatible | Optional API key | `llm_compatible_api_key` | `LLM_API_KEY` |
 
@@ -178,7 +181,9 @@ env-var mode or skipped secrets.
 1. Check env var → if set, ask to reuse, persist to secrets store
 2. Otherwise prompt for key entry via `secret_input()`
 3. Store encrypted in secrets via `init_secrets_context()`
-4. **Cache key in `self.llm_api_key`** for model fetching in Step 4
+4. If `KeySource::Env`, also keep the key in process env so bootstrap `.env`
+   persistence can include it
+5. **Cache key in `self.llm_api_key`** for model fetching in Step 4
 
 **NEAR AI** (`setup_nearai`):
 - Calls `session_manager.ensure_authenticated()` which shows the auth menu:
@@ -435,6 +440,10 @@ Bootstrap vars written to `~/.ironclaw/.env`:
 - `LLM_BASE_URL` (if openai_compatible)
 - `OLLAMA_BASE_URL` (if ollama)
 - `NEARAI_API_KEY` (if API key auth path)
+- `SECRETS_MASTER_KEY` (when Step 2 selected env key source)
+- `ANTHROPIC_API_KEY` (when Step 2 selected env key source and provider set)
+- `OPENAI_API_KEY` (when Step 2 selected env key source and provider set)
+- `LLM_API_KEY` (when Step 2 selected env key source and provider set)
 - `ONBOARD_COMPLETED` (always, "true")
 
 **Invariant:** Both Layer 1 and Layer 2 must be written. If the database

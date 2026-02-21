@@ -698,15 +698,21 @@ impl SetupWizard {
             }
             1 => {
                 // Env var mode
-                print_info("Generate a key and add it to your environment:");
                 let key_hex = crate::secrets::keychain::generate_master_key_hex();
-                println!();
-                println!("  export SECRETS_MASTER_KEY={}", key_hex);
-                println!();
-                print_info("Add this to your shell profile or .env file.");
+
+                // Keep the generated key available for subsequent wizard steps
+                // and final bootstrap env persistence.
+                #[allow(unused_unsafe)]
+                unsafe {
+                    std::env::set_var("SECRETS_MASTER_KEY", &key_hex);
+                }
+                self.secrets_crypto = Some(Arc::new(
+                    SecretsCrypto::new(SecretString::from(key_hex.clone()))
+                        .map_err(|e| SetupError::Config(e.to_string()))?,
+                ));
 
                 self.settings.secrets_master_key_source = KeySource::Env;
-                print_success("Configured for environment variable");
+                print_success("Configured for environment variable (saved to bootstrap .env)");
             }
             _ => {
                 self.settings.secrets_master_key_source = KeySource::None;
@@ -933,6 +939,14 @@ impl SetupWizard {
             ));
         }
 
+        // In env-secrets mode, also keep the provider key in bootstrap env.
+        if self.settings.secrets_master_key_source == KeySource::Env {
+            #[allow(unused_unsafe)]
+            unsafe {
+                std::env::set_var(env_var, key_str);
+            }
+        }
+
         // Cache key in memory for model fetching later in the wizard
         self.llm_api_key = Some(SecretString::from(key_str.to_string()));
 
@@ -1010,6 +1024,13 @@ impl SetupWizard {
                     print_success("API key encrypted and saved");
                 } else {
                     print_info("Secrets not available. Set LLM_API_KEY in your environment.");
+                }
+
+                if self.settings.secrets_master_key_source == KeySource::Env {
+                    #[allow(unused_unsafe)]
+                    unsafe {
+                        std::env::set_var("LLM_API_KEY", key_str);
+                    }
                 }
             }
         }
@@ -1846,6 +1867,32 @@ impl SetupWizard {
             && !api_key.is_empty()
         {
             env_vars.push(("NEARAI_API_KEY", api_key));
+        }
+
+        if self.settings.secrets_master_key_source == KeySource::Env {
+            if let Ok(master_key) = std::env::var("SECRETS_MASTER_KEY")
+                && !master_key.is_empty()
+            {
+                env_vars.push(("SECRETS_MASTER_KEY", master_key));
+            }
+
+            if let Ok(api_key) = std::env::var("ANTHROPIC_API_KEY")
+                && !api_key.is_empty()
+            {
+                env_vars.push(("ANTHROPIC_API_KEY", api_key));
+            }
+
+            if let Ok(api_key) = std::env::var("OPENAI_API_KEY")
+                && !api_key.is_empty()
+            {
+                env_vars.push(("OPENAI_API_KEY", api_key));
+            }
+
+            if let Ok(api_key) = std::env::var("LLM_API_KEY")
+                && !api_key.is_empty()
+            {
+                env_vars.push(("LLM_API_KEY", api_key));
+            }
         }
 
         // Always write ONBOARD_COMPLETED so that check_onboard_needed()
