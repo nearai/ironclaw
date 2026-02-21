@@ -766,6 +766,7 @@ mod tests {
             response_cache_max_entries: 1000,
             failover_cooldown_secs: 300,
             failover_cooldown_threshold: 3,
+            smart_routing_cascade: true,
         }
     }
 
