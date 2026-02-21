@@ -29,7 +29,8 @@ use std::time::Duration;
 use tokio::sync::mpsc;
 
 use crate::channels::OutgoingResponse;
-use crate::llm::{ChatMessage, CompletionRequest, FinishReason, LlmProvider};
+use crate::llm::{ChatMessage, CompletionRequest, LlmProvider, Reasoning};
+use crate::safety::SafetyLayer;
 use crate::workspace::Workspace;
 use crate::workspace::hygiene::HygieneConfig;
 
@@ -100,6 +101,7 @@ pub struct HeartbeatRunner {
     hygiene_config: HygieneConfig,
     workspace: Arc<Workspace>,
     llm: Arc<dyn LlmProvider>,
+    safety: Arc<SafetyLayer>,
     response_tx: Option<mpsc::Sender<OutgoingResponse>>,
     consecutive_failures: u32,
 }
@@ -111,12 +113,14 @@ impl HeartbeatRunner {
         hygiene_config: HygieneConfig,
         workspace: Arc<Workspace>,
         llm: Arc<dyn LlmProvider>,
+        safety: Arc<SafetyLayer>,
     ) -> Self {
         Self {
             config,
             hygiene_config,
             workspace,
             llm,
+            safety,
             response_tx: None,
             consecutive_failures: 0,
         }
@@ -258,25 +262,18 @@ impl HeartbeatRunner {
             .with_max_tokens(max_tokens)
             .with_temperature(0.3);
 
-        let response = match self.llm.complete(request).await {
+        let reasoning = Reasoning::new(self.llm.clone(), self.safety.clone());
+        let (content, _usage) = match reasoning.complete(request).await {
             Ok(r) => r,
             Err(e) => return HeartbeatResult::Failed(format!("LLM call failed: {}", e)),
         };
 
-        let content = response.content.trim();
+        let content = content.trim();
 
         // Guard against empty content. Reasoning models (e.g. GLM-4.7) may
         // burn all output tokens on chain-of-thought and return content: null.
         if content.is_empty() {
-            return if response.finish_reason == FinishReason::Length {
-                HeartbeatResult::Failed(
-                    "LLM response was truncated (finish_reason=length) with no content. \
-                     The model may have exhausted its token budget on reasoning."
-                        .to_string(),
-                )
-            } else {
-                HeartbeatResult::Failed("LLM returned empty content.".to_string())
-            };
+            return HeartbeatResult::Failed("LLM returned empty content.".to_string());
         }
 
         // Check if nothing needs attention
@@ -355,9 +352,10 @@ pub fn spawn_heartbeat(
     hygiene_config: HygieneConfig,
     workspace: Arc<Workspace>,
     llm: Arc<dyn LlmProvider>,
+    safety: Arc<SafetyLayer>,
     response_tx: Option<mpsc::Sender<OutgoingResponse>>,
 ) -> tokio::task::JoinHandle<()> {
-    let mut runner = HeartbeatRunner::new(config, hygiene_config, workspace, llm);
+    let mut runner = HeartbeatRunner::new(config, hygiene_config, workspace, llm, safety);
     if let Some(tx) = response_tx {
         runner = runner.with_response_channel(tx);
     }

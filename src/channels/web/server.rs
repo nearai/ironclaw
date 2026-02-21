@@ -122,6 +122,8 @@ pub struct GatewayState {
     pub session_manager: Option<Arc<SessionManager>>,
     /// Log broadcaster for the logs SSE endpoint.
     pub log_broadcaster: Option<Arc<LogBroadcaster>>,
+    /// Handle for changing the tracing log level at runtime.
+    pub log_level_handle: Option<Arc<crate::channels::web::log_layer::LogLevelHandle>>,
     /// Extension manager for extension management API.
     pub extension_manager: Option<Arc<ExtensionManager>>,
     /// Tool registry for listing registered tools.
@@ -204,6 +206,11 @@ pub async fn start_server(
         .route("/api/jobs/{id}/files/read", get(job_files_read_handler))
         // Logs
         .route("/api/logs/events", get(logs_events_handler))
+        .route("/api/logs/level", get(logs_level_get_handler))
+        .route(
+            "/api/logs/level",
+            axum::routing::put(logs_level_set_handler),
+        )
         // Extensions
         .route("/api/extensions", get(extensions_list_handler))
         .route("/api/extensions/tools", get(extensions_tools_handler))
@@ -1622,6 +1629,38 @@ async fn logs_events_handler(
                 .text(""),
         ),
     ))
+}
+
+async fn logs_level_get_handler(
+    State(state): State<Arc<GatewayState>>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let handle = state.log_level_handle.as_ref().ok_or((
+        StatusCode::SERVICE_UNAVAILABLE,
+        "Log level control not available".to_string(),
+    ))?;
+    Ok(Json(serde_json::json!({ "level": handle.current_level() })))
+}
+
+async fn logs_level_set_handler(
+    State(state): State<Arc<GatewayState>>,
+    Json(body): Json<serde_json::Value>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let handle = state.log_level_handle.as_ref().ok_or((
+        StatusCode::SERVICE_UNAVAILABLE,
+        "Log level control not available".to_string(),
+    ))?;
+
+    let level = body
+        .get("level")
+        .and_then(|v| v.as_str())
+        .ok_or((StatusCode::BAD_REQUEST, "missing 'level' field".to_string()))?;
+
+    handle
+        .set_level(level)
+        .map_err(|e| (StatusCode::BAD_REQUEST, e))?;
+
+    tracing::info!("Log level changed to '{}'", handle.current_level());
+    Ok(Json(serde_json::json!({ "level": handle.current_level() })))
 }
 
 // --- Extension handlers ---

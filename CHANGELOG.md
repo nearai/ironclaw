@@ -7,6 +7,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.8.0](https://github.com/nearai/ironclaw/compare/ironclaw-v0.7.0...ironclaw-v0.8.0) - 2026-02-20
+
+### Added
+
+- extension registry with metadata catalog and onboarding integration ([#238](https://github.com/nearai/ironclaw/pull/238))
+- *(models)* add GPT-5.3 Codex, full GPT-5.x family, Claude 4.x series, o4-mini ([#197](https://github.com/nearai/ironclaw/pull/197))
+- wire memory hygiene into the heartbeat loop ([#195](https://github.com/nearai/ironclaw/pull/195))
+
+### Fixed
+
+- persist WASM channel workspace writes across callbacks ([#264](https://github.com/nearai/ironclaw/pull/264))
+- consolidate per-module ENV_MUTEX into crate-wide test lock ([#246](https://github.com/nearai/ironclaw/pull/246))
+- remove auto-proceed fake user message injection from agent loop ([#255](https://github.com/nearai/ironclaw/pull/255))
+- onboarding errors reset flow and remote server auth (#185, #186) ([#248](https://github.com/nearai/ironclaw/pull/248))
+- parallelize tool call execution via JoinSet ([#219](https://github.com/nearai/ironclaw/pull/219)) ([#252](https://github.com/nearai/ironclaw/pull/252))
+- prevent pipe deadlock in shell command execution ([#140](https://github.com/nearai/ironclaw/pull/140))
+- persist turns after approval and add agent-level tests ([#250](https://github.com/nearai/ironclaw/pull/250))
+
+### Other
+
+- add automated PR labeling system ([#253](https://github.com/nearai/ironclaw/pull/253))
+- update CLAUDE.md for recently merged features ([#183](https://github.com/nearai/ironclaw/pull/183))
+
 ## [0.7.0](https://github.com/nearai/ironclaw/compare/ironclaw-v0.6.0...ironclaw-v0.7.0) - 2026-02-19
 
 ### Added

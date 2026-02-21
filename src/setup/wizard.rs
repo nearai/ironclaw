@@ -826,6 +826,12 @@ impl SetupWizard {
 
         self.session_manager = Some(session);
 
+        // Persist session token to the database so the runtime can load it
+        // via `attach_store()` → `load_session_from_db()` without the
+        // backwards-compat fallback. The session manager saved to disk but
+        // doesn't have a DB store attached during onboarding.
+        self.persist_session_to_db().await;
+
         // If the user chose the API key path, NEARAI_API_KEY is now set
         // in the environment. Persist it to the encrypted secrets store
         // so inject_llm_keys_from_secrets() can load it on future runs.
@@ -1160,7 +1166,6 @@ impl SetupWizard {
                 base_url,
                 auth_base_url,
                 session_path: crate::llm::session::default_session_path(),
-                api_mode: crate::config::NearAiApiMode::Responses,
                 api_key: None,
                 fallback_model: None,
                 max_retries: 3,
@@ -1859,6 +1864,54 @@ impl SetupWizard {
         }
 
         Ok(())
+    }
+
+    /// Persist the NEAR AI session token to the database.
+    ///
+    /// The session manager writes to disk during `ensure_authenticated()` but
+    /// doesn't have a DB store attached during onboarding. This reads the
+    /// session file from disk and stores it under the `nearai.session_token`
+    /// key so the runtime's `attach_store()` finds it without fallback.
+    ///
+    /// Best-effort: silently ignores errors (no DB connection yet, no
+    /// session file, etc.).
+    async fn persist_session_to_db(&self) {
+        let session_path = crate::llm::session::default_session_path();
+        let data = match std::fs::read_to_string(&session_path) {
+            Ok(d) if !d.trim().is_empty() => d,
+            _ => return,
+        };
+        let value: serde_json::Value = match serde_json::from_str(&data) {
+            Ok(v) => v,
+            Err(_) => return,
+        };
+
+        #[cfg(feature = "postgres")]
+        if let Some(ref pool) = self.db_pool {
+            let store = crate::history::Store::from_pool(pool.clone());
+            if let Err(e) = store
+                .set_setting("default", "nearai.session_token", &value)
+                .await
+            {
+                tracing::debug!("Could not persist session token to postgres: {}", e);
+            } else {
+                tracing::debug!("Session token persisted to database");
+                return;
+            }
+        }
+
+        #[cfg(feature = "libsql")]
+        if let Some(ref backend) = self.db_backend {
+            use crate::db::SettingsStore as _;
+            if let Err(e) = backend
+                .set_setting("default", "nearai.session_token", &value)
+                .await
+            {
+                tracing::debug!("Could not persist session token to libsql: {}", e);
+            } else {
+                tracing::debug!("Session token persisted to database");
+            }
+        }
     }
 
     /// Persist settings to DB and bootstrap .env after each step.
