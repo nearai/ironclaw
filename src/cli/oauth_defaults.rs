@@ -78,10 +78,12 @@ pub fn callback_url() -> String {
 ///
 /// Reads `OAUTH_CALLBACK_HOST` from the environment (default: `127.0.0.1`).
 ///
-/// **Remote server usage:** set `OAUTH_CALLBACK_HOST` to the server's public
-/// IP or hostname so the OAuth redirect reaches your local browser.  The
-/// callback listener will then bind to `0.0.0.0` instead of `127.0.0.1` to
-/// accept connections from outside the machine.
+/// **Remote server usage:** set `OAUTH_CALLBACK_HOST` to the network interface
+/// address you want to listen on (e.g. the server's LAN IP or `0.0.0.0`).
+/// The callback listener will bind to that specific address instead of the
+/// loopback interface, so the OAuth redirect can reach an external browser.
+/// Note: this transmits the session token over plain HTTP — prefer SSH port
+/// forwarding (`ssh -L 9876:127.0.0.1:9876 user@host`) when possible.
 ///
 /// # Example
 ///
@@ -95,8 +97,16 @@ pub fn callback_host() -> String {
 }
 
 /// Returns `true` if `host` is a loopback address that only accepts local connections.
+///
+/// Covers `localhost` (case-insensitive), the full `127.0.0.0/8` IPv4 loopback
+/// range, and `::1` for IPv6.
 pub fn is_loopback_host(host: &str) -> bool {
-    host == "127.0.0.1" || host == "::1" || host.eq_ignore_ascii_case("localhost")
+    if host.eq_ignore_ascii_case("localhost") {
+        return true;
+    }
+    host.parse::<std::net::IpAddr>()
+        .map(|ip| ip.is_loopback())
+        .unwrap_or(false)
 }
 
 /// Error from the OAuth callback listener.
@@ -352,7 +362,7 @@ mod tests {
     use std::sync::Mutex;
 
     use crate::cli::oauth_defaults::{
-        builtin_credentials, callback_url, is_loopback_host, landing_html,
+        builtin_credentials, callback_host, callback_url, is_loopback_host, landing_html,
     };
 
     /// Serializes env-mutating tests to prevent parallel races.
@@ -361,12 +371,58 @@ mod tests {
     #[test]
     fn test_is_loopback_host() {
         assert!(is_loopback_host("127.0.0.1"));
+        assert!(is_loopback_host("127.0.0.2")); // full 127.0.0.0/8 range
+        assert!(is_loopback_host("127.255.255.254"));
         assert!(is_loopback_host("::1"));
         assert!(is_loopback_host("localhost"));
         assert!(is_loopback_host("LOCALHOST"));
         assert!(!is_loopback_host("203.0.113.10"));
         assert!(!is_loopback_host("my-server.example.com"));
         assert!(!is_loopback_host("0.0.0.0"));
+    }
+
+    #[test]
+    fn test_callback_host_default() {
+        let _guard = ENV_MUTEX.lock().expect("env mutex poisoned");
+        let original = std::env::var("OAUTH_CALLBACK_HOST").ok();
+        // SAFETY: Under ENV_MUTEX, no concurrent env access.
+        unsafe {
+            std::env::remove_var("OAUTH_CALLBACK_HOST");
+        }
+        assert_eq!(callback_host(), "127.0.0.1");
+        // Restore
+        unsafe {
+            if let Some(val) = original {
+                std::env::set_var("OAUTH_CALLBACK_HOST", val);
+            }
+        }
+    }
+
+    #[test]
+    fn test_callback_host_env_override() {
+        let _guard = ENV_MUTEX.lock().expect("env mutex poisoned");
+        let original_host = std::env::var("OAUTH_CALLBACK_HOST").ok();
+        let original_url = std::env::var("IRONCLAW_OAUTH_CALLBACK_URL").ok();
+        // SAFETY: Under ENV_MUTEX, no concurrent env access.
+        unsafe {
+            std::env::set_var("OAUTH_CALLBACK_HOST", "203.0.113.10");
+            std::env::remove_var("IRONCLAW_OAUTH_CALLBACK_URL");
+        }
+        assert_eq!(callback_host(), "203.0.113.10");
+        // callback_url() fallback should incorporate the custom host
+        let url = callback_url();
+        assert!(url.contains("203.0.113.10"), "url was: {url}");
+        // Restore
+        unsafe {
+            if let Some(val) = original_host {
+                std::env::set_var("OAUTH_CALLBACK_HOST", val);
+            } else {
+                std::env::remove_var("OAUTH_CALLBACK_HOST");
+            }
+            if let Some(val) = original_url {
+                std::env::set_var("IRONCLAW_OAUTH_CALLBACK_URL", val);
+            }
+        }
     }
 
     #[test]
