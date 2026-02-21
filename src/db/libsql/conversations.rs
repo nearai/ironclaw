@@ -49,9 +49,10 @@ impl ConversationStore for LibSqlBackend {
     ) -> Result<Uuid, DatabaseError> {
         let conn = self.connect().await?;
         let id = Uuid::new_v4();
+        let now = fmt_ts(&Utc::now());
         conn.execute(
-                "INSERT INTO conversation_messages (id, conversation_id, role, content) VALUES (?1, ?2, ?3, ?4)",
-                params![id.to_string(), conversation_id.to_string(), role, content],
+                "INSERT INTO conversation_messages (id, conversation_id, role, content, created_at) VALUES (?1, ?2, ?3, ?4, ?5)",
+                params![id.to_string(), conversation_id.to_string(), role, content, now],
             )
             .await
             .map_err(|e| DatabaseError::Query(e.to_string()))?;
@@ -100,7 +101,7 @@ impl ConversationStore for LibSqlBackend {
                     (SELECT substr(m2.content, 1, 100)
                      FROM conversation_messages m2
                      WHERE m2.conversation_id = c.id AND m2.role = 'user'
-                     ORDER BY m2.created_at ASC
+                     ORDER BY m2.created_at ASC, m2.rowid ASC
                      LIMIT 1
                     ) AS title
                 FROM conversations c
@@ -216,7 +217,7 @@ impl ConversationStore for LibSqlBackend {
                     SELECT id, role, content, created_at
                     FROM conversation_messages
                     WHERE conversation_id = ?1 AND created_at < ?2
-                    ORDER BY created_at DESC
+                    ORDER BY created_at DESC, rowid DESC
                     LIMIT ?3
                     "#,
                 params![cid, fmt_ts(&before_ts), fetch_limit],
@@ -228,7 +229,7 @@ impl ConversationStore for LibSqlBackend {
                     SELECT id, role, content, created_at
                     FROM conversation_messages
                     WHERE conversation_id = ?1
-                    ORDER BY created_at DESC
+                    ORDER BY created_at DESC, rowid DESC
                     LIMIT ?2
                     "#,
                 params![cid, fetch_limit],
@@ -309,7 +310,7 @@ impl ConversationStore for LibSqlBackend {
                 SELECT id, role, content, created_at
                 FROM conversation_messages
                 WHERE conversation_id = ?1
-                ORDER BY created_at ASC
+                ORDER BY created_at ASC, rowid ASC
                 "#,
                 params![conversation_id.to_string()],
             )
