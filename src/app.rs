@@ -200,9 +200,13 @@ impl AppBuilder {
 
         self.session.attach_store(db.clone(), "default").await;
 
-        if let Err(e) = db.cleanup_stale_sandbox_jobs().await {
-            tracing::warn!("Failed to cleanup stale sandbox jobs: {}", e);
-        }
+        // Fire-and-forget housekeeping — no need to block startup.
+        let db_cleanup = db.clone();
+        tokio::spawn(async move {
+            if let Err(e) = db_cleanup.cleanup_stale_sandbox_jobs().await {
+                tracing::warn!("Failed to cleanup stale sandbox jobs: {}", e);
+            }
+        });
 
         self.db = Some(db);
         Ok(())
@@ -715,15 +719,18 @@ impl AppBuilder {
             }
 
             if embeddings.is_some() {
-                match ws.backfill_embeddings().await {
-                    Ok(count) if count > 0 => {
-                        tracing::info!("Backfilled embeddings for {} chunks", count);
+                let ws_bg = Arc::clone(ws);
+                tokio::spawn(async move {
+                    match ws_bg.backfill_embeddings().await {
+                        Ok(count) if count > 0 => {
+                            tracing::info!("Backfilled embeddings for {} chunks", count);
+                        }
+                        Ok(_) => {}
+                        Err(e) => {
+                            tracing::warn!("Failed to backfill embeddings: {}", e);
+                        }
                     }
-                    Ok(_) => {}
-                    Err(e) => {
-                        tracing::warn!("Failed to backfill embeddings: {}", e);
-                    }
-                }
+                });
             }
         }
 

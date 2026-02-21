@@ -487,9 +487,13 @@ async fn main() -> anyhow::Result<()> {
         session.attach_store(Arc::clone(db), "default").await;
 
         // Mark any jobs left in "running" or "creating" state as "interrupted".
-        if let Err(e) = db.cleanup_stale_sandbox_jobs().await {
-            tracing::warn!("Failed to cleanup stale sandbox jobs: {}", e);
-        }
+        // Fire-and-forget housekeeping — no need to block startup.
+        let db_cleanup = Arc::clone(db);
+        tokio::spawn(async move {
+            if let Err(e) = db_cleanup.cleanup_stale_sandbox_jobs().await {
+                tracing::warn!("Failed to cleanup stale sandbox jobs: {}", e);
+            }
+        });
     }
 
     // Create secrets store early: needed for injecting LLM API keys from encrypted
@@ -793,14 +797,20 @@ async fn main() -> anyhow::Result<()> {
         );
     }
 
-    // Register memory tools if database is available
-    if let Some(ref db) = db {
-        let mut workspace = Workspace::new_with_db("default", Arc::clone(db));
+    // Create workspace once, reused for memory tools and agent
+    let workspace: Option<Arc<Workspace>> = if let Some(ref db) = db {
+        let mut ws = Workspace::new_with_db("default", Arc::clone(db));
         if let Some(ref emb) = embeddings {
-            workspace = workspace.with_embeddings(emb.clone());
+            ws = ws.with_embeddings(emb.clone());
         }
-        let workspace = Arc::new(workspace);
-        tools.register_memory_tools(workspace);
+        Some(Arc::new(ws))
+    } else {
+        None
+    };
+
+    // Register memory tools if workspace is available
+    if let Some(ref ws) = workspace {
+        tools.register_memory_tools(Arc::clone(ws));
     }
 
     // Register builder tool if enabled.
@@ -1315,17 +1325,6 @@ async fn main() -> anyhow::Result<()> {
         None
     };
 
-    // Create workspace for agent (shared with memory tools)
-    let workspace = if let Some(ref db_ref) = db {
-        let mut ws = Workspace::new_with_db("default", Arc::clone(db_ref));
-        if let Some(ref emb) = embeddings {
-            ws = ws.with_embeddings(emb.clone());
-        }
-        Some(Arc::new(ws))
-    } else {
-        None
-    };
-
     // Seed workspace with core identity files on first boot
     if let Some(ref ws) = workspace {
         match ws.seed_if_empty().await {
@@ -1336,17 +1335,20 @@ async fn main() -> anyhow::Result<()> {
         }
     }
 
-    // Backfill embeddings if we just enabled the provider
+    // Backfill embeddings in background (fire-and-forget housekeeping)
     if let (Some(ws), Some(_)) = (&workspace, &embeddings) {
-        match ws.backfill_embeddings().await {
-            Ok(count) if count > 0 => {
-                tracing::info!("Backfilled embeddings for {} chunks", count);
+        let ws_bg = Arc::clone(ws);
+        tokio::spawn(async move {
+            match ws_bg.backfill_embeddings().await {
+                Ok(count) if count > 0 => {
+                    tracing::info!("Backfilled embeddings for {} chunks", count);
+                }
+                Ok(_) => {}
+                Err(e) => {
+                    tracing::warn!("Failed to backfill embeddings: {}", e);
+                }
             }
-            Ok(_) => {}
-            Err(e) => {
-                tracing::warn!("Failed to backfill embeddings: {}", e);
-            }
-        }
+        });
     }
 
     // Create context manager (shared between job tools and agent)
