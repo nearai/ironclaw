@@ -305,8 +305,7 @@ impl AppBuilder {
             if let Some(ref cheap_model) = self.config.llm.nearai.cheap_model {
                 let mut cheap_config = self.config.llm.nearai.clone();
                 cheap_config.model = cheap_model.clone();
-                let cheap =
-                    create_llm_provider_with_config(&cheap_config, self.session.clone())?;
+                let cheap = create_llm_provider_with_config(&cheap_config, self.session.clone())?;
                 tracing::info!(
                     primary = %llm.model_name(),
                     cheap = %cheap.model_name(),
