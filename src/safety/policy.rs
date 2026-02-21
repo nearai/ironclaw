@@ -159,11 +159,13 @@ impl Default for Policy {
             PolicyAction::Warn,
         ));
 
-        // Block shell command injection patterns
+        // Block shell command injection patterns.
+        // Only match actual dangerous command sequences, NOT backticked content
+        // (backticks are standard markdown code formatting, not shell injection).
         policy.add_rule(PolicyRule::new(
             "shell_injection",
             "Potential shell command injection",
-            r"(?i)(;\s*rm\s+-rf|;\s*curl\s+.*\|\s*sh|`.*`)",
+            r"(?i)(;\s*rm\s+-rf|;\s*curl\s+.*\|\s*sh)",
             Severity::Critical,
             PolicyAction::Block,
         ));
@@ -231,6 +233,17 @@ mod tests {
         let violations = policy.check("DROP TABLE users;");
         assert!(!violations.is_empty());
         assert!(violations.iter().any(|r| r.action == PolicyAction::Warn));
+    }
+
+    #[test]
+    fn test_backticked_code_is_not_blocked() {
+        let policy = Policy::default();
+        // Markdown code snippets should never be blocked
+        assert!(!policy.is_blocked("Use `print('hello')` to debug"));
+        assert!(!policy.is_blocked("Run `pytest tests/` to check"));
+        assert!(!policy.is_blocked("The error is in `foo.bar.baz`"));
+        // Multi-backtick code fences should also pass
+        assert!(!policy.is_blocked("```python\ndef foo():\n    pass\n```"));
     }
 
     #[test]
