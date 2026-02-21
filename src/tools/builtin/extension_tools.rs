@@ -9,7 +9,7 @@ use async_trait::async_trait;
 
 use crate::context::JobContext;
 use crate::extensions::{ExtensionKind, ExtensionManager};
-use crate::tools::tool::{Tool, ToolError, ToolOutput, require_str};
+use crate::tools::tool::{ApprovalRequirement, Tool, ToolError, ToolOutput, require_str};
 
 // ── tool_search ──────────────────────────────────────────────────────────
 
@@ -158,8 +158,8 @@ impl Tool for ToolInstallTool {
         Ok(ToolOutput::success(output, start.elapsed()))
     }
 
-    fn requires_approval(&self) -> bool {
-        true
+    fn requires_approval(&self, _params: &serde_json::Value) -> ApprovalRequirement {
+        ApprovalRequirement::UnlessAutoApproved
     }
 }
 
@@ -253,8 +253,8 @@ impl Tool for ToolAuthTool {
         Ok(ToolOutput::success(output, start.elapsed()))
     }
 
-    fn requires_approval(&self) -> bool {
-        true
+    fn requires_approval(&self, _params: &serde_json::Value) -> ApprovalRequirement {
+        ApprovalRequirement::UnlessAutoApproved
     }
 }
 
@@ -478,8 +478,8 @@ impl Tool for ToolRemoveTool {
         Ok(ToolOutput::success(output, start.elapsed()))
     }
 
-    fn requires_approval(&self) -> bool {
-        true
+    fn requires_approval(&self, _params: &serde_json::Value) -> ApprovalRequirement {
+        ApprovalRequirement::UnlessAutoApproved
     }
 }
 
@@ -500,11 +500,15 @@ mod tests {
 
     #[test]
     fn test_tool_install_schema() {
+        use crate::tools::tool::ApprovalRequirement;
         let tool = ToolInstallTool {
             manager: test_manager_stub(),
         };
         assert_eq!(tool.name(), "tool_install");
-        assert!(tool.requires_approval());
+        assert_eq!(
+            tool.requires_approval(&serde_json::json!({})),
+            ApprovalRequirement::UnlessAutoApproved
+        );
         let schema = tool.parameters_schema();
         assert!(schema["properties"].get("name").is_some());
         assert!(schema["properties"].get("url").is_some());
@@ -512,11 +516,15 @@ mod tests {
 
     #[test]
     fn test_tool_auth_schema() {
+        use crate::tools::tool::ApprovalRequirement;
         let tool = ToolAuthTool {
             manager: test_manager_stub(),
         };
         assert_eq!(tool.name(), "tool_auth");
-        assert!(tool.requires_approval());
+        assert_eq!(
+            tool.requires_approval(&serde_json::json!({})),
+            ApprovalRequirement::UnlessAutoApproved
+        );
         let schema = tool.parameters_schema();
         assert!(schema["properties"].get("name").is_some());
         // token param must NOT be in schema (security: tokens never go through LLM)
@@ -528,31 +536,43 @@ mod tests {
 
     #[test]
     fn test_tool_activate_schema() {
+        use crate::tools::tool::ApprovalRequirement;
         let tool = ToolActivateTool {
             manager: test_manager_stub(),
         };
         assert_eq!(tool.name(), "tool_activate");
-        assert!(!tool.requires_approval());
+        assert_eq!(
+            tool.requires_approval(&serde_json::json!({})),
+            ApprovalRequirement::Never
+        );
     }
 
     #[test]
     fn test_tool_list_schema() {
+        use crate::tools::tool::ApprovalRequirement;
         let tool = ToolListTool {
             manager: test_manager_stub(),
         };
         assert_eq!(tool.name(), "tool_list");
-        assert!(!tool.requires_approval());
+        assert_eq!(
+            tool.requires_approval(&serde_json::json!({})),
+            ApprovalRequirement::Never
+        );
         let schema = tool.parameters_schema();
         assert!(schema["properties"].get("kind").is_some());
     }
 
     #[test]
     fn test_tool_remove_schema() {
+        use crate::tools::tool::ApprovalRequirement;
         let tool = ToolRemoveTool {
             manager: test_manager_stub(),
         };
         assert_eq!(tool.name(), "tool_remove");
-        assert!(tool.requires_approval());
+        assert_eq!(
+            tool.requires_approval(&serde_json::json!({})),
+            ApprovalRequirement::UnlessAutoApproved
+        );
     }
 
     /// Create a stub manager for schema tests (these don't call execute).

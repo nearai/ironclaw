@@ -108,14 +108,21 @@ impl Agent {
         // Create a JobContext for tool execution (chat doesn't have a real job)
         let job_ctx = JobContext::with_user(&message.user_id, "chat", "Interactive chat session");
 
-        const MAX_TOOL_ITERATIONS: usize = 10;
+        let max_tool_iterations = self.config.max_tool_iterations;
+        // Force a text-only response on the last iteration to guarantee termination
+        // instead of hard-erroring. The penultimate iteration also gets a nudge
+        // message so the LLM knows it should wrap up.
+        let force_text_at = max_tool_iterations;
+        let nudge_at = max_tool_iterations.saturating_sub(1);
         let mut iteration = 0;
         loop {
             iteration += 1;
-            if iteration > MAX_TOOL_ITERATIONS {
+            // Hard ceiling one past the forced-text iteration (should never be reached
+            // since force_text_at guarantees a text response, but kept as a safety net).
+            if iteration > max_tool_iterations + 1 {
                 return Err(crate::error::LlmError::InvalidResponse {
                     provider: "agent".to_string(),
-                    reason: format!("Exceeded maximum tool iterations ({})", MAX_TOOL_ITERATIONS),
+                    reason: format!("Exceeded maximum tool iterations ({max_tool_iterations})"),
                 }
                 .into());
             }
@@ -143,6 +150,19 @@ impl Agent {
                 .into());
             }
 
+            // Inject a nudge message when approaching the iteration limit so the
+            // LLM is aware it should produce a final answer on the next turn.
+            if iteration == nudge_at {
+                context_messages.push(ChatMessage::system(
+                    "You are approaching the tool call limit. \
+                     Provide your best final answer on the next response \
+                     using the information you have gathered so far. \
+                     Do not call any more tools.",
+                ));
+            }
+
+            let force_text = iteration >= force_text_at;
+
             // Refresh tool definitions each iteration so newly built tools become visible
             let tool_defs = self.tools().tool_definitions().await;
 
@@ -162,8 +182,9 @@ impl Agent {
                 tool_defs
             };
 
-            // Call LLM with current context
-            let context = ReasoningContext::new()
+            // Call LLM with current context; force_text drops tools to guarantee a
+            // text response on the final iteration.
+            let mut context = ReasoningContext::new()
                 .with_messages(context_messages.clone())
                 .with_tools(tool_defs)
                 .with_metadata({
@@ -171,6 +192,14 @@ impl Agent {
                     m.insert("thread_id".to_string(), thread_id.to_string());
                     m
                 });
+            context.force_text = force_text;
+
+            if force_text {
+                tracing::info!(
+                    iteration,
+                    "Forcing text-only response (iteration limit reached)"
+                );
+            }
 
             let output = reasoning.respond_with_tools(&context).await?;
 
@@ -255,31 +284,8 @@ impl Agent {
                     for (idx, original_tc) in tool_calls.iter().enumerate() {
                         let mut tc = original_tc.clone();
 
-                        // Check if tool requires approval
-                        if let Some(tool) = self.tools().get(&tc.name).await
-                            && tool.requires_approval()
-                        {
-                            let mut is_auto_approved = {
-                                let sess = session.lock().await;
-                                sess.is_tool_auto_approved(&tc.name)
-                            };
-
-                            // Override auto-approval for destructive parameters
-                            if is_auto_approved && tool.requires_approval_for(&tc.arguments) {
-                                tracing::info!(
-                                    tool = %tc.name,
-                                    "Parameters require explicit approval despite auto-approve"
-                                );
-                                is_auto_approved = false;
-                            }
-
-                            if !is_auto_approved {
-                                approval_needed = Some((idx, tc, tool));
-                                break; // remaining tools are deferred
-                            }
-                        }
-
-                        // Hook: BeforeToolCall
+                        // Hook: BeforeToolCall (runs before approval so hooks can
+                        // modify parameters — approval is checked on final params)
                         let event = crate::hooks::HookEvent::ToolCall {
                             tool_name: tc.name.clone(),
                             parameters: tc.arguments.clone(),
@@ -320,6 +326,27 @@ impl Agent {
                                 }
                             },
                             _ => {}
+                        }
+
+                        // Check if tool requires approval on the final (post-hook)
+                        // parameters. Skipped when auto_approve_tools is set.
+                        if !self.config.auto_approve_tools
+                            && let Some(tool) = self.tools().get(&tc.name).await
+                        {
+                            use crate::tools::ApprovalRequirement;
+                            let needs_approval = match tool.requires_approval(&tc.arguments) {
+                                ApprovalRequirement::Never => false,
+                                ApprovalRequirement::UnlessAutoApproved => {
+                                    let sess = session.lock().await;
+                                    !sess.is_tool_auto_approved(&tc.name)
+                                }
+                                ApprovalRequirement::Always => true,
+                            };
+
+                            if needs_approval {
+                                approval_needed = Some((idx, tc, tool));
+                                break; // remaining tools are deferred
+                            }
                         }
 
                         let preflight_idx = preflight.len();
@@ -799,7 +826,6 @@ mod tests {
                 input_tokens: 0,
                 output_tokens: 0,
                 finish_reason: FinishReason::Stop,
-                response_id: None,
             })
         }
 
@@ -813,7 +839,6 @@ mod tests {
                 input_tokens: 0,
                 output_tokens: 0,
                 finish_reason: FinishReason::Stop,
-                response_id: None,
             })
         }
     }
@@ -850,6 +875,8 @@ mod tests {
                 allow_local_tools: false,
                 max_cost_per_day_cents: None,
                 max_actions_per_hour: None,
+                max_tool_iterations: 50,
+                auto_approve_tools: false,
             },
             deps,
             ChannelManager::new(),
@@ -880,9 +907,9 @@ mod tests {
     }
 
     #[test]
-    fn test_shell_destructive_command_requires_approval_for() {
-        // ShellTool::requires_approval_for should detect destructive commands.
-        // This exercises the same code path used inline in run_agentic_loop.
+    fn test_shell_destructive_command_requires_explicit_approval() {
+        // requires_explicit_approval() detects destructive commands that
+        // should return ApprovalRequirement::Always from ShellTool.
         use crate::tools::builtin::shell::requires_explicit_approval;
 
         let destructive_cmds = [

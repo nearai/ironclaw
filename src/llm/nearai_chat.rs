@@ -1,8 +1,12 @@
-//! NEAR AI Cloud provider implementation (Chat Completions API).
+//! NEAR AI provider implementation (Chat Completions API).
 //!
-//! This provider uses the NEAR AI Cloud API (`cloud-api.near.ai`) which
-//! exposes an OpenAI-compatible chat completions endpoint with API key
-//! authentication.
+//! This provider uses the OpenAI-compatible Chat Completions endpoint with
+//! dual auth support:
+//! - **API key auth**: When `NEARAI_API_KEY` is set, uses Bearer API key
+//! - **Session token auth**: Otherwise, uses `SessionManager` for Bearer session token
+//!   with automatic renewal on 401 errors
+
+use std::sync::Arc;
 
 use async_trait::async_trait;
 use reqwest::Client;
@@ -14,38 +18,51 @@ use serde::{Deserialize, Serialize};
 use crate::config::NearAiConfig;
 use crate::error::LlmError;
 use crate::llm::provider::{
-    ChatMessage, CompletionRequest, CompletionResponse, FinishReason, LlmProvider, ModelMetadata,
-    Role, ToolCall, ToolCompletionRequest, ToolCompletionResponse,
+    ChatMessage, CompletionRequest, CompletionResponse, FinishReason, LlmProvider, Role, ToolCall,
+    ToolCompletionRequest, ToolCompletionResponse,
 };
+use crate::llm::session::SessionManager;
 
-/// NEAR AI Cloud provider (Chat Completions API, API key auth).
+/// Information about an available model from NEAR AI API.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ModelInfo {
+    /// Model identifier.
+    #[serde(alias = "id", alias = "model")]
+    pub name: String,
+    /// Optional provider name.
+    #[serde(default)]
+    pub provider: Option<String>,
+}
+
+/// NEAR AI provider (Chat Completions API, dual auth).
 pub struct NearAiChatProvider {
     client: Client,
     config: NearAiConfig,
+    /// Session manager for session token auth (used when no API key is set).
+    session: Arc<SessionManager>,
     active_model: std::sync::RwLock<String>,
     flatten_tool_messages: bool,
 }
 
 impl NearAiChatProvider {
-    /// Create a new NEAR AI Cloud provider with API key auth.
+    /// Create a new NEAR AI Chat Completions provider.
+    ///
+    /// Auth mode is determined by `config.api_key`:
+    /// - If set, uses Bearer API key auth
+    /// - If not set, uses session token auth via `SessionManager`
     ///
     /// By default this enables tool-message flattening for compatibility with
     /// providers that reject `role: "tool"` messages.
-    pub fn new(config: NearAiConfig) -> Result<Self, LlmError> {
-        Self::new_with_flatten(config, true)
+    pub fn new(config: NearAiConfig, session: Arc<SessionManager>) -> Result<Self, LlmError> {
+        Self::new_with_flatten(config, session, true)
     }
 
     /// Create a chat completions provider with configurable tool-message flattening.
     pub fn new_with_flatten(
         config: NearAiConfig,
+        session: Arc<SessionManager>,
         flatten_tool_messages: bool,
     ) -> Result<Self, LlmError> {
-        if config.api_key.is_none() {
-            return Err(LlmError::AuthFailed {
-                provider: "nearai_chat".to_string(),
-            });
-        }
-
         let client = Client::builder()
             .timeout(std::time::Duration::from_secs(120))
             .build()
@@ -58,6 +75,7 @@ impl NearAiChatProvider {
         Ok(Self {
             client,
             config,
+            session,
             active_model,
             flatten_tool_messages,
         })
@@ -74,23 +92,50 @@ impl NearAiChatProvider {
         }
     }
 
-    fn api_key(&self) -> String {
-        self.config
-            .api_key
-            .as_ref()
-            .map(|k| k.expose_secret().to_string())
-            .unwrap_or_default()
+    /// Returns true if using API key auth, false if session token auth.
+    fn uses_api_key(&self) -> bool {
+        self.config.api_key.is_some()
+    }
+
+    /// Resolve the Bearer token for the current auth mode.
+    async fn resolve_bearer_token(&self) -> Result<String, LlmError> {
+        if let Some(ref api_key) = self.config.api_key {
+            Ok(api_key.expose_secret().to_string())
+        } else {
+            let token = self.session.get_token().await?;
+            Ok(token.expose_secret().to_string())
+        }
     }
 
     /// Send a single request to the chat completions API.
     ///
-    /// Does not retry internally — retries are handled by the external
+    /// For session token auth, handles 401 by calling `session.handle_auth_failure()`
+    /// and retrying once.
+    ///
+    /// Does not retry on other errors — retries are handled by the external
     /// `RetryProvider` wrapper in the composition chain.
     async fn send_request<T: Serialize, R: for<'de> Deserialize<'de>>(
         &self,
         body: &T,
     ) -> Result<R, LlmError> {
+        match self.send_request_inner(body).await {
+            Ok(result) => Ok(result),
+            Err(LlmError::SessionExpired { .. }) if !self.uses_api_key() => {
+                // Session expired, attempt renewal and retry once
+                self.session.handle_auth_failure().await?;
+                self.send_request_inner(body).await
+            }
+            Err(e) => Err(e),
+        }
+    }
+
+    /// Inner request implementation (single attempt).
+    async fn send_request_inner<T: Serialize, R: for<'de> Deserialize<'de>>(
+        &self,
+        body: &T,
+    ) -> Result<R, LlmError> {
         let url = self.api_url("chat/completions");
+        let token = self.resolve_bearer_token().await?;
 
         tracing::debug!("Sending request to NEAR AI Chat: {}", url);
 
@@ -103,7 +148,7 @@ impl NearAiChatProvider {
         let response = self
             .client
             .post(&url)
-            .header("Authorization", format!("Bearer {}", self.api_key()))
+            .header("Authorization", format!("Bearer {}", token))
             .header("Content-Type", "application/json")
             .json(body)
             .send()
@@ -126,6 +171,17 @@ impl NearAiChatProvider {
             let status_code = status.as_u16();
 
             if status_code == 401 {
+                // For session token auth, distinguish session expired from plain auth failure
+                if !self.uses_api_key() {
+                    let lower = response_text.to_lowercase();
+                    let is_session_expired = lower.contains("session")
+                        && (lower.contains("expired") || lower.contains("invalid"));
+                    if is_session_expired {
+                        return Err(LlmError::SessionExpired {
+                            provider: "nearai_chat".to_string(),
+                        });
+                    }
+                }
                 return Err(LlmError::AuthFailed {
                     provider: "nearai_chat".to_string(),
                 });
@@ -154,14 +210,31 @@ impl NearAiChatProvider {
         })
     }
 
-    /// Fetch available models with full metadata from the `/v1/models` endpoint.
-    async fn fetch_models(&self) -> Result<Vec<ApiModelEntry>, LlmError> {
+    /// Fetch available models from the NEAR AI API.
+    ///
+    /// Handles session renewal on 401 (same pattern as `send_request`).
+    /// Supports multiple response formats: `{models: [...]}`, `{data: [...]}`, and plain array.
+    pub async fn list_models_full(&self) -> Result<Vec<ModelInfo>, LlmError> {
+        match self.list_models_inner().await {
+            Ok(models) => Ok(models),
+            Err(LlmError::SessionExpired { .. }) if !self.uses_api_key() => {
+                self.session.handle_auth_failure().await?;
+                self.list_models_inner().await
+            }
+            Err(e) => Err(e),
+        }
+    }
+
+    async fn list_models_inner(&self) -> Result<Vec<ModelInfo>, LlmError> {
         let url = self.api_url("models");
+        let token = self.resolve_bearer_token().await?;
+
+        tracing::debug!("Fetching models from: {}", url);
 
         let response = self
             .client
             .get(&url)
-            .header("Authorization", format!("Bearer {}", self.api_key()))
+            .header("Authorization", format!("Bearer {}", token))
             .send()
             .await
             .map_err(|e| LlmError::RequestFailed {
@@ -176,6 +249,11 @@ impl NearAiChatProvider {
         })?;
 
         if !status.is_success() {
+            if status.as_u16() == 401 && !self.uses_api_key() {
+                return Err(LlmError::SessionExpired {
+                    provider: "nearai_chat".to_string(),
+                });
+            }
             let truncated = crate::agent::truncate_for_preview(&response_text, 512);
             return Err(LlmError::RequestFailed {
                 provider: "nearai_chat".to_string(),
@@ -183,27 +261,95 @@ impl NearAiChatProvider {
             });
         }
 
+        // Flexible model entry parsing -- handle various field names
         #[derive(Deserialize)]
-        struct ModelsResponse {
-            data: Vec<ApiModelEntry>,
+        struct ModelMetadataInner {
+            #[serde(default)]
+            name: Option<String>,
+            #[serde(default, alias = "modelName", alias = "model_name")]
+            model_name: Option<String>,
         }
 
-        let resp: ModelsResponse =
-            serde_json::from_str(&response_text).map_err(|e| LlmError::InvalidResponse {
-                provider: "nearai_chat".to_string(),
-                reason: format!("JSON parse error: {}", e),
-            })?;
+        #[derive(Deserialize)]
+        struct ModelEntry {
+            #[serde(default)]
+            name: Option<String>,
+            #[serde(default)]
+            id: Option<String>,
+            #[serde(default)]
+            model: Option<String>,
+            #[serde(default, alias = "modelName", alias = "model_name")]
+            model_name: Option<String>,
+            #[serde(default, alias = "modelId", alias = "model_id")]
+            model_id: Option<String>,
+            #[serde(default)]
+            metadata: Option<ModelMetadataInner>,
+        }
 
-        Ok(resp.data)
+        impl ModelEntry {
+            fn get_name(&self) -> Option<String> {
+                self.name
+                    .clone()
+                    .or_else(|| self.id.clone())
+                    .or_else(|| self.model.clone())
+                    .or_else(|| self.model_name.clone())
+                    .or_else(|| self.model_id.clone())
+                    .or_else(|| self.metadata.as_ref().and_then(|m| m.name.clone()))
+                    .or_else(|| self.metadata.as_ref().and_then(|m| m.model_name.clone()))
+            }
+        }
+
+        #[derive(Deserialize)]
+        struct ModelsResponse {
+            #[serde(default)]
+            models: Option<Vec<ModelEntry>>,
+            #[serde(default)]
+            data: Option<Vec<ModelEntry>>,
+        }
+
+        // Try {models: [...]} or {data: [...]} format
+        if let Ok(resp) = serde_json::from_str::<ModelsResponse>(&response_text)
+            && let Some(entries) = resp.models.or(resp.data)
+        {
+            let models: Vec<ModelInfo> = entries
+                .into_iter()
+                .filter_map(|e| {
+                    e.get_name().map(|name| ModelInfo {
+                        name,
+                        provider: None,
+                    })
+                })
+                .collect();
+            if !models.is_empty() {
+                return Ok(models);
+            }
+        }
+
+        // Try direct array format
+        if let Ok(entries) = serde_json::from_str::<Vec<ModelEntry>>(&response_text) {
+            let models: Vec<ModelInfo> = entries
+                .into_iter()
+                .filter_map(|e| {
+                    e.get_name().map(|name| ModelInfo {
+                        name,
+                        provider: None,
+                    })
+                })
+                .collect();
+            if !models.is_empty() {
+                return Ok(models);
+            }
+        }
+
+        // Couldn't find model names in response
+        Err(LlmError::InvalidResponse {
+            provider: "nearai_chat".to_string(),
+            reason: format!(
+                "No model names found in response: {}",
+                &response_text[..response_text.len().min(300)]
+            ),
+        })
     }
-}
-
-/// Model entry as returned by the `/v1/models` API.
-#[derive(Debug, Deserialize)]
-struct ApiModelEntry {
-    id: String,
-    #[serde(default)]
-    context_length: Option<u32>,
 }
 
 #[async_trait]
@@ -252,7 +398,6 @@ impl LlmProvider for NearAiChatProvider {
             finish_reason,
             input_tokens,
             output_tokens,
-            response_id: None,
         })
     }
 
@@ -347,7 +492,6 @@ impl LlmProvider for NearAiChatProvider {
             finish_reason,
             input_tokens,
             output_tokens,
-            response_id: None,
         })
     }
 
@@ -361,18 +505,8 @@ impl LlmProvider for NearAiChatProvider {
     }
 
     async fn list_models(&self) -> Result<Vec<String>, LlmError> {
-        let models = self.fetch_models().await?;
-        Ok(models.into_iter().map(|m| m.id).collect())
-    }
-
-    async fn model_metadata(&self) -> Result<ModelMetadata, LlmError> {
-        let active = self.active_model_name();
-        let models = self.fetch_models().await?;
-        let current = models.iter().find(|m| m.id == active);
-        Ok(ModelMetadata {
-            id: active,
-            context_length: current.and_then(|m| m.context_length),
-        })
+        let models = self.list_models_full().await?;
+        Ok(models.into_iter().map(|m| m.name).collect())
     }
 
     fn active_model_name(&self) -> String {
@@ -613,6 +747,7 @@ fn parse_usage(usage: Option<&ChatCompletionUsage>) -> (u32, u32) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::llm::session::SessionConfig;
 
     fn test_nearai_config(base_url: &str) -> NearAiConfig {
         NearAiConfig {
@@ -620,7 +755,6 @@ mod tests {
             base_url: base_url.to_string(),
             auth_base_url: "https://private.near.ai".to_string(),
             session_path: std::path::PathBuf::from("/tmp/session.json"),
-            api_mode: crate::config::NearAiApiMode::ChatCompletions,
             api_key: Some(secrecy::SecretString::from("test-key".to_string())),
             cheap_model: None,
             fallback_model: None,
@@ -632,21 +766,26 @@ mod tests {
             response_cache_max_entries: 1000,
             failover_cooldown_secs: 300,
             failover_cooldown_threshold: 3,
+            smart_routing_cascade: true,
         }
+    }
+
+    fn test_session() -> Arc<SessionManager> {
+        Arc::new(SessionManager::new(SessionConfig::default()))
     }
 
     #[test]
     fn test_api_url_with_base_without_v1() {
         let mut cfg = test_nearai_config("http://127.0.0.1:8318");
 
-        let provider = NearAiChatProvider::new(cfg.clone()).expect("provider");
+        let provider = NearAiChatProvider::new(cfg.clone(), test_session()).expect("provider");
         assert_eq!(
             provider.api_url("chat/completions"),
             "http://127.0.0.1:8318/v1/chat/completions"
         );
 
         cfg.base_url = "http://127.0.0.1:8318/".to_string();
-        let provider = NearAiChatProvider::new(cfg).expect("provider");
+        let provider = NearAiChatProvider::new(cfg, test_session()).expect("provider");
         assert_eq!(
             provider.api_url("/chat/completions"),
             "http://127.0.0.1:8318/v1/chat/completions"
@@ -657,7 +796,7 @@ mod tests {
     fn test_api_url_with_base_already_v1() {
         let cfg = test_nearai_config("http://127.0.0.1:8318/v1");
 
-        let provider = NearAiChatProvider::new(cfg).expect("provider");
+        let provider = NearAiChatProvider::new(cfg, test_session()).expect("provider");
         assert_eq!(
             provider.api_url("chat/completions"),
             "http://127.0.0.1:8318/v1/chat/completions"

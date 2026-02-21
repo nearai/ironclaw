@@ -13,7 +13,7 @@ use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use wasmtime::Store;
-use wasmtime::component::{Component, Linker};
+use wasmtime::component::Linker;
 use wasmtime_wasi::{ResourceTable, WasiCtx, WasiCtxBuilder, WasiView};
 
 use crate::context::JobContext;
@@ -581,9 +581,8 @@ impl WasmToolWrapper {
         // Set up resource limiter
         store.limiter(|data| &mut data.limiter);
 
-        // Compile the component (uses cached bytes)
-        let component = Component::new(engine, self.prepared.component_bytes())
-            .map_err(|e| WasmError::CompilationFailed(e.to_string()))?;
+        // Use the pre-compiled component (no recompilation needed)
+        let component = self.prepared.component().clone();
 
         // Create linker with all host functions properly namespaced
         let mut linker = Linker::new(engine);
