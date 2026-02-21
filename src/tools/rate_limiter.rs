@@ -24,6 +24,9 @@ use tokio::sync::RwLock;
 
 use crate::tools::tool::ToolRateLimitConfig;
 
+const MINUTE_SECS: u64 = 60;
+const HOUR_SECS: u64 = 3600;
+
 /// Result of a rate limit check.
 #[derive(Debug, Clone)]
 pub enum RateLimitResult {
@@ -132,6 +135,58 @@ impl RateLimiter {
         }
     }
 
+    /// Shared logic: reset windows, check limits, and optionally record the request.
+    async fn check_internal(
+        &self,
+        user_id: &str,
+        tool_name: &str,
+        config: &ToolRateLimitConfig,
+        record: bool,
+    ) -> RateLimitResult {
+        let key = (user_id.to_string(), tool_name.to_string());
+
+        let mut state = self.state.write().await;
+        let tool_state = state.entry(key).or_insert_with(ToolRateLimitState::new);
+
+        // Reset windows if expired.
+        tool_state
+            .minute_window
+            .maybe_reset(Duration::from_secs(MINUTE_SECS));
+        tool_state
+            .hour_window
+            .maybe_reset(Duration::from_secs(HOUR_SECS));
+
+        // Check minute limit.
+        if tool_state.minute_window.count >= config.requests_per_minute {
+            return RateLimitResult::Limited {
+                retry_after: tool_state
+                    .minute_window
+                    .time_until_reset(Duration::from_secs(MINUTE_SECS)),
+                limit_type: LimitType::PerMinute,
+            };
+        }
+
+        // Check hour limit.
+        if tool_state.hour_window.count >= config.requests_per_hour {
+            return RateLimitResult::Limited {
+                retry_after: tool_state
+                    .hour_window
+                    .time_until_reset(Duration::from_secs(HOUR_SECS)),
+                limit_type: LimitType::PerHour,
+            };
+        }
+
+        if record {
+            tool_state.minute_window.count += 1;
+            tool_state.hour_window.count += 1;
+        }
+
+        RateLimitResult::Allowed {
+            remaining_minute: config.requests_per_minute - tool_state.minute_window.count,
+            remaining_hour: config.requests_per_hour - tool_state.hour_window.count,
+        }
+    }
+
     /// Check if a request is allowed and record it if so.
     pub async fn check_and_record(
         &self,
@@ -139,47 +194,7 @@ impl RateLimiter {
         tool_name: &str,
         config: &ToolRateLimitConfig,
     ) -> RateLimitResult {
-        let key = (user_id.to_string(), tool_name.to_string());
-
-        let mut state = self.state.write().await;
-        let tool_state = state.entry(key).or_insert_with(ToolRateLimitState::new);
-
-        // Reset windows if expired
-        tool_state
-            .minute_window
-            .maybe_reset(Duration::from_secs(60));
-        tool_state
-            .hour_window
-            .maybe_reset(Duration::from_secs(3600));
-
-        // Check minute limit
-        if tool_state.minute_window.count >= config.requests_per_minute {
-            return RateLimitResult::Limited {
-                retry_after: tool_state
-                    .minute_window
-                    .time_until_reset(Duration::from_secs(60)),
-                limit_type: LimitType::PerMinute,
-            };
-        }
-
-        // Check hour limit
-        if tool_state.hour_window.count >= config.requests_per_hour {
-            return RateLimitResult::Limited {
-                retry_after: tool_state
-                    .hour_window
-                    .time_until_reset(Duration::from_secs(3600)),
-                limit_type: LimitType::PerHour,
-            };
-        }
-
-        // Record the request
-        tool_state.minute_window.count += 1;
-        tool_state.hour_window.count += 1;
-
-        RateLimitResult::Allowed {
-            remaining_minute: config.requests_per_minute - tool_state.minute_window.count,
-            remaining_hour: config.requests_per_hour - tool_state.hour_window.count,
-        }
+        self.check_internal(user_id, tool_name, config, true).await
     }
 
     /// Check without recording (for preview/estimation).
@@ -189,43 +204,7 @@ impl RateLimiter {
         tool_name: &str,
         config: &ToolRateLimitConfig,
     ) -> RateLimitResult {
-        let key = (user_id.to_string(), tool_name.to_string());
-
-        let mut state = self.state.write().await;
-        let tool_state = state.entry(key).or_insert_with(ToolRateLimitState::new);
-
-        // Reset windows if expired
-        tool_state
-            .minute_window
-            .maybe_reset(Duration::from_secs(60));
-        tool_state
-            .hour_window
-            .maybe_reset(Duration::from_secs(3600));
-
-        // Check minute limit
-        if tool_state.minute_window.count >= config.requests_per_minute {
-            return RateLimitResult::Limited {
-                retry_after: tool_state
-                    .minute_window
-                    .time_until_reset(Duration::from_secs(60)),
-                limit_type: LimitType::PerMinute,
-            };
-        }
-
-        // Check hour limit
-        if tool_state.hour_window.count >= config.requests_per_hour {
-            return RateLimitResult::Limited {
-                retry_after: tool_state
-                    .hour_window
-                    .time_until_reset(Duration::from_secs(3600)),
-                limit_type: LimitType::PerHour,
-            };
-        }
-
-        RateLimitResult::Allowed {
-            remaining_minute: config.requests_per_minute - tool_state.minute_window.count,
-            remaining_hour: config.requests_per_hour - tool_state.hour_window.count,
-        }
+        self.check_internal(user_id, tool_name, config, false).await
     }
 
     /// Get current usage for a (user, tool) pair.

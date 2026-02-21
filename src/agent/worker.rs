@@ -444,22 +444,18 @@ Report when the job is complete or if you encounter issues you cannot resolve."#
         let job_ctx = deps.context_manager.get_context(job_id).await?;
 
         // Check per-tool rate limit before running hooks or executing (cheaper check first)
-        if let Some(config) = tool.rate_limit_config() {
-            match deps
+        if let Some(config) = tool.rate_limit_config()
+            && let RateLimitResult::Limited { retry_after, .. } = deps
                 .tools
                 .rate_limiter()
                 .check_and_record(&job_ctx.user_id, tool_name, &config)
                 .await
-            {
-                RateLimitResult::Limited { retry_after, .. } => {
-                    return Err(crate::error::ToolError::RateLimited {
-                        name: tool_name.to_string(),
-                        retry_after: Some(retry_after),
-                    }
-                    .into());
-                }
-                RateLimitResult::Allowed { .. } => {}
+        {
+            return Err(crate::error::ToolError::RateLimited {
+                name: tool_name.to_string(),
+                retry_after: Some(retry_after),
             }
+            .into());
         }
 
         // Run BeforeToolCall hook
