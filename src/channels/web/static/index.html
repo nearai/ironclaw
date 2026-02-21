@@ -179,33 +179,41 @@
     <div class="tab-panel" id="tab-extensions">
       <div class="extensions-container">
         <div class="extensions-section">
-          <h3>Install Extension</h3>
-          <div class="ext-install-form" id="ext-install-form">
-            <input type="text" id="ext-install-name" placeholder="Extension name (required)">
-            <input type="text" id="ext-install-url" placeholder="URL (optional)">
-            <select id="ext-install-kind">
-              <option value="mcp_server">MCP Server</option>
-              <option value="wasm_tool">WASM Tool</option>
-              <option value="wasm_channel">WASM Channel</option>
-            </select>
-            <button onclick="installExtension()">Install</button>
-          </div>
-        </div>
-        <div class="extensions-section">
           <h3>Installed Extensions</h3>
           <div class="extensions-list" id="extensions-list">
             <div class="empty-state">Loading extensions...</div>
           </div>
         </div>
+        <div class="extensions-section" id="available-wasm-section">
+          <h3>Available WASM Extensions</h3>
+          <div class="extensions-list" id="available-wasm-list">
+            <div class="empty-state">Loading...</div>
+          </div>
+        </div>
+        <div class="extensions-section">
+          <h3>Install WASM Extension</h3>
+          <div class="ext-install-form">
+            <input type="text" id="wasm-install-name" placeholder="Extension name">
+            <input type="text" id="wasm-install-url" placeholder="URL to .tar.gz bundle">
+            <button onclick="installWasmExtension()">Install</button>
+          </div>
+        </div>
+        <div class="extensions-section">
+          <h3>MCP Servers</h3>
+          <div class="extensions-list" id="mcp-servers-list">
+            <div class="empty-state">Loading...</div>
+          </div>
+          <h4>Add Custom MCP Server</h4>
+          <div class="ext-install-form">
+            <input type="text" id="mcp-install-name" placeholder="Server name">
+            <input type="text" id="mcp-install-url" placeholder="MCP server URL (https://...)">
+            <button onclick="addMcpServer()">Add</button>
+          </div>
+        </div>
         <div class="extensions-section">
           <h3>Registered Tools</h3>
           <table class="tools-table" id="tools-table">
-            <thead>
-              <tr>
-                <th>Name</th>
-                <th>Description</th>
-              </tr>
-            </thead>
+            <thead><tr><th>Name</th><th>Description</th></tr></thead>
             <tbody id="tools-tbody"></tbody>
           </table>
           <div class="empty-state" id="tools-empty" style="display:none">No tools registered</div>

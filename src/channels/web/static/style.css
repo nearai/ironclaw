@@ -1662,6 +1662,13 @@ body {
   color: var(--text);
 }
 
+.extensions-section h4 {
+  font-size: 13px;
+  font-weight: 600;
+  margin: 16px 0 8px;
+  color: var(--text-secondary);
+}
+
 .extensions-list {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
@@ -1792,6 +1799,30 @@ body {
 
 .btn-ext.remove:hover {
   background: rgba(248, 81, 73, 0.15);
+}
+
+.btn-ext.install {
+  border-color: var(--success);
+  color: var(--success);
+}
+
+.btn-ext.install:hover {
+  background: rgba(63, 185, 80, 0.15);
+}
+
+.btn-ext.install:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.ext-available {
+  border-style: dashed;
+}
+
+.ext-keywords {
+  font-size: 11px;
+  color: var(--text-secondary);
+  opacity: 0.7;
 }
 
 .tools-table {
@@ -2378,15 +2409,6 @@ mark {
   border-color: var(--accent);
 }
 
-.ext-install-form select {
-  padding: 6px 10px;
-  background: var(--bg);
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
-  color: var(--text);
-  font-size: 13px;
-}
-
 .ext-install-form button {
   padding: 6px 16px;
   background: var(--accent);
@@ -2520,8 +2542,7 @@ mark {
     align-items: stretch;
   }
 
-  .ext-install-form input,
-  .ext-install-form select {
+  .ext-install-form input {
     width: 100%;
   }
 }
