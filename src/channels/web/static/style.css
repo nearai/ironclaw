@@ -97,7 +97,7 @@ body {
 #auth-screen input:focus {
   outline: none;
   border-color: var(--accent);
-  box-shadow: 0 0 0 3px rgba(52, 211, 153, 0.15);
+  box-shadow: 0 0 0 3px rgba(52, 211, 153, 0.3);
 }
 
 #auth-screen button {
