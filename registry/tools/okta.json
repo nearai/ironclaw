@@ -14,7 +14,7 @@
 
   "artifacts": {
     "wasm32-wasip2": {
-      "url": null,
+      "url": "https://github.com/nearai/ironclaw/releases/latest/download/okta-wasm32-wasip2.tar.gz",
       "sha256": null
     }
   },

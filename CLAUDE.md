@@ -32,7 +32,7 @@
 # Format code
 cargo fmt
 
-# Lint (address warnings before committing)
+# Lint (fix ALL warnings before committing, including pre-existing ones)
 cargo clippy --all --benches --tests --examples --all-features
 
 # Run all tests
@@ -321,7 +321,10 @@ cargo check --all-features                           # all features
 ```
 Dead code behind the wrong `#[cfg]` gate will only show up when building with a single feature.
 
+**Zero clippy warnings policy:** Fix ALL clippy warnings before committing, including pre-existing ones in files you didn't change. Never leave warnings behind — treat `cargo clippy` output as a zero-tolerance gate.
+
 **Mechanical verification before committing:** Run these checks on changed files before committing:
+- `cargo clippy --all --benches --tests --examples --all-features` -- zero warnings
 - `grep -rnE '\.unwrap\(|\.expect\(' <files>` -- no panics in production
 - `grep -rn 'super::' <files>` -- use `crate::` imports
 - If you fixed a pattern bug, `grep` for other instances of that pattern across `src/`
@@ -407,6 +410,10 @@ TINFOIL_MODEL=kimi-k2-5               # Default model
 IronClaw supports multiple LLM backends via the `LLM_BACKEND` env var: `nearai` (default), `openai`, `anthropic`, `ollama`, `openai_compatible`, and `tinfoil`.
 
 **NEAR AI** -- Uses the Chat Completions API with dual auth support. Session token auth (default): authenticates with session tokens (`sess_xxx`) obtained via browser OAuth (GitHub/Google), base URL defaults to `https://private.near.ai`. API key auth: set `NEARAI_API_KEY` (from `cloud.near.ai`), base URL defaults to `https://cloud-api.near.ai`. Both modes use the same Chat Completions endpoint. Tool messages are flattened to plain text for compatibility. Set `NEARAI_SESSION_TOKEN` env var for hosting providers that inject tokens via environment.
+
+**NEAR AI Cloud** -- Uses the OpenAI-compatible Chat Completions API (`https://cloud-api.near.ai/v1/chat/completions`). Authenticates with API keys from `cloud.near.ai`. Auto-selected when `NEARAI_API_KEY` is set (or explicitly via `NEARAI_API_MODE=chat_completions`). Tool messages are flattened to plain text for compatibility. Configure with `NEARAI_API_KEY` and `NEARAI_BASE_URL` (default: `https://cloud-api.near.ai`).
+
+**OpenAI-compatible** -- Any endpoint that speaks the OpenAI API (vLLM, LiteLLM, OpenRouter, etc.). Configure with `LLM_BASE_URL`, `LLM_API_KEY` (optional), `LLM_MODEL`. Set `LLM_EXTRA_HEADERS` to inject custom HTTP headers into every request (format: `Key:Value,Key2:Value2`), useful for OpenRouter attribution headers like `HTTP-Referer` and `X-Title`.
 
 **Tinfoil** -- Private inference via `https://inference.tinfoil.sh/v1`. Runs models inside hardware-attested TEEs so neither Tinfoil nor the cloud provider can see prompts or responses. Uses the OpenAI-compatible Chat Completions API. Configure with `TINFOIL_API_KEY` and `TINFOIL_MODEL` (default: `kimi-k2-5`).
 

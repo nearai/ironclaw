@@ -88,10 +88,17 @@ pub struct SourceSpec {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ArtifactSpec {
     /// Download URL (null until release).
+    /// Can point to a `.wasm` file or a `.tar.gz` bundle containing both
+    /// `{name}.wasm` and `{name}.capabilities.json`.
     pub url: Option<String>,
 
-    /// Hex SHA256 of the WASM binary (null until release).
+    /// Hex SHA256 of the downloaded artifact (null until release).
     pub sha256: Option<String>,
+
+    /// Optional separate download URL for the capabilities file.
+    /// Only needed when `url` points to a bare `.wasm` file instead of a bundle.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub capabilities_url: Option<String>,
 }
 
 /// Summary of authentication requirements extracted from capabilities.
@@ -138,7 +145,7 @@ pub struct BundleDefinition {
 }
 
 /// Top-level structure of `_bundles.json`.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct BundlesFile {
     pub bundles: std::collections::HashMap<String, BundleDefinition>,
 }
@@ -147,9 +154,24 @@ impl ExtensionManifest {
     /// Convert this manifest into a [`RegistryEntry`] for use with the in-chat
     /// extension discovery system.
     pub fn to_registry_entry(&self) -> RegistryEntry {
-        let source = ExtensionSource::WasmBuildable {
-            repo_url: self.source.dir.clone(),
-            build_dir: Some(self.source.dir.clone()),
+        // Prefer pre-built artifact download when a URL is available
+        let source = if let Some(artifact) = self.artifacts.get("wasm32-wasip2") {
+            if let Some(ref url) = artifact.url {
+                ExtensionSource::WasmDownload {
+                    wasm_url: url.clone(),
+                    capabilities_url: artifact.capabilities_url.clone(),
+                }
+            } else {
+                ExtensionSource::WasmBuildable {
+                    repo_url: self.source.dir.clone(),
+                    build_dir: Some(self.source.dir.clone()),
+                }
+            }
+        } else {
+            ExtensionSource::WasmBuildable {
+                repo_url: self.source.dir.clone(),
+                build_dir: Some(self.source.dir.clone()),
+            }
         };
 
         let auth_hint = match self.auth_summary.as_ref().and_then(|a| a.method.as_deref()) {

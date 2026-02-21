@@ -37,7 +37,7 @@ use tokio::sync::{RwLock, mpsc, oneshot};
 use tokio_stream::wrappers::ReceiverStream;
 use uuid::Uuid;
 use wasmtime::Store;
-use wasmtime::component::{Component, Linker};
+use wasmtime::component::Linker;
 use wasmtime_wasi::{ResourceTable, WasiCtx, WasiCtxBuilder, WasiView};
 
 use crate::channels::wasm::capabilities::ChannelCapabilities;
@@ -725,9 +725,13 @@ impl WasmChannel {
     ) -> Result<SandboxedChannel, WasmChannelError> {
         let engine = runtime.engine();
 
-        // Compile the component (uses cached bytes)
-        let component = Component::new(engine, prepared.component_bytes())
-            .map_err(|e| WasmChannelError::Compilation(e.to_string()))?;
+        // Use the pre-compiled component (no recompilation needed)
+        let component = prepared
+            .component()
+            .ok_or_else(|| {
+                WasmChannelError::Compilation("No compiled component available".to_string())
+            })?
+            .clone();
 
         // Create linker and add host functions
         let mut linker = Linker::new(engine);
@@ -778,7 +782,7 @@ impl WasmChannel {
     /// Returns the channel configuration for HTTP endpoint registration.
     async fn call_on_start(&self) -> Result<ChannelConfig, WasmChannelError> {
         // If no WASM bytes, return default config (for testing)
-        if self.prepared.component_bytes.is_empty() {
+        if self.prepared.component().is_none() {
             tracing::info!(
                 channel = %self.name,
                 "WASM channel on_start called (no WASM module, returning defaults)"
@@ -918,7 +922,7 @@ impl WasmChannel {
         );
 
         // If no WASM bytes, return 200 OK (for testing)
-        if self.prepared.component_bytes.is_empty() {
+        if self.prepared.component().is_none() {
             tracing::debug!(
                 channel = %self.name,
                 method = method,
@@ -1018,7 +1022,7 @@ impl WasmChannel {
     /// Called periodically if polling is configured.
     pub async fn call_on_poll(&self) -> Result<(), WasmChannelError> {
         // If no WASM bytes, do nothing (for testing)
-        if self.prepared.component_bytes.is_empty() {
+        if self.prepared.component().is_none() {
             tracing::debug!(
                 channel = %self.name,
                 "WASM channel on_poll called (no WASM module)"
@@ -1118,7 +1122,7 @@ impl WasmChannel {
         );
 
         // If no WASM bytes, do nothing (for testing)
-        if self.prepared.component_bytes.is_empty() {
+        if self.prepared.component().is_none() {
             tracing::debug!(
                 channel = %self.name,
                 message_id = %message_id,
@@ -1236,7 +1240,7 @@ impl WasmChannel {
         metadata: &serde_json::Value,
     ) -> Result<(), WasmChannelError> {
         // If no WASM bytes, do nothing (for testing)
-        if self.prepared.component_bytes.is_empty() {
+        if self.prepared.component().is_none() {
             return Ok(());
         }
 
@@ -1307,7 +1311,7 @@ impl WasmChannel {
         timeout: Duration,
         wit_update: wit_channel::StatusUpdate,
     ) -> Result<(), WasmChannelError> {
-        if prepared.component_bytes.is_empty() {
+        if prepared.component().is_none() {
             return Ok(());
         }
 
@@ -1627,7 +1631,7 @@ impl WasmChannel {
         workspace_store: &Arc<ChannelWorkspaceStore>,
     ) -> Result<Vec<EmittedMessage>, WasmChannelError> {
         // Skip if no WASM bytes (testing mode)
-        if prepared.component_bytes.is_empty() {
+        if prepared.component().is_none() {
             tracing::debug!(
                 channel = %channel_name,
                 "WASM channel on_poll called (no WASM module)"
@@ -2206,7 +2210,7 @@ mod tests {
         let prepared = Arc::new(PreparedChannelModule {
             name: "test".to_string(),
             description: "Test channel".to_string(),
-            component_bytes: Vec::new(),
+            component: None,
             limits: ResourceLimits::default(),
         });
 
@@ -2271,7 +2275,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_execute_poll_no_wasm_returns_empty() {
-        // When there's no WASM module (empty component_bytes), execute_poll
+        // When there's no WASM module (None component), execute_poll
         // should return an empty vector of messages
         let config = WasmChannelRuntimeConfig::for_testing();
         let runtime = Arc::new(WasmChannelRuntime::new(config).unwrap());
@@ -2279,7 +2283,7 @@ mod tests {
         let prepared = Arc::new(PreparedChannelModule {
             name: "poll-test".to_string(),
             description: "Test channel".to_string(),
-            component_bytes: Vec::new(), // No WASM bytes
+            component: None, // No WASM module
             limits: ResourceLimits::default(),
         });
 
@@ -2381,7 +2385,7 @@ mod tests {
         let prepared = Arc::new(PreparedChannelModule {
             name: "poll-channel".to_string(),
             description: "Polling test channel".to_string(),
-            component_bytes: Vec::new(),
+            component: None,
             limits: ResourceLimits::default(),
         });
 

@@ -10,7 +10,7 @@ use async_trait::async_trait;
 use crate::context::JobContext;
 use crate::skills::catalog::SkillCatalog;
 use crate::skills::registry::SkillRegistry;
-use crate::tools::tool::{Tool, ToolError, ToolOutput, require_str};
+use crate::tools::tool::{ApprovalRequirement, Tool, ToolError, ToolOutput, require_str};
 
 // ── skill_list ──────────────────────────────────────────────────────────
 
@@ -356,8 +356,8 @@ impl Tool for SkillInstallTool {
         Ok(ToolOutput::success(output, start.elapsed()))
     }
 
-    fn requires_approval(&self) -> bool {
-        true
+    fn requires_approval(&self, _params: &serde_json::Value) -> ApprovalRequirement {
+        ApprovalRequirement::UnlessAutoApproved
     }
 }
 
@@ -553,8 +553,8 @@ impl Tool for SkillRemoveTool {
         Ok(ToolOutput::success(output, start.elapsed()))
     }
 
-    fn requires_approval(&self) -> bool {
-        true
+    fn requires_approval(&self, _params: &serde_json::Value) -> ApprovalRequirement {
+        ApprovalRequirement::UnlessAutoApproved
     }
 }
 
@@ -575,27 +575,39 @@ mod tests {
 
     #[test]
     fn test_skill_list_schema() {
+        use crate::tools::tool::ApprovalRequirement;
         let tool = SkillListTool::new(test_registry());
         assert_eq!(tool.name(), "skill_list");
-        assert!(!tool.requires_approval());
+        assert_eq!(
+            tool.requires_approval(&serde_json::json!({})),
+            ApprovalRequirement::Never
+        );
         let schema = tool.parameters_schema();
         assert!(schema.get("properties").is_some());
     }
 
     #[test]
     fn test_skill_search_schema() {
+        use crate::tools::tool::ApprovalRequirement;
         let tool = SkillSearchTool::new(test_registry(), test_catalog());
         assert_eq!(tool.name(), "skill_search");
-        assert!(!tool.requires_approval());
+        assert_eq!(
+            tool.requires_approval(&serde_json::json!({})),
+            ApprovalRequirement::Never
+        );
         let schema = tool.parameters_schema();
         assert!(schema["properties"].get("query").is_some());
     }
 
     #[test]
     fn test_skill_install_schema() {
+        use crate::tools::tool::ApprovalRequirement;
         let tool = SkillInstallTool::new(test_registry(), test_catalog());
         assert_eq!(tool.name(), "skill_install");
-        assert!(tool.requires_approval());
+        assert_eq!(
+            tool.requires_approval(&serde_json::json!({})),
+            ApprovalRequirement::UnlessAutoApproved
+        );
         let schema = tool.parameters_schema();
         assert!(schema["properties"].get("name").is_some());
         assert!(schema["properties"].get("url").is_some());
@@ -604,9 +616,13 @@ mod tests {
 
     #[test]
     fn test_skill_remove_schema() {
+        use crate::tools::tool::ApprovalRequirement;
         let tool = SkillRemoveTool::new(test_registry());
         assert_eq!(tool.name(), "skill_remove");
-        assert!(tool.requires_approval());
+        assert_eq!(
+            tool.requires_approval(&serde_json::json!({})),
+            ApprovalRequirement::UnlessAutoApproved
+        );
         let schema = tool.parameters_schema();
         assert!(schema["properties"].get("name").is_some());
     }

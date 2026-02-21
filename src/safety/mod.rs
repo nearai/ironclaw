@@ -7,11 +7,13 @@
 //! - Enforcing safety policies
 //! - Detecting secret leakage in outputs
 
+mod credential_detect;
 mod leak_detector;
 mod policy;
 mod sanitizer;
 mod validator;
 
+pub use credential_detect::params_contain_manual_credentials;
 pub use leak_detector::{
     LeakAction, LeakDetectionError, LeakDetector, LeakMatch, LeakPattern, LeakScanResult,
     LeakSeverity,

@@ -89,6 +89,9 @@ impl GatewayChannel {
             skill_registry: None,
             skill_catalog: None,
             chat_rate_limiter: server::RateLimiter::new(30, 60),
+            registry_entries: Vec::new(),
+            cost_guard: None,
+            startup_time: std::time::Instant::now(),
         });
 
         Self {
@@ -119,6 +122,9 @@ impl GatewayChannel {
             skill_registry: self.state.skill_registry.clone(),
             skill_catalog: self.state.skill_catalog.clone(),
             chat_rate_limiter: server::RateLimiter::new(30, 60),
+            registry_entries: self.state.registry_entries.clone(),
+            cost_guard: self.state.cost_guard.clone(),
+            startup_time: self.state.startup_time,
         };
         mutate(&mut new_state);
         self.state = Arc::new(new_state);
@@ -203,6 +209,18 @@ impl GatewayChannel {
     /// Inject the LLM provider for OpenAI-compatible API proxy.
     pub fn with_llm_provider(mut self, llm: Arc<dyn crate::llm::LlmProvider>) -> Self {
         self.rebuild_state(|s| s.llm_provider = Some(llm));
+        self
+    }
+
+    /// Inject registry catalog entries for the available extensions API.
+    pub fn with_registry_entries(mut self, entries: Vec<crate::extensions::RegistryEntry>) -> Self {
+        self.rebuild_state(|s| s.registry_entries = entries);
+        self
+    }
+
+    /// Inject the cost guard for token/cost tracking in the status popover.
+    pub fn with_cost_guard(mut self, cg: Arc<crate::agent::cost_guard::CostGuard>) -> Self {
+        self.rebuild_state(|s| s.cost_guard = Some(cg));
         self
     }
 

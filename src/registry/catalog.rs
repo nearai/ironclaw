@@ -3,6 +3,7 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
+use crate::registry::embedded;
 use crate::registry::manifest::{BundleDefinition, BundlesFile, ExtensionManifest, ManifestKind};
 
 /// Error type for registry operations.
@@ -64,6 +65,69 @@ pub struct RegistryCatalog {
 }
 
 impl RegistryCatalog {
+    /// Find the `registry/` directory by searching relative to cwd, the executable,
+    /// and `CARGO_MANIFEST_DIR`. Returns `None` if the directory cannot be found
+    /// (non-fatal at startup).
+    pub fn find_dir() -> Option<PathBuf> {
+        // Try relative to current directory (for dev usage)
+        if let Ok(cwd) = std::env::current_dir() {
+            let candidate = cwd.join("registry");
+            if candidate.is_dir() {
+                return Some(candidate);
+            }
+        }
+
+        // Try relative to executable (covers installed binary, target/debug/, target/release/)
+        if let Ok(exe) = std::env::current_exe()
+            && let Some(parent) = exe.parent()
+        {
+            // Walk up to 3 levels: exe dir, parent (target/release -> target), grandparent (-> repo root)
+            let mut dir = Some(parent);
+            for _ in 0..3 {
+                if let Some(d) = dir {
+                    let candidate = d.join("registry");
+                    if candidate.is_dir() {
+                        return Some(candidate);
+                    }
+                    dir = d.parent();
+                }
+            }
+        }
+
+        // Try CARGO_MANIFEST_DIR (compile-time, works in dev builds)
+        let manifest_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let candidate = manifest_dir.join("registry");
+        if candidate.is_dir() {
+            return Some(candidate);
+        }
+
+        None
+    }
+
+    /// Try to load from disk; if `registry/` cannot be found, fall back to
+    /// manifests embedded into the binary at compile time.
+    pub fn load_or_embedded() -> Result<Self, RegistryError> {
+        if let Some(dir) = Self::find_dir() {
+            return Self::load(&dir);
+        }
+
+        // Fall back to embedded catalog
+        let manifests = embedded::load_embedded();
+        let bundles = embedded::load_embedded_bundles();
+
+        tracing::info!(
+            "Loaded embedded registry catalog ({} extensions, {} bundles)",
+            manifests.len(),
+            bundles.len()
+        );
+
+        Ok(Self {
+            manifests,
+            bundles,
+            root: PathBuf::new(),
+        })
+    }
+
     /// Load the catalog from a registry directory.
     ///
     /// Expects the structure:
@@ -576,5 +640,13 @@ mod tests {
     fn test_directory_not_found() {
         let result = RegistryCatalog::load(Path::new("/nonexistent/path"));
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_load_or_embedded_succeeds() {
+        // Should always succeed: either finds registry/ on disk or falls back to embedded
+        let catalog = RegistryCatalog::load_or_embedded().unwrap();
+        // At minimum, the embedded catalog from the repo should have entries
+        assert!(!catalog.all().is_empty() || !catalog.bundle_names().is_empty());
     }
 }

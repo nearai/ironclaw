@@ -1176,6 +1176,7 @@ impl SetupWizard {
                 response_cache_max_entries: 1000,
                 failover_cooldown_secs: 300,
                 failover_cooldown_threshold: 3,
+                smart_routing_cascade: true,
             },
             openai: None,
             anthropic: None,
@@ -2565,40 +2566,10 @@ fn build_channel_options(discovered: &[(String, ChannelCapabilitiesFile)]) -> Ve
     names
 }
 
-/// Try to load the registry catalog. Returns None if the registry directory
-/// cannot be found (e.g. running from an installed binary without the repo).
+/// Try to load the registry catalog. Falls back to embedded manifests when
+/// the `registry/` directory cannot be found (e.g. running from an installed binary).
 fn load_registry_catalog() -> Option<crate::registry::catalog::RegistryCatalog> {
-    // Try relative to current directory (dev usage)
-    let cwd = std::env::current_dir().ok()?;
-    let candidate = cwd.join("registry");
-    if candidate.is_dir() {
-        return crate::registry::catalog::RegistryCatalog::load(&candidate).ok();
-    }
-
-    // Try relative to executable
-    if let Ok(exe) = std::env::current_exe()
-        && let Some(parent) = exe.parent()
-    {
-        let candidate = parent.join("registry");
-        if candidate.is_dir() {
-            return crate::registry::catalog::RegistryCatalog::load(&candidate).ok();
-        }
-        if let Some(grandparent) = parent.parent() {
-            let candidate = grandparent.join("registry");
-            if candidate.is_dir() {
-                return crate::registry::catalog::RegistryCatalog::load(&candidate).ok();
-            }
-        }
-    }
-
-    // Try CARGO_MANIFEST_DIR (compile-time, works in dev builds)
-    let manifest_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
-    let candidate = manifest_dir.join("registry");
-    if candidate.is_dir() {
-        return crate::registry::catalog::RegistryCatalog::load(&candidate).ok();
-    }
-
-    None
+    crate::registry::catalog::RegistryCatalog::load_or_embedded().ok()
 }
 
 /// Install selected channels from the registry that aren't already on disk

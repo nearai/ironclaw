@@ -746,19 +746,18 @@ impl Agent {
             )> = None;
 
             for (idx, tc) in deferred_tool_calls.iter().enumerate() {
-                if let Some(tool) = self.tools().get(&tc.name).await
-                    && tool.requires_approval()
-                {
-                    let is_auto_approved = {
-                        let sess = session.lock().await;
-                        let mut approved = sess.is_tool_auto_approved(&tc.name);
-                        if approved && tool.requires_approval_for(&tc.arguments) {
-                            approved = false;
+                if let Some(tool) = self.tools().get(&tc.name).await {
+                    use crate::tools::ApprovalRequirement;
+                    let needs_approval = match tool.requires_approval(&tc.arguments) {
+                        ApprovalRequirement::Never => false,
+                        ApprovalRequirement::UnlessAutoApproved => {
+                            let sess = session.lock().await;
+                            !sess.is_tool_auto_approved(&tc.name)
                         }
-                        approved
+                        ApprovalRequirement::Always => true,
                     };
 
-                    if !is_auto_approved {
+                    if needs_approval {
                         approval_needed = Some((idx, tc.clone(), tool));
                         break; // remaining tools stay deferred
                     }

@@ -13,7 +13,7 @@ use axum::{
     http::{StatusCode, header},
     middleware,
     response::{
-        Html, IntoResponse,
+        IntoResponse,
         sse::{Event, KeepAlive, Sse},
     },
     routing::{get, post},
@@ -148,6 +148,13 @@ pub struct GatewayState {
     pub skill_catalog: Option<Arc<crate::skills::catalog::SkillCatalog>>,
     /// Rate limiter for chat endpoints (30 messages per 60 seconds).
     pub chat_rate_limiter: RateLimiter,
+    /// Registry catalog entries for the available extensions API.
+    /// Populated at startup from `registry/` manifests, independent of extension manager.
+    pub registry_entries: Vec<crate::extensions::RegistryEntry>,
+    /// Cost guard for token/cost tracking.
+    pub cost_guard: Option<Arc<crate::agent::cost_guard::CostGuard>>,
+    /// Server startup time for uptime calculation.
+    pub startup_time: std::time::Instant,
 }
 
 /// Start the gateway HTTP server.
@@ -214,6 +221,7 @@ pub async fn start_server(
         // Extensions
         .route("/api/extensions", get(extensions_list_handler))
         .route("/api/extensions/tools", get(extensions_tools_handler))
+        .route("/api/extensions/registry", get(extensions_registry_handler))
         .route("/api/extensions/install", post(extensions_install_handler))
         .route(
             "/api/extensions/{name}/activate",
@@ -344,20 +352,32 @@ pub async fn start_server(
 
 // --- Static file handlers ---
 
-async fn index_handler() -> Html<&'static str> {
-    Html(include_str!("static/index.html"))
+async fn index_handler() -> impl IntoResponse {
+    (
+        [
+            (header::CONTENT_TYPE, "text/html; charset=utf-8"),
+            (header::CACHE_CONTROL, "no-cache"),
+        ],
+        include_str!("static/index.html"),
+    )
 }
 
 async fn css_handler() -> impl IntoResponse {
     (
-        [(header::CONTENT_TYPE, "text/css")],
+        [
+            (header::CONTENT_TYPE, "text/css"),
+            (header::CACHE_CONTROL, "no-cache"),
+        ],
         include_str!("static/style.css"),
     )
 }
 
 async fn js_handler() -> impl IntoResponse {
     (
-        [(header::CONTENT_TYPE, "application/javascript")],
+        [
+            (header::CONTENT_TYPE, "application/javascript"),
+            (header::CACHE_CONTROL, "no-cache"),
+        ],
         include_str!("static/app.js"),
     )
 }
@@ -564,9 +584,13 @@ pub async fn clear_auth_mode(state: &GatewayState) {
 async fn chat_events_handler(
     State(state): State<Arc<GatewayState>>,
 ) -> Result<impl IntoResponse, (StatusCode, String)> {
-    state.sse.subscribe().ok_or((
+    let sse = state.sse.subscribe().ok_or((
         StatusCode::SERVICE_UNAVAILABLE,
         "Too many connections".to_string(),
+    ))?;
+    Ok((
+        [("X-Accel-Buffering", "no"), ("Cache-Control", "no-cache")],
+        sse,
     ))
 }
 
@@ -1592,10 +1616,7 @@ async fn job_files_read_handler(
 
 async fn logs_events_handler(
     State(state): State<Arc<GatewayState>>,
-) -> Result<
-    Sse<impl futures::Stream<Item = Result<Event, Infallible>> + Send + 'static>,
-    (StatusCode, String),
-> {
+) -> Result<impl IntoResponse, (StatusCode, String)> {
     let broadcaster = state.log_broadcaster.as_ref().ok_or((
         StatusCode::SERVICE_UNAVAILABLE,
         "Log broadcaster not available".to_string(),
@@ -1608,22 +1629,25 @@ async fn logs_events_handler(
 
     let history_stream = futures::stream::iter(history).map(|entry| {
         let data = serde_json::to_string(&entry).unwrap_or_default();
-        Ok(Event::default().event("log").data(data))
+        Ok::<_, Infallible>(Event::default().event("log").data(data))
     });
 
     let live_stream = tokio_stream::wrappers::BroadcastStream::new(rx)
         .filter_map(|result| result.ok())
         .map(|entry| {
             let data = serde_json::to_string(&entry).unwrap_or_default();
-            Ok(Event::default().event("log").data(data))
+            Ok::<_, Infallible>(Event::default().event("log").data(data))
         });
 
     let stream = history_stream.chain(live_stream);
 
-    Ok(Sse::new(stream).keep_alive(
-        KeepAlive::new()
-            .interval(std::time::Duration::from_secs(30))
-            .text(""),
+    Ok((
+        [("X-Accel-Buffering", "no"), ("Cache-Control", "no-cache")],
+        Sse::new(stream).keep_alive(
+            KeepAlive::new()
+                .interval(std::time::Duration::from_secs(30))
+                .text(""),
+        ),
     ))
 }
 
@@ -1714,10 +1738,30 @@ async fn extensions_install_handler(
     State(state): State<Arc<GatewayState>>,
     Json(req): Json<InstallExtensionRequest>,
 ) -> Result<Json<ActionResponse>, (StatusCode, String)> {
-    let ext_mgr = state.extension_manager.as_ref().ok_or((
-        StatusCode::NOT_IMPLEMENTED,
-        "Extension manager not available (secrets store required)".to_string(),
-    ))?;
+    // When extension manager isn't available, check registry entries for a helpful message
+    let Some(ext_mgr) = state.extension_manager.as_ref() else {
+        // Look up the entry in the catalog to give a specific error
+        if let Some(entry) = state.registry_entries.iter().find(|e| e.name == req.name) {
+            let msg = match &entry.source {
+                crate::extensions::ExtensionSource::WasmBuildable { .. } => {
+                    format!(
+                        "'{}' requires building from source. \
+                         Run `ironclaw registry install {}` from the CLI.",
+                        req.name, req.name
+                    )
+                }
+                _ => format!(
+                    "Extension manager not available (secrets store required). \
+                     Configure DATABASE_URL or a secrets backend to enable installation of '{}'.",
+                    req.name
+                ),
+            };
+            return Ok(Json(ActionResponse::fail(msg)));
+        }
+        return Ok(Json(ActionResponse::fail(
+            "Extension manager not available (secrets store required)".to_string(),
+        )));
+    };
 
     let kind_hint = req.kind.as_deref().and_then(|k| match k {
         "mcp_server" => Some(crate::extensions::ExtensionKind::McpServer),
@@ -1864,6 +1908,68 @@ async fn extensions_remove_handler(
         Ok(message) => Ok(Json(ActionResponse::ok(message))),
         Err(e) => Ok(Json(ActionResponse::fail(e.to_string()))),
     }
+}
+
+async fn extensions_registry_handler(
+    State(state): State<Arc<GatewayState>>,
+    Query(params): Query<RegistrySearchQuery>,
+) -> Json<RegistrySearchResponse> {
+    let query = params.query.unwrap_or_default();
+    let query_lower = query.to_lowercase();
+    let tokens: Vec<&str> = query_lower.split_whitespace().collect();
+
+    // Filter registry entries by query (or return all if empty)
+    let matching: Vec<&crate::extensions::RegistryEntry> = if tokens.is_empty() {
+        state.registry_entries.iter().collect()
+    } else {
+        state
+            .registry_entries
+            .iter()
+            .filter(|e| {
+                let name = e.name.to_lowercase();
+                let display = e.display_name.to_lowercase();
+                let desc = e.description.to_lowercase();
+                tokens.iter().any(|t| {
+                    name.contains(t)
+                        || display.contains(t)
+                        || desc.contains(t)
+                        || e.keywords.iter().any(|k| k.to_lowercase().contains(t))
+                })
+            })
+            .collect()
+    };
+
+    // Cross-reference with installed extensions by (name, kind) to avoid
+    // false positives when the same name exists as different kinds.
+    let installed: std::collections::HashSet<(String, String)> =
+        if let Some(ext_mgr) = state.extension_manager.as_ref() {
+            ext_mgr
+                .list(None)
+                .await
+                .unwrap_or_default()
+                .into_iter()
+                .map(|ext| (ext.name, ext.kind.to_string()))
+                .collect()
+        } else {
+            std::collections::HashSet::new()
+        };
+
+    let entries = matching
+        .into_iter()
+        .map(|e| {
+            let kind_str = e.kind.to_string();
+            RegistryEntryInfo {
+                name: e.name.clone(),
+                display_name: e.display_name.clone(),
+                installed: installed.contains(&(e.name.clone(), kind_str.clone())),
+                kind: kind_str,
+                description: e.description.clone(),
+                keywords: e.keywords.clone(),
+            }
+        })
+        .collect();
+
+    Json(RegistrySearchResponse { entries })
 }
 
 // --- Skills handlers ---
@@ -2565,11 +2671,43 @@ async fn gateway_status_handler(
         .map(|t| t.connection_count())
         .unwrap_or(0);
 
+    let uptime_secs = state.startup_time.elapsed().as_secs();
+
+    let (daily_cost, actions_this_hour, model_usage) = if let Some(ref cg) = state.cost_guard {
+        let cost = cg.daily_spend().await;
+        let actions = cg.actions_this_hour().await;
+        let usage = cg.model_usage().await;
+        let models: Vec<ModelUsageEntry> = usage
+            .into_iter()
+            .map(|(model, tokens)| ModelUsageEntry {
+                model,
+                input_tokens: tokens.input_tokens,
+                output_tokens: tokens.output_tokens,
+                cost: format!("{:.6}", tokens.cost),
+            })
+            .collect();
+        (Some(format!("{:.4}", cost)), Some(actions), Some(models))
+    } else {
+        (None, None, None)
+    };
+
     Json(GatewayStatusResponse {
         sse_connections,
         ws_connections,
         total_connections: sse_connections + ws_connections,
+        uptime_secs,
+        daily_cost,
+        actions_this_hour,
+        model_usage,
     })
+}
+
+#[derive(serde::Serialize)]
+struct ModelUsageEntry {
+    model: String,
+    input_tokens: u64,
+    output_tokens: u64,
+    cost: String,
 }
 
 #[derive(serde::Serialize)]
@@ -2577,6 +2715,13 @@ struct GatewayStatusResponse {
     sse_connections: u64,
     ws_connections: u64,
     total_connections: u64,
+    uptime_secs: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    daily_cost: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    actions_this_hour: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    model_usage: Option<Vec<ModelUsageEntry>>,
 }
 
 #[cfg(test)]

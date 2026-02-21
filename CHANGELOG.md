@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.0](https://github.com/nearai/ironclaw/compare/v0.8.0...v0.9.0) - 2026-02-21
+
+### Added
+
+- add TEE attestation shield to web gateway UI ([#275](https://github.com/nearai/ironclaw/pull/275))
+- configurable tool iterations, auto-approve, and policy fix ([#251](https://github.com/nearai/ironclaw/pull/251))
+
+### Fixed
+
+- add X-Accel-Buffering header to SSE endpoints ([#277](https://github.com/nearai/ironclaw/pull/277))
+
 ## [0.8.0](https://github.com/nearai/ironclaw/compare/ironclaw-v0.7.0...ironclaw-v0.8.0) - 2026-02-20
 
 ### Added

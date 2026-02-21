@@ -74,5 +74,4 @@ pub use types::{
     SecretError, SecretRef,
 };
 
-#[cfg(test)]
-pub use store::testing::InMemorySecretsStore;
+pub use store::in_memory::InMemorySecretsStore;
