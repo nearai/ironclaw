@@ -706,7 +706,8 @@ async fn main() -> anyhow::Result<()> {
 
     // Create workspace once, reused for memory tools and agent
     let workspace: Option<Arc<Workspace>> = if let Some(ref db) = db {
-        let mut ws = Workspace::new_with_db("default", Arc::clone(db));
+        let mut ws =
+            Workspace::new_with_db("default", Arc::clone(db)).with_search_config(&config.search);
         if let Some(ref emb) = embeddings {
             ws = ws.with_embeddings(emb.clone());
         }
