@@ -30,3 +30,7 @@ pub use routine::{
 pub use shell::ShellTool;
 pub use skill_tools::{SkillInstallTool, SkillListTool, SkillRemoveTool, SkillSearchTool};
 pub use time::TimeTool;
+
+mod html_converter;
+
+pub use html_converter::convert_html_to_markdown;
