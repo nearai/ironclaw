@@ -187,6 +187,10 @@ html-to-markdown = ["dep:html-to-markdown-rs", "dep:readabilityrs"]
 name = "html_to_markdown"
 required-features = ["html-to-markdown"]
 
+[[test]]
+name = "skills_catalog_integration"
+required-features = ["integration"]
+
 # The profile that 'cargo dist' will build with
 [profile.dist]
 inherits = "release"

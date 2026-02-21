@@ -84,7 +84,7 @@ impl SkillCatalog {
     }
 
     /// Create a catalog with a custom registry URL (for testing).
-    #[cfg(test)]
+    #[cfg(any(test, feature = "integration"))]
     pub fn with_url(url: &str) -> Self {
         let client = reqwest::Client::builder()
             .timeout(REQUEST_TIMEOUT)
