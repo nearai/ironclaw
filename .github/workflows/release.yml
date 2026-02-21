@@ -290,7 +290,7 @@ jobs:
 
             # Create tar.gz bundle
             bundle="target/wasm-bundles/${name}-wasm32-wasip2.tar.gz"
-            (cd target/wasm-bundles && tar czf "${name}-wasm32-wasip2.tar.gz" "${name}.wasm" "${name}.capabilities.json" 2>/dev/null || tar czf "${name}-wasm32-wasip2.tar.gz" "${name}.wasm")
+            (cd target/wasm-bundles && if [ -f "${name}.capabilities.json" ]; then tar czf "${name}-wasm32-wasip2.tar.gz" "${name}.wasm" "${name}.capabilities.json"; else tar czf "${name}-wasm32-wasip2.tar.gz" "${name}.wasm"; fi)
 
             # Compute SHA256
             sha256=$(sha256sum "$bundle" | cut -d' ' -f1)

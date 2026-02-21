@@ -647,6 +647,6 @@ mod tests {
         // Should always succeed: either finds registry/ on disk or falls back to embedded
         let catalog = RegistryCatalog::load_or_embedded().unwrap();
         // At minimum, the embedded catalog from the repo should have entries
-        assert!(!catalog.all().is_empty() || catalog.bundle_names().is_empty());
+        assert!(!catalog.all().is_empty() || !catalog.bundle_names().is_empty());
     }
 }

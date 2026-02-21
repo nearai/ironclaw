@@ -704,8 +704,17 @@ impl ExtensionManager {
         use flate2::read::GzDecoder;
         use tar::Archive;
 
+        use std::io::Read as _;
+
         let decoder = GzDecoder::new(bytes);
         let mut archive = Archive::new(decoder);
+        // Defense-in-depth: do not preserve permissions or extended attributes
+        archive.set_preserve_permissions(false);
+        #[cfg(any(unix, target_os = "redox"))]
+        archive.set_unpack_xattrs(false);
+
+        // 100 MB cap on decompressed entry size to prevent decompression bombs
+        const MAX_ENTRY_SIZE: u64 = 100 * 1024 * 1024;
 
         let wasm_filename = format!("{}.wasm", name);
         let caps_filename = format!("{}.capabilities.json", name);
@@ -718,6 +727,14 @@ impl ExtensionManager {
         for entry in entries {
             let mut entry = entry
                 .map_err(|e| ExtensionError::InstallFailed(format!("Bad tar.gz entry: {}", e)))?;
+
+            if entry.size() > MAX_ENTRY_SIZE {
+                return Err(ExtensionError::InstallFailed(format!(
+                    "Archive entry too large ({} bytes, max {} bytes)",
+                    entry.size(),
+                    MAX_ENTRY_SIZE
+                )));
+            }
 
             let entry_path = entry
                 .path()
@@ -732,15 +749,15 @@ impl ExtensionManager {
                 .unwrap_or("");
 
             if filename == wasm_filename {
-                let mut data = Vec::new();
-                std::io::Read::read_to_end(&mut entry, &mut data)
+                let mut data = Vec::with_capacity(entry.size() as usize);
+                std::io::Read::read_to_end(&mut entry.by_ref().take(MAX_ENTRY_SIZE), &mut data)
                     .map_err(|e| ExtensionError::InstallFailed(e.to_string()))?;
                 std::fs::write(target_wasm, &data)
                     .map_err(|e| ExtensionError::InstallFailed(e.to_string()))?;
                 found_wasm = true;
             } else if filename == caps_filename {
-                let mut data = Vec::new();
-                std::io::Read::read_to_end(&mut entry, &mut data)
+                let mut data = Vec::with_capacity(entry.size() as usize);
+                std::io::Read::read_to_end(&mut entry.by_ref().take(MAX_ENTRY_SIZE), &mut data)
                     .map_err(|e| ExtensionError::InstallFailed(e.to_string()))?;
                 std::fs::write(target_caps, &data)
                     .map_err(|e| ExtensionError::InstallFailed(e.to_string()))?;

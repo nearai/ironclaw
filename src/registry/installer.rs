@@ -185,9 +185,14 @@ impl RegistryInstaller {
         );
         let bytes = download_artifact(url).await?;
 
-        // Verify SHA256 if provided
+        // Verify SHA256 if provided, warn otherwise
         if let Some(expected_sha) = &artifact.sha256 {
             verify_sha256(&bytes, expected_sha, url)?;
+        } else {
+            println!(
+                "WARNING: No SHA256 checksum for '{}'; download is not cryptographically verified.",
+                manifest.name
+            );
         }
 
         let target_caps = target_dir.join(format!("{}.capabilities.json", manifest.name));
@@ -459,8 +464,17 @@ fn extract_tar_gz(
     use flate2::read::GzDecoder;
     use tar::Archive;
 
+    use std::io::Read as _;
+
     let decoder = GzDecoder::new(bytes);
     let mut archive = Archive::new(decoder);
+    // Defense-in-depth: do not preserve permissions or extended attributes
+    archive.set_preserve_permissions(false);
+    #[cfg(any(unix, target_os = "redox"))]
+    archive.set_unpack_xattrs(false);
+
+    // 100 MB cap on decompressed entry size to prevent decompression bombs
+    const MAX_ENTRY_SIZE: u64 = 100 * 1024 * 1024;
 
     let wasm_filename = format!("{}.wasm", name);
     let caps_filename = format!("{}.capabilities.json", name);
@@ -480,6 +494,17 @@ fn extract_tar_gz(
             reason: format!("failed to read tar.gz entry: {}", e),
         })?;
 
+        if entry.size() > MAX_ENTRY_SIZE {
+            return Err(RegistryError::DownloadFailed {
+                url: url.to_string(),
+                reason: format!(
+                    "archive entry too large ({} bytes, max {} bytes)",
+                    entry.size(),
+                    MAX_ENTRY_SIZE
+                ),
+            });
+        }
+
         let entry_path = entry
             .path()
             .map_err(|e| RegistryError::DownloadFailed {
@@ -495,23 +520,21 @@ fn extract_tar_gz(
             .unwrap_or("");
 
         if filename == wasm_filename {
-            let mut data = Vec::new();
-            std::io::Read::read_to_end(&mut entry, &mut data).map_err(|e| {
-                RegistryError::DownloadFailed {
+            let mut data = Vec::with_capacity(entry.size() as usize);
+            std::io::Read::read_to_end(&mut entry.by_ref().take(MAX_ENTRY_SIZE), &mut data)
+                .map_err(|e| RegistryError::DownloadFailed {
                     url: url.to_string(),
                     reason: format!("failed to read {} from archive: {}", wasm_filename, e),
-                }
-            })?;
+                })?;
             std::fs::write(target_wasm, &data).map_err(RegistryError::Io)?;
             found_wasm = true;
         } else if filename == caps_filename {
-            let mut data = Vec::new();
-            std::io::Read::read_to_end(&mut entry, &mut data).map_err(|e| {
-                RegistryError::DownloadFailed {
+            let mut data = Vec::with_capacity(entry.size() as usize);
+            std::io::Read::read_to_end(&mut entry.by_ref().take(MAX_ENTRY_SIZE), &mut data)
+                .map_err(|e| RegistryError::DownloadFailed {
                     url: url.to_string(),
                     reason: format!("failed to read {} from archive: {}", caps_filename, e),
-                }
-            })?;
+                })?;
             std::fs::write(target_caps, &data).map_err(RegistryError::Io)?;
             found_caps = true;
         }
