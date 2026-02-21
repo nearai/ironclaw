@@ -231,6 +231,16 @@ pub async fn start_server(
             "/api/extensions/{name}/remove",
             post(extensions_remove_handler),
         )
+        .route(
+            "/api/extensions/{name}/setup",
+            get(extensions_setup_handler).post(extensions_setup_submit_handler),
+        )
+        // Pairing
+        .route("/api/pairing/{channel}", get(pairing_list_handler))
+        .route(
+            "/api/pairing/{channel}/approve",
+            post(pairing_approve_handler),
+        )
         // Routines
         .route("/api/routines", get(routines_list_handler))
         .route("/api/routines/summary", get(routines_summary_handler))
@@ -1708,6 +1718,7 @@ async fn extensions_list_handler(
             authenticated: ext.authenticated,
             active: ext.active,
             tools: ext.tools,
+            needs_setup: ext.needs_setup,
         })
         .collect();
 
@@ -1970,6 +1981,98 @@ async fn extensions_registry_handler(
         .collect();
 
     Json(RegistrySearchResponse { entries })
+}
+
+async fn extensions_setup_handler(
+    State(state): State<Arc<GatewayState>>,
+    Path(name): Path<String>,
+) -> Result<Json<ExtensionSetupResponse>, (StatusCode, String)> {
+    let ext_mgr = state.extension_manager.as_ref().ok_or((
+        StatusCode::NOT_IMPLEMENTED,
+        "Extension manager not available (secrets store required)".to_string(),
+    ))?;
+
+    let secrets = ext_mgr
+        .get_setup_schema(&name)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    let kind = ext_mgr
+        .list(None)
+        .await
+        .ok()
+        .and_then(|list| list.into_iter().find(|e| e.name == name))
+        .map(|e| e.kind.to_string())
+        .unwrap_or_default();
+
+    Ok(Json(ExtensionSetupResponse {
+        name,
+        kind,
+        secrets,
+    }))
+}
+
+async fn extensions_setup_submit_handler(
+    State(state): State<Arc<GatewayState>>,
+    Path(name): Path<String>,
+    Json(req): Json<ExtensionSetupRequest>,
+) -> Result<Json<ActionResponse>, (StatusCode, String)> {
+    let ext_mgr = state.extension_manager.as_ref().ok_or((
+        StatusCode::NOT_IMPLEMENTED,
+        "Extension manager not available (secrets store required)".to_string(),
+    ))?;
+
+    match ext_mgr.save_setup_secrets(&name, &req.secrets).await {
+        Ok(message) => Ok(Json(ActionResponse::ok(message))),
+        Err(e) => Ok(Json(ActionResponse::fail(e.to_string()))),
+    }
+}
+
+// --- Pairing handlers ---
+
+async fn pairing_list_handler(
+    Path(channel): Path<String>,
+) -> Result<Json<PairingListResponse>, (StatusCode, String)> {
+    let store = crate::pairing::PairingStore::new();
+    let requests = store
+        .list_pending(&channel)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    let infos = requests
+        .into_iter()
+        .map(|r| PairingRequestInfo {
+            code: r.code,
+            sender_id: r.id,
+            meta: r.meta,
+            created_at: r.created_at,
+        })
+        .collect();
+
+    Ok(Json(PairingListResponse {
+        channel,
+        requests: infos,
+    }))
+}
+
+async fn pairing_approve_handler(
+    Path(channel): Path<String>,
+    Json(req): Json<PairingApproveRequest>,
+) -> Result<Json<ActionResponse>, (StatusCode, String)> {
+    let store = crate::pairing::PairingStore::new();
+    match store.approve(&channel, &req.code) {
+        Ok(Some(approved)) => Ok(Json(ActionResponse::ok(format!(
+            "Pairing approved for sender '{}'",
+            approved.id
+        )))),
+        Ok(None) => Ok(Json(ActionResponse::fail(
+            "Invalid or expired pairing code".to_string(),
+        ))),
+        Err(crate::pairing::PairingStoreError::ApproveRateLimited) => Err((
+            StatusCode::TOO_MANY_REQUESTS,
+            "Too many failed approve attempts; try again later".to_string(),
+        )),
+        Err(e) => Ok(Json(ActionResponse::fail(e.to_string()))),
+    }
 }
 
 // --- Skills handlers ---
