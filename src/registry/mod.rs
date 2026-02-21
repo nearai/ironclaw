@@ -12,6 +12,7 @@
 //! ```
 
 pub mod catalog;
+pub mod embedded;
 pub mod installer;
 pub mod manifest;
 

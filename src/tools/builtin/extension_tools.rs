@@ -596,6 +596,7 @@ mod tests {
             None,
             "test".to_string(),
             None,
+            Vec::new(),
         ))
     }
 }

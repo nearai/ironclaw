@@ -13,7 +13,7 @@ use axum::{
     http::{StatusCode, header},
     middleware,
     response::{
-        Html, IntoResponse,
+        IntoResponse,
         sse::{Event, KeepAlive, Sse},
     },
     routing::{get, post},
@@ -148,6 +148,9 @@ pub struct GatewayState {
     pub skill_catalog: Option<Arc<crate::skills::catalog::SkillCatalog>>,
     /// Rate limiter for chat endpoints (30 messages per 60 seconds).
     pub chat_rate_limiter: RateLimiter,
+    /// Registry catalog entries for the available extensions API.
+    /// Populated at startup from `registry/` manifests, independent of extension manager.
+    pub registry_entries: Vec<crate::extensions::RegistryEntry>,
 }
 
 /// Start the gateway HTTP server.
@@ -214,6 +217,7 @@ pub async fn start_server(
         // Extensions
         .route("/api/extensions", get(extensions_list_handler))
         .route("/api/extensions/tools", get(extensions_tools_handler))
+        .route("/api/extensions/registry", get(extensions_registry_handler))
         .route("/api/extensions/install", post(extensions_install_handler))
         .route(
             "/api/extensions/{name}/activate",
@@ -344,20 +348,32 @@ pub async fn start_server(
 
 // --- Static file handlers ---
 
-async fn index_handler() -> Html<&'static str> {
-    Html(include_str!("static/index.html"))
+async fn index_handler() -> impl IntoResponse {
+    (
+        [
+            (header::CONTENT_TYPE, "text/html; charset=utf-8"),
+            (header::CACHE_CONTROL, "no-cache"),
+        ],
+        include_str!("static/index.html"),
+    )
 }
 
 async fn css_handler() -> impl IntoResponse {
     (
-        [(header::CONTENT_TYPE, "text/css")],
+        [
+            (header::CONTENT_TYPE, "text/css"),
+            (header::CACHE_CONTROL, "no-cache"),
+        ],
         include_str!("static/style.css"),
     )
 }
 
 async fn js_handler() -> impl IntoResponse {
     (
-        [(header::CONTENT_TYPE, "application/javascript")],
+        [
+            (header::CONTENT_TYPE, "application/javascript"),
+            (header::CACHE_CONTROL, "no-cache"),
+        ],
         include_str!("static/app.js"),
     )
 }
@@ -1718,10 +1734,30 @@ async fn extensions_install_handler(
     State(state): State<Arc<GatewayState>>,
     Json(req): Json<InstallExtensionRequest>,
 ) -> Result<Json<ActionResponse>, (StatusCode, String)> {
-    let ext_mgr = state.extension_manager.as_ref().ok_or((
-        StatusCode::NOT_IMPLEMENTED,
-        "Extension manager not available (secrets store required)".to_string(),
-    ))?;
+    // When extension manager isn't available, check registry entries for a helpful message
+    let Some(ext_mgr) = state.extension_manager.as_ref() else {
+        // Look up the entry in the catalog to give a specific error
+        if let Some(entry) = state.registry_entries.iter().find(|e| e.name == req.name) {
+            let msg = match &entry.source {
+                crate::extensions::ExtensionSource::WasmBuildable { .. } => {
+                    format!(
+                        "'{}' requires building from source. \
+                         Run `ironclaw registry install {}` from the CLI.",
+                        req.name, req.name
+                    )
+                }
+                _ => format!(
+                    "Extension manager not available (secrets store required). \
+                     Configure DATABASE_URL or a secrets backend to enable installation of '{}'.",
+                    req.name
+                ),
+            };
+            return Ok(Json(ActionResponse::fail(msg)));
+        }
+        return Ok(Json(ActionResponse::fail(
+            "Extension manager not available (secrets store required)".to_string(),
+        )));
+    };
 
     let kind_hint = req.kind.as_deref().and_then(|k| match k {
         "mcp_server" => Some(crate::extensions::ExtensionKind::McpServer),
@@ -1868,6 +1904,64 @@ async fn extensions_remove_handler(
         Ok(message) => Ok(Json(ActionResponse::ok(message))),
         Err(e) => Ok(Json(ActionResponse::fail(e.to_string()))),
     }
+}
+
+async fn extensions_registry_handler(
+    State(state): State<Arc<GatewayState>>,
+    Query(params): Query<RegistrySearchQuery>,
+) -> Json<RegistrySearchResponse> {
+    let query = params.query.unwrap_or_default();
+    let query_lower = query.to_lowercase();
+    let tokens: Vec<&str> = query_lower.split_whitespace().collect();
+
+    // Filter registry entries by query (or return all if empty)
+    let matching: Vec<&crate::extensions::RegistryEntry> = if tokens.is_empty() {
+        state.registry_entries.iter().collect()
+    } else {
+        state
+            .registry_entries
+            .iter()
+            .filter(|e| {
+                let name = e.name.to_lowercase();
+                let display = e.display_name.to_lowercase();
+                let desc = e.description.to_lowercase();
+                tokens.iter().any(|t| {
+                    name.contains(t)
+                        || display.contains(t)
+                        || desc.contains(t)
+                        || e.keywords.iter().any(|k| k.to_lowercase().contains(t))
+                })
+            })
+            .collect()
+    };
+
+    // Cross-reference with installed extensions (if extension manager is available)
+    let installed_names: std::collections::HashSet<String> =
+        if let Some(ext_mgr) = state.extension_manager.as_ref() {
+            ext_mgr
+                .list(None)
+                .await
+                .unwrap_or_default()
+                .into_iter()
+                .map(|ext| ext.name)
+                .collect()
+        } else {
+            std::collections::HashSet::new()
+        };
+
+    let entries = matching
+        .into_iter()
+        .map(|e| RegistryEntryInfo {
+            name: e.name.clone(),
+            display_name: e.display_name.clone(),
+            kind: e.kind.to_string(),
+            description: e.description.clone(),
+            keywords: e.keywords.clone(),
+            installed: installed_names.contains(&e.name),
+        })
+        .collect();
+
+    Json(RegistrySearchResponse { entries })
 }
 
 // --- Skills handlers ---

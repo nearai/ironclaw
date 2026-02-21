@@ -137,6 +137,10 @@ impl RegistryInstaller {
     }
 
     /// Download and install a pre-built artifact.
+    ///
+    /// Supports two formats:
+    /// - **tar.gz bundle**: Contains `{name}.wasm` + `{name}.capabilities.json`
+    /// - **bare .wasm file**: Just the WASM binary (capabilities fetched separately if available)
     pub async fn install_from_artifact(
         &self,
         manifest: &ExtensionManifest,
@@ -152,13 +156,6 @@ impl RegistryInstaller {
         let url = artifact.url.as_ref().ok_or_else(|| {
             RegistryError::ExtensionNotFound(format!(
                 "No artifact URL for '{}'. Use --build to build from source.",
-                manifest.name
-            ))
-        })?;
-
-        let expected_sha = artifact.sha256.as_ref().ok_or_else(|| {
-            RegistryError::ExtensionNotFound(format!(
-                "No SHA256 hash for '{}'. Cannot verify download.",
                 manifest.name
             ))
         })?;
@@ -186,75 +183,76 @@ impl RegistryInstaller {
             "Downloading {} '{}'...",
             manifest.kind, manifest.display_name
         );
-        let response = reqwest::get(url)
-            .await
-            .map_err(|e| RegistryError::DownloadFailed {
-                url: url.clone(),
-                reason: format!("request failed: {}", e),
-            })?;
+        let bytes = download_artifact(url).await?;
 
-        let response = response
-            .error_for_status()
-            .map_err(|e| RegistryError::DownloadFailed {
-                url: url.clone(),
-                reason: e.to_string(),
-            })?;
-
-        let bytes = response
-            .bytes()
-            .await
-            .map_err(|e| RegistryError::DownloadFailed {
-                url: url.clone(),
-                reason: format!("failed to read body: {}", e),
-            })?;
-
-        // Verify SHA256
-        use sha2::{Digest, Sha256};
-        let mut hasher = Sha256::new();
-        hasher.update(&bytes);
-        let actual_sha = format!("{:x}", hasher.finalize());
-
-        if actual_sha != *expected_sha {
-            return Err(RegistryError::DownloadFailed {
-                url: url.clone(),
-                reason: format!(
-                    "SHA256 mismatch: expected {}, got {}",
-                    expected_sha, actual_sha
-                ),
-            });
+        // Verify SHA256 if provided
+        if let Some(expected_sha) = &artifact.sha256 {
+            verify_sha256(&bytes, expected_sha, url)?;
         }
 
-        // Write file
-        fs::write(&target_wasm, &bytes)
-            .await
-            .map_err(RegistryError::Io)?;
-
-        // Copy capabilities from source dir (still needed even for pre-built artifacts).
-        // NOTE: This requires the source tree to be present. When pre-built artifact
-        // distribution is implemented, capabilities should be bundled with the artifact
-        // or fetched from a separate URL.
-        let caps_source = self
-            .repo_root
-            .join(&manifest.source.dir)
-            .join(&manifest.source.capabilities);
         let target_caps = target_dir.join(format!("{}.capabilities.json", manifest.name));
-        let has_capabilities = if caps_source.exists() {
-            fs::copy(&caps_source, &target_caps)
+
+        // Detect format and extract
+        let has_capabilities = if is_gzip(&bytes) {
+            // tar.gz bundle: extract {name}.wasm and {name}.capabilities.json
+            let extracted =
+                extract_tar_gz(&bytes, &manifest.name, &target_wasm, &target_caps, url)?;
+            extracted.has_capabilities
+        } else {
+            // Bare WASM file
+            fs::write(&target_wasm, &bytes)
                 .await
                 .map_err(RegistryError::Io)?;
-            true
-        } else {
-            false
+
+            // Try to get capabilities from:
+            // 1. Separate capabilities_url in the artifact
+            // 2. Source tree (legacy, requires repo)
+            if let Some(ref caps_url) = artifact.capabilities_url {
+                match download_artifact(caps_url).await {
+                    Ok(caps_bytes) => {
+                        fs::write(&target_caps, &caps_bytes)
+                            .await
+                            .map_err(RegistryError::Io)?;
+                        true
+                    }
+                    Err(e) => {
+                        tracing::warn!("Failed to download capabilities from {}: {}", caps_url, e);
+                        false
+                    }
+                }
+            } else {
+                // Legacy fallback: try source tree
+                let caps_source = self
+                    .repo_root
+                    .join(&manifest.source.dir)
+                    .join(&manifest.source.capabilities);
+                if caps_source.exists() {
+                    fs::copy(&caps_source, &target_caps)
+                        .await
+                        .map_err(RegistryError::Io)?;
+                    true
+                } else {
+                    false
+                }
+            }
         };
 
         println!("  Installed to {}", target_wasm.display());
+
+        let mut warnings = Vec::new();
+        if !has_capabilities {
+            warnings.push(format!(
+                "No capabilities file found for '{}'. Auth and hooks may not work.",
+                manifest.name
+            ));
+        }
 
         Ok(InstallOutcome {
             name: manifest.name.clone(),
             kind: manifest.kind,
             wasm_path: target_wasm,
             has_capabilities,
-            warnings: Vec::new(),
+            warnings,
         })
     }
 
@@ -399,6 +397,141 @@ async fn build_wasm_component(source_dir: &Path, crate_name: &str) -> anyhow::Re
     )
 }
 
+/// Download an artifact from a URL.
+async fn download_artifact(url: &str) -> Result<bytes::Bytes, RegistryError> {
+    let response = reqwest::get(url)
+        .await
+        .map_err(|e| RegistryError::DownloadFailed {
+            url: url.to_string(),
+            reason: format!("request failed: {}", e),
+        })?;
+
+    let response = response
+        .error_for_status()
+        .map_err(|e| RegistryError::DownloadFailed {
+            url: url.to_string(),
+            reason: e.to_string(),
+        })?;
+
+    response
+        .bytes()
+        .await
+        .map_err(|e| RegistryError::DownloadFailed {
+            url: url.to_string(),
+            reason: format!("failed to read body: {}", e),
+        })
+}
+
+/// Verify SHA256 of downloaded bytes.
+fn verify_sha256(bytes: &[u8], expected: &str, url: &str) -> Result<(), RegistryError> {
+    use sha2::{Digest, Sha256};
+    let mut hasher = Sha256::new();
+    hasher.update(bytes);
+    let actual = format!("{:x}", hasher.finalize());
+
+    if actual != expected {
+        return Err(RegistryError::DownloadFailed {
+            url: url.to_string(),
+            reason: format!("SHA256 mismatch: expected {}, got {}", expected, actual),
+        });
+    }
+    Ok(())
+}
+
+/// Check if bytes start with gzip magic number (0x1f 0x8b).
+fn is_gzip(bytes: &[u8]) -> bool {
+    bytes.len() >= 2 && bytes[0] == 0x1f && bytes[1] == 0x8b
+}
+
+/// Result of extracting a tar.gz bundle.
+struct ExtractResult {
+    has_capabilities: bool,
+}
+
+/// Extract a tar.gz archive, looking for `{name}.wasm` and `{name}.capabilities.json`.
+fn extract_tar_gz(
+    bytes: &[u8],
+    name: &str,
+    target_wasm: &Path,
+    target_caps: &Path,
+    url: &str,
+) -> Result<ExtractResult, RegistryError> {
+    use flate2::read::GzDecoder;
+    use tar::Archive;
+
+    let decoder = GzDecoder::new(bytes);
+    let mut archive = Archive::new(decoder);
+
+    let wasm_filename = format!("{}.wasm", name);
+    let caps_filename = format!("{}.capabilities.json", name);
+    let mut found_wasm = false;
+    let mut found_caps = false;
+
+    let entries = archive
+        .entries()
+        .map_err(|e| RegistryError::DownloadFailed {
+            url: url.to_string(),
+            reason: format!("failed to read tar.gz entries: {}", e),
+        })?;
+
+    for entry in entries {
+        let mut entry = entry.map_err(|e| RegistryError::DownloadFailed {
+            url: url.to_string(),
+            reason: format!("failed to read tar.gz entry: {}", e),
+        })?;
+
+        let entry_path = entry
+            .path()
+            .map_err(|e| RegistryError::DownloadFailed {
+                url: url.to_string(),
+                reason: format!("invalid path in tar.gz: {}", e),
+            })?
+            .to_path_buf();
+
+        // Match by filename (ignoring any directory prefix in the archive)
+        let filename = entry_path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("");
+
+        if filename == wasm_filename {
+            let mut data = Vec::new();
+            std::io::Read::read_to_end(&mut entry, &mut data).map_err(|e| {
+                RegistryError::DownloadFailed {
+                    url: url.to_string(),
+                    reason: format!("failed to read {} from archive: {}", wasm_filename, e),
+                }
+            })?;
+            std::fs::write(target_wasm, &data).map_err(RegistryError::Io)?;
+            found_wasm = true;
+        } else if filename == caps_filename {
+            let mut data = Vec::new();
+            std::io::Read::read_to_end(&mut entry, &mut data).map_err(|e| {
+                RegistryError::DownloadFailed {
+                    url: url.to_string(),
+                    reason: format!("failed to read {} from archive: {}", caps_filename, e),
+                }
+            })?;
+            std::fs::write(target_caps, &data).map_err(RegistryError::Io)?;
+            found_caps = true;
+        }
+    }
+
+    if !found_wasm {
+        return Err(RegistryError::DownloadFailed {
+            url: url.to_string(),
+            reason: format!(
+                "tar.gz archive does not contain '{}'. Archive may be malformed.",
+                wasm_filename
+            ),
+        });
+    }
+
+    Ok(ExtractResult {
+        has_capabilities: found_caps,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -411,5 +544,104 @@ mod tests {
             PathBuf::from("/home/.ironclaw/channels"),
         );
         assert_eq!(installer.repo_root, PathBuf::from("/repo"));
+    }
+
+    #[test]
+    fn test_is_gzip() {
+        assert!(is_gzip(&[0x1f, 0x8b, 0x08]));
+        assert!(!is_gzip(&[0x00, 0x61, 0x73, 0x6d])); // WASM magic
+        assert!(!is_gzip(&[0x1f])); // Too short
+        assert!(!is_gzip(&[]));
+    }
+
+    #[test]
+    fn test_verify_sha256_valid() {
+        use sha2::{Digest, Sha256};
+        let data = b"hello world";
+        let mut hasher = Sha256::new();
+        hasher.update(data);
+        let hash = format!("{:x}", hasher.finalize());
+        assert!(verify_sha256(data, &hash, "test://url").is_ok());
+    }
+
+    #[test]
+    fn test_verify_sha256_invalid() {
+        assert!(verify_sha256(b"data", "0000", "test://url").is_err());
+    }
+
+    #[test]
+    fn test_extract_tar_gz() {
+        use flate2::Compression;
+        use flate2::write::GzEncoder;
+        use tar::Builder;
+
+        // Create a tar.gz in memory with test.wasm and test.capabilities.json
+        let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
+        {
+            let mut builder = Builder::new(&mut encoder);
+
+            let wasm_data = b"\0asm\x01\x00\x00\x00";
+            let mut header = tar::Header::new_gnu();
+            header.set_size(wasm_data.len() as u64);
+            header.set_cksum();
+            builder
+                .append_data(&mut header, "test.wasm", &wasm_data[..])
+                .unwrap();
+
+            let caps_data = br#"{"auth":null}"#;
+            let mut header = tar::Header::new_gnu();
+            header.set_size(caps_data.len() as u64);
+            header.set_cksum();
+            builder
+                .append_data(&mut header, "test.capabilities.json", &caps_data[..])
+                .unwrap();
+
+            builder.finish().unwrap();
+        }
+        let gz_bytes = encoder.finish().unwrap();
+
+        let tmp = tempfile::tempdir().unwrap();
+        let wasm_path = tmp.path().join("test.wasm");
+        let caps_path = tmp.path().join("test.capabilities.json");
+
+        let result =
+            extract_tar_gz(&gz_bytes, "test", &wasm_path, &caps_path, "test://url").unwrap();
+
+        assert!(wasm_path.exists());
+        assert!(caps_path.exists());
+        assert!(result.has_capabilities);
+    }
+
+    #[test]
+    fn test_extract_tar_gz_missing_wasm() {
+        use flate2::Compression;
+        use flate2::write::GzEncoder;
+        use tar::Builder;
+
+        let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
+        {
+            let mut builder = Builder::new(&mut encoder);
+
+            let data = b"not a wasm file";
+            let mut header = tar::Header::new_gnu();
+            header.set_size(data.len() as u64);
+            header.set_cksum();
+            builder
+                .append_data(&mut header, "wrong.wasm", &data[..])
+                .unwrap();
+            builder.finish().unwrap();
+        }
+        let gz_bytes = encoder.finish().unwrap();
+
+        let tmp = tempfile::tempdir().unwrap();
+        let result = extract_tar_gz(
+            &gz_bytes,
+            "test",
+            &tmp.path().join("test.wasm"),
+            &tmp.path().join("test.capabilities.json"),
+            "test://url",
+        );
+
+        assert!(result.is_err());
     }
 }

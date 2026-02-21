@@ -579,11 +579,44 @@ impl AppBuilder {
 
         tokio::join!(wasm_tools_future, mcp_servers_future);
 
-        // Create extension manager
-        let extension_manager = if let Some(ref secrets) = self.secrets_store {
+        // Load registry catalog entries for extension discovery
+        let catalog_entries = match crate::registry::RegistryCatalog::load_or_embedded() {
+            Ok(catalog) => {
+                let entries: Vec<_> = catalog
+                    .all()
+                    .iter()
+                    .map(|m| m.to_registry_entry())
+                    .collect();
+                tracing::info!(
+                    count = entries.len(),
+                    "Loaded registry catalog entries for extension discovery"
+                );
+                entries
+            }
+            Err(e) => {
+                tracing::warn!("Failed to load registry catalog: {}", e);
+                Vec::new()
+            }
+        };
+
+        // Create extension manager. Use ephemeral in-memory secrets if no
+        // persistent store is configured (listing/install/activate still work).
+        let ext_secrets: Arc<dyn crate::secrets::SecretsStore + Send + Sync> = if let Some(ref s) =
+            self.secrets_store
+        {
+            Arc::clone(s)
+        } else {
+            use crate::secrets::{InMemorySecretsStore, SecretsCrypto};
+            let ephemeral_key =
+                secrecy::SecretString::from(crate::secrets::keychain::generate_master_key_hex());
+            let crypto = Arc::new(SecretsCrypto::new(ephemeral_key).expect("ephemeral crypto"));
+            tracing::debug!("Using ephemeral in-memory secrets store for extension manager");
+            Arc::new(InMemorySecretsStore::new(crypto))
+        };
+        let extension_manager = {
             let manager = Arc::new(ExtensionManager::new(
                 Arc::clone(&mcp_session_manager),
-                Arc::clone(secrets),
+                ext_secrets,
                 Arc::clone(tools),
                 Some(Arc::clone(hooks)),
                 wasm_tool_runtime.clone(),
@@ -592,16 +625,11 @@ impl AppBuilder {
                 self.config.tunnel.public_url.clone(),
                 "default".to_string(),
                 self.db.clone(),
+                catalog_entries.clone(),
             ));
             tools.register_extension_tools(Arc::clone(&manager));
             tracing::info!("Extension manager initialized with in-chat discovery tools");
             Some(manager)
-        } else {
-            tracing::debug!(
-                "Extension manager not available (no secrets store). \
-                 Extension tools won't be registered."
-            );
-            None
         };
 
         // register_builder_tool() already calls register_dev_tools() internally,

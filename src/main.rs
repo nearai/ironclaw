@@ -909,11 +909,43 @@ async fn main() -> anyhow::Result<()> {
 
     let (dev_loaded_tool_names, _) = tokio::join!(wasm_tools_future, mcp_servers_future);
 
-    // Create extension manager for in-chat discovery/install/auth/activate
-    let extension_manager = if let Some(ref secrets) = secrets_store {
+    // Load registry catalog entries for in-chat extension discovery
+    let catalog_entries = match ironclaw::registry::RegistryCatalog::load_or_embedded() {
+        Ok(catalog) => {
+            let entries: Vec<ironclaw::extensions::RegistryEntry> = catalog
+                .all()
+                .iter()
+                .map(|m| m.to_registry_entry())
+                .collect();
+            tracing::info!(
+                count = entries.len(),
+                "Loaded registry catalog entries for extension discovery"
+            );
+            entries
+        }
+        Err(e) => {
+            tracing::warn!("Failed to load registry catalog: {}", e);
+            Vec::new()
+        }
+    };
+
+    // Create extension manager for in-chat discovery/install/auth/activate.
+    // If no persistent secrets store is available, use an ephemeral in-memory store
+    // so that listing/installing/activating extensions still works (auth won't persist).
+    let ext_secrets: Arc<dyn SecretsStore + Send + Sync> = if let Some(ref s) = secrets_store {
+        Arc::clone(s)
+    } else {
+        use ironclaw::secrets::{InMemorySecretsStore, SecretsCrypto};
+        let ephemeral_key =
+            secrecy::SecretString::from(ironclaw::secrets::keychain::generate_master_key_hex());
+        let crypto = Arc::new(SecretsCrypto::new(ephemeral_key).expect("ephemeral crypto"));
+        tracing::debug!("Using ephemeral in-memory secrets store for extension manager");
+        Arc::new(InMemorySecretsStore::new(crypto))
+    };
+    let extension_manager = {
         let manager = Arc::new(ExtensionManager::new(
             Arc::clone(&mcp_session_manager),
-            Arc::clone(secrets),
+            ext_secrets,
             Arc::clone(&tools),
             Some(Arc::clone(&hooks)),
             wasm_tool_runtime.clone(),
@@ -922,16 +954,11 @@ async fn main() -> anyhow::Result<()> {
             config.tunnel.public_url.clone(),
             "default".to_string(),
             db.clone(),
+            catalog_entries.clone(),
         ));
         tools.register_extension_tools(Arc::clone(&manager));
         tracing::info!("Extension manager initialized with in-chat discovery tools");
         Some(manager)
-    } else {
-        tracing::debug!(
-            "Extension manager not available (no secrets store). \
-             Extension tools won't be registered."
-        );
-        None
     };
 
     // Set up orchestrator for sandboxed job execution
@@ -1332,6 +1359,9 @@ async fn main() -> anyhow::Result<()> {
         gw = gw.with_tool_registry(Arc::clone(&tools));
         if let Some(ref ext_mgr) = extension_manager {
             gw = gw.with_extension_manager(Arc::clone(ext_mgr));
+        }
+        if !catalog_entries.is_empty() {
+            gw = gw.with_registry_entries(catalog_entries.clone());
         }
         if let Some(ref d) = db {
             gw = gw.with_store(Arc::clone(d));

@@ -1,7 +1,5 @@
 //! Registry CLI commands for discovering and installing extensions.
 
-use std::path::PathBuf;
-
 use clap::Subcommand;
 
 use crate::registry::catalog::RegistryCatalog;
@@ -59,8 +57,20 @@ pub enum RegistryCommand {
 
 /// Run a registry command.
 pub async fn run_registry_command(cmd: RegistryCommand) -> anyhow::Result<()> {
-    let registry_dir = find_registry_dir()?;
-    let catalog = RegistryCatalog::load(&registry_dir)?;
+    // For install commands that need to build from source, a disk registry is required.
+    // For list/info, embedded manifests suffice.
+    let registry_dir = RegistryCatalog::find_dir();
+    let catalog = if let Some(ref dir) = registry_dir {
+        RegistryCatalog::load(dir)?
+    } else {
+        RegistryCatalog::load_or_embedded()?
+    };
+
+    // Resolve repo root for installer (empty path when running from binary)
+    let repo_root = registry_dir
+        .as_ref()
+        .and_then(|d| d.parent().map(|p| p.to_path_buf()))
+        .unwrap_or_default();
 
     match cmd {
         RegistryCommand::List { kind, tag, verbose } => {
@@ -68,51 +78,12 @@ pub async fn run_registry_command(cmd: RegistryCommand) -> anyhow::Result<()> {
         }
         RegistryCommand::Info { name } => cmd_info(&catalog, &name),
         RegistryCommand::Install { name, force, build } => {
-            cmd_install(&catalog, &registry_dir, &name, force, build).await
+            cmd_install(&catalog, &repo_root, &name, force, build).await
         }
         RegistryCommand::InstallDefaults { force, build } => {
-            cmd_install(&catalog, &registry_dir, "default", force, build).await
+            cmd_install(&catalog, &repo_root, "default", force, build).await
         }
     }
-}
-
-/// Find the registry directory by looking relative to the current executable or cwd.
-fn find_registry_dir() -> anyhow::Result<PathBuf> {
-    // Try relative to current directory (for dev usage)
-    let cwd = std::env::current_dir()?;
-    let candidate = cwd.join("registry");
-    if candidate.is_dir() {
-        return Ok(candidate);
-    }
-
-    // Try relative to executable (covers installed binary, target/debug/, target/release/)
-    if let Ok(exe) = std::env::current_exe()
-        && let Some(parent) = exe.parent()
-    {
-        // Walk up to 3 levels: exe dir, parent (target/release → target), grandparent (→ repo root)
-        let mut dir = Some(parent);
-        for _ in 0..3 {
-            if let Some(d) = dir {
-                let candidate = d.join("registry");
-                if candidate.is_dir() {
-                    return Ok(candidate);
-                }
-                dir = d.parent();
-            }
-        }
-    }
-
-    // Try CARGO_MANIFEST_DIR (compile-time, works in dev builds)
-    let manifest_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
-    let candidate = manifest_dir.join("registry");
-    if candidate.is_dir() {
-        return Ok(candidate);
-    }
-
-    anyhow::bail!(
-        "Could not find registry/ directory. Run from the ironclaw repo root, \
-         or ensure registry/ is next to the ironclaw binary."
-    )
 }
 
 fn cmd_list(
@@ -254,16 +225,11 @@ fn cmd_info(catalog: &RegistryCatalog, name: &str) -> anyhow::Result<()> {
 
 async fn cmd_install(
     catalog: &RegistryCatalog,
-    registry_dir: &std::path::Path,
+    repo_root: &std::path::Path,
     name: &str,
     force: bool,
     prefer_build: bool,
 ) -> anyhow::Result<()> {
-    // Registry dir parent is the repo root
-    let repo_root = registry_dir
-        .parent()
-        .ok_or_else(|| anyhow::anyhow!("Cannot determine repo root from registry dir"))?;
-
     let installer = RegistryInstaller::with_defaults(repo_root.to_path_buf());
 
     let (manifests, bundle) = catalog.resolve(name)?;
