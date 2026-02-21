@@ -362,4 +362,37 @@ mod tests {
         assert!(rate.to_string().contains("101 actions"));
         assert!(rate.to_string().contains("100 allowed"));
     }
+
+    #[tokio::test]
+    async fn test_model_usage_per_model_tracking() {
+        let guard = CostGuard::new(CostGuardConfig::default());
+
+        // Initially empty
+        assert!(guard.model_usage().await.is_empty());
+
+        // Record calls for two different models
+        guard.record_llm_call("gpt-4o", 1000, 500).await;
+        guard.record_llm_call("gpt-4o", 2000, 1000).await;
+        guard
+            .record_llm_call("claude-3-5-sonnet-20241022", 500, 200)
+            .await;
+
+        let usage = guard.model_usage().await;
+        assert_eq!(usage.len(), 2);
+
+        let gpt = usage.get("gpt-4o").expect("gpt-4o should be tracked");
+        assert_eq!(gpt.input_tokens, 3000);
+        assert_eq!(gpt.output_tokens, 1500);
+        assert!(gpt.cost > Decimal::ZERO);
+
+        let claude = usage
+            .get("claude-3-5-sonnet-20241022")
+            .expect("claude should be tracked");
+        assert_eq!(claude.input_tokens, 500);
+        assert_eq!(claude.output_tokens, 200);
+        assert!(claude.cost > Decimal::ZERO);
+
+        // Costs should differ since models have different pricing
+        assert_ne!(gpt.cost, claude.cost);
+    }
 }

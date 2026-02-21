@@ -2304,10 +2304,10 @@ function fetchGatewayStatus() {
       });
       for (var i = 0; i < data.model_usage.length; i++) {
         var m = data.model_usage[i];
-        var name = shortModelName(m.model);
+        var name = escapeHtml(shortModelName(m.model));
         html += '<div class="gw-model-row">'
           + '<span class="gw-model-name">' + name + '</span>'
-          + '<span class="gw-model-cost">' + formatCost(m.cost) + '</span>'
+          + '<span class="gw-model-cost">' + escapeHtml(formatCost(m.cost)) + '</span>'
           + '</div>';
         html += '<div class="gw-token-detail">'
           + '<span>in: ' + formatTokenCount(m.input_tokens) + '</span>'
