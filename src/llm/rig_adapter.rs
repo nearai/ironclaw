@@ -59,8 +59,19 @@ impl<M: CompletionModel> RigAdapter<M> {
     /// When enabled, `cache_control: {"type": "ephemeral"}` is injected into
     /// every request so Anthropic caches the prompt prefix server-side.
     /// Only call this for the direct Anthropic backend.
+    ///
+    /// If the configured model does not support caching (e.g. claude-2),
+    /// a warning is logged once at construction and caching is disabled.
     pub fn with_prompt_cache(mut self, enabled: bool) -> Self {
-        self.enable_prompt_cache = enabled;
+        if enabled && !supports_prompt_cache(&self.model_name) {
+            tracing::warn!(
+                model = %self.model_name,
+                "Prompt caching requested but model does not support it; disabling"
+            );
+            self.enable_prompt_cache = false;
+        } else {
+            self.enable_prompt_cache = enabled;
+        }
         self
     }
 }
@@ -418,19 +429,12 @@ fn build_rig_request(
     // Enable Anthropic prompt caching via automatic cache_control.
     // Anthropic auto-places the cache breakpoint at the last cacheable block,
     // caching the prefix (tools → system → messages) for subsequent requests.
-    // Only Claude 3+ models support caching; older models (claude-2, instant)
-    // return 400 if cache_control is present.
-    let additional_params = if enable_prompt_cache && supports_prompt_cache(model_name) {
+    // Model validation happens once in with_prompt_cache(); here we just check the flag.
+    let additional_params = if enable_prompt_cache {
         tracing::debug!(model = model_name, "Injecting cache_control for Anthropic prompt caching");
         Some(serde_json::json!({
             "cache_control": {"type": "ephemeral"}
         }))
-    } else if enable_prompt_cache {
-        tracing::warn!(
-            model = model_name,
-            "Prompt caching enabled but model does not support it; skipping cache_control"
-        );
-        None
     } else {
         None
     };

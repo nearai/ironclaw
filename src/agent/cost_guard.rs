@@ -408,12 +408,12 @@ mod tests {
         let guard = CostGuard::new(CostGuardConfig::default());
 
         // Full price: 1000 input + 500 output, no cache
-        let full_cost = guard.record_llm_call("gpt-4o", 1000, 500, 0).await;
+        let full_cost = guard.record_llm_call("claude-opus-4-6", 1000, 500, 0).await;
 
         let guard2 = CostGuard::new(CostGuardConfig::default());
 
         // Same tokens but all input cached (90% discount on input)
-        let cached_cost = guard2.record_llm_call("gpt-4o", 1000, 500, 1000).await;
+        let cached_cost = guard2.record_llm_call("claude-opus-4-6", 1000, 500, 1000).await;
 
         // Cached cost must be strictly less than full cost
         assert!(
@@ -424,7 +424,7 @@ mod tests {
         );
 
         // The difference should be exactly 90% of the input cost
-        let (input_rate, _) = costs::model_cost("gpt-4o").unwrap();
+        let (input_rate, _) = costs::model_cost("claude-opus-4-6").unwrap();
         let expected_savings = input_rate * Decimal::from(1000u32) * dec!(9) / dec!(10);
         let actual_savings = full_cost - cached_cost;
         assert_eq!(
