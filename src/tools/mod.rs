@@ -21,4 +21,4 @@ pub use builder::{
     TestCase, TestHarness, TestResult, TestSuite, ValidationError, ValidationResult, WasmValidator,
 };
 pub use registry::ToolRegistry;
-pub use tool::{Tool, ToolDomain, ToolError, ToolOutput};
+pub use tool::{ApprovalRequirement, Tool, ToolDomain, ToolError, ToolOutput};

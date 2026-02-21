@@ -432,7 +432,7 @@ Report when the job is complete or if you encounter issues you cannot resolve."#
                 })?;
 
         // Tools requiring approval are blocked in autonomous jobs
-        if tool.requires_approval() {
+        if tool.requires_approval(params).is_required() {
             return Err(crate::error::ToolError::AuthRequired {
                 name: tool_name.to_string(),
             }

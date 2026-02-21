@@ -408,6 +408,28 @@ impl ActionResponse {
     }
 }
 
+// --- Registry ---
+
+#[derive(Debug, Serialize)]
+pub struct RegistryEntryInfo {
+    pub name: String,
+    pub display_name: String,
+    pub kind: String,
+    pub description: String,
+    pub keywords: Vec<String>,
+    pub installed: bool,
+}
+
+#[derive(Debug, Serialize)]
+pub struct RegistrySearchResponse {
+    pub entries: Vec<RegistryEntryInfo>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct RegistrySearchQuery {
+    pub query: Option<String>,
+}
+
 // --- Skills ---
 
 #[derive(Debug, Serialize)]

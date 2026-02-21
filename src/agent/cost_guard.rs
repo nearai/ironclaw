@@ -4,7 +4,7 @@
 //! to prevent runaway agents from burning through API credits. Especially
 //! important for daemon/heartbeat modes where the agent acts autonomously.
 
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Instant;
 
@@ -53,6 +53,14 @@ impl std::fmt::Display for CostLimitExceeded {
     }
 }
 
+/// Per-model token usage counters.
+#[derive(Debug, Clone, Default)]
+pub struct ModelTokens {
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    pub cost: Decimal,
+}
+
 /// Tracks costs and action rates, enforcing configurable limits.
 ///
 /// Thread-safe; designed to be shared via `Arc<CostGuard>`.
@@ -67,6 +75,9 @@ pub struct CostGuard {
 
     /// Flag set when daily budget is exceeded to short-circuit checks.
     budget_exceeded: AtomicBool,
+
+    /// Per-model token usage since startup.
+    model_tokens: Mutex<HashMap<String, ModelTokens>>,
 }
 
 struct DailyCost {
@@ -85,6 +96,7 @@ impl CostGuard {
             }),
             action_window: Mutex::new(VecDeque::new()),
             budget_exceeded: AtomicBool::new(false),
+            model_tokens: Mutex::new(HashMap::new()),
         }
     }
 
@@ -192,6 +204,15 @@ impl CostGuard {
             window.push_back(Instant::now());
         }
 
+        // Track per-model token usage
+        {
+            let mut tokens = self.model_tokens.lock().await;
+            let entry = tokens.entry(model.to_string()).or_default();
+            entry.input_tokens += u64::from(input_tokens);
+            entry.output_tokens += u64::from(output_tokens);
+            entry.cost += cost;
+        }
+
         cost
     }
 
@@ -214,6 +235,11 @@ impl CostGuard {
             window.pop_front();
         }
         window.len() as u64
+    }
+
+    /// Per-model token usage since startup.
+    pub async fn model_usage(&self) -> HashMap<String, ModelTokens> {
+        self.model_tokens.lock().await.clone()
     }
 }
 
@@ -335,5 +361,38 @@ mod tests {
         };
         assert!(rate.to_string().contains("101 actions"));
         assert!(rate.to_string().contains("100 allowed"));
+    }
+
+    #[tokio::test]
+    async fn test_model_usage_per_model_tracking() {
+        let guard = CostGuard::new(CostGuardConfig::default());
+
+        // Initially empty
+        assert!(guard.model_usage().await.is_empty());
+
+        // Record calls for two different models
+        guard.record_llm_call("gpt-4o", 1000, 500).await;
+        guard.record_llm_call("gpt-4o", 2000, 1000).await;
+        guard
+            .record_llm_call("claude-3-5-sonnet-20241022", 500, 200)
+            .await;
+
+        let usage = guard.model_usage().await;
+        assert_eq!(usage.len(), 2);
+
+        let gpt = usage.get("gpt-4o").expect("gpt-4o should be tracked");
+        assert_eq!(gpt.input_tokens, 3000);
+        assert_eq!(gpt.output_tokens, 1500);
+        assert!(gpt.cost > Decimal::ZERO);
+
+        let claude = usage
+            .get("claude-3-5-sonnet-20241022")
+            .expect("claude should be tracked");
+        assert_eq!(claude.input_tokens, 500);
+        assert_eq!(claude.output_tokens, 200);
+        assert!(claude.cost > Decimal::ZERO);
+
+        // Costs should differ since models have different pricing
+        assert_ne!(gpt.cost, claude.cost);
     }
 }

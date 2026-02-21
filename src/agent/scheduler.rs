@@ -357,7 +357,7 @@ impl Scheduler {
             .into());
         }
 
-        if tool.requires_approval() {
+        if tool.requires_approval(&params).is_required() {
             return Err(crate::error::ToolError::AuthRequired {
                 name: tool_name.to_string(),
             }

@@ -228,14 +228,6 @@ impl LlmProvider for CachedProvider {
     fn set_model(&self, model: &str) -> Result<(), LlmError> {
         self.inner.set_model(model)
     }
-
-    fn seed_response_chain(&self, thread_id: &str, response_id: String) {
-        self.inner.seed_response_chain(thread_id, response_id);
-    }
-
-    fn get_response_chain_id(&self, thread_id: &str) -> Option<String> {
-        self.inner.get_response_chain_id(thread_id)
-    }
 }
 
 #[cfg(test)]

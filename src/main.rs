@@ -3,7 +3,7 @@
 use std::sync::Arc;
 
 use clap::Parser;
-use tracing_subscriber::{EnvFilter, layer::SubscriberExt, util::SubscriberInitExt};
+use tracing_subscriber::EnvFilter;
 
 use ironclaw::{
     agent::{Agent, AgentDeps, SessionManager},
@@ -14,7 +14,7 @@ use ironclaw::{
             RegisteredEndpoint, SharedWasmChannel, WasmChannelLoader, WasmChannelRouter,
             WasmChannelRuntime, WasmChannelRuntimeConfig, create_wasm_channel_router,
         },
-        web::log_layer::{LogBroadcaster, WebLogLayer},
+        web::log_layer::LogBroadcaster,
     },
     cli::{
         Cli, Command, run_mcp_command, run_pairing_command, run_service_command,
@@ -24,12 +24,7 @@ use ironclaw::{
     context::ContextManager,
     extensions::ExtensionManager,
     hooks::{HookRegistry, bootstrap_hooks},
-    llm::{
-        CachedProvider, CircuitBreakerConfig, CircuitBreakerProvider, CooldownConfig,
-        FailoverProvider, LlmProvider, ResponseCacheConfig, RetryConfig, RetryProvider,
-        SessionConfig, create_cheap_llm_provider, create_llm_provider,
-        create_llm_provider_with_config, create_session_manager,
-    },
+    llm::{SessionConfig, build_provider_chain, create_session_manager},
     orchestrator::{
         ContainerJobConfig, ContainerJobManager, OrchestratorApi, TokenStore,
         api::OrchestratorState,
@@ -201,6 +196,9 @@ async fn main() -> anyhow::Result<()> {
                 )
                 .init();
 
+            let _ = dotenvy::dotenv();
+            ironclaw::bootstrap::load_ironclaw_env();
+
             return ironclaw::cli::run_doctor_command().await;
         }
         Some(Command::Status) => {
@@ -209,6 +207,9 @@ async fn main() -> anyhow::Result<()> {
                     EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("warn")),
                 )
                 .init();
+
+            let _ = dotenvy::dotenv();
+            ironclaw::bootstrap::load_ironclaw_env();
 
             return run_status_command().await;
         }
@@ -360,23 +361,14 @@ async fn main() -> anyhow::Result<()> {
     };
     let session = create_session_manager(session_config).await;
 
-    // Initialize tracing
-    let env_filter = EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| EnvFilter::new("ironclaw=info,tower_http=warn"));
-
     // Create log broadcaster before tracing init so the WebLogLayer can capture all events.
     // This gets wired to the gateway's /api/logs/events SSE endpoint later.
     let log_broadcaster = Arc::new(LogBroadcaster::new());
 
-    tracing_subscriber::registry()
-        .with(env_filter)
-        .with(
-            tracing_subscriber::fmt::layer()
-                .with_target(false)
-                .with_writer(ironclaw::tracing_fmt::TruncatingStderr::default()),
-        )
-        .with(WebLogLayer::new(Arc::clone(&log_broadcaster)))
-        .init();
+    // Initialize tracing with a reloadable EnvFilter so the gateway can switch
+    // log levels (e.g. ironclaw=debug) at runtime without restarting.
+    let log_level_handle =
+        ironclaw::channels::web::log_layer::init_tracing(Arc::clone(&log_broadcaster));
 
     // Create CLI channel
     let repl_channel = if let Some(ref msg) = cli.message {
@@ -490,9 +482,13 @@ async fn main() -> anyhow::Result<()> {
         session.attach_store(Arc::clone(db), "default").await;
 
         // Mark any jobs left in "running" or "creating" state as "interrupted".
-        if let Err(e) = db.cleanup_stale_sandbox_jobs().await {
-            tracing::warn!("Failed to cleanup stale sandbox jobs: {}", e);
-        }
+        // Fire-and-forget housekeeping — no need to block startup.
+        let db_cleanup = Arc::clone(db);
+        tokio::spawn(async move {
+            if let Err(e) = db_cleanup.cleanup_stale_sandbox_jobs().await {
+                tracing::warn!("Failed to cleanup stale sandbox jobs: {}", e);
+            }
+        });
     }
 
     // Create secrets store early: needed for injecting LLM API keys from encrypted
@@ -625,112 +621,23 @@ async fn main() -> anyhow::Result<()> {
             None
         };
 
-    // Initialize LLM provider (clone session so we can reuse it for embeddings)
-    let llm = create_llm_provider(&config.llm, session.clone())?;
-    tracing::info!("LLM provider initialized: {}", llm.model_name());
-
-    // Wrap each provider with RetryProvider for automatic retries on transient errors.
-    // RetryProvider sits inside FailoverProvider so each provider in the failover chain
-    // gets its own retry attempts before the failover moves to the next provider.
-    let retry_config = RetryConfig {
-        max_retries: config.llm.nearai.max_retries,
-    };
-    let llm: Arc<dyn LlmProvider> = if retry_config.max_retries > 0 {
-        tracing::info!(
-            max_retries = retry_config.max_retries,
-            "LLM retry wrapper enabled"
-        );
-        Arc::new(RetryProvider::new(llm, retry_config.clone()))
-    } else {
-        llm
-    };
-
-    // Wrap in failover if a fallback model is configured
-    let llm: Arc<dyn LlmProvider> =
-        if let Some(fallback_model) = config.llm.nearai.fallback_model.as_ref() {
-            if fallback_model == &config.llm.nearai.model {
-                tracing::warn!(
-                    "fallback_model is the same as primary model, failover may not be effective"
-                );
-            }
-            let mut fallback_config = config.llm.nearai.clone();
-            fallback_config.model = fallback_model.clone();
-            let fallback = create_llm_provider_with_config(&fallback_config, session.clone())?;
-            tracing::info!(
-                primary = %llm.model_name(),
-                fallback = %fallback.model_name(),
-                "LLM failover enabled"
-            );
-            // Wrap fallback with retry too
-            let fallback: Arc<dyn LlmProvider> = if retry_config.max_retries > 0 {
-                Arc::new(RetryProvider::new(fallback, retry_config.clone()))
-            } else {
-                fallback
-            };
-            let cooldown_config = CooldownConfig {
-                cooldown_duration: std::time::Duration::from_secs(
-                    config.llm.nearai.failover_cooldown_secs,
-                ),
-                failure_threshold: config.llm.nearai.failover_cooldown_threshold,
-            };
-            Arc::new(FailoverProvider::with_cooldown(
-                vec![llm, fallback],
-                cooldown_config,
-            )?)
-        } else {
-            llm
-        };
-
-    // Wrap in circuit breaker if configured
-    let llm: Arc<dyn LlmProvider> =
-        if let Some(threshold) = config.llm.nearai.circuit_breaker_threshold {
-            let cb_config = CircuitBreakerConfig {
-                failure_threshold: threshold,
-                recovery_timeout: std::time::Duration::from_secs(
-                    config.llm.nearai.circuit_breaker_recovery_secs,
-                ),
-                ..CircuitBreakerConfig::default()
-            };
-            tracing::info!(
-                threshold,
-                recovery_secs = config.llm.nearai.circuit_breaker_recovery_secs,
-                "LLM circuit breaker enabled"
-            );
-            Arc::new(CircuitBreakerProvider::new(llm, cb_config))
-        } else {
-            llm
-        };
-
-    // Wrap in response cache if configured
-    let llm: Arc<dyn LlmProvider> = if config.llm.nearai.response_cache_enabled {
-        let rc_config = ResponseCacheConfig {
-            ttl: std::time::Duration::from_secs(config.llm.nearai.response_cache_ttl_secs),
-            max_entries: config.llm.nearai.response_cache_max_entries,
-        };
-        tracing::info!(
-            ttl_secs = config.llm.nearai.response_cache_ttl_secs,
-            max_entries = config.llm.nearai.response_cache_max_entries,
-            "LLM response cache enabled"
-        );
-        Arc::new(CachedProvider::new(llm, rc_config))
-    } else {
-        llm
-    };
-
-    // Initialize cheap LLM provider for lightweight tasks (heartbeat, evaluation)
-    let cheap_llm = create_cheap_llm_provider(&config.llm, session.clone())?;
-    if let Some(ref cheap) = cheap_llm {
-        tracing::info!("Cheap LLM provider initialized: {}", cheap.model_name());
-    }
+    // Build the full LLM provider chain (retry → smart routing → failover → circuit breaker → cache)
+    let (llm, cheap_llm) = build_provider_chain(&config.llm, session.clone())?;
 
     // Initialize safety layer
     let safety = Arc::new(SafetyLayer::new(&config.safety));
     tracing::info!("Safety layer initialized");
 
-    // Initialize tool registry
-    let tools = Arc::new(ToolRegistry::new());
+    // Initialize tool registry with credential injection support
+    let credential_registry = Arc::new(ironclaw::tools::wasm::SharedCredentialRegistry::new());
+    let tools = if let Some(ref ss) = secrets_store {
+        Arc::new(
+            ToolRegistry::new().with_credentials(Arc::clone(&credential_registry), Arc::clone(ss)),
+        )
+    } else {
+        Arc::new(ToolRegistry::new())
+    };
     tools.register_builtin_tools();
-    tracing::info!("Registered {} built-in tools", tools.count());
 
     // Create embeddings provider if configured
     let embeddings: Option<Arc<dyn EmbeddingProvider>> = if config.embeddings.enabled {
@@ -797,14 +704,20 @@ async fn main() -> anyhow::Result<()> {
         );
     }
 
-    // Register memory tools if database is available
-    if let Some(ref db) = db {
-        let mut workspace = Workspace::new_with_db("default", Arc::clone(db));
+    // Create workspace once, reused for memory tools and agent
+    let workspace: Option<Arc<Workspace>> = if let Some(ref db) = db {
+        let mut ws = Workspace::new_with_db("default", Arc::clone(db));
         if let Some(ref emb) = embeddings {
-            workspace = workspace.with_embeddings(emb.clone());
+            ws = ws.with_embeddings(emb.clone());
         }
-        let workspace = Arc::new(workspace);
-        tools.register_memory_tools(workspace);
+        Some(Arc::new(ws))
+    } else {
+        None
+    };
+
+    // Register memory tools if workspace is available
+    if let Some(ref ws) = workspace {
+        tools.register_memory_tools(Arc::clone(ws));
     }
 
     // Register builder tool if enabled.
@@ -996,11 +909,43 @@ async fn main() -> anyhow::Result<()> {
 
     let (dev_loaded_tool_names, _) = tokio::join!(wasm_tools_future, mcp_servers_future);
 
-    // Create extension manager for in-chat discovery/install/auth/activate
-    let extension_manager = if let Some(ref secrets) = secrets_store {
+    // Load registry catalog entries for in-chat extension discovery
+    let catalog_entries = match ironclaw::registry::RegistryCatalog::load_or_embedded() {
+        Ok(catalog) => {
+            let entries: Vec<ironclaw::extensions::RegistryEntry> = catalog
+                .all()
+                .iter()
+                .map(|m| m.to_registry_entry())
+                .collect();
+            tracing::info!(
+                count = entries.len(),
+                "Loaded registry catalog entries for extension discovery"
+            );
+            entries
+        }
+        Err(e) => {
+            tracing::warn!("Failed to load registry catalog: {}", e);
+            Vec::new()
+        }
+    };
+
+    // Create extension manager for in-chat discovery/install/auth/activate.
+    // If no persistent secrets store is available, use an ephemeral in-memory store
+    // so that listing/installing/activating extensions still works (auth won't persist).
+    let ext_secrets: Arc<dyn SecretsStore + Send + Sync> = if let Some(ref s) = secrets_store {
+        Arc::clone(s)
+    } else {
+        use ironclaw::secrets::{InMemorySecretsStore, SecretsCrypto};
+        let ephemeral_key =
+            secrecy::SecretString::from(ironclaw::secrets::keychain::generate_master_key_hex());
+        let crypto = Arc::new(SecretsCrypto::new(ephemeral_key).expect("ephemeral crypto"));
+        tracing::debug!("Using ephemeral in-memory secrets store for extension manager");
+        Arc::new(InMemorySecretsStore::new(crypto))
+    };
+    let extension_manager = {
         let manager = Arc::new(ExtensionManager::new(
             Arc::clone(&mcp_session_manager),
-            Arc::clone(secrets),
+            ext_secrets,
             Arc::clone(&tools),
             Some(Arc::clone(&hooks)),
             wasm_tool_runtime.clone(),
@@ -1009,26 +954,22 @@ async fn main() -> anyhow::Result<()> {
             config.tunnel.public_url.clone(),
             "default".to_string(),
             db.clone(),
+            catalog_entries.clone(),
         ));
         tools.register_extension_tools(Arc::clone(&manager));
         tracing::info!("Extension manager initialized with in-chat discovery tools");
         Some(manager)
-    } else {
-        tracing::debug!(
-            "Extension manager not available (no secrets store). \
-             Extension tools won't be registered."
-        );
-        None
     };
 
     // Set up orchestrator for sandboxed job execution
     // When allow_local_tools is false (default), the LLM uses create_job for FS/shell work.
     // When allow_local_tools is true, dev tools are also registered directly (current behavior).
-    if config.agent.allow_local_tools {
+    // register_builder_tool() already calls register_dev_tools() internally,
+    // so only register them here when the builder didn't already do it.
+    let builder_registered_dev_tools =
+        config.builder.enabled && (config.agent.allow_local_tools || !config.sandbox.enabled);
+    if config.agent.allow_local_tools && !builder_registered_dev_tools {
         tools.register_dev_tools();
-        tracing::info!(
-            "Local tools enabled (allow_local_tools=true), dev tools registered directly"
-        );
     }
 
     // Shared state for job events (used by both orchestrator and web gateway)
@@ -1079,7 +1020,6 @@ async fn main() -> anyhow::Result<()> {
             }
         });
 
-        tracing::info!("Orchestrator API started on :50051, sandbox delegation enabled");
         if config.claude_code.enabled {
             tracing::info!(
                 "Claude Code sandbox mode available (model: {}, max_turns: {})",
@@ -1319,23 +1259,9 @@ async fn main() -> anyhow::Result<()> {
         None
     };
 
-    // Create workspace for agent (shared with memory tools)
-    let workspace = if let Some(ref db_ref) = db {
-        let mut ws = Workspace::new_with_db("default", Arc::clone(db_ref));
-        if let Some(ref emb) = embeddings {
-            ws = ws.with_embeddings(emb.clone());
-        }
-        Some(Arc::new(ws))
-    } else {
-        None
-    };
-
     // Seed workspace with core identity files on first boot
     if let Some(ref ws) = workspace {
         match ws.seed_if_empty().await {
-            Ok(count) if count > 0 => {
-                tracing::info!("Workspace seeded with {} core files", count);
-            }
             Ok(_) => {}
             Err(e) => {
                 tracing::warn!("Failed to seed workspace: {}", e);
@@ -1343,17 +1269,20 @@ async fn main() -> anyhow::Result<()> {
         }
     }
 
-    // Backfill embeddings if we just enabled the provider
+    // Backfill embeddings in background (fire-and-forget housekeeping)
     if let (Some(ws), Some(_)) = (&workspace, &embeddings) {
-        match ws.backfill_embeddings().await {
-            Ok(count) if count > 0 => {
-                tracing::info!("Backfilled embeddings for {} chunks", count);
+        let ws_bg = Arc::clone(ws);
+        tokio::spawn(async move {
+            match ws_bg.backfill_embeddings().await {
+                Ok(count) if count > 0 => {
+                    tracing::info!("Backfilled embeddings for {} chunks", count);
+                }
+                Ok(_) => {}
+                Err(e) => {
+                    tracing::warn!("Failed to backfill embeddings: {}", e);
+                }
             }
-            Ok(_) => {}
-            Err(e) => {
-                tracing::warn!("Failed to backfill embeddings: {}", e);
-            }
-        }
+        });
     }
 
     // Create context manager (shared between job tools and agent)
@@ -1417,6 +1346,14 @@ async fn main() -> anyhow::Result<()> {
         (None, None)
     };
 
+    // Create cost guard early so gateway can reference it.
+    let cost_guard = Arc::new(ironclaw::agent::cost_guard::CostGuard::new(
+        ironclaw::agent::cost_guard::CostGuardConfig {
+            max_cost_per_day_cents: config.agent.max_cost_per_day_cents,
+            max_actions_per_hour: config.agent.max_actions_per_hour,
+        },
+    ));
+
     // Add web gateway channel if configured
     let mut gateway_url: Option<String> = None;
     if let Some(ref gw_config) = config.channels.gateway {
@@ -1426,9 +1363,13 @@ async fn main() -> anyhow::Result<()> {
         }
         gw = gw.with_session_manager(Arc::clone(&session_manager));
         gw = gw.with_log_broadcaster(Arc::clone(&log_broadcaster));
+        gw = gw.with_log_level_handle(Arc::clone(&log_level_handle));
         gw = gw.with_tool_registry(Arc::clone(&tools));
         if let Some(ref ext_mgr) = extension_manager {
             gw = gw.with_extension_manager(Arc::clone(ext_mgr));
+        }
+        if !catalog_entries.is_empty() {
+            gw = gw.with_registry_entries(catalog_entries.clone());
         }
         if let Some(ref d) = db {
             gw = gw.with_store(Arc::clone(d));
@@ -1442,6 +1383,7 @@ async fn main() -> anyhow::Result<()> {
         if let Some(ref sc) = skill_catalog {
             gw = gw.with_skill_catalog(Arc::clone(sc));
         }
+        gw = gw.with_cost_guard(Arc::clone(&cost_guard));
         if config.sandbox.enabled {
             gw = gw.with_prompt_queue(Arc::clone(&prompt_queue));
 
@@ -1464,11 +1406,6 @@ async fn main() -> anyhow::Result<()> {
             gw.auth_token()
         ));
 
-        tracing::info!(
-            "Web gateway enabled on {}:{}",
-            gw_config.host,
-            gw_config.port
-        );
         tracing::info!("Web UI: http://{}:{}/", gw_config.host, gw_config.port);
 
         channel_names.push("gateway".to_string());
@@ -1481,12 +1418,6 @@ async fn main() -> anyhow::Result<()> {
     let boot_cheap_model = cheap_llm.as_ref().map(|c| c.model_name().to_string());
 
     // Create and run the agent
-    let cost_guard = Arc::new(ironclaw::agent::cost_guard::CostGuard::new(
-        ironclaw::agent::cost_guard::CostGuardConfig {
-            max_cost_per_day_cents: config.agent.max_cost_per_day_cents,
-            max_actions_per_hour: config.agent.max_actions_per_hour,
-        },
-    ));
     let deps = AgentDeps {
         store: db,
         llm,
@@ -1510,8 +1441,6 @@ async fn main() -> anyhow::Result<()> {
         Some(context_manager),
         Some(session_manager),
     );
-
-    tracing::info!("Agent initialized, starting main loop...");
 
     // Print boot screen for interactive CLI mode (not single-message mode).
     if config.channels.cli.enabled && cli.message.is_none() {

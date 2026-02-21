@@ -11,7 +11,9 @@ use async_trait::async_trait;
 use tokio::fs;
 
 use crate::context::JobContext;
-use crate::tools::tool::{Tool, ToolDomain, ToolError, ToolOutput, require_str};
+use crate::tools::tool::{
+    ApprovalRequirement, Tool, ToolDomain, ToolError, ToolOutput, require_str,
+};
 use crate::workspace::paths as ws_paths;
 
 /// Well-known workspace filenames that must go through memory_write, not write_file.
@@ -265,8 +267,8 @@ impl Tool for ReadFileTool {
         true // File content could contain anything
     }
 
-    fn requires_approval(&self) -> bool {
-        true // Reading local files should require approval
+    fn requires_approval(&self, _params: &serde_json::Value) -> ApprovalRequirement {
+        ApprovalRequirement::UnlessAutoApproved
     }
 
     fn domain(&self) -> ToolDomain {
@@ -372,8 +374,8 @@ impl Tool for WriteFileTool {
         Ok(ToolOutput::success(result, start.elapsed()))
     }
 
-    fn requires_approval(&self) -> bool {
-        true // File writes should require approval
+    fn requires_approval(&self, _params: &serde_json::Value) -> ApprovalRequirement {
+        ApprovalRequirement::UnlessAutoApproved
     }
 
     fn requires_sanitization(&self) -> bool {
@@ -488,8 +490,8 @@ impl Tool for ListDirTool {
         false // Directory listings are safe
     }
 
-    fn requires_approval(&self) -> bool {
-        true // Directory listings can leak filesystem structure
+    fn requires_approval(&self, _params: &serde_json::Value) -> ApprovalRequirement {
+        ApprovalRequirement::UnlessAutoApproved
     }
 
     fn domain(&self) -> ToolDomain {
@@ -697,8 +699,8 @@ impl Tool for ApplyPatchTool {
         Ok(ToolOutput::success(result, start.elapsed()))
     }
 
-    fn requires_approval(&self) -> bool {
-        true // File edits should require approval
+    fn requires_approval(&self, _params: &serde_json::Value) -> ApprovalRequirement {
+        ApprovalRequirement::UnlessAutoApproved
     }
 
     fn requires_sanitization(&self) -> bool {
