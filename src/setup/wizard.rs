@@ -1083,7 +1083,10 @@ impl SetupWizard {
                 // NEAR AI: use existing provider list_models()
                 let fetched = self.fetch_nearai_models().await;
                 let default_models: Vec<(String, String)> = vec![
-                    ("zai/GLM-latest".into(), "GLM Latest (default, fast)".into()),
+                    (
+                        "zai-org/GLM-latest".into(),
+                        "GLM Latest (default, fast)".into(),
+                    ),
                     (
                         "anthropic::claude-sonnet-4-20250514".into(),
                         "Claude Sonnet 4 (best quality)".into(),
