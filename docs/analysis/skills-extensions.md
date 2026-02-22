@@ -84,7 +84,7 @@ Regex patterns are compiled with a 64 KiB state limit to prevent ReDoS via patho
 
 ### 2.3 Skill Parser (`parser.rs`)
 
-Source: `/Users/mudrii/src/ironclaw/src/skills/parser.rs`
+Source: `src/skills/parser.rs`
 
 `parse_skill_md(content: &str) -> Result<ParsedSkill, SkillParseError>` is the entry point. It handles:
 
@@ -107,7 +107,7 @@ Error variants:
 
 ### 2.4 Skill Registry (`registry.rs`)
 
-Source: `/Users/mudrii/src/ironclaw/src/skills/registry.rs`
+Source: `src/skills/registry.rs`
 
 `SkillRegistry` manages the in-memory set of loaded skills and the on-disk `~/.ironclaw/skills/` directory.
 
@@ -154,7 +154,7 @@ Only `SkillSource::User` skills can be removed. `SkillSource::Workspace` and `Sk
 
 ### 2.5 Skill Catalog (`catalog.rs`)
 
-Source: `/Users/mudrii/src/ironclaw/src/skills/catalog.rs`
+Source: `src/skills/catalog.rs`
 
 `SkillCatalog` is a runtime HTTP client for the ClawHub public registry at `https://clawhub.ai`. No compile-time entries exist; the catalog is always live.
 
@@ -192,7 +192,7 @@ The slug is URL-encoded to prevent query string injection via characters like `&
 
 ### 2.6 Skill Gating (`gating.rs`)
 
-Source: `/Users/mudrii/src/ironclaw/src/skills/gating.rs`
+Source: `src/skills/gating.rs`
 
 Gating is the prerequisite check that runs before a skill is loaded. If any requirement fails, the skill is skipped with a warning.
 
@@ -212,7 +212,7 @@ All failures are accumulated; a skill fails if any single requirement is unmet. 
 
 ### 2.7 Skill Selector (`selector.rs`)
 
-Source: `/Users/mudrii/src/ironclaw/src/skills/selector.rs`
+Source: `src/skills/selector.rs`
 
 `prefilter_skills(message, available_skills, max_candidates, max_context_tokens) -> Vec<&LoadedSkill>` performs the first phase of skill selection. It is entirely deterministic — no LLM involvement, no loaded skill content in context — preventing circular manipulation where a loaded skill could influence which skills get selected.
 
@@ -241,7 +241,7 @@ The token cost of a skill is `max(declared_tokens, 1)`. If the prompt body is es
 
 ### 2.8 Skill Attenuation (`attenuation.rs`)
 
-Source: `/Users/mudrii/src/ironclaw/src/skills/attenuation.rs`
+Source: `src/skills/attenuation.rs`
 
 Attenuation is the security gate that restricts the LLM's tool access based on the trust level of active skills. The principle: a skill cannot expand its own authority, only constrain it.
 
@@ -280,7 +280,7 @@ All other tools — including `shell`, `http`, `memory_write`, file write tools,
 
 ## 3. Extensions System (`extensions/`)
 
-Source: `/Users/mudrii/src/ironclaw/src/extensions/`
+Source: `src/extensions/`
 
 ### 3.1 What Extensions Are
 
@@ -371,7 +371,7 @@ All sources run concurrently with an 8-second timeout on GitHub search.
 
 ## 4. Hooks System (`hooks/`)
 
-Source: `/Users/mudrii/src/ironclaw/src/hooks/`
+Source: `src/hooks/`
 
 ### 4.1 Hook Points
 
@@ -560,7 +560,7 @@ Skills are separate from extensions. The skill install flow uses the built-in `s
 
 ## 6. WASM Channel Schema (`channels/wasm/schema.rs`)
 
-Source: `/Users/mudrii/src/ironclaw/src/channels/wasm/schema.rs`
+Source: `src/channels/wasm/schema.rs`
 
 ### 6.1 Capabilities File Schema
 
@@ -624,7 +624,7 @@ Each WASM channel declares its permissions in a sidecar JSON file (e.g., `slack.
 
 ### 6.2 Channel Capabilities (`capabilities.rs`)
 
-Source: `/Users/mudrii/src/ironclaw/src/channels/wasm/capabilities.rs`
+Source: `src/channels/wasm/capabilities.rs`
 
 `ChannelCapabilities` extends the tool-level `Capabilities` struct with channel-specific permissions:
 

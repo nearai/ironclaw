@@ -79,10 +79,10 @@ to `0.0.0.0` because containers reach the host via the docker bridge gateway
 
 Source files:
 
-- `/Users/mudrii/src/ironclaw/src/orchestrator/mod.rs`
-- `/Users/mudrii/src/ironclaw/src/orchestrator/api.rs`
-- `/Users/mudrii/src/ironclaw/src/orchestrator/auth.rs`
-- `/Users/mudrii/src/ironclaw/src/orchestrator/job_manager.rs`
+- `src/orchestrator/mod.rs`
+- `src/orchestrator/api.rs`
+- `src/orchestrator/auth.rs`
+- `src/orchestrator/job_manager.rs`
 
 ### Container lifecycle (`job_manager.rs`)
 
@@ -171,7 +171,7 @@ This gives the browser UI real-time visibility into container activity.
 
 ## 4. Worker Runtime (`worker/runtime.rs`)
 
-Source file: `/Users/mudrii/src/ironclaw/src/worker/runtime.rs`
+Source file: `src/worker/runtime.rs`
 
 `WorkerRuntime` is the entry point when `ironclaw worker` is invoked inside
 a container. It reads `IRONCLAW_WORKER_TOKEN` from the environment and
@@ -219,7 +219,7 @@ What the worker cannot do:
 
 ## 5. Worker API (`worker/api.rs`)
 
-Source file: `/Users/mudrii/src/ironclaw/src/worker/api.rs`
+Source file: `src/worker/api.rs`
 
 `WorkerHttpClient` is the HTTP client used by both `WorkerRuntime` and
 `ClaudeBridgeRuntime` to talk to the orchestrator. Every request includes
@@ -252,7 +252,7 @@ cleanly without error logs.
 
 ## 6. Claude Bridge (`worker/claude_bridge.rs`)
 
-Source file: `/Users/mudrii/src/ironclaw/src/worker/claude_bridge.rs`
+Source file: `src/worker/claude_bridge.rs`
 
 `ClaudeBridgeRuntime` is the alternative to `WorkerRuntime`. Instead of
 running an internal LLM reasoning loop, it spawns the `claude` CLI and
@@ -302,7 +302,7 @@ Stderr from `claude` is captured in a separate tokio task and forwarded as
 
 ## 7. Proxy LLM (`worker/proxy_llm.rs`)
 
-Source file: `/Users/mudrii/src/ironclaw/src/worker/proxy_llm.rs`
+Source file: `src/worker/proxy_llm.rs`
 
 `ProxyLlmProvider` implements the `LlmProvider` trait by routing all calls
 through `WorkerHttpClient` instead of calling any LLM API directly.
@@ -335,7 +335,7 @@ or manipulated job cannot use another job's LLM quota.
 
 ## 8. Dockerfile.worker
 
-Source file: `/Users/mudrii/src/ironclaw/Dockerfile.worker`
+Source file: `Dockerfile.worker`
 
 The Dockerfile uses a two-stage build:
 
@@ -386,7 +386,7 @@ docker build -f Dockerfile.worker -t ironclaw-worker .
 
 ## 9. Docker Compose (`docker-compose.yml`)
 
-Source file: `/Users/mudrii/src/ironclaw/docker-compose.yml`
+Source file: `docker-compose.yml`
 
 The `docker-compose.yml` is scoped to local development only. It does not
 define the worker container — workers are created on-demand by the orchestrator
