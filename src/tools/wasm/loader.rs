@@ -383,6 +383,31 @@ impl LoadResults {
 /// Compile-time project root, used to locate tools-src/ in dev builds.
 const CARGO_MANIFEST_DIR: &str = env!("CARGO_MANIFEST_DIR");
 
+/// Resolve the WASM target directory for a given crate directory.
+///
+/// Checks (in order):
+/// 1. `CARGO_TARGET_DIR` env var (shared target dir)
+/// 2. `<crate_dir>/target/` (default per-crate layout)
+pub fn resolve_wasm_target_dir(crate_dir: &Path) -> PathBuf {
+    crate::registry::artifacts::resolve_target_dir(crate_dir)
+}
+
+/// Return the expected path to a compiled WASM artifact for a given crate.
+///
+/// Combines [`resolve_wasm_target_dir`] with the `wasm32-wasip2/release/` subdirectory
+/// and the binary name without extension (e.g. `slack_tool`).
+///
+/// `binary_name` should not include the `.wasm` extension; it is appended automatically.
+///
+/// This is a convenience function for callers that know the exact triple (wasip2)
+/// and binary name. For multi-triple search, use
+/// [`crate::registry::artifacts::find_wasm_artifact`] instead.
+pub fn wasm_artifact_path(crate_dir: &Path, binary_name: &str) -> PathBuf {
+    resolve_wasm_target_dir(crate_dir)
+        .join("wasm32-wasip2/release")
+        .join(format!("{}.wasm", binary_name))
+}
+
 /// Resolve the tools source directory.
 ///
 /// Checks (in order):
@@ -426,9 +451,7 @@ pub async fn discover_dev_tools() -> Result<HashMap<String, DiscoveredTool>, std
         let crate_name = dir_name.replace('-', "_");
         let install_name = format!("{}-tool", dir_name);
 
-        let wasm_path = path
-            .join("target/wasm32-wasip2/release")
-            .join(format!("{}_tool.wasm", crate_name));
+        let wasm_path = wasm_artifact_path(&path, &format!("{}_tool", crate_name));
 
         if !wasm_path.exists() {
             continue;

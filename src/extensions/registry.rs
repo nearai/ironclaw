@@ -1,7 +1,7 @@
 //! Curated in-memory catalog of known extensions with fuzzy search.
 //!
-//! The registry holds well-known MCP servers and WASM tools that can be installed
-//! via conversational commands. Online discoveries are cached here too.
+//! The registry holds well-known channels, tools, and MCP servers that can be
+//! installed via conversational commands. Online discoveries are cached here too.
 
 use tokio::sync::RwLock;
 
@@ -114,6 +114,21 @@ impl ExtensionRegistry {
         }
         let cache = self.discovery_cache.read().await;
         cache.iter().find(|e| e.name == name).cloned()
+    }
+
+    /// Return all registry entries (builtins + cached discoveries).
+    pub async fn all_entries(&self) -> Vec<RegistryEntry> {
+        let mut entries = self.entries.clone();
+        let cache = self.discovery_cache.read().await;
+        for entry in cache.iter() {
+            if !entries
+                .iter()
+                .any(|e| e.name == entry.name && e.kind == entry.kind)
+            {
+                entries.push(entry.clone());
+            }
+        }
+        entries
     }
 
     /// Add discovered entries to the cache.
@@ -578,6 +593,7 @@ mod tests {
                 source: ExtensionSource::WasmBuildable {
                     repo_url: "channels-src/telegram".to_string(),
                     build_dir: Some("channels-src/telegram".to_string()),
+                    crate_name: Some("telegram-channel".to_string()),
                 },
                 auth_hint: AuthHint::CapabilitiesAuth,
             },
@@ -591,6 +607,7 @@ mod tests {
                 source: ExtensionSource::WasmBuildable {
                     repo_url: "tools-src/slack".to_string(),
                     build_dir: Some("tools-src/slack".to_string()),
+                    crate_name: Some("slack-tool".to_string()),
                 },
                 auth_hint: AuthHint::CapabilitiesAuth,
             },

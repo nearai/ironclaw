@@ -798,10 +798,10 @@ Create alongside the .wasm file to grant capabilities:
         match (&requirement.software_type, &requirement.language) {
             (SoftwareType::WasmTool, Language::Rust) => {
                 // WASM output location
-                project_dir.join(format!(
-                    "target/wasm32-wasip2/release/{}.wasm",
-                    requirement.name.replace('-', "_")
-                ))
+                crate::tools::wasm::wasm_artifact_path(
+                    project_dir,
+                    &requirement.name.replace('-', "_"),
+                )
             }
             (SoftwareType::CliBinary, Language::Rust) => project_dir.join(format!(
                 "target/release/{}",

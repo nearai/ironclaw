@@ -30,7 +30,8 @@ impl Tool for ToolSearchTool {
     }
 
     fn description(&self) -> &str {
-        "Search for available extensions (MCP servers, WASM tools, WASM channels) to add. \
+        "Search for available extensions to add new capabilities. Extensions include \
+         channels (Telegram, Slack, Discord — for messaging), tools, and MCP servers. \
          Use discover:true to search online if the built-in registry has no results."
     }
 
@@ -100,7 +101,7 @@ impl Tool for ToolInstallTool {
     }
 
     fn description(&self) -> &str {
-        "Install an extension (MCP server, WASM tool, or WASM channel). \
+        "Install an extension (channel, tool, or MCP server). \
          Use the name from tool_search results, or provide an explicit URL."
     }
 
@@ -278,7 +279,7 @@ impl Tool for ToolActivateTool {
     }
 
     fn description(&self) -> &str {
-        "Activate an installed extension, connecting to MCP servers or loading WASM tools into the runtime."
+        "Activate an installed extension — starts channels, loads tools, or connects to MCP servers."
     }
 
     fn parameters_schema(&self) -> serde_json::Value {
@@ -372,7 +373,8 @@ impl Tool for ToolListTool {
     }
 
     fn description(&self) -> &str {
-        "List all installed extensions with their authentication and activation status."
+        "List extensions with their authentication and activation status. \
+         Set include_available:true to also show registry entries not yet installed."
     }
 
     fn parameters_schema(&self) -> serde_json::Value {
@@ -383,6 +385,11 @@ impl Tool for ToolListTool {
                     "type": "string",
                     "enum": ["mcp_server", "wasm_tool", "wasm_channel"],
                     "description": "Filter by extension type (omit to list all)"
+                },
+                "include_available": {
+                    "type": "boolean",
+                    "description": "If true, also include registry entries that are not yet installed",
+                    "default": false
                 }
             }
         })
@@ -405,9 +412,14 @@ impl Tool for ToolListTool {
                 _ => None,
             });
 
+        let include_available = params
+            .get("include_available")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+
         let extensions = self
             .manager
-            .list(kind_filter)
+            .list(kind_filter, include_available)
             .await
             .map_err(|e| ToolError::ExecutionFailed(e.to_string()))?;
 
@@ -439,7 +451,7 @@ impl Tool for ToolRemoveTool {
     }
 
     fn description(&self) -> &str {
-        "Remove an installed extension (MCP server or WASM tool). \
+        "Remove an installed extension (channel, tool, or MCP server). \
          Unregisters tools and deletes configuration."
     }
 

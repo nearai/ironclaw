@@ -33,7 +33,7 @@ fn okta_api_call(method: &str, url: &str, body: Option<&str>) -> Result<String, 
         &format!("Okta API: {} {}", method, url),
     );
 
-    let response = host::http_request(method, url, headers, body_bytes.as_deref())?;
+    let response = host::http_request(method, url, headers, body_bytes.as_deref(), None)?;
 
     if response.status < 200 || response.status >= 300 {
         let body_text = String::from_utf8_lossy(&response.body);
@@ -224,7 +224,7 @@ fn okta_api_call_with_headers(
         &format!("Okta API: {} {}", method, url),
     );
 
-    let response = host::http_request(method, url, headers, body_bytes.as_deref())?;
+    let response = host::http_request(method, url, headers, body_bytes.as_deref(), None)?;
 
     if response.status < 200 || response.status >= 300 {
         let body_text = String::from_utf8_lossy(&response.body);

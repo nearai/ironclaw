@@ -40,16 +40,39 @@ impl ChannelManager {
     }
 
     /// Add a channel to the manager.
-    pub fn add(&mut self, channel: Box<dyn Channel>) {
+    pub async fn add(&self, channel: Box<dyn Channel>) {
         let name = channel.name().to_string();
-        // We need to get the inner HashMap to insert
-        // Since we're in a sync context during setup, we'll use try_write
-        if let Ok(mut channels) = self.channels.try_write() {
-            channels.insert(name.clone(), channel);
-            tracing::debug!("Added channel: {}", name);
-        } else {
-            tracing::error!("Failed to add channel: {} (lock contention)", name);
-        }
+        self.channels.write().await.insert(name.clone(), channel);
+        tracing::debug!("Added channel: {}", name);
+    }
+
+    /// Hot-add a channel to a running agent.
+    ///
+    /// Starts the channel, registers it in the channels map for `respond()`/`broadcast()`,
+    /// and spawns a task that forwards its stream messages through `inject_tx` into
+    /// the agent loop.
+    pub async fn hot_add(&self, channel: Box<dyn Channel>) -> Result<(), ChannelError> {
+        let name = channel.name().to_string();
+        let stream = channel.start().await?;
+
+        // Register for respond/broadcast/send_status
+        self.channels.write().await.insert(name.clone(), channel);
+
+        // Forward stream messages through inject_tx
+        let tx = self.inject_tx.clone();
+        tokio::spawn(async move {
+            use futures::StreamExt;
+            let mut stream = stream;
+            while let Some(msg) = stream.next().await {
+                if tx.send(msg).await.is_err() {
+                    tracing::warn!(channel = %name, "Inject channel closed, stopping hot-added channel");
+                    break;
+                }
+            }
+            tracing::info!(channel = %name, "Hot-added channel stream ended");
+        });
+
+        Ok(())
     }
 
     /// Start all channels and return a merged stream of messages.
