@@ -292,7 +292,7 @@ The pairing store does not read environment variables directly. Its base directo
 |---------|---------|-------------|
 | `GATEWAY_HOST` | `127.0.0.1` | Local address the gateway binds to. Change to `0.0.0.0` only if the network is trusted. |
 | `GATEWAY_PORT` | `3001` | Local port the gateway listens on. This is the port tunnels forward to. |
-| `GATEWAY_AUTH_TOKEN` | `changeme` | Bearer token required for all gateway API requests. Mobile apps and webhooks must send this token. |
+| `GATEWAY_AUTH_TOKEN` | *(required)* | Bearer token required for all gateway API requests. Generate with `openssl rand -hex 32`. **Never use default tokens in production.** |
 
 ---
 
