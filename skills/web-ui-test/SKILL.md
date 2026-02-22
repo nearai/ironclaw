@@ -30,7 +30,7 @@ Use this skill when manually testing the IronClaw web gateway UI via the Claude 
 ## Starting the Server
 
 ```bash
-CLI_ENABLED=false GATEWAY_AUTH_TOKEN=test123 cargo run
+CLI_ENABLED=false GATEWAY_AUTH_TOKEN=<your-token> cargo run
 ```
 
 Wait for "Agent ironclaw ready and listening" in the logs before proceeding.
@@ -94,7 +94,7 @@ Wait for "Agent ironclaw ready and listening" in the logs before proceeding.
 After testing, remove any test-installed skills:
 
 ```bash
-rm -rf ~/.ironclaw/skills/<skill-name>
+rm -rf ~/.ironclaw/installed_skills/<skill-name>
 ```
 
 Stop the server with Ctrl+C or by killing the process.
