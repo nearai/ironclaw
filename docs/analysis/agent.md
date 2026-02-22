@@ -220,7 +220,7 @@ during concurrent session creation:
 
 1. Read lock: check if session already exists.
 2. If not found: upgrade to write lock.
-3. Re-check: another goroutine may have created the session between steps 1 and 2.
+3. Re-check: another task may have created the session between steps 1 and 2.
 4. Only create if still absent.
 
 ---

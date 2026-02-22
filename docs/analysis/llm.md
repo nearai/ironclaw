@@ -164,7 +164,7 @@ Notable factory quirks:
 | Anthropic | API key | Anthropic API | Native | Via cost table |
 | Ollama | None | Chat Completions | Native | Zero cost (local) |
 | OpenAiCompatible | Optional key | Chat Completions | Native | Via cost table |
-| Tinfoil | API key | Chat Completions | Native | Via cost table |
+| Tinfoil | API key | Chat Completions | Chat-format | Via cost table |
 
 ---
 

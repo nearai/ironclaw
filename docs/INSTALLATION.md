@@ -70,7 +70,7 @@ Access the web UI at `http://localhost:3000`
 
 | Requirement | When Needed |
 |-------------|-------------|
-| Rust 1.92+ | Building from source |
+| Rust 1.85+ | Building from source |
 | PostgreSQL 15+ with pgvector | PostgreSQL backend (default) |
 | Docker / Podman | Docker sandbox for shell tools |
 
@@ -383,6 +383,7 @@ Create `~/Library/LaunchAgents/ai.ironclaw.plist`:
         <string>3000</string>
         <key>GATEWAY_AUTH_TOKEN</key>
         <string>YOUR_TOKEN_HERE</string>
+        <!-- Generate with: openssl rand -hex 32 -->
         <key>SANDBOX_ENABLED</key>
         <string>true</string>
         <key>RUST_LOG</key>
@@ -452,6 +453,7 @@ Environment=GATEWAY_ENABLED=true
 Environment=GATEWAY_HOST=127.0.0.1
 Environment=GATEWAY_PORT=3000
 Environment=GATEWAY_AUTH_TOKEN=YOUR_TOKEN_HERE
+# Generate with: openssl rand -hex 32
 Environment=CLI_ENABLED=false
 Environment=SANDBOX_ENABLED=true
 Environment=RUST_LOG=ironclaw=info

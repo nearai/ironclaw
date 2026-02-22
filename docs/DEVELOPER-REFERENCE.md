@@ -447,7 +447,7 @@ Request → SmartRoutingProvider → RetryProvider → CircuitBreakerProvider �
 Source: `src/llm/smart_routing.rs`, `src/llm/retry.rs`, `src/llm/circuit_breaker.rs`, `src/llm/response_cache.rs`, `src/llm/failover.rs`
 
 **SmartRoutingProvider** (`src/llm/smart_routing.rs`): Routes requests to cheap vs primary model based on message complexity.
-- `Simple` (greetings, yes/no, ≤10 chars, simple keywords) → cheap model (`NEARAI_CHEAP_MODEL`)
+- `Simple` (greetings, yes/no, ≤200 chars, simple keywords) → cheap model (`NEARAI_CHEAP_MODEL`)
 - `Complex` (code blocks, implementation/refactor/debug/analyze keywords, >1000 chars) → primary model
 - `Moderate` (everything else) → cheap model first; if response contains uncertainty phrases → escalate to primary (cascade)
 - Tool calls (`complete_with_tools`) always go to primary — reliable structured output required
@@ -505,7 +505,6 @@ Source: `src/llm/smart_routing.rs`, `src/llm/retry.rs`, `src/llm/circuit_breaker
 
 | Limitation | Impact |
 |-----------|--------|
-| Workspace/memory not wired via Database trait | `EMBEDDING_ENABLED=true` requires PostgreSQL |
 | Secrets store not available | AES-GCM encrypted secrets require PostgreSQL |
 | Hybrid search: FTS5 only (no vector) | Semantic search unavailable |
 | Settings reload from DB skipped | Config changes require restart |
