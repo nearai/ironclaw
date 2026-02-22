@@ -154,6 +154,10 @@ impl CostGuard {
     /// - `cache_read_input_tokens`: tokens served from cache at 10% input rate.
     /// - `cache_creation_input_tokens`: tokens written to cache.
     /// - `cache_write_multiplier`: cost multiplier for cache writes (1.25 for 5m, 2.0 for 1h).
+    ///
+    /// When `cost_per_token` is `Some`, those rates are used directly (provider-
+    /// sourced pricing). When `None`, falls back to the static `costs::model_cost`
+    /// lookup table, then `costs::default_cost`.
     pub async fn record_llm_call(
         &self,
         model: &str,
@@ -162,9 +166,10 @@ impl CostGuard {
         cache_read_input_tokens: u32,
         cache_creation_input_tokens: u32,
         cache_write_multiplier: Decimal,
+        cost_per_token: Option<(Decimal, Decimal)>,
     ) -> Decimal {
-        let (input_rate, output_rate) =
-            costs::model_cost(model).unwrap_or_else(costs::default_cost);
+        let (input_rate, output_rate) = cost_per_token
+            .unwrap_or_else(|| costs::model_cost(model).unwrap_or_else(costs::default_cost));
         // Cached read tokens cost 10% of the input rate (Anthropic's 90% discount).
         // Cached write tokens cost write_multiplier × input_rate (e.g. 1.25× for 5m, 2× for 1h).
         // Uncached tokens = total input - cache reads - cache writes.
@@ -277,7 +282,7 @@ mod tests {
         assert!(guard.check_allowed().await.is_ok());
 
         // Record a big call, still allowed
-        guard.record_llm_call("gpt-4o", 100_000, 100_000, 0, 0, Decimal::ONE).await;
+        guard.record_llm_call("gpt-4o", 100_000, 100_000, 0, 0, Decimal::ONE, None).await;
         assert!(guard.check_allowed().await.is_ok());
     }
 
@@ -294,7 +299,7 @@ mod tests {
         // Record a call that costs more than $0.01
         // gpt-4o: input=$0.0000025/tok, output=$0.00001/tok
         // 10000 input + 10000 output = $0.025 + $0.10 = $0.125
-        guard.record_llm_call("gpt-4o", 10_000, 10_000, 0, 0, Decimal::ONE).await;
+        guard.record_llm_call("gpt-4o", 10_000, 10_000, 0, 0, Decimal::ONE, None).await;
 
         // Now should be blocked
         let result = guard.check_allowed().await;
@@ -317,7 +322,7 @@ mod tests {
         // First 3 actions allowed
         for _ in 0..3 {
             assert!(guard.check_allowed().await.is_ok());
-            guard.record_llm_call("gpt-4o", 10, 10, 0, 0, Decimal::ONE).await;
+            guard.record_llm_call("gpt-4o", 10, 10, 0, 0, Decimal::ONE, None).await;
         }
 
         // 4th should be blocked
@@ -338,7 +343,7 @@ mod tests {
 
         assert_eq!(guard.daily_spend().await, Decimal::ZERO);
 
-        let cost = guard.record_llm_call("gpt-4o", 1000, 500, 0, 0, Decimal::ONE).await;
+        let cost = guard.record_llm_call("gpt-4o", 1000, 500, 0, 0, Decimal::ONE, None).await;
         assert!(cost > Decimal::ZERO);
         assert_eq!(guard.daily_spend().await, cost);
     }
@@ -349,8 +354,8 @@ mod tests {
 
         assert_eq!(guard.actions_this_hour().await, 0);
 
-        guard.record_llm_call("gpt-4o", 10, 10, 0, 0, Decimal::ONE).await;
-        guard.record_llm_call("gpt-4o", 10, 10, 0, 0, Decimal::ONE).await;
+        guard.record_llm_call("gpt-4o", 10, 10, 0, 0, Decimal::ONE, None).await;
+        guard.record_llm_call("gpt-4o", 10, 10, 0, 0, Decimal::ONE, None).await;
 
         assert_eq!(guard.actions_this_hour().await, 2);
     }
@@ -387,10 +392,10 @@ mod tests {
         assert!(guard.model_usage().await.is_empty());
 
         // Record calls for two different models
-        guard.record_llm_call("gpt-4o", 1000, 500, 0, 0, Decimal::ONE).await;
-        guard.record_llm_call("gpt-4o", 2000, 1000, 0, 0, Decimal::ONE).await;
+        guard.record_llm_call("gpt-4o", 1000, 500, 0, 0, Decimal::ONE, None).await;
+        guard.record_llm_call("gpt-4o", 2000, 1000, 0, 0, Decimal::ONE, None).await;
         guard
-            .record_llm_call("claude-3-5-sonnet-20241022", 500, 200, 0, 0, Decimal::ONE)
+            .record_llm_call("claude-3-5-sonnet-20241022", 500, 200, 0, 0, Decimal::ONE, None)
             .await;
 
         let usage = guard.model_usage().await;

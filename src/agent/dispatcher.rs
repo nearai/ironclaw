@@ -226,6 +226,7 @@ impl Agent {
                     output.usage.cache_read_input_tokens,
                     output.usage.cache_creation_input_tokens,
                     write_multiplier,
+                    Some(self.llm().cost_per_token()),
                 )
                 .await;
             tracing::debug!(
@@ -898,7 +899,7 @@ mod tests {
                 auto_approve_tools: false,
             },
             deps,
-            ChannelManager::new(),
+            Arc::new(ChannelManager::new()),
             None,
             None,
             None,

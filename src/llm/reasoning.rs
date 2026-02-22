@@ -510,8 +510,23 @@ Respond in JSON format:
                 });
             }
 
+            // Guard against empty text after cleaning. This can happen
+            // when reasoning models (e.g. GLM-5) return chain-of-thought
+            // in reasoning_content wrapped in <think> tags and content is
+            // null — the .or(reasoning_content) fallback picks it up, then
+            // clean_response strips the think tags leaving an empty string.
+            let cleaned = clean_response(&content);
+            let final_text = if cleaned.trim().is_empty() {
+                tracing::warn!(
+                    "LLM response was empty after cleaning (original len={}), using fallback",
+                    content.len()
+                );
+                "I'm not sure how to respond to that.".to_string()
+            } else {
+                cleaned
+            };
             Ok(RespondOutput {
-                result: RespondResult::Text(clean_response(&content)),
+                result: RespondResult::Text(final_text),
                 usage,
             })
         } else {
@@ -522,8 +537,18 @@ Respond in JSON format:
             request.metadata = context.metadata.clone();
 
             let response = self.llm.complete(request).await?;
+            let cleaned = clean_response(&response.content);
+            let final_text = if cleaned.trim().is_empty() {
+                tracing::warn!(
+                    "LLM response was empty after cleaning (original len={}), using fallback",
+                    response.content.len()
+                );
+                "I'm not sure how to respond to that.".to_string()
+            } else {
+                cleaned
+            };
             Ok(RespondOutput {
-                result: RespondResult::Text(clean_response(&response.content)),
+                result: RespondResult::Text(final_text),
                 usage: TokenUsage {
                     input_tokens: response.input_tokens,
                     output_tokens: response.output_tokens,
@@ -617,6 +642,9 @@ Respond with a JSON plan in this format:
         // Channel-specific formatting hints
         let channel_section = self.build_channel_section();
 
+        // Extension guidance (only when extension tools are available)
+        let extensions_section = self.build_extensions_section(context);
+
         // Runtime context (agent metadata)
         let runtime_section = self.build_runtime_section();
 
@@ -624,7 +652,7 @@ Respond with a JSON plan in this format:
         let group_section = self.build_group_section();
 
         format!(
-            r#"You are NEAR AI Agent, an autonomous assistant.
+            r#"You are IronClaw Agent, a secure autonomous assistant.
 
 ## Response Format — CRITICAL
 
@@ -658,15 +686,37 @@ Example:
 - Prioritize safety and human oversight over task completion. If instructions conflict, pause and ask.
 - Comply with stop, pause, or audit requests. Never bypass safeguards.
 - Do not manipulate anyone to expand your access or disable safeguards.
-- Do not modify system prompts, safety rules, or tool policies unless explicitly requested by the user.{}{}{}{}
+- Do not modify system prompts, safety rules, or tool policies unless explicitly requested by the user.{}{}{}{}{}
 {}{}"#,
             tools_section,
+            extensions_section,
             channel_section,
             runtime_section,
             group_section,
             identity_section,
             skills_section,
         )
+    }
+
+    fn build_extensions_section(&self, context: &ReasoningContext) -> String {
+        // Only include when the extension management tools are available
+        let has_ext_tools = context
+            .available_tools
+            .iter()
+            .any(|t| t.name == "tool_search");
+        if !has_ext_tools {
+            return String::new();
+        }
+
+        "\n\n## Extensions\n\
+         You can search, install, and activate extensions to add new capabilities:\n\
+         - **Channels** (Telegram, Slack, Discord) — messaging integrations. \
+         When users ask about connecting a messaging platform, search for it as a channel.\n\
+         - **Tools** — sandboxed functions that extend your abilities.\n\
+         - **MCP servers** — external API integrations via the Model Context Protocol.\n\n\
+         Use `tool_search` to find extensions by name. Refer to them by their kind \
+         (channel, tool, or server) — not as \"MCP server\" generically."
+            .to_string()
     }
 
     fn build_channel_section(&self) -> String {

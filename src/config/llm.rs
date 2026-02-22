@@ -251,10 +251,7 @@ impl LlmConfig {
         let nearai = NearAiConfig {
             model: optional_env("NEARAI_MODEL")?
                 .or_else(|| settings.selected_model.clone())
-                .unwrap_or_else(|| {
-                    "fireworks::accounts/fireworks/models/llama4-maverick-instruct-basic"
-                        .to_string()
-                }),
+                .unwrap_or_else(|| "zai-org/GLM-latest".to_string()),
             cheap_model: optional_env("NEARAI_CHEAP_MODEL")?,
             base_url: optional_env("NEARAI_BASE_URL")?.unwrap_or_else(|| {
                 if nearai_api_key.is_some() {
