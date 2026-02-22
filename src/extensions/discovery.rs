@@ -1,4 +1,4 @@
-//! Online extension discovery for finding MCP servers not in the built-in registry.
+//! Online extension discovery for finding extensions not in the built-in registry.
 //!
 //! Multi-tier search strategy:
 //! 1. Probe well-known URL patterns (mcp.{service}.com, {service}.com/mcp)
@@ -246,7 +246,6 @@ fn extract_url(source: &ExtensionSource) -> String {
         ExtensionSource::Discovered { url } => url.clone(),
         ExtensionSource::WasmDownload { wasm_url, .. } => wasm_url.clone(),
         ExtensionSource::WasmBuildable { repo_url, .. } => repo_url.clone(),
-        ExtensionSource::Bundled { name } => name.clone(),
     }
 }
 

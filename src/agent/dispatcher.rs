@@ -222,6 +222,7 @@ impl Agent {
                     &model_name,
                     output.usage.input_tokens,
                     output.usage.output_tokens,
+                    Some(self.llm().cost_per_token()),
                 )
                 .await;
             tracing::debug!(
@@ -890,7 +891,7 @@ mod tests {
                 auto_approve_tools: false,
             },
             deps,
-            ChannelManager::new(),
+            Arc::new(ChannelManager::new()),
             None,
             None,
             None,

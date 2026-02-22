@@ -1,4 +1,4 @@
-use crate::config::helpers::{optional_env, parse_optional_env};
+use crate::config::helpers::{optional_env, parse_bool_env, parse_optional_env, parse_string_env};
 use crate::error::ConfigError;
 
 /// Docker sandbox configuration.
@@ -44,28 +44,13 @@ impl SandboxModeConfig {
             .unwrap_or_default();
 
         Ok(Self {
-            enabled: optional_env("SANDBOX_ENABLED")?
-                .map(|s| s.parse())
-                .transpose()
-                .map_err(|e| ConfigError::InvalidValue {
-                    key: "SANDBOX_ENABLED".to_string(),
-                    message: format!("must be 'true' or 'false': {e}"),
-                })?
-                .unwrap_or(true),
-            policy: optional_env("SANDBOX_POLICY")?.unwrap_or_else(|| "readonly".to_string()),
+            enabled: parse_bool_env("SANDBOX_ENABLED", true)?,
+            policy: parse_string_env("SANDBOX_POLICY", "readonly")?,
             timeout_secs: parse_optional_env("SANDBOX_TIMEOUT_SECS", 120)?,
             memory_limit_mb: parse_optional_env("SANDBOX_MEMORY_LIMIT_MB", 2048)?,
             cpu_shares: parse_optional_env("SANDBOX_CPU_SHARES", 1024)?,
-            image: optional_env("SANDBOX_IMAGE")?
-                .unwrap_or_else(|| "ironclaw-worker:latest".to_string()),
-            auto_pull_image: optional_env("SANDBOX_AUTO_PULL")?
-                .map(|s| s.parse())
-                .transpose()
-                .map_err(|e| ConfigError::InvalidValue {
-                    key: "SANDBOX_AUTO_PULL".to_string(),
-                    message: format!("must be 'true' or 'false': {e}"),
-                })?
-                .unwrap_or(true),
+            image: parse_string_env("SANDBOX_IMAGE", "ironclaw-worker:latest")?,
+            auto_pull_image: parse_bool_env("SANDBOX_AUTO_PULL", true)?,
             extra_allowed_domains: extra_domains,
         })
     }
@@ -221,18 +206,11 @@ impl ClaudeCodeConfig {
     pub(crate) fn resolve() -> Result<Self, ConfigError> {
         let defaults = Self::default();
         Ok(Self {
-            enabled: optional_env("CLAUDE_CODE_ENABLED")?
-                .map(|s| s.parse())
-                .transpose()
-                .map_err(|e| ConfigError::InvalidValue {
-                    key: "CLAUDE_CODE_ENABLED".to_string(),
-                    message: format!("must be 'true' or 'false': {e}"),
-                })?
-                .unwrap_or(defaults.enabled),
+            enabled: parse_bool_env("CLAUDE_CODE_ENABLED", defaults.enabled)?,
             config_dir: optional_env("CLAUDE_CONFIG_DIR")?
                 .map(std::path::PathBuf::from)
                 .unwrap_or(defaults.config_dir),
-            model: optional_env("CLAUDE_CODE_MODEL")?.unwrap_or(defaults.model),
+            model: parse_string_env("CLAUDE_CODE_MODEL", defaults.model)?,
             max_turns: parse_optional_env("CLAUDE_CODE_MAX_TURNS", defaults.max_turns)?,
             memory_limit_mb: parse_optional_env(
                 "CLAUDE_CODE_MEMORY_LIMIT_MB",

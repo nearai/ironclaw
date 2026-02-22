@@ -1704,7 +1704,7 @@ async fn extensions_list_handler(
     ))?;
 
     let installed = ext_mgr
-        .list(None)
+        .list(None, false)
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
@@ -1955,7 +1955,7 @@ async fn extensions_registry_handler(
     let installed: std::collections::HashSet<(String, String)> =
         if let Some(ext_mgr) = state.extension_manager.as_ref() {
             ext_mgr
-                .list(None)
+                .list(None, false)
                 .await
                 .unwrap_or_default()
                 .into_iter()
@@ -1998,7 +1998,7 @@ async fn extensions_setup_handler(
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
     let kind = ext_mgr
-        .list(None)
+        .list(None, false)
         .await
         .ok()
         .and_then(|list| list.into_iter().find(|e| e.name == name))
