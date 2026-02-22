@@ -148,6 +148,7 @@ http-body-util = "0.1"
 bytes = "1"
 base64 = "0.22.1"
 mime_guess = "2.0.5"
+clap_complete = "4.5.0"
 
 # HTML to Markdown conversion (feature gated)
 html-to-markdown-rs = { version = "2.3", optional = true }

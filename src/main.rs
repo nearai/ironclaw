@@ -51,11 +51,11 @@ async fn main() -> anyhow::Result<()> {
     // Handle non-agent commands first (they don't need full setup)
     match &cli.command {
         Some(Command::Tool(tool_cmd)) => {
-            init_cli_tracing();
+            init_cli_logging();
             return run_tool_command(tool_cmd.clone()).await;
         }
         Some(Command::Config(config_cmd)) => {
-            init_cli_tracing();
+            init_cli_logging();
             return ironclaw::cli::run_config_command(config_cmd.clone()).await;
         }
         Some(Command::Registry(registry_cmd)) => {
@@ -89,6 +89,10 @@ async fn main() -> anyhow::Result<()> {
             let _ = dotenvy::dotenv();
             ironclaw::bootstrap::load_ironclaw_env();
             return run_status_command().await;
+        }
+        Some(Command::Completion(completion)) => {
+            init_cli_logging();
+            return completion.run();
         }
         Some(Command::Worker {
             job_id,
