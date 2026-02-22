@@ -385,7 +385,7 @@ SANDBOX_DEFAULT_POLICY=workspace_write # ReadOnly, WorkspaceWrite, FullAccess
 
 # Claude Code mode (runs inside sandbox containers)
 CLAUDE_CODE_ENABLED=false
-CLAUDE_CODE_MODEL=claude-sonnet-4-20250514
+CLAUDE_CODE_MODEL=claude-sonnet-4-6
 CLAUDE_CODE_MAX_TURNS=50
 CLAUDE_CODE_CONFIG_DIR=/home/worker/.claude
 
