@@ -1442,6 +1442,70 @@ impl WasmChannel {
             StatusUpdate::StreamChunk(_) => {
                 // No-op, too noisy
             }
+            StatusUpdate::ApprovalNeeded {
+                tool_name,
+                description,
+                parameters,
+                ..
+            } => {
+                // WASM channels (Telegram, Slack, etc.) cannot render
+                // interactive approval overlays.  Send the approval prompt
+                // as an actual message so the user can reply yes/no.
+                self.cancel_typing_task().await;
+
+                let params_preview = parameters
+                    .as_object()
+                    .map(|obj| {
+                        obj.iter()
+                            .map(|(k, v)| {
+                                let val = match v {
+                                    serde_json::Value::String(s) => {
+                                        if s.len() > 80 {
+                                            format!("\"{}...\"", &s[..77])
+                                        } else {
+                                            format!("\"{}\"", s)
+                                        }
+                                    }
+                                    other => {
+                                        let s = other.to_string();
+                                        if s.len() > 80 {
+                                            format!("{}...", &s[..77])
+                                        } else {
+                                            s
+                                        }
+                                    }
+                                };
+                                format!("  {}: {}", k, val)
+                            })
+                            .collect::<Vec<_>>()
+                            .join("\n")
+                    })
+                    .unwrap_or_default();
+
+                let prompt = format!(
+                    "Approval needed: {tool_name}\n\
+                     {description}\n\
+                     \n\
+                     Parameters:\n\
+                     {params_preview}\n\
+                     \n\
+                     Reply \"yes\" to approve, \"no\" to deny, or \"always\" to auto-approve."
+                );
+
+                let metadata_json = serde_json::to_string(metadata).unwrap_or_default();
+                if let Err(e) = self
+                    .call_on_respond(uuid::Uuid::new_v4(), &prompt, None, &metadata_json)
+                    .await
+                {
+                    tracing::warn!(
+                        channel = %self.name,
+                        error = %e,
+                        "Failed to send approval prompt via on_respond, falling back to on_status"
+                    );
+                    // Fall back to status update (typing indicator)
+                    let _ = self.call_on_status(&status, metadata).await;
+                }
+            }
             _ => {
                 // Done, Interrupted, Status, ToolStarted, ToolCompleted: cancel and fire once
                 self.cancel_typing_task().await;

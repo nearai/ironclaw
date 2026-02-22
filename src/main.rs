@@ -530,6 +530,10 @@ async fn main() -> anyhow::Result<()> {
                 }
             }
         } else {
+            tracing::warn!(
+                "No master key available (SECRETS_MASTER_KEY not set and keychain lookup failed). \
+                 Secrets store disabled — WASM channels requiring credentials will not start."
+            );
             #[cfg(feature = "libsql")]
             let _ = libsql_db.take();
             None
@@ -1082,6 +1086,7 @@ async fn main() -> anyhow::Result<()> {
 
     // Collect webhook route fragments; a single WebhookServer hosts them all.
     let mut webhook_routes: Vec<axum::Router> = Vec::new();
+    let mut wasm_webhook_route_registered = false;
 
     // Load WASM channels and register their webhook routes.
     if let Some(ref wasm_ch_runtime) = wasm_channel_runtime
@@ -1111,8 +1116,13 @@ async fn main() -> anyhow::Result<()> {
                         .as_ref()
                         .is_some_and(|cap| cap.setup.required_secrets.iter().any(|s| !s.optional));
 
-                    if has_required_secrets {
-                        let missing = if let Some(ref secrets) = secrets_store {
+                    // IMPORTANT: even when credentials are missing, we still
+                    // register the channel with the webhook router so that
+                    // incoming webhooks return 200 (accepted but not processed)
+                    // instead of 404. Returning 404 causes platforms like Telegram
+                    // to disable the webhook URL.
+                    let credentials_missing = if has_required_secrets {
+                        if let Some(ref secrets) = secrets_store {
                             let required = loaded
                                 .capabilities_file
                                 .as_ref()
@@ -1144,19 +1154,10 @@ async fn main() -> anyhow::Result<()> {
                                 "No secrets store available, skipping channel startup"
                             );
                             true
-                        };
-
-                        if missing {
-                            // Don't add to loaded_wasm_channel_names — this
-                            // keeps the channel out of `active_channel_names` so
-                            // the full activation path runs when the user saves
-                            // credentials. The web UI discovers installed
-                            // channels by checking the .wasm files on disk.
-                            continue;
                         }
-                    }
-
-                    loaded_wasm_channel_names.push(channel_name.clone());
+                    } else {
+                        false
+                    };
 
                     let secret_name = loaded.webhook_secret_name();
 
@@ -1181,6 +1182,39 @@ async fn main() -> anyhow::Result<()> {
                     }];
 
                     let channel_arc = Arc::new(loaded.channel);
+
+                    // Always register with the webhook router so incoming
+                    // webhooks don't 404 (which causes platforms to deactivate
+                    // the webhook URL). The WASM channel can handle requests
+                    // even when not fully started — it just won't emit messages.
+                    tracing::info!(
+                        channel = %channel_name,
+                        has_webhook_secret = webhook_secret.is_some(),
+                        secret_header = ?secret_header,
+                        credentials_missing,
+                        "Registering channel with router"
+                    );
+
+                    wasm_channel_router
+                        .register(
+                            Arc::clone(&channel_arc),
+                            endpoints,
+                            webhook_secret.clone(),
+                            secret_header,
+                        )
+                        .await;
+                    has_webhook_channels = true;
+
+                    if credentials_missing {
+                        // Don't add to loaded_wasm_channel_names — this
+                        // keeps the channel out of `active_channel_names` so
+                        // the full activation path runs when the user saves
+                        // credentials. The web UI discovers installed
+                        // channels by checking the .wasm files on disk.
+                        continue;
+                    }
+
+                    loaded_wasm_channel_names.push(channel_name.clone());
 
                     {
                         let mut config_updates = std::collections::HashMap::new();
@@ -1219,23 +1253,6 @@ async fn main() -> anyhow::Result<()> {
                         }
                     }
 
-                    tracing::info!(
-                        channel = %channel_name,
-                        has_webhook_secret = webhook_secret.is_some(),
-                        secret_header = ?secret_header,
-                        "Registering channel with router"
-                    );
-
-                    wasm_channel_router
-                        .register(
-                            Arc::clone(&channel_arc),
-                            endpoints,
-                            webhook_secret.clone(),
-                            secret_header,
-                        )
-                        .await;
-                    has_webhook_channels = true;
-
                     if let Some(ref secrets) = secrets_store {
                         match inject_channel_credentials(
                             &channel_arc,
@@ -1272,6 +1289,7 @@ async fn main() -> anyhow::Result<()> {
                         Arc::clone(&wasm_channel_router),
                         extension_manager.as_ref().map(Arc::clone),
                     ));
+                    wasm_webhook_route_registered = true;
                 }
 
                 // Tell extension manager which channels are actually loaded
@@ -1290,8 +1308,15 @@ async fn main() -> anyhow::Result<()> {
         }
     }
 
-    // Always register the WASM channel catch-all webhook route when the runtime
-    if wasm_channel_runtime.is_some() && loaded_wasm_channel_names.is_empty() {
+    // Register the WASM channel catch-all webhook route when the runtime is
+    // available but no channels were fully activated AND the route wasn't
+    // already registered (channels with missing credentials still register
+    // their webhook paths). This ensures hot-activated channels can receive
+    // webhooks.
+    if wasm_channel_runtime.is_some()
+        && loaded_wasm_channel_names.is_empty()
+        && !wasm_webhook_route_registered
+    {
         webhook_routes.push(create_wasm_channel_router(
             Arc::clone(&wasm_channel_router),
             extension_manager.as_ref().map(Arc::clone),

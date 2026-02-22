@@ -502,8 +502,23 @@ Respond in JSON format:
                 });
             }
 
+            // Guard against empty text after cleaning. This can happen
+            // when reasoning models (e.g. GLM-5) return chain-of-thought
+            // in reasoning_content wrapped in <think> tags and content is
+            // null — the .or(reasoning_content) fallback picks it up, then
+            // clean_response strips the think tags leaving an empty string.
+            let cleaned = clean_response(&content);
+            let final_text = if cleaned.trim().is_empty() {
+                tracing::warn!(
+                    "LLM response was empty after cleaning (original len={}), using fallback",
+                    content.len()
+                );
+                "I'm not sure how to respond to that.".to_string()
+            } else {
+                cleaned
+            };
             Ok(RespondOutput {
-                result: RespondResult::Text(clean_response(&content)),
+                result: RespondResult::Text(final_text),
                 usage,
             })
         } else {
@@ -514,8 +529,18 @@ Respond in JSON format:
             request.metadata = context.metadata.clone();
 
             let response = self.llm.complete(request).await?;
+            let cleaned = clean_response(&response.content);
+            let final_text = if cleaned.trim().is_empty() {
+                tracing::warn!(
+                    "LLM response was empty after cleaning (original len={}), using fallback",
+                    response.content.len()
+                );
+                "I'm not sure how to respond to that.".to_string()
+            } else {
+                cleaned
+            };
             Ok(RespondOutput {
-                result: RespondResult::Text(clean_response(&response.content)),
+                result: RespondResult::Text(final_text),
                 usage: TokenUsage {
                     input_tokens: response.input_tokens,
                     output_tokens: response.output_tokens,
