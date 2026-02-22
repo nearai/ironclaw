@@ -224,14 +224,27 @@ async fn list_servers(verbose: bool) -> anyhow::Result<()> {
         return Ok(());
     }
 
+    // Initialize secrets store to check auth status
+    let secrets = get_secrets_store().await.ok();
+
     println!();
     println!("  Configured MCP servers:");
     println!();
 
     for server in &servers.servers {
         let status = if server.enabled { "●" } else { "○" };
+
+        // Check if server requires auth AND whether we actually have tokens
         let auth_status = if server.requires_auth() {
-            " (auth required)"
+            if let Some(ref secrets) = secrets {
+                if is_authenticated(server, secrets, DEFAULT_USER_ID).await {
+                    " (authenticated)"
+                } else {
+                    " (auth required)"
+                }
+            } else {
+                " (auth required)"
+            }
         } else {
             ""
         };
