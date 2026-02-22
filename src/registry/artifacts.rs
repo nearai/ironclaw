@@ -32,7 +32,12 @@ const WASM_TRIPLES: &[&str] = &[
 /// 2. `<crate_dir>/target/` (default per-crate layout)
 pub fn resolve_target_dir(crate_dir: &Path) -> PathBuf {
     if let Ok(dir) = std::env::var("CARGO_TARGET_DIR") {
-        return PathBuf::from(dir);
+        let p = PathBuf::from(dir);
+        // Resolve relative CARGO_TARGET_DIR against crate_dir
+        if p.is_relative() {
+            return crate_dir.join(p);
+        }
+        return p;
     }
     crate_dir.join("target")
 }
@@ -229,7 +234,14 @@ pub async fn install_wasm_files(
     ];
     for caps_src in &caps_candidates {
         if caps_src.exists() {
-            let _ = fs::copy(caps_src, &caps_dst).await;
+            if let Err(e) = fs::copy(caps_src, &caps_dst).await {
+                tracing::warn!(
+                    "Failed to copy capabilities sidecar {} -> {}: {}",
+                    caps_src.display(),
+                    caps_dst.display(),
+                    e,
+                );
+            }
             break;
         }
     }

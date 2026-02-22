@@ -501,10 +501,7 @@ impl LlmProvider for NearAiChatProvider {
 
         // Fall back to reasoning_content when content is null (e.g. GLM-5
         // returns its answer in reasoning_content instead of content).
-        let content = choice
-            .message
-            .content
-            .or(choice.message.reasoning_content);
+        let content = choice.message.content.or(choice.message.reasoning_content);
         let tool_calls: Vec<ToolCall> = choice
             .message
             .tool_calls

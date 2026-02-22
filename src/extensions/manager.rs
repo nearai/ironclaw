@@ -1688,6 +1688,14 @@ impl ExtensionManager {
             )));
         }
 
+        // Validate name to prevent path traversal
+        if name.contains('/') || name.contains('\\') || name.contains("..") || name.contains('\0') {
+            return Err(ExtensionError::ActivationFailed(format!(
+                "Invalid channel name '{}': contains path separator or traversal characters",
+                name
+            )));
+        }
+
         // Load the channel from files
         let wasm_path = self.wasm_channels_dir.join(format!("{}.wasm", name));
         let cap_path = self
@@ -1875,7 +1883,18 @@ impl ExtensionManager {
         };
 
         // Also refresh the webhook secret in the router
-        let webhook_secret_name = format!("{}_webhook_secret", name);
+        // Load capabilities file to get the correct secret name (may be overridden)
+        let webhook_secret_name = {
+            let cap_path = self
+                .wasm_channels_dir
+                .join(format!("{}.capabilities.json", name));
+            match tokio::fs::read(&cap_path).await {
+                Ok(bytes) => crate::channels::wasm::ChannelCapabilitiesFile::from_bytes(&bytes)
+                    .map(|f| f.webhook_secret_name())
+                    .unwrap_or_else(|_| format!("{}_webhook_secret", name)),
+                Err(_) => format!("{}_webhook_secret", name),
+            }
+        };
         if let Ok(secret) = self
             .secrets
             .get_decrypted(&self.user_id, &webhook_secret_name)

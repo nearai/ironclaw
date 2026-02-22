@@ -293,7 +293,7 @@ async fn main() -> anyhow::Result<()> {
     };
 
     if let Some(repl) = repl_channel {
-        channels.add(Box::new(repl));
+        channels.add(Box::new(repl)).await;
         if cli.message.is_some() {
             tracing::info!("Single message mode");
         } else {
@@ -318,7 +318,7 @@ async fn main() -> anyhow::Result<()> {
             loaded_wasm_channel_names = result.channel_names;
             for (name, channel) in result.channels {
                 channel_names.push(name);
-                channels.add(channel);
+                channels.add(channel).await;
             }
             if let Some(routes) = result.webhook_routes {
                 webhook_routes.push(routes);
@@ -340,7 +340,7 @@ async fn main() -> anyhow::Result<()> {
                 .expect("HttpConfig host:port must be a valid SocketAddr"),
         );
         channel_names.push("http".to_string());
-        channels.add(Box::new(http_channel));
+        channels.add(Box::new(http_channel)).await;
         tracing::info!(
             "HTTP channel enabled on {}:{}",
             http_config.host,
@@ -466,7 +466,7 @@ async fn main() -> anyhow::Result<()> {
         tracing::info!("Web UI: http://{}:{}/", gw_config.host, gw_config.port);
 
         channel_names.push("gateway".to_string());
-        channels.add(Box::new(gw));
+        channels.add(Box::new(gw)).await;
     }
 
     // ── Boot screen ────────────────────────────────────────────────────

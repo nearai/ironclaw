@@ -40,16 +40,10 @@ impl ChannelManager {
     }
 
     /// Add a channel to the manager.
-    pub fn add(&self, channel: Box<dyn Channel>) {
+    pub async fn add(&self, channel: Box<dyn Channel>) {
         let name = channel.name().to_string();
-        // We need to get the inner HashMap to insert
-        // Since we're in a sync context during setup, we'll use try_write
-        if let Ok(mut channels) = self.channels.try_write() {
-            channels.insert(name.clone(), channel);
-            tracing::debug!("Added channel: {}", name);
-        } else {
-            tracing::error!("Failed to add channel: {} (lock contention)", name);
-        }
+        self.channels.write().await.insert(name.clone(), channel);
+        tracing::debug!("Added channel: {}", name);
     }
 
     /// Hot-add a channel to a running agent.
