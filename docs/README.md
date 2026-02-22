@@ -93,7 +93,7 @@ See [INSTALLATION.md](INSTALLATION.md) for complete setup, all LLM backends, ser
 
 ## What's New in v0.9.0
 
-### v0.9.0 (2026-02-21)
+### v0.9.0 (2026-02-22)
 - **TEE Attestation Shield**: Added hardware-attested TEEs for enhanced security in web gateway UI
 - **Configurable Tool Iterations**: New `AGENT_MAX_TOOL_ITERATIONS` setting for agentic loop control
 - **Auto-Approve Tools**: New `AGENT_AUTO_APPROVE_TOOLS` for CI/benchmarking
@@ -113,4 +113,4 @@ See [INSTALLATION.md](INSTALLATION.md) for complete setup, all LLM backends, ser
 Documented: IronClaw v0.9.0
 Source: [github.com/nearai/ironclaw](https://github.com/nearai/ironclaw)
 Docs repo: [github.com/mudrii/ironclaw-docs](https://github.com/mudrii/ironclaw-docs)
-Generated: 2026-02-21
+Generated: 2026-02-22

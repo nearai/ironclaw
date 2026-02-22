@@ -1,6 +1,6 @@
 # IronClaw Codebase Analysis — Channel System
 
-> Updated: 2026-02-21 | Version: v0.9.0
+> Updated: 2026-02-22 | Version: v0.9.0
 
 ---
 
@@ -814,7 +814,7 @@ or populate `allow_from` with an allowlist of phone numbers.
 | `HTTP_USER_ID` | `http` | User identity assigned to webhook messages |
 | `GATEWAY_ENABLED` | `false` | Enable web gateway channel |
 | `GATEWAY_HOST` | `127.0.0.1` | Gateway listen address |
-| `GATEWAY_PORT` | `3002` | Gateway listen port |
+| `GATEWAY_PORT` | `3000` | Gateway listen port |
 | `GATEWAY_AUTH_TOKEN` | auto-generated | Bearer token for all protected API endpoints. If unset, a random 32-char token is generated and logged at startup. |
 | `GATEWAY_USER_ID` | `default` | User identity for messages sent through the gateway |
 | `WHATSAPP_ACCESS_TOKEN` | — | WhatsApp Cloud API access token (Meta Developer Portal). Required to enable the WhatsApp WASM channel. |
@@ -832,7 +832,7 @@ CLI_ENABLED=false
 # Enable web gateway for browser and API access
 GATEWAY_ENABLED=true
 GATEWAY_HOST=127.0.0.1
-GATEWAY_PORT=3002
+GATEWAY_PORT=3000
 GATEWAY_AUTH_TOKEN=change-me-to-a-strong-random-token
 
 # Enable HTTP webhook for external integrations (optional)

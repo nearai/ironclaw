@@ -1053,7 +1053,7 @@ tail -f ~/.ironclaw/logs/stdout.log
 tail -f ~/.ironclaw/logs/stderr.log
 
 # Gateway health check
-curl -H "Authorization: Bearer $GATEWAY_AUTH_TOKEN" http://127.0.0.1:3002/api/health
+curl -H "Authorization: Bearer $GATEWAY_AUTH_TOKEN" http://127.0.0.1:3000/api/health
 
 # Check job state in DB (libSQL)
 sqlite3 ~/.ironclaw/ironclaw.db "SELECT id, status, created_at FROM agent_jobs ORDER BY created_at DESC LIMIT 10;"
@@ -1061,4 +1061,4 @@ sqlite3 ~/.ironclaw/ironclaw.db "SELECT id, status, created_at FROM agent_jobs O
 
 ---
 
-*Source: IronClaw v0.9.0 · Docs: github.com/mudrii/ironclaw-docs · Generated: 2026-02-21*
+*Source: IronClaw v0.9.0 · Docs: github.com/mudrii/ironclaw-docs · Generated: 2026-02-22*
