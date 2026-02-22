@@ -358,6 +358,8 @@ ironclaw --oneshot "What is the capital of France?"
 
 Create `~/Library/LaunchAgents/ai.ironclaw.plist`:
 
+> **Note:** Replace all instances of `YOUR_USERNAME` with your actual macOS username in the plist below.
+
 ```xml
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -381,9 +383,9 @@ Create `~/Library/LaunchAgents/ai.ironclaw.plist`:
         <string>false</string>
         <key>GATEWAY_PORT</key>
         <string>3000</string>
+        <!-- Replace YOUR_TOKEN_HERE with output of: openssl rand -hex 32 -->
         <key>GATEWAY_AUTH_TOKEN</key>
         <string>YOUR_TOKEN_HERE</string>
-        <!-- Generate with: openssl rand -hex 32 -->
         <key>SANDBOX_ENABLED</key>
         <string>true</string>
         <key>RUST_LOG</key>
