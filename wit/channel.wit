@@ -261,6 +261,18 @@ interface channel {
         tool-started,
         /// A tool execution completed.
         tool-completed,
+        /// A tool execution produced a preview/result status.
+        tool-result,
+        /// A tool call is waiting for user approval.
+        approval-needed,
+        /// Generic status text that should be shown to the user.
+        status,
+        /// A background/sandbox job was started.
+        job-started,
+        /// An extension/tool requires user authentication.
+        auth-required,
+        /// Authentication flow completed.
+        auth-completed,
     }
 
     /// A status update from the agent.

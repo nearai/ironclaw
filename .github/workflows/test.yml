@@ -19,3 +19,5 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: Run Tests
         run: cargo test --all-features -- --nocapture
+      - name: Run Telegram Channel Tests
+        run: cargo test --manifest-path channels-src/telegram/Cargo.toml -- --nocapture
