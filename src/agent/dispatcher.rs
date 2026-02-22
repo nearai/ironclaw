@@ -216,12 +216,16 @@ impl Agent {
 
             // Record cost and track token usage
             let model_name = self.llm().active_model_name();
+            let write_multiplier = self.llm().cache_write_multiplier();
             let call_cost = self
                 .cost_guard()
                 .record_llm_call(
                     &model_name,
                     output.usage.input_tokens,
                     output.usage.output_tokens,
+                    output.usage.cache_read_input_tokens,
+                    output.usage.cache_creation_input_tokens,
+                    write_multiplier,
                     Some(self.llm().cost_per_token()),
                 )
                 .await;
@@ -838,6 +842,8 @@ mod tests {
                 input_tokens: 0,
                 output_tokens: 0,
                 finish_reason: FinishReason::Stop,
+                cache_read_input_tokens: 0,
+                cache_creation_input_tokens: 0,
             })
         }
 
@@ -851,6 +857,8 @@ mod tests {
                 input_tokens: 0,
                 output_tokens: 0,
                 finish_reason: FinishReason::Stop,
+                cache_read_input_tokens: 0,
+                cache_creation_input_tokens: 0,
             })
         }
     }
