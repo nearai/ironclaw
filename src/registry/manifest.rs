@@ -165,12 +165,14 @@ impl ExtensionManifest {
                 ExtensionSource::WasmBuildable {
                     repo_url: self.source.dir.clone(),
                     build_dir: Some(self.source.dir.clone()),
+                    crate_name: Some(self.source.crate_name.clone()),
                 }
             }
         } else {
             ExtensionSource::WasmBuildable {
                 repo_url: self.source.dir.clone(),
                 build_dir: Some(self.source.dir.clone()),
+                crate_name: Some(self.source.crate_name.clone()),
             }
         };
 
