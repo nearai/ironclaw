@@ -246,10 +246,8 @@ impl Agent {
                                 retry_error = %retry_err,
                                 "Retry after auto-compaction also failed"
                             );
-                            // Return the original error for a clearer message
-                            crate::error::Error::from(
-                                crate::error::LlmError::ContextLengthExceeded { used, limit },
-                            )
+                            // Propagate the actual retry error so callers see the real failure
+                            crate::error::Error::from(retry_err)
                         })?
                 }
                 Err(e) => return Err(e.into()),
@@ -843,27 +841,37 @@ fn compact_messages_for_retry(messages: &[ChatMessage]) -> Vec<ChatMessage> {
 
     let mut compacted = Vec::new();
 
-    // Keep all System messages (system prompt, skill context, nudges, etc.)
-    for msg in messages {
-        if msg.role == Role::System {
-            compacted.push(msg.clone());
-        }
-    }
-
     // Find the last User message index
     let last_user_idx = messages.iter().rposition(|m| m.role == Role::User);
 
     if let Some(idx) = last_user_idx {
-        // Add a note about dropped context
-        compacted.push(ChatMessage::system(
-            "[Note: Earlier conversation history was automatically compacted \
-             to fit within the context window. The most recent exchange is preserved below.]",
-        ));
+        // Keep System messages that appear BEFORE the last User message.
+        // System messages after that point (e.g. nudges) are included in the
+        // slice extension below, avoiding duplication.
+        for msg in &messages[..idx] {
+            if msg.role == Role::System {
+                compacted.push(msg.clone());
+            }
+        }
+
+        // Only add a compaction note if there was earlier history that is being dropped
+        if idx > 0 {
+            compacted.push(ChatMessage::system(
+                "[Note: Earlier conversation history was automatically compacted \
+                 to fit within the context window. The most recent exchange is preserved below.]",
+            ));
+        }
 
         // Keep the last User message and everything after it
         compacted.extend_from_slice(&messages[idx..]);
     } else {
-        // No user messages found (shouldn't happen normally); keep everything non-system
+        // No user messages found (shouldn't happen normally); keep everything,
+        // with system messages first to preserve prompt ordering.
+        for msg in messages {
+            if msg.role == Role::System {
+                compacted.push(msg.clone());
+            }
+        }
         for msg in messages {
             if msg.role != Role::System {
                 compacted.push(msg.clone());
@@ -1368,5 +1376,43 @@ mod tests {
         assert!(compacted[3].tool_calls.is_some()); // assistant with tool calls
         assert_eq!(compacted[4].name.as_deref(), Some("http"));
         assert_eq!(compacted[5].name.as_deref(), Some("echo"));
+    }
+
+    #[test]
+    fn test_compact_no_duplicate_system_after_last_user() {
+        // A system nudge message injected AFTER the last user message must
+        // not be duplicated — it should only appear once (via extend_from_slice).
+        let messages = vec![
+            ChatMessage::system("System prompt"),
+            ChatMessage::user("Question"),
+            ChatMessage::system("Nudge: wrap up"),
+            ChatMessage::assistant_with_tool_calls(
+                None,
+                vec![ToolCall {
+                    id: "c1".to_string(),
+                    name: "echo".to_string(),
+                    arguments: serde_json::json!({}),
+                }],
+            ),
+            ChatMessage::tool_result("c1", "echo", "done"),
+        ];
+
+        let compacted = compact_messages_for_retry(&messages);
+
+        // system prompt + note + user + nudge + assistant + tool_result = 6
+        assert_eq!(compacted.len(), 6);
+        assert_eq!(compacted[0].content, "System prompt");
+        assert!(compacted[1].content.contains("compacted"));
+        assert_eq!(compacted[2].content, "Question");
+        assert_eq!(compacted[3].content, "Nudge: wrap up"); // not duplicated
+        assert_eq!(compacted[4].role, Role::Assistant);
+        assert_eq!(compacted[5].role, Role::Tool);
+
+        // Verify "Nudge: wrap up" appears exactly once
+        let nudge_count = compacted
+            .iter()
+            .filter(|m| m.content == "Nudge: wrap up")
+            .count();
+        assert_eq!(nudge_count, 1);
     }
 }
