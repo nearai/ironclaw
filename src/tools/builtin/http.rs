@@ -571,8 +571,8 @@ mod tests {
         // compatibility. OpenAI rejects union types containing "array" unless
         // "items" is also specified, and body accepts any JSON value.
         assert!(
-            body.get("description").is_some(),
-            "body schema must have a description"
+            body.get("type").is_none(),
+            "body schema should not have a 'type' to be freeform for OpenAI compatibility"
         );
     }
 
