@@ -1,8 +1,12 @@
+use std::sync::Arc;
+
 use secrecy::{ExposeSecret, SecretString};
 
-use crate::config::helpers::optional_env;
+use crate::config::helpers::{optional_env, parse_bool_env, parse_optional_env};
 use crate::error::ConfigError;
+use crate::llm::SessionManager;
 use crate::settings::Settings;
+use crate::workspace::EmbeddingProvider;
 
 /// Embeddings provider configuration.
 #[derive(Debug, Clone)]
@@ -65,23 +69,10 @@ impl EmbeddingsConfig {
             .or_else(|| settings.ollama_base_url.clone())
             .unwrap_or_else(|| "http://localhost:11434".to_string());
 
-        let dimension = optional_env("EMBEDDING_DIMENSION")?
-            .map(|s| s.parse::<usize>())
-            .transpose()
-            .map_err(|e| ConfigError::InvalidValue {
-                key: "EMBEDDING_DIMENSION".to_string(),
-                message: format!("must be a positive integer: {e}"),
-            })?
-            .unwrap_or_else(|| default_dimension_for_model(&model));
+        let dimension =
+            parse_optional_env("EMBEDDING_DIMENSION", default_dimension_for_model(&model))?;
 
-        let enabled = optional_env("EMBEDDING_ENABLED")?
-            .map(|s| s.parse())
-            .transpose()
-            .map_err(|e| ConfigError::InvalidValue {
-                key: "EMBEDDING_ENABLED".to_string(),
-                message: format!("must be 'true' or 'false': {e}"),
-            })?
-            .unwrap_or(settings.embeddings.enabled);
+        let enabled = parse_bool_env("EMBEDDING_ENABLED", settings.embeddings.enabled)?;
 
         Ok(Self {
             enabled,
@@ -96,6 +87,65 @@ impl EmbeddingsConfig {
     /// Get the OpenAI API key if configured.
     pub fn openai_api_key(&self) -> Option<&str> {
         self.openai_api_key.as_ref().map(|s| s.expose_secret())
+    }
+
+    /// Create the appropriate embedding provider based on configuration.
+    ///
+    /// Returns `None` if embeddings are disabled or the required credentials
+    /// are missing. The `nearai_base_url` and `session` are needed only for
+    /// the NEAR AI provider but must be passed unconditionally.
+    pub fn create_provider(
+        &self,
+        nearai_base_url: &str,
+        session: Arc<SessionManager>,
+    ) -> Option<Arc<dyn EmbeddingProvider>> {
+        if !self.enabled {
+            tracing::info!("Embeddings disabled (set EMBEDDING_ENABLED=true to enable)");
+            return None;
+        }
+
+        match self.provider.as_str() {
+            "nearai" => {
+                tracing::info!(
+                    "Embeddings enabled via NEAR AI (model: {}, dim: {})",
+                    self.model,
+                    self.dimension,
+                );
+                Some(Arc::new(
+                    crate::workspace::NearAiEmbeddings::new(nearai_base_url, session)
+                        .with_model(&self.model, self.dimension),
+                ))
+            }
+            "ollama" => {
+                tracing::info!(
+                    "Embeddings enabled via Ollama (model: {}, url: {}, dim: {})",
+                    self.model,
+                    self.ollama_base_url,
+                    self.dimension,
+                );
+                Some(Arc::new(
+                    crate::workspace::OllamaEmbeddings::new(&self.ollama_base_url)
+                        .with_model(&self.model, self.dimension),
+                ))
+            }
+            _ => {
+                if let Some(api_key) = self.openai_api_key() {
+                    tracing::info!(
+                        "Embeddings enabled via OpenAI (model: {}, dim: {})",
+                        self.model,
+                        self.dimension,
+                    );
+                    Some(Arc::new(crate::workspace::OpenAiEmbeddings::with_model(
+                        api_key,
+                        &self.model,
+                        self.dimension,
+                    )))
+                } else {
+                    tracing::warn!("Embeddings configured but OPENAI_API_KEY not set");
+                    None
+                }
+            }
+        }
     }
 }
 

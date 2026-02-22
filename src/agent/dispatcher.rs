@@ -222,6 +222,7 @@ impl Agent {
                     &model_name,
                     output.usage.input_tokens,
                     output.usage.output_tokens,
+                    Some(self.llm().cost_per_token()),
                 )
                 .await;
             tracing::debug!(
