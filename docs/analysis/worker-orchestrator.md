@@ -361,8 +361,9 @@ Additional installs:
 - Rust toolchain (`rustup`, toolchain `1.92.0`) installed into
   `/usr/local/rustup` and `/usr/local/cargo`, world-readable. This allows
   workers to compile Rust code inside the container.
-- `@anthropic-ai/claude-code` (latest) installed globally via npm — required
-  for `claude-bridge` mode.
+- `@anthropic-ai/claude-code` installed globally via npm — required
+  for `claude-bridge` mode. **Note:** Using `latest` tag introduces supply-chain
+  risk. For production, pin to a specific version (e.g., `@anthropic-ai/claude-code@1.2.3`).
 
 Security hardening at the Dockerfile level:
 
