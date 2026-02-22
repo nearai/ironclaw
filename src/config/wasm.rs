@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 use std::time::Duration;
 
-use crate::config::helpers::{optional_env, parse_optional_env};
+use crate::config::helpers::{optional_env, parse_bool_env, parse_optional_env};
 use crate::error::ConfigError;
 
 /// WASM sandbox configuration.
@@ -48,14 +48,7 @@ fn default_tools_dir() -> PathBuf {
 impl WasmConfig {
     pub(crate) fn resolve() -> Result<Self, ConfigError> {
         Ok(Self {
-            enabled: optional_env("WASM_ENABLED")?
-                .map(|s| s.parse())
-                .transpose()
-                .map_err(|e| ConfigError::InvalidValue {
-                    key: "WASM_ENABLED".to_string(),
-                    message: format!("must be 'true' or 'false': {e}"),
-                })?
-                .unwrap_or(true),
+            enabled: parse_bool_env("WASM_ENABLED", true)?,
             tools_dir: optional_env("WASM_TOOLS_DIR")?
                 .map(PathBuf::from)
                 .unwrap_or_else(default_tools_dir),
@@ -65,14 +58,7 @@ impl WasmConfig {
             )?,
             default_timeout_secs: parse_optional_env("WASM_DEFAULT_TIMEOUT_SECS", 60)?,
             default_fuel_limit: parse_optional_env("WASM_DEFAULT_FUEL_LIMIT", 10_000_000)?,
-            cache_compiled: optional_env("WASM_CACHE_COMPILED")?
-                .map(|s| s.parse())
-                .transpose()
-                .map_err(|e| ConfigError::InvalidValue {
-                    key: "WASM_CACHE_COMPILED".to_string(),
-                    message: format!("must be 'true' or 'false': {e}"),
-                })?
-                .unwrap_or(true),
+            cache_compiled: parse_bool_env("WASM_CACHE_COMPILED", true)?,
             cache_dir: optional_env("WASM_CACHE_DIR")?.map(PathBuf::from),
         })
     }

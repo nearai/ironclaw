@@ -387,4 +387,19 @@ impl RoutineStore for LibSqlBackend {
             None => Ok(0),
         }
     }
+
+    async fn link_routine_run_to_job(
+        &self,
+        run_id: Uuid,
+        job_id: Uuid,
+    ) -> Result<(), DatabaseError> {
+        let conn = self.connect().await?;
+        conn.execute(
+            "UPDATE routine_runs SET job_id = ?1 WHERE id = ?2",
+            params![job_id.to_string(), run_id.to_string()],
+        )
+        .await
+        .map_err(|e| DatabaseError::Query(e.to_string()))?;
+        Ok(())
+    }
 }

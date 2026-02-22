@@ -120,7 +120,7 @@ This document tracks feature parity between IronClaw (Rust implementation) and O
 | Per-group tool policies | ✅ | ❌ | Allow/deny specific tools |
 | Thread isolation | ✅ | ✅ | Separate sessions per thread |
 | Per-channel media limits | ✅ | 🚧 | Caption support for media; no size limits |
-| Typing indicators | ✅ | 🚧 | TUI shows status |
+| Typing indicators | ✅ | 🚧 | TUI + Telegram typing/actionable status prompts; richer parity pending |
 | Per-channel ackReaction config | ✅ | ❌ | Customizable acknowledgement reactions |
 | Group session priming | ✅ | ❌ | Member roster injected for context |
 | Sender_id in trusted metadata | ✅ | ❌ | Exposed in system metadata |

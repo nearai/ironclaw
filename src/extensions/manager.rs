@@ -1,8 +1,8 @@
 //! Central extension manager that dispatches operations by ExtensionKind.
 //!
-//! Holds references to MCP infrastructure, WASM tool runtime, secrets store,
-//! and tool registry. All extension operations (search, install, auth, activate,
-//! list, remove) flow through here.
+//! Holds references to channel runtime, WASM tool runtime, MCP infrastructure,
+//! secrets store, and tool registry. All extension operations (search, install,
+//! auth, activate, list, remove) flow through here.
 
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
@@ -10,6 +10,10 @@ use std::sync::Arc;
 
 use tokio::sync::RwLock;
 
+use crate::channels::ChannelManager;
+use crate::channels::wasm::{
+    RegisteredEndpoint, SharedWasmChannel, WasmChannelLoader, WasmChannelRouter, WasmChannelRuntime,
+};
 use crate::extensions::discovery::OnlineDiscovery;
 use crate::extensions::registry::ExtensionRegistry;
 use crate::extensions::{
@@ -17,6 +21,7 @@ use crate::extensions::{
     InstalledExtension, RegistryEntry, ResultSource, SearchResult,
 };
 use crate::hooks::HookRegistry;
+use crate::pairing::PairingStore;
 use crate::secrets::{CreateSecretParams, SecretsStore};
 use crate::tools::ToolRegistry;
 use crate::tools::mcp::McpClient;
@@ -35,6 +40,18 @@ struct PendingAuth {
     created_at: std::time::Instant,
 }
 
+/// Runtime infrastructure needed for hot-activating WASM channels.
+///
+/// Set after construction via [`ExtensionManager::set_channel_runtime`] once the
+/// channel manager, WASM runtime, pairing store, and webhook router are available.
+struct ChannelRuntimeState {
+    channel_manager: Arc<ChannelManager>,
+    wasm_channel_runtime: Arc<WasmChannelRuntime>,
+    pairing_store: Arc<PairingStore>,
+    wasm_channel_router: Arc<WasmChannelRouter>,
+    telegram_owner_id: Option<i64>,
+}
+
 /// Central manager for extension lifecycle operations.
 pub struct ExtensionManager {
     registry: ExtensionRegistry,
@@ -50,13 +67,16 @@ pub struct ExtensionManager {
     wasm_tools_dir: PathBuf,
     wasm_channels_dir: PathBuf,
 
+    // WASM channel hot-activation infrastructure (set post-construction)
+    channel_runtime: RwLock<Option<ChannelRuntimeState>>,
+
     // Shared
     secrets: Arc<dyn SecretsStore + Send + Sync>,
     tool_registry: Arc<ToolRegistry>,
     hooks: Option<Arc<HookRegistry>>,
     pending_auth: RwLock<HashMap<String, PendingAuth>>,
-    /// Tunnel URL for remote OAuth callbacks (used in future iterations).
-    _tunnel_url: Option<String>,
+    /// Tunnel URL for webhook configuration and remote OAuth callbacks.
+    tunnel_url: Option<String>,
     user_id: String,
     /// Optional database store for DB-backed MCP config.
     store: Option<Arc<dyn crate::db::Database>>,
@@ -92,15 +112,38 @@ impl ExtensionManager {
             wasm_tool_runtime,
             wasm_tools_dir,
             wasm_channels_dir,
+            channel_runtime: RwLock::new(None),
             secrets,
             tool_registry,
             hooks,
             pending_auth: RwLock::new(HashMap::new()),
-            _tunnel_url: tunnel_url,
+            tunnel_url,
             user_id,
             store,
             active_channel_names: RwLock::new(HashSet::new()),
         }
+    }
+
+    /// Configure the channel runtime infrastructure for hot-activating WASM channels.
+    ///
+    /// Call after construction (and after wrapping in `Arc`) once the channel
+    /// manager, WASM runtime, pairing store, and webhook router are available.
+    /// Without this, channel activation returns an error.
+    pub async fn set_channel_runtime(
+        &self,
+        channel_manager: Arc<ChannelManager>,
+        wasm_channel_runtime: Arc<WasmChannelRuntime>,
+        pairing_store: Arc<PairingStore>,
+        wasm_channel_router: Arc<WasmChannelRouter>,
+        telegram_owner_id: Option<i64>,
+    ) {
+        *self.channel_runtime.write().await = Some(ChannelRuntimeState {
+            channel_manager,
+            wasm_channel_runtime,
+            pairing_store,
+            wasm_channel_router,
+            telegram_owner_id,
+        });
     }
 
     /// Register channel names that were loaded at startup.
@@ -207,14 +250,18 @@ impl ExtensionManager {
         match kind {
             ExtensionKind::McpServer => self.activate_mcp(name).await,
             ExtensionKind::WasmTool => self.activate_wasm_tool(name).await,
-            ExtensionKind::WasmChannel => Err(ExtensionError::ChannelNeedsRestart),
+            ExtensionKind::WasmChannel => self.activate_wasm_channel(name).await,
         }
     }
 
-    /// List all installed extensions with their status.
+    /// List extensions with their status.
+    ///
+    /// When `include_available` is `true`, registry entries that are not yet
+    /// installed are appended with `installed: false`.
     pub async fn list(
         &self,
         kind_filter: Option<ExtensionKind>,
+        include_available: bool,
     ) -> Result<Vec<InstalledExtension>, ExtensionError> {
         let mut extensions = Vec::new();
 
@@ -249,6 +296,7 @@ impl ExtensionManager {
                             active,
                             tools,
                             needs_setup: false,
+                            installed: true,
                         });
                     }
                 }
@@ -276,6 +324,7 @@ impl ExtensionManager {
                             active,
                             tools: if active { vec![name] } else { Vec::new() },
                             needs_setup: false,
+                            installed: true,
                         });
                     }
                 }
@@ -305,12 +354,43 @@ impl ExtensionManager {
                             active,
                             tools: Vec::new(),
                             needs_setup,
+                            installed: true,
                         });
                     }
                 }
                 Err(e) => {
                     tracing::debug!("Failed to discover WASM channels for listing: {}", e);
                 }
+            }
+        }
+
+        // Append available-but-not-installed registry entries
+        if include_available {
+            let installed_names: std::collections::HashSet<(String, ExtensionKind)> = extensions
+                .iter()
+                .map(|e| (e.name.clone(), e.kind))
+                .collect();
+
+            for entry in self.registry.all_entries().await {
+                if let Some(filter) = kind_filter
+                    && entry.kind != filter
+                {
+                    continue;
+                }
+                if installed_names.contains(&(entry.name.clone(), entry.kind)) {
+                    continue;
+                }
+                extensions.push(InstalledExtension {
+                    name: entry.name,
+                    kind: entry.kind,
+                    description: Some(entry.description),
+                    url: None,
+                    authenticated: false,
+                    active: false,
+                    tools: Vec::new(),
+                    needs_setup: false,
+                    installed: false,
+                });
             }
         }
 
@@ -491,12 +571,19 @@ impl ExtensionManager {
                     )
                     .await
                 }
-                ExtensionSource::WasmBuildable { .. } => {
-                    Err(ExtensionError::InstallFailed(format!(
-                        "'{}' requires building from source. Run `ironclaw registry install {}` \
-                         from the CLI (requires cargo-component).",
-                        entry.name, entry.name
-                    )))
+                ExtensionSource::WasmBuildable {
+                    build_dir,
+                    crate_name,
+                    ..
+                } => {
+                    self.install_wasm_from_buildable(
+                        &entry.name,
+                        build_dir.as_deref(),
+                        crate_name.as_deref(),
+                        &self.wasm_tools_dir,
+                        ExtensionKind::WasmTool,
+                    )
+                    .await
                 }
                 _ => Err(ExtensionError::InstallFailed(
                     "WASM tool entry has no download URL".to_string(),
@@ -514,12 +601,19 @@ impl ExtensionManager {
                     )
                     .await
                 }
-                ExtensionSource::WasmBuildable { .. } => {
-                    Err(ExtensionError::InstallFailed(format!(
-                        "'{}' requires building from source. Run `ironclaw registry install {}` \
-                         from the CLI (requires cargo-component).",
-                        entry.name, entry.name
-                    )))
+                ExtensionSource::WasmBuildable {
+                    build_dir,
+                    crate_name,
+                    ..
+                } => {
+                    self.install_wasm_from_buildable(
+                        &entry.name,
+                        build_dir.as_deref(),
+                        crate_name.as_deref(),
+                        &self.wasm_channels_dir,
+                        ExtensionKind::WasmChannel,
+                    )
+                    .await
                 }
                 _ => Err(ExtensionError::InstallFailed(
                     "WASM channel entry has no download URL".to_string(),
@@ -597,9 +691,8 @@ impl ExtensionManager {
             name: name.to_string(),
             kind: ExtensionKind::WasmChannel,
             message: format!(
-                "WASM channel '{}' installed to {}. Restart to activate.",
+                "WASM channel '{}' installed. Run activate to start it.",
                 name,
-                self.wasm_channels_dir.display()
             ),
         })
     }
@@ -824,6 +917,115 @@ impl ExtensionManager {
         }
 
         Ok(())
+    }
+
+    #[allow(dead_code)] // Used by upcoming hot-activation flow
+    async fn install_bundled_channel_from_artifacts(
+        &self,
+        name: &str,
+    ) -> Result<InstallResult, ExtensionError> {
+        // Check if already installed
+        let channel_wasm = self.wasm_channels_dir.join(format!("{}.wasm", name));
+        if channel_wasm.exists() {
+            return Err(ExtensionError::AlreadyInstalled(name.to_string()));
+        }
+
+        crate::channels::wasm::install_bundled_channel(name, &self.wasm_channels_dir, false)
+            .await
+            .map_err(ExtensionError::InstallFailed)?;
+
+        tracing::info!(
+            "Installed bundled channel '{}' to {}",
+            name,
+            self.wasm_channels_dir.display()
+        );
+
+        Ok(InstallResult {
+            name: name.to_string(),
+            kind: ExtensionKind::WasmChannel,
+            message: format!(
+                "Channel '{}' installed. \
+                 Run tool_auth('{}') to configure authentication, then activate.",
+                name, name,
+            ),
+        })
+    }
+
+    /// Install a WASM extension from local build artifacts (WasmBuildable source).
+    ///
+    /// Resolves the build directory (relative to `CARGO_MANIFEST_DIR` or absolute),
+    /// looks for the compiled WASM artifact, and copies it (plus capabilities.json)
+    /// to the install directory. Falls back to an error if artifacts don't exist.
+    async fn install_wasm_from_buildable(
+        &self,
+        name: &str,
+        build_dir: Option<&str>,
+        crate_name: Option<&str>,
+        target_dir: &std::path::Path,
+        kind: ExtensionKind,
+    ) -> Result<InstallResult, ExtensionError> {
+        let manifest_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+
+        // Resolve build directory
+        let resolved_dir = match build_dir {
+            Some(dir) => {
+                let p = std::path::Path::new(dir);
+                if p.is_absolute() {
+                    p.to_path_buf()
+                } else {
+                    manifest_dir.join(dir)
+                }
+            }
+            None => manifest_dir.to_path_buf(),
+        };
+
+        // Determine the binary name to look for
+        let binary_name = crate_name.unwrap_or(name);
+
+        let wasm_src =
+            crate::registry::artifacts::find_wasm_artifact(&resolved_dir, binary_name, "release")
+                .ok_or_else(|| {
+                ExtensionError::InstallFailed(format!(
+                    "'{}' requires building from source. Build artifact not found. \
+                         Run `cargo component build --release` in {} first, \
+                         or use `ironclaw registry install {}`.",
+                    name,
+                    resolved_dir.display(),
+                    name,
+                ))
+            })?;
+
+        let wasm_dst = crate::registry::artifacts::install_wasm_files(
+            &wasm_src,
+            &resolved_dir,
+            name,
+            target_dir,
+            true,
+        )
+        .await
+        .map_err(|e| ExtensionError::InstallFailed(e.to_string()))?;
+
+        let kind_label = match kind {
+            ExtensionKind::WasmTool => "WASM tool",
+            ExtensionKind::WasmChannel => "WASM channel",
+            ExtensionKind::McpServer => "MCP server",
+        };
+
+        tracing::info!(
+            "Installed {} '{}' from build artifacts at {}",
+            kind_label,
+            name,
+            wasm_dst.display(),
+        );
+
+        Ok(InstallResult {
+            name: name.to_string(),
+            kind,
+            message: format!(
+                "{} '{}' installed from local build artifacts. Run activate to load it.",
+                kind_label, name,
+            ),
+        })
     }
 
     async fn auth_mcp(
@@ -1451,6 +1653,332 @@ impl ExtensionManager {
         })
     }
 
+    /// Activate a WASM channel at runtime without restarting.
+    ///
+    /// Loads the channel from its WASM file, injects credentials and config,
+    /// registers it with the webhook router, and hot-adds it to the channel manager
+    /// so its stream feeds into the agent loop.
+    async fn activate_wasm_channel(&self, name: &str) -> Result<ActivateResult, ExtensionError> {
+        // If already active, re-inject credentials and refresh webhook secret.
+        // Handles the case where a channel was loaded at startup before the
+        // user saved secrets via the web UI.
+        {
+            let active = self.active_channel_names.read().await;
+            if active.contains(name) {
+                return self.refresh_active_channel(name).await;
+            }
+        }
+
+        // Verify runtime infrastructure is available and clone Arcs so we don't
+        // hold the RwLock guard across awaits.
+        let (
+            channel_runtime,
+            channel_manager,
+            pairing_store,
+            wasm_channel_router,
+            telegram_owner_id,
+        ) = {
+            let rt_guard = self.channel_runtime.read().await;
+            let rt = rt_guard.as_ref().ok_or_else(|| {
+                ExtensionError::ActivationFailed(
+                    "WASM channel runtime not configured. Restart IronClaw to activate."
+                        .to_string(),
+                )
+            })?;
+            (
+                Arc::clone(&rt.wasm_channel_runtime),
+                Arc::clone(&rt.channel_manager),
+                Arc::clone(&rt.pairing_store),
+                Arc::clone(&rt.wasm_channel_router),
+                rt.telegram_owner_id,
+            )
+        };
+
+        // Check auth status first
+        let (authenticated, _needs_setup) = self.check_channel_auth_status(name).await;
+        if !authenticated {
+            return Err(ExtensionError::ActivationFailed(format!(
+                "Channel '{}' requires configuration. Use the setup form to provide credentials.",
+                name
+            )));
+        }
+
+        // Validate name to prevent path traversal
+        if name.contains('/') || name.contains('\\') || name.contains("..") || name.contains('\0') {
+            return Err(ExtensionError::ActivationFailed(format!(
+                "Invalid channel name '{}': contains path separator or traversal characters",
+                name
+            )));
+        }
+
+        // Load the channel from files
+        let wasm_path = self.wasm_channels_dir.join(format!("{}.wasm", name));
+        let cap_path = self
+            .wasm_channels_dir
+            .join(format!("{}.capabilities.json", name));
+        let cap_path_option = if cap_path.exists() {
+            Some(cap_path.as_path())
+        } else {
+            None
+        };
+
+        let loader =
+            WasmChannelLoader::new(Arc::clone(&channel_runtime), Arc::clone(&pairing_store));
+        let loaded = loader
+            .load_from_files(name, &wasm_path, cap_path_option)
+            .await
+            .map_err(|e| ExtensionError::ActivationFailed(e.to_string()))?;
+
+        let channel_name = loaded.name().to_string();
+        let webhook_secret_name = loaded.webhook_secret_name();
+        let secret_header = loaded.webhook_secret_header().map(|s| s.to_string());
+
+        // Get webhook secret from secrets store
+        let webhook_secret = self
+            .secrets
+            .get_decrypted(&self.user_id, &webhook_secret_name)
+            .await
+            .ok()
+            .map(|s| s.expose().to_string());
+
+        let channel_arc = Arc::new(loaded.channel);
+
+        // Inject runtime config (tunnel_url, webhook_secret, owner_id)
+        {
+            let mut config_updates = std::collections::HashMap::new();
+
+            if let Some(ref tunnel_url) = self.tunnel_url {
+                config_updates.insert(
+                    "tunnel_url".to_string(),
+                    serde_json::Value::String(tunnel_url.clone()),
+                );
+            }
+
+            if let Some(ref secret) = webhook_secret {
+                config_updates.insert(
+                    "webhook_secret".to_string(),
+                    serde_json::Value::String(secret.clone()),
+                );
+            }
+
+            if channel_name == "telegram"
+                && let Some(owner_id) = telegram_owner_id
+            {
+                config_updates.insert("owner_id".to_string(), serde_json::json!(owner_id));
+            }
+
+            if !config_updates.is_empty() {
+                channel_arc.update_config(config_updates).await;
+                tracing::info!(
+                    channel = %channel_name,
+                    has_tunnel = self.tunnel_url.is_some(),
+                    has_webhook_secret = webhook_secret.is_some(),
+                    "Injected runtime config into hot-activated channel"
+                );
+            }
+        }
+
+        // Register with webhook router
+        {
+            let webhook_path = format!("/webhook/{}", channel_name);
+            let endpoints = vec![RegisteredEndpoint {
+                channel_name: channel_name.clone(),
+                path: webhook_path,
+                methods: vec!["POST".to_string()],
+                require_secret: webhook_secret.is_some(),
+            }];
+
+            wasm_channel_router
+                .register(
+                    Arc::clone(&channel_arc),
+                    endpoints,
+                    webhook_secret,
+                    secret_header,
+                )
+                .await;
+            tracing::info!(channel = %channel_name, "Registered hot-activated channel with webhook router");
+        }
+
+        // Inject credentials
+        match crate::extensions::manager::inject_channel_credentials_from_secrets(
+            &channel_arc,
+            self.secrets.as_ref(),
+            &channel_name,
+            &self.user_id,
+        )
+        .await
+        {
+            Ok(count) => {
+                if count > 0 {
+                    tracing::info!(
+                        channel = %channel_name,
+                        credentials_injected = count,
+                        "Credentials injected into hot-activated channel"
+                    );
+                }
+            }
+            Err(e) => {
+                tracing::error!(
+                    channel = %channel_name,
+                    error = %e,
+                    "Failed to inject credentials into hot-activated channel"
+                );
+            }
+        }
+
+        // Hot-add the channel to the running agent
+        channel_manager
+            .hot_add(Box::new(SharedWasmChannel::new(channel_arc)))
+            .await
+            .map_err(|e| ExtensionError::ActivationFailed(e.to_string()))?;
+
+        // Mark as active
+        self.active_channel_names
+            .write()
+            .await
+            .insert(channel_name.clone());
+
+        tracing::info!(channel = %channel_name, "Hot-activated WASM channel");
+
+        Ok(ActivateResult {
+            name: channel_name,
+            kind: ExtensionKind::WasmChannel,
+            tools_loaded: Vec::new(),
+            message: format!("Channel '{}' activated and running", name),
+        })
+    }
+
+    /// Refresh credentials and webhook secret on an already-active channel.
+    ///
+    /// Called when the user saves new secrets via the setup form for a channel
+    /// that was loaded at startup (possibly without credentials).
+    async fn refresh_active_channel(&self, name: &str) -> Result<ActivateResult, ExtensionError> {
+        let router = {
+            let rt_guard = self.channel_runtime.read().await;
+            match rt_guard.as_ref() {
+                Some(rt) => Arc::clone(&rt.wasm_channel_router),
+                None => {
+                    return Ok(ActivateResult {
+                        name: name.to_string(),
+                        kind: ExtensionKind::WasmChannel,
+                        tools_loaded: Vec::new(),
+                        message: format!("Channel '{}' is already active", name),
+                    });
+                }
+            }
+        };
+
+        let webhook_path = format!("/webhook/{}", name);
+        let existing_channel = match router.get_channel_for_path(&webhook_path).await {
+            Some(ch) => ch,
+            None => {
+                return Ok(ActivateResult {
+                    name: name.to_string(),
+                    kind: ExtensionKind::WasmChannel,
+                    tools_loaded: Vec::new(),
+                    message: format!("Channel '{}' is already active", name),
+                });
+            }
+        };
+
+        // Re-inject credentials from secrets store into the running channel
+        let cred_count = match inject_channel_credentials_from_secrets(
+            &existing_channel,
+            self.secrets.as_ref(),
+            name,
+            &self.user_id,
+        )
+        .await
+        {
+            Ok(count) => count,
+            Err(e) => {
+                tracing::warn!(
+                    channel = %name,
+                    error = %e,
+                    "Failed to refresh credentials on already-active channel"
+                );
+                0
+            }
+        };
+
+        // Also refresh the webhook secret in the router
+        // Load capabilities file to get the correct secret name (may be overridden)
+        let webhook_secret_name = {
+            let cap_path = self
+                .wasm_channels_dir
+                .join(format!("{}.capabilities.json", name));
+            match tokio::fs::read(&cap_path).await {
+                Ok(bytes) => crate::channels::wasm::ChannelCapabilitiesFile::from_bytes(&bytes)
+                    .map(|f| f.webhook_secret_name())
+                    .unwrap_or_else(|_| format!("{}_webhook_secret", name)),
+                Err(_) => format!("{}_webhook_secret", name),
+            }
+        };
+        if let Ok(secret) = self
+            .secrets
+            .get_decrypted(&self.user_id, &webhook_secret_name)
+            .await
+        {
+            router
+                .update_secret(name, secret.expose().to_string())
+                .await;
+
+            // Also inject the webhook_secret into the channel's runtime config
+            let mut config_updates = std::collections::HashMap::new();
+            config_updates.insert(
+                "webhook_secret".to_string(),
+                serde_json::Value::String(secret.expose().to_string()),
+            );
+            existing_channel.update_config(config_updates).await;
+        }
+
+        // Refresh tunnel_url in case it wasn't set at startup
+        if let Some(ref tunnel_url) = self.tunnel_url {
+            let mut config_updates = std::collections::HashMap::new();
+            config_updates.insert(
+                "tunnel_url".to_string(),
+                serde_json::Value::String(tunnel_url.clone()),
+            );
+            existing_channel.update_config(config_updates).await;
+        }
+
+        // Re-call on_start() to trigger webhook registration with the
+        // now-available credentials (e.g., setWebhook for Telegram).
+        if cred_count > 0 {
+            match existing_channel.call_on_start().await {
+                Ok(_config) => {
+                    tracing::info!(
+                        channel = %name,
+                        "Re-ran on_start after credential refresh (webhook re-registered)"
+                    );
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        channel = %name,
+                        error = %e,
+                        "on_start failed after credential refresh"
+                    );
+                }
+            }
+        }
+
+        tracing::info!(
+            channel = %name,
+            credentials_refreshed = cred_count,
+            "Refreshed credentials and config on already-active channel"
+        );
+
+        Ok(ActivateResult {
+            name: name.to_string(),
+            kind: ExtensionKind::WasmChannel,
+            tools_loaded: Vec::new(),
+            message: format!(
+                "Channel '{}' is already active; refreshed {} credential(s)",
+                name, cred_count
+            ),
+        })
+    }
+
     /// Determine what kind of installed extension this is.
     async fn determine_installed_kind(&self, name: &str) -> Result<ExtensionKind, ExtensionError> {
         // Check MCP servers first
@@ -1609,10 +2137,25 @@ impl ExtensionManager {
             }
         }
 
-        Ok(format!(
-            "Configuration saved for '{}'. Restart IronClaw for changes to take effect.",
-            name
-        ))
+        // Try to hot-activate the channel now that secrets are saved
+        match self.activate_wasm_channel(name).await {
+            Ok(result) => Ok(format!(
+                "Configuration saved and channel '{}' activated. {}",
+                name, result.message
+            )),
+            Err(e) => {
+                tracing::warn!(
+                    channel = name,
+                    error = %e,
+                    "Saved configuration but hot-activation failed, restart may be needed"
+                );
+                Ok(format!(
+                    "Configuration saved for '{}'. \
+                     Automatic activation failed ({}), restart IronClaw to activate.",
+                    name, e
+                ))
+            }
+        }
     }
 
     async fn unregister_hook_prefix(&self, prefix: &str) -> usize {
@@ -1629,6 +2172,53 @@ impl ExtensionManager {
         }
         removed
     }
+}
+
+/// Inject credentials for a channel based on naming convention.
+///
+/// Looks for secrets matching the pattern `{channel_name}_*` and injects them
+/// as credential placeholders (e.g., `telegram_bot_token` -> `{TELEGRAM_BOT_TOKEN}`).
+///
+/// Returns the number of credentials injected.
+async fn inject_channel_credentials_from_secrets(
+    channel: &Arc<crate::channels::wasm::WasmChannel>,
+    secrets: &dyn SecretsStore,
+    channel_name: &str,
+    user_id: &str,
+) -> Result<usize, String> {
+    let all_secrets = secrets
+        .list(user_id)
+        .await
+        .map_err(|e| format!("Failed to list secrets: {}", e))?;
+
+    let prefix = format!("{}_", channel_name);
+    let mut count = 0;
+
+    for secret_meta in all_secrets {
+        if !secret_meta.name.starts_with(&prefix) {
+            continue;
+        }
+
+        let decrypted = match secrets.get_decrypted(user_id, &secret_meta.name).await {
+            Ok(d) => d,
+            Err(e) => {
+                tracing::warn!(
+                    secret = %secret_meta.name,
+                    error = %e,
+                    "Failed to decrypt secret for channel credential injection"
+                );
+                continue;
+            }
+        };
+
+        let placeholder = secret_meta.name.to_uppercase();
+        channel
+            .set_credential(&placeholder, decrypted.expose().to_string())
+            .await;
+        count += 1;
+    }
+
+    Ok(count)
 }
 
 /// Infer the extension kind from a URL.

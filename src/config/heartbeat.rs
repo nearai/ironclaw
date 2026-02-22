@@ -1,4 +1,4 @@
-use crate::config::helpers::optional_env;
+use crate::config::helpers::{optional_env, parse_bool_env, parse_optional_env};
 use crate::error::ConfigError;
 use crate::settings::Settings;
 
@@ -29,22 +29,11 @@ impl Default for HeartbeatConfig {
 impl HeartbeatConfig {
     pub(crate) fn resolve(settings: &Settings) -> Result<Self, ConfigError> {
         Ok(Self {
-            enabled: optional_env("HEARTBEAT_ENABLED")?
-                .map(|s| s.parse())
-                .transpose()
-                .map_err(|e| ConfigError::InvalidValue {
-                    key: "HEARTBEAT_ENABLED".to_string(),
-                    message: format!("must be 'true' or 'false': {e}"),
-                })?
-                .unwrap_or(settings.heartbeat.enabled),
-            interval_secs: optional_env("HEARTBEAT_INTERVAL_SECS")?
-                .map(|s| s.parse())
-                .transpose()
-                .map_err(|e| ConfigError::InvalidValue {
-                    key: "HEARTBEAT_INTERVAL_SECS".to_string(),
-                    message: format!("must be a positive integer: {e}"),
-                })?
-                .unwrap_or(settings.heartbeat.interval_secs),
+            enabled: parse_bool_env("HEARTBEAT_ENABLED", settings.heartbeat.enabled)?,
+            interval_secs: parse_optional_env(
+                "HEARTBEAT_INTERVAL_SECS",
+                settings.heartbeat.interval_secs,
+            )?,
             notify_channel: optional_env("HEARTBEAT_NOTIFY_CHANNEL")?
                 .or_else(|| settings.heartbeat.notify_channel.clone()),
             notify_user: optional_env("HEARTBEAT_NOTIFY_USER")?

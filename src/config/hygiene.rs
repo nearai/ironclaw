@@ -1,4 +1,4 @@
-use crate::config::helpers::optional_env;
+use crate::config::helpers::{parse_bool_env, parse_optional_env};
 use crate::error::ConfigError;
 
 /// Memory hygiene configuration.
@@ -28,30 +28,9 @@ impl Default for HygieneConfig {
 impl HygieneConfig {
     pub(crate) fn resolve() -> Result<Self, ConfigError> {
         Ok(Self {
-            enabled: optional_env("MEMORY_HYGIENE_ENABLED")?
-                .map(|s| s.parse())
-                .transpose()
-                .map_err(|e| ConfigError::InvalidValue {
-                    key: "MEMORY_HYGIENE_ENABLED".to_string(),
-                    message: format!("must be 'true' or 'false': {e}"),
-                })?
-                .unwrap_or(true),
-            retention_days: optional_env("MEMORY_HYGIENE_RETENTION_DAYS")?
-                .map(|s| s.parse())
-                .transpose()
-                .map_err(|e| ConfigError::InvalidValue {
-                    key: "MEMORY_HYGIENE_RETENTION_DAYS".to_string(),
-                    message: format!("must be a positive integer: {e}"),
-                })?
-                .unwrap_or(30),
-            cadence_hours: optional_env("MEMORY_HYGIENE_CADENCE_HOURS")?
-                .map(|s| s.parse())
-                .transpose()
-                .map_err(|e| ConfigError::InvalidValue {
-                    key: "MEMORY_HYGIENE_CADENCE_HOURS".to_string(),
-                    message: format!("must be a positive integer: {e}"),
-                })?
-                .unwrap_or(12),
+            enabled: parse_bool_env("MEMORY_HYGIENE_ENABLED", true)?,
+            retention_days: parse_optional_env("MEMORY_HYGIENE_RETENTION_DAYS", 30)?,
+            cadence_hours: parse_optional_env("MEMORY_HYGIENE_CADENCE_HOURS", 12)?,
         })
     }
 

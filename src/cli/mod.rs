@@ -11,6 +11,7 @@
 //! - Active health diagnostics (`doctor`)
 //! - Checking system health (`status`)
 
+mod completion;
 mod config;
 mod doctor;
 mod mcp;
@@ -22,6 +23,7 @@ mod service;
 pub mod status;
 mod tool;
 
+pub use completion::Completion;
 pub use config::{ConfigCommand, run_config_command};
 pub use doctor::run_doctor_command;
 pub use mcp::{McpCommand, run_mcp_command};
@@ -117,6 +119,9 @@ pub enum Command {
 
     /// Show system health and diagnostics
     Status,
+
+    /// Generate shell completion scripts
+    Completion(Completion),
 
     /// Run as a sandboxed worker inside a Docker container (internal use).
     /// This is invoked automatically by the orchestrator, not by users directly.
