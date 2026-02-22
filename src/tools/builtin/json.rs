@@ -28,8 +28,7 @@ impl Tool for JsonTool {
                     "description": "The JSON operation to perform"
                 },
                 "data": {
-                    "type": ["string", "object", "array", "number", "boolean", "null"],
-                    "description": "JSON input data. Pass a string for parse, any type otherwise."
+                    "description": "JSON input data. Pass a string for parse, or any JSON value (object, array, string, number, boolean, null) otherwise."
                 },
                 "path": {
                     "type": "string",
@@ -192,16 +191,19 @@ mod tests {
     }
 
     #[test]
-    fn test_json_tool_schema_data_has_type() {
+    fn test_json_tool_schema_data_is_freeform() {
         let schema = JsonTool.parameters_schema();
         let data = schema
             .get("properties")
             .and_then(|p| p.get("data"))
             .expect("data schema missing");
 
+        // Data is intentionally freeform (no "type" constraint) for OpenAI
+        // compatibility. OpenAI rejects union types containing "array" unless
+        // "items" is also specified.
         assert!(
-            data.get("type").is_some(),
-            "data schema must include a type for OpenAI-compatible tool validation"
+            data.get("type").is_none(),
+            "data schema should not have a 'type' to be freeform for OpenAI compatibility"
         );
     }
 }
