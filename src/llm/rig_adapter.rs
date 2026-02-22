@@ -3,8 +3,8 @@
 //! This lets us use any rig-core provider (OpenAI, Anthropic, Ollama, etc.) as an
 //! `Arc<dyn LlmProvider>` without changing any of the agent, reasoning, or tool code.
 
-use async_trait::async_trait;
 use crate::config::CacheRetention;
+use async_trait::async_trait;
 use rig::OneOrMany;
 use rig::completion::{
     AssistantContent, CompletionModel, CompletionRequest as RigRequest,
@@ -448,13 +448,21 @@ fn build_rig_request(
     let additional_params = match cache_retention {
         CacheRetention::None => None,
         CacheRetention::Short => {
-            tracing::debug!(model = model_name, ttl = "5m", "Injecting cache_control for Anthropic prompt caching");
+            tracing::debug!(
+                model = model_name,
+                ttl = "5m",
+                "Injecting cache_control for Anthropic prompt caching"
+            );
             Some(serde_json::json!({
                 "cache_control": {"type": "ephemeral"}
             }))
         }
         CacheRetention::Long => {
-            tracing::debug!(model = model_name, ttl = "1h", "Injecting cache_control for Anthropic prompt caching");
+            tracing::debug!(
+                model = model_name,
+                ttl = "1h",
+                "Injecting cache_control for Anthropic prompt caching"
+            );
             Some(serde_json::json!({
                 "cache_control": {"type": "ephemeral", "ttl": "1h"}
             }))
@@ -1006,10 +1014,11 @@ mod tests {
         )
         .unwrap();
 
-        let params = req.additional_params.expect("should have additional_params when cache enabled");
+        let params = req
+            .additional_params
+            .expect("should have additional_params when cache enabled");
         assert_eq!(
-            params["cache_control"]["type"],
-            "ephemeral",
+            params["cache_control"]["type"], "ephemeral",
             "cache_control should be set to ephemeral when prompt cache is enabled"
         );
         assert!(
@@ -1052,9 +1061,14 @@ mod tests {
         )
         .unwrap();
 
-        let params = req.additional_params.expect("should have additional_params for long retention");
+        let params = req
+            .additional_params
+            .expect("should have additional_params for long retention");
         assert_eq!(params["cache_control"]["type"], "ephemeral");
-        assert_eq!(params["cache_control"]["ttl"], "1h", "Long retention should include ttl=1h");
+        assert_eq!(
+            params["cache_control"]["ttl"], "1h",
+            "Long retention should include ttl=1h"
+        );
     }
 
     // -- supports_prompt_cache tests --
