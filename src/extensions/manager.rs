@@ -4,7 +4,7 @@
 //! and tool registry. All extension operations (search, install, auth, activate,
 //! list, remove) flow through here.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -60,6 +60,8 @@ pub struct ExtensionManager {
     user_id: String,
     /// Optional database store for DB-backed MCP config.
     store: Option<Arc<dyn crate::db::Database>>,
+    /// Names of WASM channels that were successfully loaded at startup.
+    active_channel_names: RwLock<HashSet<String>>,
 }
 
 impl ExtensionManager {
@@ -97,7 +99,15 @@ impl ExtensionManager {
             _tunnel_url: tunnel_url,
             user_id,
             store,
+            active_channel_names: RwLock::new(HashSet::new()),
         }
+    }
+
+    /// Register channel names that were loaded at startup.
+    /// Called after WASM channels are loaded so `list()` reports accurate active status.
+    pub async fn set_active_channels(&self, names: Vec<String>) {
+        let mut active = self.active_channel_names.write().await;
+        active.extend(names);
     }
 
     /// Search for extensions. If `discover` is true, also searches online.
@@ -186,7 +196,7 @@ impl ExtensionManager {
         match kind {
             ExtensionKind::McpServer => self.auth_mcp(name, token).await,
             ExtensionKind::WasmTool => self.auth_wasm_tool(name, token).await,
-            ExtensionKind::WasmChannel => self.auth_wasm_tool(name, token).await,
+            ExtensionKind::WasmChannel => self.auth_wasm_channel(name, token).await,
         }
     }
 
@@ -238,6 +248,7 @@ impl ExtensionManager {
                             authenticated,
                             active,
                             tools,
+                            needs_setup: false,
                         });
                     }
                 }
@@ -264,6 +275,7 @@ impl ExtensionManager {
                             authenticated: true, // WASM tools don't always need auth
                             active,
                             tools: if active { vec![name] } else { Vec::new() },
+                            needs_setup: false,
                         });
                     }
                 }
@@ -279,15 +291,20 @@ impl ExtensionManager {
         {
             match crate::channels::wasm::discover_channels(&self.wasm_channels_dir).await {
                 Ok(channels) => {
+                    let active_names = self.active_channel_names.read().await;
                     for (name, _discovered) in channels {
+                        let active = active_names.contains(&name);
+                        let (authenticated, needs_setup) =
+                            self.check_channel_auth_status(&name).await;
                         extensions.push(InstalledExtension {
                             name,
                             kind: ExtensionKind::WasmChannel,
                             description: None,
                             url: None,
-                            authenticated: true,
-                            active: true, // If loaded at startup, they're active
+                            authenticated,
+                            active,
                             tools: Vec::new(),
+                            needs_setup,
                         });
                     }
                 }
@@ -369,10 +386,27 @@ impl ExtensionManager {
 
                 Ok(format!("Removed WASM tool '{}'", name))
             }
-            ExtensionKind::WasmChannel => Err(ExtensionError::Other(
-                "Channel removal requires restart. Delete the .wasm file from ~/.ironclaw/channels/ and restart."
-                    .to_string(),
-            )),
+            ExtensionKind::WasmChannel => {
+                // Delete channel files
+                let wasm_path = self.wasm_channels_dir.join(format!("{}.wasm", name));
+                let cap_path = self
+                    .wasm_channels_dir
+                    .join(format!("{}.capabilities.json", name));
+
+                if wasm_path.exists() {
+                    tokio::fs::remove_file(&wasm_path)
+                        .await
+                        .map_err(|e| ExtensionError::Other(e.to_string()))?;
+                }
+                if cap_path.exists() {
+                    let _ = tokio::fs::remove_file(&cap_path).await;
+                }
+
+                Ok(format!(
+                    "Removed channel '{}'. Restart IronClaw for the change to take effect.",
+                    name
+                ))
+            }
         }
     }
 
@@ -1094,6 +1128,169 @@ impl ExtensionManager {
         })
     }
 
+    /// Check whether a WASM channel has all required secrets stored.
+    /// Returns `(authenticated, needs_setup)`.
+    async fn check_channel_auth_status(&self, name: &str) -> (bool, bool) {
+        let cap_path = self
+            .wasm_channels_dir
+            .join(format!("{}.capabilities.json", name));
+        if !cap_path.exists() {
+            return (true, false);
+        }
+        let Ok(cap_bytes) = tokio::fs::read(&cap_path).await else {
+            return (true, false);
+        };
+        let Ok(cap_file) = crate::channels::wasm::ChannelCapabilitiesFile::from_bytes(&cap_bytes)
+        else {
+            return (true, false);
+        };
+        let required = &cap_file.setup.required_secrets;
+        if required.is_empty() {
+            return (true, false);
+        }
+        let mut all_provided = true;
+        for secret in required {
+            if secret.optional {
+                continue;
+            }
+            if !self
+                .secrets
+                .exists(&self.user_id, &secret.name)
+                .await
+                .unwrap_or(false)
+            {
+                all_provided = false;
+                break;
+            }
+        }
+        (all_provided, true)
+    }
+
+    async fn auth_wasm_channel(
+        &self,
+        name: &str,
+        token: Option<&str>,
+    ) -> Result<AuthResult, ExtensionError> {
+        let cap_path = self
+            .wasm_channels_dir
+            .join(format!("{}.capabilities.json", name));
+
+        if !cap_path.exists() {
+            return Ok(AuthResult {
+                name: name.to_string(),
+                kind: ExtensionKind::WasmChannel,
+                auth_url: None,
+                callback_type: None,
+                instructions: None,
+                setup_url: None,
+                awaiting_token: false,
+                status: "no_auth_required".to_string(),
+            });
+        }
+
+        let cap_bytes = tokio::fs::read(&cap_path)
+            .await
+            .map_err(|e| ExtensionError::Other(e.to_string()))?;
+
+        let cap_file = crate::channels::wasm::ChannelCapabilitiesFile::from_bytes(&cap_bytes)
+            .map_err(|e| ExtensionError::Other(e.to_string()))?;
+
+        // Get required secrets from the setup section
+        let required_secrets = &cap_file.setup.required_secrets;
+        if required_secrets.is_empty() {
+            return Ok(AuthResult {
+                name: name.to_string(),
+                kind: ExtensionKind::WasmChannel,
+                auth_url: None,
+                callback_type: None,
+                instructions: None,
+                setup_url: None,
+                awaiting_token: false,
+                status: "no_auth_required".to_string(),
+            });
+        }
+
+        // Find the first non-optional secret that isn't yet stored
+        let mut missing = Vec::new();
+        for secret in required_secrets {
+            if secret.optional {
+                continue;
+            }
+            if !self
+                .secrets
+                .exists(&self.user_id, &secret.name)
+                .await
+                .unwrap_or(false)
+            {
+                missing.push(secret);
+            }
+        }
+
+        if missing.is_empty() {
+            return Ok(AuthResult {
+                name: name.to_string(),
+                kind: ExtensionKind::WasmChannel,
+                auth_url: None,
+                callback_type: None,
+                instructions: None,
+                setup_url: None,
+                awaiting_token: false,
+                status: "authenticated".to_string(),
+            });
+        }
+
+        // If a token was provided, store it for the first missing secret
+        if let Some(token_value) = token {
+            let secret = &missing[0];
+            let params =
+                CreateSecretParams::new(&secret.name, token_value).with_provider(name.to_string());
+            self.secrets
+                .create(&self.user_id, params)
+                .await
+                .map_err(|e| ExtensionError::AuthFailed(e.to_string()))?;
+
+            // Check if there are more missing secrets
+            if missing.len() <= 1 {
+                return Ok(AuthResult {
+                    name: name.to_string(),
+                    kind: ExtensionKind::WasmChannel,
+                    auth_url: None,
+                    callback_type: None,
+                    instructions: None,
+                    setup_url: None,
+                    awaiting_token: false,
+                    status: "authenticated".to_string(),
+                });
+            }
+
+            // More secrets needed; prompt for the next one
+            let next = &missing[1];
+            return Ok(AuthResult {
+                name: name.to_string(),
+                kind: ExtensionKind::WasmChannel,
+                auth_url: None,
+                callback_type: None,
+                instructions: Some(next.prompt.clone()),
+                setup_url: cap_file.setup.validation_endpoint.clone(),
+                awaiting_token: true,
+                status: "awaiting_token".to_string(),
+            });
+        }
+
+        // Prompt for the first missing secret
+        let secret = &missing[0];
+        Ok(AuthResult {
+            name: name.to_string(),
+            kind: ExtensionKind::WasmChannel,
+            auth_url: None,
+            callback_type: None,
+            instructions: Some(secret.prompt.clone()),
+            setup_url: cap_file.setup.validation_endpoint.clone(),
+            awaiting_token: true,
+            status: "awaiting_token".to_string(),
+        })
+    }
+
     async fn activate_mcp(&self, name: &str) -> Result<ActivateResult, ExtensionError> {
         // Check if already activated
         {
@@ -1280,6 +1477,140 @@ impl ExtensionManager {
     async fn cleanup_expired_auths(&self) {
         let mut pending = self.pending_auth.write().await;
         pending.retain(|_, auth| auth.created_at.elapsed() < std::time::Duration::from_secs(300));
+    }
+
+    /// Get the setup schema for an extension (secret fields and their status).
+    pub async fn get_setup_schema(
+        &self,
+        name: &str,
+    ) -> Result<Vec<crate::channels::web::types::SecretFieldInfo>, ExtensionError> {
+        let kind = self.determine_installed_kind(name).await?;
+        match kind {
+            ExtensionKind::WasmChannel => {
+                let cap_path = self
+                    .wasm_channels_dir
+                    .join(format!("{}.capabilities.json", name));
+                if !cap_path.exists() {
+                    return Ok(Vec::new());
+                }
+                let cap_bytes = tokio::fs::read(&cap_path)
+                    .await
+                    .map_err(|e| ExtensionError::Other(e.to_string()))?;
+                let cap_file =
+                    crate::channels::wasm::ChannelCapabilitiesFile::from_bytes(&cap_bytes)
+                        .map_err(|e| ExtensionError::Other(e.to_string()))?;
+
+                let mut fields = Vec::new();
+                for secret in &cap_file.setup.required_secrets {
+                    let provided = self
+                        .secrets
+                        .exists(&self.user_id, &secret.name)
+                        .await
+                        .unwrap_or(false);
+                    fields.push(crate::channels::web::types::SecretFieldInfo {
+                        name: secret.name.clone(),
+                        prompt: secret.prompt.clone(),
+                        optional: secret.optional,
+                        provided,
+                        auto_generate: secret.auto_generate.is_some(),
+                    });
+                }
+                Ok(fields)
+            }
+            _ => Ok(Vec::new()),
+        }
+    }
+
+    /// Save setup secrets for an extension, validating names against the capabilities schema.
+    pub async fn save_setup_secrets(
+        &self,
+        name: &str,
+        secrets: &std::collections::HashMap<String, String>,
+    ) -> Result<String, ExtensionError> {
+        let kind = self.determine_installed_kind(name).await?;
+        if kind != ExtensionKind::WasmChannel {
+            return Err(ExtensionError::Other(
+                "Setup is only supported for WASM channels".to_string(),
+            ));
+        }
+
+        let cap_path = self
+            .wasm_channels_dir
+            .join(format!("{}.capabilities.json", name));
+        if !cap_path.exists() {
+            return Err(ExtensionError::Other(format!(
+                "Capabilities file not found for '{}'",
+                name
+            )));
+        }
+        let cap_bytes = tokio::fs::read(&cap_path)
+            .await
+            .map_err(|e| ExtensionError::Other(e.to_string()))?;
+        let cap_file = crate::channels::wasm::ChannelCapabilitiesFile::from_bytes(&cap_bytes)
+            .map_err(|e| ExtensionError::Other(e.to_string()))?;
+
+        // Build allowed secret names from capabilities
+        let allowed: std::collections::HashSet<String> = cap_file
+            .setup
+            .required_secrets
+            .iter()
+            .map(|s| s.name.clone())
+            .collect();
+
+        // Validate and store each submitted secret
+        for (secret_name, secret_value) in secrets {
+            if !allowed.contains(secret_name.as_str()) {
+                return Err(ExtensionError::Other(format!(
+                    "Unknown secret '{}' for extension '{}'",
+                    secret_name, name
+                )));
+            }
+            if secret_value.trim().is_empty() {
+                continue;
+            }
+            let params =
+                CreateSecretParams::new(secret_name, secret_value).with_provider(name.to_string());
+            self.secrets
+                .create(&self.user_id, params)
+                .await
+                .map_err(|e| ExtensionError::AuthFailed(e.to_string()))?;
+        }
+
+        // Auto-generate any missing secrets that have auto_generate set
+        for secret_def in &cap_file.setup.required_secrets {
+            if let Some(ref auto_gen) = secret_def.auto_generate {
+                let already_provided = secrets
+                    .get(&secret_def.name)
+                    .is_some_and(|v| !v.trim().is_empty());
+                let already_stored = self
+                    .secrets
+                    .exists(&self.user_id, &secret_def.name)
+                    .await
+                    .unwrap_or(false);
+                if !already_provided && !already_stored {
+                    use rand::RngCore;
+                    let mut bytes = vec![0u8; auto_gen.length];
+                    rand::thread_rng().fill_bytes(&mut bytes);
+                    let hex_value: String = bytes.iter().map(|b| format!("{b:02x}")).collect();
+                    let params = CreateSecretParams::new(&secret_def.name, &hex_value)
+                        .with_provider(name.to_string());
+                    self.secrets
+                        .create(&self.user_id, params)
+                        .await
+                        .map_err(|e| ExtensionError::AuthFailed(e.to_string()))?;
+                    tracing::info!(
+                        "Auto-generated secret '{}' for channel '{}'",
+                        secret_def.name,
+                        name
+                    );
+                }
+            }
+        }
+
+        Ok(format!(
+            "Configuration saved for '{}'. Restart IronClaw for changes to take effect.",
+            name
+        ))
     }
 
     async fn unregister_hook_prefix(&self, prefix: &str) -> usize {

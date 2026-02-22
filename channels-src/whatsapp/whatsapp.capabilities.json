@@ -48,6 +48,9 @@
   },
   "config": {
     "api_version": "v18.0",
-    "reply_to_message": true
+    "reply_to_message": true,
+    "owner_id": null,
+    "dm_policy": "pairing",
+    "allow_from": []
   }
 }

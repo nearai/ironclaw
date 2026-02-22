@@ -184,6 +184,9 @@ pub struct InstalledExtension {
     /// Tool names if active.
     #[serde(default)]
     pub tools: Vec<String>,
+    /// Whether this extension has a setup schema (required_secrets) that can be configured.
+    #[serde(default)]
+    pub needs_setup: bool,
 }
 
 /// Error type for extension operations.

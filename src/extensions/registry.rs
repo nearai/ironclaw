@@ -270,11 +270,11 @@ fn builtin_entries() -> Vec<RegistryEntry> {
             auth_hint: AuthHint::Dcr,
         },
         RegistryEntry {
-            name: "slack".to_string(),
-            display_name: "Slack".to_string(),
+            name: "slack-mcp".to_string(),
+            display_name: "Slack MCP".to_string(),
             kind: ExtensionKind::McpServer,
             description:
-                "Connect to Slack for messaging, channel management, and team communication"
+                "Connect to Slack via MCP for messaging, channel management, and team communication"
                     .to_string(),
             keywords: vec![
                 "messaging".into(),
@@ -380,6 +380,9 @@ fn builtin_entries() -> Vec<RegistryEntry> {
             },
             auth_hint: AuthHint::Dcr,
         },
+        // WASM channels (telegram, slack, discord, whatsapp) come from the embedded
+        // registry catalog (registry/channels/*.json) with WasmDownload URLs pointing
+        // to GitHub release artifacts. See new_with_catalog() for merging.
     ]
 }
 
@@ -578,10 +581,10 @@ mod tests {
                 },
                 auth_hint: AuthHint::CapabilitiesAuth,
             },
-            // This shares a name with a builtin but has a different kind, so both should appear
+            // This shares a name with the builtin slack-mcp but has a different kind, so both should appear
             RegistryEntry {
-                name: "slack".to_string(),
-                display_name: "Slack WASM".to_string(),
+                name: "slack-mcp".to_string(),
+                display_name: "Slack MCP WASM".to_string(),
                 kind: ExtensionKind::WasmTool,
                 description: "Slack WASM tool".to_string(),
                 keywords: vec!["messaging".into()],
@@ -600,25 +603,25 @@ mod tests {
         assert!(!results.is_empty(), "Should find telegram from catalog");
         assert_eq!(results[0].entry.name, "telegram");
 
-        // Should have both builtin MCP slack and catalog WASM slack
+        // Should have both builtin MCP slack-mcp and catalog WASM slack-mcp
         let results = registry.search("slack").await;
         let slack_mcp = results
             .iter()
-            .any(|r| r.entry.name == "slack" && r.entry.kind == ExtensionKind::McpServer);
+            .any(|r| r.entry.name == "slack-mcp" && r.entry.kind == ExtensionKind::McpServer);
         let slack_wasm = results
             .iter()
-            .any(|r| r.entry.name == "slack" && r.entry.kind == ExtensionKind::WasmTool);
-        assert!(slack_mcp, "Should have builtin MCP slack");
-        assert!(slack_wasm, "Should have catalog WASM slack");
+            .any(|r| r.entry.name == "slack-mcp" && r.entry.kind == ExtensionKind::WasmTool);
+        assert!(slack_mcp, "Should have builtin MCP slack-mcp");
+        assert!(slack_wasm, "Should have catalog WASM slack-mcp");
     }
 
     #[tokio::test]
     async fn test_new_with_catalog_dedup_same_kind() {
         // A catalog entry with same name AND kind as a builtin should be skipped
         let catalog_entries = vec![RegistryEntry {
-            name: "slack".to_string(),
-            display_name: "Slack Override".to_string(),
-            kind: ExtensionKind::McpServer, // same kind as builtin
+            name: "slack-mcp".to_string(),
+            display_name: "Slack MCP Override".to_string(),
+            kind: ExtensionKind::McpServer, // same kind as builtin slack-mcp
             description: "Should be skipped".to_string(),
             keywords: vec![],
             source: ExtensionSource::McpUrl {
@@ -629,9 +632,12 @@ mod tests {
 
         let registry = ExtensionRegistry::new_with_catalog(catalog_entries);
 
-        let entry = registry.get("slack").await;
+        let entry = registry.get("slack-mcp").await;
         assert!(entry.is_some());
         // Should still be the builtin, not the override
-        assert_eq!(entry.unwrap().display_name, "Slack");
+        assert_eq!(entry.unwrap().display_name, "Slack MCP");
     }
+
+    // Channel tests (telegram, slack, discord, whatsapp) require the embedded catalog
+    // to be loaded via new_with_catalog(). See test_new_with_catalog for catalog coverage.
 }

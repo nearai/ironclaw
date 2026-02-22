@@ -385,6 +385,10 @@ impl Tool for WriteFileTool {
     fn domain(&self) -> ToolDomain {
         ToolDomain::Container
     }
+
+    fn rate_limit_config(&self) -> Option<crate::tools::tool::ToolRateLimitConfig> {
+        Some(crate::tools::tool::ToolRateLimitConfig::new(20, 200))
+    }
 }
 
 /// List directory contents tool.
@@ -709,6 +713,10 @@ impl Tool for ApplyPatchTool {
 
     fn domain(&self) -> ToolDomain {
         ToolDomain::Container
+    }
+
+    fn rate_limit_config(&self) -> Option<crate::tools::tool::ToolRateLimitConfig> {
+        Some(crate::tools::tool::ToolRateLimitConfig::new(20, 200))
     }
 }
 

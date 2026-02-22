@@ -226,6 +226,15 @@ struct WhatsAppMessageMetadata {
     timestamp: String,
 }
 
+/// Workspace path for persisting owner_id across WASM callbacks.
+const OWNER_ID_PATH: &str = "state/owner_id";
+/// Workspace path for persisting dm_policy across WASM callbacks.
+const DM_POLICY_PATH: &str = "state/dm_policy";
+/// Workspace path for persisting allow_from (JSON array) across WASM callbacks.
+const ALLOW_FROM_PATH: &str = "state/allow_from";
+/// Channel name for pairing store (used by pairing host APIs).
+const CHANNEL_NAME: &str = "whatsapp";
+
 /// Channel configuration from capabilities file.
 #[derive(Debug, Deserialize)]
 struct WhatsAppConfig {
@@ -236,6 +245,15 @@ struct WhatsAppConfig {
     /// Whether to reply to the original message (thread context)
     #[serde(default = "default_reply_to_message")]
     reply_to_message: bool,
+
+    #[serde(default)]
+    owner_id: Option<String>,
+
+    #[serde(default)]
+    dm_policy: Option<String>,
+
+    #[serde(default)]
+    allow_from: Option<Vec<String>>,
 }
 
 fn default_api_version() -> String {
@@ -264,6 +282,9 @@ impl Guest for WhatsAppChannel {
                 WhatsAppConfig {
                     api_version: default_api_version(),
                     reply_to_message: default_reply_to_message(),
+                    owner_id: None,
+                    dm_policy: None,
+                    allow_from: None,
                 }
             }
         };
@@ -278,6 +299,24 @@ impl Guest for WhatsAppChannel {
 
         // Persist api_version in workspace so on_respond() can read it
         let _ = channel_host::workspace_write("channels/whatsapp/api_version", &config.api_version);
+
+        // Persist permission config for handle_message
+        if let Some(ref owner_id) = config.owner_id {
+            let _ = channel_host::workspace_write(OWNER_ID_PATH, owner_id);
+            channel_host::log(
+                channel_host::LogLevel::Info,
+                &format!("Owner restriction enabled: user {}", owner_id),
+            );
+        } else {
+            let _ = channel_host::workspace_write(OWNER_ID_PATH, "");
+        }
+
+        let dm_policy = config.dm_policy.as_deref().unwrap_or("pairing");
+        let _ = channel_host::workspace_write(DM_POLICY_PATH, dm_policy);
+
+        let allow_from_json = serde_json::to_string(&config.allow_from.unwrap_or_default())
+            .unwrap_or_else(|_| "[]".to_string());
+        let _ = channel_host::workspace_write(ALLOW_FROM_PATH, &allow_from_json);
 
         // WhatsApp Cloud API is webhook-only, no polling available
         Ok(ChannelConfig {
@@ -604,6 +643,15 @@ fn handle_message(
     // Look up sender's name from contacts
     let user_name = contact_names.get(&message.from).cloned();
 
+    // Permission check (WhatsApp is always DM)
+    if !check_sender_permission(
+        &message.from,
+        user_name.as_deref(),
+        phone_number_id,
+    ) {
+        return;
+    }
+
     // Build metadata for response routing
     // This is critical - the response handler uses this to know where to send
     let metadata = WhatsAppMessageMetadata {
@@ -636,6 +684,149 @@ fn handle_message(
 // ============================================================================
 // Utilities
 // ============================================================================
+
+// ============================================================================
+// Permission & Pairing
+// ============================================================================
+
+/// Check if a sender is permitted. Returns true if allowed.
+/// WhatsApp is always 1-to-1 (DM), so dm_policy always applies.
+fn check_sender_permission(
+    sender_phone: &str,
+    user_name: Option<&str>,
+    phone_number_id: &str,
+) -> bool {
+    // 1. Owner check (highest priority)
+    let owner_id = channel_host::workspace_read(OWNER_ID_PATH).filter(|s| !s.is_empty());
+    if let Some(ref owner) = owner_id {
+        if sender_phone != owner {
+            channel_host::log(
+                channel_host::LogLevel::Debug,
+                &format!(
+                    "Dropping message from non-owner {} (owner: {})",
+                    sender_phone, owner
+                ),
+            );
+            return false;
+        }
+        return true;
+    }
+
+    // 2. DM policy (WhatsApp is always DM)
+    let dm_policy =
+        channel_host::workspace_read(DM_POLICY_PATH).unwrap_or_else(|| "pairing".to_string());
+
+    if dm_policy == "open" {
+        return true;
+    }
+
+    // 3. Build merged allow list
+    let mut allowed: Vec<String> = channel_host::workspace_read(ALLOW_FROM_PATH)
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or_default();
+
+    if let Ok(store_allowed) = channel_host::pairing_read_allow_from(CHANNEL_NAME) {
+        allowed.extend(store_allowed);
+    }
+
+    // 4. Check sender (phone number or name)
+    let is_allowed = allowed.contains(&"*".to_string())
+        || allowed.contains(&sender_phone.to_string())
+        || user_name.is_some_and(|u| allowed.contains(&u.to_string()));
+
+    if is_allowed {
+        return true;
+    }
+
+    // 5. Not allowed — handle by policy
+    if dm_policy == "pairing" {
+        let meta = serde_json::json!({
+            "phone": sender_phone,
+            "name": user_name,
+        })
+        .to_string();
+
+        match channel_host::pairing_upsert_request(CHANNEL_NAME, sender_phone, &meta) {
+            Ok(result) => {
+                channel_host::log(
+                    channel_host::LogLevel::Info,
+                    &format!(
+                        "Pairing request for {}: code {}",
+                        sender_phone, result.code
+                    ),
+                );
+                if result.created {
+                    let _ = send_pairing_reply(sender_phone, phone_number_id, &result.code);
+                }
+            }
+            Err(e) => {
+                channel_host::log(
+                    channel_host::LogLevel::Error,
+                    &format!("Pairing upsert failed: {}", e),
+                );
+            }
+        }
+    }
+    false
+}
+
+/// Send a pairing code message via WhatsApp Cloud API.
+fn send_pairing_reply(
+    recipient_phone: &str,
+    phone_number_id: &str,
+    code: &str,
+) -> Result<(), String> {
+    let api_version = channel_host::workspace_read("channels/whatsapp/api_version")
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "v18.0".to_string());
+
+    let url = format!(
+        "https://graph.facebook.com/{}/{}/messages",
+        api_version, phone_number_id
+    );
+
+    let payload = serde_json::json!({
+        "messaging_product": "whatsapp",
+        "recipient_type": "individual",
+        "to": recipient_phone,
+        "type": "text",
+        "text": {
+            "preview_url": false,
+            "body": format!(
+                "To pair with this bot, run: ironclaw pairing approve whatsapp {}",
+                code
+            )
+        }
+    });
+
+    let payload_bytes =
+        serde_json::to_vec(&payload).map_err(|e| format!("Failed to serialize: {}", e))?;
+
+    let headers = serde_json::json!({
+        "Content-Type": "application/json",
+        "Authorization": "Bearer {WHATSAPP_ACCESS_TOKEN}"
+    });
+
+    let result = channel_host::http_request(
+        "POST",
+        &url,
+        &headers.to_string(),
+        Some(&payload_bytes),
+        None,
+    );
+
+    match result {
+        Ok(response) if response.status >= 200 && response.status < 300 => Ok(()),
+        Ok(response) => {
+            let body_str = String::from_utf8_lossy(&response.body);
+            Err(format!(
+                "WhatsApp API error: {} - {}",
+                response.status, body_str
+            ))
+        }
+        Err(e) => Err(format!("HTTP request failed: {}", e)),
+    }
+}
 
 /// Create a JSON HTTP response.
 fn json_response(status: u16, value: serde_json::Value) -> OutgoingHttpResponse {

@@ -20,6 +20,7 @@ const CARGO_MANIFEST_DIR: &str = env!("CARGO_MANIFEST_DIR");
 const KNOWN_CHANNELS: &[(&str, &str)] = &[
     ("telegram", "telegram_channel"),
     ("slack", "slack_channel"),
+    ("discord", "discord_channel"),
     ("whatsapp", "whatsapp_channel"),
 ];
 
@@ -42,6 +43,10 @@ fn channels_src_dir() -> PathBuf {
 
 /// Locate the build artifacts for a channel.
 ///
+/// Checks two layouts:
+/// 1. **Flat** (Docker/packaged): `<channels_src>/<name>/<name>.wasm`
+/// 2. **Build tree** (dev): `<channels_src>/<name>/target/wasm32-wasip2/release/<crate_name>.wasm`
+///
 /// Returns (wasm_path, capabilities_path) or an error if files are missing.
 fn locate_channel_artifacts(name: &str) -> Result<(PathBuf, PathBuf), String> {
     let (_, crate_name) = KNOWN_CHANNELS
@@ -52,31 +57,34 @@ fn locate_channel_artifacts(name: &str) -> Result<(PathBuf, PathBuf), String> {
     let src_dir = channels_src_dir();
     let channel_dir = src_dir.join(name);
 
-    let wasm_path = channel_dir
+    let caps_path = channel_dir.join(format!("{}.capabilities.json", name));
+
+    // Check flat layout first (Docker/packaged deployments)
+    let flat_wasm = channel_dir.join(format!("{}.wasm", name));
+    if flat_wasm.exists() && caps_path.exists() {
+        return Ok((flat_wasm, caps_path));
+    }
+
+    // Fall back to build tree layout (dev builds)
+    let build_wasm = channel_dir
         .join("target/wasm32-wasip2/release")
         .join(format!("{}.wasm", crate_name));
 
-    let caps_path = channel_dir.join(format!("{}.capabilities.json", name));
-
-    if !wasm_path.exists() {
-        return Err(format!(
-            "Channel '{}' WASM not found at {}. Build it first:\n  \
-             cd {} && cargo build --target wasm32-wasip2 --release",
-            name,
-            wasm_path.display(),
-            channel_dir.display()
-        ));
+    if build_wasm.exists() && caps_path.exists() {
+        return Ok((build_wasm, caps_path));
     }
 
-    if !caps_path.exists() {
-        return Err(format!(
-            "Channel '{}' capabilities not found at {}",
-            name,
-            caps_path.display()
-        ));
-    }
-
-    Ok((wasm_path, caps_path))
+    Err(format!(
+        "Channel '{}' WASM not found. Checked:\n  \
+         - {} (flat/packaged)\n  \
+         - {} (build tree)\n  \
+         Build it first:\n  \
+         cd {} && cargo build --target wasm32-wasip2 --release",
+        name,
+        flat_wasm.display(),
+        build_wasm.display(),
+        channel_dir.display()
+    ))
 }
 
 /// Install a channel from build artifacts into the channels directory.
@@ -130,10 +138,11 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_known_channels_includes_all_three() {
+    fn test_known_channels_includes_all_four() {
         let names = bundled_channel_names();
         assert!(names.contains(&"telegram"));
         assert!(names.contains(&"slack"));
+        assert!(names.contains(&"discord"));
         assert!(names.contains(&"whatsapp"));
     }
 

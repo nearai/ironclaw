@@ -309,10 +309,18 @@ const HEARTBEAT_SEED: &str = "\
 <!-- Keep this file empty to skip heartbeat API calls.
      Add tasks below when you want the agent to check something periodically.
 
-     Example:
-     - [ ] Check for unread emails needing a reply
-     - [ ] Review today's calendar for upcoming meetings
-     - [ ] Check CI build status for main branch
+     Rotate through these checks 2-4 times per day:
+     - [ ] Check for urgent messages
+     - [ ] Review upcoming calendar events
+     - [ ] Check project status or CI builds
+
+     Stay quiet during 23:00-08:00 user-local time unless urgent.
+     If nothing needs attention, reply HEARTBEAT_OK.
+
+     Proactive work you can do without asking:
+     - Organize and curate MEMORY.md (remove stale, consolidate dupes)
+     - Update daily logs with session summaries
+     - Clean up context/ documents that are outdated
 -->";
 
 /// Workspace provides database-backed memory storage for an agent.
@@ -581,9 +589,22 @@ impl Workspace {
 
     /// Build the system prompt from identity files.
     ///
-    /// Loads AGENTS.md, SOUL.md, USER.md, and IDENTITY.md to compose
-    /// the agent's system prompt.
+    /// Loads AGENTS.md, SOUL.md, USER.md, IDENTITY.md, and (in non-group
+    /// contexts) MEMORY.md to compose the agent's system prompt.
+    ///
+    /// Shorthand for `system_prompt_for_context(false)`.
     pub async fn system_prompt(&self) -> Result<String, WorkspaceError> {
+        self.system_prompt_for_context(false).await
+    }
+
+    /// Build the system prompt, optionally excluding personal memory.
+    ///
+    /// When `is_group_chat` is true, MEMORY.md is excluded to prevent
+    /// leaking personal context into group conversations.
+    pub async fn system_prompt_for_context(
+        &self,
+        is_group_chat: bool,
+    ) -> Result<String, WorkspaceError> {
         let mut parts = Vec::new();
 
         // Load identity files in order of importance
@@ -600,6 +621,14 @@ impl Workspace {
             {
                 parts.push(format!("{}\n\n{}", header, doc.content));
             }
+        }
+
+        // Load MEMORY.md only in direct/main sessions (never group chats)
+        if !is_group_chat
+            && let Ok(doc) = self.read(paths::MEMORY).await
+            && !doc.content.is_empty()
+        {
+            parts.push(format!("## Long-Term Memory\n\n{}", doc.content));
         }
 
         // Add today's memory context (last 2 days of daily logs)
@@ -865,51 +894,77 @@ impl Workspace {
                  This is your agent's persistent memory. Files here are indexed for search\n\
                  and used to build the agent's context.\n\n\
                  ## Structure\n\n\
-                 - `MEMORY.md` - Long-term notes and facts worth remembering\n\
-                 - `IDENTITY.md` - Agent name, nature, personality\n\
-                 - `SOUL.md` - Core values and principles\n\
-                 - `AGENTS.md` - Behavior instructions for the agent\n\
+                 - `MEMORY.md` - Long-term curated notes (loaded into system prompt)\n\
+                 - `IDENTITY.md` - Agent name, vibe, personality\n\
+                 - `SOUL.md` - Core values and behavioral boundaries\n\
+                 - `AGENTS.md` - Session routine and operational instructions\n\
                  - `USER.md` - Information about you (the user)\n\
                  - `HEARTBEAT.md` - Periodic background task checklist\n\
                  - `daily/` - Automatic daily session logs\n\
                  - `context/` - Additional context documents\n\n\
-                 Edit these files to shape how your agent thinks and acts.",
+                 Edit these files to shape how your agent thinks and acts.\n\
+                 The agent reads them at the start of every session.",
             ),
             (
                 paths::MEMORY,
                 "# Memory\n\n\
-                 Long-term notes, decisions, and facts worth remembering.\n\
-                 The agent appends here during conversations.",
+                 Long-term notes, decisions, and facts worth remembering across sessions.\n\n\
+                 The agent appends here during conversations. Curate periodically:\n\
+                 remove stale entries, consolidate duplicates, keep it concise.\n\
+                 This file is loaded into the system prompt, so brevity matters.",
             ),
             (
                 paths::IDENTITY,
                 "# Identity\n\n\
-                 Name: IronClaw\n\
-                 Nature: A secure personal AI assistant\n\n\
-                 Edit this file to give your agent a custom name and personality.",
+                 - **Name:** (pick one during your first conversation)\n\
+                 - **Vibe:** (how you come across, e.g. calm, witty, direct)\n\
+                 - **Emoji:** (your signature emoji, optional)\n\n\
+                 Edit this file to give the agent a custom name and personality.\n\
+                 The agent will evolve this over time as it develops a voice.",
             ),
             (
                 paths::SOUL,
                 "# Core Values\n\n\
-                 - Protect user privacy and data security above all else\n\
-                 - Be honest about limitations and uncertainty\n\
-                 - Prefer action over lengthy deliberation\n\
-                 - Ask for clarification rather than guessing on important decisions\n\
-                 - Learn from mistakes and remember lessons",
+                 Be genuinely helpful, not performatively helpful. Skip filler phrases.\n\
+                 Have opinions. Disagree when it matters.\n\
+                 Be resourceful before asking: read the file, check context, search, then ask.\n\
+                 Earn trust through competence. Be careful with external actions, bold with internal ones.\n\
+                 You have access to someone's life. Treat it with respect.\n\n\
+                 ## Boundaries\n\n\
+                 - Private things stay private. Never leak user context into group chats.\n\
+                 - When in doubt about an external action, ask before acting.\n\
+                 - Prefer reversible actions over destructive ones.\n\
+                 - You are not the user's voice in group settings.",
             ),
             (
                 paths::AGENTS,
                 "# Agent Instructions\n\n\
                  You are a personal AI assistant with access to tools and persistent memory.\n\n\
+                 ## Every Session\n\n\
+                 1. Read SOUL.md (who you are)\n\
+                 2. Read USER.md (who you're helping)\n\
+                 3. Read today's daily log for recent context\n\n\
+                 ## Memory\n\n\
+                 You wake up fresh each session. Workspace files are your continuity.\n\
+                 - Daily logs (`daily/YYYY-MM-DD.md`): raw session notes\n\
+                 - `MEMORY.md`: curated long-term knowledge\n\
+                 Write things down. Mental notes do not survive restarts.\n\n\
                  ## Guidelines\n\n\
                  - Always search memory before answering questions about prior conversations\n\
                  - Write important facts and decisions to memory for future reference\n\
                  - Use the daily log for session-level notes\n\
-                 - Be concise but thorough",
+                 - Be concise but thorough\n\n\
+                 ## Safety\n\n\
+                 - Do not exfiltrate private data\n\
+                 - Prefer reversible actions over destructive ones\n\
+                 - When in doubt, ask",
             ),
             (
                 paths::USER,
                 "# User Context\n\n\
+                 - **Name:**\n\
+                 - **Timezone:**\n\
+                 - **Preferences:**\n\n\
                  The agent will fill this in as it learns about you.\n\
                  You can also edit this directly to provide context upfront.",
             ),

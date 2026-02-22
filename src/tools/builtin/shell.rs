@@ -725,6 +725,10 @@ impl Tool for ShellTool {
     fn domain(&self) -> ToolDomain {
         ToolDomain::Container
     }
+
+    fn rate_limit_config(&self) -> Option<crate::tools::tool::ToolRateLimitConfig> {
+        Some(crate::tools::tool::ToolRateLimitConfig::new(30, 300))
+    }
 }
 
 /// Truncate output to fit within limits (UTF-8 safe).

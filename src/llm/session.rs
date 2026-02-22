@@ -7,6 +7,8 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use crate::cli::oauth_defaults::OAUTH_CALLBACK_PORT;
+
 use chrono::{DateTime, Utc};
 use reqwest::Client;
 use secrecy::SecretString;
@@ -238,6 +240,7 @@ impl SessionManager {
         use crate::cli::oauth_defaults;
 
         let cb_url = oauth_defaults::callback_url();
+        let host = oauth_defaults::callback_host();
 
         // Show auth provider menu BEFORE binding the listener
         println!();
@@ -286,6 +289,18 @@ impl SessionManager {
                     reason: format!("Invalid choice: {}", other),
                 });
             }
+        }
+
+        // Warn about plain-HTTP token transmission only for OAuth paths (1, 2)
+        // where the callback URL actually carries the session token.
+        if !oauth_defaults::is_loopback_host(&host) {
+            println!();
+            println!("Warning: OAuth callback is using plain HTTP to a remote host ({host}).");
+            println!("         The session token will be transmitted unencrypted.");
+            println!("         Consider SSH port forwarding instead:");
+            println!(
+                "           ssh -L {OAUTH_CALLBACK_PORT}:127.0.0.1:{OAUTH_CALLBACK_PORT} user@{host}"
+            );
         }
 
         // OAuth paths: bind the callback listener now
