@@ -79,13 +79,15 @@ impl Agent {
             .await?;
 
         // Set the dedicated category field (not stored in metadata)
-        if let Some(cat) = category {
-            let _ = self
+        if let Some(cat) = category
+            && let Err(e) = self
                 .context_manager
                 .update_context(job_id, |ctx| {
                     ctx.category = Some(cat);
                 })
-                .await;
+                .await
+        {
+            tracing::warn!(job_id = %job_id, "Failed to set job category: {}", e);
         }
 
         Ok(format!(
