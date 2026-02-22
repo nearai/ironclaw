@@ -252,6 +252,10 @@ impl Agent {
             thread.messages()
         };
 
+        // Persist user message to DB immediately so it survives crashes
+        self.persist_user_message(thread_id, &message.user_id, content)
+            .await;
+
         // Send thinking status
         let _ = self
             .channels
@@ -320,9 +324,8 @@ impl Agent {
                     )
                     .await;
 
-                // Persist turn to DB before returning so the write
-                // completes even if the process shuts down right after.
-                self.persist_turn(thread_id, &message.user_id, content, Some(&response))
+                // Persist assistant response (user message already persisted at turn start)
+                self.persist_assistant_response(thread_id, &response)
                     .await;
 
                 Ok(SubmissionResult::response(response))
@@ -351,23 +354,21 @@ impl Agent {
             }
             Err(e) => {
                 thread.fail_turn(e.to_string());
-
-                // Persist the user message even on failure
-                self.persist_turn(thread_id, &message.user_id, content, None)
-                    .await;
-
+                // User message already persisted at turn start; nothing else to save
                 Ok(SubmissionResult::error(e.to_string()))
             }
         }
     }
 
-    /// Persist a turn (user message + optional assistant response) to the DB.
-    pub(super) async fn persist_turn(
+    /// Persist the user message to the DB at turn start (before the agentic loop).
+    ///
+    /// This ensures the user message is durable even if the process crashes
+    /// mid-response. Call this right after `thread.start_turn()`.
+    pub(super) async fn persist_user_message(
         &self,
         thread_id: Uuid,
         user_id: &str,
         user_input: &str,
-        response: Option<&str>,
     ) {
         let store = match self.store() {
             Some(s) => Arc::clone(s),
@@ -387,13 +388,23 @@ impl Agent {
             .await
         {
             tracing::warn!("Failed to persist user message: {}", e);
-            return;
         }
+    }
 
-        if let Some(resp) = response
-            && let Err(e) = store
-                .add_conversation_message(thread_id, "assistant", resp)
-                .await
+    /// Persist the assistant response to the DB after the agentic loop completes.
+    pub(super) async fn persist_assistant_response(
+        &self,
+        thread_id: Uuid,
+        response: &str,
+    ) {
+        let store = match self.store() {
+            Some(s) => Arc::clone(s),
+            None => return,
+        };
+
+        if let Err(e) = store
+            .add_conversation_message(thread_id, "assistant", response)
+            .await
         {
             tracing::warn!("Failed to persist assistant message: {}", e);
         }
@@ -1015,12 +1026,10 @@ impl Agent {
 
             match result {
                 Ok(AgenticLoopResult::Response(response)) => {
-                    let user_input = thread.last_turn().map(|t| t.user_input.clone());
                     thread.complete_turn(&response);
-                    if let Some(input) = user_input {
-                        self.persist_turn(thread_id, &message.user_id, &input, Some(&response))
-                            .await;
-                    }
+                    // User message already persisted at turn start; save assistant response
+                    self.persist_assistant_response(thread_id, &response)
+                        .await;
                     let _ = self
                         .channels
                         .send_status(
@@ -1055,12 +1064,8 @@ impl Agent {
                     })
                 }
                 Err(e) => {
-                    let user_input = thread.last_turn().map(|t| t.user_input.clone());
                     thread.fail_turn(e.to_string());
-                    if let Some(input) = user_input {
-                        self.persist_turn(thread_id, &message.user_id, &input, None)
-                            .await;
-                    }
+                    // User message already persisted at turn start
                     Ok(SubmissionResult::error(e.to_string()))
                 }
             }
@@ -1074,13 +1079,11 @@ impl Agent {
             {
                 let mut sess = session.lock().await;
                 if let Some(thread) = sess.threads.get_mut(&thread_id) {
-                    let user_input = thread.last_turn().map(|t| t.user_input.clone());
                     thread.clear_pending_approval();
                     thread.complete_turn(&rejection);
-                    if let Some(input) = user_input {
-                        self.persist_turn(thread_id, &message.user_id, &input, Some(&rejection))
-                            .await;
-                    }
+                    // User message already persisted at turn start; save rejection response
+                    self.persist_assistant_response(thread_id, &rejection)
+                        .await;
                 }
             }
 
@@ -1115,13 +1118,11 @@ impl Agent {
         {
             let mut sess = session.lock().await;
             if let Some(thread) = sess.threads.get_mut(&thread_id) {
-                let user_input = thread.last_turn().map(|t| t.user_input.clone());
                 thread.enter_auth_mode(ext_name.clone());
                 thread.complete_turn(&instructions);
-                if let Some(input) = user_input {
-                    self.persist_turn(thread_id, &message.user_id, &input, Some(&instructions))
-                        .await;
-                }
+                // User message already persisted at turn start; save auth instructions
+                self.persist_assistant_response(thread_id, &instructions)
+                    .await;
             }
         }
         let _ = self
