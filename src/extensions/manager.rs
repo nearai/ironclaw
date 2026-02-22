@@ -610,9 +610,6 @@ impl ExtensionManager {
                     )
                     .await
                 }
-                ExtensionSource::Bundled { name } => {
-                    self.install_bundled_channel_from_artifacts(name).await
-                }
                 _ => Err(ExtensionError::InstallFailed(
                     "WASM channel entry has no download URL".to_string(),
                 )),
@@ -917,6 +914,7 @@ impl ExtensionManager {
         Ok(())
     }
 
+    #[allow(dead_code)] // Used by upcoming hot-activation flow
     async fn install_bundled_channel_from_artifacts(
         &self,
         name: &str,

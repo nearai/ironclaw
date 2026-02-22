@@ -642,7 +642,7 @@ Respond with a JSON plan in this format:
         let group_section = self.build_group_section();
 
         format!(
-            r#"You are NEAR AI Agent, an autonomous assistant.
+            r#"You are IronClaw Agent, a secure autonomous assistant.
 
 ## Response Format — CRITICAL
 

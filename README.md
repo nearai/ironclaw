@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="ironclaw.png" alt="IronClaw" width="200"/>
+  <img src="ironclaw.png?v=2" alt="IronClaw" width="200"/>
 </p>
 
 <h1 align="center">IronClaw</h1>

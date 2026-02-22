@@ -380,7 +380,18 @@ pub async fn authorize_mcp_server(
 ) -> Result<AccessToken, AuthError> {
     // Find an available port for the callback first (needed for DCR)
     let (listener, port) = find_available_port().await?;
-    let redirect_uri = format!("http://localhost:{}/callback", port);
+    let host = oauth_defaults::callback_host();
+    let redirect_uri = format!("http://{}:{}/callback", host, port);
+
+    // Warn when the callback is served over plain HTTP to a remote host.
+    // Authorization codes travel unencrypted; SSH port forwarding is safer:
+    //   ssh -L <port>:127.0.0.1:<port> user@your-server
+    if !oauth_defaults::is_loopback_host(&host) {
+        println!("Warning: MCP OAuth callback is using plain HTTP to a remote host ({host}).");
+        println!("         Authorization codes will be transmitted unencrypted.");
+        println!("         Consider SSH port forwarding instead:");
+        println!("           ssh -L {port}:127.0.0.1:{port} user@{host}");
+    }
 
     // Determine client_id and endpoints
     let (client_id, authorization_url, token_url, use_pkce, scopes, extra_params) =
