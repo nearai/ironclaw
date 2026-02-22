@@ -392,6 +392,9 @@ impl Agent {
     }
 
     /// Persist the assistant response to the DB after the agentic loop completes.
+    ///
+    /// Assumes `persist_user_message` was called earlier in the turn to ensure
+    /// the conversation row exists.
     pub(super) async fn persist_assistant_response(
         &self,
         thread_id: Uuid,
