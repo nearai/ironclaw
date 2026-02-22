@@ -1460,16 +1460,18 @@ impl WasmChannel {
                             .map(|(k, v)| {
                                 let val = match v {
                                     serde_json::Value::String(s) => {
-                                        if s.len() > 80 {
-                                            format!("\"{}...\"", &s[..77])
+                                        if s.chars().count() > 80 {
+                                            let truncated: String = s.chars().take(77).collect();
+                                            format!("\"{}...\"", truncated)
                                         } else {
                                             format!("\"{}\"", s)
                                         }
                                     }
                                     other => {
                                         let s = other.to_string();
-                                        if s.len() > 80 {
-                                            format!("{}...", &s[..77])
+                                        if s.chars().count() > 80 {
+                                            let truncated: String = s.chars().take(77).collect();
+                                            format!("{}...", truncated)
                                         } else {
                                             s
                                         }
