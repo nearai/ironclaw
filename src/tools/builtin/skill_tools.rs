@@ -388,14 +388,23 @@ pub fn validate_fetch_url(url_str: &str) -> Result<(), ToolError> {
         .host_str()
         .ok_or_else(|| ToolError::ExecutionFailed("URL has no host".to_string()))?;
 
-    // Check if host is an IP address and reject private ranges
-    if let Ok(ip) = host.parse::<std::net::IpAddr>()
-        && (ip.is_loopback() || ip.is_unspecified() || is_private_ip(&ip) || is_link_local_ip(&ip))
-    {
-        return Err(ToolError::ExecutionFailed(format!(
-            "URL points to a private/loopback/link-local address: {}",
-            host
-        )));
+    // Check if host is an IP address and reject private ranges.
+    // Unwrap IPv4-mapped IPv6 addresses (e.g. ::ffff:192.168.1.1) to catch
+    // SSRF bypasses that encode private IPv4 addresses as IPv6.
+    if let Ok(raw_ip) = host.parse::<std::net::IpAddr>() {
+        let ip = match raw_ip {
+            std::net::IpAddr::V6(v6) => v6
+                .to_ipv4_mapped()
+                .map(std::net::IpAddr::V4)
+                .unwrap_or(std::net::IpAddr::V6(v6)),
+            other => other,
+        };
+        if ip.is_loopback() || ip.is_unspecified() || is_private_ip(&ip) || is_link_local_ip(&ip) {
+            return Err(ToolError::ExecutionFailed(format!(
+                "URL points to a private/loopback/link-local address: {}",
+                host
+            )));
+        }
     }
 
     // Reject common internal hostnames
@@ -467,10 +476,19 @@ pub async fn fetch_skill_content(url: &str) -> Result<String, ToolError> {
         )));
     }
 
+    // Limit download size to prevent memory exhaustion from large responses.
+    const MAX_DOWNLOAD_BYTES: usize = 10 * 1024 * 1024; // 10 MB
     let bytes = response
         .bytes()
         .await
         .map_err(|e| ToolError::ExecutionFailed(format!("Failed to read response body: {}", e)))?;
+    if bytes.len() > MAX_DOWNLOAD_BYTES {
+        return Err(ToolError::ExecutionFailed(format!(
+            "Response too large: {} bytes (max {} bytes)",
+            bytes.len(),
+            MAX_DOWNLOAD_BYTES
+        )));
+    }
 
     // Detect ZIP archive (PK\x03\x04 magic) and extract SKILL.md
     let content = if bytes.starts_with(b"PK\x03\x04") {
@@ -501,6 +519,9 @@ fn extract_skill_from_zip(data: &[u8]) -> Result<String, ToolError> {
     use flate2::read::DeflateDecoder;
     use std::io::Read;
 
+    // SKILL.md files should never be larger than 1 MB.
+    const MAX_DECOMPRESSED: usize = 1_024 * 1_024;
+
     let mut offset = 0;
     while offset + 30 <= data.len() {
         // Local file header signature = PK\x03\x04
@@ -509,10 +530,18 @@ fn extract_skill_from_zip(data: &[u8]) -> Result<String, ToolError> {
         }
 
         let compression = u16::from_le_bytes([data[offset + 8], data[offset + 9]]);
-        let compressed_size =
-            u32::from_le_bytes(data[offset + 18..offset + 22].try_into().unwrap()) as usize;
-        let uncompressed_size =
-            u32::from_le_bytes(data[offset + 22..offset + 26].try_into().unwrap()) as usize;
+        let compressed_size = u32::from_le_bytes([
+            data[offset + 18],
+            data[offset + 19],
+            data[offset + 20],
+            data[offset + 21],
+        ]) as usize;
+        let uncompressed_size = u32::from_le_bytes([
+            data[offset + 22],
+            data[offset + 23],
+            data[offset + 24],
+            data[offset + 25],
+        ]) as usize;
         let name_len = u16::from_le_bytes([data[offset + 26], data[offset + 27]]) as usize;
         let extra_len = u16::from_le_bytes([data[offset + 28], data[offset + 29]]) as usize;
 
@@ -523,8 +552,12 @@ fn extract_skill_from_zip(data: &[u8]) -> Result<String, ToolError> {
         }
         let file_name = std::str::from_utf8(&data[name_start..name_end]).unwrap_or("");
 
-        let data_start = name_end + extra_len;
-        let data_end = data_start + compressed_size;
+        let data_start = name_end
+            .checked_add(extra_len)
+            .ok_or_else(|| ToolError::ExecutionFailed("ZIP header offset overflow".to_string()))?;
+        let data_end = data_start
+            .checked_add(compressed_size)
+            .ok_or_else(|| ToolError::ExecutionFailed("ZIP header size overflow".to_string()))?;
 
         if file_name == "SKILL.md" {
             if data_end > data.len() {
@@ -533,13 +566,20 @@ fn extract_skill_from_zip(data: &[u8]) -> Result<String, ToolError> {
                 ));
             }
 
+            if uncompressed_size > MAX_DECOMPRESSED {
+                return Err(ToolError::ExecutionFailed(
+                    "ZIP entry too large to decompress safely".to_string(),
+                ));
+            }
+
             let raw = &data[data_start..data_end];
             let decompressed = match compression {
                 0 => raw.to_vec(), // Store
                 8 => {
-                    // Deflate
-                    let mut decoder = DeflateDecoder::new(raw);
-                    let mut buf = Vec::with_capacity(uncompressed_size);
+                    // Deflate -- wrap with a read limit to guard against ZIP bombs
+                    // where the declared size is small but decompressed output is huge.
+                    let mut decoder = DeflateDecoder::new(raw).take(MAX_DECOMPRESSED as u64);
+                    let mut buf = Vec::with_capacity(uncompressed_size.min(MAX_DECOMPRESSED));
                     decoder.read_to_end(&mut buf).map_err(|e| {
                         ToolError::ExecutionFailed(format!("Failed to decompress SKILL.md: {}", e))
                     })?;

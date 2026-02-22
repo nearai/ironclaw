@@ -162,10 +162,10 @@ impl SkillCatalog {
         let response = match self.client.get(&url).query(&[("q", query)]).send().await {
             Ok(resp) => resp,
             Err(e) => {
-                tracing::debug!("Catalog search failed (network): {}", e);
+                tracing::warn!("Catalog search failed (network): {}", e);
                 return CatalogSearchOutcome {
                     results: Vec::new(),
-                    error: Some(format!("Registry unreachable: {e}")),
+                    error: Some("Registry unreachable".to_string()),
                 };
             }
         };
@@ -206,10 +206,8 @@ impl SkillCatalog {
         } else if let Ok(arr) = serde_json::from_str::<Vec<CatalogSearchResult>>(&body) {
             arr
         } else {
-            tracing::debug!(
-                "Catalog search: failed to parse response: {}",
-                &body[..body.len().min(200)]
-            );
+            let preview = body.get(..200).unwrap_or(&body);
+            tracing::debug!("Catalog search: failed to parse response: {}", preview);
             return CatalogSearchOutcome {
                 results: Vec::new(),
                 error: Some("Invalid response from registry".to_string()),
