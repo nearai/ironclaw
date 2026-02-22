@@ -1,6 +1,6 @@
 # IronClaw Codebase Analysis — Worker & Orchestrator (Docker Sandbox)
 
-> Updated: 2026-02-21 | Version: v0.9.0
+> Updated: 2026-02-22 | Version: v0.9.0
 
 ## 1. Overview
 

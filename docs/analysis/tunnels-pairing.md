@@ -1,6 +1,6 @@
 # IronClaw Codebase Analysis — Tunnels & Mobile Pairing
 
-> Updated: 2026-02-21 | Version: v0.9.0
+> Updated: 2026-02-22 | Version: v0.9.0
 
 ## 1. Overview
 
@@ -251,7 +251,7 @@ Example output (human-readable):
 
 ```
 Pairing requests (1):
-  XK3NB7QR  user123  username=alice  2026-02-21T03:55:00+00:00
+  XK3NB7QR  user123  username=alice  2026-02-22T03:55:00+00:00
 ```
 
 ### `ironclaw pairing approve <channel> <code>`
