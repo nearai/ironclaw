@@ -70,7 +70,7 @@ Access the web UI at `http://localhost:3000`
 
 | Requirement | When Needed |
 |-------------|-------------|
-| Rust 1.85+ | Building from source |
+| Rust 1.92+ | Building from source |
 | PostgreSQL 15+ with pgvector | PostgreSQL backend (default) |
 | Docker / Podman | Docker sandbox for shell tools |
 
@@ -347,7 +347,9 @@ ironclaw
 ### One-shot Mode
 
 ```bash
-ironclaw --oneshot "What is the capital of France?"
+ironclaw --message "What is the capital of France?"
+# or
+ironclaw -m "What is the capital of France?"
 ```
 
 ---
@@ -590,9 +592,9 @@ INFO Agent ironclaw ready and listening
 
 **Symptom:** Semantic queries return empty results.
 
-**Cause:** libSQL uses FTS5 keyword search only; no vector search.
+**Cause:** libSQL supports vector search via `vector_top_k()` when embeddings are enabled. If embeddings are disabled or missing, it falls back to FTS5 keyword-only search.
 
-**Fix:** Use keyword-rich queries, or switch to PostgreSQL for hybrid search.
+**Fix:** Enable embeddings and ensure memory chunks have embeddings. Use keyword-rich queries as fallback, or switch to PostgreSQL for more advanced hybrid search.
 
 ### libSQL embedding dimension mismatch
 

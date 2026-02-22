@@ -502,7 +502,7 @@ network_mode: "bridge"                     Containers cannot reach each other's 
 | `SANDBOX_CPU_SHARES` | `1024` | Relative CPU weight for containers |
 | `SANDBOX_EXTRA_DOMAINS` | unset | Comma-separated domains added to default allowlist |
 | `SANDBOX_POLICY` | `readonly` | Sandbox policy: `readonly`, `workspace_write`, or `full_access` |
-| `GATEWAY_AUTH_TOKEN` | (required) | Bearer token for web gateway API access |
+| `GATEWAY_AUTH_TOKEN` | auto-generated | Bearer token for web gateway API access. If unset, a random 32-char token is generated and logged at startup. Strongly recommended to set explicitly for repeatable deployments. |
 | `GATEWAY_ENABLED` | `true` | Enable the web-facing gateway |
 | `GATEWAY_HOST` | `127.0.0.1` | Bind address for the web gateway |
 | `GATEWAY_PORT` | `3000` | Port for the web gateway |

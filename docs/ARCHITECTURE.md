@@ -173,7 +173,7 @@ The following table lists every source module directory and the key top-level fi
 | `registry` | `src/registry/` | Extension/tool registry client for discovering installable tools and channels |
 | `safety` | `src/safety/` | Prompt injection defense: `Sanitizer` (pattern detection, XML escaping), `Validator` (length, encoding checks), `Policy` (rule-based actions: Block/Warn/Review/Sanitize), `LeakDetector` (15+ secret patterns with Block/Redact/Warn actions), `CredentialDetector` (HTTP param credential detection: requires approval when auth data is present in headers/URL) |
 | `sandbox` | `src/sandbox/` | Docker-based job isolation: `SandboxManager`, `ContainerRunner`, `NetworkProxy` (hyper HTTP/CONNECT proxy with domain allowlist and credential injection), `SandboxPolicy` (ReadOnly/WorkspaceWrite/FullAccess) |
-| `secrets` | `src/secrets/` | Encrypted credential storage: AES-256-GCM encryption, HKDF-SHA256 per-secret key derivation, PostgreSQL and libSQL backends, OS keychain integration (macOS: security-framework, Linux: secret-service/KWallet) |
+| `secrets` | `src/secrets/` | Encrypted credential storage: AES-256-GCM encryption, HKDF-SHA256 per-secret key derivation, PostgreSQL backend (libSQL not supported for encrypted store), OS keychain integration (macOS: security-framework, Linux: secret-service/KWallet) |
 | `setup` | `src/setup/` | 7-step interactive onboarding wizard: database backend selection, NEAR AI authentication, secrets master key setup, channel configuration |
 | `skills` | `src/skills/` | SKILL.md prompt extension system: `SkillRegistry` (discover, install, remove), deterministic scorer (keywords/tags/regex), `SkillTrust` model (Trusted vs Installed), tool attenuation (trust-based ceiling), gating requirements (bins/env/config), `SkillCatalog` (ClawHub HTTP client) |
 | `tools` | `src/tools/` | Extensible tool system: `Tool` trait, `ToolRegistry` (shadowing protection for built-in names), built-in tools (echo, time, json, http, shell, file ops, memory, job mgmt, routines, extensions, skills, `HtmlConverter` (HTML-to-Markdown, two-stage: readability extraction + markdown conversion; feature-gated `html-to-markdown`)), WASM sandbox (wasmtime component model, fuel metering, memory limits), MCP client (JSON-RPC over HTTP), dynamic software builder |
@@ -740,7 +740,7 @@ Every major extension point is expressed as a trait. This allows swapping implem
 - `Arc<dyn LlmProvider>` — primary and failover LLM providers, all wrapping strategies
 - `Arc<dyn Tool>` — built-in, WASM, and MCP tools in the same registry
 - `Arc<dyn Database>` — PostgreSQL and libSQL backends
-- `Arc<dyn SecretsStore + Send + Sync>` — PostgreSQL and libSQL secrets stores
+- `Arc<dyn SecretsStore + Send + Sync>` — PostgreSQL secrets store (libSQL not supported for encrypted secrets)
 - `Arc<dyn EmbeddingProvider>` — OpenAI, NEAR AI, and Ollama embeddings
 - `Box<dyn Channel>` — REPL, HTTP, web gateway, WASM channels
 - `Arc<dyn NetworkPolicyDecider>` — custom network access policies for sandbox containers
@@ -861,7 +861,7 @@ The `tools` module is one of the largest modules, reflecting the breadth of the 
 | `termimad` | 0.34 | Markdown rendering in terminal REPL |
 | `pgvector` | 0.4 | PostgreSQL vector type support for semantic search |
 | `regex` | 1.x | Pattern matching for safety layer and skill scoring |
-| `serde_yaml` | 0.9.x | YAML parsing for SKILL.md frontmatter |
+| `serde_yml` | 0.0.12 | YAML parsing for SKILL.md frontmatter |
 | `dotenvy` | 0.15 | `.env` file loading |
 | `hyper` | 1.5 | HTTP/1.1 and HTTP/2 server for network proxy |
 | `subtle` | 2.x | Constant-time comparison for auth token validation |

@@ -11,21 +11,21 @@
 
 | Document | Lines | Description |
 |----------|------:|-------------|
-| [INSTALLATION.md](INSTALLATION.md) | 600+ | Installation, configuration, service setup, troubleshooting |
-| [ARCHITECTURE.md](ARCHITECTURE.md) | 862 | Master architecture: modules, data flows, diagrams |
-| [DEVELOPER-REFERENCE.md](DEVELOPER-REFERENCE.md) | 1065 | Developer reference: errors, config, code review patterns |
-| [analysis/agent.md](analysis/agent.md) | 890 | Agent loop, sessions, jobs, routines, heartbeat, cost guard |
-| [analysis/channels.md](analysis/channels.md) | 815 | REPL, web gateway, HTTP, WASM, webhook channels + full API routes |
-| [analysis/cli.md](analysis/cli.md) | 492 | CLI subcommands, doctor, service manager, MCP, registry |
-| [analysis/config.md](analysis/config.md) | 926 | Configuration system — exhaustive env var reference |
-| [analysis/llm.md](analysis/llm.md) | 745 | LLM backends, multi-provider, retry, cost guard, schema fix |
-| [analysis/safety-sandbox.md](analysis/safety-sandbox.md) | 511 | Safety layer, WASM sandbox, Docker orchestrator, SSRF proxy |
-| [analysis/skills-extensions.md](analysis/skills-extensions.md) | 703 | Skills system, WASM channels, extensions, hooks |
-| [analysis/tools.md](analysis/tools.md) | 1367 | Tool system, all built-in tools, MCP client, WASM tools, builder |
-| [analysis/tunnels-pairing.md](analysis/tunnels-pairing.md) | 343 | Tunnels (cloudflare/ngrok/tailscale/custom), mobile pairing |
-| [analysis/worker-orchestrator.md](analysis/worker-orchestrator.md) | 469 | Worker runtime, Claude bridge, proxy LLM, Docker sandbox |
-| [analysis/workspace-memory.md](analysis/workspace-memory.md) | 717 | Workspace FS, semantic memory, embeddings, hybrid search |
-| [analysis/secrets-keychain.md](analysis/secrets-keychain.md) | 346 | Secrets store, keychain, AES-GCM crypto, credential injection |
+| [INSTALLATION.md](INSTALLATION.md) | ~690 | Installation, configuration, service setup, troubleshooting |
+| [ARCHITECTURE.md](ARCHITECTURE.md) | ~871 | Master architecture: modules, data flows, diagrams |
+| [DEVELOPER-REFERENCE.md](DEVELOPER-REFERENCE.md) | ~1065 | Developer reference: errors, config, code review patterns |
+| [analysis/agent.md](analysis/agent.md) | ~890 | Agent loop, sessions, jobs, routines, heartbeat, cost guard |
+| [analysis/channels.md](analysis/channels.md) | ~886 | REPL, web gateway, HTTP, WASM, webhook channels + full API routes |
+| [analysis/cli.md](analysis/cli.md) | ~492 | CLI subcommands, doctor, service manager, MCP, registry |
+| [analysis/config.md](analysis/config.md) | ~926 | Configuration system — exhaustive env var reference |
+| [analysis/llm.md](analysis/llm.md) | ~745 | LLM backends, multi-provider, retry, cost guard, schema fix |
+| [analysis/safety-sandbox.md](analysis/safety-sandbox.md) | ~520 | Safety layer, WASM sandbox, Docker orchestrator, SSRF proxy |
+| [analysis/skills-extensions.md](analysis/skills-extensions.md) | ~703 | Skills system, WASM channels, extensions, hooks |
+| [analysis/tools.md](analysis/tools.md) | ~1367 | Tool system, all built-in tools, MCP client, WASM tools, builder |
+| [analysis/tunnels-pairing.md](analysis/tunnels-pairing.md) | ~345 | Tunnels (cloudflare/ngrok/tailscale/custom), mobile pairing |
+| [analysis/worker-orchestrator.md](analysis/worker-orchestrator.md) | ~484 | Worker runtime, Claude bridge, proxy LLM, Docker sandbox |
+| [analysis/workspace-memory.md](analysis/workspace-memory.md) | ~726 | Workspace FS, semantic memory, embeddings, hybrid search |
+| [analysis/secrets-keychain.md](analysis/secrets-keychain.md) | ~346 | Secrets store, keychain, AES-GCM crypto, credential injection |
 
 ---
 

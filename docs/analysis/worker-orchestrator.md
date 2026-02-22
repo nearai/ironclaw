@@ -16,7 +16,7 @@ The system uses a two-process model:
   exposes an internal HTTP API that containers call back on.
 
 - **Worker**: runs inside a Docker container as a separate invocation of the
-  `ironclaw` binary (in `--worker-mode` or `--claude-bridge` mode). It has no
+  `ironclaw` binary (via `worker` or `claude-bridge` subcommands). It has no
   direct access to the database, secrets store, or LLM API keys. All access
   goes through the orchestrator.
 
@@ -67,7 +67,8 @@ specific job only.
     └── POST /worker/{id}/complete        — signal job done / trigger cleanup
 ```
 
-The orchestrator listens on port 50051 (configurable). On macOS/Windows
+The orchestrator listens on port 50051. The port number is currently fixed in the
+implementation and can only be changed by modifying the code. On macOS/Windows
 (Docker Desktop), it binds to `127.0.0.1` because Docker Desktop routes
 `host.docker.internal` through its VM to the host loopback. On Linux, it binds
 to `0.0.0.0` because containers reach the host via the docker bridge gateway
