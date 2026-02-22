@@ -350,6 +350,8 @@ Four files compose the agent's identity, loaded in order by `Workspace::system_p
 
 After identity files, the system prompt also appends today's and yesterday's daily logs under `## Today's Notes` / `## Yesterday's Notes`. All sections are joined with `\n\n---\n\n`.
 
+For non-group-chat sessions, `MEMORY.md` content is injected between identity files and daily logs as `## Long-Term Memory`. This is excluded in group chats to prevent context leakage.
+
 The system prompt is assembled at session start and injected as the LLM system message. Files that do not exist or are empty are silently skipped.
 
 ### Seeding
