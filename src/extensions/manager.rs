@@ -546,9 +546,41 @@ impl ExtensionManager {
         &self,
         entry: &RegistryEntry,
     ) -> Result<InstallResult, ExtensionError> {
+        let primary_result = self.try_install_from_source(entry, &entry.source).await;
+        match (&primary_result, &entry.fallback_source) {
+            (Err(primary_err), Some(fallback)) => {
+                // Download failed (e.g. 404 because release artifacts don't exist yet).
+                // Try the fallback source (build from source).
+                tracing::info!(
+                    extension = %entry.name,
+                    primary_error = %primary_err,
+                    "Primary install failed, trying fallback source"
+                );
+                self.try_install_from_source(entry, fallback)
+                    .await
+                    .map_err(|fallback_err| {
+                        tracing::error!(
+                            extension = %entry.name,
+                            fallback_error = %fallback_err,
+                            "Fallback install also failed"
+                        );
+                        // Return the fallback error since it's more actionable
+                        fallback_err
+                    })
+            }
+            _ => primary_result,
+        }
+    }
+
+    /// Attempt to install an extension using a specific source.
+    async fn try_install_from_source(
+        &self,
+        entry: &RegistryEntry,
+        source: &ExtensionSource,
+    ) -> Result<InstallResult, ExtensionError> {
         match entry.kind {
             ExtensionKind::McpServer => {
-                let url = match &entry.source {
+                let url = match source {
                     ExtensionSource::McpUrl { url } => url.clone(),
                     ExtensionSource::Discovered { url } => url.clone(),
                     _ => {
@@ -559,7 +591,7 @@ impl ExtensionManager {
                 };
                 self.install_mcp_from_url(&entry.name, &url).await
             }
-            ExtensionKind::WasmTool => match &entry.source {
+            ExtensionKind::WasmTool => match source {
                 ExtensionSource::WasmDownload {
                     wasm_url,
                     capabilities_url,
@@ -586,10 +618,10 @@ impl ExtensionManager {
                     .await
                 }
                 _ => Err(ExtensionError::InstallFailed(
-                    "WASM tool entry has no download URL".to_string(),
+                    "WASM tool entry has no download URL or build info".to_string(),
                 )),
             },
-            ExtensionKind::WasmChannel => match &entry.source {
+            ExtensionKind::WasmChannel => match source {
                 ExtensionSource::WasmDownload {
                     wasm_url,
                     capabilities_url,
@@ -616,7 +648,7 @@ impl ExtensionManager {
                     .await
                 }
                 _ => Err(ExtensionError::InstallFailed(
-                    "WASM channel entry has no download URL".to_string(),
+                    "WASM channel entry has no download URL or build info".to_string(),
                 )),
             },
         }

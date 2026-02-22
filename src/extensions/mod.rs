@@ -64,6 +64,9 @@ pub struct RegistryEntry {
     pub keywords: Vec<String>,
     /// Where to get this extension.
     pub source: ExtensionSource,
+    /// Fallback source when the primary source fails (e.g., download 404 → build from source).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fallback_source: Option<Box<ExtensionSource>>,
     /// How authentication works.
     pub auth_hint: AuthHint,
 }
