@@ -28,8 +28,7 @@ impl Tool for JsonTool {
                     "description": "The JSON operation to perform"
                 },
                 "data": {
-                    "type": ["string", "object", "array", "number", "boolean", "null"],
-                    "description": "JSON input data. Pass a string for parse, any type otherwise."
+                    "description": "JSON input data. Pass a string for parse, or any JSON value (object, array, string, number, boolean, null) otherwise."
                 },
                 "path": {
                     "type": "string",
