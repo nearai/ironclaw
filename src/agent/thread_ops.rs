@@ -325,8 +325,7 @@ impl Agent {
                     .await;
 
                 // Persist assistant response (user message already persisted at turn start)
-                self.persist_assistant_response(thread_id, &response)
-                    .await;
+                self.persist_assistant_response(thread_id, &response).await;
 
                 Ok(SubmissionResult::response(response))
             }
@@ -395,11 +394,7 @@ impl Agent {
     ///
     /// Assumes `persist_user_message` was called earlier in the turn to ensure
     /// the conversation row exists.
-    pub(super) async fn persist_assistant_response(
-        &self,
-        thread_id: Uuid,
-        response: &str,
-    ) {
+    pub(super) async fn persist_assistant_response(&self, thread_id: Uuid, response: &str) {
         let store = match self.store() {
             Some(s) => Arc::clone(s),
             None => return,
@@ -1031,8 +1026,7 @@ impl Agent {
                 Ok(AgenticLoopResult::Response(response)) => {
                     thread.complete_turn(&response);
                     // User message already persisted at turn start; save assistant response
-                    self.persist_assistant_response(thread_id, &response)
-                        .await;
+                    self.persist_assistant_response(thread_id, &response).await;
                     let _ = self
                         .channels
                         .send_status(
@@ -1085,8 +1079,7 @@ impl Agent {
                     thread.clear_pending_approval();
                     thread.complete_turn(&rejection);
                     // User message already persisted at turn start; save rejection response
-                    self.persist_assistant_response(thread_id, &rejection)
-                        .await;
+                    self.persist_assistant_response(thread_id, &rejection).await;
                 }
             }
 
