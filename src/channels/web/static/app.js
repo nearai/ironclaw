@@ -1455,18 +1455,11 @@ function renderExtensionCard(ext) {
   actions.className = 'ext-actions';
 
   if (!ext.active) {
-    if (ext.kind === 'wasm_channel') {
-      const restartLabel = document.createElement('span');
-      restartLabel.className = 'ext-restart-label';
-      restartLabel.textContent = 'Restart to activate';
-      actions.appendChild(restartLabel);
-    } else {
-      const activateBtn = document.createElement('button');
-      activateBtn.className = 'btn-ext activate';
-      activateBtn.textContent = 'Activate';
-      activateBtn.addEventListener('click', () => activateExtension(ext.name));
-      actions.appendChild(activateBtn);
-    }
+    const activateBtn = document.createElement('button');
+    activateBtn.className = 'btn-ext activate';
+    activateBtn.textContent = 'Activate';
+    activateBtn.addEventListener('click', () => activateExtension(ext.name));
+    actions.appendChild(activateBtn);
   } else {
     const activeLabel = document.createElement('span');
     activeLabel.className = 'ext-active-label';
@@ -1490,8 +1483,10 @@ function renderExtensionCard(ext) {
 
   card.appendChild(actions);
 
-  // For active WASM channels, check for pending pairing requests
-  if (ext.active && ext.kind === 'wasm_channel') {
+  // For WASM channels, check for pending pairing requests.
+  // Show even when inactive — pairing requests can arrive via webhooks
+  // before the channel is fully activated.
+  if (ext.kind === 'wasm_channel') {
     const pairingSection = document.createElement('div');
     pairingSection.className = 'ext-pairing';
     card.appendChild(pairingSection);

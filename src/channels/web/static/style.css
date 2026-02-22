@@ -1936,12 +1936,6 @@ body {
   font-weight: 500;
 }
 
-.ext-restart-label {
-  font-size: 12px;
-  color: var(--text-secondary);
-  font-style: italic;
-}
-
 .btn-ext {
   padding: 4px 10px;
   border-radius: var(--radius);

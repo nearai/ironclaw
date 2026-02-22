@@ -61,7 +61,7 @@ fn convert_test_pages_to_markdown() {
                 std::fs::read_to_string(path.join("metadata.json")).expect("read metadata.json");
             serde_json::from_str(&raw).expect("invalid metadata.json")
         } else {
-            PageMetadata::default()
+            Default::default()
         };
 
         let url = metadata.url.as_deref().unwrap_or(&default_url).to_string();

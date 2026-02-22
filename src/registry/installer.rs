@@ -94,12 +94,13 @@ impl RegistryInstaller {
             source_dir.display()
         );
         let crate_name = &manifest.source.crate_name;
-        let wasm_path = build_wasm_component(&source_dir, crate_name)
-            .await
-            .map_err(|e| RegistryError::ManifestRead {
-                path: source_dir.clone(),
-                reason: format!("build failed: {}", e),
-            })?;
+        let wasm_path =
+            crate::registry::artifacts::build_wasm_component(&source_dir, crate_name, true)
+                .await
+                .map_err(|e| RegistryError::ManifestRead {
+                    path: source_dir.clone(),
+                    reason: format!("build failed: {}", e),
+                })?;
 
         // Copy WASM binary
         println!("  Installing to {}", target_wasm.display());
@@ -351,64 +352,6 @@ impl RegistryInstaller {
 
         (outcomes, auth_hints)
     }
-}
-
-/// Build a WASM component from a source directory using `cargo component build --release`.
-///
-/// Uses `tokio::process::Command` with inherited stdio so build progress is visible.
-/// Looks for the specific `{crate_name}.wasm` in the release directory rather than
-/// picking the first `.wasm` file found.
-async fn build_wasm_component(source_dir: &Path, crate_name: &str) -> anyhow::Result<PathBuf> {
-    use tokio::process::Command;
-
-    // Check cargo-component availability
-    let check = Command::new("cargo")
-        .args(["component", "--version"])
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status()
-        .await;
-
-    if check.is_err() || !check.as_ref().map(|s| s.success()).unwrap_or(false) {
-        anyhow::bail!("cargo-component not found. Install with: cargo install cargo-component");
-    }
-
-    // Use status() with inherited stdio so build output streams to the terminal.
-    let status = Command::new("cargo")
-        .current_dir(source_dir)
-        .args(["component", "build", "--release"])
-        .status()
-        .await?;
-
-    if !status.success() {
-        anyhow::bail!("Build failed (exit code: {})", status);
-    }
-
-    // Look for the specific crate's WASM file (Cargo uses underscores in artifact names).
-    let wasm_filename = format!("{}.wasm", crate_name.replace('-', "_"));
-    let target_base = source_dir.join("target");
-    let candidates = [
-        "wasm32-wasip1",
-        "wasm32-wasip2",
-        "wasm32-wasi",
-        "wasm32-unknown-unknown",
-    ];
-
-    for target in &candidates {
-        let wasm_path = target_base
-            .join(target)
-            .join("release")
-            .join(&wasm_filename);
-        if wasm_path.exists() {
-            return Ok(wasm_path);
-        }
-    }
-
-    anyhow::bail!(
-        "Could not find {} in {}/target/*/release/",
-        wasm_filename,
-        source_dir.display()
-    )
 }
 
 /// Download an artifact from a URL.
