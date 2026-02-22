@@ -1167,6 +1167,21 @@ impl Store {
             .await?;
         Ok(row.get("cnt"))
     }
+
+    /// Link a routine run to a dispatched job.
+    pub async fn link_routine_run_to_job(
+        &self,
+        run_id: Uuid,
+        job_id: Uuid,
+    ) -> Result<(), DatabaseError> {
+        let conn = self.conn().await?;
+        conn.execute(
+            "UPDATE routine_runs SET job_id = $1 WHERE id = $2",
+            &[&job_id, &run_id],
+        )
+        .await?;
+        Ok(())
+    }
 }
 
 #[cfg(feature = "postgres")]

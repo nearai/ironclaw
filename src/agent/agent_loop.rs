@@ -98,7 +98,7 @@ impl Agent {
     pub fn new(
         config: AgentConfig,
         deps: AgentDeps,
-        channels: ChannelManager,
+        channels: Arc<ChannelManager>,
         heartbeat_config: Option<HeartbeatConfig>,
         hygiene_config: Option<crate::config::HygieneConfig>,
         routine_config: Option<RoutineConfig>,
@@ -123,7 +123,7 @@ impl Agent {
         Self {
             config,
             deps,
-            channels: Arc::new(channels),
+            channels,
             context_manager,
             scheduler,
             router: Router::new(),
@@ -397,6 +397,7 @@ impl Agent {
                         self.llm().clone(),
                         Arc::clone(workspace),
                         notify_tx,
+                        Some(self.scheduler.clone()),
                     ));
 
                     // Register routine tools
@@ -499,21 +500,41 @@ impl Agent {
                         Ok(crate::hooks::HookOutcome::Continue {
                             modified: Some(new_content),
                         }) => {
-                            let _ = self
+                            if let Err(e) = self
                                 .channels
                                 .respond(&message, OutgoingResponse::text(new_content))
-                                .await;
+                                .await
+                            {
+                                tracing::error!(
+                                    channel = %message.channel,
+                                    error = %e,
+                                    "Failed to send response to channel"
+                                );
+                            }
                         }
                         _ => {
-                            let _ = self
+                            if let Err(e) = self
                                 .channels
                                 .respond(&message, OutgoingResponse::text(response))
-                                .await;
+                                .await
+                            {
+                                tracing::error!(
+                                    channel = %message.channel,
+                                    error = %e,
+                                    "Failed to send response to channel"
+                                );
+                            }
                         }
                     }
                 }
-                Ok(Some(_)) => {
+                Ok(Some(empty)) => {
                     // Empty response, nothing to send (e.g. approval handled via send_status)
+                    tracing::debug!(
+                        channel = %message.channel,
+                        user = %message.user_id,
+                        empty_len = empty.len(),
+                        "Suppressed empty response (not sent to channel)"
+                    );
                 }
                 Ok(None) => {
                     // Shutdown signal received (/quit, /exit, /shutdown)
@@ -522,10 +543,17 @@ impl Agent {
                 }
                 Err(e) => {
                     tracing::error!("Error handling message: {}", e);
-                    let _ = self
+                    if let Err(send_err) = self
                         .channels
                         .respond(&message, OutgoingResponse::text(format!("Error: {}", e)))
-                        .await;
+                        .await
+                    {
+                        tracing::error!(
+                            channel = %message.channel,
+                            error = %send_err,
+                            "Failed to send error response to channel"
+                        );
+                    }
                 }
             }
 

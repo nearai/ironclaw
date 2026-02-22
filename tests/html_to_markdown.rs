@@ -27,10 +27,8 @@ fn normalize(s: &str) -> String {
 /// Normalize typographic/smart punctuation to ASCII so tests match converter output
 /// regardless of apostrophe/quote variants (e.g. U+2019 ' → U+0027 ').
 fn normalize_smart_punctuation(s: &str) -> String {
-    s.replace('\u{2019}', "'") // RIGHT SINGLE QUOTATION MARK
-        .replace('\u{2018}', "'") // LEFT SINGLE QUOTATION MARK
-        .replace('\u{201C}', "\"") // LEFT DOUBLE QUOTATION MARK
-        .replace('\u{201D}', "\"") // RIGHT DOUBLE QUOTATION MARK
+    s.replace(['\u{2019}', '\u{2018}'], "'")
+        .replace(['\u{201C}', '\u{201D}'], "\"")
 }
 
 #[test]
@@ -58,15 +56,13 @@ fn convert_test_pages_to_markdown() {
             .unwrap_or("unknown");
         let default_url = format!("https://example.com/test-pages/{}/", dir_name);
 
-        let metadata: PageMetadata = path
-            .join("metadata.json")
-            .is_file()
-            .then(|| {
-                let raw = std::fs::read_to_string(path.join("metadata.json"))
-                    .expect("read metadata.json");
-                serde_json::from_str(&raw).expect("invalid metadata.json")
-            })
-            .unwrap_or_default();
+        let metadata: PageMetadata = if path.join("metadata.json").is_file() {
+            let raw =
+                std::fs::read_to_string(path.join("metadata.json")).expect("read metadata.json");
+            serde_json::from_str(&raw).expect("invalid metadata.json")
+        } else {
+            Default::default()
+        };
 
         let url = metadata.url.as_deref().unwrap_or(&default_url).to_string();
 

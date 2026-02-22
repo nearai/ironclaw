@@ -277,9 +277,15 @@ async fn main() -> anyhow::Result<()> {
 
     // ── Channel setup ──────────────────────────────────────────────────
 
-    let mut channels = ChannelManager::new();
+    let channels = ChannelManager::new();
     let mut channel_names: Vec<String> = Vec::new();
     let mut loaded_wasm_channel_names: Vec<String> = Vec::new();
+    #[allow(clippy::type_complexity)]
+    let mut wasm_channel_runtime_state: Option<(
+        Arc<WasmChannelRuntime>,
+        Arc<PairingStore>,
+        Arc<WasmChannelRouter>,
+    )> = None;
 
     // Create CLI channel
     let repl_channel = if let Some(ref msg) = cli.message {
@@ -293,7 +299,7 @@ async fn main() -> anyhow::Result<()> {
     };
 
     if let Some(repl) = repl_channel {
-        channels.add(Box::new(repl));
+        channels.add(Box::new(repl)).await;
         if cli.message.is_some() {
             tracing::info!("Single message mode");
         } else {
@@ -316,9 +322,14 @@ async fn main() -> anyhow::Result<()> {
 
         if let Some(result) = wasm_result {
             loaded_wasm_channel_names = result.channel_names;
+            wasm_channel_runtime_state = Some((
+                result.wasm_channel_runtime,
+                result.pairing_store,
+                result.wasm_channel_router,
+            ));
             for (name, channel) in result.channels {
                 channel_names.push(name);
-                channels.add(channel);
+                channels.add(channel).await;
             }
             if let Some(routes) = result.webhook_routes {
                 webhook_routes.push(routes);
@@ -340,7 +351,7 @@ async fn main() -> anyhow::Result<()> {
                 .expect("HttpConfig host:port must be a valid SocketAddr"),
         );
         channel_names.push("http".to_string());
-        channels.add(Box::new(http_channel));
+        channels.add(Box::new(http_channel)).await;
         tracing::info!(
             "HTTP channel enabled on {}:{}",
             http_config.host,
@@ -466,7 +477,7 @@ async fn main() -> anyhow::Result<()> {
         tracing::info!("Web UI: http://{}:{}/", gw_config.host, gw_config.port);
 
         channel_names.push("gateway".to_string());
-        channels.add(Box::new(gw));
+        channels.add(Box::new(gw)).await;
     }
 
     // ── Boot screen ────────────────────────────────────────────────────
@@ -516,6 +527,24 @@ async fn main() -> anyhow::Result<()> {
 
     // ── Run the agent ──────────────────────────────────────────────────
 
+    let channels = Arc::new(channels);
+
+    // Wire up channel runtime for hot-activation of WASM channels.
+    if let Some(ref ext_mgr) = components.extension_manager
+        && let Some((rt, ps, router)) = wasm_channel_runtime_state.take()
+    {
+        ext_mgr
+            .set_channel_runtime(
+                Arc::clone(&channels),
+                rt,
+                ps,
+                router,
+                config.channels.telegram_owner_id,
+            )
+            .await;
+        tracing::info!("Channel runtime wired into extension manager for hot-activation");
+    }
+
     let deps = AgentDeps {
         store: components.db,
         llm: components.llm,
@@ -529,6 +558,7 @@ async fn main() -> anyhow::Result<()> {
         hooks: components.hooks,
         cost_guard: components.cost_guard,
     };
+
     let agent = Agent::new(
         config.agent.clone(),
         deps,
@@ -733,6 +763,10 @@ struct WasmChannelSetup {
     channels: Vec<(String, Box<dyn ironclaw::channels::Channel>)>,
     channel_names: Vec<String>,
     webhook_routes: Option<axum::Router>,
+    /// Runtime objects needed for hot-activation via ExtensionManager.
+    wasm_channel_runtime: Arc<WasmChannelRuntime>,
+    pairing_store: Arc<PairingStore>,
+    wasm_channel_router: Arc<WasmChannelRouter>,
 }
 
 /// Load WASM channels and register their webhook routes.
@@ -750,7 +784,7 @@ async fn setup_wasm_channels(
     };
 
     let pairing_store = Arc::new(PairingStore::new());
-    let loader = WasmChannelLoader::new(Arc::clone(&runtime), pairing_store);
+    let loader = WasmChannelLoader::new(Arc::clone(&runtime), Arc::clone(&pairing_store));
 
     let results = match loader
         .load_from_dir(&config.channels.wasm_channels_dir)
@@ -879,7 +913,7 @@ async fn setup_wasm_channels(
 
     let webhook_routes = if has_webhook_channels {
         Some(create_wasm_channel_router(
-            wasm_router,
+            Arc::clone(&wasm_router),
             extension_manager.map(Arc::clone),
         ))
     } else {
@@ -890,6 +924,9 @@ async fn setup_wasm_channels(
         channels,
         channel_names,
         webhook_routes,
+        wasm_channel_runtime: runtime,
+        pairing_store,
+        wasm_channel_router: wasm_router,
     })
 }
 
