@@ -238,6 +238,7 @@ function sendMessage() {
   const sendBtn = document.getElementById('send-btn');
   if (!currentThreadId) {
     console.warn('sendMessage: no thread selected, ignoring');
+    setStatus('Waiting for thread to load...');
     return;
   }
   const content = input.value.trim();
@@ -262,6 +263,8 @@ function sendMessage() {
 }
 
 function enableChatInput() {
+  // Don't re-enable until a thread is selected (prevents orphan messages)
+  if (!currentThreadId) return;
   const input = document.getElementById('chat-input');
   const sendBtn = document.getElementById('send-btn');
   sendBtn.disabled = false;
