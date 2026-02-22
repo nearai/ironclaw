@@ -968,7 +968,7 @@ impl ExtensionManager {
         };
 
         let pkce = PkceChallenge::generate();
-        let resource = server.url.trim_end_matches('/').to_string();
+        let resource = crate::tools::mcp::auth::canonical_resource_uri(&server.url);
         let auth_url = build_authorization_url(
             &metadata.authorization_endpoint,
             &client_id,

@@ -4,6 +4,7 @@
 //! See: https://spec.modelcontextprotocol.io/specification/2025-03-26/basic/authorization/
 
 use std::collections::HashMap;
+use std::net::IpAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -49,6 +50,85 @@ pub enum AuthError {
 
     #[error("Secrets error: {0}")]
     Secrets(String),
+}
+
+/// Validate that a URL is safe for network requests (prevents SSRF).
+///
+/// Checks that:
+/// - The URL uses HTTPS scheme (or HTTP for localhost)
+/// - The URL does not resolve to private, loopback, or link-local IP addresses
+fn validate_url_safe(url: &str) -> Result<(), AuthError> {
+    let parsed = reqwest::Url::parse(url)
+        .map_err(|e| AuthError::DiscoveryFailed(format!("Invalid URL: {}", e)))?;
+
+    // Only allow https:// (or http:// for localhost)
+    match parsed.scheme() {
+        "https" => {}
+        "http" => {
+            // Only allow HTTP for localhost/127.0.0.1
+            if let Some(host) = parsed.host_str() {
+                if host != "localhost" && host != "127.0.0.1" && host != "[::1]" {
+                    return Err(AuthError::DiscoveryFailed(
+                        "HTTP URLs are only allowed for localhost".to_string(),
+                    ));
+                }
+            }
+        }
+        _ => {
+            return Err(AuthError::DiscoveryFailed(format!(
+                "Unsupported URL scheme: {}",
+                parsed.scheme()
+            )))
+        }
+    }
+
+    // Check if the host resolves to a dangerous IP address
+    if let Some(host) = parsed.host_str() {
+        // Try to resolve the hostname to IP addresses
+        if let Ok(addrs) = std::net::ToSocketAddrs::to_socket_addrs(&(host, 443)) {
+            for addr in addrs {
+                let ip = addr.ip();
+                if is_dangerous_ip(&ip) {
+                    return Err(AuthError::DiscoveryFailed(format!(
+                        "URL resolves to prohibited IP address: {}",
+                        ip
+                    )));
+                }
+            }
+        }
+    }
+
+    Ok(())
+}
+
+/// Check if an IP address is dangerous for SSRF (private, loopback, link-local).
+fn is_dangerous_ip(ip: &IpAddr) -> bool {
+    match ip {
+        IpAddr::V4(v4) => {
+            // Loopback: 127.0.0.0/8
+            v4.is_loopback()
+                // Private: 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16
+                || v4.is_private()
+                // Link-local: 169.254.0.0/16
+                || v4.is_link_local()
+                // Multicast: 224.0.0.0/4
+                || v4.is_multicast()
+                // Broadcast: 255.255.255.255
+                || v4.is_broadcast()
+                // Documentation/TEST-NET: 192.0.2.0/24, 198.51.100.0/24, 203.0.113.0/24
+                || v4.is_documentation()
+        }
+        IpAddr::V6(v6) => {
+            // Loopback: ::1
+            v6.is_loopback()
+                // Multicast: ff00::/8
+                || v6.is_multicast()
+                // Link-local: fe80::/10
+                || ((v6.segments()[0] & 0xffc0) == 0xfe80)
+                // Unique local: fc00::/7
+                || ((v6.segments()[0] & 0xfe00) == 0xfc00)
+        }
+    }
 }
 
 /// OAuth protected resource metadata.
@@ -223,7 +303,9 @@ fn build_well_known_uri(base_url: &str, well_known_suffix: &str) -> Result<Strin
 }
 
 /// Build the canonical resource URI for RFC 8707 `resource` parameter.
-fn canonical_resource_uri(server_url: &str) -> String {
+///
+/// Removes URL fragments and trailing slashes to create a normalized resource identifier.
+pub fn canonical_resource_uri(server_url: &str) -> String {
     let mut url = server_url.to_string();
     if let Some(pos) = url.find('#') {
         url.truncate(pos);
@@ -249,9 +331,13 @@ fn parse_resource_metadata_url(www_authenticate: &str) -> Option<String> {
 /// `WWW-Authenticate` header from the 401 response to extract the
 /// `resource_metadata` URL.
 async fn discover_via_401(server_url: &str) -> Result<Option<String>, AuthError> {
+    // Validate the URL before making the request
+    validate_url_safe(server_url)?;
+
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(10))
-        .redirect(reqwest::redirect::Policy::limited(5))
+        // Disable redirects to prevent SSRF via redirect chains
+        .redirect(reqwest::redirect::Policy::none())
         .build()
         .map_err(|e| AuthError::Http(e.to_string()))?;
 
@@ -268,7 +354,12 @@ async fn discover_via_401(server_url: &str) -> Result<Option<String>, AuthError>
         && let Some(www_auth) = response.headers().get("www-authenticate")
         && let Ok(header_str) = www_auth.to_str()
     {
-        return Ok(parse_resource_metadata_url(header_str));
+        let metadata_url = parse_resource_metadata_url(header_str);
+        // Validate the resource_metadata URL from the header
+        if let Some(ref url) = metadata_url {
+            validate_url_safe(url)?;
+        }
+        return Ok(metadata_url);
     }
 
     Ok(None)
@@ -278,6 +369,9 @@ async fn discover_via_401(server_url: &str) -> Result<Option<String>, AuthError>
 async fn fetch_resource_metadata(
     url: &str,
 ) -> Result<ProtectedResourceMetadata, AuthError> {
+    // Validate URL to prevent SSRF
+    validate_url_safe(url)?;
+
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(10))
         .build()
@@ -325,13 +419,16 @@ pub async fn discover_protected_resource(
 pub async fn discover_authorization_server(
     auth_server_url: &str,
 ) -> Result<AuthorizationServerMetadata, AuthError> {
+    let well_known_url =
+        build_well_known_uri(auth_server_url, "oauth-authorization-server")?;
+
+    // Validate URL to prevent SSRF
+    validate_url_safe(&well_known_url)?;
+
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(10))
         .build()
         .map_err(|e| AuthError::Http(e.to_string()))?;
-
-    let well_known_url =
-        build_well_known_uri(auth_server_url, "oauth-authorization-server")?;
 
     tracing::debug!("Fetching auth server metadata from {}", well_known_url);
 
@@ -353,6 +450,25 @@ pub async fn discover_authorization_server(
         .json()
         .await
         .map_err(|e| AuthError::DiscoveryFailed(format!("Invalid metadata: {}", e)))
+}
+
+/// Try to discover authorization server metadata from a list of authorization server URLs.
+///
+/// Iterates through the list and returns the first successful discovery.
+async fn try_discover_from_auth_servers(
+    servers: &[String],
+) -> Result<Option<AuthorizationServerMetadata>, AuthError> {
+    for auth_server_url in servers {
+        match discover_authorization_server(auth_server_url).await {
+            Ok(meta) => return Ok(Some(meta)),
+            Err(e) => tracing::debug!(
+                "Auth server discovery failed for {}: {}",
+                auth_server_url,
+                e
+            ),
+        }
+    }
+    Ok(None)
 }
 
 /// Discover OAuth endpoints for an MCP server.
@@ -397,15 +513,10 @@ pub async fn discover_full_oauth_metadata(
                 resource_metadata_url
             );
             if let Ok(resource_meta) = fetch_resource_metadata(&resource_metadata_url).await {
-                for auth_server_url in &resource_meta.authorization_servers {
-                    match discover_authorization_server(auth_server_url).await {
-                        Ok(meta) => return Ok(meta),
-                        Err(e) => tracing::debug!(
-                            "Auth server discovery failed for {}: {}",
-                            auth_server_url,
-                            e
-                        ),
-                    }
+                if let Ok(Some(meta)) =
+                    try_discover_from_auth_servers(&resource_meta.authorization_servers).await
+                {
+                    return Ok(meta);
                 }
             }
         }
@@ -420,15 +531,10 @@ pub async fn discover_full_oauth_metadata(
     );
     match discover_protected_resource(server_url).await {
         Ok(resource_meta) => {
-            for auth_server_url in &resource_meta.authorization_servers {
-                match discover_authorization_server(auth_server_url).await {
-                    Ok(meta) => return Ok(meta),
-                    Err(e) => tracing::debug!(
-                        "Auth server discovery failed for {}: {}",
-                        auth_server_url,
-                        e
-                    ),
-                }
+            if let Ok(Some(meta)) =
+                try_discover_from_auth_servers(&resource_meta.authorization_servers).await
+            {
+                return Ok(meta);
             }
             if resource_meta.authorization_servers.is_empty() {
                 tracing::debug!("No authorization_servers in protected resource metadata");

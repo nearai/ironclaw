@@ -236,12 +236,14 @@ async fn list_servers(verbose: bool) -> anyhow::Result<()> {
 
         // Check if server requires auth AND whether we actually have tokens
         let auth_status = if server.requires_auth() {
-            if let Some(ref secrets) = secrets {
-                if is_authenticated(server, secrets, DEFAULT_USER_ID).await {
-                    " (authenticated)"
-                } else {
-                    " (auth required)"
-                }
+            let authenticated = if let Some(ref secrets) = secrets {
+                is_authenticated(server, secrets, DEFAULT_USER_ID).await
+            } else {
+                false
+            };
+
+            if authenticated {
+                " (authenticated)"
             } else {
                 " (auth required)"
             }
