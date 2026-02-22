@@ -23,6 +23,7 @@ pub struct BootInfo {
     pub docker_status: crate::sandbox::detect::DockerStatus,
     pub claude_code_enabled: bool,
     pub routines_enabled: bool,
+    pub skills_enabled: bool,
     pub channels: Vec<String>,
     /// Public URL from a managed tunnel (e.g., "https://abc.ngrok.io").
     pub tunnel_url: Option<String>,
@@ -112,6 +113,9 @@ pub fn print_boot_screen(info: &BootInfo) {
     if info.routines_enabled {
         features.push("routines".to_string());
     }
+    if info.skills_enabled {
+        features.push("skills".to_string());
+    }
     if !features.is_empty() {
         println!(
             "  {dim}features{reset}  {cyan}{}{reset}",
@@ -175,6 +179,7 @@ mod tests {
             docker_status: DockerStatus::Available,
             claude_code_enabled: false,
             routines_enabled: true,
+            skills_enabled: true,
             channels: vec![
                 "repl".to_string(),
                 "gateway".to_string(),
@@ -207,6 +212,7 @@ mod tests {
             docker_status: DockerStatus::Disabled,
             claude_code_enabled: false,
             routines_enabled: false,
+            skills_enabled: false,
             channels: vec![],
             tunnel_url: None,
             tunnel_provider: None,
@@ -235,6 +241,7 @@ mod tests {
             docker_status: DockerStatus::Disabled,
             claude_code_enabled: false,
             routines_enabled: false,
+            skills_enabled: false,
             channels: vec!["repl".to_string()],
             tunnel_url: None,
             tunnel_provider: None,

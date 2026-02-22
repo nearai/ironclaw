@@ -1503,6 +1503,7 @@ async fn main() -> anyhow::Result<()> {
             docker_status,
             claude_code_enabled: config.claude_code.enabled,
             routines_enabled: config.routines.enabled,
+            skills_enabled: config.skills.enabled,
             channels: channel_names,
             tunnel_url: active_tunnel
                 .as_ref()

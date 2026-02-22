@@ -19,7 +19,7 @@ pub struct SkillsConfig {
 impl Default for SkillsConfig {
     fn default() -> Self {
         Self {
-            enabled: false,
+            enabled: true,
             local_dir: default_skills_dir(),
             max_active_skills: 3,
             max_context_tokens: 4000,
@@ -45,7 +45,7 @@ impl SkillsConfig {
                     key: "SKILLS_ENABLED".to_string(),
                     message: format!("must be 'true' or 'false': {e}"),
                 })?
-                .unwrap_or(false),
+                .unwrap_or(true),
             local_dir: optional_env("SKILLS_DIR")?
                 .map(PathBuf::from)
                 .unwrap_or_else(default_skills_dir),

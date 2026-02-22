@@ -5,7 +5,7 @@
 //! up-to-date with the registry.
 //!
 //! Configuration:
-//! - `CLAWHUB_REGISTRY` env var overrides the default base URL (`https://clawhub.ai`)
+//! - `CLAWHUB_REGISTRY` env var overrides the default base URL
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -14,7 +14,10 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::RwLock;
 
 /// Default ClawHub registry URL.
-const DEFAULT_REGISTRY_URL: &str = "https://clawhub.ai";
+///
+/// Points directly at the Convex backend, bypassing Vercel's edge which
+/// rejects non-browser TLS fingerprints (JA3/JA4 filtering).
+const DEFAULT_REGISTRY_URL: &str = "https://wry-manatee-359.convex.site";
 
 /// How long cached search results remain valid (5 minutes).
 const CACHE_TTL: Duration = Duration::from_secs(300);
@@ -24,6 +27,15 @@ const MAX_RESULTS: usize = 25;
 
 /// HTTP request timeout for catalog queries.
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Result of a catalog search, carrying both results and any error that occurred.
+#[derive(Debug, Clone)]
+pub struct CatalogSearchOutcome {
+    /// Skill entries returned by the search (empty on error).
+    pub results: Vec<CatalogEntry>,
+    /// If the registry was unreachable or returned an error, a human-readable message.
+    pub error: Option<String>,
+}
 
 /// A skill entry from the ClawHub catalog.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -41,18 +53,21 @@ pub struct CatalogEntry {
     /// Relevance score from the search API.
     #[serde(default)]
     pub score: f64,
+    /// Last updated timestamp (epoch milliseconds from registry).
+    #[serde(default)]
+    pub updated_at: Option<u64>,
 }
 
 /// Cached search result with TTL.
 struct CachedSearch {
     query: String,
-    results: Vec<CatalogEntry>,
+    outcome: CatalogSearchOutcome,
     fetched_at: Instant,
 }
 
 /// Runtime skill catalog that queries ClawHub's API.
 pub struct SkillCatalog {
-    /// Base URL for the registry (e.g. `https://clawhub.ai`).
+    /// Base URL for the registry.
     registry_url: String,
     /// HTTP client (reused across requests).
     client: reqwest::Client,
@@ -64,7 +79,7 @@ impl SkillCatalog {
     /// Create a new catalog.
     ///
     /// Reads `CLAWHUB_REGISTRY` (or legacy `CLAWDHUB_REGISTRY`) from the
-    /// environment, falling back to `https://clawhub.ai`.
+    /// environment, falling back to the Convex backend.
     pub fn new() -> Self {
         let registry_url = std::env::var("CLAWHUB_REGISTRY")
             .or_else(|_| std::env::var("CLAWDHUB_REGISTRY"))
@@ -102,9 +117,10 @@ impl SkillCatalog {
     /// Search for skills in the catalog.
     ///
     /// First checks the in-memory cache. If not cached or expired, fetches
-    /// from the ClawHub API. Returns an empty Vec on network errors (catalog
-    /// search is best-effort, never blocks the agent).
-    pub async fn search(&self, query: &str) -> Vec<CatalogEntry> {
+    /// from the ClawHub API. Returns a [`CatalogSearchOutcome`] that carries
+    /// both results and any error that occurred (catalog search is best-effort,
+    /// never blocks the agent).
+    pub async fn search(&self, query: &str) -> CatalogSearchOutcome {
         let query_lower = query.to_lowercase();
 
         // Check cache
@@ -113,12 +129,12 @@ impl SkillCatalog {
             if let Some(cached) = cache.iter().find(|c| c.query == query_lower)
                 && cached.fetched_at.elapsed() < CACHE_TTL
             {
-                return cached.results.clone();
+                return cached.outcome.clone();
             }
         }
 
         // Fetch from API
-        let results = self.fetch_search(&query_lower).await;
+        let outcome = self.fetch_search(&query_lower).await;
 
         // Update cache
         {
@@ -131,43 +147,77 @@ impl SkillCatalog {
             }
             cache.push(CachedSearch {
                 query: query_lower,
-                results: results.clone(),
+                outcome: outcome.clone(),
                 fetched_at: Instant::now(),
             });
         }
 
-        results
+        outcome
     }
 
     /// Fetch search results from the ClawHub API.
-    async fn fetch_search(&self, query: &str) -> Vec<CatalogEntry> {
+    async fn fetch_search(&self, query: &str) -> CatalogSearchOutcome {
         let url = format!("{}/api/v1/search", self.registry_url);
 
         let response = match self.client.get(&url).query(&[("q", query)]).send().await {
             Ok(resp) => resp,
             Err(e) => {
                 tracing::debug!("Catalog search failed (network): {}", e);
-                return Vec::new();
+                return CatalogSearchOutcome {
+                    results: Vec::new(),
+                    error: Some(format!("Registry unreachable: {e}")),
+                };
             }
         };
 
         if !response.status().is_success() {
+            let status = response.status();
             tracing::debug!(
                 "Catalog search returned status {}: {}",
-                response.status(),
+                status,
                 response
                     .text()
                     .await
                     .unwrap_or_else(|_| "(no body)".to_string())
             );
-            return Vec::new();
+            return CatalogSearchOutcome {
+                results: Vec::new(),
+                error: Some(format!("Registry returned status {status}")),
+            };
         }
 
-        // Parse the response -- ClawHub returns an array of results.
-        // We try the v1 format first (with slug, displayName, version, score),
-        // then fall back to a simpler format.
-        match response.json::<Vec<CatalogSearchResult>>().await {
-            Ok(results) => results
+        // Parse the response body as text first so we can try multiple formats.
+        let body = match response.text().await {
+            Ok(b) => b,
+            Err(e) => {
+                tracing::debug!("Catalog search: failed to read response body: {}", e);
+                return CatalogSearchOutcome {
+                    results: Vec::new(),
+                    error: Some("Failed to read registry response".to_string()),
+                };
+            }
+        };
+
+        // Try wrapped format first: {"results": [...]}
+        // Then fall back to bare array: [...]
+        let raw_results = if let Ok(envelope) = serde_json::from_str::<CatalogSearchEnvelope>(&body)
+        {
+            envelope.results
+        } else if let Ok(arr) = serde_json::from_str::<Vec<CatalogSearchResult>>(&body) {
+            arr
+        } else {
+            tracing::debug!(
+                "Catalog search: failed to parse response: {}",
+                &body[..body.len().min(200)]
+            );
+            return CatalogSearchOutcome {
+                results: Vec::new(),
+                error: Some("Invalid response from registry".to_string()),
+            };
+        };
+
+        CatalogSearchOutcome {
+            results: raw_results
                 .into_iter()
                 .take(MAX_RESULTS)
                 .map(|r| CatalogEntry {
@@ -176,12 +226,10 @@ impl SkillCatalog {
                     description: r.summary.unwrap_or_default(),
                     version: r.version.unwrap_or_default(),
                     score: r.score.unwrap_or(0.0),
+                    updated_at: r.updated_at,
                 })
                 .collect(),
-            Err(e) => {
-                tracing::debug!("Catalog search: failed to parse response: {}", e);
-                Vec::new()
-            }
+            error: None,
         }
     }
 
@@ -202,6 +250,12 @@ impl Default for SkillCatalog {
     }
 }
 
+/// Wrapper for ClawHub's `{"results": [...]}` envelope.
+#[derive(Debug, Deserialize)]
+struct CatalogSearchEnvelope {
+    results: Vec<CatalogSearchResult>,
+}
+
 /// Internal type matching ClawHub's `/api/v1/search` response items.
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -215,6 +269,8 @@ struct CatalogSearchResult {
     summary: Option<String>,
     #[serde(default)]
     score: Option<f64>,
+    #[serde(default)]
+    updated_at: Option<u64>,
 }
 
 /// Construct the download URL for a skill's SKILL.md from the registry.
@@ -252,11 +308,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_search_returns_empty_on_network_error() {
+    async fn test_search_returns_error_on_network_failure() {
         // Point at an invalid URL to trigger a network error
         let catalog = SkillCatalog::with_url("http://127.0.0.1:1");
-        let results = catalog.search("test").await;
-        assert!(results.is_empty());
+        let outcome = catalog.search("test").await;
+        assert!(outcome.results.is_empty());
+        assert!(outcome.error.is_some());
+        assert!(outcome.error.unwrap().contains("Registry unreachable"));
     }
 
     #[tokio::test]
@@ -296,6 +354,28 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_wrapped_response() {
+        // ClawHub returns {"results": [...]} format
+        let json = r#"{"results":[{"slug":"markdown","displayName":"Markdown","summary":"A skill","version":"1.0.0","score":3.5}]}"#;
+        let envelope: CatalogSearchEnvelope = serde_json::from_str(json).unwrap();
+        assert_eq!(envelope.results.len(), 1);
+        assert_eq!(envelope.results[0].slug, "markdown");
+        assert_eq!(
+            envelope.results[0].display_name.as_deref(),
+            Some("Markdown")
+        );
+    }
+
+    #[test]
+    fn test_parse_bare_array_response() {
+        // Fallback: bare array format
+        let json = r#"[{"slug":"markdown","displayName":"Markdown","summary":"A skill","version":"1.0.0","score":3.5}]"#;
+        let results: Vec<CatalogSearchResult> = serde_json::from_str(json).unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].slug, "markdown");
+    }
+
+    #[test]
     fn test_catalog_entry_serde() {
         let entry = CatalogEntry {
             slug: "test/skill".to_string(),
@@ -303,6 +383,7 @@ mod tests {
             description: "A test".to_string(),
             version: "1.0.0".to_string(),
             score: 0.95,
+            updated_at: Some(1700000000000),
         };
         let json = serde_json::to_string(&entry).unwrap();
         let parsed: CatalogEntry = serde_json::from_str(&json).unwrap();

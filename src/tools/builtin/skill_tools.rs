@@ -155,7 +155,8 @@ impl Tool for SkillSearchTool {
         let query = require_str(&params, "query")?;
 
         // Search the ClawHub catalog (async, best-effort)
-        let catalog_results = self.catalog.search(query).await;
+        let catalog_outcome = self.catalog.search(query).await;
+        let catalog_error = catalog_outcome.error.clone();
 
         // Search locally loaded skills
         let installed_names: Vec<String> = {
@@ -171,7 +172,8 @@ impl Tool for SkillSearchTool {
         };
 
         // Mark catalog entries that are already installed
-        let catalog_json: Vec<serde_json::Value> = catalog_results
+        let catalog_json: Vec<serde_json::Value> = catalog_outcome
+            .results
             .iter()
             .map(|entry| {
                 let is_installed = installed_names.iter().any(|n| {
@@ -218,13 +220,16 @@ impl Tool for SkillSearchTool {
                 .collect()
         };
 
-        let output = serde_json::json!({
+        let mut output = serde_json::json!({
             "catalog": catalog_json,
             "catalog_count": catalog_json.len(),
             "installed": local_matches,
             "installed_count": local_matches.len(),
             "registry_url": self.catalog.registry_url(),
         });
+        if let Some(err) = catalog_error {
+            output["catalog_error"] = serde_json::Value::String(err);
+        }
 
         Ok(ToolOutput::success(output, start.elapsed()))
     }
@@ -435,6 +440,11 @@ fn is_link_local_ip(ip: &std::net::IpAddr) -> bool {
 }
 
 /// Fetch SKILL.md content from a URL with SSRF protection.
+///
+/// The ClawHub registry returns skill downloads as ZIP archives containing
+/// `SKILL.md` and `_meta.json`. This function detects ZIP responses (by the
+/// `PK\x03\x04` magic bytes) and extracts `SKILL.md` automatically. Plain
+/// text responses are returned as-is.
 pub async fn fetch_skill_content(url: &str) -> Result<String, ToolError> {
     validate_fetch_url(url)?;
 
@@ -457,10 +467,19 @@ pub async fn fetch_skill_content(url: &str) -> Result<String, ToolError> {
         )));
     }
 
-    let content = response
-        .text()
+    let bytes = response
+        .bytes()
         .await
         .map_err(|e| ToolError::ExecutionFailed(format!("Failed to read response body: {}", e)))?;
+
+    // Detect ZIP archive (PK\x03\x04 magic) and extract SKILL.md
+    let content = if bytes.starts_with(b"PK\x03\x04") {
+        extract_skill_from_zip(&bytes)?
+    } else {
+        String::from_utf8(bytes.to_vec()).map_err(|e| {
+            ToolError::ExecutionFailed(format!("Response is not valid UTF-8: {}", e))
+        })?
+    };
 
     // Basic size check
     if content.len() as u64 > crate::skills::MAX_PROMPT_FILE_SIZE {
@@ -472,6 +491,80 @@ pub async fn fetch_skill_content(url: &str) -> Result<String, ToolError> {
     }
 
     Ok(content)
+}
+
+/// Extract `SKILL.md` from a ZIP archive returned by the ClawHub download API.
+///
+/// Walks ZIP local file headers looking for an entry named `SKILL.md`.
+/// Supports Store (method 0) and Deflate (method 8) compression.
+fn extract_skill_from_zip(data: &[u8]) -> Result<String, ToolError> {
+    use flate2::read::DeflateDecoder;
+    use std::io::Read;
+
+    let mut offset = 0;
+    while offset + 30 <= data.len() {
+        // Local file header signature = PK\x03\x04
+        if data[offset..offset + 4] != [0x50, 0x4B, 0x03, 0x04] {
+            break;
+        }
+
+        let compression = u16::from_le_bytes([data[offset + 8], data[offset + 9]]);
+        let compressed_size =
+            u32::from_le_bytes(data[offset + 18..offset + 22].try_into().unwrap()) as usize;
+        let uncompressed_size =
+            u32::from_le_bytes(data[offset + 22..offset + 26].try_into().unwrap()) as usize;
+        let name_len = u16::from_le_bytes([data[offset + 26], data[offset + 27]]) as usize;
+        let extra_len = u16::from_le_bytes([data[offset + 28], data[offset + 29]]) as usize;
+
+        let name_start = offset + 30;
+        let name_end = name_start + name_len;
+        if name_end > data.len() {
+            break;
+        }
+        let file_name = std::str::from_utf8(&data[name_start..name_end]).unwrap_or("");
+
+        let data_start = name_end + extra_len;
+        let data_end = data_start + compressed_size;
+
+        if file_name == "SKILL.md" {
+            if data_end > data.len() {
+                return Err(ToolError::ExecutionFailed(
+                    "ZIP archive truncated".to_string(),
+                ));
+            }
+
+            let raw = &data[data_start..data_end];
+            let decompressed = match compression {
+                0 => raw.to_vec(), // Store
+                8 => {
+                    // Deflate
+                    let mut decoder = DeflateDecoder::new(raw);
+                    let mut buf = Vec::with_capacity(uncompressed_size);
+                    decoder.read_to_end(&mut buf).map_err(|e| {
+                        ToolError::ExecutionFailed(format!("Failed to decompress SKILL.md: {}", e))
+                    })?;
+                    buf
+                }
+                other => {
+                    return Err(ToolError::ExecutionFailed(format!(
+                        "Unsupported ZIP compression method: {}",
+                        other
+                    )));
+                }
+            };
+
+            return String::from_utf8(decompressed).map_err(|e| {
+                ToolError::ExecutionFailed(format!("SKILL.md in archive is not valid UTF-8: {}", e))
+            });
+        }
+
+        // Skip to next entry
+        offset = data_end;
+    }
+
+    Err(ToolError::ExecutionFailed(
+        "ZIP archive does not contain SKILL.md".to_string(),
+    ))
 }
 
 // ── skill_remove ────────────────────────────────────────────────────────
@@ -674,5 +767,79 @@ mod tests {
     fn test_validate_fetch_url_rejects_file_scheme() {
         let err = super::validate_fetch_url("file:///etc/passwd").unwrap_err();
         assert!(err.to_string().contains("Only HTTPS"));
+    }
+
+    #[test]
+    fn test_extract_skill_from_zip_deflate() {
+        // Build a real ZIP with flate2 + manual header construction.
+        use flate2::Compression;
+        use flate2::write::DeflateEncoder;
+        use std::io::Write;
+
+        let skill_md = b"---\nname: test\n---\n# Test Skill\n";
+        let mut encoder = DeflateEncoder::new(Vec::new(), Compression::default());
+        encoder.write_all(skill_md).unwrap();
+        let compressed = encoder.finish().unwrap();
+
+        let mut zip = Vec::new();
+        // Local file header
+        zip.extend_from_slice(&[0x50, 0x4B, 0x03, 0x04]); // signature
+        zip.extend_from_slice(&[0x14, 0x00]); // version needed (2.0)
+        zip.extend_from_slice(&[0x00, 0x00]); // flags
+        zip.extend_from_slice(&[0x08, 0x00]); // compression: deflate
+        zip.extend_from_slice(&[0x00, 0x00, 0x00, 0x00]); // mod time/date
+        zip.extend_from_slice(&[0x00, 0x00, 0x00, 0x00]); // crc32 (unused)
+        zip.extend_from_slice(&(compressed.len() as u32).to_le_bytes()); // compressed size
+        zip.extend_from_slice(&(skill_md.len() as u32).to_le_bytes()); // uncompressed size
+        zip.extend_from_slice(&8u16.to_le_bytes()); // filename length
+        zip.extend_from_slice(&0u16.to_le_bytes()); // extra field length
+        zip.extend_from_slice(b"SKILL.md");
+        zip.extend_from_slice(&compressed);
+
+        let result = super::extract_skill_from_zip(&zip).unwrap();
+        assert_eq!(result, "---\nname: test\n---\n# Test Skill\n");
+    }
+
+    #[test]
+    fn test_extract_skill_from_zip_store() {
+        let skill_md = b"---\nname: stored\n---\n# Stored\n";
+
+        let mut zip = Vec::new();
+        // Local file header
+        zip.extend_from_slice(&[0x50, 0x4B, 0x03, 0x04]);
+        zip.extend_from_slice(&[0x0A, 0x00]); // version needed (1.0)
+        zip.extend_from_slice(&[0x00, 0x00]); // flags
+        zip.extend_from_slice(&[0x00, 0x00]); // compression: store
+        zip.extend_from_slice(&[0x00, 0x00, 0x00, 0x00]); // mod time/date
+        zip.extend_from_slice(&[0x00, 0x00, 0x00, 0x00]); // crc32
+        zip.extend_from_slice(&(skill_md.len() as u32).to_le_bytes()); // compressed = uncompressed
+        zip.extend_from_slice(&(skill_md.len() as u32).to_le_bytes());
+        zip.extend_from_slice(&8u16.to_le_bytes()); // filename length
+        zip.extend_from_slice(&0u16.to_le_bytes()); // extra field length
+        zip.extend_from_slice(b"SKILL.md");
+        zip.extend_from_slice(skill_md);
+
+        let result = super::extract_skill_from_zip(&zip).unwrap();
+        assert_eq!(result, "---\nname: stored\n---\n# Stored\n");
+    }
+
+    #[test]
+    fn test_extract_skill_from_zip_missing_skill_md() {
+        let mut zip = Vec::new();
+        zip.extend_from_slice(&[0x50, 0x4B, 0x03, 0x04]);
+        zip.extend_from_slice(&[0x0A, 0x00]); // version
+        zip.extend_from_slice(&[0x00, 0x00]); // flags
+        zip.extend_from_slice(&[0x00, 0x00]); // compression: store
+        zip.extend_from_slice(&[0x00, 0x00, 0x00, 0x00]); // mod time/date
+        zip.extend_from_slice(&[0x00, 0x00, 0x00, 0x00]); // crc32
+        zip.extend_from_slice(&2u32.to_le_bytes()); // compressed size
+        zip.extend_from_slice(&2u32.to_le_bytes()); // uncompressed size
+        zip.extend_from_slice(&10u16.to_le_bytes()); // filename length
+        zip.extend_from_slice(&0u16.to_le_bytes()); // extra field length
+        zip.extend_from_slice(b"_meta.json");
+        zip.extend_from_slice(b"{}");
+
+        let err = super::extract_skill_from_zip(&zip).unwrap_err();
+        assert!(err.to_string().contains("does not contain SKILL.md"));
     }
 }

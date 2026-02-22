@@ -41,6 +41,7 @@
       <button data-tab="jobs">Jobs</button>
       <button data-tab="routines">Routines</button>
       <button data-tab="extensions">Extensions</button>
+      <button data-tab="skills">Skills</button>
       <div class="spacer"></div>
       <button class="status-logs-btn" data-tab="logs" title="Logs">Logs</button>
       <div class="tee-shield" id="tee-shield" style="display:none" title="Running in a Trusted Execution Environment">
@@ -227,6 +228,34 @@
             <tbody id="tools-tbody"></tbody>
           </table>
           <div class="empty-state" id="tools-empty" style="display:none">No tools registered</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Skills Tab -->
+    <div class="tab-panel" id="tab-skills">
+      <div class="extensions-container">
+        <div class="extensions-section">
+          <h3>Search ClawHub</h3>
+          <div class="skill-search-box">
+            <input type="text" id="skill-search-input" placeholder="Search for skills...">
+            <button onclick="searchClawHub()">Search</button>
+          </div>
+          <div class="extensions-list" id="skill-search-results"></div>
+        </div>
+        <div class="extensions-section">
+          <h3>Installed Skills</h3>
+          <div class="extensions-list" id="skills-list">
+            <div class="empty-state">Loading skills...</div>
+          </div>
+        </div>
+        <div class="extensions-section">
+          <h3>Install Skill by URL</h3>
+          <div class="ext-install-form">
+            <input type="text" id="skill-install-name" placeholder="Skill name or slug">
+            <input type="text" id="skill-install-url" placeholder="HTTPS URL to SKILL.md (optional)">
+            <button onclick="installSkillFromForm()">Install</button>
+          </div>
         </div>
       </div>
     </div>

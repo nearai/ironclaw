@@ -58,8 +58,10 @@ pub async fn skills_search_handler(
     ))?;
 
     // Search ClawHub catalog
-    let catalog_results = catalog.search(&req.query).await;
-    let catalog_json: Vec<serde_json::Value> = catalog_results
+    let catalog_outcome = catalog.search(&req.query).await;
+    let catalog_error = catalog_outcome.error.clone();
+    let catalog_json: Vec<serde_json::Value> = catalog_outcome
+        .results
         .into_iter()
         .map(|e| {
             serde_json::json!({
@@ -68,6 +70,7 @@ pub async fn skills_search_handler(
                 "description": e.description,
                 "version": e.version,
                 "score": e.score,
+                "updatedAt": e.updated_at,
             })
         })
         .collect();
@@ -103,6 +106,7 @@ pub async fn skills_search_handler(
         catalog: catalog_json,
         installed,
         registry_url: catalog.registry_url().to_string(),
+        catalog_error,
     }))
 }
 
