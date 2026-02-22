@@ -52,7 +52,7 @@ IronClaw is a Rust-based personal AI assistant built by [NEAR AI](https://near.a
 | `tunnel/` | 6 | Tunnels: cloudflare, ngrok, tailscale, custom |
 | `secrets/` | 5 | Keychain, AES-256-GCM crypto, credential injection |
 | `worker/` | 5 | Docker worker: runtime, LLM bridge, proxy |
-| **Total** | **260+** | ~115,000 lines of Rust |
+| **Total** | **260+** | ~115,000 Rust source lines (approximate; measured on v0.9.0, including app code, tests, comments) |
 
 ---
 
@@ -75,10 +75,13 @@ LLM_BACKEND=openai
 OPENAI_API_KEY=sk-proj-...
 GATEWAY_ENABLED=true
 GATEWAY_PORT=3000
-GATEWAY_AUTH_TOKEN=<run: openssl rand -hex 32>
+GATEWAY_AUTH_TOKEN=REPLACE_WITH_SECURE_TOKEN
 CLI_ENABLED=false
 RUST_LOG=ironclaw=info
 EOF
+
+# Generate a secure token: openssl rand -hex 32
+# Replace REPLACE_WITH_SECURE_TOKEN above with the output
 
 # Run (one-shot)
 ironclaw --no-onboard

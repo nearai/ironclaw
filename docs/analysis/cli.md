@@ -429,6 +429,8 @@ const GOOGLE_CLIENT_ID: &str = match option_env!("IRONCLAW_GOOGLE_CLIENT_ID") {
 
 Override at **compile time** by setting `IRONCLAW_GOOGLE_CLIENT_ID` and `IRONCLAW_GOOGLE_CLIENT_SECRET` before running `cargo build`. Override at **runtime** by setting `GOOGLE_OAUTH_CLIENT_ID` / `GOOGLE_OAUTH_CLIENT_SECRET` env vars; these take priority over built-in defaults.
 
+> **Security Note:** While Google's OAuth flow for installed/desktop apps treats `client_secret` as non-confidential (since it's distributed with the binary), developers should understand the security implications. For production deployments, consider using your own OAuth credentials registered with Google. See [Google's OAuth 2.0 for Installed Applications](https://developers.google.com/identity/protocols/oauth2/installed-app) for details on why this pattern is acceptable.
+
 The `builtin_credentials(secret_name)` function is the lookup point — it returns credentials keyed by the tool's `auth.secret_name` from `capabilities.json`. Currently only `"google_oauth_token"` has built-in credentials; all other providers return `None` and must supply a `client_id` in their capabilities file or via env var.
 
 **Shared callback server**
