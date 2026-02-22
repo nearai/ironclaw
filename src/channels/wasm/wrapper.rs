@@ -30,6 +30,7 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -553,6 +554,10 @@ pub struct WasmChannel {
     /// In-memory workspace store persisting writes across callback invocations.
     /// Ensures WASM channels can maintain state (e.g., polling offsets) between ticks.
     workspace_store: Arc<ChannelWorkspaceStore>,
+
+    /// Consecutive response failures for health monitoring.
+    /// Reset to 0 on success; emits a warning after `CONSECUTIVE_ERROR_THRESHOLD`.
+    consecutive_errors: AtomicU32,
 }
 
 impl WasmChannel {
@@ -584,6 +589,7 @@ impl WasmChannel {
             typing_task: RwLock::new(None),
             pairing_store,
             workspace_store: Arc::new(ChannelWorkspaceStore::new()),
+            consecutive_errors: AtomicU32::new(0),
         }
     }
 
@@ -1886,6 +1892,45 @@ impl WasmChannel {
     }
 }
 
+/// Number of consecutive response failures before emitting a health warning.
+const CONSECUTIVE_ERROR_THRESHOLD: u32 = 5;
+
+/// Classified error from a WASM channel callback failure reason string.
+#[derive(Debug)]
+enum ChannelCallbackError {
+    /// Token invalid or revoked — surfaces as AuthRequired.
+    AuthFailure(String),
+    /// Upstream rate-limited — log but don't flood the user.
+    RateLimited,
+    /// Missing permission/scope.
+    MissingScope(String),
+    /// Everything else.
+    Other(String),
+}
+
+/// Classify a WASM callback error reason string into actionable categories.
+///
+/// The error reason comes from the WASM module's `on_respond` return value
+/// (e.g., Slack channel returns `"invalid_auth: token_revoked"`).
+fn classify_callback_error(reason: &str) -> ChannelCallbackError {
+    let lower = reason.to_lowercase();
+    if lower.contains("invalid_auth")
+        || lower.contains("token_revoked")
+        || lower.contains("token_expired")
+        || lower.contains("not_authed")
+        || lower.contains("account_inactive")
+        || lower.contains("unauthorized")
+    {
+        ChannelCallbackError::AuthFailure(reason.to_string())
+    } else if lower.contains("rate_limited") || lower.contains("ratelimited") {
+        ChannelCallbackError::RateLimited
+    } else if lower.contains("missing_scope") {
+        ChannelCallbackError::MissingScope(reason.to_string())
+    } else {
+        ChannelCallbackError::Other(reason.to_string())
+    }
+}
+
 #[async_trait]
 impl Channel for WasmChannel {
     fn name(&self) -> &str {
@@ -1982,19 +2027,74 @@ impl Channel for WasmChannel {
         // The original metadata contains channel-specific routing info (e.g., Telegram chat_id)
         // that the WASM channel needs to send the reply to the correct destination.
         let metadata_json = serde_json::to_string(&msg.metadata).unwrap_or_default();
-        self.call_on_respond(
-            msg.id,
-            &response.content,
-            response.thread_id.as_deref(),
-            &metadata_json,
-        )
-        .await
-        .map_err(|e| ChannelError::SendFailed {
-            name: self.name.clone(),
-            reason: e.to_string(),
-        })?;
+        let result = self
+            .call_on_respond(
+                msg.id,
+                &response.content,
+                response.thread_id.as_deref(),
+                &metadata_json,
+            )
+            .await;
 
-        Ok(())
+        match result {
+            Ok(()) => {
+                self.consecutive_errors.store(0, Ordering::Relaxed);
+                Ok(())
+            }
+            Err(e) => {
+                let count = self.consecutive_errors.fetch_add(1, Ordering::Relaxed) + 1;
+                let reason = e.to_string();
+
+                // Classify the error for targeted logging / action
+                let classified = classify_callback_error(&reason);
+                match classified {
+                    ChannelCallbackError::AuthFailure(ref detail) => {
+                        tracing::error!(
+                            channel = %self.name,
+                            detail = %detail,
+                            "Channel auth failure — token may be invalid or revoked"
+                        );
+                    }
+                    ChannelCallbackError::RateLimited => {
+                        tracing::warn!(
+                            channel = %self.name,
+                            "Channel response rate-limited by upstream API"
+                        );
+                    }
+                    ChannelCallbackError::MissingScope(ref detail) => {
+                        tracing::error!(
+                            channel = %self.name,
+                            detail = %detail,
+                            "Channel missing required API scope"
+                        );
+                    }
+                    ChannelCallbackError::Other(ref detail) => {
+                        tracing::warn!(
+                            channel = %self.name,
+                            consecutive = count,
+                            detail = %detail,
+                            "Channel on_respond failed"
+                        );
+                    }
+                }
+
+                // Emit a health warning after N consecutive failures
+                if count == CONSECUTIVE_ERROR_THRESHOLD {
+                    tracing::error!(
+                        channel = %self.name,
+                        consecutive = count,
+                        last_error = %reason,
+                        "Channel has {} consecutive response failures — may need attention",
+                        count
+                    );
+                }
+
+                Err(ChannelError::SendFailed {
+                    name: self.name.clone(),
+                    reason,
+                })
+            }
+        }
     }
 
     async fn send_status(
