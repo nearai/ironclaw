@@ -241,6 +241,11 @@ function isCurrentThread(threadId) {
 function sendMessage() {
   const input = document.getElementById('chat-input');
   const sendBtn = document.getElementById('send-btn');
+  if (!currentThreadId) {
+    console.warn('sendMessage: no thread selected, ignoring');
+    setStatus('Waiting for thread to load...');
+    return;
+  }
   const content = input.value.trim();
   if (!content) return;
 
@@ -263,6 +268,8 @@ function sendMessage() {
 }
 
 function enableChatInput() {
+  // Don't re-enable until a thread is selected (prevents orphan messages)
+  if (!currentThreadId) return;
   const input = document.getElementById('chat-input');
   const sendBtn = document.getElementById('send-btn');
   sendBtn.disabled = false;
@@ -740,6 +747,11 @@ function loadThreads() {
     if (!currentThreadId && assistantThreadId) {
       switchToAssistant();
     }
+
+    // Enable chat input once a thread is available
+    if (currentThreadId) {
+      enableChatInput();
+    }
   }).catch(() => {});
 }
 
@@ -787,6 +799,10 @@ chatInput.addEventListener('keydown', (e) => {
   }
 });
 chatInput.addEventListener('input', () => autoResizeTextarea(chatInput));
+
+// Disable send until a thread is selected (loadThreads will enable it)
+chatInput.disabled = true;
+document.getElementById('send-btn').disabled = true;
 
 // Infinite scroll: load older messages when scrolled near the top
 document.getElementById('chat-messages').addEventListener('scroll', function () {
