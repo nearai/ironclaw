@@ -222,11 +222,15 @@ CREATE TABLE IF NOT EXISTS memory_chunks (
     chunk_index INTEGER NOT NULL,
     content TEXT NOT NULL,
     embedding F32_BLOB(1536),
+    chunk_version INTEGER NOT NULL DEFAULT 1,
     created_at TEXT NOT NULL DEFAULT (datetime('now')),
     UNIQUE (document_id, chunk_index)
 );
 
 CREATE INDEX IF NOT EXISTS idx_memory_chunks_document ON memory_chunks(document_id);
+
+-- Index for finding stale chunks that need re-indexing
+CREATE INDEX IF NOT EXISTS idx_memory_chunks_version ON memory_chunks(chunk_version);
 
 -- Vector index for semantic search (libSQL native)
 CREATE INDEX IF NOT EXISTS idx_memory_chunks_embedding

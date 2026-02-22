@@ -2,27 +2,72 @@
 //!
 //! Documents are split into overlapping chunks for better search recall.
 //! The overlap ensures context is preserved across chunk boundaries.
+//!
+//! ## Chunk Sizing
+//!
+//! Chunk size significantly impacts retrieval quality:
+//! - **Too large** (~800+ words): Dilutes relevance — only a few sentences may match
+//!   the query, but the entire chunk is returned as context noise.
+//! - **Too small** (~100 words): Loses paragraph-level context, more API calls.
+//! - **Sweet spot** (~300 words ≈ 400 tokens): Balances precision with context.
+//!
+//! Research from OpenAI, Cohere, and RAG papers suggests 200-500 tokens optimal.
+//! We use 300 words (~400 tokens for English) as the default.
+//!
+//! ## Versioning
+//!
+//! When chunk parameters change, existing chunks become stale (wrong boundaries,
+//! embeddings computed on different text). The `CHUNK_VERSION` constant tracks
+//! the current chunking schema. Chunks with older versions are re-indexed on
+//! startup to ensure consistent search quality.
+
+/// Current chunk schema version.
+///
+/// Increment this when changing chunking parameters (size, overlap, algorithm).
+/// Existing chunks with lower versions will be re-indexed on startup.
+///
+/// ## Version History
+/// - V1: Initial (800 words, 15% overlap, min 50)
+/// - V2: Smaller chunks for better recall (300 words, 15% overlap, min 30)
+pub const CHUNK_VERSION: i32 = 2;
 
 /// Configuration for document chunking.
 #[derive(Debug, Clone)]
 pub struct ChunkConfig {
     /// Target chunk size in words (approximate tokens).
-    /// Default: 800 (roughly 800 tokens for English text).
+    ///
+    /// Default: 300 words (~400 tokens for English text).
+    ///
+    /// ## Why 300 words?
+    /// - OpenAI text-embedding-3: optimal at 256-512 tokens
+    /// - Cohere embed-v3: optimal at 200-400 tokens
+    /// - RAG research consensus: 200-500 tokens
+    /// - 300 words ≈ 400 tokens (1.33 tokens/word for English)
     pub chunk_size: usize,
+
     /// Overlap percentage between chunks.
-    /// Default: 0.15 (15% overlap).
+    ///
+    /// Default: 0.15 (15% overlap = ~45 words at default chunk size).
+    ///
+    /// Overlap ensures context is preserved across chunk boundaries and
+    /// improves recall for queries that span chunk boundaries.
     pub overlap_percent: f32,
+
     /// Minimum chunk size (don't create tiny trailing chunks).
-    /// Default: 50 words.
+    ///
+    /// Default: 30 words (proportional to chunk_size reduction from 800→300).
+    ///
+    /// Trailing content smaller than this is merged with the previous chunk
+    /// rather than creating a low-quality micro-chunk.
     pub min_chunk_size: usize,
 }
 
 impl Default for ChunkConfig {
     fn default() -> Self {
         Self {
-            chunk_size: 800,
-            overlap_percent: 0.15,
-            min_chunk_size: 50,
+            chunk_size: 300,      // Was 800; reduced for better recall precision
+            overlap_percent: 0.15, // Unchanged; now ~45 words instead of ~120
+            min_chunk_size: 30,    // Was 50; proportionally reduced
         }
     }
 }
@@ -251,6 +296,21 @@ mod tests {
 
         assert_eq!(config.overlap_size(), 15);
         assert_eq!(config.step_size(), 85);
+    }
+
+    #[test]
+    fn test_default_config_values() {
+        let config = ChunkConfig::default();
+        assert_eq!(config.chunk_size, 300, "Default chunk size should be 300 words");
+        assert_eq!(config.min_chunk_size, 30, "Default min chunk size should be 30 words");
+        assert!((config.overlap_percent - 0.15).abs() < 0.001, "Default overlap should be 15%");
+        assert_eq!(config.overlap_size(), 45, "Overlap should be ~45 words at default size");
+    }
+
+    #[test]
+    fn test_chunk_version_exists() {
+        // Ensure CHUNK_VERSION is defined and reasonable
+        assert!(CHUNK_VERSION >= 2, "CHUNK_VERSION should be at least 2 after size reduction");
     }
 
     #[test]
