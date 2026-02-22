@@ -90,6 +90,10 @@ async fn main() -> anyhow::Result<()> {
             ironclaw::bootstrap::load_ironclaw_env();
             return run_status_command().await;
         }
+        Some(Command::Completion(completion)) => {
+            init_cli_tracing();
+            return completion.run();
+        }
         Some(Command::Worker {
             job_id,
             orchestrator_url,
