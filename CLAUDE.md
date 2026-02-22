@@ -572,6 +572,10 @@ Four built-in tools for managing skills at runtime:
 - `<workspace>/skills/` -- Per-workspace skills (trusted)
 - `~/.ironclaw/installed_skills/` -- Registry-installed skills (installed trust)
 
+### Testing Skills
+
+- `skills/web-ui-test/` -- Manual test checklist for the web gateway UI via Claude for Chrome extension. Covers connection, chat, skills search/install/remove, and other tabs.
+
 Skills configuration: see Configuration section above.
 
 ## Docker Sandbox
