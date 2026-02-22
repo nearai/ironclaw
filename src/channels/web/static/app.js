@@ -2192,14 +2192,20 @@ function appendActivityEvent(terminal, eventType, data) {
         + escapeHtml(typeof data.input === 'string' ? data.input : JSON.stringify(data.input, null, 2))
         + '</pre></details>';
       break;
-    case 'tool_result':
-      el.innerHTML = '<details class="activity-tool-block activity-tool-result"><summary>'
-        + '<span class="activity-tool-icon">&#10003;</span> '
+    case 'tool_result': {
+      const trSuccess = data.success !== false;
+      const trIcon = trSuccess ? '&#10003;' : '&#10007;';
+      const trOutput = data.output || data.error || '';
+      const trClass = 'activity-tool-block activity-tool-result'
+        + (trSuccess ? '' : ' activity-tool-error');
+      el.innerHTML = '<details class="' + trClass + '"><summary>'
+        + '<span class="activity-tool-icon">' + trIcon + '</span> '
         + escapeHtml(data.tool_name || 'result')
         + '</summary><pre class="activity-tool-output">'
-        + escapeHtml(data.output || '')
+        + escapeHtml(trOutput)
         + '</pre></details>';
       break;
+    }
     case 'status':
       el.innerHTML = '<span class="activity-status">' + escapeHtml(data.message || '') + '</span>';
       break;
@@ -2207,7 +2213,7 @@ function appendActivityEvent(terminal, eventType, data) {
       el.className += ' activity-final';
       const success = data.success !== false;
       el.innerHTML = '<span class="activity-result-status" data-success="' + success + '">'
-        + escapeHtml(data.message || data.status || 'done') + '</span>';
+        + escapeHtml(data.message || data.error || data.status || 'done') + '</span>';
       if (data.session_id) {
         el.innerHTML += ' <span class="activity-session-id">session: ' + escapeHtml(data.session_id) + '</span>';
       }
@@ -2392,7 +2398,9 @@ function renderRoutineDetail(routine) {
         + '<td>' + formatDate(run.started_at) + '</td>'
         + '<td>' + formatDate(run.completed_at) + '</td>'
         + '<td><span class="badge ' + runStatusClass + '">' + escapeHtml(run.status) + '</span></td>'
-        + '<td>' + escapeHtml(run.result_summary || '-') + '</td>'
+        + '<td>' + escapeHtml(run.result_summary || '-')
+          + (run.job_id ? ' <a href="#" onclick="event.preventDefault(); switchTab(\'jobs\'); openJobDetail(\'' + run.job_id + '\')">[view job]</a>' : '')
+          + '</td>'
         + '<td>' + (run.tokens_used != null ? run.tokens_used : '-') + '</td>'
         + '</tr>';
     }

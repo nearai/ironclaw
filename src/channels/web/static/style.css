@@ -2246,6 +2246,14 @@ body {
   color: var(--success);
 }
 
+.activity-tool-error .activity-tool-icon {
+  color: var(--danger);
+}
+
+.activity-tool-error summary {
+  color: var(--danger);
+}
+
 .activity-tool-input,
 .activity-tool-output {
   padding: 8px 10px;
