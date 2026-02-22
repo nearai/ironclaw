@@ -548,9 +548,11 @@ impl ExtensionManager {
     ) -> Result<InstallResult, ExtensionError> {
         let primary_result = self.try_install_from_source(entry, &entry.source).await;
         match (&primary_result, &entry.fallback_source) {
+            // Don't attempt fallback if already installed
+            (Err(ExtensionError::AlreadyInstalled(_)), _) => primary_result,
             (Err(primary_err), Some(fallback)) => {
-                // Download failed (e.g. 404 because release artifacts don't exist yet).
-                // Try the fallback source (build from source).
+                // Primary install failed (e.g. download 404 because release artifacts
+                // don't exist yet). Try the fallback source (build from source).
                 tracing::info!(
                     extension = %entry.name,
                     primary_error = %primary_err,
@@ -564,8 +566,11 @@ impl ExtensionManager {
                             fallback_error = %fallback_err,
                             "Fallback install also failed"
                         );
-                        // Return the fallback error since it's more actionable
-                        fallback_err
+                        // Include both errors so users can diagnose the full chain
+                        ExtensionError::Other(format!(
+                            "Primary install failed: {}; fallback install also failed: {}",
+                            primary_err, fallback_err
+                        ))
                     })
             }
             _ => primary_result,
