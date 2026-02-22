@@ -50,7 +50,7 @@ use ironclaw::secrets::SecretsCrypto;
 #[cfg(any(feature = "postgres", feature = "libsql"))]
 use ironclaw::setup::{SetupConfig, SetupWizard};
 
-fn init_cli_logging() {
+fn init_cli_tracing() {
     tracing_subscriber::fmt()
         .with_env_filter(
             EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("warn")),
@@ -65,11 +65,11 @@ async fn main() -> anyhow::Result<()> {
     // Handle non-agent commands first (they don't need full setup)
     match &cli.command {
         Some(Command::Tool(tool_cmd)) => {
-            init_cli_logging();
+            init_cli_tracing();
             return run_tool_command(tool_cmd.clone()).await;
         }
         Some(Command::Config(config_cmd)) => {
-            init_cli_logging();
+            init_cli_tracing();
             return ironclaw::cli::run_config_command(config_cmd.clone()).await;
         }
         Some(Command::Registry(registry_cmd)) => {
@@ -82,11 +82,11 @@ async fn main() -> anyhow::Result<()> {
             return ironclaw::cli::run_registry_command(registry_cmd.clone()).await;
         }
         Some(Command::Mcp(mcp_cmd)) => {
-            init_cli_logging();
+            init_cli_tracing();
             return run_mcp_command(mcp_cmd.clone()).await;
         }
         Some(Command::Memory(mem_cmd)) => {
-            init_cli_logging();
+            init_cli_tracing();
 
             // Memory commands need database (and optionally embeddings)
             let config = Config::from_env()
@@ -159,11 +159,11 @@ async fn main() -> anyhow::Result<()> {
                 .await;
         }
         Some(Command::Pairing(pairing_cmd)) => {
-            init_cli_logging();
+            init_cli_tracing();
             return run_pairing_command(pairing_cmd.clone()).map_err(|e| anyhow::anyhow!("{}", e));
         }
         Some(Command::Service(service_cmd)) => {
-            init_cli_logging();
+            init_cli_tracing();
             return run_service_command(service_cmd);
         }
         Some(Command::Doctor) => {
@@ -191,7 +191,7 @@ async fn main() -> anyhow::Result<()> {
             return run_status_command().await;
         }
         Some(Command::Completion(completion)) => {
-            init_cli_logging();
+            init_cli_tracing();
             return completion.run();
         }
         Some(Command::Worker {
