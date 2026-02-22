@@ -9,6 +9,7 @@ let assistantThreadId = null;
 let hasMore = false;
 let oldestTimestamp = null;
 let loadingOlder = false;
+let sseHasConnectedBefore = false;
 let jobEvents = new Map(); // job_id -> Array of events
 let jobListRefreshTimer = null;
 const JOB_EVENTS_CAP = 500;
@@ -107,6 +108,10 @@ function connectSSE() {
   eventSource.onopen = () => {
     document.getElementById('sse-dot').classList.remove('disconnected');
     document.getElementById('sse-status').textContent = 'Connected';
+    if (sseHasConnectedBefore && currentThreadId) {
+      loadHistory();
+    }
+    sseHasConnectedBefore = true;
   };
 
   eventSource.onerror = () => {
