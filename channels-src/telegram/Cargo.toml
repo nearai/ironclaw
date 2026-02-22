@@ -17,7 +17,6 @@ serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 
 # Exclude from parent workspace (this is a standalone WASM component)
-[workspace]
 
 [profile.release]
 # Optimize for size
@@ -25,3 +24,5 @@ opt-level = "s"
 lto = true
 strip = true
 codegen-units = 1
+
+[workspace]
