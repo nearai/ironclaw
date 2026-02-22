@@ -282,7 +282,7 @@ impl LlmConfig {
                 .or_else(|| settings.ollama_base_url.clone())
                 .unwrap_or_else(|| "http://localhost:11434".to_string());
             let model = optional_env("OLLAMA_MODEL")?
-                .or_else(|| settings.ollama_model.clone())
+                .or_else(|| settings.selected_model.clone())
                 .unwrap_or_else(|| "llama3".to_string());
             Some(OllamaConfig { base_url, model })
         } else {
