@@ -212,7 +212,48 @@ impl Agent {
                 );
             }
 
-            let output = reasoning.respond_with_tools(&context).await?;
+            let output = match reasoning.respond_with_tools(&context).await {
+                Ok(output) => output,
+                Err(crate::error::LlmError::ContextLengthExceeded { used, limit }) => {
+                    tracing::warn!(
+                        used,
+                        limit,
+                        iteration,
+                        "Context length exceeded, compacting messages and retrying"
+                    );
+
+                    // Compact: keep system messages + last user message + current turn
+                    context_messages = compact_messages_for_retry(&context_messages);
+
+                    // Rebuild context with compacted messages
+                    let mut retry_context = ReasoningContext::new()
+                        .with_messages(context_messages.clone())
+                        .with_tools(if force_text {
+                            Vec::new()
+                        } else {
+                            context.available_tools.clone()
+                        })
+                        .with_metadata(context.metadata.clone());
+                    retry_context.force_text = force_text;
+
+                    reasoning
+                        .respond_with_tools(&retry_context)
+                        .await
+                        .map_err(|retry_err| {
+                            tracing::error!(
+                                original_used = used,
+                                original_limit = limit,
+                                retry_error = %retry_err,
+                                "Retry after auto-compaction also failed"
+                            );
+                            // Return the original error for a clearer message
+                            crate::error::Error::from(
+                                crate::error::LlmError::ContextLengthExceeded { used, limit },
+                            )
+                        })?
+                }
+                Err(e) => return Err(e.into()),
+            };
 
             // Record cost and track token usage
             let model_name = self.llm().active_model_name();
@@ -791,6 +832,48 @@ pub(super) fn check_auth_required(
     Some((name, instructions))
 }
 
+/// Compact messages for retry after a context-length-exceeded error.
+///
+/// Keeps all `System` messages (which carry the system prompt and instructions),
+/// finds the last `User` message, and retains it plus every subsequent message
+/// (the current turn's assistant tool calls and tool results). A short note is
+/// inserted so the LLM knows earlier history was dropped.
+fn compact_messages_for_retry(messages: &[ChatMessage]) -> Vec<ChatMessage> {
+    use crate::llm::Role;
+
+    let mut compacted = Vec::new();
+
+    // Keep all System messages (system prompt, skill context, nudges, etc.)
+    for msg in messages {
+        if msg.role == Role::System {
+            compacted.push(msg.clone());
+        }
+    }
+
+    // Find the last User message index
+    let last_user_idx = messages.iter().rposition(|m| m.role == Role::User);
+
+    if let Some(idx) = last_user_idx {
+        // Add a note about dropped context
+        compacted.push(ChatMessage::system(
+            "[Note: Earlier conversation history was automatically compacted \
+             to fit within the context window. The most recent exchange is preserved below.]",
+        ));
+
+        // Keep the last User message and everything after it
+        compacted.extend_from_slice(&messages[idx..]);
+    } else {
+        // No user messages found (shouldn't happen normally); keep everything non-system
+        for msg in messages {
+            if msg.role != Role::System {
+                compacted.push(msg.clone());
+            }
+        }
+    }
+
+    compacted
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
@@ -1149,5 +1232,141 @@ mod tests {
         .await;
 
         assert!(result.is_err());
+    }
+
+    // ---- compact_messages_for_retry tests ----
+
+    use super::compact_messages_for_retry;
+    use crate::llm::{ChatMessage, Role};
+
+    #[test]
+    fn test_compact_keeps_system_and_last_user_exchange() {
+        let messages = vec![
+            ChatMessage::system("You are a helpful assistant."),
+            ChatMessage::user("First question"),
+            ChatMessage::assistant("First answer"),
+            ChatMessage::user("Second question"),
+            ChatMessage::assistant("Second answer"),
+            ChatMessage::user("Third question"),
+            ChatMessage::assistant_with_tool_calls(
+                None,
+                vec![ToolCall {
+                    id: "call_1".to_string(),
+                    name: "echo".to_string(),
+                    arguments: serde_json::json!({"message": "hi"}),
+                }],
+            ),
+            ChatMessage::tool_result("call_1", "echo", "hi"),
+        ];
+
+        let compacted = compact_messages_for_retry(&messages);
+
+        // Should have: system prompt + compaction note + last user msg + tool call + tool result
+        assert_eq!(compacted.len(), 5);
+        assert_eq!(compacted[0].role, Role::System);
+        assert_eq!(compacted[0].content, "You are a helpful assistant.");
+        assert_eq!(compacted[1].role, Role::System); // compaction note
+        assert!(compacted[1].content.contains("compacted"));
+        assert_eq!(compacted[2].role, Role::User);
+        assert_eq!(compacted[2].content, "Third question");
+        assert_eq!(compacted[3].role, Role::Assistant); // tool call
+        assert_eq!(compacted[4].role, Role::Tool); // tool result
+    }
+
+    #[test]
+    fn test_compact_preserves_multiple_system_messages() {
+        let messages = vec![
+            ChatMessage::system("System prompt"),
+            ChatMessage::system("Skill context"),
+            ChatMessage::user("Old question"),
+            ChatMessage::assistant("Old answer"),
+            ChatMessage::system("Nudge message"),
+            ChatMessage::user("Current question"),
+        ];
+
+        let compacted = compact_messages_for_retry(&messages);
+
+        // 3 system messages + compaction note + last user message
+        assert_eq!(compacted.len(), 5);
+        assert_eq!(compacted[0].content, "System prompt");
+        assert_eq!(compacted[1].content, "Skill context");
+        assert_eq!(compacted[2].content, "Nudge message");
+        assert!(compacted[3].content.contains("compacted")); // note
+        assert_eq!(compacted[4].content, "Current question");
+    }
+
+    #[test]
+    fn test_compact_single_user_message_keeps_everything() {
+        let messages = vec![
+            ChatMessage::system("System prompt"),
+            ChatMessage::user("Only question"),
+        ];
+
+        let compacted = compact_messages_for_retry(&messages);
+
+        // system + compaction note + user
+        assert_eq!(compacted.len(), 3);
+        assert_eq!(compacted[0].content, "System prompt");
+        assert!(compacted[1].content.contains("compacted"));
+        assert_eq!(compacted[2].content, "Only question");
+    }
+
+    #[test]
+    fn test_compact_no_user_messages_keeps_non_system() {
+        let messages = vec![
+            ChatMessage::system("System prompt"),
+            ChatMessage::assistant("Stray assistant message"),
+        ];
+
+        let compacted = compact_messages_for_retry(&messages);
+
+        // system + assistant (no user message found, keeps all non-system)
+        assert_eq!(compacted.len(), 2);
+        assert_eq!(compacted[0].role, Role::System);
+        assert_eq!(compacted[1].role, Role::Assistant);
+    }
+
+    #[test]
+    fn test_compact_drops_old_history_but_keeps_current_turn_tools() {
+        // Simulate a multi-turn conversation where the current turn has
+        // multiple tool calls and results.
+        let messages = vec![
+            ChatMessage::system("System prompt"),
+            ChatMessage::user("Question 1"),
+            ChatMessage::assistant("Answer 1"),
+            ChatMessage::user("Question 2"),
+            ChatMessage::assistant("Answer 2"),
+            ChatMessage::user("Question 3"),
+            ChatMessage::assistant("Answer 3"),
+            ChatMessage::user("Current question"),
+            ChatMessage::assistant_with_tool_calls(
+                None,
+                vec![
+                    ToolCall {
+                        id: "c1".to_string(),
+                        name: "http".to_string(),
+                        arguments: serde_json::json!({}),
+                    },
+                    ToolCall {
+                        id: "c2".to_string(),
+                        name: "echo".to_string(),
+                        arguments: serde_json::json!({}),
+                    },
+                ],
+            ),
+            ChatMessage::tool_result("c1", "http", "response data"),
+            ChatMessage::tool_result("c2", "echo", "echoed"),
+        ];
+
+        let compacted = compact_messages_for_retry(&messages);
+
+        // system + note + user + assistant(tool_calls) + tool_result + tool_result
+        assert_eq!(compacted.len(), 6);
+        assert_eq!(compacted[0].content, "System prompt");
+        assert!(compacted[1].content.contains("compacted"));
+        assert_eq!(compacted[2].content, "Current question");
+        assert!(compacted[3].tool_calls.is_some()); // assistant with tool calls
+        assert_eq!(compacted[4].name.as_deref(), Some("http"));
+        assert_eq!(compacted[5].name.as_deref(), Some("echo"));
     }
 }
