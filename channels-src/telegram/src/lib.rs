@@ -286,7 +286,11 @@ fn classify_status_update(update: &StatusUpdate) -> Option<TelegramStatusAction>
         StatusType::ToolStarted | StatusType::ToolCompleted | StatusType::ToolResult => None,
         StatusType::Status => {
             let msg = update.message.trim();
-            if msg.eq_ignore_ascii_case("Done") || msg.eq_ignore_ascii_case("Awaiting approval") {
+            if msg.eq_ignore_ascii_case("Done")
+                || msg.eq_ignore_ascii_case("Interrupted")
+                || msg.eq_ignore_ascii_case("Awaiting approval")
+                || msg.eq_ignore_ascii_case("Rejected")
+            {
                 None
             } else {
                 status_message_for_user(update).map(TelegramStatusAction::Notify)
@@ -1629,6 +1633,28 @@ mod tests {
         let update = StatusUpdate {
             status: StatusType::Status,
             message: "done".to_string(),
+            metadata_json: "{}".to_string(),
+        };
+
+        assert_eq!(classify_status_update(&update), None);
+    }
+
+    #[test]
+    fn test_classify_status_update_status_interrupted_ignored() {
+        let update = StatusUpdate {
+            status: StatusType::Status,
+            message: "interrupted".to_string(),
+            metadata_json: "{}".to_string(),
+        };
+
+        assert_eq!(classify_status_update(&update), None);
+    }
+
+    #[test]
+    fn test_classify_status_update_status_rejected_ignored() {
+        let update = StatusUpdate {
+            status: StatusType::Status,
+            message: "Rejected".to_string(),
             metadata_json: "{}".to_string(),
         };
 

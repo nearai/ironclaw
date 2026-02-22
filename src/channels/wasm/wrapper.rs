@@ -2137,11 +2137,16 @@ fn status_to_wit(status: &StatusUpdate, metadata: &serde_json::Value) -> wit_cha
             metadata_json,
         },
         StatusUpdate::Status(msg) => {
-            // Map well-known status strings to WIT types
-            let status_type = match msg.as_str() {
-                "Done" => wit_channel::StatusType::Done,
-                "Interrupted" => wit_channel::StatusType::Interrupted,
-                _ => wit_channel::StatusType::Status,
+            // Map well-known status strings to WIT types (case-insensitive
+            // to stay consistent with is_terminal_text_status and the
+            // Telegram-side classify_status_update).
+            let trimmed = msg.trim();
+            let status_type = if trimmed.eq_ignore_ascii_case("done") {
+                wit_channel::StatusType::Done
+            } else if trimmed.eq_ignore_ascii_case("interrupted") {
+                wit_channel::StatusType::Interrupted
+            } else {
+                wit_channel::StatusType::Status
             };
             wit_channel::StatusUpdate {
                 status: status_type,
@@ -2788,6 +2793,27 @@ mod tests {
     }
 
     #[test]
+    fn test_status_to_wit_done_case_insensitive() {
+        use super::status_to_wit;
+
+        let metadata = serde_json::json!(null);
+
+        // lowercase
+        let wit = status_to_wit(
+            &crate::channels::StatusUpdate::Status("done".into()),
+            &metadata,
+        );
+        assert!(matches!(wit.status, super::wit_channel::StatusType::Done));
+
+        // with whitespace
+        let wit = status_to_wit(
+            &crate::channels::StatusUpdate::Status(" Done ".into()),
+            &metadata,
+        );
+        assert!(matches!(wit.status, super::wit_channel::StatusType::Done));
+    }
+
+    #[test]
     fn test_status_to_wit_interrupted() {
         use super::status_to_wit;
 
@@ -2797,6 +2823,33 @@ mod tests {
             &metadata,
         );
 
+        assert!(matches!(
+            wit.status,
+            super::wit_channel::StatusType::Interrupted
+        ));
+    }
+
+    #[test]
+    fn test_status_to_wit_interrupted_case_insensitive() {
+        use super::status_to_wit;
+
+        let metadata = serde_json::json!(null);
+
+        // lowercase
+        let wit = status_to_wit(
+            &crate::channels::StatusUpdate::Status("interrupted".into()),
+            &metadata,
+        );
+        assert!(matches!(
+            wit.status,
+            super::wit_channel::StatusType::Interrupted
+        ));
+
+        // with whitespace
+        let wit = status_to_wit(
+            &crate::channels::StatusUpdate::Status(" Interrupted ".into()),
+            &metadata,
+        );
         assert!(matches!(
             wit.status,
             super::wit_channel::StatusType::Interrupted
