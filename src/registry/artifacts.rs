@@ -272,7 +272,8 @@ mod tests {
     #[test]
     fn test_find_wasm_artifact_found() {
         let dir = TempDir::new().unwrap();
-        let wasm_dir = dir.path().join("target/wasm32-wasip2/release");
+        let target_base = resolve_target_dir(dir.path());
+        let wasm_dir = target_base.join("wasm32-wasip2/release");
         std::fs::create_dir_all(&wasm_dir).unwrap();
         std::fs::File::create(wasm_dir.join("my_tool.wasm")).unwrap();
 
@@ -284,7 +285,8 @@ mod tests {
     #[test]
     fn test_find_wasm_artifact_hyphen_to_underscore() {
         let dir = TempDir::new().unwrap();
-        let wasm_dir = dir.path().join("target/wasm32-wasip1/release");
+        let target_base = resolve_target_dir(dir.path());
+        let wasm_dir = target_base.join("wasm32-wasip1/release");
         std::fs::create_dir_all(&wasm_dir).unwrap();
         std::fs::File::create(wasm_dir.join("my_tool.wasm")).unwrap();
 
@@ -296,7 +298,8 @@ mod tests {
     #[test]
     fn test_find_any_wasm_artifact_found() {
         let dir = TempDir::new().unwrap();
-        let wasm_dir = dir.path().join("target/wasm32-wasip2/release");
+        let target_base = resolve_target_dir(dir.path());
+        let wasm_dir = target_base.join("wasm32-wasip2/release");
         std::fs::create_dir_all(&wasm_dir).unwrap();
         std::fs::File::create(wasm_dir.join("something.wasm")).unwrap();
 

@@ -395,7 +395,9 @@ pub fn resolve_wasm_target_dir(crate_dir: &Path) -> PathBuf {
 /// Return the expected path to a compiled WASM artifact for a given crate.
 ///
 /// Combines [`resolve_wasm_target_dir`] with the `wasm32-wasip2/release/` subdirectory
-/// and the binary name (e.g. `slack_tool.wasm`).
+/// and the binary name without extension (e.g. `slack_tool`).
+///
+/// `binary_name` should not include the `.wasm` extension; it is appended automatically.
 ///
 /// This is a convenience function for callers that know the exact triple (wasip2)
 /// and binary name. For multi-triple search, use

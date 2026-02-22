@@ -83,7 +83,7 @@ fn locate_channel_artifacts(name: &str) -> Result<(PathBuf, PathBuf), String> {
          - {} (flat/packaged)\n  \
          - {} (build tree, and other triples)\n  \
          Build it first:\n  \
-         cd {} && cargo build --target wasm32-wasip2 --release",
+         cd {} && cargo component build --release",
         name,
         flat_wasm.display(),
         expected_build.display(),

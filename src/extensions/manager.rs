@@ -40,6 +40,18 @@ struct PendingAuth {
     created_at: std::time::Instant,
 }
 
+/// Runtime infrastructure needed for hot-activating WASM channels.
+///
+/// Set after construction via [`ExtensionManager::set_channel_runtime`] once the
+/// channel manager, WASM runtime, pairing store, and webhook router are available.
+struct ChannelRuntimeState {
+    channel_manager: Arc<ChannelManager>,
+    wasm_channel_runtime: Arc<WasmChannelRuntime>,
+    pairing_store: Arc<PairingStore>,
+    wasm_channel_router: Arc<WasmChannelRouter>,
+    telegram_owner_id: Option<i64>,
+}
+
 /// Central manager for extension lifecycle operations.
 pub struct ExtensionManager {
     registry: ExtensionRegistry,
@@ -55,13 +67,8 @@ pub struct ExtensionManager {
     wasm_tools_dir: PathBuf,
     wasm_channels_dir: PathBuf,
 
-    // WASM channel hot-activation infrastructure
-    wasm_channel_runtime: Option<Arc<WasmChannelRuntime>>,
-    channel_manager: Option<Arc<ChannelManager>>,
-    pairing_store: Option<Arc<PairingStore>>,
-    wasm_channel_router: Option<Arc<WasmChannelRouter>>,
-    /// Telegram owner user ID for bot access control.
-    telegram_owner_id: Option<i64>,
+    // WASM channel hot-activation infrastructure (set post-construction)
+    channel_runtime: RwLock<Option<ChannelRuntimeState>>,
 
     // Shared
     secrets: Arc<dyn SecretsStore + Send + Sync>,
@@ -105,11 +112,7 @@ impl ExtensionManager {
             wasm_tool_runtime,
             wasm_tools_dir,
             wasm_channels_dir,
-            wasm_channel_runtime: None,
-            channel_manager: None,
-            pairing_store: None,
-            wasm_channel_router: None,
-            telegram_owner_id: None,
+            channel_runtime: RwLock::new(None),
             secrets,
             tool_registry,
             hooks,
@@ -123,22 +126,24 @@ impl ExtensionManager {
 
     /// Configure the channel runtime infrastructure for hot-activating WASM channels.
     ///
-    /// Must be called after construction to enable `activate_wasm_channel()`.
-    /// Without this, channel activation falls back to an error.
-    pub fn with_channel_runtime(
-        mut self,
+    /// Call after construction (and after wrapping in `Arc`) once the channel
+    /// manager, WASM runtime, pairing store, and webhook router are available.
+    /// Without this, channel activation returns an error.
+    pub async fn set_channel_runtime(
+        &self,
         channel_manager: Arc<ChannelManager>,
         wasm_channel_runtime: Arc<WasmChannelRuntime>,
         pairing_store: Arc<PairingStore>,
         wasm_channel_router: Arc<WasmChannelRouter>,
         telegram_owner_id: Option<i64>,
-    ) -> Self {
-        self.channel_manager = Some(channel_manager);
-        self.wasm_channel_runtime = Some(wasm_channel_runtime);
-        self.pairing_store = Some(pairing_store);
-        self.wasm_channel_router = Some(wasm_channel_router);
-        self.telegram_owner_id = telegram_owner_id;
-        self
+    ) {
+        *self.channel_runtime.write().await = Some(ChannelRuntimeState {
+            channel_manager,
+            wasm_channel_runtime,
+            pairing_store,
+            wasm_channel_router,
+            telegram_owner_id,
+        });
     }
 
     /// Register channel names that were loaded at startup.
@@ -1662,22 +1667,30 @@ impl ExtensionManager {
             }
         }
 
-        // Verify runtime infrastructure is available
-        let channel_runtime = self.wasm_channel_runtime.as_ref().ok_or_else(|| {
-            ExtensionError::ActivationFailed(
-                "WASM channel runtime not available. Restart IronClaw to activate.".to_string(),
+        // Verify runtime infrastructure is available and clone Arcs so we don't
+        // hold the RwLock guard across awaits.
+        let (
+            channel_runtime,
+            channel_manager,
+            pairing_store,
+            wasm_channel_router,
+            telegram_owner_id,
+        ) = {
+            let rt_guard = self.channel_runtime.read().await;
+            let rt = rt_guard.as_ref().ok_or_else(|| {
+                ExtensionError::ActivationFailed(
+                    "WASM channel runtime not configured. Restart IronClaw to activate."
+                        .to_string(),
+                )
+            })?;
+            (
+                Arc::clone(&rt.wasm_channel_runtime),
+                Arc::clone(&rt.channel_manager),
+                Arc::clone(&rt.pairing_store),
+                Arc::clone(&rt.wasm_channel_router),
+                rt.telegram_owner_id,
             )
-        })?;
-        let channel_manager = self.channel_manager.as_ref().ok_or_else(|| {
-            ExtensionError::ActivationFailed(
-                "Channel manager not available. Restart IronClaw to activate.".to_string(),
-            )
-        })?;
-        let pairing_store = self.pairing_store.as_ref().ok_or_else(|| {
-            ExtensionError::ActivationFailed(
-                "Pairing store not available. Restart IronClaw to activate.".to_string(),
-            )
-        })?;
+        };
 
         // Check auth status first
         let (authenticated, _needs_setup) = self.check_channel_auth_status(name).await;
@@ -1707,7 +1720,8 @@ impl ExtensionManager {
             None
         };
 
-        let loader = WasmChannelLoader::new(Arc::clone(channel_runtime), Arc::clone(pairing_store));
+        let loader =
+            WasmChannelLoader::new(Arc::clone(&channel_runtime), Arc::clone(&pairing_store));
         let loaded = loader
             .load_from_files(name, &wasm_path, cap_path_option)
             .await
@@ -1746,7 +1760,7 @@ impl ExtensionManager {
             }
 
             if channel_name == "telegram"
-                && let Some(owner_id) = self.telegram_owner_id
+                && let Some(owner_id) = telegram_owner_id
             {
                 config_updates.insert("owner_id".to_string(), serde_json::json!(owner_id));
             }
@@ -1762,8 +1776,8 @@ impl ExtensionManager {
             }
         }
 
-        // Register with webhook router if available
-        if let Some(ref router) = self.wasm_channel_router {
+        // Register with webhook router
+        {
             let webhook_path = format!("/webhook/{}", channel_name);
             let endpoints = vec![RegisteredEndpoint {
                 channel_name: channel_name.clone(),
@@ -1772,7 +1786,7 @@ impl ExtensionManager {
                 require_secret: webhook_secret.is_some(),
             }];
 
-            router
+            wasm_channel_router
                 .register(
                     Arc::clone(&channel_arc),
                     endpoints,
@@ -1837,15 +1851,18 @@ impl ExtensionManager {
     /// Called when the user saves new secrets via the setup form for a channel
     /// that was loaded at startup (possibly without credentials).
     async fn refresh_active_channel(&self, name: &str) -> Result<ActivateResult, ExtensionError> {
-        let router = match self.wasm_channel_router {
-            Some(ref r) => r,
-            None => {
-                return Ok(ActivateResult {
-                    name: name.to_string(),
-                    kind: ExtensionKind::WasmChannel,
-                    tools_loaded: Vec::new(),
-                    message: format!("Channel '{}' is already active", name),
-                });
+        let router = {
+            let rt_guard = self.channel_runtime.read().await;
+            match rt_guard.as_ref() {
+                Some(rt) => Arc::clone(&rt.wasm_channel_router),
+                None => {
+                    return Ok(ActivateResult {
+                        name: name.to_string(),
+                        kind: ExtensionKind::WasmChannel,
+                        tools_loaded: Vec::new(),
+                        message: format!("Channel '{}' is already active", name),
+                    });
+                }
             }
         };
 
