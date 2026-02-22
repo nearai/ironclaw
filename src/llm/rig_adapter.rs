@@ -396,15 +396,12 @@ fn supports_prompt_cache(name: &str) -> bool {
     let lower = name.to_lowercase();
     // Strip optional provider prefix (e.g. "anthropic/claude-...")
     let model = lower.strip_prefix("anthropic/").unwrap_or(&lower);
-    // Must be a Claude model
-    if !model.starts_with("claude") {
-        return false;
-    }
-    // Exclude legacy models that predate caching support
-    if model.contains("claude-2") || model.contains("instant") {
-        return false;
-    }
-    true
+    // Only Claude 3+ families support prompt caching
+    model.starts_with("claude-3")
+        || model.starts_with("claude-4")
+        || model.starts_with("claude-sonnet")
+        || model.starts_with("claude-opus")
+        || model.starts_with("claude-haiku")
 }
 
 /// Extract `cache_creation_input_tokens` from the raw provider response.

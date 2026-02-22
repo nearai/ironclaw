@@ -173,7 +173,7 @@ impl CostGuard {
         // Cached read tokens cost 10% of the input rate (Anthropic's 90% discount).
         // Cached write tokens cost write_multiplier × input_rate (e.g. 1.25× for 5m, 2× for 1h).
         // Uncached tokens = total input - cache reads - cache writes.
-        let cached_total = cache_read_input_tokens + cache_creation_input_tokens;
+        let cached_total = cache_read_input_tokens.saturating_add(cache_creation_input_tokens);
         let uncached_input = input_tokens.saturating_sub(cached_total);
         let cache_read_cost = input_rate * Decimal::from(cache_read_input_tokens) / dec!(10);
         let cache_write_cost =
