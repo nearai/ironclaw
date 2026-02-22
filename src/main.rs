@@ -929,6 +929,25 @@ async fn main() -> anyhow::Result<()> {
         }
     };
 
+    // Initialize channel manager and WASM channel runtime early so they can be
+    // shared with the extension manager for hot-activation of channels at runtime.
+    let channels = Arc::new(ChannelManager::new());
+
+    let wasm_channel_runtime: Option<Arc<WasmChannelRuntime>> =
+        if config.channels.wasm_channels_enabled {
+            match WasmChannelRuntime::new(WasmChannelRuntimeConfig::default()) {
+                Ok(runtime) => Some(Arc::new(runtime)),
+                Err(e) => {
+                    tracing::warn!("Failed to initialize WASM channel runtime: {}", e);
+                    None
+                }
+            }
+        } else {
+            None
+        };
+    let wasm_pairing_store = Arc::new(PairingStore::new());
+    let wasm_channel_router = Arc::new(WasmChannelRouter::new());
+
     // Create extension manager for in-chat discovery/install/auth/activate.
     // If no persistent secrets store is available, use an ephemeral in-memory store
     // so that listing/installing/activating extensions still works (auth won't persist).
@@ -943,7 +962,7 @@ async fn main() -> anyhow::Result<()> {
         Arc::new(InMemorySecretsStore::new(crypto))
     };
     let extension_manager = {
-        let manager = Arc::new(ExtensionManager::new(
+        let mut manager = ExtensionManager::new(
             Arc::clone(&mcp_session_manager),
             ext_secrets,
             Arc::clone(&tools),
@@ -955,7 +974,18 @@ async fn main() -> anyhow::Result<()> {
             "default".to_string(),
             db.clone(),
             catalog_entries.clone(),
-        ));
+        );
+        // Wire up channel runtime infrastructure for hot-activation
+        if let Some(ref wasm_ch_rt) = wasm_channel_runtime {
+            manager = manager.with_channel_runtime(
+                Arc::clone(&channels),
+                Arc::clone(wasm_ch_rt),
+                Arc::clone(&wasm_pairing_store),
+                Arc::clone(&wasm_channel_router),
+                config.channels.telegram_owner_id,
+            );
+        }
+        let manager = Arc::new(manager);
         tools.register_extension_tools(Arc::clone(&manager));
         tracing::info!("Extension manager initialized with in-chat discovery tools");
         Some(manager)
@@ -1037,8 +1067,6 @@ async fn main() -> anyhow::Result<()> {
         tools.count()
     );
 
-    // Initialize channel manager
-    let mut channels = ChannelManager::new();
     let mut channel_names: Vec<String> = Vec::new();
     let mut loaded_wasm_channel_names: Vec<String> = Vec::new();
 
@@ -1056,168 +1084,218 @@ async fn main() -> anyhow::Result<()> {
     let mut webhook_routes: Vec<axum::Router> = Vec::new();
 
     // Load WASM channels and register their webhook routes.
-    if config.channels.wasm_channels_enabled && config.channels.wasm_channels_dir.exists() {
-        match WasmChannelRuntime::new(WasmChannelRuntimeConfig::default()) {
-            Ok(runtime) => {
-                let runtime = Arc::new(runtime);
-                let pairing_store = Arc::new(PairingStore::new());
-                let loader = WasmChannelLoader::new(Arc::clone(&runtime), pairing_store);
+    if let Some(ref wasm_ch_runtime) = wasm_channel_runtime
+        && config.channels.wasm_channels_dir.exists()
+    {
+        let loader =
+            WasmChannelLoader::new(Arc::clone(wasm_ch_runtime), Arc::clone(&wasm_pairing_store));
 
-                match loader
-                    .load_from_dir(&config.channels.wasm_channels_dir)
-                    .await
-                {
-                    Ok(results) => {
-                        let wasm_router = Arc::new(WasmChannelRouter::new());
-                        let mut has_webhook_channels = false;
+        match loader
+            .load_from_dir(&config.channels.wasm_channels_dir)
+            .await
+        {
+            Ok(results) => {
+                let mut has_webhook_channels = false;
 
-                        for loaded in results.loaded {
-                            let channel_name = loaded.name().to_string();
-                            loaded_wasm_channel_names.push(channel_name.clone());
-                            tracing::info!("Loaded WASM channel: {}", channel_name);
+                for loaded in results.loaded {
+                    let channel_name = loaded.name().to_string();
+                    tracing::info!("Loaded WASM channel: {}", channel_name);
 
-                            let secret_name = loaded.webhook_secret_name();
+                    // Check if the channel has required (non-optional) secrets.
+                    // If so, verify they exist in the secrets store before starting
+                    // the channel. Channels with missing credentials are left
+                    // inactive so the hot-activation path can start them properly
+                    // once the user saves credentials via the web UI.
+                    let has_required_secrets = loaded
+                        .capabilities_file
+                        .as_ref()
+                        .is_some_and(|cap| cap.setup.required_secrets.iter().any(|s| !s.optional));
 
-                            let webhook_secret = if let Some(ref secrets) = secrets_store {
-                                secrets
-                                    .get_decrypted("default", &secret_name)
+                    if has_required_secrets {
+                        let missing = if let Some(ref secrets) = secrets_store {
+                            let required = loaded
+                                .capabilities_file
+                                .as_ref()
+                                .unwrap()
+                                .setup
+                                .required_secrets
+                                .iter()
+                                .filter(|s| !s.optional);
+                            let mut any_missing = false;
+                            for secret in required {
+                                if !secrets
+                                    .exists("default", &secret.name)
                                     .await
-                                    .ok()
-                                    .map(|s| s.expose().to_string())
-                            } else {
-                                None
-                            };
-
-                            let secret_header =
-                                loaded.webhook_secret_header().map(|s| s.to_string());
-
-                            let webhook_path = format!("/webhook/{}", channel_name);
-                            let endpoints = vec![RegisteredEndpoint {
-                                channel_name: channel_name.clone(),
-                                path: webhook_path.clone(),
-                                methods: vec!["POST".to_string()],
-                                require_secret: webhook_secret.is_some(),
-                            }];
-
-                            let channel_arc = Arc::new(loaded.channel);
-
-                            {
-                                let mut config_updates = std::collections::HashMap::new();
-
-                                if let Some(ref tunnel_url) = config.tunnel.public_url {
-                                    config_updates.insert(
-                                        "tunnel_url".to_string(),
-                                        serde_json::Value::String(tunnel_url.clone()),
-                                    );
-                                }
-
-                                if let Some(ref secret) = webhook_secret {
-                                    config_updates.insert(
-                                        "webhook_secret".to_string(),
-                                        serde_json::Value::String(secret.clone()),
-                                    );
-                                }
-
-                                // Inject owner_id for Telegram so the bot only responds
-                                // to the bound user account.
-                                if channel_name == "telegram"
-                                    && let Some(owner_id) = config.channels.telegram_owner_id
+                                    .unwrap_or(false)
                                 {
-                                    config_updates.insert(
-                                        "owner_id".to_string(),
-                                        serde_json::json!(owner_id),
-                                    );
-                                }
-
-                                if !config_updates.is_empty() {
-                                    channel_arc.update_config(config_updates).await;
                                     tracing::info!(
                                         channel = %channel_name,
-                                        has_tunnel = config.tunnel.public_url.is_some(),
-                                        has_webhook_secret = webhook_secret.is_some(),
-                                        "Injected runtime config into channel"
+                                        secret = %secret.name,
+                                        "Required secret not found, skipping channel startup"
+                                    );
+                                    any_missing = true;
+                                    break;
+                                }
+                            }
+                            any_missing
+                        } else {
+                            tracing::info!(
+                                channel = %channel_name,
+                                "No secrets store available, skipping channel startup"
+                            );
+                            true
+                        };
+
+                        if missing {
+                            // Don't add to loaded_wasm_channel_names — this
+                            // keeps the channel out of `active_channel_names` so
+                            // the full activation path runs when the user saves
+                            // credentials. The web UI discovers installed
+                            // channels by checking the .wasm files on disk.
+                            continue;
+                        }
+                    }
+
+                    loaded_wasm_channel_names.push(channel_name.clone());
+
+                    let secret_name = loaded.webhook_secret_name();
+
+                    let webhook_secret = if let Some(ref secrets) = secrets_store {
+                        secrets
+                            .get_decrypted("default", &secret_name)
+                            .await
+                            .ok()
+                            .map(|s| s.expose().to_string())
+                    } else {
+                        None
+                    };
+
+                    let secret_header = loaded.webhook_secret_header().map(|s| s.to_string());
+
+                    let webhook_path = format!("/webhook/{}", channel_name);
+                    let endpoints = vec![RegisteredEndpoint {
+                        channel_name: channel_name.clone(),
+                        path: webhook_path.clone(),
+                        methods: vec!["POST".to_string()],
+                        require_secret: webhook_secret.is_some(),
+                    }];
+
+                    let channel_arc = Arc::new(loaded.channel);
+
+                    {
+                        let mut config_updates = std::collections::HashMap::new();
+
+                        if let Some(ref tunnel_url) = config.tunnel.public_url {
+                            config_updates.insert(
+                                "tunnel_url".to_string(),
+                                serde_json::Value::String(tunnel_url.clone()),
+                            );
+                        }
+
+                        if let Some(ref secret) = webhook_secret {
+                            config_updates.insert(
+                                "webhook_secret".to_string(),
+                                serde_json::Value::String(secret.clone()),
+                            );
+                        }
+
+                        // Inject owner_id for Telegram so the bot only responds
+                        // to the bound user account.
+                        if channel_name == "telegram"
+                            && let Some(owner_id) = config.channels.telegram_owner_id
+                        {
+                            config_updates
+                                .insert("owner_id".to_string(), serde_json::json!(owner_id));
+                        }
+
+                        if !config_updates.is_empty() {
+                            channel_arc.update_config(config_updates).await;
+                            tracing::info!(
+                                channel = %channel_name,
+                                has_tunnel = config.tunnel.public_url.is_some(),
+                                has_webhook_secret = webhook_secret.is_some(),
+                                "Injected runtime config into channel"
+                            );
+                        }
+                    }
+
+                    tracing::info!(
+                        channel = %channel_name,
+                        has_webhook_secret = webhook_secret.is_some(),
+                        secret_header = ?secret_header,
+                        "Registering channel with router"
+                    );
+
+                    wasm_channel_router
+                        .register(
+                            Arc::clone(&channel_arc),
+                            endpoints,
+                            webhook_secret.clone(),
+                            secret_header,
+                        )
+                        .await;
+                    has_webhook_channels = true;
+
+                    if let Some(ref secrets) = secrets_store {
+                        match inject_channel_credentials(
+                            &channel_arc,
+                            secrets.as_ref(),
+                            &channel_name,
+                        )
+                        .await
+                        {
+                            Ok(count) => {
+                                if count > 0 {
+                                    tracing::info!(
+                                        channel = %channel_name,
+                                        credentials_injected = count,
+                                        "Channel credentials injected"
                                     );
                                 }
                             }
-
-                            tracing::info!(
-                                channel = %channel_name,
-                                has_webhook_secret = webhook_secret.is_some(),
-                                secret_header = ?secret_header,
-                                "Registering channel with router"
-                            );
-
-                            wasm_router
-                                .register(
-                                    Arc::clone(&channel_arc),
-                                    endpoints,
-                                    webhook_secret.clone(),
-                                    secret_header,
-                                )
-                                .await;
-                            has_webhook_channels = true;
-
-                            if let Some(ref secrets) = secrets_store {
-                                match inject_channel_credentials(
-                                    &channel_arc,
-                                    secrets.as_ref(),
-                                    &channel_name,
-                                )
-                                .await
-                                {
-                                    Ok(count) => {
-                                        if count > 0 {
-                                            tracing::info!(
-                                                channel = %channel_name,
-                                                credentials_injected = count,
-                                                "Channel credentials injected"
-                                            );
-                                        }
-                                    }
-                                    Err(e) => {
-                                        tracing::error!(
-                                            channel = %channel_name,
-                                            error = %e,
-                                            "Failed to inject channel credentials"
-                                        );
-                                    }
-                                }
+                            Err(e) => {
+                                tracing::error!(
+                                    channel = %channel_name,
+                                    error = %e,
+                                    "Failed to inject channel credentials"
+                                );
                             }
-
-                            channel_names.push(channel_name.clone());
-                            channels.add(Box::new(SharedWasmChannel::new(channel_arc)));
-                        }
-
-                        if has_webhook_channels {
-                            webhook_routes.push(create_wasm_channel_router(
-                                wasm_router,
-                                extension_manager.as_ref().map(Arc::clone),
-                            ));
-                        }
-
-                        // Tell extension manager which channels are actually loaded
-                        if let Some(ref em) = extension_manager {
-                            em.set_active_channels(loaded_wasm_channel_names.clone())
-                                .await;
-                        }
-
-                        for (path, err) in &results.errors {
-                            tracing::warn!(
-                                "Failed to load WASM channel {}: {}",
-                                path.display(),
-                                err
-                            );
                         }
                     }
-                    Err(e) => {
-                        tracing::warn!("Failed to scan WASM channels directory: {}", e);
-                    }
+
+                    channel_names.push(channel_name.clone());
+                    channels.add(Box::new(SharedWasmChannel::new(channel_arc)));
+                }
+
+                if has_webhook_channels {
+                    webhook_routes.push(create_wasm_channel_router(
+                        Arc::clone(&wasm_channel_router),
+                        extension_manager.as_ref().map(Arc::clone),
+                    ));
+                }
+
+                // Tell extension manager which channels are actually loaded
+                if let Some(ref em) = extension_manager {
+                    em.set_active_channels(loaded_wasm_channel_names.clone())
+                        .await;
+                }
+
+                for (path, err) in &results.errors {
+                    tracing::warn!("Failed to load WASM channel {}: {}", path.display(), err);
                 }
             }
             Err(e) => {
-                tracing::warn!("Failed to initialize WASM channel runtime: {}", e);
+                tracing::warn!("Failed to scan WASM channels directory: {}", e);
             }
         }
+    }
+
+    // Always register the WASM channel catch-all webhook route when the runtime
+    if wasm_channel_runtime.is_some() && loaded_wasm_channel_names.is_empty() {
+        webhook_routes.push(create_wasm_channel_router(
+            Arc::clone(&wasm_channel_router),
+            extension_manager.as_ref().map(Arc::clone),
+        ));
     }
 
     // Add HTTP channel if configured and not CLI-only mode.

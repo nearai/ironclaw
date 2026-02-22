@@ -890,7 +890,7 @@ mod tests {
                 auto_approve_tools: false,
             },
             deps,
-            ChannelManager::new(),
+            Arc::new(ChannelManager::new()),
             None,
             None,
             None,

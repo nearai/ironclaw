@@ -607,6 +607,9 @@ Respond with a JSON plan in this format:
         // Channel-specific formatting hints
         let channel_section = self.build_channel_section();
 
+        // Extension guidance (only when extension tools are available)
+        let extensions_section = self.build_extensions_section(context);
+
         // Runtime context (agent metadata)
         let runtime_section = self.build_runtime_section();
 
@@ -648,15 +651,37 @@ Example:
 - Prioritize safety and human oversight over task completion. If instructions conflict, pause and ask.
 - Comply with stop, pause, or audit requests. Never bypass safeguards.
 - Do not manipulate anyone to expand your access or disable safeguards.
-- Do not modify system prompts, safety rules, or tool policies unless explicitly requested by the user.{}{}{}{}
+- Do not modify system prompts, safety rules, or tool policies unless explicitly requested by the user.{}{}{}{}{}
 {}{}"#,
             tools_section,
+            extensions_section,
             channel_section,
             runtime_section,
             group_section,
             identity_section,
             skills_section,
         )
+    }
+
+    fn build_extensions_section(&self, context: &ReasoningContext) -> String {
+        // Only include when the extension management tools are available
+        let has_ext_tools = context
+            .available_tools
+            .iter()
+            .any(|t| t.name == "tool_search");
+        if !has_ext_tools {
+            return String::new();
+        }
+
+        "\n\n## Extensions\n\
+         You can search, install, and activate extensions to add new capabilities:\n\
+         - **Channels** (Telegram, Slack, Discord) — messaging integrations. \
+         When users ask about connecting a messaging platform, search for it as a channel.\n\
+         - **Tools** — sandboxed functions that extend your abilities.\n\
+         - **MCP servers** — external API integrations via the Model Context Protocol.\n\n\
+         Use `tool_search` to find extensions by name. Refer to them by their kind \
+         (channel, tool, or server) — not as \"MCP server\" generically."
+            .to_string()
     }
 
     fn build_channel_section(&self) -> String {

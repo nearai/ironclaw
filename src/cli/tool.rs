@@ -4,7 +4,6 @@
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::process::Command as ProcessCommand;
 use std::sync::Arc;
 
 use clap::Subcommand;
@@ -155,11 +154,18 @@ async fn install_tool(
         };
 
         // Build the WASM component if not skipping
+        let profile = if release { "release" } else { "debug" };
         let wasm_path = if skip_build {
             // Look for existing wasm file
-            find_wasm_artifact(&path, &tool_name, release)?
+            crate::registry::artifacts::find_wasm_artifact(&path, &tool_name, profile)
+                .or_else(|| crate::registry::artifacts::find_any_wasm_artifact(&path, profile))
+                .ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "No .wasm artifact found. Run without --skip-build to build first."
+                    )
+                })?
         } else {
-            build_wasm_component(&path, release)?
+            crate::registry::artifacts::build_wasm_component_sync(&path, release)?
         };
 
         // Look for capabilities file
@@ -251,169 +257,6 @@ async fn install_tool(
     }
 
     Ok(())
-}
-
-/// Build a WASM component using cargo-component.
-fn build_wasm_component(source_dir: &Path, release: bool) -> anyhow::Result<PathBuf> {
-    println!("Building WASM component in {}...", source_dir.display());
-
-    // Check if cargo-component is available
-    let check = ProcessCommand::new("cargo")
-        .args(["component", "--version"])
-        .output();
-
-    if check.is_err() || !check.unwrap().status.success() {
-        anyhow::bail!(
-            "cargo-component not found. Install with: cargo install cargo-component\n\
-             Or use --skip-build with an existing .wasm file."
-        );
-    }
-
-    // Build command
-    let mut cmd = ProcessCommand::new("cargo");
-    cmd.current_dir(source_dir).args(["component", "build"]);
-
-    if release {
-        cmd.arg("--release");
-    }
-
-    println!(
-        "  Running: cargo component build{}",
-        if release { " --release" } else { "" }
-    );
-
-    let output = cmd.output()?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        anyhow::bail!("Build failed:\n{}", stderr);
-    }
-
-    // Find the output wasm file
-    // cargo-component may output to wasm32-wasip1 or wasm32-wasip2 depending on version
-    let profile = if release { "release" } else { "debug" };
-    let candidates = [
-        source_dir
-            .join("target")
-            .join("wasm32-wasip1")
-            .join(profile),
-        source_dir
-            .join("target")
-            .join("wasm32-wasip2")
-            .join(profile),
-        source_dir
-            .join("target")
-            .join("wasm32-unknown-unknown")
-            .join(profile),
-    ];
-
-    let target_dir = candidates.iter().find(|p| p.exists()).ok_or_else(|| {
-        anyhow::anyhow!(
-            "No WASM target directory found. Expected one of: {}",
-            candidates
-                .iter()
-                .map(|p| p.display().to_string())
-                .collect::<Vec<_>>()
-                .join(", ")
-        )
-    })?;
-
-    // Look for .wasm files in target dir
-    let entries: Vec<_> = std::fs::read_dir(target_dir)?
-        .filter_map(|e| e.ok())
-        .filter(|e| {
-            e.path()
-                .extension()
-                .map(|ext| ext == "wasm")
-                .unwrap_or(false)
-        })
-        .collect();
-
-    if entries.is_empty() {
-        anyhow::bail!(
-            "No .wasm file found in {}. Build may have failed.",
-            target_dir.display()
-        );
-    }
-
-    if entries.len() > 1 {
-        println!(
-            "  Warning: Multiple .wasm files found, using first: {}",
-            entries[0].path().display()
-        );
-    }
-
-    let wasm_path = entries[0].path();
-    println!("  Built: {}", wasm_path.display());
-
-    Ok(wasm_path)
-}
-
-/// Find an existing WASM artifact without building.
-fn find_wasm_artifact(source_dir: &Path, name: &str, release: bool) -> anyhow::Result<PathBuf> {
-    let profile = if release { "release" } else { "debug" };
-
-    // cargo-component may output to wasm32-wasip1 or wasm32-wasip2 depending on version
-    let target_dirs = [
-        source_dir
-            .join("target")
-            .join("wasm32-wasip1")
-            .join(profile),
-        source_dir
-            .join("target")
-            .join("wasm32-wasip2")
-            .join(profile),
-        source_dir
-            .join("target")
-            .join("wasm32-unknown-unknown")
-            .join(profile),
-    ];
-
-    let snake_name = name.replace('-', "_");
-
-    // Try exact name match in any target dir first
-    for target_dir in &target_dirs {
-        let candidates = [
-            target_dir.join(format!("{}.wasm", name)),
-            target_dir.join(format!("{}.wasm", snake_name)),
-        ];
-        for candidate in &candidates {
-            if candidate.exists() {
-                return Ok(candidate.clone());
-            }
-        }
-    }
-
-    // Find a target dir that exists
-    let target_dir = target_dirs.iter().find(|p| p.exists()).ok_or_else(|| {
-        anyhow::anyhow!("No target directory found. Run without --skip-build to build first.")
-    })?;
-
-    // Fall back to any .wasm file
-    let entries: Vec<_> = std::fs::read_dir(target_dir)
-        .map_err(|_| {
-            anyhow::anyhow!(
-                "Target directory not found: {}. Run without --skip-build.",
-                target_dir.display()
-            )
-        })?
-        .filter_map(|e| e.ok())
-        .filter(|e| {
-            e.path()
-                .extension()
-                .map(|ext| ext == "wasm")
-                .unwrap_or(false)
-        })
-        .collect();
-
-    if entries.is_empty() {
-        anyhow::bail!(
-            "No .wasm file found in {}. Build the project first or remove --skip-build.",
-            target_dir.display()
-        );
-    }
-
-    Ok(entries[0].path())
 }
 
 /// Extract crate name from Cargo.toml.

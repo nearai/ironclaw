@@ -780,7 +780,12 @@ impl WasmChannel {
     /// Execute the on_start callback.
     ///
     /// Returns the channel configuration for HTTP endpoint registration.
-    async fn call_on_start(&self) -> Result<ChannelConfig, WasmChannelError> {
+    /// Call the WASM module's `on_start` callback.
+    ///
+    /// Typically called once during `start()`, but can be called again after
+    /// credentials are refreshed to re-trigger webhook registration and
+    /// other one-time setup that depends on credentials.
+    pub async fn call_on_start(&self) -> Result<ChannelConfig, WasmChannelError> {
         // If no WASM bytes, return default config (for testing)
         if self.prepared.component().is_none() {
             tracing::info!(

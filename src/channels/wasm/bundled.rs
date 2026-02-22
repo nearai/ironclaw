@@ -65,24 +65,28 @@ fn locate_channel_artifacts(name: &str) -> Result<(PathBuf, PathBuf), String> {
         return Ok((flat_wasm, caps_path));
     }
 
-    // Fall back to build tree layout (dev builds)
-    let build_wasm = channel_dir
-        .join("target/wasm32-wasip2/release")
-        .join(format!("{}.wasm", crate_name));
-
-    if build_wasm.exists() && caps_path.exists() {
+    // Fall back to build tree layout (dev builds) — search across all WASM triples
+    if let Some(build_wasm) =
+        crate::registry::artifacts::find_wasm_artifact(&channel_dir, crate_name, "release")
+        && caps_path.exists()
+    {
         return Ok((build_wasm, caps_path));
     }
+
+    // Provide a helpful error with the paths we checked
+    let expected_build = crate::registry::artifacts::resolve_target_dir(&channel_dir)
+        .join("wasm32-wasip2/release")
+        .join(format!("{}.wasm", crate_name));
 
     Err(format!(
         "Channel '{}' WASM not found. Checked:\n  \
          - {} (flat/packaged)\n  \
-         - {} (build tree)\n  \
+         - {} (build tree, and other triples)\n  \
          Build it first:\n  \
          cd {} && cargo build --target wasm32-wasip2 --release",
         name,
         flat_wasm.display(),
-        build_wasm.display(),
+        expected_build.display(),
         channel_dir.display()
     ))
 }

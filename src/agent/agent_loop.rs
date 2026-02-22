@@ -98,7 +98,7 @@ impl Agent {
     pub fn new(
         config: AgentConfig,
         deps: AgentDeps,
-        channels: ChannelManager,
+        channels: Arc<ChannelManager>,
         heartbeat_config: Option<HeartbeatConfig>,
         hygiene_config: Option<crate::config::HygieneConfig>,
         routine_config: Option<RoutineConfig>,
@@ -123,7 +123,7 @@ impl Agent {
         Self {
             config,
             deps,
-            channels: Arc::new(channels),
+            channels,
             context_manager,
             scheduler,
             router: Router::new(),
