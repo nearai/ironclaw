@@ -43,6 +43,12 @@ pub struct GatewayConfig {
     /// Bearer token for authentication. Random hex generated at startup if unset.
     pub auth_token: Option<String>,
     pub user_id: String,
+    /// Additional user scopes for workspace reads.
+    ///
+    /// When set, the workspace will be able to read (search, read, list) from
+    /// these additional user scopes while writes remain isolated to `user_id`.
+    /// Parsed from `WORKSPACE_READ_SCOPES` (comma-separated).
+    pub workspace_read_scopes: Vec<String>,
     /// Memory layer definitions (JSON in env var, or from external config).
     pub memory_layers: Vec<crate::workspace::layer::MemoryLayer>,
 }
@@ -150,11 +156,21 @@ impl ChannelsConfig {
                 }
             }
 
+            let workspace_read_scopes = optional_env("WORKSPACE_READ_SCOPES")?
+                .map(|s| {
+                    s.split(',')
+                        .map(|s| s.trim().to_string())
+                        .filter(|s| !s.is_empty())
+                        .collect()
+                })
+                .unwrap_or_default();
+
             Some(GatewayConfig {
                 host: optional_env("GATEWAY_HOST")?.unwrap_or_else(|| "127.0.0.1".to_string()),
                 port: parse_optional_env("GATEWAY_PORT", 3000)?,
                 auth_token: optional_env("GATEWAY_AUTH_TOKEN")?,
                 user_id,
+                workspace_read_scopes,
                 memory_layers,
             })
         } else {

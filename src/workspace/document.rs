@@ -120,6 +120,43 @@ impl WorkspaceEntry {
     }
 }
 
+/// Merge workspace entries from multiple scopes into a deduplicated, sorted list.
+///
+/// When the same path appears in multiple scopes:
+/// - Keeps the most recent `updated_at`
+/// - If any scope marks it as a directory, the merged entry is a directory
+pub fn merge_workspace_entries(
+    entries: impl IntoIterator<Item = WorkspaceEntry>,
+) -> Vec<WorkspaceEntry> {
+    let mut seen = std::collections::HashMap::new();
+    for entry in entries {
+        seen.entry(entry.path.clone())
+            .and_modify(|existing: &mut WorkspaceEntry| {
+                // Keep the most recent updated_at (and its content_preview)
+                if let (Some(existing_ts), Some(new_ts)) =
+                    (&existing.updated_at, &entry.updated_at)
+                {
+                    if new_ts > existing_ts {
+                        existing.updated_at = Some(*new_ts);
+                        existing.content_preview = entry.content_preview.clone();
+                    }
+                } else if existing.updated_at.is_none() {
+                    existing.updated_at = entry.updated_at;
+                    existing.content_preview = entry.content_preview.clone();
+                }
+                // If either is a directory, mark as directory
+                if entry.is_directory {
+                    existing.is_directory = true;
+                    existing.content_preview = None;
+                }
+            })
+            .or_insert(entry);
+    }
+    let mut result: Vec<WorkspaceEntry> = seen.into_values().collect();
+    result.sort_by(|a, b| a.path.cmp(&b.path));
+    result
+}
+
 /// A chunk of a memory document for search indexing.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MemoryChunk {
@@ -217,5 +254,116 @@ mod tests {
             content_preview: None,
         };
         assert_eq!(entry.name(), "alpha");
+    }
+
+    #[test]
+    fn test_merge_workspace_entries_empty() {
+        let result = merge_workspace_entries(vec![]);
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn test_merge_workspace_entries_keeps_newer_timestamp_and_preview() {
+        use chrono::TimeZone;
+        let old_ts = chrono::Utc.with_ymd_and_hms(2025, 1, 1, 0, 0, 0).unwrap();
+        let new_ts = chrono::Utc.with_ymd_and_hms(2025, 6, 1, 0, 0, 0).unwrap();
+
+        let entries = vec![
+            WorkspaceEntry {
+                path: "notes.md".to_string(),
+                is_directory: false,
+                updated_at: Some(old_ts),
+                content_preview: Some("old".to_string()),
+            },
+            WorkspaceEntry {
+                path: "notes.md".to_string(),
+                is_directory: false,
+                updated_at: Some(new_ts),
+                content_preview: Some("new".to_string()),
+            },
+        ];
+
+        let result = merge_workspace_entries(entries);
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].updated_at, Some(new_ts));
+        assert_eq!(result[0].content_preview, Some("new".to_string()));
+    }
+
+    #[test]
+    fn test_merge_workspace_entries_directory_wins() {
+        let entries = vec![
+            WorkspaceEntry {
+                path: "projects".to_string(),
+                is_directory: false,
+                updated_at: None,
+                content_preview: Some("file content".to_string()),
+            },
+            WorkspaceEntry {
+                path: "projects".to_string(),
+                is_directory: true,
+                updated_at: None,
+                content_preview: None,
+            },
+        ];
+
+        let result = merge_workspace_entries(entries);
+        assert_eq!(result.len(), 1);
+        assert!(result[0].is_directory);
+        assert!(result[0].content_preview.is_none());
+    }
+
+    #[test]
+    fn test_merge_workspace_entries_fills_missing_timestamp() {
+        use chrono::TimeZone;
+        let ts = chrono::Utc.with_ymd_and_hms(2025, 3, 1, 0, 0, 0).unwrap();
+
+        let entries = vec![
+            WorkspaceEntry {
+                path: "a.md".to_string(),
+                is_directory: false,
+                updated_at: None,
+                content_preview: None,
+            },
+            WorkspaceEntry {
+                path: "a.md".to_string(),
+                is_directory: false,
+                updated_at: Some(ts),
+                content_preview: None,
+            },
+        ];
+
+        let result = merge_workspace_entries(entries);
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].updated_at, Some(ts));
+    }
+
+    #[test]
+    fn test_merge_workspace_entries_sorted_by_path() {
+        let entries = vec![
+            WorkspaceEntry {
+                path: "z.md".to_string(),
+                is_directory: false,
+                updated_at: None,
+                content_preview: None,
+            },
+            WorkspaceEntry {
+                path: "a.md".to_string(),
+                is_directory: false,
+                updated_at: None,
+                content_preview: None,
+            },
+            WorkspaceEntry {
+                path: "m.md".to_string(),
+                is_directory: false,
+                updated_at: None,
+                content_preview: None,
+            },
+        ];
+
+        let result = merge_workspace_entries(entries);
+        assert_eq!(result.len(), 3);
+        assert_eq!(result[0].path, "a.md");
+        assert_eq!(result[1].path, "m.md");
+        assert_eq!(result[2].path, "z.md");
     }
 }

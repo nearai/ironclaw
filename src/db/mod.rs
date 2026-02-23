@@ -396,6 +396,96 @@ pub trait WorkspaceStore: Send + Sync {
         embedding: Option<&[f32]>,
         config: &SearchConfig,
     ) -> Result<Vec<SearchResult>, WorkspaceError>;
+
+    // ==================== Multi-scope read methods ====================
+    //
+    // Default implementations loop over user_ids calling single-scope methods,
+    // then merge results. Backends can override with efficient SQL (e.g.,
+    // `WHERE user_id = ANY($1::text[])`).
+
+    /// Hybrid search across multiple user scopes, merging results by score.
+    ///
+    /// **Note:** The default implementation calls `hybrid_search` per scope and
+    /// merges by raw score. Because RRF scores are normalized independently
+    /// within each scope, scores are not directly comparable across scopes.
+    /// The Postgres backend overrides this with a single combined query that
+    /// applies RRF once to the unified result set.
+    async fn hybrid_search_multi(
+        &self,
+        user_ids: &[String],
+        agent_id: Option<Uuid>,
+        query: &str,
+        embedding: Option<&[f32]>,
+        config: &SearchConfig,
+    ) -> Result<Vec<SearchResult>, WorkspaceError> {
+        let mut all_results = Vec::new();
+        for uid in user_ids {
+            let results = self
+                .hybrid_search(uid, agent_id, query, embedding, config)
+                .await?;
+            all_results.extend(results);
+        }
+        // Re-sort by score descending and truncate to limit
+        all_results.sort_by(|a, b| {
+            b.score
+                .partial_cmp(&a.score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+        all_results.truncate(config.limit);
+        Ok(all_results)
+    }
+
+    /// List all file paths across multiple user scopes.
+    async fn list_all_paths_multi(
+        &self,
+        user_ids: &[String],
+        agent_id: Option<Uuid>,
+    ) -> Result<Vec<String>, WorkspaceError> {
+        let mut all_paths = Vec::new();
+        for uid in user_ids {
+            let paths = self.list_all_paths(uid, agent_id).await?;
+            all_paths.extend(paths);
+        }
+        all_paths.sort();
+        all_paths.dedup();
+        Ok(all_paths)
+    }
+
+    /// Get a document by path, searching across multiple user scopes.
+    ///
+    /// Returns the first match found (tries each user_id in order).
+    async fn get_document_by_path_multi(
+        &self,
+        user_ids: &[String],
+        agent_id: Option<Uuid>,
+        path: &str,
+    ) -> Result<MemoryDocument, WorkspaceError> {
+        for uid in user_ids {
+            match self.get_document_by_path(uid, agent_id, path).await {
+                Ok(doc) => return Ok(doc),
+                Err(WorkspaceError::DocumentNotFound { .. }) => continue,
+                Err(e) => return Err(e),
+            }
+        }
+        Err(WorkspaceError::DocumentNotFound {
+            doc_type: path.to_string(),
+            user_id: format!("[{}]", user_ids.join(", ")),
+        })
+    }
+
+    /// List directory contents across multiple user scopes.
+    async fn list_directory_multi(
+        &self,
+        user_ids: &[String],
+        agent_id: Option<Uuid>,
+        directory: &str,
+    ) -> Result<Vec<WorkspaceEntry>, WorkspaceError> {
+        let mut all_entries = Vec::new();
+        for uid in user_ids {
+            all_entries.extend(self.list_directory(uid, agent_id, directory).await?);
+        }
+        Ok(crate::workspace::merge_workspace_entries(all_entries))
+    }
 }
 
 /// Backend-agnostic database supertrait.
