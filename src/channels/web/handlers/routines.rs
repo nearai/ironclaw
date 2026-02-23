@@ -11,11 +11,13 @@ use serde::Deserialize;
 use uuid::Uuid;
 
 use crate::channels::IncomingMessage;
+use crate::channels::web::auth::AuthenticatedUser;
 use crate::channels::web::server::GatewayState;
 use crate::channels::web::types::*;
 
 pub async fn routines_list_handler(
     State(state): State<Arc<GatewayState>>,
+    AuthenticatedUser(user): AuthenticatedUser,
 ) -> Result<Json<RoutineListResponse>, (StatusCode, String)> {
     let store = state.store.as_ref().ok_or((
         StatusCode::SERVICE_UNAVAILABLE,
@@ -23,7 +25,7 @@ pub async fn routines_list_handler(
     ))?;
 
     let routines = store
-        .list_routines(&state.user_id)
+        .list_routines(&user.user_id)
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
@@ -34,6 +36,7 @@ pub async fn routines_list_handler(
 
 pub async fn routines_summary_handler(
     State(state): State<Arc<GatewayState>>,
+    AuthenticatedUser(user): AuthenticatedUser,
 ) -> Result<Json<RoutineSummaryResponse>, (StatusCode, String)> {
     let store = state.store.as_ref().ok_or((
         StatusCode::SERVICE_UNAVAILABLE,
@@ -41,7 +44,7 @@ pub async fn routines_summary_handler(
     ))?;
 
     let routines = store
-        .list_routines(&state.user_id)
+        .list_routines(&user.user_id)
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
@@ -77,6 +80,7 @@ pub async fn routines_summary_handler(
 
 pub async fn routines_detail_handler(
     State(state): State<Arc<GatewayState>>,
+    AuthenticatedUser(_user): AuthenticatedUser,
     Path(id): Path<String>,
 ) -> Result<Json<RoutineDetailResponse>, (StatusCode, String)> {
     let store = state.store.as_ref().ok_or((
@@ -131,6 +135,7 @@ pub async fn routines_detail_handler(
 
 pub async fn routines_trigger_handler(
     State(state): State<Arc<GatewayState>>,
+    AuthenticatedUser(user): AuthenticatedUser,
     Path(id): Path<String>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
     let store = state.store.as_ref().ok_or((
@@ -156,7 +161,7 @@ pub async fn routines_trigger_handler(
     };
 
     let content = format!("[routine:{}] {}", routine.name, prompt);
-    let msg = IncomingMessage::new("gateway", &state.user_id, content);
+    let msg = IncomingMessage::new("gateway", &user.user_id, content);
 
     let tx_guard = state.msg_tx.read().await;
     let tx = tx_guard.as_ref().ok_or((
@@ -184,6 +189,7 @@ pub struct ToggleRequest {
 
 pub async fn routines_toggle_handler(
     State(state): State<Arc<GatewayState>>,
+    AuthenticatedUser(_user): AuthenticatedUser,
     Path(id): Path<String>,
     body: Option<Json<ToggleRequest>>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
@@ -220,6 +226,7 @@ pub async fn routines_toggle_handler(
 
 pub async fn routines_delete_handler(
     State(state): State<Arc<GatewayState>>,
+    AuthenticatedUser(_user): AuthenticatedUser,
     Path(id): Path<String>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
     let store = state.store.as_ref().ok_or((
@@ -247,6 +254,7 @@ pub async fn routines_delete_handler(
 
 pub async fn routines_runs_handler(
     State(state): State<Arc<GatewayState>>,
+    AuthenticatedUser(_user): AuthenticatedUser,
     Path(id): Path<String>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
     let store = state.store.as_ref().ok_or((

@@ -10,11 +10,13 @@ use axum::{
 use serde::Deserialize;
 use uuid::Uuid;
 
+use crate::channels::web::auth::AuthenticatedUser;
 use crate::channels::web::server::GatewayState;
 use crate::channels::web::types::*;
 
 pub async fn jobs_list_handler(
     State(state): State<Arc<GatewayState>>,
+    AuthenticatedUser(user): AuthenticatedUser,
 ) -> Result<Json<JobListResponse>, (StatusCode, String)> {
     let store = state.store.as_ref().ok_or((
         StatusCode::SERVICE_UNAVAILABLE,
@@ -23,14 +25,14 @@ pub async fn jobs_list_handler(
 
     // Fetch sandbox jobs scoped to the authenticated user.
     let sandbox_jobs = store
-        .list_sandbox_jobs_for_user(&state.user_id)
+        .list_sandbox_jobs_for_user(&user.user_id)
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
     // Scope jobs to the authenticated user.
     let mut jobs: Vec<JobInfo> = sandbox_jobs
         .iter()
-        .filter(|j| j.user_id == state.user_id)
+        .filter(|j| j.user_id == user.user_id)
         .map(|j| {
             let ui_state = match j.status.as_str() {
                 "creating" => "pending",
@@ -56,6 +58,7 @@ pub async fn jobs_list_handler(
 
 pub async fn jobs_summary_handler(
     State(state): State<Arc<GatewayState>>,
+    AuthenticatedUser(user): AuthenticatedUser,
 ) -> Result<Json<JobSummaryResponse>, (StatusCode, String)> {
     let store = state.store.as_ref().ok_or((
         StatusCode::SERVICE_UNAVAILABLE,
@@ -63,7 +66,7 @@ pub async fn jobs_summary_handler(
     ))?;
 
     let s = store
-        .sandbox_job_summary_for_user(&state.user_id)
+        .sandbox_job_summary_for_user(&user.user_id)
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
@@ -79,6 +82,7 @@ pub async fn jobs_summary_handler(
 
 pub async fn jobs_detail_handler(
     State(state): State<Arc<GatewayState>>,
+    AuthenticatedUser(user): AuthenticatedUser,
     Path(id): Path<String>,
 ) -> Result<Json<JobDetailResponse>, (StatusCode, String)> {
     let job_id = Uuid::parse_str(&id)
@@ -88,7 +92,7 @@ pub async fn jobs_detail_handler(
     if let Some(ref store) = state.store
         && let Ok(Some(job)) = store.get_sandbox_job(job_id).await
     {
-        if job.user_id != state.user_id {
+        if job.user_id != user.user_id {
             return Err((StatusCode::NOT_FOUND, "Job not found".to_string()));
         }
         let browse_id = std::path::Path::new(&job.project_dir)
@@ -151,6 +155,7 @@ pub async fn jobs_detail_handler(
 
 pub async fn jobs_cancel_handler(
     State(state): State<Arc<GatewayState>>,
+    AuthenticatedUser(user): AuthenticatedUser,
     Path(id): Path<String>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
     let job_id = Uuid::parse_str(&id)
@@ -160,7 +165,7 @@ pub async fn jobs_cancel_handler(
     if let Some(ref store) = state.store
         && let Ok(Some(job)) = store.get_sandbox_job(job_id).await
     {
-        if job.user_id != state.user_id {
+        if job.user_id != user.user_id {
             return Err((StatusCode::NOT_FOUND, "Job not found".to_string()));
         }
         if job.status == "running" || job.status == "creating" {
@@ -193,6 +198,7 @@ pub async fn jobs_cancel_handler(
 
 pub async fn jobs_restart_handler(
     State(state): State<Arc<GatewayState>>,
+    AuthenticatedUser(user): AuthenticatedUser,
     Path(id): Path<String>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
     let store = state.store.as_ref().ok_or((
@@ -214,7 +220,7 @@ pub async fn jobs_restart_handler(
         .ok_or((StatusCode::NOT_FOUND, "Job not found".to_string()))?;
 
     // Scope to the authenticated user.
-    if old_job.user_id != state.user_id {
+    if old_job.user_id != user.user_id {
         return Err((StatusCode::NOT_FOUND, "Job not found".to_string()));
     }
 
@@ -298,6 +304,7 @@ pub async fn jobs_restart_handler(
 /// Submit a follow-up prompt to a running Claude Code sandbox job.
 pub async fn jobs_prompt_handler(
     State(state): State<Arc<GatewayState>>,
+    AuthenticatedUser(user): AuthenticatedUser,
     Path(id): Path<String>,
     Json(body): Json<serde_json::Value>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
@@ -313,7 +320,7 @@ pub async fn jobs_prompt_handler(
     // Verify user owns this job.
     if let Some(ref store) = state.store
         && !store
-            .sandbox_job_belongs_to_user(job_id, &state.user_id)
+            .sandbox_job_belongs_to_user(job_id, &user.user_id)
             .await
             .unwrap_or(false)
     {
@@ -347,6 +354,7 @@ pub async fn jobs_prompt_handler(
 /// Load persisted job events for a job (for history replay on page open).
 pub async fn jobs_events_handler(
     State(state): State<Arc<GatewayState>>,
+    AuthenticatedUser(user): AuthenticatedUser,
     Path(id): Path<String>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
     let store = state.store.as_ref().ok_or((
@@ -360,7 +368,7 @@ pub async fn jobs_events_handler(
 
     // Verify user owns this job.
     if !store
-        .sandbox_job_belongs_to_user(job_id, &state.user_id)
+        .sandbox_job_belongs_to_user(job_id, &user.user_id)
         .await
         .unwrap_or(false)
     {
@@ -399,6 +407,7 @@ pub struct FilePathQuery {
 
 pub async fn job_files_list_handler(
     State(state): State<Arc<GatewayState>>,
+    AuthenticatedUser(user): AuthenticatedUser,
     Path(id): Path<String>,
     Query(query): Query<FilePathQuery>,
 ) -> Result<Json<ProjectFilesResponse>, (StatusCode, String)> {
@@ -417,7 +426,7 @@ pub async fn job_files_list_handler(
         .ok_or((StatusCode::NOT_FOUND, "Job not found".to_string()))?;
 
     // Verify user owns this job.
-    if job.user_id != state.user_id {
+    if job.user_id != user.user_id {
         return Err((StatusCode::NOT_FOUND, "Job not found".to_string()));
     }
 
@@ -467,6 +476,7 @@ pub async fn job_files_list_handler(
 
 pub async fn job_files_read_handler(
     State(state): State<Arc<GatewayState>>,
+    AuthenticatedUser(user): AuthenticatedUser,
     Path(id): Path<String>,
     Query(query): Query<FilePathQuery>,
 ) -> Result<Json<ProjectFileReadResponse>, (StatusCode, String)> {
@@ -485,7 +495,7 @@ pub async fn job_files_read_handler(
         .ok_or((StatusCode::NOT_FOUND, "Job not found".to_string()))?;
 
     // Verify user owns this job.
-    if job.user_id != state.user_id {
+    if job.user_id != user.user_id {
         return Err((StatusCode::NOT_FOUND, "Job not found".to_string()));
     }
 

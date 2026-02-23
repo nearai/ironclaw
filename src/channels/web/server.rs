@@ -27,7 +27,7 @@ use uuid::Uuid;
 
 use crate::agent::SessionManager;
 use crate::channels::IncomingMessage;
-use crate::channels::web::auth::{AuthState, auth_middleware};
+use crate::channels::web::auth::{AuthenticatedUser, MultiAuthState, UserIdentity, auth_middleware};
 use crate::channels::web::handlers::skills::{
     skills_install_handler, skills_list_handler, skills_remove_handler, skills_search_handler,
 };
@@ -113,14 +113,72 @@ impl RateLimiter {
     }
 }
 
+/// Per-user workspace pool: lazily creates and caches workspaces keyed by user_id.
+///
+/// In single-user mode, exactly one workspace is cached. In multi-user mode,
+/// each authenticated user gets their own workspace with appropriate scopes and layers.
+pub struct WorkspacePool {
+    db: Arc<dyn Database>,
+    embeddings: Option<Arc<dyn crate::workspace::EmbeddingProvider>>,
+    cache: tokio::sync::RwLock<std::collections::HashMap<String, Arc<Workspace>>>,
+}
+
+impl WorkspacePool {
+    pub fn new(
+        db: Arc<dyn Database>,
+        embeddings: Option<Arc<dyn crate::workspace::EmbeddingProvider>>,
+    ) -> Self {
+        Self {
+            db,
+            embeddings,
+            cache: tokio::sync::RwLock::new(std::collections::HashMap::new()),
+        }
+    }
+
+    /// Get or create a workspace for the given user identity.
+    pub async fn get_or_create(&self, identity: &UserIdentity) -> Arc<Workspace> {
+        // Fast path: check read lock
+        {
+            let cache = self.cache.read().await;
+            if let Some(ws) = cache.get(&identity.user_id) {
+                return Arc::clone(ws);
+            }
+        }
+
+        // Slow path: create workspace under write lock
+        let mut cache = self.cache.write().await;
+        // Double-check after acquiring write lock
+        if let Some(ws) = cache.get(&identity.user_id) {
+            return Arc::clone(ws);
+        }
+
+        let mut ws = Workspace::new_with_db(&identity.user_id, Arc::clone(&self.db));
+        if !identity.workspace_read_scopes.is_empty() {
+            ws = ws.with_additional_read_scopes(identity.workspace_read_scopes.clone());
+        }
+        if !identity.memory_layers.is_empty() {
+            ws = ws.with_memory_layers(identity.memory_layers.clone());
+        }
+        if let Some(ref emb) = self.embeddings {
+            ws = ws.with_embeddings(Arc::clone(emb));
+        }
+
+        let ws = Arc::new(ws);
+        cache.insert(identity.user_id.clone(), Arc::clone(&ws));
+        ws
+    }
+}
+
 /// Shared state for all gateway handlers.
 pub struct GatewayState {
     /// Channel to send messages to the agent loop.
     pub msg_tx: tokio::sync::RwLock<Option<mpsc::Sender<IncomingMessage>>>,
     /// SSE broadcast manager.
     pub sse: SseManager,
-    /// Workspace for memory API.
+    /// Workspace for memory API (single-user fallback).
     pub workspace: Option<Arc<Workspace>>,
+    /// Per-user workspace pool for multi-user mode.
+    pub workspace_pool: Option<Arc<WorkspacePool>>,
     /// Session manager for thread info.
     pub session_manager: Option<Arc<SessionManager>>,
     /// Log broadcaster for the logs SSE endpoint.
@@ -137,8 +195,8 @@ pub struct GatewayState {
     pub job_manager: Option<Arc<ContainerJobManager>>,
     /// Prompt queue for Claude Code follow-up prompts.
     pub prompt_queue: Option<PromptQueue>,
-    /// User ID for this gateway.
-    pub user_id: String,
+    /// Default user ID (fallback for non-request contexts like heartbeat/routines).
+    pub default_user_id: String,
     /// Shutdown signal sender.
     pub shutdown_tx: tokio::sync::RwLock<Option<oneshot::Sender<()>>>,
     /// WebSocket connection tracker.
@@ -166,7 +224,7 @@ pub struct GatewayState {
 pub async fn start_server(
     addr: SocketAddr,
     state: Arc<GatewayState>,
-    auth_token: String,
+    auth: MultiAuthState,
 ) -> Result<SocketAddr, crate::error::ChannelError> {
     let listener = tokio::net::TcpListener::bind(addr).await.map_err(|e| {
         crate::error::ChannelError::StartupFailed {
@@ -186,7 +244,7 @@ pub async fn start_server(
     let public = Router::new().route("/api/health", get(health_handler));
 
     // Protected routes (require auth)
-    let auth_state = AuthState { token: auth_token };
+    let auth_state = auth;
     let protected = Router::new()
         // Chat
         .route("/api/chat/send", post(chat_send_handler))
@@ -419,6 +477,7 @@ async fn health_handler() -> Json<HealthResponse> {
 
 async fn chat_send_handler(
     State(state): State<Arc<GatewayState>>,
+    AuthenticatedUser(user): AuthenticatedUser,
     Json(req): Json<SendMessageRequest>,
 ) -> Result<(StatusCode, Json<SendMessageResponse>), (StatusCode, String)> {
     if !state.chat_rate_limiter.check() {
@@ -428,7 +487,7 @@ async fn chat_send_handler(
         ));
     }
 
-    let mut msg = IncomingMessage::new("gateway", &state.user_id, &req.content);
+    let mut msg = IncomingMessage::new("gateway", &user.user_id, &req.content);
 
     if let Some(ref thread_id) = req.thread_id {
         msg = msg.with_thread(thread_id);
@@ -461,6 +520,7 @@ async fn chat_send_handler(
 
 async fn chat_approval_handler(
     State(state): State<Arc<GatewayState>>,
+    AuthenticatedUser(user): AuthenticatedUser,
     Json(req): Json<ApprovalRequest>,
 ) -> Result<(StatusCode, Json<SendMessageResponse>), (StatusCode, String)> {
     let (approved, always) = match req.action.as_str() {
@@ -496,7 +556,7 @@ async fn chat_approval_handler(
         )
     })?;
 
-    let mut msg = IncomingMessage::new("gateway", &state.user_id, content);
+    let mut msg = IncomingMessage::new("gateway", &user.user_id, content);
 
     if let Some(ref thread_id) = req.thread_id {
         msg = msg.with_thread(thread_id);
@@ -531,6 +591,7 @@ async fn chat_approval_handler(
 /// The token never touches the LLM, chat history, or SSE stream.
 async fn chat_auth_token_handler(
     State(state): State<Arc<GatewayState>>,
+    AuthenticatedUser(user): AuthenticatedUser,
     Json(req): Json<AuthTokenRequest>,
 ) -> Result<Json<ActionResponse>, (StatusCode, String)> {
     let ext_mgr = state.extension_manager.as_ref().ok_or((
@@ -558,7 +619,7 @@ async fn chat_auth_token_handler(
         };
 
         // Clear auth mode on the active thread
-        clear_auth_mode(&state).await;
+        clear_auth_mode(&state, &user.user_id).await;
 
         state.sse.broadcast(SseEvent::AuthCompleted {
             extension_name: req.extension_name,
@@ -586,16 +647,17 @@ async fn chat_auth_token_handler(
 /// Cancel an in-progress auth flow.
 async fn chat_auth_cancel_handler(
     State(state): State<Arc<GatewayState>>,
+    AuthenticatedUser(user): AuthenticatedUser,
     Json(_req): Json<AuthCancelRequest>,
 ) -> Result<Json<ActionResponse>, (StatusCode, String)> {
-    clear_auth_mode(&state).await;
+    clear_auth_mode(&state, &user.user_id).await;
     Ok(Json(ActionResponse::ok("Auth cancelled")))
 }
 
 /// Clear pending auth mode on the active thread.
-pub async fn clear_auth_mode(state: &GatewayState) {
+pub async fn clear_auth_mode(state: &GatewayState, user_id: &str) {
     if let Some(ref sm) = state.session_manager {
-        let session = sm.get_or_create_session(&state.user_id).await;
+        let session = sm.get_or_create_session(user_id).await;
         let mut sess = session.lock().await;
         if let Some(thread_id) = sess.active_thread
             && let Some(thread) = sess.threads.get_mut(&thread_id)
@@ -664,6 +726,7 @@ struct HistoryQuery {
 
 async fn chat_history_handler(
     State(state): State<Arc<GatewayState>>,
+    AuthenticatedUser(user): AuthenticatedUser,
     Query(query): Query<HistoryQuery>,
 ) -> Result<Json<HistoryResponse>, (StatusCode, String)> {
     let session_manager = state.session_manager.as_ref().ok_or((
@@ -671,7 +734,7 @@ async fn chat_history_handler(
         "Session manager not available".to_string(),
     ))?;
 
-    let session = session_manager.get_or_create_session(&state.user_id).await;
+    let session = session_manager.get_or_create_session(&user.user_id).await;
     let sess = session.lock().await;
 
     let limit = query.limit.unwrap_or(50);
@@ -706,7 +769,7 @@ async fn chat_history_handler(
         && let Some(ref store) = state.store
     {
         let owned = store
-            .conversation_belongs_to_user(thread_id, &state.user_id)
+            .conversation_belongs_to_user(thread_id, &user.user_id)
             .await
             .unwrap_or(false);
         if !owned && !sess.threads.contains_key(&thread_id) {
@@ -837,25 +900,26 @@ fn build_turns_from_db_messages(messages: &[crate::history::ConversationMessage]
 
 async fn chat_threads_handler(
     State(state): State<Arc<GatewayState>>,
+    AuthenticatedUser(user): AuthenticatedUser,
 ) -> Result<Json<ThreadListResponse>, (StatusCode, String)> {
     let session_manager = state.session_manager.as_ref().ok_or((
         StatusCode::SERVICE_UNAVAILABLE,
         "Session manager not available".to_string(),
     ))?;
 
-    let session = session_manager.get_or_create_session(&state.user_id).await;
+    let session = session_manager.get_or_create_session(&user.user_id).await;
     let sess = session.lock().await;
 
     // Try DB first for persistent thread list
     if let Some(ref store) = state.store {
         // Auto-create assistant thread if it doesn't exist
         let assistant_id = store
-            .get_or_create_assistant_conversation(&state.user_id, "gateway")
+            .get_or_create_assistant_conversation(&user.user_id, "gateway")
             .await
             .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
         if let Ok(summaries) = store
-            .list_conversations_with_preview(&state.user_id, "gateway", 50)
+            .list_conversations_with_preview(&user.user_id, "gateway", 50)
             .await
         {
             let mut assistant_thread = None;
@@ -924,13 +988,14 @@ async fn chat_threads_handler(
 
 async fn chat_new_thread_handler(
     State(state): State<Arc<GatewayState>>,
+    AuthenticatedUser(user): AuthenticatedUser,
 ) -> Result<Json<ThreadInfo>, (StatusCode, String)> {
     let session_manager = state.session_manager.as_ref().ok_or((
         StatusCode::SERVICE_UNAVAILABLE,
         "Session manager not available".to_string(),
     ))?;
 
-    let session = session_manager.get_or_create_session(&state.user_id).await;
+    let session = session_manager.get_or_create_session(&user.user_id).await;
     let mut sess = session.lock().await;
     let thread = sess.create_thread();
     let thread_id = thread.id;
@@ -947,7 +1012,7 @@ async fn chat_new_thread_handler(
     // Persist the empty conversation row with thread_type metadata
     if let Some(ref store) = state.store {
         let store = Arc::clone(store);
-        let user_id = state.user_id.clone();
+        let user_id = user.user_id.clone();
         tokio::spawn(async move {
             if let Err(e) = store
                 .ensure_conversation(thread_id, "gateway", &user_id, None)
@@ -1132,6 +1197,7 @@ async fn memory_search_handler(
 
 async fn jobs_list_handler(
     State(state): State<Arc<GatewayState>>,
+    AuthenticatedUser(user): AuthenticatedUser,
 ) -> Result<Json<JobListResponse>, (StatusCode, String)> {
     let store = state.store.as_ref().ok_or((
         StatusCode::SERVICE_UNAVAILABLE,
@@ -1140,14 +1206,14 @@ async fn jobs_list_handler(
 
     // Fetch sandbox jobs scoped to the authenticated user.
     let sandbox_jobs = store
-        .list_sandbox_jobs_for_user(&state.user_id)
+        .list_sandbox_jobs_for_user(&user.user_id)
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
     // Scope jobs to the authenticated user.
     let mut jobs: Vec<JobInfo> = sandbox_jobs
         .iter()
-        .filter(|j| j.user_id == state.user_id)
+        .filter(|j| j.user_id == user.user_id)
         .map(|j| {
             let ui_state = match j.status.as_str() {
                 "creating" => "pending",
@@ -1173,6 +1239,7 @@ async fn jobs_list_handler(
 
 async fn jobs_summary_handler(
     State(state): State<Arc<GatewayState>>,
+    AuthenticatedUser(user): AuthenticatedUser,
 ) -> Result<Json<JobSummaryResponse>, (StatusCode, String)> {
     let store = state.store.as_ref().ok_or((
         StatusCode::SERVICE_UNAVAILABLE,
@@ -1180,7 +1247,7 @@ async fn jobs_summary_handler(
     ))?;
 
     let s = store
-        .sandbox_job_summary_for_user(&state.user_id)
+        .sandbox_job_summary_for_user(&user.user_id)
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
@@ -1196,6 +1263,7 @@ async fn jobs_summary_handler(
 
 async fn jobs_detail_handler(
     State(state): State<Arc<GatewayState>>,
+    AuthenticatedUser(user): AuthenticatedUser,
     Path(id): Path<String>,
 ) -> Result<Json<JobDetailResponse>, (StatusCode, String)> {
     let job_id = Uuid::parse_str(&id)
@@ -1205,7 +1273,7 @@ async fn jobs_detail_handler(
     if let Some(ref store) = state.store
         && let Ok(Some(job)) = store.get_sandbox_job(job_id).await
     {
-        if job.user_id != state.user_id {
+        if job.user_id != user.user_id {
             return Err((StatusCode::NOT_FOUND, "Job not found".to_string()));
         }
         let browse_id = std::path::Path::new(&job.project_dir)
@@ -1268,6 +1336,7 @@ async fn jobs_detail_handler(
 
 async fn jobs_cancel_handler(
     State(state): State<Arc<GatewayState>>,
+    AuthenticatedUser(user): AuthenticatedUser,
     Path(id): Path<String>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
     let job_id = Uuid::parse_str(&id)
@@ -1277,7 +1346,7 @@ async fn jobs_cancel_handler(
     if let Some(ref store) = state.store
         && let Ok(Some(job)) = store.get_sandbox_job(job_id).await
     {
-        if job.user_id != state.user_id {
+        if job.user_id != user.user_id {
             return Err((StatusCode::NOT_FOUND, "Job not found".to_string()));
         }
         if job.status == "running" || job.status == "creating" {
@@ -1310,6 +1379,7 @@ async fn jobs_cancel_handler(
 
 async fn jobs_restart_handler(
     State(state): State<Arc<GatewayState>>,
+    AuthenticatedUser(user): AuthenticatedUser,
     Path(id): Path<String>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
     let store = state.store.as_ref().ok_or((
@@ -1331,7 +1401,7 @@ async fn jobs_restart_handler(
         .ok_or((StatusCode::NOT_FOUND, "Job not found".to_string()))?;
 
     // Scope to the authenticated user.
-    if old_job.user_id != state.user_id {
+    if old_job.user_id != user.user_id {
         return Err((StatusCode::NOT_FOUND, "Job not found".to_string()));
     }
 
@@ -1417,6 +1487,7 @@ async fn jobs_restart_handler(
 /// Submit a follow-up prompt to a running Claude Code sandbox job.
 async fn jobs_prompt_handler(
     State(state): State<Arc<GatewayState>>,
+    AuthenticatedUser(user): AuthenticatedUser,
     Path(id): Path<String>,
     Json(body): Json<serde_json::Value>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
@@ -1432,7 +1503,7 @@ async fn jobs_prompt_handler(
     // Verify user owns this job.
     if let Some(ref store) = state.store
         && !store
-            .sandbox_job_belongs_to_user(job_id, &state.user_id)
+            .sandbox_job_belongs_to_user(job_id, &user.user_id)
             .await
             .unwrap_or(false)
     {
@@ -1466,6 +1537,7 @@ async fn jobs_prompt_handler(
 /// Load persisted job events for a job (for history replay on page open).
 async fn jobs_events_handler(
     State(state): State<Arc<GatewayState>>,
+    AuthenticatedUser(user): AuthenticatedUser,
     Path(id): Path<String>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
     let store = state.store.as_ref().ok_or((
@@ -1479,7 +1551,7 @@ async fn jobs_events_handler(
 
     // Verify user owns this job.
     if !store
-        .sandbox_job_belongs_to_user(job_id, &state.user_id)
+        .sandbox_job_belongs_to_user(job_id, &user.user_id)
         .await
         .unwrap_or(false)
     {
@@ -1518,6 +1590,7 @@ struct FilePathQuery {
 
 async fn job_files_list_handler(
     State(state): State<Arc<GatewayState>>,
+    AuthenticatedUser(user): AuthenticatedUser,
     Path(id): Path<String>,
     Query(query): Query<FilePathQuery>,
 ) -> Result<Json<ProjectFilesResponse>, (StatusCode, String)> {
@@ -1536,7 +1609,7 @@ async fn job_files_list_handler(
         .ok_or((StatusCode::NOT_FOUND, "Job not found".to_string()))?;
 
     // Verify user owns this job.
-    if job.user_id != state.user_id {
+    if job.user_id != user.user_id {
         return Err((StatusCode::NOT_FOUND, "Job not found".to_string()));
     }
 
@@ -1586,6 +1659,7 @@ async fn job_files_list_handler(
 
 async fn job_files_read_handler(
     State(state): State<Arc<GatewayState>>,
+    AuthenticatedUser(user): AuthenticatedUser,
     Path(id): Path<String>,
     Query(query): Query<FilePathQuery>,
 ) -> Result<Json<ProjectFileReadResponse>, (StatusCode, String)> {
@@ -1604,7 +1678,7 @@ async fn job_files_read_handler(
         .ok_or((StatusCode::NOT_FOUND, "Job not found".to_string()))?;
 
     // Verify user owns this job.
-    if job.user_id != state.user_id {
+    if job.user_id != user.user_id {
         return Err((StatusCode::NOT_FOUND, "Job not found".to_string()));
     }
 
@@ -2093,6 +2167,7 @@ async fn pairing_approve_handler(
 
 async fn routines_list_handler(
     State(state): State<Arc<GatewayState>>,
+    AuthenticatedUser(user): AuthenticatedUser,
 ) -> Result<Json<RoutineListResponse>, (StatusCode, String)> {
     let store = state.store.as_ref().ok_or((
         StatusCode::SERVICE_UNAVAILABLE,
@@ -2100,7 +2175,7 @@ async fn routines_list_handler(
     ))?;
 
     let routines = store
-        .list_routines(&state.user_id)
+        .list_routines(&user.user_id)
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
@@ -2111,6 +2186,7 @@ async fn routines_list_handler(
 
 async fn routines_summary_handler(
     State(state): State<Arc<GatewayState>>,
+    AuthenticatedUser(user): AuthenticatedUser,
 ) -> Result<Json<RoutineSummaryResponse>, (StatusCode, String)> {
     let store = state.store.as_ref().ok_or((
         StatusCode::SERVICE_UNAVAILABLE,
@@ -2118,7 +2194,7 @@ async fn routines_summary_handler(
     ))?;
 
     let routines = store
-        .list_routines(&state.user_id)
+        .list_routines(&user.user_id)
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
@@ -2208,6 +2284,7 @@ async fn routines_detail_handler(
 
 async fn routines_trigger_handler(
     State(state): State<Arc<GatewayState>>,
+    AuthenticatedUser(user): AuthenticatedUser,
     Path(id): Path<String>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
     let store = state.store.as_ref().ok_or((
@@ -2233,7 +2310,7 @@ async fn routines_trigger_handler(
     };
 
     let content = format!("[routine:{}] {}", routine.name, prompt);
-    let msg = IncomingMessage::new("gateway", &state.user_id, content);
+    let msg = IncomingMessage::new("gateway", &user.user_id, content);
 
     let tx_guard = state.msg_tx.read().await;
     let tx = tx_guard.as_ref().ok_or((
@@ -2410,12 +2487,13 @@ fn routine_to_info(r: &crate::agent::routine::Routine) -> RoutineInfo {
 
 async fn settings_list_handler(
     State(state): State<Arc<GatewayState>>,
+    AuthenticatedUser(user): AuthenticatedUser,
 ) -> Result<Json<SettingsListResponse>, StatusCode> {
     let store = state
         .store
         .as_ref()
         .ok_or(StatusCode::SERVICE_UNAVAILABLE)?;
-    let rows = store.list_settings(&state.user_id).await.map_err(|e| {
+    let rows = store.list_settings(&user.user_id).await.map_err(|e| {
         tracing::error!("Failed to list settings: {}", e);
         StatusCode::INTERNAL_SERVER_ERROR
     })?;
@@ -2434,6 +2512,7 @@ async fn settings_list_handler(
 
 async fn settings_get_handler(
     State(state): State<Arc<GatewayState>>,
+    AuthenticatedUser(user): AuthenticatedUser,
     Path(key): Path<String>,
 ) -> Result<Json<SettingResponse>, StatusCode> {
     let store = state
@@ -2441,7 +2520,7 @@ async fn settings_get_handler(
         .as_ref()
         .ok_or(StatusCode::SERVICE_UNAVAILABLE)?;
     let row = store
-        .get_setting_full(&state.user_id, &key)
+        .get_setting_full(&user.user_id, &key)
         .await
         .map_err(|e| {
             tracing::error!("Failed to get setting '{}': {}", key, e);
@@ -2458,6 +2537,7 @@ async fn settings_get_handler(
 
 async fn settings_set_handler(
     State(state): State<Arc<GatewayState>>,
+    AuthenticatedUser(user): AuthenticatedUser,
     Path(key): Path<String>,
     Json(body): Json<SettingWriteRequest>,
 ) -> Result<StatusCode, StatusCode> {
@@ -2466,7 +2546,7 @@ async fn settings_set_handler(
         .as_ref()
         .ok_or(StatusCode::SERVICE_UNAVAILABLE)?;
     store
-        .set_setting(&state.user_id, &key, &body.value)
+        .set_setting(&user.user_id, &key, &body.value)
         .await
         .map_err(|e| {
             tracing::error!("Failed to set setting '{}': {}", key, e);
@@ -2478,6 +2558,7 @@ async fn settings_set_handler(
 
 async fn settings_delete_handler(
     State(state): State<Arc<GatewayState>>,
+    AuthenticatedUser(user): AuthenticatedUser,
     Path(key): Path<String>,
 ) -> Result<StatusCode, StatusCode> {
     let store = state
@@ -2485,7 +2566,7 @@ async fn settings_delete_handler(
         .as_ref()
         .ok_or(StatusCode::SERVICE_UNAVAILABLE)?;
     store
-        .delete_setting(&state.user_id, &key)
+        .delete_setting(&user.user_id, &key)
         .await
         .map_err(|e| {
             tracing::error!("Failed to delete setting '{}': {}", key, e);
@@ -2497,12 +2578,13 @@ async fn settings_delete_handler(
 
 async fn settings_export_handler(
     State(state): State<Arc<GatewayState>>,
+    AuthenticatedUser(user): AuthenticatedUser,
 ) -> Result<Json<SettingsExportResponse>, StatusCode> {
     let store = state
         .store
         .as_ref()
         .ok_or(StatusCode::SERVICE_UNAVAILABLE)?;
-    let settings = store.get_all_settings(&state.user_id).await.map_err(|e| {
+    let settings = store.get_all_settings(&user.user_id).await.map_err(|e| {
         tracing::error!("Failed to export settings: {}", e);
         StatusCode::INTERNAL_SERVER_ERROR
     })?;
@@ -2512,6 +2594,7 @@ async fn settings_export_handler(
 
 async fn settings_import_handler(
     State(state): State<Arc<GatewayState>>,
+    AuthenticatedUser(user): AuthenticatedUser,
     Json(body): Json<SettingsImportRequest>,
 ) -> Result<StatusCode, StatusCode> {
     let store = state
@@ -2519,7 +2602,7 @@ async fn settings_import_handler(
         .as_ref()
         .ok_or(StatusCode::SERVICE_UNAVAILABLE)?;
     store
-        .set_all_settings(&state.user_id, &body.settings)
+        .set_all_settings(&user.user_id, &body.settings)
         .await
         .map_err(|e| {
             tracing::error!("Failed to import settings: {}", e);

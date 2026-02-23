@@ -1,6 +1,8 @@
+use std::collections::HashMap;
 use std::path::PathBuf;
 
 use secrecy::SecretString;
+use serde::Deserialize;
 
 use crate::config::helpers::{optional_env, parse_bool_env, parse_optional_env};
 use crate::error::ConfigError;
@@ -49,6 +51,20 @@ pub struct GatewayConfig {
     pub workspace_read_scopes: Vec<String>,
     /// Memory layer definitions (JSON in env var, or from external config).
     pub memory_layers: Vec<crate::workspace::layer::MemoryLayer>,
+    /// Multi-user token map. When set, each token maps to a user identity.
+    /// Parsed from `GATEWAY_USER_TOKENS` (JSON string). When absent, falls back
+    /// to single-user mode via `auth_token` + `user_id`.
+    pub user_tokens: Option<HashMap<String, UserTokenConfig>>,
+}
+
+/// Per-user token configuration for multi-user mode.
+#[derive(Debug, Clone, Deserialize)]
+pub struct UserTokenConfig {
+    pub user_id: String,
+    #[serde(default)]
+    pub workspace_read_scopes: Vec<String>,
+    #[serde(default)]
+    pub memory_layers: Vec<crate::workspace::layer::MemoryLayer>,
 }
 
 impl ChannelsConfig {
@@ -78,6 +94,19 @@ impl ChannelsConfig {
                 None => crate::workspace::layer::MemoryLayer::default_for_user(&user_id),
             };
 
+            let user_tokens: Option<HashMap<String, UserTokenConfig>> =
+                match optional_env("GATEWAY_USER_TOKENS")? {
+                    Some(json_str) => Some(serde_json::from_str(&json_str).map_err(|e| {
+                        ConfigError::InvalidValue {
+                            key: "GATEWAY_USER_TOKENS".to_string(),
+                            message: format!(
+                                "must be valid JSON object mapping tokens to user configs: {e}"
+                            ),
+                        }
+                    })?),
+                    None => None,
+                };
+
             let workspace_read_scopes = optional_env("WORKSPACE_READ_SCOPES")?
                 .map(|s| {
                     s.split(',')
@@ -94,6 +123,7 @@ impl ChannelsConfig {
                 user_id,
                 workspace_read_scopes,
                 memory_layers,
+                user_tokens,
             })
         } else {
             None

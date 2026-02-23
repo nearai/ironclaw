@@ -20,6 +20,7 @@ use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 
 use ironclaw::channels::IncomingMessage;
+use ironclaw::channels::web::auth::MultiAuthState;
 use ironclaw::channels::web::server::{GatewayState, start_server};
 use ironclaw::channels::web::sse::SseManager;
 use ironclaw::channels::web::types::SseEvent;
@@ -41,6 +42,7 @@ async fn start_test_server() -> (
         msg_tx: tokio::sync::RwLock::new(Some(agent_tx)),
         sse: SseManager::new(),
         workspace: None,
+        workspace_pool: None,
         session_manager: None,
         log_broadcaster: None,
         log_level_handle: None,
@@ -49,7 +51,7 @@ async fn start_test_server() -> (
         store: None,
         job_manager: None,
         prompt_queue: None,
-        user_id: "test-user".to_string(),
+        default_user_id: "test-user".to_string(),
         shutdown_tx: tokio::sync::RwLock::new(None),
         ws_tracker: Some(Arc::new(WsConnectionTracker::new())),
         llm_provider: None,
@@ -62,7 +64,8 @@ async fn start_test_server() -> (
     });
 
     let addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
-    let bound_addr = start_server(addr, state.clone(), AUTH_TOKEN.to_string())
+    let auth = MultiAuthState::single(AUTH_TOKEN.to_string(), "test-user".to_string());
+    let bound_addr = start_server(addr, state.clone(), auth)
         .await
         .expect("Failed to start test server");
 

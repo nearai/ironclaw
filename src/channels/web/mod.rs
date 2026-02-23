@@ -44,6 +44,7 @@ use crate::workspace::Workspace;
 
 use self::log_layer::{LogBroadcaster, LogLevelHandle};
 
+use self::auth::MultiAuthState;
 use self::server::GatewayState;
 use self::sse::SseManager;
 use self::types::SseEvent;
@@ -52,14 +53,15 @@ use self::types::SseEvent;
 pub struct GatewayChannel {
     config: GatewayConfig,
     state: Arc<GatewayState>,
-    /// The actual auth token in use (generated or from config).
-    auth_token: String,
+    /// Multi-user auth state (replaces bare auth_token).
+    auth: MultiAuthState,
 }
 
 impl GatewayChannel {
     /// Create a new gateway channel.
     ///
     /// If no auth token is configured, generates a random one and prints it.
+    /// Builds a single-user `MultiAuthState` from the config.
     pub fn new(config: GatewayConfig) -> Self {
         let auth_token = config.auth_token.clone().unwrap_or_else(|| {
             use rand::Rng;
@@ -71,10 +73,20 @@ impl GatewayChannel {
             token
         });
 
+        let auth = MultiAuthState::single_with_identity(
+            auth_token,
+            auth::UserIdentity {
+                user_id: config.user_id.clone(),
+                workspace_read_scopes: config.workspace_read_scopes.clone(),
+                memory_layers: config.memory_layers.clone(),
+            },
+        );
+
         let state = Arc::new(GatewayState {
             msg_tx: tokio::sync::RwLock::new(None),
             sse: SseManager::new(),
             workspace: None,
+            workspace_pool: None,
             session_manager: None,
             log_broadcaster: None,
             log_level_handle: None,
@@ -83,7 +95,7 @@ impl GatewayChannel {
             store: None,
             job_manager: None,
             prompt_queue: None,
-            user_id: config.user_id.clone(),
+            default_user_id: config.user_id.clone(),
             shutdown_tx: tokio::sync::RwLock::new(None),
             ws_tracker: Some(Arc::new(ws::WsConnectionTracker::new())),
             llm_provider: None,
@@ -98,7 +110,41 @@ impl GatewayChannel {
         Self {
             config,
             state,
-            auth_token,
+            auth,
+        }
+    }
+
+    /// Create a gateway channel with a pre-built multi-user auth state.
+    pub fn new_multi_auth(config: GatewayConfig, auth: MultiAuthState) -> Self {
+        let state = Arc::new(GatewayState {
+            msg_tx: tokio::sync::RwLock::new(None),
+            sse: SseManager::new(),
+            workspace: None,
+            workspace_pool: None,
+            session_manager: None,
+            log_broadcaster: None,
+            log_level_handle: None,
+            extension_manager: None,
+            tool_registry: None,
+            store: None,
+            job_manager: None,
+            prompt_queue: None,
+            default_user_id: config.user_id.clone(),
+            shutdown_tx: tokio::sync::RwLock::new(None),
+            ws_tracker: Some(Arc::new(ws::WsConnectionTracker::new())),
+            llm_provider: None,
+            skill_registry: None,
+            skill_catalog: None,
+            chat_rate_limiter: server::RateLimiter::new(30, 60),
+            registry_entries: Vec::new(),
+            cost_guard: None,
+            startup_time: std::time::Instant::now(),
+        });
+
+        Self {
+            config,
+            state,
+            auth,
         }
     }
 
@@ -108,6 +154,7 @@ impl GatewayChannel {
             msg_tx: tokio::sync::RwLock::new(None),
             sse: SseManager::new(),
             workspace: self.state.workspace.clone(),
+            workspace_pool: self.state.workspace_pool.clone(),
             session_manager: self.state.session_manager.clone(),
             log_broadcaster: self.state.log_broadcaster.clone(),
             log_level_handle: self.state.log_level_handle.clone(),
@@ -116,7 +163,7 @@ impl GatewayChannel {
             store: self.state.store.clone(),
             job_manager: self.state.job_manager.clone(),
             prompt_queue: self.state.prompt_queue.clone(),
-            user_id: self.state.user_id.clone(),
+            default_user_id: self.state.default_user_id.clone(),
             shutdown_tx: tokio::sync::RwLock::new(None),
             ws_tracker: self.state.ws_tracker.clone(),
             llm_provider: self.state.llm_provider.clone(),
@@ -225,9 +272,15 @@ impl GatewayChannel {
         self
     }
 
-    /// Get the auth token (for printing to console on startup).
+    /// Inject the per-user workspace pool for multi-user mode.
+    pub fn with_workspace_pool(mut self, pool: Arc<server::WorkspacePool>) -> Self {
+        self.rebuild_state(|s| s.workspace_pool = Some(pool));
+        self
+    }
+
+    /// Get the first auth token (for printing to console on startup).
     pub fn auth_token(&self) -> &str {
-        &self.auth_token
+        self.auth.first_token().unwrap_or("")
     }
 
     /// Get a reference to the shared gateway state (for the agent to push SSE events).
@@ -256,7 +309,7 @@ impl Channel for GatewayChannel {
                 ),
             })?;
 
-        server::start_server(addr, self.state.clone(), self.auth_token.clone()).await?;
+        server::start_server(addr, self.state.clone(), self.auth.clone()).await?;
 
         Ok(Box::pin(ReceiverStream::new(rx)))
     }

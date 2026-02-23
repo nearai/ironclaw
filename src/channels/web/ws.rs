@@ -117,7 +117,7 @@ pub async fn handle_ws_connection(socket: WebSocket, state: Arc<GatewayState>) {
     });
 
     // Receiver task: read client frames and route to agent
-    let user_id = state.user_id.clone();
+    let user_id = state.default_user_id.clone();
     while let Some(Ok(frame)) = ws_stream.next().await {
         match frame {
             Message::Text(text) => {
@@ -254,7 +254,7 @@ async fn handle_client_message(
                                 extension_name, e
                             ),
                         };
-                        crate::channels::web::server::clear_auth_mode(state).await;
+                        crate::channels::web::server::clear_auth_mode(state, user_id).await;
                         state
                             .sse
                             .broadcast(crate::channels::web::types::SseEvent::AuthCompleted {
@@ -290,7 +290,7 @@ async fn handle_client_message(
             }
         }
         WsClientMessage::AuthCancel { .. } => {
-            crate::channels::web::server::clear_auth_mode(state).await;
+            crate::channels::web::server::clear_auth_mode(state, user_id).await;
         }
         WsClientMessage::Ping => {
             let _ = direct_tx.send(WsServerMessage::Pong).await;
@@ -475,6 +475,7 @@ mod tests {
             msg_tx: tokio::sync::RwLock::new(msg_tx),
             sse: SseManager::new(),
             workspace: None,
+            workspace_pool: None,
             session_manager: None,
             log_broadcaster: None,
             log_level_handle: None,
@@ -483,7 +484,7 @@ mod tests {
             store: None,
             job_manager: None,
             prompt_queue: None,
-            user_id: "test".to_string(),
+            default_user_id: "test".to_string(),
             shutdown_tx: tokio::sync::RwLock::new(None),
             ws_tracker: Some(Arc::new(WsConnectionTracker::new())),
             llm_provider: None,

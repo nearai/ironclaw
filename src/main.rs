@@ -456,10 +456,44 @@ async fn main() -> anyhow::Result<()> {
 
     let mut gateway_url: Option<String> = None;
     if let Some(ref gw_config) = config.channels.gateway {
-        let mut gw =
-            GatewayChannel::new(gw_config.clone()).with_llm_provider(Arc::clone(&components.llm));
+        // Build multi-user auth state if user_tokens is configured, else single-user.
+        let mut gw = if let Some(ref user_tokens) = gw_config.user_tokens {
+            use ironclaw::channels::web::auth::{MultiAuthState, UserIdentity};
+            let tokens = user_tokens
+                .iter()
+                .map(|(token, cfg)| {
+                    (
+                        token.clone(),
+                        UserIdentity {
+                            user_id: cfg.user_id.clone(),
+                            workspace_read_scopes: cfg.workspace_read_scopes.clone(),
+                            memory_layers: if cfg.memory_layers.is_empty() {
+                                ironclaw::workspace::layer::MemoryLayer::default_for_user(
+                                    &cfg.user_id,
+                                )
+                            } else {
+                                cfg.memory_layers.clone()
+                            },
+                        },
+                    )
+                })
+                .collect();
+            let auth = MultiAuthState::multi(tokens);
+            GatewayChannel::new_multi_auth(gw_config.clone(), auth)
+        } else {
+            GatewayChannel::new(gw_config.clone())
+        };
+        gw = gw.with_llm_provider(Arc::clone(&components.llm));
         if let Some(ref ws) = components.workspace {
             gw = gw.with_workspace(Arc::clone(ws));
+        }
+        // Create per-user workspace pool for multi-user mode.
+        if let Some(ref db) = components.db {
+            let pool = Arc::new(ironclaw::channels::web::server::WorkspacePool::new(
+                Arc::clone(db),
+                components.embeddings.clone(),
+            ));
+            gw = gw.with_workspace_pool(pool);
         }
         gw = gw.with_session_manager(Arc::clone(&session_manager));
         gw = gw.with_log_broadcaster(Arc::clone(&log_broadcaster));
