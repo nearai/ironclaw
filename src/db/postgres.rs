@@ -648,4 +648,49 @@ impl WorkspaceStore for PgBackend {
             .hybrid_search(user_id, agent_id, query, embedding, config)
             .await
     }
+
+    // Optimized multi-scope overrides using `ANY($1::text[])` SQL.
+
+    async fn hybrid_search_multi(
+        &self,
+        user_ids: &[String],
+        agent_id: Option<Uuid>,
+        query: &str,
+        embedding: Option<&[f32]>,
+        config: &SearchConfig,
+    ) -> Result<Vec<SearchResult>, WorkspaceError> {
+        self.repo
+            .hybrid_search_multi(user_ids, agent_id, query, embedding, config)
+            .await
+    }
+
+    async fn list_all_paths_multi(
+        &self,
+        user_ids: &[String],
+        agent_id: Option<Uuid>,
+    ) -> Result<Vec<String>, WorkspaceError> {
+        self.repo.list_all_paths_multi(user_ids, agent_id).await
+    }
+
+    async fn get_document_by_path_multi(
+        &self,
+        user_ids: &[String],
+        agent_id: Option<Uuid>,
+        path: &str,
+    ) -> Result<MemoryDocument, WorkspaceError> {
+        self.repo
+            .get_document_by_path_multi(user_ids, agent_id, path)
+            .await
+    }
+
+    async fn list_directory_multi(
+        &self,
+        user_ids: &[String],
+        agent_id: Option<Uuid>,
+        directory: &str,
+    ) -> Result<Vec<WorkspaceEntry>, WorkspaceError> {
+        self.repo
+            .list_directory_multi(user_ids, agent_id, directory)
+            .await
+    }
 }

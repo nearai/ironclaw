@@ -354,7 +354,29 @@ impl AppBuilder {
 
         // Register memory tools if database is available
         let workspace = if let Some(ref db) = self.db {
-            let mut ws = Workspace::new_with_db("default", db.clone());
+            // Use GATEWAY_USER_ID as workspace scope (default: "default")
+            let ws_user_id = self
+                .config
+                .channels
+                .gateway
+                .as_ref()
+                .map(|g| g.user_id.as_str())
+                .unwrap_or("default");
+
+            let mut ws = Workspace::new_with_db(ws_user_id, db.clone());
+
+            // Wire additional read scopes from WORKSPACE_READ_SCOPES
+            if let Some(ref gw) = self.config.channels.gateway
+                && !gw.workspace_read_scopes.is_empty()
+            {
+                ws = ws.with_additional_read_scopes(gw.workspace_read_scopes.clone());
+                tracing::info!(
+                    user_id = ws_user_id,
+                    read_scopes = ?ws.read_user_ids(),
+                    "Workspace configured with multi-scope reads"
+                );
+            }
+
             if let Some(ref emb) = embeddings {
                 ws = ws.with_embeddings(emb.clone());
             }

@@ -500,4 +500,246 @@ impl Repository {
             })
             .collect())
     }
+
+    // ==================== Multi-scope search (optimized SQL) ====================
+
+    /// Hybrid search across multiple user scopes with efficient SQL.
+    ///
+    /// Uses `user_id = ANY($1::text[])` instead of N separate queries.
+    pub async fn hybrid_search_multi(
+        &self,
+        user_ids: &[String],
+        agent_id: Option<Uuid>,
+        query: &str,
+        embedding: Option<&[f32]>,
+        config: &SearchConfig,
+    ) -> Result<Vec<SearchResult>, WorkspaceError> {
+        let fts_results = if config.use_fts {
+            self.fts_search_multi(user_ids, agent_id, query, config.pre_fusion_limit)
+                .await?
+        } else {
+            Vec::new()
+        };
+
+        let vector_results = if config.use_vector {
+            if let Some(embedding) = embedding {
+                self.vector_search_multi(user_ids, agent_id, embedding, config.pre_fusion_limit)
+                    .await?
+            } else {
+                Vec::new()
+            }
+        } else {
+            Vec::new()
+        };
+
+        Ok(reciprocal_rank_fusion(fts_results, vector_results, config))
+    }
+
+    /// FTS search across multiple user scopes.
+    async fn fts_search_multi(
+        &self,
+        user_ids: &[String],
+        agent_id: Option<Uuid>,
+        query: &str,
+        limit: usize,
+    ) -> Result<Vec<RankedResult>, WorkspaceError> {
+        let conn = self.conn().await?;
+
+        let rows = conn
+            .query(
+                r#"
+                SELECT c.id as chunk_id, c.document_id, c.content,
+                       ts_rank_cd(c.content_tsv, plainto_tsquery('english', $3)) as rank
+                FROM memory_chunks c
+                JOIN memory_documents d ON d.id = c.document_id
+                WHERE d.user_id = ANY($1::text[]) AND d.agent_id IS NOT DISTINCT FROM $2
+                  AND c.content_tsv @@ plainto_tsquery('english', $3)
+                ORDER BY rank DESC
+                LIMIT $4
+                "#,
+                &[&user_ids, &agent_id, &query, &(limit as i64)],
+            )
+            .await
+            .map_err(|e| WorkspaceError::SearchFailed {
+                reason: format!("FTS multi-scope query failed: {}", e),
+            })?;
+
+        Ok(rows
+            .iter()
+            .enumerate()
+            .map(|(i, row)| RankedResult {
+                chunk_id: row.get("chunk_id"),
+                document_id: row.get("document_id"),
+                content: row.get("content"),
+                rank: (i + 1) as u32,
+            })
+            .collect())
+    }
+
+    /// Vector search across multiple user scopes.
+    async fn vector_search_multi(
+        &self,
+        user_ids: &[String],
+        agent_id: Option<Uuid>,
+        embedding: &[f32],
+        limit: usize,
+    ) -> Result<Vec<RankedResult>, WorkspaceError> {
+        let conn = self.conn().await?;
+        let embedding_vec = Vector::from(embedding.to_vec());
+
+        let rows = conn
+            .query(
+                r#"
+                SELECT c.id as chunk_id, c.document_id, c.content,
+                       1 - (c.embedding <=> $3) as similarity
+                FROM memory_chunks c
+                JOIN memory_documents d ON d.id = c.document_id
+                WHERE d.user_id = ANY($1::text[]) AND d.agent_id IS NOT DISTINCT FROM $2
+                  AND c.embedding IS NOT NULL
+                ORDER BY c.embedding <=> $3
+                LIMIT $4
+                "#,
+                &[&user_ids, &agent_id, &embedding_vec, &(limit as i64)],
+            )
+            .await
+            .map_err(|e| WorkspaceError::SearchFailed {
+                reason: format!("Vector multi-scope query failed: {}", e),
+            })?;
+
+        Ok(rows
+            .iter()
+            .enumerate()
+            .map(|(i, row)| RankedResult {
+                chunk_id: row.get("chunk_id"),
+                document_id: row.get("document_id"),
+                content: row.get("content"),
+                rank: (i + 1) as u32,
+            })
+            .collect())
+    }
+
+    /// List all file paths across multiple user scopes with a single query.
+    pub async fn list_all_paths_multi(
+        &self,
+        user_ids: &[String],
+        agent_id: Option<Uuid>,
+    ) -> Result<Vec<String>, WorkspaceError> {
+        let conn = self.conn().await?;
+
+        let rows = conn
+            .query(
+                r#"
+                SELECT DISTINCT path FROM memory_documents
+                WHERE user_id = ANY($1::text[]) AND agent_id IS NOT DISTINCT FROM $2
+                ORDER BY path
+                "#,
+                &[&user_ids, &agent_id],
+            )
+            .await
+            .map_err(|e| WorkspaceError::SearchFailed {
+                reason: format!("List paths multi-scope failed: {}", e),
+            })?;
+
+        Ok(rows.iter().map(|row| row.get("path")).collect())
+    }
+
+    /// Get a document by path across multiple user scopes.
+    ///
+    /// Returns the first match (ordered by the input user_ids priority).
+    pub async fn get_document_by_path_multi(
+        &self,
+        user_ids: &[String],
+        agent_id: Option<Uuid>,
+        path: &str,
+    ) -> Result<MemoryDocument, WorkspaceError> {
+        let conn = self.conn().await?;
+
+        let row = conn
+            .query_opt(
+                r#"
+                SELECT id, user_id, agent_id, path, content,
+                       created_at, updated_at, metadata
+                FROM memory_documents
+                WHERE user_id = ANY($1::text[]) AND agent_id IS NOT DISTINCT FROM $2 AND path = $3
+                ORDER BY array_position($1::text[], user_id)
+                LIMIT 1
+                "#,
+                &[&user_ids, &agent_id, &path],
+            )
+            .await
+            .map_err(|e| WorkspaceError::SearchFailed {
+                reason: format!("Query failed: {}", e),
+            })?;
+
+        match row {
+            Some(row) => Ok(self.row_to_document(&row)),
+            None => Err(WorkspaceError::DocumentNotFound {
+                doc_type: path.to_string(),
+                user_id: user_ids.first().cloned().unwrap_or_default(),
+            }),
+        }
+    }
+
+    /// List directory contents across multiple user scopes.
+    pub async fn list_directory_multi(
+        &self,
+        user_ids: &[String],
+        agent_id: Option<Uuid>,
+        directory: &str,
+    ) -> Result<Vec<WorkspaceEntry>, WorkspaceError> {
+        let conn = self.conn().await?;
+
+        let rows = conn
+            .query(
+                "SELECT path, is_directory, updated_at, content_preview FROM list_workspace_files_multi($1, $2, $3)",
+                &[&user_ids, &agent_id, &directory],
+            )
+            .await;
+
+        // Fall back to the default loop implementation if the SQL function
+        // doesn't exist yet (avoids hard requirement on migration).
+        match rows {
+            Ok(rows) => Ok(rows
+                .iter()
+                .map(|row| {
+                    let updated_at: Option<DateTime<Utc>> = row.get("updated_at");
+                    WorkspaceEntry {
+                        path: row.get("path"),
+                        is_directory: row.get("is_directory"),
+                        updated_at,
+                        content_preview: row.get("content_preview"),
+                    }
+                })
+                .collect()),
+            Err(_) => {
+                // Fallback: loop over user_ids if the SQL function is missing
+                let mut seen = std::collections::HashMap::new();
+                for uid in user_ids {
+                    let entries = self.list_directory(uid, agent_id, directory).await?;
+                    for entry in entries {
+                        seen.entry(entry.path.clone())
+                            .and_modify(|existing: &mut WorkspaceEntry| {
+                                if let (Some(existing_ts), Some(new_ts)) =
+                                    (&existing.updated_at, &entry.updated_at)
+                                {
+                                    if new_ts > existing_ts {
+                                        existing.updated_at = Some(*new_ts);
+                                    }
+                                } else if existing.updated_at.is_none() {
+                                    existing.updated_at = entry.updated_at;
+                                }
+                                if entry.is_directory {
+                                    existing.is_directory = true;
+                                    existing.content_preview = None;
+                                }
+                            })
+                            .or_insert(entry);
+                    }
+                }
+                let mut entries: Vec<WorkspaceEntry> = seen.into_values().collect();
+                entries.sort_by(|a, b| a.path.cmp(&b.path));
+                Ok(entries)
+            }
+        }
+    }
 }

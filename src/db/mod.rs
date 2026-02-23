@@ -390,6 +390,113 @@ pub trait WorkspaceStore: Send + Sync {
         embedding: Option<&[f32]>,
         config: &SearchConfig,
     ) -> Result<Vec<SearchResult>, WorkspaceError>;
+
+    // ==================== Multi-scope read methods ====================
+    //
+    // Default implementations loop over user_ids calling single-scope methods,
+    // then merge results. Backends can override with efficient SQL (e.g.,
+    // `WHERE user_id = ANY($1::text[])`).
+
+    /// Hybrid search across multiple user scopes, merging results via RRF.
+    async fn hybrid_search_multi(
+        &self,
+        user_ids: &[String],
+        agent_id: Option<Uuid>,
+        query: &str,
+        embedding: Option<&[f32]>,
+        config: &SearchConfig,
+    ) -> Result<Vec<SearchResult>, WorkspaceError> {
+        let mut all_results = Vec::new();
+        for uid in user_ids {
+            let results = self
+                .hybrid_search(uid, agent_id, query, embedding, config)
+                .await?;
+            all_results.extend(results);
+        }
+        // Re-sort by score descending and truncate to limit
+        all_results.sort_by(|a, b| {
+            b.score
+                .partial_cmp(&a.score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+        all_results.truncate(config.limit);
+        Ok(all_results)
+    }
+
+    /// List all file paths across multiple user scopes.
+    async fn list_all_paths_multi(
+        &self,
+        user_ids: &[String],
+        agent_id: Option<Uuid>,
+    ) -> Result<Vec<String>, WorkspaceError> {
+        let mut all_paths = Vec::new();
+        for uid in user_ids {
+            let paths = self.list_all_paths(uid, agent_id).await?;
+            all_paths.extend(paths);
+        }
+        all_paths.sort();
+        all_paths.dedup();
+        Ok(all_paths)
+    }
+
+    /// Get a document by path, searching across multiple user scopes.
+    ///
+    /// Returns the first match found (tries each user_id in order).
+    async fn get_document_by_path_multi(
+        &self,
+        user_ids: &[String],
+        agent_id: Option<Uuid>,
+        path: &str,
+    ) -> Result<MemoryDocument, WorkspaceError> {
+        for uid in user_ids {
+            match self.get_document_by_path(uid, agent_id, path).await {
+                Ok(doc) => return Ok(doc),
+                Err(WorkspaceError::DocumentNotFound { .. }) => continue,
+                Err(e) => return Err(e),
+            }
+        }
+        Err(WorkspaceError::DocumentNotFound {
+            doc_type: path.to_string(),
+            user_id: user_ids.first().cloned().unwrap_or_default(),
+        })
+    }
+
+    /// List directory contents across multiple user scopes.
+    async fn list_directory_multi(
+        &self,
+        user_ids: &[String],
+        agent_id: Option<Uuid>,
+        directory: &str,
+    ) -> Result<Vec<WorkspaceEntry>, WorkspaceError> {
+        let mut seen = std::collections::HashMap::new();
+        for uid in user_ids {
+            let entries = self.list_directory(uid, agent_id, directory).await?;
+            for entry in entries {
+                seen.entry(entry.path.clone())
+                    .and_modify(|existing: &mut WorkspaceEntry| {
+                        // Merge: keep the most recent updated_at
+                        if let (Some(existing_ts), Some(new_ts)) =
+                            (&existing.updated_at, &entry.updated_at)
+                        {
+                            if new_ts > existing_ts {
+                                existing.updated_at = Some(*new_ts);
+                            }
+                        } else if existing.updated_at.is_none() {
+                            existing.updated_at = entry.updated_at;
+                        }
+                        // If either is a directory, mark as directory
+                        if entry.is_directory {
+                            existing.is_directory = true;
+                            existing.content_preview = None;
+                        }
+                    })
+                    .or_insert(entry);
+            }
+        }
+        let mut entries: Vec<WorkspaceEntry> = seen.into_values().collect();
+        entries.sort_by(|a, b| a.path.cmp(&b.path));
+        Ok(entries)
+    }
 }
 
 /// Backend-agnostic database supertrait.
