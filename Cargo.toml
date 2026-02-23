@@ -202,6 +202,10 @@ required-features = ["html-to-markdown"]
 name = "structured_collections"
 required-features = ["libsql"]
 
+[[test]]
+name = "structured_tools"
+required-features = ["libsql"]
+
 # The profile that 'cargo dist' will build with
 [profile.dist]
 inherits = "release"

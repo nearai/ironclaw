@@ -437,6 +437,59 @@ impl ToolRegistry {
         }
     }
 
+    /// Register structured collection tools.
+    ///
+    /// Registers three management tools (list, register, drop) plus dynamically
+    /// generated per-collection tools for each existing schema. The register tool
+    /// gets a reference to the registry so it can add per-collection tools
+    /// when new schemas are created mid-session.
+    ///
+    /// `user_id` is needed to load existing schemas at startup.
+    pub async fn register_collection_tools(
+        self: &Arc<Self>,
+        db: Arc<dyn Database>,
+        user_id: &str,
+    ) {
+        use crate::tools::builtin::{
+            CollectionDropTool, CollectionListTool, CollectionRegisterTool,
+            generate_collection_tools,
+        };
+
+        // Register management tools
+        self.register_sync(Arc::new(CollectionListTool::new(Arc::clone(&db))));
+        self.register_sync(Arc::new(CollectionRegisterTool::new(
+            Arc::clone(&db),
+            Arc::clone(self),
+        )));
+        self.register_sync(Arc::new(CollectionDropTool::new(
+            Arc::clone(&db),
+            Arc::clone(self),
+        )));
+
+        // Load existing schemas and generate per-collection tools
+        match db.list_collections(user_id).await {
+            Ok(schemas) => {
+                let mut tool_count = 0;
+                for schema in &schemas {
+                    let tools = generate_collection_tools(schema, Arc::clone(&db));
+                    tool_count += tools.len();
+                    for tool in tools {
+                        self.register(tool).await;
+                    }
+                }
+                tracing::info!(
+                    "Registered 3 collection management tools + {} per-collection tools for {} schemas",
+                    tool_count,
+                    schemas.len()
+                );
+            }
+            Err(e) => {
+                tracing::warn!("Failed to load collection schemas: {e}");
+                tracing::info!("Registered 3 collection management tools (no existing schemas loaded)");
+            }
+        }
+    }
+
     /// Register the software builder tool.
     ///
     /// The builder tool allows the agent to create new software including WASM tools,
