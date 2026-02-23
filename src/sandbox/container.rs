@@ -26,7 +26,7 @@
 //! ```
 
 use std::collections::HashMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use bollard::Docker;
@@ -494,6 +494,8 @@ impl ContainerRunner {
 /// 3. `~/.docker/run/docker.sock` (Docker Desktop 4.13+ on macOS — primary user-owned socket)
 /// 4. `~/.colima/default/docker.sock` (Colima — popular lightweight Docker Desktop alternative)
 /// 5. `~/.rd/docker.sock` (Rancher Desktop on macOS)
+/// 6. `$XDG_RUNTIME_DIR/docker.sock` (common rootless Docker socket on Linux)
+/// 7. `/run/user/$UID/docker.sock` (rootless Docker fallback on Linux)
 pub async fn connect_docker() -> Result<Docker> {
     // First try bollard defaults (checks DOCKER_HOST env var, then /var/run/docker.sock).
     // This covers Linux, OrbStack (updates the /var/run symlink), and any user with
@@ -504,17 +506,13 @@ pub async fn connect_docker() -> Result<Docker> {
         return Ok(docker);
     }
 
-    // Try well-known user-owned socket locations for macOS container runtimes.
-    // Docker Desktop 4.13+ (stabilised in 4.18) stopped creating the /var/run/docker.sock
-    // symlink by default and moved the API socket to ~/.docker/run/docker.sock.
-    if let Some(home) = std::env::var_os("HOME") {
-        let home = std::path::Path::new(&home);
-        let candidates = [
-            home.join(".docker/run/docker.sock"),     // Docker Desktop 4.13+
-            home.join(".colima/default/docker.sock"), // Colima
-            home.join(".rd/docker.sock"),             // Rancher Desktop
-        ];
-        for sock in &candidates {
+    #[cfg(unix)]
+    {
+        // Try well-known user-owned socket locations for desktop and rootless runtimes.
+        // Docker Desktop 4.13+ (stabilised in 4.18) stopped creating the
+        // /var/run/docker.sock symlink by default and moved the API socket
+        // to ~/.docker/run/docker.sock.
+        for sock in unix_socket_candidates() {
             if sock.exists() {
                 let sock_str = sock.to_string_lossy();
                 if let Ok(docker) =
@@ -530,14 +528,69 @@ pub async fn connect_docker() -> Result<Docker> {
     Err(SandboxError::DockerNotAvailable {
         reason: "Could not connect to Docker daemon. Tried: $DOCKER_HOST, \
             /var/run/docker.sock, ~/.docker/run/docker.sock, \
-            ~/.colima/default/docker.sock, ~/.rd/docker.sock"
+            ~/.colima/default/docker.sock, ~/.rd/docker.sock, \
+            $XDG_RUNTIME_DIR/docker.sock, /run/user/$UID/docker.sock"
             .to_string(),
     })
+}
+
+#[cfg(unix)]
+fn unix_socket_candidates() -> Vec<PathBuf> {
+    unix_socket_candidates_from_env(
+        std::env::var_os("HOME").map(PathBuf::from),
+        std::env::var_os("XDG_RUNTIME_DIR").map(PathBuf::from),
+        std::env::var("UID").ok(),
+    )
+}
+
+#[cfg(unix)]
+fn unix_socket_candidates_from_env(
+    home: Option<PathBuf>,
+    xdg_runtime_dir: Option<PathBuf>,
+    uid: Option<String>,
+) -> Vec<PathBuf> {
+    let mut candidates = Vec::new();
+    let mut push_unique = |path: PathBuf| {
+        if !candidates.iter().any(|existing| existing == &path) {
+            candidates.push(path);
+        }
+    };
+
+    if let Some(home) = home {
+        push_unique(home.join(".docker/run/docker.sock")); // Docker Desktop 4.13+
+        push_unique(home.join(".colima/default/docker.sock")); // Colima
+        push_unique(home.join(".rd/docker.sock")); // Rancher Desktop
+    }
+
+    if let Some(xdg_runtime_dir) = xdg_runtime_dir {
+        push_unique(xdg_runtime_dir.join("docker.sock"));
+    }
+
+    if let Some(uid) = uid.filter(|value| !value.is_empty()) {
+        push_unique(PathBuf::from(format!("/run/user/{uid}/docker.sock")));
+    }
+
+    candidates
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn test_unix_socket_candidates_include_rootless_paths() {
+        let candidates = unix_socket_candidates_from_env(
+            Some(PathBuf::from("/home/tester")),
+            Some(PathBuf::from("/run/user/1000")),
+            Some("1000".to_string()),
+        );
+
+        assert!(candidates.contains(&PathBuf::from("/home/tester/.docker/run/docker.sock")));
+        assert!(candidates.contains(&PathBuf::from("/home/tester/.colima/default/docker.sock")));
+        assert!(candidates.contains(&PathBuf::from("/home/tester/.rd/docker.sock")));
+        assert!(candidates.contains(&PathBuf::from("/run/user/1000/docker.sock")));
+    }
 
     #[tokio::test]
     async fn test_docker_connection() {

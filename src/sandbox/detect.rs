@@ -10,16 +10,16 @@
 //!   (`~/.docker/run/docker.sock`) and the default `/var/run/docker.sock`.
 //!
 //! - **Linux**: High confidence for standard installs. Rootless Docker uses
-//!   a different socket path (`/run/user/$UID/docker.sock`) which is not
+//!   a different socket path (`/run/user/$UID/docker.sock`) which is now
 //!   checked by the fallback in `connect_docker()`. If `DOCKER_HOST` is set,
-//!   bollard's default connection will use it correctly.
+//!   bollard's default connection still takes precedence.
 //!
 //! - **Windows**: Medium confidence. Binary detection uses `where.exe` which
 //!   works reliably. Daemon detection relies on bollard's default named pipe
 //!   connection (`//./pipe/docker_engine`) which works with Docker Desktop.
-//!   The Unix socket fallback in `connect_docker()` is a no-op on Windows.
-//!   If Docker Desktop is running but the named pipe is not available,
-//!   detection may report `NotRunning` even though Docker is functional.
+//!   The Unix socket fallback in `connect_docker()` is a no-op on Windows,
+//!   so detection also probes `docker version`/`docker info` via CLI if the
+//!   named pipe is unavailable.
 
 /// Docker daemon availability status.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -115,15 +115,26 @@ pub async fn check_docker() -> DockerDetection {
     }
 
     // Step 2: Try to connect to the daemon
-    match crate::sandbox::connect_docker().await {
-        Ok(_) => DockerDetection {
+    if crate::sandbox::connect_docker().await.is_ok() {
+        return DockerDetection {
             status: DockerStatus::Available,
             platform,
-        },
-        Err(_) => DockerDetection {
-            status: DockerStatus::NotRunning,
+        };
+    }
+
+    // Windows fallback: if the named pipe probe fails but docker CLI can still
+    // reach the daemon/server, treat Docker as available.
+    #[cfg(windows)]
+    if docker_cli_daemon_reachable() {
+        return DockerDetection {
+            status: DockerStatus::Available,
             platform,
-        },
+        };
+    }
+
+    DockerDetection {
+        status: DockerStatus::NotRunning,
+        platform,
     }
 }
 
@@ -147,6 +158,32 @@ fn docker_binary_exists() -> bool {
             .status()
             .is_ok_and(|s| s.success())
     }
+}
+
+#[cfg(windows)]
+fn docker_cli_daemon_reachable() -> bool {
+    let stdout = std::process::Stdio::null();
+    let stderr = std::process::Stdio::null();
+
+    // `docker version` requires daemon reachability for server fields.
+    let version_ok = std::process::Command::new("docker")
+        .args(["version", "--format", "{{.Server.Version}}"])
+        .stdout(stdout)
+        .stderr(stderr)
+        .status()
+        .is_ok_and(|s| s.success());
+
+    if version_ok {
+        return true;
+    }
+
+    // Fallback for environments where `docker version --format` behaves differently.
+    std::process::Command::new("docker")
+        .args(["info", "--format", "{{.ServerVersion}}"])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .is_ok_and(|s| s.success())
 }
 
 #[cfg(test)]
