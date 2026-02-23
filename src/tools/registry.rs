@@ -22,6 +22,7 @@ use crate::tools::builtin::{
     SkillListTool, SkillRemoveTool, SkillSearchTool, TimeTool, ToolActivateTool, ToolAuthTool,
     ToolInstallTool, ToolListTool, ToolRemoveTool, ToolSearchTool, WriteFileTool,
 };
+use crate::tools::rate_limiter::RateLimiter;
 use crate::tools::tool::{Tool, ToolDomain};
 use crate::tools::wasm::{
     Capabilities, OAuthRefreshConfig, ResourceLimits, SharedCredentialRegistry, WasmError,
@@ -77,6 +78,8 @@ pub struct ToolRegistry {
     credential_registry: Option<Arc<SharedCredentialRegistry>>,
     /// Secrets store for credential injection (shared with HTTP tool).
     secrets_store: Option<Arc<dyn SecretsStore + Send + Sync>>,
+    /// Shared rate limiter for built-in tool invocations.
+    rate_limiter: RateLimiter,
 }
 
 impl ToolRegistry {
@@ -87,6 +90,7 @@ impl ToolRegistry {
             builtin_names: RwLock::new(std::collections::HashSet::new()),
             credential_registry: None,
             secrets_store: None,
+            rate_limiter: RateLimiter::new(),
         }
     }
 
@@ -104,6 +108,11 @@ impl ToolRegistry {
     /// Get a reference to the shared credential registry.
     pub fn credential_registry(&self) -> Option<&Arc<SharedCredentialRegistry>> {
         self.credential_registry.as_ref()
+    }
+
+    /// Get the shared rate limiter for checking built-in tool limits.
+    pub fn rate_limiter(&self) -> &RateLimiter {
+        &self.rate_limiter
     }
 
     /// Register a tool. Rejects dynamic tools that try to shadow a built-in name.

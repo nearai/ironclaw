@@ -18,6 +18,7 @@ use crate::llm::{
 };
 use crate::safety::SafetyLayer;
 use crate::tools::ToolRegistry;
+use crate::tools::rate_limiter::RateLimitResult;
 
 /// Shared dependencies for worker execution.
 ///
@@ -97,6 +98,20 @@ impl Worker {
         }
     }
 
+    /// Fire-and-forget persistence of a job event.
+    fn log_event(&self, event_type: &str, data: serde_json::Value) {
+        if let Some(store) = self.store() {
+            let store = store.clone();
+            let job_id = self.job_id;
+            let event_type = event_type.to_string();
+            tokio::spawn(async move {
+                if let Err(e) = store.save_job_event(job_id, &event_type, &data).await {
+                    tracing::warn!("Failed to persist event for job {}: {}", job_id, e);
+                }
+            });
+        }
+    }
+
     /// Run the worker until the job is complete or stopped.
     pub async fn run(self, mut rx: mpsc::Receiver<WorkerMessage>) -> Result<(), Error> {
         tracing::info!("Worker starting for job {}", self.job_id);
@@ -163,7 +178,15 @@ Report when the job is complete or if you encounter issues you cannot resolve."#
         reasoning: &Reasoning,
         reason_ctx: &mut ReasoningContext,
     ) -> Result<(), Error> {
-        let max_iterations = 50;
+        const MAX_WORKER_ITERATIONS: usize = 500;
+        let max_iterations = self
+            .context_manager()
+            .get_context(self.job_id)
+            .await
+            .ok()
+            .and_then(|ctx| ctx.metadata.get("max_iterations").and_then(|v| v.as_u64()))
+            .unwrap_or(50) as usize;
+        let max_iterations = max_iterations.min(MAX_WORKER_ITERATIONS);
         let mut iteration = 0;
 
         // Initial tool definitions for planning (will be refreshed in loop)
@@ -191,6 +214,14 @@ Report when the job is complete or if you encounter issues you cannot resolve."#
                             .collect::<Vec<_>>()
                             .join("\n")
                     )));
+
+                    self.log_event("message", serde_json::json!({
+                        "role": "assistant",
+                        "content": format!("Plan: {}\n\n{}", p.goal,
+                            p.actions.iter().enumerate()
+                                .map(|(i, a)| format!("{}. {} - {}", i + 1, a.tool_name, a.reasoning))
+                                .collect::<Vec<_>>().join("\n"))
+                    }));
 
                     Some(p)
                 }
@@ -266,6 +297,14 @@ Report when the job is complete or if you encounter issues you cannot resolve."#
                         // Add assistant response to context
                         reason_ctx.messages.push(ChatMessage::assistant(&response));
 
+                        self.log_event(
+                            "message",
+                            serde_json::json!({
+                                "role": "assistant",
+                                "content": response,
+                            }),
+                        );
+
                         // Give it one more chance to select a tool
                         if iteration > 3 && iteration % 5 == 0 {
                             reason_ctx.messages.push(ChatMessage::user(
@@ -283,6 +322,16 @@ Report when the job is complete or if you encounter issues you cannot resolve."#
                             self.job_id,
                             tool_calls.len()
                         );
+
+                        if let Some(ref text) = content {
+                            self.log_event(
+                                "message",
+                                serde_json::json!({
+                                    "role": "assistant",
+                                    "content": text,
+                                }),
+                            );
+                        }
 
                         // Add assistant message with tool_calls (OpenAI protocol)
                         reason_ctx
@@ -439,8 +488,23 @@ Report when the job is complete or if you encounter issues you cannot resolve."#
             .into());
         }
 
-        // Fetch job context early so we have the real user_id for hooks
+        // Fetch job context early so we have the real user_id for hooks and rate limiting
         let job_ctx = deps.context_manager.get_context(job_id).await?;
+
+        // Check per-tool rate limit before running hooks or executing (cheaper check first)
+        if let Some(config) = tool.rate_limit_config()
+            && let RateLimitResult::Limited { retry_after, .. } = deps
+                .tools
+                .rate_limiter()
+                .check_and_record(&job_ctx.user_id, tool_name, &config)
+                .await
+        {
+            return Err(crate::error::ToolError::RateLimited {
+                name: tool_name.to_string(),
+                retry_after: Some(retry_after),
+            }
+            .into());
+        }
 
         // Run BeforeToolCall hook
         let params = {
@@ -651,6 +715,15 @@ Report when the job is complete or if you encounter issues you cannot resolve."#
         selection: &ToolSelection,
         result: Result<String, Error>,
     ) -> Result<bool, Error> {
+        self.log_event(
+            "tool_use",
+            serde_json::json!({
+                "tool_name": selection.tool_name,
+                "input": crate::agent::agent_loop::truncate_for_preview(
+                    &selection.parameters.to_string(), 500),
+            }),
+        );
+
         match result {
             Ok(output) => {
                 // Sanitize output
@@ -670,6 +743,12 @@ Report when the job is complete or if you encounter issues you cannot resolve."#
                     &selection.tool_name,
                     wrapped,
                 ));
+
+                self.log_event("tool_result", serde_json::json!({
+                    "tool_name": selection.tool_name,
+                    "success": true,
+                    "output": crate::agent::agent_loop::truncate_for_preview(&sanitized.content, 500),
+                }));
 
                 // Tool output never drives job completion. A malicious tool could
                 // emit "TASK_COMPLETE" to force premature completion. Only the LLM's
@@ -696,6 +775,15 @@ Report when the job is complete or if you encounter issues you cannot resolve."#
                         }
                     });
                 }
+
+                self.log_event(
+                    "tool_result",
+                    serde_json::json!({
+                        "tool_name": selection.tool_name,
+                        "success": false,
+                        "output": format!("Error: {}", e),
+                    }),
+                );
 
                 reason_ctx.messages.push(ChatMessage::tool_result(
                     &selection.tool_call_id,
@@ -818,6 +906,13 @@ Report when the job is complete or if you encounter issues you cannot resolve."#
                 reason: s,
             })?;
 
+        self.log_event(
+            "result",
+            serde_json::json!({
+                "success": true,
+                "message": "Job completed successfully",
+            }),
+        );
         self.persist_status(
             JobState::Completed,
             Some("Job completed successfully".to_string()),
@@ -836,6 +931,13 @@ Report when the job is complete or if you encounter issues you cannot resolve."#
                 reason: s,
             })?;
 
+        self.log_event(
+            "result",
+            serde_json::json!({
+                "success": false,
+                "message": format!("Execution failed: {}", reason),
+            }),
+        );
         self.persist_status(JobState::Failed, Some(reason.to_string()));
         Ok(())
     }
@@ -849,6 +951,13 @@ Report when the job is complete or if you encounter issues you cannot resolve."#
                 reason: s,
             })?;
 
+        self.log_event(
+            "result",
+            serde_json::json!({
+                "success": false,
+                "message": format!("Job stuck: {}", reason),
+            }),
+        );
         self.persist_status(JobState::Stuck, Some(reason.to_string()));
         Ok(())
     }
