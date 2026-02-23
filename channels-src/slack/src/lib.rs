@@ -176,10 +176,10 @@ fn classify_slack_error(http_status: u16, error_field: Option<&str>) -> SlackApi
 
 /// Whether a Slack API error is transient and worth retrying.
 fn is_retryable(err: &SlackApiError) -> bool {
-    matches!(
-        err,
-        SlackApiError::RateLimited { .. } | SlackApiError::ServerError(_)
-    )
+    // Only retry on transient server errors (5xx).
+    // RateLimited is NOT retryable inside WASM because the module cannot sleep —
+    // retrying immediately would busy-loop and hammer the Slack API.
+    matches!(err, SlackApiError::ServerError(_))
 }
 
 // ============================================================================
@@ -887,7 +887,8 @@ mod tests {
 
     #[test]
     fn test_retryable_errors() {
-        assert!(is_retryable(&SlackApiError::RateLimited {
+        // RateLimited is NOT retryable inside WASM (can't sleep → busy-loop)
+        assert!(!is_retryable(&SlackApiError::RateLimited {
             retry_after_ms: 1000
         }));
         assert!(is_retryable(&SlackApiError::ServerError(500)));
