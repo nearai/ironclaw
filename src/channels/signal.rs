@@ -28,6 +28,8 @@ const MAX_SSE_EVENT_SIZE: usize = 256 * 1024;
 const MAX_HTTP_RESPONSE_SIZE: usize = 10 * 1024 * 1024;
 const MAX_REPLY_TARGETS: usize = 10000;
 
+const REPLY_TARGETS_CAP: NonZeroUsize = unsafe { NonZeroUsize::new_unchecked(MAX_REPLY_TARGETS) };
+
 /// Recipient classification for outbound messages.
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum RecipientTarget {
@@ -91,23 +93,22 @@ pub struct SignalChannel {
 
 impl SignalChannel {
     /// Create a new Signal channel.
-    pub fn new(config: SignalConfig) -> Self {
+    pub fn new(config: SignalConfig) -> Result<Self, ChannelError> {
         let mut config = config;
         config.http_url = config.http_url.trim_end_matches('/').to_string();
 
         let client = Client::builder()
             .connect_timeout(Duration::from_secs(10))
             .build()
-            .expect("Signal HTTP client should build");
+            .map_err(|e| ChannelError::Http(e.to_string()))?;
 
-        // NOTE: MAX_REPLY_TARGETS is a non-zero constant.
-        let cap = NonZeroUsize::new(MAX_REPLY_TARGETS).expect("MAX_REPLY_TARGETS must be > 0");
+        let cap = REPLY_TARGETS_CAP;
 
-        Self {
+        Ok(Self {
             config,
             client,
             reply_targets: Arc::new(RwLock::new(LruCache::new(cap))),
-        }
+        })
     }
 
     /// Effective sender: prefer `sourceNumber` (E.164), fall back to `source`
@@ -818,11 +819,11 @@ mod tests {
         }
     }
 
-    fn make_channel() -> SignalChannel {
+    fn make_channel() -> Result<SignalChannel, ChannelError> {
         SignalChannel::new(make_config())
     }
 
-    fn make_channel_with_allowed_group(group_id: &str) -> SignalChannel {
+    fn make_channel_with_allowed_group(group_id: &str) -> Result<SignalChannel, ChannelError> {
         SignalChannel::new(make_config_with_allowed_group(group_id))
     }
 
@@ -844,121 +845,131 @@ mod tests {
     }
 
     #[test]
-    fn creates_with_correct_fields() {
-        let ch = make_channel();
+    fn creates_with_correct_fields() -> Result<(), ChannelError> {
+        let ch = make_channel()?;
         assert_eq!(ch.config.http_url, "http://127.0.0.1:8686");
         assert_eq!(ch.config.account, "+1234567890");
         assert_eq!(ch.config.allowed_users.len(), 1);
         assert!(ch.config.allowed_groups.is_empty());
         assert!(!ch.config.ignore_attachments);
         assert!(!ch.config.ignore_stories);
+        Ok(())
     }
 
     #[test]
-    fn strips_trailing_slash() {
+    fn strips_trailing_slash() -> Result<(), ChannelError> {
         let mut config = make_config();
         config.http_url = "http://127.0.0.1:8686/".to_string();
-        let ch = SignalChannel::new(config);
+        let ch = SignalChannel::new(config)?;
         assert_eq!(ch.config.http_url, "http://127.0.0.1:8686");
+        Ok(())
     }
 
     #[test]
-    fn wildcard_allows_anyone() {
+    fn wildcard_allows_anyone() -> Result<(), ChannelError> {
         let mut config = make_config();
         config.allowed_users = vec!["*".to_string()];
-        let ch = SignalChannel::new(config);
+        let ch = SignalChannel::new(config)?;
         assert!(ch.is_sender_allowed("+9999999999"));
+        Ok(())
     }
 
     #[test]
-    fn specific_sender_allowed() {
-        let ch = make_channel();
+    fn specific_sender_allowed() -> Result<(), ChannelError> {
+        let ch = make_channel()?;
         assert!(ch.is_sender_allowed("+1111111111"));
+        Ok(())
     }
 
     #[test]
-    fn unknown_sender_denied() {
-        let ch = make_channel();
+    fn unknown_sender_denied() -> Result<(), ChannelError> {
+        let ch = make_channel()?;
         assert!(!ch.is_sender_allowed("+9999999999"));
+        Ok(())
     }
 
     #[test]
-    fn empty_allowlist_denies_all() {
+    fn empty_allowlist_denies_all() -> Result<(), ChannelError> {
         let mut config = make_config();
         config.allowed_users = vec![];
-        let ch = SignalChannel::new(config);
-        // Empty allowlist = deny all (secure by default).
+        let ch = SignalChannel::new(config)?;
         assert!(!ch.is_sender_allowed("+1111111111"));
+        Ok(())
     }
 
     #[test]
-    fn uuid_prefix_in_allowlist() {
+    fn uuid_prefix_in_allowlist() -> Result<(), ChannelError> {
         let uuid = "a1b2c3d4-e5f6-7890-abcd-ef1234567890";
         let mut config = make_config();
         config.allowed_users = vec![format!("uuid:{uuid}")];
-        let ch = SignalChannel::new(config);
-        // Should match against bare UUID sender.
+        let ch = SignalChannel::new(config)?;
         assert!(ch.is_sender_allowed(uuid));
         // Should not match phone numbers.
         assert!(!ch.is_sender_allowed("+1111111111"));
+        Ok(())
     }
 
     #[test]
-    fn bare_uuid_in_allowlist() {
+    fn bare_uuid_in_allowlist() -> Result<(), ChannelError> {
         let uuid = "a1b2c3d4-e5f6-7890-abcd-ef1234567890";
         let mut config = make_config();
         config.allowed_users = vec![uuid.to_string()];
-        let ch = SignalChannel::new(config);
+        let ch = SignalChannel::new(config)?;
         assert!(ch.is_sender_allowed(uuid));
+        Ok(())
     }
 
     #[test]
-    fn group_allowlist_filtering() {
+    fn group_allowlist_filtering() -> Result<(), ChannelError> {
         let mut config = make_config();
         config.allowed_users = vec!["*".to_string()];
         config.allowed_groups = vec!["group123".to_string()];
-        let ch = SignalChannel::new(config);
+        let ch = SignalChannel::new(config)?;
         assert!(ch.is_group_allowed("group123"));
         assert!(!ch.is_group_allowed("other_group"));
+        Ok(())
     }
 
     #[test]
-    fn group_allowlist_wildcard() {
+    fn group_allowlist_wildcard() -> Result<(), ChannelError> {
         let mut config = make_config();
         config.allowed_groups = vec!["*".to_string()];
-        let ch = SignalChannel::new(config);
+        let ch = SignalChannel::new(config)?;
         assert!(ch.is_group_allowed("any_group"));
+        Ok(())
     }
 
     #[test]
-    fn group_allowlist_empty_denies_all() {
+    fn group_allowlist_empty_denies_all() -> Result<(), ChannelError> {
         let mut config = make_config();
         config.allowed_groups = vec![];
-        let ch = SignalChannel::new(config);
-        // Empty allowlist = deny all groups (DMs only, secure by default).
+        let ch = SignalChannel::new(config)?;
         assert!(!ch.is_group_allowed("any_group"));
+        Ok(())
     }
 
     #[test]
-    fn name_returns_signal() {
-        let ch = make_channel();
+    fn name_returns_signal() -> Result<(), ChannelError> {
+        let ch = make_channel()?;
         assert_eq!(ch.name(), "signal");
+        Ok(())
     }
 
     #[test]
-    fn process_envelope_dm_accepted_with_empty_allowed_groups() {
+    fn process_envelope_dm_accepted_with_empty_allowed_groups() -> Result<(), ChannelError> {
         // Empty allowed_groups = DMs only. DMs should be accepted.
-        let ch = make_channel();
+        let ch = make_channel()?;
         let env = make_envelope(Some("+1111111111"), Some("Hello!"));
         assert!(ch.process_envelope(&env).is_some());
+        Ok(())
     }
 
     #[test]
-    fn process_envelope_group_denied_with_empty_allowed_groups() {
+    fn process_envelope_group_denied_with_empty_allowed_groups() -> Result<(), ChannelError> {
         // Empty allowed_groups = DMs only. Group messages should be denied.
         let mut config = make_config();
         config.allowed_users = vec!["*".to_string()];
-        let ch = SignalChannel::new(config);
+        let ch = SignalChannel::new(config)?;
 
         let env = Envelope {
             source: Some("+1111111111".to_string()),
@@ -977,11 +988,12 @@ mod tests {
             timestamp: Some(1000),
         };
         assert!(ch.process_envelope(&env).is_none());
+        Ok(())
     }
 
     #[test]
-    fn process_envelope_group_accepted_when_in_allowed_groups() {
-        let ch = make_channel_with_allowed_group("group123");
+    fn process_envelope_group_accepted_when_in_allowed_groups() -> Result<(), ChannelError> {
+        let ch = make_channel_with_allowed_group("group123")?;
 
         let env = Envelope {
             source: Some("+1111111111".to_string()),
@@ -1019,6 +1031,7 @@ mod tests {
             timestamp: Some(1000),
         };
         assert!(ch.process_envelope(&env2).is_none());
+        Ok(())
     }
 
     #[test]
@@ -1168,54 +1181,59 @@ mod tests {
     }
 
     #[test]
-    fn process_envelope_valid_dm() {
-        let ch = make_channel();
+    fn process_envelope_valid_dm() -> Result<(), ChannelError> {
+        let ch = make_channel()?;
         let env = make_envelope(Some("+1111111111"), Some("Hello!"));
         let (msg, target) = ch.process_envelope(&env).unwrap();
         assert_eq!(msg.content, "Hello!");
         assert_eq!(msg.user_id, "+1111111111");
         assert_eq!(msg.channel, "signal");
         assert_eq!(target, "+1111111111");
+        Ok(())
     }
 
     #[test]
-    fn process_envelope_denied_sender() {
-        let ch = make_channel();
+    fn process_envelope_denied_sender() -> Result<(), ChannelError> {
+        let ch = make_channel()?;
         let env = make_envelope(Some("+9999999999"), Some("Hello!"));
         assert!(ch.process_envelope(&env).is_none());
+        Ok(())
     }
 
     #[test]
-    fn process_envelope_empty_message() {
-        let ch = make_channel();
+    fn process_envelope_empty_message() -> Result<(), ChannelError> {
+        let ch = make_channel()?;
         let env = make_envelope(Some("+1111111111"), Some(""));
         assert!(ch.process_envelope(&env).is_none());
+        Ok(())
     }
 
     #[test]
-    fn process_envelope_no_data_message() {
-        let ch = make_channel();
+    fn process_envelope_no_data_message() -> Result<(), ChannelError> {
+        let ch = make_channel()?;
         let env = make_envelope(Some("+1111111111"), None);
         assert!(ch.process_envelope(&env).is_none());
+        Ok(())
     }
 
     #[test]
-    fn process_envelope_skips_stories() {
+    fn process_envelope_skips_stories() -> Result<(), ChannelError> {
         let mut config = make_config();
         config.allowed_users = vec!["*".to_string()];
         config.ignore_stories = true;
-        let ch = SignalChannel::new(config);
+        let ch = SignalChannel::new(config)?;
         let mut env = make_envelope(Some("+1111111111"), Some("story text"));
         env.story_message = Some(serde_json::json!({}));
         assert!(ch.process_envelope(&env).is_none());
+        Ok(())
     }
 
     #[test]
-    fn process_envelope_skips_attachment_only() {
+    fn process_envelope_skips_attachment_only() -> Result<(), ChannelError> {
         let mut config = make_config();
         config.allowed_users = vec!["*".to_string()];
         config.ignore_attachments = true;
-        let ch = SignalChannel::new(config);
+        let ch = SignalChannel::new(config)?;
         let env = Envelope {
             source: Some("+1111111111".to_string()),
             source_number: Some("+1111111111".to_string()),
@@ -1231,14 +1249,15 @@ mod tests {
             timestamp: Some(1_700_000_000_000),
         };
         assert!(ch.process_envelope(&env).is_none());
+        Ok(())
     }
 
     #[test]
-    fn process_envelope_uuid_sender_dm() {
+    fn process_envelope_uuid_sender_dm() -> Result<(), ChannelError> {
         let uuid = "a1b2c3d4-e5f6-7890-abcd-ef1234567890";
         let mut config = make_config();
         config.allowed_users = vec!["*".to_string()];
-        let ch = SignalChannel::new(config);
+        let ch = SignalChannel::new(config)?;
 
         let env = Envelope {
             source: Some(uuid.to_string()),
@@ -1263,15 +1282,16 @@ mod tests {
         // Verify reply routing: UUID sender in DM should route as Direct.
         let parsed = SignalChannel::parse_recipient_target(&target);
         assert_eq!(parsed, RecipientTarget::Direct(uuid.to_string()));
+        Ok(())
     }
 
     #[test]
-    fn process_envelope_uuid_sender_in_group() {
+    fn process_envelope_uuid_sender_in_group() -> Result<(), ChannelError> {
         let uuid = "a1b2c3d4-e5f6-7890-abcd-ef1234567890";
         let mut config = make_config_with_allowed_group("testgroup");
         config.ignore_attachments = false;
         config.ignore_stories = false;
-        let ch = SignalChannel::new(config);
+        let ch = SignalChannel::new(config)?;
 
         let env = Envelope {
             source: Some(uuid.to_string()),
@@ -1299,14 +1319,15 @@ mod tests {
         // Verify reply routing: group message should still route as Group.
         let parsed = SignalChannel::parse_recipient_target(&target);
         assert_eq!(parsed, RecipientTarget::Group("testgroup".to_string()));
+        Ok(())
     }
 
     #[test]
-    fn process_envelope_group_not_in_allowed_groups() {
+    fn process_envelope_group_not_in_allowed_groups() -> Result<(), ChannelError> {
         let mut config = make_config();
         config.allowed_users = vec!["*".to_string()];
         config.allowed_groups = vec!["allowed_group".to_string()];
-        let ch = SignalChannel::new(config);
+        let ch = SignalChannel::new(config)?;
 
         let env = Envelope {
             source: Some("+1111111111".to_string()),
@@ -1325,6 +1346,7 @@ mod tests {
             timestamp: Some(1_700_000_000_000),
         };
         assert!(ch.process_envelope(&env).is_none());
+        Ok(())
     }
 
     #[test]
@@ -1399,8 +1421,8 @@ mod tests {
     // ── build_rpc_params tests ──────────────────────────────────────
 
     #[test]
-    fn build_rpc_params_direct_with_message() {
-        let ch = make_channel();
+    fn build_rpc_params_direct_with_message() -> Result<(), ChannelError> {
+        let ch = make_channel()?;
         let target = RecipientTarget::Direct("+5555555555".to_string());
         let params = ch.build_rpc_params(&target, Some("Hello!"));
         assert_eq!(params["recipient"], serde_json::json!(["+5555555555"]));
@@ -1408,22 +1430,24 @@ mod tests {
         assert_eq!(params["message"], "Hello!");
         // Direct targets must NOT include groupId.
         assert!(params.get("groupId").is_none());
+        Ok(())
     }
 
     #[test]
-    fn build_rpc_params_direct_without_message() {
-        let ch = make_channel();
+    fn build_rpc_params_direct_without_message() -> Result<(), ChannelError> {
+        let ch = make_channel()?;
         let target = RecipientTarget::Direct("+5555555555".to_string());
         let params = ch.build_rpc_params(&target, None);
         assert_eq!(params["recipient"], serde_json::json!(["+5555555555"]));
         assert_eq!(params["account"], "+1234567890");
         // No message key should be present for typing indicators.
         assert!(params.get("message").is_none());
+        Ok(())
     }
 
     #[test]
-    fn build_rpc_params_group_with_message() {
-        let ch = make_channel();
+    fn build_rpc_params_group_with_message() -> Result<(), ChannelError> {
+        let ch = make_channel()?;
         let target = RecipientTarget::Group("abc123".to_string());
         let params = ch.build_rpc_params(&target, Some("Group msg"));
         assert_eq!(params["groupId"], "abc123");
@@ -1431,45 +1455,49 @@ mod tests {
         assert_eq!(params["message"], "Group msg");
         // Group targets must NOT include recipient.
         assert!(params.get("recipient").is_none());
+        Ok(())
     }
 
     #[test]
-    fn build_rpc_params_group_without_message() {
-        let ch = make_channel();
+    fn build_rpc_params_group_without_message() -> Result<(), ChannelError> {
+        let ch = make_channel()?;
         let target = RecipientTarget::Group("abc123".to_string());
         let params = ch.build_rpc_params(&target, None);
         assert_eq!(params["groupId"], "abc123");
         assert_eq!(params["account"], "+1234567890");
         assert!(params.get("message").is_none());
+        Ok(())
     }
 
     #[test]
-    fn build_rpc_params_uuid_direct_target() {
-        let ch = make_channel();
+    fn build_rpc_params_uuid_direct_target() -> Result<(), ChannelError> {
+        let ch = make_channel()?;
         let uuid = "a1b2c3d4-e5f6-7890-abcd-ef1234567890";
         let target = RecipientTarget::Direct(uuid.to_string());
         let params = ch.build_rpc_params(&target, Some("hi"));
         assert_eq!(params["recipient"], serde_json::json!([uuid]));
+        Ok(())
     }
 
     // ── metadata assertion tests ────────────────────────────────────
 
     #[test]
-    fn process_envelope_metadata_has_signal_fields() {
-        let ch = make_channel();
+    fn process_envelope_metadata_has_signal_fields() -> Result<(), ChannelError> {
+        let ch = make_channel()?;
         let env = make_envelope(Some("+1111111111"), Some("Hello!"));
         let (msg, _) = ch.process_envelope(&env).unwrap();
         assert_eq!(msg.metadata["signal_sender"], "+1111111111");
         assert_eq!(msg.metadata["signal_target"], "+1111111111");
         assert_eq!(msg.metadata["signal_timestamp"], 1_700_000_000_000_u64);
+        Ok(())
     }
 
     #[test]
-    fn process_envelope_metadata_group_target() {
+    fn process_envelope_metadata_group_target() -> Result<(), ChannelError> {
         let mut config = make_config();
         config.allowed_users = vec!["*".to_string()];
         config.allowed_groups = vec!["*".to_string()];
-        let ch = SignalChannel::new(config);
+        let ch = SignalChannel::new(config)?;
 
         let env = Envelope {
             source: Some("+2222222222".to_string()),
@@ -1490,18 +1518,19 @@ mod tests {
         let (msg, _) = ch.process_envelope(&env).unwrap();
         assert_eq!(msg.metadata["signal_target"], "group:mygroup");
         assert_eq!(msg.metadata["signal_sender"], "+2222222222");
+        Ok(())
     }
 
     // ── attachment-with-text tests ──────────────────────────────────
 
     #[test]
-    fn process_envelope_attachment_with_text_not_skipped() {
+    fn process_envelope_attachment_with_text_not_skipped() -> Result<(), ChannelError> {
         // Even with ignore_attachments=true, messages that have BOTH text
         // and attachments should be processed (only attachment-only are skipped).
         let mut config = make_config();
         config.allowed_users = vec!["*".to_string()];
         config.ignore_attachments = true;
-        let ch = SignalChannel::new(config);
+        let ch = SignalChannel::new(config)?;
 
         let env = Envelope {
             source: Some("+1111111111".to_string()),
@@ -1524,16 +1553,17 @@ mod tests {
         );
         let (msg, _) = result.unwrap();
         assert_eq!(msg.content, "Check this out");
+        Ok(())
     }
 
     #[test]
-    fn process_envelope_attachment_only_not_skipped_when_ignore_disabled() {
+    fn process_envelope_attachment_only_not_skipped_when_ignore_disabled() -> Result<(), ChannelError> {
         // With ignore_attachments=false, attachment-only messages should be
         // processed with the "[Attachment]" placeholder text.
         let mut config = make_config();
         config.allowed_users = vec!["*".to_string()];
         config.ignore_attachments = false;
-        let ch = SignalChannel::new(config);
+        let ch = SignalChannel::new(config)?;
 
         let env = Envelope {
             source: Some("+1111111111".to_string()),
@@ -1555,15 +1585,16 @@ mod tests {
         assert!(result.is_some(), "Attachment-only should be processed when ignore_attachments=false");
         let (msg, _) = result.unwrap();
         assert_eq!(msg.content, "[Attachment]");
+        Ok(())
     }
 
     // ── source_name / display name tests ────────────────────────────
 
     #[test]
-    fn process_envelope_source_name_sets_user_name() {
+    fn process_envelope_source_name_sets_user_name() -> Result<(), ChannelError> {
         let mut config = make_config();
         config.allowed_users = vec!["*".to_string()];
-        let ch = SignalChannel::new(config);
+        let ch = SignalChannel::new(config)?;
 
         let env = Envelope {
             source: Some("+3333333333".to_string()),
@@ -1581,13 +1612,14 @@ mod tests {
         };
         let (msg, _) = ch.process_envelope(&env).unwrap();
         assert_eq!(msg.user_name.as_deref(), Some("Alice"));
+        Ok(())
     }
 
     #[test]
-    fn process_envelope_empty_source_name_not_set() {
+    fn process_envelope_empty_source_name_not_set() -> Result<(), ChannelError> {
         let mut config = make_config();
         config.allowed_users = vec!["*".to_string()];
-        let ch = SignalChannel::new(config);
+        let ch = SignalChannel::new(config)?;
 
         let env = Envelope {
             source: Some("+3333333333".to_string()),
@@ -1608,34 +1640,37 @@ mod tests {
             msg.user_name.is_none(),
             "Empty source_name should not set user_name"
         );
+        Ok(())
     }
 
     #[test]
-    fn process_envelope_no_source_name_not_set() {
-        let ch = make_channel();
+    fn process_envelope_no_source_name_not_set() -> Result<(), ChannelError> {
+        let ch = make_channel()?;
         let env = make_envelope(Some("+1111111111"), Some("hi"));
         let (msg, _) = ch.process_envelope(&env).unwrap();
         assert!(msg.user_name.is_none());
+        Ok(())
     }
 
     // ── thread_id tests ─────────────────────────────────────────────────────────────────
 
     #[test]
-    fn process_envelope_dm_sets_thread_id_to_uuid() {
-        let ch = make_channel();
+    fn process_envelope_dm_sets_thread_id_to_uuid() -> Result<(), ChannelError> {
+        let ch = make_channel()?;
         let env = make_envelope(Some("+1111111111"), Some("DM"));
         let (msg, _) = ch.process_envelope(&env).unwrap();
         // DMs now set thread_id to a deterministic UUID derived from phone number
         let expected_thread_id = SignalChannel::thread_id_from_identifier("+1111111111");
         assert_eq!(msg.thread_id, Some(expected_thread_id), "DMs should set thread_id to UUID");
+        Ok(())
     }
 
     #[test]
-    fn process_envelope_group_sets_thread_id_to_uuid() {
+    fn process_envelope_group_sets_thread_id_to_uuid() -> Result<(), ChannelError> {
         let mut config = make_config();
         config.allowed_users = vec!["*".to_string()];
         config.allowed_groups = vec!["*".to_string()];
-        let ch = SignalChannel::new(config);
+        let ch = SignalChannel::new(config)?;
 
         let env = Envelope {
             source: Some("+1111111111".to_string()),
@@ -1657,15 +1692,16 @@ mod tests {
         // Groups now set thread_id to a deterministic UUID derived from group ID
         let expected_thread_id = SignalChannel::thread_id_from_identifier("group:grp999");
         assert_eq!(msg.thread_id, Some(expected_thread_id), "Groups should set thread_id to UUID");
+        Ok(())
     }
 
     // ── timestamp edge cases ────────────────────────────────────────
 
     #[test]
-    fn process_envelope_uses_data_message_timestamp() {
+    fn process_envelope_uses_data_message_timestamp() -> Result<(), ChannelError> {
         let mut config = make_config();
         config.allowed_users = vec!["*".to_string()];
-        let ch = SignalChannel::new(config);
+        let ch = SignalChannel::new(config)?;
 
         let env = Envelope {
             source: Some("+1111111111".to_string()),
@@ -1684,13 +1720,14 @@ mod tests {
         let (msg, _) = ch.process_envelope(&env).unwrap();
         // data_message timestamp takes priority.
         assert_eq!(msg.metadata["signal_timestamp"], 9999);
+        Ok(())
     }
 
     #[test]
-    fn process_envelope_falls_back_to_envelope_timestamp() {
+    fn process_envelope_falls_back_to_envelope_timestamp() -> Result<(), ChannelError> {
         let mut config = make_config();
         config.allowed_users = vec!["*".to_string()];
-        let ch = SignalChannel::new(config);
+        let ch = SignalChannel::new(config)?;
 
         let env = Envelope {
             source: Some("+1111111111".to_string()),
@@ -1708,13 +1745,14 @@ mod tests {
         };
         let (msg, _) = ch.process_envelope(&env).unwrap();
         assert_eq!(msg.metadata["signal_timestamp"], 7777);
+        Ok(())
     }
 
     #[test]
-    fn process_envelope_generates_timestamp_when_missing() {
+    fn process_envelope_generates_timestamp_when_missing() -> Result<(), ChannelError> {
         let mut config = make_config();
         config.allowed_users = vec!["*".to_string()];
-        let ch = SignalChannel::new(config);
+        let ch = SignalChannel::new(config)?;
 
         let env = Envelope {
             source: Some("+1111111111".to_string()),
@@ -1734,6 +1772,7 @@ mod tests {
         // Should generate a timestamp (current time in millis), just verify it's positive.
         let ts = msg.metadata["signal_timestamp"].as_u64().unwrap();
         assert!(ts > 0, "Generated timestamp should be positive");
+        Ok(())
     }
 
     // ── SSE envelope deserialization edge cases ─────────────────────
@@ -1804,54 +1843,57 @@ mod tests {
     // ── config edge cases ───────────────────────────────────────────
 
     #[test]
-    fn multiple_allowed_users() {
+    fn multiple_allowed_users() -> Result<(), ChannelError> {
         let mut config = make_config();
         config.allowed_users = vec![
             "+1111111111".to_string(),
             "+2222222222".to_string(),
             "a1b2c3d4-e5f6-7890-abcd-ef1234567890".to_string(),
         ];
-        let ch = SignalChannel::new(config);
+        let ch = SignalChannel::new(config)?;
         assert!(ch.is_sender_allowed("+1111111111"));
         assert!(ch.is_sender_allowed("+2222222222"));
         assert!(ch.is_sender_allowed("a1b2c3d4-e5f6-7890-abcd-ef1234567890"));
         assert!(!ch.is_sender_allowed("+9999999999"));
+        Ok(())
     }
 
     #[test]
-    fn multiple_allowed_groups() {
+    fn multiple_allowed_groups() -> Result<(), ChannelError> {
         let mut config = make_config();
         config.allowed_groups = vec!["group_a".to_string(), "group_b".to_string()];
-        let ch = SignalChannel::new(config);
+        let ch = SignalChannel::new(config)?;
         assert!(ch.is_group_allowed("group_a"));
         assert!(ch.is_group_allowed("group_b"));
         assert!(!ch.is_group_allowed("group_c"));
+        Ok(())
     }
 
     #[test]
-    fn uuid_prefix_normalization_in_allowlist() {
+    fn uuid_prefix_normalization_in_allowlist() -> Result<(), ChannelError> {
         let uuid = "a1b2c3d4-e5f6-7890-abcd-ef1234567890";
         let mut config = make_config();
         config.allowed_users = vec![format!("uuid:{uuid}"), "+1111111111".to_string()];
-        let ch = SignalChannel::new(config);
+        let ch = SignalChannel::new(config)?;
         // uuid:-prefixed entry should match bare UUID sender.
         assert!(ch.is_sender_allowed(uuid));
         // Phone numbers still work alongside UUID entries.
         assert!(ch.is_sender_allowed("+1111111111"));
         // Non-matching should fail.
         assert!(!ch.is_sender_allowed("+9999999999"));
+        Ok(())
     }
 
     // ── stories behavior tests ──────────────────────────────────────
 
     #[test]
-    fn process_envelope_stories_not_skipped_when_disabled() {
+    fn process_envelope_stories_not_skipped_when_disabled() -> Result<(), ChannelError> {
         // With ignore_stories=false, story messages with a data_message
         // should still be processed.
         let mut config = make_config();
         config.allowed_users = vec!["*".to_string()];
         config.ignore_stories = false;
-        let ch = SignalChannel::new(config);
+        let ch = SignalChannel::new(config)?;
 
         let env = Envelope {
             source: Some("+1111111111".to_string()),
@@ -1872,22 +1914,25 @@ mod tests {
             result.is_some(),
             "Stories should not be skipped when ignore_stories=false"
         );
+        Ok(())
     }
 
     // ── trailing slash variations ───────────────────────────────────
 
     #[test]
-    fn strips_multiple_trailing_slashes() {
+    fn strips_multiple_trailing_slashes() -> Result<(), ChannelError> {
         let mut config = make_config();
         config.http_url = "http://127.0.0.1:8686///".to_string();
-        let ch = SignalChannel::new(config);
+        let ch = SignalChannel::new(config)?;
         assert_eq!(ch.config.http_url, "http://127.0.0.1:8686");
+        Ok(())
     }
 
     #[test]
-    fn preserves_url_without_trailing_slash() {
+    fn preserves_url_without_trailing_slash() -> Result<(), ChannelError> {
         let config = make_config();
-        let ch = SignalChannel::new(config);
+        let ch = SignalChannel::new(config)?;
         assert_eq!(ch.config.http_url, "http://127.0.0.1:8686");
+        Ok(())
     }
 }

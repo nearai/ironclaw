@@ -372,7 +372,7 @@ async fn main() -> anyhow::Result<()> {
     if !cli.cli_only
         && let Some(ref signal_config) = config.channels.signal
     {
-        let signal_channel = SignalChannel::new(signal_config.clone());
+        let signal_channel = SignalChannel::new(signal_config.clone())?;
         channel_names.push("signal".to_string());
         channels.add(Box::new(signal_channel)).await;
         let safe_url = SignalChannel::redact_url(&signal_config.http_url);
