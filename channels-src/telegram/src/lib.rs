@@ -244,6 +244,67 @@ struct TelegramConfig {
 
 struct TelegramChannel;
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum TelegramStatusAction {
+    Typing,
+    Notify(String),
+}
+
+const TELEGRAM_STATUS_MAX_CHARS: usize = 600;
+
+fn truncate_status_message(input: &str, max_chars: usize) -> String {
+    let mut iter = input.chars();
+    let truncated: String = iter.by_ref().take(max_chars).collect();
+    if iter.next().is_some() {
+        format!("{}...", truncated)
+    } else {
+        truncated
+    }
+}
+
+fn status_message_for_user(update: &StatusUpdate) -> Option<String> {
+    let message = update.message.trim();
+    if message.is_empty() {
+        None
+    } else {
+        Some(truncate_status_message(message, TELEGRAM_STATUS_MAX_CHARS))
+    }
+}
+
+fn get_updates_url(offset: i64, timeout_secs: u32) -> String {
+    format!(
+        "https://api.telegram.org/bot{{TELEGRAM_BOT_TOKEN}}/getUpdates?offset={}&timeout={}&allowed_updates=[\"message\",\"edited_message\"]",
+        offset, timeout_secs
+    )
+}
+
+fn classify_status_update(update: &StatusUpdate) -> Option<TelegramStatusAction> {
+    match update.status {
+        StatusType::Thinking => Some(TelegramStatusAction::Typing),
+        StatusType::Done | StatusType::Interrupted => None,
+        // Tool telemetry can be noisy in chat; keep it as typing-only UX.
+        StatusType::ToolStarted | StatusType::ToolCompleted | StatusType::ToolResult => None,
+        StatusType::Status => {
+            let msg = update.message.trim();
+            if msg.eq_ignore_ascii_case("Done")
+                || msg.eq_ignore_ascii_case("Interrupted")
+                || msg.eq_ignore_ascii_case("Awaiting approval")
+                || msg.eq_ignore_ascii_case("Rejected")
+            {
+                None
+            } else {
+                status_message_for_user(update).map(TelegramStatusAction::Notify)
+            }
+        }
+        StatusType::ApprovalNeeded
+        | StatusType::JobStarted
+        | StatusType::AuthRequired
+        | StatusType::AuthCompleted => {
+            status_message_for_user(update).map(TelegramStatusAction::Notify)
+        }
+    }
+}
+
 impl Guest for TelegramChannel {
     fn on_start(config_json: String) -> Result<ChannelConfig, String> {
         channel_host::log(
@@ -422,20 +483,36 @@ impl Guest for TelegramChannel {
             &format!("Polling getUpdates with offset {}", offset),
         );
 
-        // Build getUpdates URL with parameters
-        // - offset: Identifier of the first update to be returned
-        // - timeout: Long polling timeout in seconds (Telegram recommends 30+)
-        // - allowed_updates: Only get message updates
-        let url = format!(
-            "https://api.telegram.org/bot{{TELEGRAM_BOT_TOKEN}}/getUpdates?offset={}&timeout=30&allowed_updates=[\"message\",\"edited_message\"]",
-            offset
-        );
+        let headers_json = serde_json::json!({}).to_string();
+        let primary_url = get_updates_url(offset, 30);
 
-        let headers = serde_json::json!({});
+        // 35s HTTP timeout outlives Telegram's 30s server-side long-poll.
+        // If the TCP connection drops, retry once immediately with a short poll
+        // so we don't wait a full extra tick (~30s) before delivering updates.
+        let result = match channel_host::http_request(
+            "GET",
+            &primary_url,
+            &headers_json,
+            None,
+            Some(35_000),
+        ) {
+            Ok(response) => Ok(response),
+            Err(primary_err) => {
+                channel_host::log(
+                    channel_host::LogLevel::Warn,
+                    &format!(
+                        "getUpdates request failed ({}), retrying once immediately",
+                        primary_err
+                    ),
+                );
 
-        // 35s HTTP timeout outlives Telegram's 30s server-side long-poll
-        let result =
-            channel_host::http_request("GET", &url, &headers.to_string(), None, Some(35_000));
+                let retry_url = get_updates_url(offset, 3);
+                channel_host::http_request("GET", &retry_url, &headers_json, None, Some(8_000))
+                    .map_err(|retry_err| {
+                        format!("primary error: {}; retry error: {}", primary_err, retry_err)
+                    })
+            }
+        };
 
         match result {
             Ok(response) => {
@@ -516,7 +593,7 @@ impl Guest for TelegramChannel {
         let result = send_message(
             metadata.chat_id,
             &response.content,
-            metadata.message_id,
+            Some(metadata.message_id),
             Some("Markdown"),
         );
 
@@ -539,7 +616,7 @@ impl Guest for TelegramChannel {
                 let msg_id = send_message(
                     metadata.chat_id,
                     &response.content,
-                    metadata.message_id,
+                    Some(metadata.message_id),
                     None,
                 )
                 .map_err(|e| format!("Plain-text retry also failed: {}", e))?;
@@ -558,10 +635,10 @@ impl Guest for TelegramChannel {
     }
 
     fn on_status(update: StatusUpdate) {
-        // Only send typing indicator for Thinking status
-        if !matches!(update.status, StatusType::Thinking) {
-            return;
-        }
+        let action = match classify_status_update(&update) {
+            Some(action) => action,
+            None => return,
+        };
 
         // Parse chat_id from metadata
         let metadata: TelegramMessageMetadata = match serde_json::from_str(&update.metadata_json) {
@@ -569,40 +646,68 @@ impl Guest for TelegramChannel {
             Err(_) => {
                 channel_host::log(
                     channel_host::LogLevel::Debug,
-                    "on_status: no valid Telegram metadata, skipping typing indicator",
+                    "on_status: no valid Telegram metadata, skipping status update",
                 );
                 return;
             }
         };
 
-        // POST /sendChatAction with action "typing"
-        let payload = serde_json::json!({
-            "chat_id": metadata.chat_id,
-            "action": "typing"
-        });
+        match action {
+            TelegramStatusAction::Typing => {
+                // POST /sendChatAction with action "typing"
+                let payload = serde_json::json!({
+                    "chat_id": metadata.chat_id,
+                    "action": "typing"
+                });
 
-        let payload_bytes = match serde_json::to_vec(&payload) {
-            Ok(b) => b,
-            Err(_) => return,
-        };
+                let payload_bytes = match serde_json::to_vec(&payload) {
+                    Ok(b) => b,
+                    Err(_) => return,
+                };
 
-        let headers = serde_json::json!({
-            "Content-Type": "application/json"
-        });
+                let headers = serde_json::json!({
+                    "Content-Type": "application/json"
+                });
 
-        let result = channel_host::http_request(
-            "POST",
-            "https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendChatAction",
-            &headers.to_string(),
-            Some(&payload_bytes),
-            None,
-        );
+                let result = channel_host::http_request(
+                    "POST",
+                    "https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendChatAction",
+                    &headers.to_string(),
+                    Some(&payload_bytes),
+                    None,
+                );
 
-        if let Err(e) = result {
-            channel_host::log(
-                channel_host::LogLevel::Debug,
-                &format!("sendChatAction failed: {}", e),
-            );
+                if let Err(e) = result {
+                    channel_host::log(
+                        channel_host::LogLevel::Debug,
+                        &format!("sendChatAction failed: {}", e),
+                    );
+                }
+            }
+            TelegramStatusAction::Notify(prompt) => {
+                // Send user-visible status updates for actionable events.
+                if let Err(first_err) =
+                    send_message(metadata.chat_id, &prompt, Some(metadata.message_id), None)
+                {
+                    channel_host::log(
+                        channel_host::LogLevel::Warn,
+                        &format!(
+                            "Failed to send status reply ({}), retrying without reply context",
+                            first_err
+                        ),
+                    );
+
+                    if let Err(retry_err) = send_message(metadata.chat_id, &prompt, None, None) {
+                        channel_host::log(
+                            channel_host::LogLevel::Debug,
+                            &format!(
+                                "Failed to send status message without reply context: {}",
+                                retry_err
+                            ),
+                        );
+                    }
+                }
+            }
         }
     }
 
@@ -643,14 +748,17 @@ impl std::fmt::Display for SendError {
 fn send_message(
     chat_id: i64,
     text: &str,
-    reply_to_message_id: i64,
+    reply_to_message_id: Option<i64>,
     parse_mode: Option<&str>,
 ) -> Result<i64, SendError> {
     let mut payload = serde_json::json!({
         "chat_id": chat_id,
         "text": text,
-        "reply_to_message_id": reply_to_message_id,
     });
+
+    if let Some(message_id) = reply_to_message_id {
+        payload["reply_to_message_id"] = serde_json::Value::Number(message_id.into());
+    }
 
     if let Some(mode) = parse_mode {
         payload["parse_mode"] = serde_json::Value::String(mode.to_string());
@@ -831,40 +939,17 @@ fn register_webhook(tunnel_url: &str, webhook_secret: Option<&str>) -> Result<()
 
 /// Send a pairing code message to a chat. Used when an unknown user DMs the bot.
 fn send_pairing_reply(chat_id: i64, code: &str) -> Result<(), String> {
-    let payload = serde_json::json!({
-        "chat_id": chat_id,
-        "text": format!(
+    send_message(
+        chat_id,
+        &format!(
             "To pair with this bot, run: `ironclaw pairing approve telegram {}`",
             code
         ),
-        "parse_mode": "Markdown",
-    });
-
-    let payload_bytes =
-        serde_json::to_vec(&payload).map_err(|e| format!("Failed to serialize payload: {}", e))?;
-
-    let headers = serde_json::json!({
-        "Content-Type": "application/json"
-    });
-
-    let result = channel_host::http_request(
-        "POST",
-        "https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
-        &headers.to_string(),
-        Some(&payload_bytes),
         None,
-    );
-
-    match result {
-        Ok(response) => {
-            if response.status != 200 {
-                let body_str = String::from_utf8_lossy(&response.body);
-                return Err(format!("HTTP {}: {}", response.status, body_str));
-            }
-            Ok(())
-        }
-        Err(e) => Err(format!("HTTP request failed: {}", e)),
-    }
+        Some("Markdown"),
+    )
+    .map(|_| ())
+    .map_err(|e| e.to_string())
 }
 
 // ============================================================================
@@ -1027,33 +1112,17 @@ fn handle_message(message: TelegramMessage) {
 
     let metadata_json = serde_json::to_string(&metadata).unwrap_or_else(|_| "{}".to_string());
 
-    // Clean the message text (strip bot mentions and commands)
     let bot_username = channel_host::workspace_read(BOT_USERNAME_PATH).unwrap_or_default();
-    let cleaned_text = clean_message_text(
+    let content_to_emit = match content_to_emit_for_agent(
         &content,
         if bot_username.is_empty() {
             None
         } else {
             Some(bot_username.as_str())
         },
-    );
-
-    // Determine what to emit to the agent.
-    // - `/start` (no args): emit a welcome placeholder so the agent greets the user
-    // - Other bare `/commands` (e.g. /interrupt, /help): pass the raw command through
-    //   so Submission::parse() can handle it
-    // - Commands with args (e.g. `/start hello`): cleaned_text already has the args
-    // - Plain text: pass through as-is
-    let trimmed_content = content.trim();
-    let content_to_emit = if trimmed_content.eq_ignore_ascii_case("/start") {
-        "[User started the bot]".to_string()
-    } else if cleaned_text.is_empty() && trimmed_content.starts_with('/') {
-        // Bare control command like /interrupt, /stop, /help — pass through raw
-        trimmed_content.to_string()
-    } else if cleaned_text.is_empty() {
-        return;
-    } else {
-        cleaned_text
+    ) {
+        Some(value) => value,
+        None => return,
     };
 
     // Emit the message to the agent
@@ -1121,6 +1190,31 @@ fn clean_message_text(text: &str, bot_username: Option<&str>) -> String {
     result
 }
 
+/// Decide which user content should be emitted to the agent loop.
+///
+/// - `/start` emits a placeholder so the agent can greet the user
+/// - bare slash commands are passed through for Submission parsing
+/// - empty/mention-only messages are ignored
+/// - otherwise cleaned text is emitted
+fn content_to_emit_for_agent(content: &str, bot_username: Option<&str>) -> Option<String> {
+    let cleaned_text = clean_message_text(content, bot_username);
+    let trimmed_content = content.trim();
+
+    if trimmed_content.eq_ignore_ascii_case("/start") {
+        return Some("[User started the bot]".to_string());
+    }
+
+    if cleaned_text.is_empty() && trimmed_content.starts_with('/') {
+        return Some(trimmed_content.to_string());
+    }
+
+    if cleaned_text.is_empty() {
+        return None;
+    }
+
+    Some(cleaned_text)
+}
+
 // ============================================================================
 // Utilities
 // ============================================================================
@@ -1181,62 +1275,126 @@ mod tests {
         // Commands with args: command prefix stripped, args returned
         assert_eq!(clean_message_text("/start hello", None), "hello");
         assert_eq!(clean_message_text("/help me please", None), "me please");
-        assert_eq!(clean_message_text("/model claude-opus-4-6", None), "claude-opus-4-6");
+        assert_eq!(
+            clean_message_text("/model claude-opus-4-6", None),
+            "claude-opus-4-6"
+        );
     }
 
     /// Tests for the content_to_emit logic in handle_message.
-    /// Since handle_message uses WASM host calls, we test the decision logic inline.
+    /// Since handle_message uses WASM host calls, test the extracted decision function.
     #[test]
     fn test_content_to_emit_logic() {
-        // Simulates the content_to_emit decision for various inputs.
-        // This mirrors the logic in handle_message after clean_message_text.
-        fn resolve_content(content: &str) -> Option<String> {
-            let cleaned_text = clean_message_text(content, None);
-            let trimmed_content = content.trim();
-            if trimmed_content.eq_ignore_ascii_case("/start") {
-                Some("[User started the bot]".to_string())
-            } else if cleaned_text.is_empty() && trimmed_content.starts_with('/') {
-                Some(trimmed_content.to_string())
-            } else if cleaned_text.is_empty() {
-                None // would return/skip in handle_message
-            } else {
-                Some(cleaned_text)
-            }
-        }
-
         // /start → welcome placeholder
-        assert_eq!(resolve_content("/start"), Some("[User started the bot]".to_string()));
-        assert_eq!(resolve_content("/Start"), Some("[User started the bot]".to_string()));
-        assert_eq!(resolve_content("  /start  "), Some("[User started the bot]".to_string()));
+        assert_eq!(
+            content_to_emit_for_agent("/start", None),
+            Some("[User started the bot]".to_string())
+        );
+        assert_eq!(
+            content_to_emit_for_agent("/Start", None),
+            Some("[User started the bot]".to_string())
+        );
+        assert_eq!(
+            content_to_emit_for_agent("  /start  ", None),
+            Some("[User started the bot]".to_string())
+        );
 
         // /start with args → pass args through
-        assert_eq!(resolve_content("/start hello"), Some("hello".to_string()));
+        assert_eq!(
+            content_to_emit_for_agent("/start hello", None),
+            Some("hello".to_string())
+        );
 
         // Control commands → pass through raw so Submission::parse() can match
-        assert_eq!(resolve_content("/interrupt"), Some("/interrupt".to_string()));
-        assert_eq!(resolve_content("/stop"), Some("/stop".to_string()));
-        assert_eq!(resolve_content("/help"), Some("/help".to_string()));
-        assert_eq!(resolve_content("/undo"), Some("/undo".to_string()));
-        assert_eq!(resolve_content("/redo"), Some("/redo".to_string()));
-        assert_eq!(resolve_content("/ping"), Some("/ping".to_string()));
-        assert_eq!(resolve_content("/tools"), Some("/tools".to_string()));
-        assert_eq!(resolve_content("/compact"), Some("/compact".to_string()));
-        assert_eq!(resolve_content("/clear"), Some("/clear".to_string()));
-        assert_eq!(resolve_content("/version"), Some("/version".to_string()));
+        assert_eq!(
+            content_to_emit_for_agent("/interrupt", None),
+            Some("/interrupt".to_string())
+        );
+        assert_eq!(
+            content_to_emit_for_agent("/stop", None),
+            Some("/stop".to_string())
+        );
+        assert_eq!(
+            content_to_emit_for_agent("/help", None),
+            Some("/help".to_string())
+        );
+        assert_eq!(
+            content_to_emit_for_agent("/undo", None),
+            Some("/undo".to_string())
+        );
+        assert_eq!(
+            content_to_emit_for_agent("/redo", None),
+            Some("/redo".to_string())
+        );
+        assert_eq!(
+            content_to_emit_for_agent("/ping", None),
+            Some("/ping".to_string())
+        );
+        assert_eq!(
+            content_to_emit_for_agent("/tools", None),
+            Some("/tools".to_string())
+        );
+        assert_eq!(
+            content_to_emit_for_agent("/compact", None),
+            Some("/compact".to_string())
+        );
+        assert_eq!(
+            content_to_emit_for_agent("/clear", None),
+            Some("/clear".to_string())
+        );
+        assert_eq!(
+            content_to_emit_for_agent("/version", None),
+            Some("/version".to_string())
+        );
+        assert_eq!(
+            content_to_emit_for_agent("/approve", None),
+            Some("/approve".to_string())
+        );
+        assert_eq!(
+            content_to_emit_for_agent("/always", None),
+            Some("/always".to_string())
+        );
+        assert_eq!(
+            content_to_emit_for_agent("/deny", None),
+            Some("/deny".to_string())
+        );
+        assert_eq!(
+            content_to_emit_for_agent("/yes", None),
+            Some("/yes".to_string())
+        );
+        assert_eq!(
+            content_to_emit_for_agent("/no", None),
+            Some("/no".to_string())
+        );
 
         // Commands with args → cleaned text (command stripped)
-        assert_eq!(resolve_content("/help me please"), Some("me please".to_string()));
+        assert_eq!(
+            content_to_emit_for_agent("/help me please", None),
+            Some("me please".to_string())
+        );
 
         // Plain text → pass through
-        assert_eq!(resolve_content("hello world"), Some("hello world".to_string()));
-        assert_eq!(resolve_content("just text"), Some("just text".to_string()));
+        assert_eq!(
+            content_to_emit_for_agent("hello world", None),
+            Some("hello world".to_string())
+        );
+        assert_eq!(
+            content_to_emit_for_agent("just text", None),
+            Some("just text".to_string())
+        );
 
         // Empty / whitespace → skip (None)
-        assert_eq!(resolve_content(""), None);
-        assert_eq!(resolve_content("   "), None);
+        assert_eq!(content_to_emit_for_agent("", None), None);
+        assert_eq!(content_to_emit_for_agent("   ", None), None);
 
         // Bare @mention without bot → skip
-        assert_eq!(resolve_content("@botname"), None);
+        assert_eq!(content_to_emit_for_agent("@botname", None), None);
+
+        // With bot username configured: other mentions are preserved.
+        assert_eq!(
+            content_to_emit_for_agent("@alice hello", Some("MyBot")),
+            Some("@alice hello".to_string())
+        );
     }
 
     #[test]
@@ -1316,5 +1474,237 @@ mod tests {
         let msg: TelegramMessage = serde_json::from_str(json).unwrap();
         assert_eq!(msg.text, None);
         assert_eq!(msg.caption.as_deref(), Some("What's in this image?"));
+    }
+
+    #[test]
+    fn test_get_updates_url_includes_offset_and_timeout() {
+        let url = get_updates_url(444_809_884, 30);
+        assert!(url.contains("offset=444809884"));
+        assert!(url.contains("timeout=30"));
+        assert!(url.contains("allowed_updates=[\"message\",\"edited_message\"]"));
+    }
+
+    #[test]
+    fn test_classify_status_update_thinking() {
+        let update = StatusUpdate {
+            status: StatusType::Thinking,
+            message: "Thinking...".to_string(),
+            metadata_json: "{}".to_string(),
+        };
+
+        assert_eq!(
+            classify_status_update(&update),
+            Some(TelegramStatusAction::Typing)
+        );
+    }
+
+    #[test]
+    fn test_classify_status_update_approval_needed() {
+        let update = StatusUpdate {
+            status: StatusType::ApprovalNeeded,
+            message: "Approval needed for tool 'http_request'".to_string(),
+            metadata_json: "{}".to_string(),
+        };
+
+        assert_eq!(
+            classify_status_update(&update),
+            Some(TelegramStatusAction::Notify(
+                "Approval needed for tool 'http_request'".to_string()
+            ))
+        );
+    }
+
+    #[test]
+    fn test_classify_status_update_done_ignored() {
+        let update = StatusUpdate {
+            status: StatusType::Done,
+            message: "Done".to_string(),
+            metadata_json: "{}".to_string(),
+        };
+
+        assert_eq!(classify_status_update(&update), None);
+    }
+
+    #[test]
+    fn test_classify_status_update_auth_required() {
+        let update = StatusUpdate {
+            status: StatusType::AuthRequired,
+            message: "Authentication required for weather.".to_string(),
+            metadata_json: "{}".to_string(),
+        };
+
+        assert_eq!(
+            classify_status_update(&update),
+            Some(TelegramStatusAction::Notify(
+                "Authentication required for weather.".to_string()
+            ))
+        );
+    }
+
+    #[test]
+    fn test_classify_status_update_tool_started_ignored() {
+        let update = StatusUpdate {
+            status: StatusType::ToolStarted,
+            message: "Tool started: http_request".to_string(),
+            metadata_json: "{}".to_string(),
+        };
+
+        assert_eq!(classify_status_update(&update), None);
+    }
+
+    #[test]
+    fn test_classify_status_update_tool_completed_ignored() {
+        let update = StatusUpdate {
+            status: StatusType::ToolCompleted,
+            message: "Tool completed: http_request (ok)".to_string(),
+            metadata_json: "{}".to_string(),
+        };
+
+        assert_eq!(classify_status_update(&update), None);
+    }
+
+    #[test]
+    fn test_classify_status_update_job_started_notify() {
+        let update = StatusUpdate {
+            status: StatusType::JobStarted,
+            message: "Job started: Daily sync".to_string(),
+            metadata_json: "{}".to_string(),
+        };
+
+        assert_eq!(
+            classify_status_update(&update),
+            Some(TelegramStatusAction::Notify(
+                "Job started: Daily sync".to_string()
+            ))
+        );
+    }
+
+    #[test]
+    fn test_classify_status_update_auth_completed_notify() {
+        let update = StatusUpdate {
+            status: StatusType::AuthCompleted,
+            message: "Authentication completed for weather.".to_string(),
+            metadata_json: "{}".to_string(),
+        };
+
+        assert_eq!(
+            classify_status_update(&update),
+            Some(TelegramStatusAction::Notify(
+                "Authentication completed for weather.".to_string()
+            ))
+        );
+    }
+
+    #[test]
+    fn test_classify_status_update_tool_result_ignored() {
+        let update = StatusUpdate {
+            status: StatusType::ToolResult,
+            message: "Tool result: http_request ...".to_string(),
+            metadata_json: "{}".to_string(),
+        };
+
+        assert_eq!(classify_status_update(&update), None);
+    }
+
+    #[test]
+    fn test_classify_status_update_awaiting_approval_ignored() {
+        let update = StatusUpdate {
+            status: StatusType::Status,
+            message: "Awaiting approval".to_string(),
+            metadata_json: "{}".to_string(),
+        };
+
+        assert_eq!(classify_status_update(&update), None);
+    }
+
+    #[test]
+    fn test_classify_status_update_interrupted_ignored() {
+        let update = StatusUpdate {
+            status: StatusType::Interrupted,
+            message: "Interrupted".to_string(),
+            metadata_json: "{}".to_string(),
+        };
+
+        assert_eq!(classify_status_update(&update), None);
+    }
+
+    #[test]
+    fn test_classify_status_update_status_done_ignored_case_insensitive() {
+        let update = StatusUpdate {
+            status: StatusType::Status,
+            message: "done".to_string(),
+            metadata_json: "{}".to_string(),
+        };
+
+        assert_eq!(classify_status_update(&update), None);
+    }
+
+    #[test]
+    fn test_classify_status_update_status_interrupted_ignored() {
+        let update = StatusUpdate {
+            status: StatusType::Status,
+            message: "interrupted".to_string(),
+            metadata_json: "{}".to_string(),
+        };
+
+        assert_eq!(classify_status_update(&update), None);
+    }
+
+    #[test]
+    fn test_classify_status_update_status_rejected_ignored() {
+        let update = StatusUpdate {
+            status: StatusType::Status,
+            message: "Rejected".to_string(),
+            metadata_json: "{}".to_string(),
+        };
+
+        assert_eq!(classify_status_update(&update), None);
+    }
+
+    #[test]
+    fn test_classify_status_update_status_notify() {
+        let update = StatusUpdate {
+            status: StatusType::Status,
+            message: "Context compaction started".to_string(),
+            metadata_json: "{}".to_string(),
+        };
+
+        assert_eq!(
+            classify_status_update(&update),
+            Some(TelegramStatusAction::Notify(
+                "Context compaction started".to_string()
+            ))
+        );
+    }
+
+    #[test]
+    fn test_status_message_for_user_ignores_blank() {
+        let update = StatusUpdate {
+            status: StatusType::AuthRequired,
+            message: "   ".to_string(),
+            metadata_json: "{}".to_string(),
+        };
+
+        assert_eq!(status_message_for_user(&update), None);
+    }
+
+    #[test]
+    fn test_truncate_status_message_appends_ellipsis() {
+        let input = "abcdefghijklmnopqrstuvwxyz";
+        let output = truncate_status_message(input, 10);
+        assert_eq!(output, "abcdefghij...");
+    }
+
+    #[test]
+    fn test_status_message_for_user_truncates_long_input() {
+        let update = StatusUpdate {
+            status: StatusType::AuthRequired,
+            message: "x".repeat(700),
+            metadata_json: "{}".to_string(),
+        };
+
+        let msg = status_message_for_user(&update).expect("expected message");
+        assert!(msg.len() <= TELEGRAM_STATUS_MAX_CHARS + 3);
+        assert!(msg.ends_with("..."));
     }
 }

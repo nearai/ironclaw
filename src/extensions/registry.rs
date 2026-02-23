@@ -1,7 +1,7 @@
 //! Curated in-memory catalog of known extensions with fuzzy search.
 //!
-//! The registry holds well-known MCP servers and WASM tools that can be installed
-//! via conversational commands. Online discoveries are cached here too.
+//! The registry holds well-known channels, tools, and MCP servers that can be
+//! installed via conversational commands. Online discoveries are cached here too.
 
 use tokio::sync::RwLock;
 
@@ -114,6 +114,21 @@ impl ExtensionRegistry {
         }
         let cache = self.discovery_cache.read().await;
         cache.iter().find(|e| e.name == name).cloned()
+    }
+
+    /// Return all registry entries (builtins + cached discoveries).
+    pub async fn all_entries(&self) -> Vec<RegistryEntry> {
+        let mut entries = self.entries.clone();
+        let cache = self.discovery_cache.read().await;
+        for entry in cache.iter() {
+            if !entries
+                .iter()
+                .any(|e| e.name == entry.name && e.kind == entry.kind)
+            {
+                entries.push(entry.clone());
+            }
+        }
+        entries
     }
 
     /// Add discovered entries to the cache.
@@ -380,72 +395,9 @@ fn builtin_entries() -> Vec<RegistryEntry> {
             },
             auth_hint: AuthHint::Dcr,
         },
-        // -- WASM Channels (bundled) --
-        RegistryEntry {
-            name: "telegram".to_string(),
-            display_name: "Telegram".to_string(),
-            kind: ExtensionKind::WasmChannel,
-            description: "Telegram Bot API channel for receiving and sending messages via Telegram"
-                .to_string(),
-            keywords: vec![
-                "chat".into(),
-                "messaging".into(),
-                "bot".into(),
-                "channel".into(),
-            ],
-            source: ExtensionSource::Bundled {
-                name: "telegram".to_string(),
-            },
-            auth_hint: AuthHint::CapabilitiesAuth,
-        },
-        RegistryEntry {
-            name: "slack".to_string(),
-            display_name: "Slack".to_string(),
-            kind: ExtensionKind::WasmChannel,
-            description: "Slack Events API channel for receiving and sending messages via Slack"
-                .to_string(),
-            keywords: vec![
-                "chat".into(),
-                "messaging".into(),
-                "team".into(),
-                "channel".into(),
-            ],
-            source: ExtensionSource::Bundled {
-                name: "slack".to_string(),
-            },
-            auth_hint: AuthHint::CapabilitiesAuth,
-        },
-        RegistryEntry {
-            name: "discord".to_string(),
-            display_name: "Discord".to_string(),
-            kind: ExtensionKind::WasmChannel,
-            description:
-                "Discord Gateway channel for handling slash commands, buttons, and messages"
-                    .to_string(),
-            keywords: vec![
-                "chat".into(),
-                "messaging".into(),
-                "gaming".into(),
-                "channel".into(),
-            ],
-            source: ExtensionSource::Bundled {
-                name: "discord".to_string(),
-            },
-            auth_hint: AuthHint::CapabilitiesAuth,
-        },
-        RegistryEntry {
-            name: "whatsapp".to_string(),
-            display_name: "WhatsApp".to_string(),
-            kind: ExtensionKind::WasmChannel,
-            description:
-                "WhatsApp Business API channel for receiving and sending WhatsApp messages"
-                    .to_string(),
-            keywords: vec!["chat".into(), "messaging".into(), "channel".into()],
-            source: ExtensionSource::Bundled {
-                name: "whatsapp".to_string(),
-            },
-            auth_hint: AuthHint::CapabilitiesAuth,
-        },
+        // WASM channels (telegram, slack, discord, whatsapp) come from the embedded
+        // registry catalog (registry/channels/*.json) with WasmDownload URLs pointing
+        // to GitHub release artifacts. See new_with_catalog() for merging.
     ]
 }
 
@@ -641,6 +593,7 @@ mod tests {
                 source: ExtensionSource::WasmBuildable {
                     repo_url: "channels-src/telegram".to_string(),
                     build_dir: Some("channels-src/telegram".to_string()),
+                    crate_name: Some("telegram-channel".to_string()),
                 },
                 auth_hint: AuthHint::CapabilitiesAuth,
             },
@@ -654,6 +607,7 @@ mod tests {
                 source: ExtensionSource::WasmBuildable {
                     repo_url: "tools-src/slack".to_string(),
                     build_dir: Some("tools-src/slack".to_string()),
+                    crate_name: Some("slack-tool".to_string()),
                 },
                 auth_hint: AuthHint::CapabilitiesAuth,
             },
@@ -701,46 +655,6 @@ mod tests {
         assert_eq!(entry.unwrap().display_name, "Slack MCP");
     }
 
-    #[tokio::test]
-    async fn test_search_finds_telegram_channel() {
-        let registry = ExtensionRegistry::new();
-        let results = registry.search("telegram").await;
-
-        assert!(!results.is_empty(), "Should find telegram in registry");
-        assert_eq!(results[0].entry.name, "telegram");
-        assert_eq!(results[0].entry.kind, ExtensionKind::WasmChannel);
-    }
-
-    #[tokio::test]
-    async fn test_search_channel_by_keyword() {
-        let registry = ExtensionRegistry::new();
-        let results = registry.search("bot messaging").await;
-
-        let has_telegram = results.iter().any(|r| r.entry.name == "telegram");
-        assert!(
-            has_telegram,
-            "Telegram should appear in bot messaging search"
-        );
-    }
-
-    #[tokio::test]
-    async fn test_get_bundled_channels() {
-        let registry = ExtensionRegistry::new();
-
-        let telegram = registry.get("telegram").await;
-        assert!(telegram.is_some());
-        assert_eq!(telegram.unwrap().kind, ExtensionKind::WasmChannel);
-
-        let slack = registry.get("slack").await;
-        assert!(slack.is_some());
-        assert_eq!(slack.unwrap().kind, ExtensionKind::WasmChannel);
-
-        let discord = registry.get("discord").await;
-        assert!(discord.is_some());
-        assert_eq!(discord.unwrap().kind, ExtensionKind::WasmChannel);
-
-        let whatsapp = registry.get("whatsapp").await;
-        assert!(whatsapp.is_some());
-        assert_eq!(whatsapp.unwrap().kind, ExtensionKind::WasmChannel);
-    }
+    // Channel tests (telegram, slack, discord, whatsapp) require the embedded catalog
+    // to be loaded via new_with_catalog(). See test_new_with_catalog for catalog coverage.
 }
