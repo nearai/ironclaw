@@ -547,12 +547,11 @@ impl ExtensionManager {
         entry: &RegistryEntry,
     ) -> Result<InstallResult, ExtensionError> {
         let primary_result = self.try_install_from_source(entry, &entry.source).await;
-        match (&primary_result, &entry.fallback_source) {
-            // Don't attempt fallback if already installed
-            (Err(ExtensionError::AlreadyInstalled(_)), _) => primary_result,
-            (Err(primary_err), Some(fallback)) => {
-                // Primary install failed (e.g. download 404 because release artifacts
-                // don't exist yet). Try the fallback source (build from source).
+        match fallback_decision(&primary_result, &entry.fallback_source) {
+            FallbackDecision::Return => primary_result,
+            FallbackDecision::TryFallback => {
+                let primary_err = primary_result.unwrap_err();
+                let fallback = entry.fallback_source.as_ref().unwrap();
                 tracing::info!(
                     extension = %entry.name,
                     primary_error = %primary_err,
@@ -566,18 +565,9 @@ impl ExtensionManager {
                             fallback_error = %fallback_err,
                             "Fallback install also failed"
                         );
-                        // Forward AlreadyInstalled directly instead of wrapping
-                        if matches!(fallback_err, ExtensionError::AlreadyInstalled(_)) {
-                            return fallback_err;
-                        }
-                        // Include both errors so users can diagnose the full chain
-                        ExtensionError::Other(format!(
-                            "Primary install failed: {}; fallback install also failed: {}",
-                            primary_err, fallback_err
-                        ))
+                        combine_install_errors(&primary_err, fallback_err)
                     })
             }
-            _ => primary_result,
         }
     }
 
@@ -2269,10 +2259,56 @@ fn infer_kind_from_url(url: &str) -> ExtensionKind {
     }
 }
 
+/// Decision from `fallback_decision`: should we try the fallback source or
+/// return the primary result as-is?
+enum FallbackDecision {
+    /// Return the primary result directly (success or non-retriable error).
+    Return,
+    /// Primary failed with a retriable error and a fallback source is available.
+    TryFallback,
+}
+
+/// Decide whether to attempt a fallback install based on the primary result
+/// and the availability of a fallback source.
+fn fallback_decision(
+    primary_result: &Result<InstallResult, ExtensionError>,
+    fallback_source: &Option<Box<ExtensionSource>>,
+) -> FallbackDecision {
+    match (primary_result, fallback_source) {
+        // Success — no fallback needed
+        (Ok(_), _) => FallbackDecision::Return,
+        // AlreadyInstalled — don't try building from source
+        (Err(ExtensionError::AlreadyInstalled(_)), _) => FallbackDecision::Return,
+        // Failed with a fallback available — try it
+        (Err(_), Some(_)) => FallbackDecision::TryFallback,
+        // Failed with no fallback — return the error
+        (Err(_), None) => FallbackDecision::Return,
+    }
+}
+
+/// Combine primary and fallback errors into a single error.
+///
+/// Preserves `AlreadyInstalled` from the fallback directly; otherwise wraps
+/// both error messages into `ExtensionError::Other`.
+fn combine_install_errors(
+    primary_err: &ExtensionError,
+    fallback_err: ExtensionError,
+) -> ExtensionError {
+    if matches!(fallback_err, ExtensionError::AlreadyInstalled(_)) {
+        return fallback_err;
+    }
+    ExtensionError::Other(format!(
+        "Primary install failed: {}; fallback install also failed: {}",
+        primary_err, fallback_err
+    ))
+}
+
 #[cfg(test)]
 mod tests {
-    use crate::extensions::ExtensionKind;
-    use crate::extensions::manager::infer_kind_from_url;
+    use crate::extensions::manager::{
+        FallbackDecision, combine_install_errors, fallback_decision, infer_kind_from_url,
+    };
+    use crate::extensions::{ExtensionError, ExtensionKind, ExtensionSource, InstallResult};
 
     #[test]
     fn test_infer_kind_from_url() {
@@ -2291,6 +2327,88 @@ mod tests {
         assert_eq!(
             infer_kind_from_url("https://example.com/mcp"),
             ExtensionKind::McpServer
+        );
+    }
+
+    // ---- fallback install logic tests ----
+
+    fn make_ok_result() -> Result<InstallResult, ExtensionError> {
+        Ok(InstallResult {
+            name: "test".to_string(),
+            kind: ExtensionKind::WasmTool,
+            message: "Installed".to_string(),
+        })
+    }
+
+    fn make_fallback_source() -> Option<Box<ExtensionSource>> {
+        Some(Box::new(ExtensionSource::WasmBuildable {
+            repo_url: "tools-src/test".to_string(),
+            build_dir: Some("tools-src/test".to_string()),
+            crate_name: Some("test-tool".to_string()),
+        }))
+    }
+
+    #[test]
+    fn test_fallback_decision_success_returns_directly() {
+        let result = make_ok_result();
+        let fallback = make_fallback_source();
+        assert!(matches!(
+            fallback_decision(&result, &fallback),
+            FallbackDecision::Return
+        ));
+    }
+
+    #[test]
+    fn test_fallback_decision_already_installed_skips_fallback() {
+        let result: Result<InstallResult, ExtensionError> =
+            Err(ExtensionError::AlreadyInstalled("test".to_string()));
+        let fallback = make_fallback_source();
+        assert!(matches!(
+            fallback_decision(&result, &fallback),
+            FallbackDecision::Return
+        ));
+    }
+
+    #[test]
+    fn test_fallback_decision_download_failed_triggers_fallback() {
+        let result: Result<InstallResult, ExtensionError> =
+            Err(ExtensionError::DownloadFailed("404 Not Found".to_string()));
+        let fallback = make_fallback_source();
+        assert!(matches!(
+            fallback_decision(&result, &fallback),
+            FallbackDecision::TryFallback
+        ));
+    }
+
+    #[test]
+    fn test_fallback_decision_error_without_fallback_returns() {
+        let result: Result<InstallResult, ExtensionError> =
+            Err(ExtensionError::DownloadFailed("404 Not Found".to_string()));
+        let fallback = None;
+        assert!(matches!(
+            fallback_decision(&result, &fallback),
+            FallbackDecision::Return
+        ));
+    }
+
+    #[test]
+    fn test_combine_errors_includes_both_messages() {
+        let primary = ExtensionError::DownloadFailed("404 Not Found".to_string());
+        let fallback = ExtensionError::InstallFailed("cargo not found".to_string());
+        let combined = combine_install_errors(&primary, fallback);
+        let msg = combined.to_string();
+        assert!(msg.contains("404 Not Found"), "missing primary: {msg}");
+        assert!(msg.contains("cargo not found"), "missing fallback: {msg}");
+    }
+
+    #[test]
+    fn test_combine_errors_forwards_already_installed_from_fallback() {
+        let primary = ExtensionError::DownloadFailed("404".to_string());
+        let fallback = ExtensionError::AlreadyInstalled("test".to_string());
+        let combined = combine_install_errors(&primary, fallback);
+        assert!(
+            matches!(combined, ExtensionError::AlreadyInstalled(ref name) if name == "test"),
+            "Expected AlreadyInstalled, got: {combined:?}"
         );
     }
 }
