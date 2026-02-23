@@ -8,6 +8,9 @@ use tokio::fs;
 use crate::registry::catalog::RegistryError;
 use crate::registry::manifest::{BundleDefinition, ExtensionManifest, ManifestKind};
 
+// GitHub-only by design. New trusted hosts (e.g. a NEAR AI CDN) must be
+// explicitly added here; unknown hosts fall back to source build with a
+// warning rather than surfacing a clear "host not allowed" error.
 const ALLOWED_ARTIFACT_HOSTS: &[&str] = &[
     "github.com",
     "objects.githubusercontent.com",
@@ -277,6 +280,11 @@ impl RegistryInstaller {
         manifest: &ExtensionManifest,
         force: bool,
     ) -> Result<InstallOutcome, RegistryError> {
+        // Validate upfront so we fail fast on bad manifests regardless of
+        // which install path runs, without relying on inner methods to
+        // catch it first.
+        validate_manifest_install_inputs(manifest)?;
+
         let has_artifact = manifest
             .artifacts
             .get("wasm32-wasip2")
@@ -725,6 +733,16 @@ mod tests {
         artifact_url: Option<String>,
         sha256: Option<&str>,
     ) -> ExtensionManifest {
+        test_manifest_with_kind(name, source_dir, artifact_url, sha256, ManifestKind::Tool)
+    }
+
+    fn test_manifest_with_kind(
+        name: &str,
+        source_dir: &str,
+        artifact_url: Option<String>,
+        sha256: Option<&str>,
+        kind: ManifestKind,
+    ) -> ExtensionManifest {
         let mut artifacts = HashMap::new();
         if artifact_url.is_some() || sha256.is_some() {
             artifacts.insert(
@@ -740,7 +758,7 @@ mod tests {
         ExtensionManifest {
             name: name.to_string(),
             display_name: name.to_string(),
-            kind: ManifestKind::Tool,
+            kind,
             version: "0.1.0".to_string(),
             description: "test manifest".to_string(),
             keywords: Vec::new(),
@@ -933,6 +951,66 @@ mod tests {
         assert!(wasm_path.exists());
         assert!(caps_path.exists());
         assert!(result.has_capabilities);
+    }
+
+    #[tokio::test]
+    async fn test_install_from_source_rejects_wrong_prefix_for_channel() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let installer = RegistryInstaller::new(
+            temp.path().to_path_buf(),
+            temp.path().join("tools"),
+            temp.path().join("channels"),
+        );
+
+        // Channel manifest with tools-src/ prefix should be rejected
+        let manifest = test_manifest_with_kind(
+            "telegram",
+            "tools-src/telegram",
+            None,
+            None,
+            ManifestKind::Channel,
+        );
+
+        let result = installer.install_from_source(&manifest, false).await;
+        match result {
+            Err(RegistryError::InvalidManifest { field, reason, .. }) => {
+                assert_eq!(field, "source.dir");
+                assert!(reason.contains("channels-src/"), "reason: {}", reason);
+            }
+            other => panic!("unexpected result: {:?}", other),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_install_from_source_accepts_correct_channel_prefix() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let installer = RegistryInstaller::new(
+            temp.path().to_path_buf(),
+            temp.path().join("tools"),
+            temp.path().join("channels"),
+        );
+
+        // Channel manifest with channels-src/ prefix should pass validation
+        // (will fail later because source dir doesn't exist, which is fine)
+        let manifest = test_manifest_with_kind(
+            "telegram",
+            "channels-src/telegram",
+            None,
+            None,
+            ManifestKind::Channel,
+        );
+
+        let result = installer.install_from_source(&manifest, false).await;
+        match result {
+            Err(RegistryError::ManifestRead { reason, .. }) => {
+                assert!(
+                    reason.contains("source directory does not exist"),
+                    "reason: {}",
+                    reason
+                );
+            }
+            other => panic!("unexpected result: {:?}", other),
+        }
     }
 
     #[test]

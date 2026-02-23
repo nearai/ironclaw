@@ -27,6 +27,9 @@ pub enum RegistryError {
         path: std::path::PathBuf,
     },
 
+    // `url` is stored for programmatic access (logs, retries) but intentionally
+    // omitted from the Display message to avoid leaking internal artifact URLs
+    // to end users.
     #[error("Artifact download failed: {reason}")]
     DownloadFailed { url: String, reason: String },
 
