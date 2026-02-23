@@ -1788,7 +1788,7 @@ That's my plan."#;
     }
 
     #[test]
-    fn test_system_prompt_contains_source_attribution() {
+    fn test_system_prompt_contains_source_attribution_and_tool_guidance() {
         use std::sync::Arc;
 
         use crate::config::SafetyConfig;
@@ -1833,46 +1833,6 @@ That's my plan."#;
             prompt.contains("Sources"),
             "System prompt should mention Sources section"
         );
-    }
-
-    #[test]
-    fn test_system_prompt_contains_proactive_tool_guidance() {
-        use std::sync::Arc;
-
-        use crate::config::SafetyConfig;
-        use crate::safety::SafetyLayer;
-
-        struct DummyLlm2;
-        #[async_trait::async_trait]
-        impl crate::llm::LlmProvider for DummyLlm2 {
-            fn model_name(&self) -> &str {
-                "dummy"
-            }
-            fn cost_per_token(&self) -> (rust_decimal::Decimal, rust_decimal::Decimal) {
-                (rust_decimal::Decimal::ZERO, rust_decimal::Decimal::ZERO)
-            }
-            async fn complete(
-                &self,
-                _request: crate::llm::CompletionRequest,
-            ) -> Result<crate::llm::CompletionResponse, crate::error::LlmError> {
-                unimplemented!()
-            }
-            async fn complete_with_tools(
-                &self,
-                _request: crate::llm::ToolCompletionRequest,
-            ) -> Result<crate::llm::ToolCompletionResponse, crate::error::LlmError> {
-                unimplemented!()
-            }
-        }
-
-        let safety = Arc::new(SafetyLayer::new(&SafetyConfig {
-            max_output_length: 100_000,
-            injection_check_enabled: false,
-        }));
-        let reasoning = Reasoning::new(Arc::new(DummyLlm2), safety);
-        let context = ReasoningContext::new();
-        let prompt = reasoning.build_conversation_prompt(&context);
-
         assert!(
             prompt.contains("Use tools proactively"),
             "System prompt should encourage proactive tool use"

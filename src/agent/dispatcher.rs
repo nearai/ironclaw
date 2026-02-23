@@ -550,7 +550,8 @@ impl Agent {
                                 }
                                 tool_summaries.push(format!(
                                     "tool:{} status:rejected reason:{}",
-                                    tc.name, error_msg
+                                    sanitize_audit_field(&tc.name),
+                                    sanitize_audit_field(&error_msg)
                                 ));
                                 context_messages
                                     .push(ChatMessage::tool_result(&tc.id, &tc.name, error_msg));
@@ -603,27 +604,20 @@ impl Agent {
                                 // Collect tool summary for audit trail
                                 match &tool_result {
                                     Ok(output) => {
-                                        // Include truncated params for context (e.g. URL for http)
-                                        let params_preview = tc
-                                            .arguments
-                                            .as_object()
-                                            .and_then(|o| {
-                                                o.get("url")
-                                                    .or_else(|| o.get("query"))
-                                                    .or_else(|| o.get("path"))
-                                            })
-                                            .and_then(|v| v.as_str())
-                                            .unwrap_or("");
+                                        let params_preview = extract_params_preview(&tc.arguments);
                                         let output_len = output.len();
                                         tool_summaries.push(format!(
                                             "tool:{} params:{} status:ok output_bytes:{}",
-                                            tc.name, params_preview, output_len
+                                            sanitize_audit_field(&tc.name),
+                                            params_preview,
+                                            output_len
                                         ));
                                     }
                                     Err(e) => {
                                         tool_summaries.push(format!(
                                             "tool:{} status:error reason:{}",
-                                            tc.name, e
+                                            sanitize_audit_field(&tc.name),
+                                            sanitize_audit_field(&e.to_string())
                                         ));
                                     }
                                 }
@@ -685,9 +679,11 @@ impl Agent {
                         && let Some(store) = self.store()
                     {
                         let summary = tool_summaries.join("\n");
-                        // Ignore errors — audit trail is best-effort
+                        // Use "system" role so sanitize_tool_messages doesn't
+                        // re-cast this as User input (orphan "tool" messages
+                        // without a tool_call_id get promoted to User role).
                         let _ = store
-                            .add_conversation_message(thread_id, "tool", &summary)
+                            .add_conversation_message(thread_id, "system", &summary)
                             .await;
                     }
 
@@ -830,6 +826,39 @@ pub(super) struct ParsedAuthData {
     pub(super) setup_url: Option<String>,
 }
 
+// ── Audit trail helpers ─────────────────────────────────────────────────
+
+/// Maximum length for any single field in an audit summary line.
+/// Prevents oversized DB entries and context window exhaustion.
+const AUDIT_FIELD_MAX_LEN: usize = 200;
+
+/// Sanitize a string for inclusion in an audit summary line.
+/// Strips control characters (newlines, tabs, etc.) that could be used for
+/// log injection / spoofing, and truncates to `AUDIT_FIELD_MAX_LEN`.
+fn sanitize_audit_field(s: &str) -> String {
+    let cleaned: String = s.chars().filter(|c| !c.is_control()).collect();
+    if cleaned.len() > AUDIT_FIELD_MAX_LEN {
+        format!("{}…", &cleaned[..AUDIT_FIELD_MAX_LEN])
+    } else {
+        cleaned
+    }
+}
+
+/// Extract a short params preview (url, query, or path) from tool call arguments.
+/// Returns a sanitized, truncated string suitable for audit logging.
+fn extract_params_preview(arguments: &serde_json::Value) -> String {
+    let raw = arguments
+        .as_object()
+        .and_then(|o| {
+            o.get("url")
+                .or_else(|| o.get("query"))
+                .or_else(|| o.get("path"))
+        })
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    sanitize_audit_field(raw)
+}
+
 /// Extract auth_url and setup_url from a tool_auth result JSON string.
 pub(super) fn parse_auth_result(result: &Result<String, Error>) -> ParsedAuthData {
     let parsed = result
@@ -950,7 +979,9 @@ mod tests {
     use crate::safety::SafetyLayer;
     use crate::tools::ToolRegistry;
 
-    use super::check_auth_required;
+    use super::{
+        AUDIT_FIELD_MAX_LEN, check_auth_required, extract_params_preview, sanitize_audit_field,
+    };
 
     /// Minimal LLM provider for unit tests that always returns a static response.
     struct StaticLlmProvider;
@@ -1465,13 +1496,12 @@ mod tests {
 
     #[test]
     fn test_tool_summary_format_ok() {
-        // Verify the tool summary format matches what's persisted to DB
-        let tool_name = "http";
-        let params_preview = "https://example.com";
+        let name = sanitize_audit_field("http");
+        let params = extract_params_preview(&serde_json::json!({"url": "https://example.com"}));
         let output_len = 4096;
         let summary = format!(
             "tool:{} params:{} status:ok output_bytes:{}",
-            tool_name, params_preview, output_len
+            name, params, output_len
         );
         assert!(summary.starts_with("tool:http"));
         assert!(summary.contains("params:https://example.com"));
@@ -1481,9 +1511,9 @@ mod tests {
 
     #[test]
     fn test_tool_summary_format_error() {
-        let tool_name = "shell";
-        let error = "Command not found: foobar";
-        let summary = format!("tool:{} status:error reason:{}", tool_name, error);
+        let name = sanitize_audit_field("shell");
+        let reason = sanitize_audit_field("Command not found: foobar");
+        let summary = format!("tool:{} status:error reason:{}", name, reason);
         assert!(summary.starts_with("tool:shell"));
         assert!(summary.contains("status:error"));
         assert!(summary.contains("reason:Command not found"));
@@ -1491,43 +1521,37 @@ mod tests {
 
     #[test]
     fn test_tool_summary_params_preview_extraction() {
-        // Verify the params preview logic extracts url/query/path
+        // Extracts url
         let params = serde_json::json!({"url": "https://api.example.com/data", "method": "GET"});
-        let preview = params
-            .as_object()
-            .and_then(|o| {
-                o.get("url")
-                    .or_else(|| o.get("query"))
-                    .or_else(|| o.get("path"))
-            })
-            .and_then(|v| v.as_str())
-            .unwrap_or("");
-        assert_eq!(preview, "https://api.example.com/data");
+        assert_eq!(
+            extract_params_preview(&params),
+            "https://api.example.com/data"
+        );
 
         // Falls back to query
         let params2 = serde_json::json!({"query": "rust async"});
-        let preview2 = params2
-            .as_object()
-            .and_then(|o| {
-                o.get("url")
-                    .or_else(|| o.get("query"))
-                    .or_else(|| o.get("path"))
-            })
-            .and_then(|v| v.as_str())
-            .unwrap_or("");
-        assert_eq!(preview2, "rust async");
+        assert_eq!(extract_params_preview(&params2), "rust async");
 
         // Empty when no matching key
         let params3 = serde_json::json!({"message": "hello"});
-        let preview3 = params3
-            .as_object()
-            .and_then(|o| {
-                o.get("url")
-                    .or_else(|| o.get("query"))
-                    .or_else(|| o.get("path"))
-            })
-            .and_then(|v| v.as_str())
-            .unwrap_or("");
-        assert_eq!(preview3, "");
+        assert_eq!(extract_params_preview(&params3), "");
+    }
+
+    #[test]
+    fn test_sanitize_audit_field_strips_newlines() {
+        // Newlines could be used for log injection / audit trail spoofing
+        let malicious = "http\ntool:shell status:ok output_bytes:0";
+        let cleaned = sanitize_audit_field(malicious);
+        assert!(!cleaned.contains('\n'));
+        assert_eq!(cleaned, "httptool:shell status:ok output_bytes:0");
+    }
+
+    #[test]
+    fn test_sanitize_audit_field_truncates_long_strings() {
+        let long = "x".repeat(500);
+        let cleaned = sanitize_audit_field(&long);
+        // 200 chars + ellipsis
+        assert!(cleaned.len() <= AUDIT_FIELD_MAX_LEN + "…".len());
+        assert!(cleaned.ends_with('…'));
     }
 }
