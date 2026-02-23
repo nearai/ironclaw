@@ -1261,6 +1261,17 @@ mod tests {
     }
 
     #[test]
+    fn test_validate_url_safe_http_localhost_bypass_blocked() {
+        // HTTP to domains that resolve to localhost should be blocked
+        // Only the exact strings "localhost", "127.0.0.1", and "[::1]" are allowed
+        // This prevents bypasses using domains like localtest.me that resolve to 127.0.0.1
+        assert!(validate_url_safe("http://localtest.me").is_err());
+        assert!(validate_url_safe("http://vcap.me").is_err());
+        assert!(validate_url_safe("http://lvh.me").is_err());
+        assert!(validate_url_safe("http://127.0.0.2").is_err()); // Different loopback IP
+    }
+
+    #[test]
     fn test_validate_url_safe_invalid_scheme() {
         // Only HTTP and HTTPS should be allowed
         assert!(validate_url_safe("ftp://example.com").is_err());
