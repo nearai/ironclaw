@@ -104,6 +104,7 @@ impl OnlineDiscovery {
                             source: ExtensionSource::McpUrl {
                                 url: url.to_string(),
                             },
+                            fallback_source: None,
                             auth_hint: AuthHint::Dcr,
                         })
                     } else {
@@ -178,6 +179,7 @@ impl OnlineDiscovery {
                         .unwrap_or_else(|| format!("MCP server from GitHub: {}", item.full_name)),
                     keywords: item.topics,
                     source: ExtensionSource::Discovered { url },
+                    fallback_source: None,
                     auth_hint: AuthHint::Dcr,
                 })
             })
