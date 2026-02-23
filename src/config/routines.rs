@@ -1,4 +1,4 @@
-use crate::config::helpers::{optional_env, parse_optional_env};
+use crate::config::helpers::{parse_bool_env, parse_optional_env};
 use crate::error::ConfigError;
 
 /// Routines configuration.
@@ -31,14 +31,7 @@ impl Default for RoutineConfig {
 impl RoutineConfig {
     pub(crate) fn resolve() -> Result<Self, ConfigError> {
         Ok(Self {
-            enabled: optional_env("ROUTINES_ENABLED")?
-                .map(|s| s.parse())
-                .transpose()
-                .map_err(|e| ConfigError::InvalidValue {
-                    key: "ROUTINES_ENABLED".to_string(),
-                    message: format!("must be 'true' or 'false': {e}"),
-                })?
-                .unwrap_or(true),
+            enabled: parse_bool_env("ROUTINES_ENABLED", true)?,
             cron_check_interval_secs: parse_optional_env("ROUTINES_CRON_INTERVAL", 15)?,
             max_concurrent_routines: parse_optional_env("ROUTINES_MAX_CONCURRENT", 10)?,
             default_cooldown_secs: parse_optional_env("ROUTINES_DEFAULT_COOLDOWN", 300)?,

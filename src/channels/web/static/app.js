@@ -9,6 +9,7 @@ let assistantThreadId = null;
 let hasMore = false;
 let oldestTimestamp = null;
 let loadingOlder = false;
+let sseHasConnectedBefore = false;
 let jobEvents = new Map(); // job_id -> Array of events
 let jobListRefreshTimer = null;
 const JOB_EVENTS_CAP = 500;
@@ -111,6 +112,10 @@ function connectSSE() {
   eventSource.onopen = () => {
     document.getElementById('sse-dot').classList.remove('disconnected');
     document.getElementById('sse-status').textContent = 'Connected';
+    if (sseHasConnectedBefore && currentThreadId) {
+      loadHistory();
+    }
+    sseHasConnectedBefore = true;
   };
 
   eventSource.onerror = () => {
@@ -240,6 +245,11 @@ function isCurrentThread(threadId) {
 function sendMessage() {
   const input = document.getElementById('chat-input');
   const sendBtn = document.getElementById('send-btn');
+  if (!currentThreadId) {
+    console.warn('sendMessage: no thread selected, ignoring');
+    setStatus('Waiting for thread to load...');
+    return;
+  }
   const content = input.value.trim();
   if (!content) return;
 
@@ -262,6 +272,8 @@ function sendMessage() {
 }
 
 function enableChatInput() {
+  // Don't re-enable until a thread is selected (prevents orphan messages)
+  if (!currentThreadId) return;
   const input = document.getElementById('chat-input');
   const sendBtn = document.getElementById('send-btn');
   sendBtn.disabled = false;
@@ -739,6 +751,11 @@ function loadThreads() {
     if (!currentThreadId && assistantThreadId) {
       switchToAssistant();
     }
+
+    // Enable chat input once a thread is available
+    if (currentThreadId) {
+      enableChatInput();
+    }
   }).catch(() => {});
 }
 
@@ -786,6 +803,10 @@ chatInput.addEventListener('keydown', (e) => {
   }
 });
 chatInput.addEventListener('input', () => autoResizeTextarea(chatInput));
+
+// Disable send until a thread is selected (loadThreads will enable it)
+chatInput.disabled = true;
+document.getElementById('send-btn').disabled = true;
 
 // Infinite scroll: load older messages when scrolled near the top
 document.getElementById('chat-messages').addEventListener('scroll', function () {
@@ -1460,18 +1481,11 @@ function renderExtensionCard(ext) {
   actions.className = 'ext-actions';
 
   if (!ext.active) {
-    if (ext.kind === 'wasm_channel') {
-      const restartLabel = document.createElement('span');
-      restartLabel.className = 'ext-restart-label';
-      restartLabel.textContent = 'Restart to activate';
-      actions.appendChild(restartLabel);
-    } else {
-      const activateBtn = document.createElement('button');
-      activateBtn.className = 'btn-ext activate';
-      activateBtn.textContent = 'Activate';
-      activateBtn.addEventListener('click', () => activateExtension(ext.name));
-      actions.appendChild(activateBtn);
-    }
+    const activateBtn = document.createElement('button');
+    activateBtn.className = 'btn-ext activate';
+    activateBtn.textContent = 'Activate';
+    activateBtn.addEventListener('click', () => activateExtension(ext.name));
+    actions.appendChild(activateBtn);
   } else {
     const activeLabel = document.createElement('span');
     activeLabel.className = 'ext-active-label';
@@ -1495,8 +1509,10 @@ function renderExtensionCard(ext) {
 
   card.appendChild(actions);
 
-  // For active WASM channels, check for pending pairing requests
-  if (ext.active && ext.kind === 'wasm_channel') {
+  // For WASM channels, check for pending pairing requests.
+  // Show even when inactive — pairing requests can arrive via webhooks
+  // before the channel is fully activated.
+  if (ext.kind === 'wasm_channel') {
     const pairingSection = document.createElement('div');
     pairingSection.className = 'ext-pairing';
     card.appendChild(pairingSection);
@@ -2197,14 +2213,20 @@ function appendActivityEvent(terminal, eventType, data) {
         + escapeHtml(typeof data.input === 'string' ? data.input : JSON.stringify(data.input, null, 2))
         + '</pre></details>';
       break;
-    case 'tool_result':
-      el.innerHTML = '<details class="activity-tool-block activity-tool-result"><summary>'
-        + '<span class="activity-tool-icon">&#10003;</span> '
+    case 'tool_result': {
+      const trSuccess = data.success !== false;
+      const trIcon = trSuccess ? '&#10003;' : '&#10007;';
+      const trOutput = data.output || data.error || '';
+      const trClass = 'activity-tool-block activity-tool-result'
+        + (trSuccess ? '' : ' activity-tool-error');
+      el.innerHTML = '<details class="' + trClass + '"><summary>'
+        + '<span class="activity-tool-icon">' + trIcon + '</span> '
         + escapeHtml(data.tool_name || 'result')
         + '</summary><pre class="activity-tool-output">'
-        + escapeHtml(data.output || '')
+        + escapeHtml(trOutput)
         + '</pre></details>';
       break;
+    }
     case 'status':
       el.innerHTML = '<span class="activity-status">' + escapeHtml(data.message || '') + '</span>';
       break;
@@ -2212,7 +2234,7 @@ function appendActivityEvent(terminal, eventType, data) {
       el.className += ' activity-final';
       const success = data.success !== false;
       el.innerHTML = '<span class="activity-result-status" data-success="' + success + '">'
-        + escapeHtml(data.message || data.status || 'done') + '</span>';
+        + escapeHtml(data.message || data.error || data.status || 'done') + '</span>';
       if (data.session_id) {
         el.innerHTML += ' <span class="activity-session-id">session: ' + escapeHtml(data.session_id) + '</span>';
       }
@@ -2397,7 +2419,9 @@ function renderRoutineDetail(routine) {
         + '<td>' + formatDate(run.started_at) + '</td>'
         + '<td>' + formatDate(run.completed_at) + '</td>'
         + '<td><span class="badge ' + runStatusClass + '">' + escapeHtml(run.status) + '</span></td>'
-        + '<td>' + escapeHtml(run.result_summary || '-') + '</td>'
+        + '<td>' + escapeHtml(run.result_summary || '-')
+          + (run.job_id ? ' <a href="#" onclick="event.preventDefault(); switchTab(\'jobs\'); openJobDetail(\'' + run.job_id + '\')">[view job]</a>' : '')
+          + '</td>'
         + '<td>' + (run.tokens_used != null ? run.tokens_used : '-') + '</td>'
         + '</tr>';
     }

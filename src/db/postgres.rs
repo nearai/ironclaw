@@ -437,6 +437,14 @@ impl RoutineStore for PgBackend {
     async fn count_running_routine_runs(&self, routine_id: Uuid) -> Result<i64, DatabaseError> {
         self.store.count_running_routine_runs(routine_id).await
     }
+
+    async fn link_routine_run_to_job(
+        &self,
+        run_id: Uuid,
+        job_id: Uuid,
+    ) -> Result<(), DatabaseError> {
+        self.store.link_routine_run_to_job(run_id, job_id).await
+    }
 }
 
 // ==================== ToolFailureStore ====================

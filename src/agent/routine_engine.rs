@@ -19,6 +19,7 @@ use regex::Regex;
 use tokio::sync::{RwLock, mpsc};
 use uuid::Uuid;
 
+use crate::agent::Scheduler;
 use crate::agent::routine::{
     NotifyConfig, Routine, RoutineAction, RoutineRun, RunStatus, Trigger, next_cron_fire,
 };
@@ -41,6 +42,8 @@ pub struct RoutineEngine {
     running_count: Arc<AtomicUsize>,
     /// Compiled event regex cache: routine_id -> compiled regex.
     event_cache: Arc<RwLock<Vec<(Uuid, Routine, Regex)>>>,
+    /// Scheduler for dispatching jobs (FullJob mode).
+    scheduler: Option<Arc<Scheduler>>,
 }
 
 impl RoutineEngine {
@@ -50,6 +53,7 @@ impl RoutineEngine {
         llm: Arc<dyn LlmProvider>,
         workspace: Arc<Workspace>,
         notify_tx: mpsc::Sender<OutgoingResponse>,
+        scheduler: Option<Arc<Scheduler>>,
     ) -> Self {
         Self {
             config,
@@ -59,6 +63,7 @@ impl RoutineEngine {
             notify_tx,
             running_count: Arc::new(AtomicUsize::new(0)),
             event_cache: Arc::new(RwLock::new(Vec::new())),
+            scheduler,
         }
     }
 
@@ -225,7 +230,7 @@ impl RoutineEngine {
             workspace: self.workspace.clone(),
             notify_tx: self.notify_tx.clone(),
             running_count: self.running_count.clone(),
-            max_lightweight_tokens: self.config.max_lightweight_tokens,
+            scheduler: self.scheduler.clone(),
         };
 
         tokio::spawn(async move {
@@ -257,7 +262,7 @@ impl RoutineEngine {
             workspace: self.workspace.clone(),
             notify_tx: self.notify_tx.clone(),
             running_count: self.running_count.clone(),
-            max_lightweight_tokens: self.config.max_lightweight_tokens,
+            scheduler: self.scheduler.clone(),
         };
 
         // Record the run in DB, then spawn execution
@@ -304,7 +309,7 @@ struct EngineContext {
     workspace: Arc<Workspace>,
     notify_tx: mpsc::Sender<OutgoingResponse>,
     running_count: Arc<AtomicUsize>,
-    max_lightweight_tokens: u32,
+    scheduler: Option<Arc<Scheduler>>,
 }
 
 /// Execute a routine run. Handles both lightweight and full_job modes.
@@ -318,29 +323,11 @@ async fn execute_routine(ctx: EngineContext, routine: Routine, run: RoutineRun) 
             context_paths,
             max_tokens,
         } => execute_lightweight(&ctx, &routine, prompt, context_paths, *max_tokens).await,
-        RoutineAction::FullJob { description, .. } => {
-            // Full job mode: scheduler integration not yet implemented.
-            // Execute as lightweight and prepend a warning to the summary.
-            tracing::warn!(
-                routine = %routine.name,
-                "FullJob mode not yet implemented; falling back to lightweight execution"
-            );
-            match execute_lightweight(&ctx, &routine, description, &[], ctx.max_lightweight_tokens)
-                .await
-            {
-                Ok((status, summary, tokens)) => {
-                    let warning = "[Note: FullJob mode is not yet implemented. This routine ran as \
-                         a single LLM call without tool access. Configure as 'lightweight' \
-                         or wait for full scheduler integration.]";
-                    let summary = match summary {
-                        Some(s) => Some(format!("{warning}\n\n{s}")),
-                        None => Some(warning.to_string()),
-                    };
-                    Ok((status, summary, tokens))
-                }
-                Err(e) => Err(e),
-            }
-        }
+        RoutineAction::FullJob {
+            title,
+            description,
+            max_iterations,
+        } => execute_full_job(&ctx, &routine, &run, title, description, *max_iterations).await,
     };
 
     // Decrement running count
@@ -416,6 +403,57 @@ fn sanitize_routine_name(name: &str) -> String {
             }
         })
         .collect()
+}
+
+/// Execute a full-job routine by dispatching to the scheduler.
+///
+/// Fire-and-forget: creates a job via `Scheduler::dispatch_job` (which handles
+/// creation, metadata, persistence, and scheduling), links the routine run to
+/// the job, and returns immediately. The job runs independently via the
+/// existing Worker/Scheduler with full tool access.
+async fn execute_full_job(
+    ctx: &EngineContext,
+    routine: &Routine,
+    run: &RoutineRun,
+    title: &str,
+    description: &str,
+    max_iterations: u32,
+) -> Result<(RunStatus, Option<String>, Option<i32>), RoutineError> {
+    let scheduler = ctx
+        .scheduler
+        .as_ref()
+        .ok_or_else(|| RoutineError::JobDispatchFailed {
+            reason: "scheduler not available".to_string(),
+        })?;
+
+    let metadata = serde_json::json!({ "max_iterations": max_iterations });
+
+    let job_id = scheduler
+        .dispatch_job(&routine.user_id, title, description, Some(metadata))
+        .await
+        .map_err(|e| RoutineError::JobDispatchFailed {
+            reason: format!("failed to dispatch job: {e}"),
+        })?;
+
+    // Link the routine run to the dispatched job
+    if let Err(e) = ctx.store.link_routine_run_to_job(run.id, job_id).await {
+        tracing::error!(
+            routine = %routine.name,
+            "Failed to link run to job: {}", e
+        );
+    }
+
+    tracing::info!(
+        routine = %routine.name,
+        job_id = %job_id,
+        max_iterations = max_iterations,
+        "Dispatched full job for routine"
+    );
+
+    let summary = format!(
+        "Dispatched job {job_id} for full execution with tool access (max_iterations: {max_iterations})"
+    );
+    Ok((RunStatus::Ok, Some(summary), None))
 }
 
 /// Execute a lightweight routine (single LLM call).

@@ -290,7 +290,8 @@ pub async fn start_server(
     let statics = Router::new()
         .route("/", get(index_handler))
         .route("/style.css", get(css_handler))
-        .route("/app.js", get(js_handler));
+        .route("/app.js", get(js_handler))
+        .route("/favicon.ico", get(favicon_handler));
 
     // Project file serving (behind auth to prevent unauthorized file access).
     let projects = Router::new()
@@ -389,6 +390,16 @@ async fn js_handler() -> impl IntoResponse {
             (header::CACHE_CONTROL, "no-cache"),
         ],
         include_str!("static/app.js"),
+    )
+}
+
+async fn favicon_handler() -> impl IntoResponse {
+    (
+        [
+            (header::CONTENT_TYPE, "image/x-icon"),
+            (header::CACHE_CONTROL, "public, max-age=86400"),
+        ],
+        include_bytes!("static/favicon.ico").as_slice(),
     )
 }
 
@@ -1704,7 +1715,7 @@ async fn extensions_list_handler(
     ))?;
 
     let installed = ext_mgr
-        .list(None)
+        .list(None, false)
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
@@ -1955,7 +1966,7 @@ async fn extensions_registry_handler(
     let installed: std::collections::HashSet<(String, String)> =
         if let Some(ext_mgr) = state.extension_manager.as_ref() {
             ext_mgr
-                .list(None)
+                .list(None, false)
                 .await
                 .unwrap_or_default()
                 .into_iter()
@@ -1998,7 +2009,7 @@ async fn extensions_setup_handler(
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
     let kind = ext_mgr
-        .list(None)
+        .list(None, false)
         .await
         .ok()
         .and_then(|list| list.into_iter().find(|e| e.name == name))
