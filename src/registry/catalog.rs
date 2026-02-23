@@ -27,12 +27,17 @@ pub enum RegistryError {
         path: std::path::PathBuf,
     },
 
-    #[error("Download failed for {url}: {reason}")]
+    #[error("Artifact download failed: {reason}")]
     DownloadFailed { url: String, reason: String },
 
-    #[error(
-        "Checksum verification failed for {url}: expected {expected_sha256}, got {actual_sha256}"
-    )]
+    #[error("Invalid extension manifest for '{name}' field '{field}': {reason}")]
+    InvalidManifest {
+        name: String,
+        field: &'static str,
+        reason: String,
+    },
+
+    #[error("Checksum verification failed: expected {expected_sha256}, got {actual_sha256}")]
     ChecksumMismatch {
         url: String,
         expected_sha256: String,
@@ -40,7 +45,7 @@ pub enum RegistryError {
     },
 
     #[error(
-        "Source fallback unavailable for '{name}' because '{source_dir}' does not exist after artifact install failed: {artifact_error}. Retry artifact download or run from a repository checkout."
+        "Source fallback unavailable for '{name}' after artifact install failed. Retry artifact download or run from a repository checkout."
     )]
     SourceFallbackUnavailable {
         name: String,
@@ -48,9 +53,7 @@ pub enum RegistryError {
         artifact_error: Box<RegistryError>,
     },
 
-    #[error(
-        "Artifact install and source fallback both failed for '{name}': artifact={artifact_error}; source={source_error}"
-    )]
+    #[error("Artifact install and source fallback both failed for '{name}'.")]
     InstallFallbackFailed {
         name: String,
         artifact_error: Box<RegistryError>,
