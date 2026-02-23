@@ -18,6 +18,9 @@ use crate::context::{ActionRecord, JobContext, JobState};
 use crate::db::{
     ConversationStore, Database, JobStore, RoutineStore, SandboxStore, SettingsStore,
     ToolFailureStore, WorkspaceStore,
+    structured::{
+        Aggregation, CollectionSchema, Filter, Record, StructuredStore,
+    },
 };
 use crate::error::{DatabaseError, WorkspaceError};
 use crate::history::{
@@ -659,5 +662,115 @@ impl WorkspaceStore for PgBackend {
         self.repo
             .hybrid_search(user_id, agent_id, query, embedding, config)
             .await
+    }
+}
+
+// ==================== StructuredStore (stub) ====================
+
+#[async_trait]
+impl StructuredStore for PgBackend {
+    async fn register_collection(
+        &self,
+        _user_id: &str,
+        _schema: &CollectionSchema,
+    ) -> Result<(), DatabaseError> {
+        Err(DatabaseError::Query(
+            "structured collections not yet implemented for postgres".to_string(),
+        ))
+    }
+
+    async fn get_collection_schema(
+        &self,
+        _user_id: &str,
+        _collection: &str,
+    ) -> Result<CollectionSchema, DatabaseError> {
+        Err(DatabaseError::Query(
+            "structured collections not yet implemented for postgres".to_string(),
+        ))
+    }
+
+    async fn list_collections(
+        &self,
+        _user_id: &str,
+    ) -> Result<Vec<CollectionSchema>, DatabaseError> {
+        Err(DatabaseError::Query(
+            "structured collections not yet implemented for postgres".to_string(),
+        ))
+    }
+
+    async fn drop_collection(
+        &self,
+        _user_id: &str,
+        _collection: &str,
+    ) -> Result<(), DatabaseError> {
+        Err(DatabaseError::Query(
+            "structured collections not yet implemented for postgres".to_string(),
+        ))
+    }
+
+    async fn insert_record(
+        &self,
+        _user_id: &str,
+        _collection: &str,
+        _data: serde_json::Value,
+    ) -> Result<Uuid, DatabaseError> {
+        Err(DatabaseError::Query(
+            "structured collections not yet implemented for postgres".to_string(),
+        ))
+    }
+
+    async fn get_record(
+        &self,
+        _user_id: &str,
+        _record_id: Uuid,
+    ) -> Result<Record, DatabaseError> {
+        Err(DatabaseError::Query(
+            "structured collections not yet implemented for postgres".to_string(),
+        ))
+    }
+
+    async fn update_record(
+        &self,
+        _user_id: &str,
+        _record_id: Uuid,
+        _updates: serde_json::Value,
+    ) -> Result<(), DatabaseError> {
+        Err(DatabaseError::Query(
+            "structured collections not yet implemented for postgres".to_string(),
+        ))
+    }
+
+    async fn delete_record(
+        &self,
+        _user_id: &str,
+        _record_id: Uuid,
+    ) -> Result<(), DatabaseError> {
+        Err(DatabaseError::Query(
+            "structured collections not yet implemented for postgres".to_string(),
+        ))
+    }
+
+    async fn query_records(
+        &self,
+        _user_id: &str,
+        _collection: &str,
+        _filters: &[Filter],
+        _order_by: Option<&str>,
+        _limit: usize,
+    ) -> Result<Vec<Record>, DatabaseError> {
+        Err(DatabaseError::Query(
+            "structured collections not yet implemented for postgres".to_string(),
+        ))
+    }
+
+    async fn aggregate(
+        &self,
+        _user_id: &str,
+        _collection: &str,
+        _aggregation: &Aggregation,
+    ) -> Result<serde_json::Value, DatabaseError> {
+        Err(DatabaseError::Query(
+            "structured collections not yet implemented for postgres".to_string(),
+        ))
     }
 }
