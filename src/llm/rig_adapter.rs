@@ -4,6 +4,7 @@
 //! `Arc<dyn LlmProvider>` without changing any of the agent, reasoning, or tool code.
 
 use async_trait::async_trait;
+use futures::FutureExt;
 use rig::OneOrMany;
 use rig::completion::{
     AssistantContent, CompletionModel, CompletionRequest as RigRequest,
@@ -19,6 +20,9 @@ use serde::de::DeserializeOwned;
 use serde_json::Value as JsonValue;
 
 use std::collections::HashSet;
+use std::panic::{AssertUnwindSafe, PanicHookInfo, catch_unwind};
+use std::sync::Once;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use crate::error::LlmError;
 use crate::llm::costs;
@@ -391,6 +395,118 @@ fn build_rig_request(
     })
 }
 
+fn panic_payload_str<'a>(payload: &'a (dyn std::any::Any + Send + 'static)) -> Option<&'a str> {
+    if let Some(s) = payload.downcast_ref::<&str>() {
+        return Some(*s);
+    }
+    if let Some(s) = payload.downcast_ref::<String>() {
+        return Some(s.as_str());
+    }
+    None
+}
+
+fn map_completion_panic(payload: Box<dyn std::any::Any + Send + 'static>) -> String {
+    if let Some(s) = panic_payload_str(payload.as_ref()) {
+        return s.to_string();
+    }
+    "provider completion panicked with non-string payload".to_string()
+}
+
+fn should_suppress_rig_openai_usage_panic_details(
+    message: Option<&str>,
+    location_file: Option<&str>,
+) -> bool {
+    let Some(message) = message else {
+        return false;
+    };
+    if !message.contains("attempt to subtract with overflow") {
+        return false;
+    }
+
+    let Some(file) = location_file else {
+        return false;
+    };
+    file.contains("/src/providers/openai/completion/mod.rs") && file.contains("/rig-core-")
+}
+
+fn should_suppress_rig_openai_usage_panic(info: &PanicHookInfo<'_>) -> bool {
+    should_suppress_rig_openai_usage_panic_details(
+        panic_payload_str(info.payload()),
+        info.location().map(|location| location.file()),
+    )
+}
+
+fn install_rig_panic_suppression_hook_once() {
+    static INSTALL_HOOK: Once = Once::new();
+
+    INSTALL_HOOK.call_once(|| {
+        let previous_hook = std::panic::take_hook();
+        std::panic::set_hook(Box::new(move |info| {
+            if RIG_PANIC_SUPPRESSION_DEPTH.load(Ordering::Relaxed) > 0
+                && should_suppress_rig_openai_usage_panic(info)
+            {
+                tracing::debug!(
+                    "Suppressed known rig-core usage underflow panic (captured via catch_unwind)"
+                );
+                return;
+            }
+            previous_hook(info);
+        }));
+    });
+}
+
+static RIG_PANIC_SUPPRESSION_DEPTH: AtomicUsize = AtomicUsize::new(0);
+
+struct RigPanicSuppressionGuard;
+
+impl RigPanicSuppressionGuard {
+    fn enter() -> Self {
+        RIG_PANIC_SUPPRESSION_DEPTH.fetch_add(1, Ordering::Relaxed);
+        Self
+    }
+}
+
+impl Drop for RigPanicSuppressionGuard {
+    fn drop(&mut self) {
+        RIG_PANIC_SUPPRESSION_DEPTH.fetch_sub(1, Ordering::Relaxed);
+    }
+}
+
+async fn run_completion_guarded<M: CompletionModel>(
+    model: &M,
+    rig_req: RigRequest,
+    provider_name: &str,
+) -> Result<rig::completion::CompletionResponse<M::Response>, LlmError> {
+    install_rig_panic_suppression_hook_once();
+    let _guard = RigPanicSuppressionGuard::enter();
+
+    let fut = catch_unwind(AssertUnwindSafe(|| model.completion(rig_req))).map_err(|panic| {
+        LlmError::RequestFailed {
+            provider: provider_name.to_string(),
+            reason: format!(
+                "provider completion panicked before request dispatch: {}",
+                map_completion_panic(panic)
+            ),
+        }
+    })?;
+
+    let response = AssertUnwindSafe(fut)
+        .catch_unwind()
+        .await
+        .map_err(|panic| LlmError::RequestFailed {
+            provider: provider_name.to_string(),
+            reason: format!(
+                "provider completion panicked while awaiting response: {}",
+                map_completion_panic(panic)
+            ),
+        })?;
+
+    response.map_err(|e| LlmError::RequestFailed {
+        provider: provider_name.to_string(),
+        reason: e.to_string(),
+    })
+}
+
 #[async_trait]
 impl<M> LlmProvider for RigAdapter<M>
 where
@@ -429,14 +545,7 @@ where
             request.max_tokens,
         )?;
 
-        let response =
-            self.model
-                .completion(rig_req)
-                .await
-                .map_err(|e| LlmError::RequestFailed {
-                    provider: self.model_name.clone(),
-                    reason: e.to_string(),
-                })?;
+        let response = run_completion_guarded(&self.model, rig_req, &self.model_name).await?;
 
         let (text, _tool_calls, finish) = extract_response(&response.choice, &response.usage);
 
@@ -480,14 +589,7 @@ where
             request.max_tokens,
         )?;
 
-        let response =
-            self.model
-                .completion(rig_req)
-                .await
-                .map_err(|e| LlmError::RequestFailed {
-                    provider: self.model_name.clone(),
-                    reason: e.to_string(),
-                })?;
+        let response = run_completion_guarded(&self.model, rig_req, &self.model_name).await?;
 
         let (text, mut tool_calls, finish) = extract_response(&response.choice, &response.usage);
 
@@ -839,6 +941,83 @@ mod tests {
         assert_eq!(saturate_u32(100), 100);
         assert_eq!(saturate_u32(u64::MAX), u32::MAX);
         assert_eq!(saturate_u32(u32::MAX as u64), u32::MAX);
+    }
+
+    #[test]
+    fn test_map_completion_panic_string_payload() {
+        let payload: Box<dyn std::any::Any + Send + 'static> =
+            Box::new("attempt to subtract with overflow".to_string());
+        assert_eq!(
+            map_completion_panic(payload),
+            "attempt to subtract with overflow"
+        );
+    }
+
+    #[test]
+    fn test_map_completion_panic_str_payload() {
+        let payload: Box<dyn std::any::Any + Send + 'static> = Box::new("overflow panic");
+        assert_eq!(map_completion_panic(payload), "overflow panic");
+    }
+
+    #[test]
+    fn test_map_completion_panic_non_string_payload() {
+        let payload: Box<dyn std::any::Any + Send + 'static> = Box::new(42usize);
+        assert_eq!(
+            map_completion_panic(payload),
+            "provider completion panicked with non-string payload"
+        );
+    }
+
+    #[test]
+    fn test_should_suppress_rig_openai_usage_panic_true_for_known_case() {
+        assert!(should_suppress_rig_openai_usage_panic_details(
+            Some("attempt to subtract with overflow"),
+            Some(
+                "/home/panos/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/rig-core-0.30.0/src/providers/openai/completion/mod.rs"
+            )
+        ));
+    }
+
+    #[test]
+    fn test_should_suppress_rig_openai_usage_panic_false_for_other_message() {
+        assert!(!should_suppress_rig_openai_usage_panic_details(
+            Some("some other panic"),
+            Some(
+                "/home/panos/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/rig-core-0.30.0/src/providers/openai/completion/mod.rs"
+            )
+        ));
+    }
+
+    #[test]
+    fn test_should_suppress_rig_openai_usage_panic_false_for_other_file() {
+        assert!(!should_suppress_rig_openai_usage_panic_details(
+            Some("attempt to subtract with overflow"),
+            Some("/workspace/code/ironclaw/src/llm/rig_adapter.rs")
+        ));
+    }
+
+    #[test]
+    fn test_rig_panic_suppression_guard_refcount_balances() {
+        let before = RIG_PANIC_SUPPRESSION_DEPTH.load(Ordering::Relaxed);
+        {
+            let _guard1 = RigPanicSuppressionGuard::enter();
+            assert_eq!(
+                RIG_PANIC_SUPPRESSION_DEPTH.load(Ordering::Relaxed),
+                before + 1
+            );
+            {
+                let _guard2 = RigPanicSuppressionGuard::enter();
+                assert_eq!(
+                    RIG_PANIC_SUPPRESSION_DEPTH.load(Ordering::Relaxed),
+                    before + 2
+                );
+            }
+            assert_eq!(
+                RIG_PANIC_SUPPRESSION_DEPTH.load(Ordering::Relaxed),
+                before + 1
+            );
+        }
+        assert_eq!(RIG_PANIC_SUPPRESSION_DEPTH.load(Ordering::Relaxed), before);
     }
 
     // -- normalize_tool_name tests --
