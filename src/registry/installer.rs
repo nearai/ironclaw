@@ -137,6 +137,52 @@ impl RegistryInstaller {
         })
     }
 
+    pub async fn install_with_source_fallback(
+        &self,
+        manifest: &ExtensionManifest,
+        force: bool,
+    ) -> Result<InstallOutcome, RegistryError> {
+        let has_artifact = manifest
+            .artifacts
+            .get("wasm32-wasip2")
+            .and_then(|a| a.url.as_ref())
+            .is_some();
+
+        if !has_artifact {
+            return self.install_from_source(manifest, force).await;
+        }
+
+        match self.install_from_artifact(manifest, force).await {
+            Ok(outcome) => Ok(outcome),
+            Err(RegistryError::AlreadyInstalled { name, path }) => {
+                Err(RegistryError::AlreadyInstalled { name, path })
+            }
+            Err(artifact_err) => {
+                tracing::warn!(
+                    extension = %manifest.name,
+                    error = %artifact_err,
+                    "Artifact install failed; falling back to build-from-source"
+                );
+                match self.install_from_source(manifest, force).await {
+                    Ok(mut outcome) => {
+                        outcome.warnings.push(format!(
+                            "Artifact install failed ({}); installed via source fallback.",
+                            artifact_err
+                        ));
+                        Ok(outcome)
+                    }
+                    Err(source_err) => Err(RegistryError::ManifestRead {
+                        path: self.repo_root.join(&manifest.source.dir),
+                        reason: format!(
+                            "artifact install failed: {}; source fallback failed: {}",
+                            artifact_err, source_err
+                        ),
+                    }),
+                }
+            }
+        }
+    }
+
     /// Download and install a pre-built artifact.
     ///
     /// Supports two formats:
