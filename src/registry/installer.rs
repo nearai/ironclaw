@@ -364,6 +364,17 @@ impl RegistryInstaller {
 
         validate_artifact_url(&manifest.name, "artifacts.wasm32-wasip2.url", url)?;
 
+        // Require SHA256 — refuse to install unverified binaries. Check before
+        // downloading to avoid wasting bandwidth on manifests that are missing
+        // checksums.
+        let expected_sha = artifact.sha256.as_ref().ok_or_else(|| {
+            RegistryError::InvalidManifest {
+                name: manifest.name.clone(),
+                field: "artifacts.wasm32-wasip2.sha256",
+                reason: "sha256 is required for artifact downloads".to_string(),
+            }
+        })?;
+
         let target_dir = match manifest.kind {
             ManifestKind::Tool => &self.tools_dir,
             ManifestKind::Channel => &self.channels_dir,
@@ -388,16 +399,7 @@ impl RegistryInstaller {
             manifest.kind, manifest.display_name
         );
         let bytes = download_artifact(url).await?;
-
-        // Verify SHA256 if provided, warn otherwise
-        if let Some(expected_sha) = &artifact.sha256 {
-            verify_sha256(&bytes, expected_sha, url)?;
-        } else {
-            println!(
-                "WARNING: No SHA256 checksum for '{}'; download is not cryptographically verified.",
-                manifest.name
-            );
-        }
+        verify_sha256(&bytes, expected_sha, url)?;
 
         let target_caps = target_dir.join(format!("{}.capabilities.json", manifest.name));
 
@@ -874,6 +876,35 @@ mod tests {
         match result {
             Err(RegistryError::InvalidManifest { field, .. }) => {
                 assert_eq!(field, "artifacts.wasm32-wasip2.url");
+            }
+            other => panic!("unexpected result: {:?}", other),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_install_from_artifact_rejects_null_sha256() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let installer = RegistryInstaller::new(
+            temp.path().to_path_buf(),
+            temp.path().join("tools"),
+            temp.path().join("channels"),
+        );
+
+        // Valid URL but no sha256 — should be rejected before any download attempt
+        let manifest = test_manifest(
+            "demo",
+            "tools-src/demo",
+            Some(
+                "https://github.com/nearai/ironclaw/releases/latest/download/demo-wasm32-wasip2.tar.gz".to_string(),
+            ),
+            None, // sha256 = null
+        );
+
+        let result = installer.install_from_artifact(&manifest, false).await;
+        match result {
+            Err(RegistryError::InvalidManifest { field, reason, .. }) => {
+                assert_eq!(field, "artifacts.wasm32-wasip2.sha256");
+                assert!(reason.contains("required"), "reason: {}", reason);
             }
             other => panic!("unexpected result: {:?}", other),
         }
