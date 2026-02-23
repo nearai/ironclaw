@@ -18,9 +18,12 @@ WORKDIR /app
 # Copy manifests first for layer caching
 COPY Cargo.toml Cargo.lock ./
 
-# Copy source and build artifacts
+# Copy source, build script, tests, and supporting directories
+COPY build.rs build.rs
 COPY src/ src/
+COPY tests/ tests/
 COPY migrations/ migrations/
+COPY registry/ registry/
 COPY wit/ wit/
 
 RUN cargo build --release --bin ironclaw
