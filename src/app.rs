@@ -303,11 +303,22 @@ impl AppBuilder {
             .create_provider(&self.config.llm.nearai.base_url, self.session.clone());
 
         // Register memory tools if database is available
+        let workspace_user_id = self
+            .config
+            .channels
+            .gateway
+            .as_ref()
+            .map(|gw| gw.user_id.as_str())
+            .unwrap_or("default");
         let workspace = if let Some(ref db) = self.db {
-            let mut ws = Workspace::new_with_db("default", db.clone())
+            let mut ws = Workspace::new_with_db(workspace_user_id, db.clone())
                 .with_search_config(&self.config.search);
             if let Some(ref emb) = embeddings {
                 ws = ws.with_embeddings(emb.clone());
+            }
+            // Wire memory layers from gateway config if present
+            if let Some(ref gw) = self.config.channels.gateway {
+                ws = ws.with_memory_layers(gw.memory_layers.clone());
             }
             let ws = Arc::new(ws);
             tools.register_memory_tools(Arc::clone(&ws));
