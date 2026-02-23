@@ -73,35 +73,22 @@ impl Agent {
         description: String,
         category: Option<String>,
     ) -> Result<String, Error> {
-        // Create job context
         let job_id = self
-            .context_manager
-            .create_job_for_user(user_id, &title, &description)
+            .scheduler
+            .dispatch_job(user_id, &title, &description, None)
             .await?;
 
-        // Update category if provided
-        if let Some(cat) = category {
-            self.context_manager
+        // Set the dedicated category field (not stored in metadata)
+        if let Some(cat) = category
+            && let Err(e) = self
+                .context_manager
                 .update_context(job_id, |ctx| {
                     ctx.category = Some(cat);
                 })
-                .await?;
-        }
-
-        // Persist new job to database (fire-and-forget)
-        if let Some(store) = self.store()
-            && let Ok(ctx) = self.context_manager.get_context(job_id).await
+                .await
         {
-            let store = store.clone();
-            tokio::spawn(async move {
-                if let Err(e) = store.save_job(&ctx).await {
-                    tracing::warn!("Failed to persist new job {}: {}", job_id, e);
-                }
-            });
+            tracing::warn!(job_id = %job_id, "Failed to set job category: {}", e);
         }
-
-        // Schedule for execution
-        self.scheduler.schedule(job_id).await?;
 
         Ok(format!(
             "Created job: {}\nID: {}\n\nThe job has been scheduled and is now running.",

@@ -1,6 +1,6 @@
 use std::time::Duration;
 
-use crate::config::helpers::optional_env;
+use crate::config::helpers::{parse_bool_env, parse_option_env, parse_optional_env};
 use crate::error::ConfigError;
 use crate::settings::Settings;
 
@@ -32,109 +32,43 @@ pub struct AgentConfig {
 impl AgentConfig {
     pub(crate) fn resolve(settings: &Settings) -> Result<Self, ConfigError> {
         Ok(Self {
-            name: optional_env("AGENT_NAME")?.unwrap_or_else(|| settings.agent.name.clone()),
-            max_parallel_jobs: optional_env("AGENT_MAX_PARALLEL_JOBS")?
-                .map(|s| s.parse())
-                .transpose()
-                .map_err(|e| ConfigError::InvalidValue {
-                    key: "AGENT_MAX_PARALLEL_JOBS".to_string(),
-                    message: format!("must be a positive integer: {e}"),
-                })?
-                .unwrap_or(settings.agent.max_parallel_jobs as usize),
-            job_timeout: Duration::from_secs(
-                optional_env("AGENT_JOB_TIMEOUT_SECS")?
-                    .map(|s| s.parse())
-                    .transpose()
-                    .map_err(|e| ConfigError::InvalidValue {
-                        key: "AGENT_JOB_TIMEOUT_SECS".to_string(),
-                        message: format!("must be a positive integer: {e}"),
-                    })?
-                    .unwrap_or(settings.agent.job_timeout_secs),
-            ),
-            stuck_threshold: Duration::from_secs(
-                optional_env("AGENT_STUCK_THRESHOLD_SECS")?
-                    .map(|s| s.parse())
-                    .transpose()
-                    .map_err(|e| ConfigError::InvalidValue {
-                        key: "AGENT_STUCK_THRESHOLD_SECS".to_string(),
-                        message: format!("must be a positive integer: {e}"),
-                    })?
-                    .unwrap_or(settings.agent.stuck_threshold_secs),
-            ),
-            repair_check_interval: Duration::from_secs(
-                optional_env("SELF_REPAIR_CHECK_INTERVAL_SECS")?
-                    .map(|s| s.parse())
-                    .transpose()
-                    .map_err(|e| ConfigError::InvalidValue {
-                        key: "SELF_REPAIR_CHECK_INTERVAL_SECS".to_string(),
-                        message: format!("must be a positive integer: {e}"),
-                    })?
-                    .unwrap_or(settings.agent.repair_check_interval_secs),
-            ),
-            max_repair_attempts: optional_env("SELF_REPAIR_MAX_ATTEMPTS")?
-                .map(|s| s.parse())
-                .transpose()
-                .map_err(|e| ConfigError::InvalidValue {
-                    key: "SELF_REPAIR_MAX_ATTEMPTS".to_string(),
-                    message: format!("must be a positive integer: {e}"),
-                })?
-                .unwrap_or(settings.agent.max_repair_attempts),
-            use_planning: optional_env("AGENT_USE_PLANNING")?
-                .map(|s| s.parse())
-                .transpose()
-                .map_err(|e| ConfigError::InvalidValue {
-                    key: "AGENT_USE_PLANNING".to_string(),
-                    message: format!("must be 'true' or 'false': {e}"),
-                })?
-                .unwrap_or(settings.agent.use_planning),
-            session_idle_timeout: Duration::from_secs(
-                optional_env("SESSION_IDLE_TIMEOUT_SECS")?
-                    .map(|s| s.parse())
-                    .transpose()
-                    .map_err(|e| ConfigError::InvalidValue {
-                        key: "SESSION_IDLE_TIMEOUT_SECS".to_string(),
-                        message: format!("must be a positive integer: {e}"),
-                    })?
-                    .unwrap_or(settings.agent.session_idle_timeout_secs),
-            ),
-            allow_local_tools: optional_env("ALLOW_LOCAL_TOOLS")?
-                .map(|s| s.parse())
-                .transpose()
-                .map_err(|e| ConfigError::InvalidValue {
-                    key: "ALLOW_LOCAL_TOOLS".to_string(),
-                    message: format!("must be 'true' or 'false': {e}"),
-                })?
-                .unwrap_or(false),
-            max_cost_per_day_cents: optional_env("MAX_COST_PER_DAY_CENTS")?
-                .map(|s| s.parse())
-                .transpose()
-                .map_err(|e| ConfigError::InvalidValue {
-                    key: "MAX_COST_PER_DAY_CENTS".to_string(),
-                    message: format!("must be a positive integer: {e}"),
-                })?,
-            max_actions_per_hour: optional_env("MAX_ACTIONS_PER_HOUR")?
-                .map(|s| s.parse())
-                .transpose()
-                .map_err(|e| ConfigError::InvalidValue {
-                    key: "MAX_ACTIONS_PER_HOUR".to_string(),
-                    message: format!("must be a positive integer: {e}"),
-                })?,
-            max_tool_iterations: optional_env("AGENT_MAX_TOOL_ITERATIONS")?
-                .map(|s| s.parse())
-                .transpose()
-                .map_err(|e| ConfigError::InvalidValue {
-                    key: "AGENT_MAX_TOOL_ITERATIONS".to_string(),
-                    message: format!("must be a positive integer: {e}"),
-                })?
-                .unwrap_or(settings.agent.max_tool_iterations),
-            auto_approve_tools: optional_env("AGENT_AUTO_APPROVE_TOOLS")?
-                .map(|s| s.parse())
-                .transpose()
-                .map_err(|e| ConfigError::InvalidValue {
-                    key: "AGENT_AUTO_APPROVE_TOOLS".to_string(),
-                    message: format!("must be 'true' or 'false': {e}"),
-                })?
-                .unwrap_or(settings.agent.auto_approve_tools),
+            name: parse_optional_env("AGENT_NAME", settings.agent.name.clone())?,
+            max_parallel_jobs: parse_optional_env(
+                "AGENT_MAX_PARALLEL_JOBS",
+                settings.agent.max_parallel_jobs as usize,
+            )?,
+            job_timeout: Duration::from_secs(parse_optional_env(
+                "AGENT_JOB_TIMEOUT_SECS",
+                settings.agent.job_timeout_secs,
+            )?),
+            stuck_threshold: Duration::from_secs(parse_optional_env(
+                "AGENT_STUCK_THRESHOLD_SECS",
+                settings.agent.stuck_threshold_secs,
+            )?),
+            repair_check_interval: Duration::from_secs(parse_optional_env(
+                "SELF_REPAIR_CHECK_INTERVAL_SECS",
+                settings.agent.repair_check_interval_secs,
+            )?),
+            max_repair_attempts: parse_optional_env(
+                "SELF_REPAIR_MAX_ATTEMPTS",
+                settings.agent.max_repair_attempts,
+            )?,
+            use_planning: parse_bool_env("AGENT_USE_PLANNING", settings.agent.use_planning)?,
+            session_idle_timeout: Duration::from_secs(parse_optional_env(
+                "SESSION_IDLE_TIMEOUT_SECS",
+                settings.agent.session_idle_timeout_secs,
+            )?),
+            allow_local_tools: parse_bool_env("ALLOW_LOCAL_TOOLS", false)?,
+            max_cost_per_day_cents: parse_option_env("MAX_COST_PER_DAY_CENTS")?,
+            max_actions_per_hour: parse_option_env("MAX_ACTIONS_PER_HOUR")?,
+            max_tool_iterations: parse_optional_env(
+                "AGENT_MAX_TOOL_ITERATIONS",
+                settings.agent.max_tool_iterations,
+            )?,
+            auto_approve_tools: parse_bool_env(
+                "AGENT_AUTO_APPROVE_TOOLS",
+                settings.agent.auto_approve_tools,
+            )?,
         })
     }
 }

@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-use crate::config::helpers::{optional_env, parse_optional_env};
+use crate::config::helpers::{optional_env, parse_bool_env, parse_optional_env};
 use crate::error::ConfigError;
 
 /// Skills system configuration.
@@ -38,14 +38,7 @@ fn default_skills_dir() -> PathBuf {
 impl SkillsConfig {
     pub(crate) fn resolve() -> Result<Self, ConfigError> {
         Ok(Self {
-            enabled: optional_env("SKILLS_ENABLED")?
-                .map(|s| s.parse())
-                .transpose()
-                .map_err(|e| ConfigError::InvalidValue {
-                    key: "SKILLS_ENABLED".to_string(),
-                    message: format!("must be 'true' or 'false': {e}"),
-                })?
-                .unwrap_or(false),
+            enabled: parse_bool_env("SKILLS_ENABLED", false)?,
             local_dir: optional_env("SKILLS_DIR")?
                 .map(PathBuf::from)
                 .unwrap_or_else(default_skills_dir),
