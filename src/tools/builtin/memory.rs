@@ -160,6 +160,10 @@ impl Tool for MemoryWriteTool {
                     "type": "boolean",
                     "description": "If true, append to existing content. If false, replace entirely.",
                     "default": true
+                },
+                "layer": {
+                    "type": "string",
+                    "description": "Memory layer to write to (e.g. 'private', 'household', 'finance'). Defaults to 'private'."
                 }
             },
             "required": ["content"]
@@ -201,46 +205,15 @@ impl Tool for MemoryWriteTool {
             .and_then(|v| v.as_bool())
             .unwrap_or(true);
 
-        let path = match target {
-            "memory" => {
-                if append {
-                    self.workspace
-                        .append_memory(content)
-                        .await
-                        .map_err(|e| ToolError::ExecutionFailed(format!("Write failed: {}", e)))?;
-                } else {
-                    self.workspace
-                        .write(paths::MEMORY, content)
-                        .await
-                        .map_err(|e| ToolError::ExecutionFailed(format!("Write failed: {}", e)))?;
-                }
-                paths::MEMORY.to_string()
-            }
-            "daily_log" => {
-                self.workspace
-                    .append_daily_log(content)
-                    .await
-                    .map_err(|e| ToolError::ExecutionFailed(format!("Write failed: {}", e)))?;
-                format!("daily/{}.md", chrono::Utc::now().format("%Y-%m-%d"))
-            }
-            "heartbeat" => {
-                if append {
-                    self.workspace
-                        .append(paths::HEARTBEAT, content)
-                        .await
-                        .map_err(|e| ToolError::ExecutionFailed(format!("Write failed: {}", e)))?;
-                } else {
-                    self.workspace
-                        .write(paths::HEARTBEAT, content)
-                        .await
-                        .map_err(|e| ToolError::ExecutionFailed(format!("Write failed: {}", e)))?;
-                }
-                paths::HEARTBEAT.to_string()
-            }
+        let layer = params.get("layer").and_then(|v| v.as_str());
+
+        // Resolve the target to a workspace path
+        let resolved_path = match target {
+            "memory" => paths::MEMORY.to_string(),
+            "daily_log" => format!("daily/{}.md", chrono::Utc::now().format("%Y-%m-%d")),
+            "heartbeat" => paths::HEARTBEAT.to_string(),
             path => {
                 // Protect identity files from LLM overwrites (prompt injection defense).
-                // These files are injected into the system prompt, so poisoning them
-                // would let an attacker rewrite the agent's core instructions.
                 let normalized = path.trim_start_matches('/');
                 if PROTECTED_IDENTITY_FILES
                     .iter()
@@ -251,25 +224,85 @@ impl Tool for MemoryWriteTool {
                         path
                     )));
                 }
-
-                if append {
-                    self.workspace
-                        .append(path, content)
-                        .await
-                        .map_err(|e| ToolError::ExecutionFailed(format!("Write failed: {}", e)))?;
-                } else {
-                    self.workspace
-                        .write(path, content)
-                        .await
-                        .map_err(|e| ToolError::ExecutionFailed(format!("Write failed: {}", e)))?;
-                }
                 path.to_string()
             }
         };
 
+        // When a layer is specified, route through layer-aware methods for ALL targets.
+        let (actual_layer, redirected) = if let Some(layer_name) = layer {
+            let result = if append {
+                self.workspace
+                    .append_to_layer(layer_name, &resolved_path, content)
+                    .await
+                    .map_err(|e| {
+                        ToolError::ExecutionFailed(format!("Write failed: {}", e))
+                    })?
+            } else {
+                self.workspace
+                    .write_to_layer(layer_name, &resolved_path, content)
+                    .await
+                    .map_err(|e| {
+                        ToolError::ExecutionFailed(format!("Write failed: {}", e))
+                    })?
+            };
+            (result.actual_layer, result.redirected)
+        } else {
+            // No layer specified -- use default workspace methods
+            match target {
+                "memory" => {
+                    if append {
+                        self.workspace
+                            .append_memory(content)
+                            .await
+                            .map_err(|e| ToolError::ExecutionFailed(format!("Write failed: {}", e)))?;
+                    } else {
+                        self.workspace
+                            .write(paths::MEMORY, content)
+                            .await
+                            .map_err(|e| ToolError::ExecutionFailed(format!("Write failed: {}", e)))?;
+                    }
+                }
+                "daily_log" => {
+                    self.workspace
+                        .append_daily_log(content)
+                        .await
+                        .map_err(|e| ToolError::ExecutionFailed(format!("Write failed: {}", e)))?;
+                }
+                "heartbeat" => {
+                    if append {
+                        self.workspace
+                            .append(paths::HEARTBEAT, content)
+                            .await
+                            .map_err(|e| ToolError::ExecutionFailed(format!("Write failed: {}", e)))?;
+                    } else {
+                        self.workspace
+                            .write(paths::HEARTBEAT, content)
+                            .await
+                            .map_err(|e| ToolError::ExecutionFailed(format!("Write failed: {}", e)))?;
+                    }
+                }
+                _ => {
+                    if append {
+                        self.workspace
+                            .append(&resolved_path, content)
+                            .await
+                            .map_err(|e| ToolError::ExecutionFailed(format!("Write failed: {}", e)))?;
+                    } else {
+                        self.workspace
+                            .write(&resolved_path, content)
+                            .await
+                            .map_err(|e| ToolError::ExecutionFailed(format!("Write failed: {}", e)))?;
+                    }
+                }
+            }
+            ("private".to_string(), false)
+        };
+
         let output = serde_json::json!({
             "status": "written",
-            "path": path,
+            "path": resolved_path,
+            "layer": actual_layer,
+            "redirected": redirected,
             "append": append,
             "content_length": content.len(),
         });

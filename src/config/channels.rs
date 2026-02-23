@@ -43,6 +43,8 @@ pub struct GatewayConfig {
     /// Bearer token for authentication. Random hex generated at startup if unset.
     pub auth_token: Option<String>,
     pub user_id: String,
+    /// Memory layer definitions (JSON in env var, or from external config).
+    pub memory_layers: Vec<crate::workspace::layer::MemoryLayer>,
 }
 
 /// Signal channel configuration (signal-cli daemon HTTP/JSON-RPC).
@@ -103,11 +105,24 @@ impl ChannelsConfig {
 
         let gateway_enabled = parse_bool_env("GATEWAY_ENABLED", true)?;
         let gateway = if gateway_enabled {
+            let user_id = optional_env("GATEWAY_USER_ID")?.unwrap_or_else(|| "default".to_string());
+
+            let memory_layers = match optional_env("MEMORY_LAYERS")? {
+                Some(json_str) => {
+                    serde_json::from_str(&json_str).map_err(|e| ConfigError::InvalidValue {
+                        key: "MEMORY_LAYERS".to_string(),
+                        message: format!("must be valid JSON array of layer objects: {e}"),
+                    })?
+                }
+                None => crate::workspace::layer::MemoryLayer::default_for_user(&user_id),
+            };
+
             Some(GatewayConfig {
                 host: optional_env("GATEWAY_HOST")?.unwrap_or_else(|| "127.0.0.1".to_string()),
                 port: parse_optional_env("GATEWAY_PORT", 3000)?,
                 auth_token: optional_env("GATEWAY_AUTH_TOKEN")?,
-                user_id: optional_env("GATEWAY_USER_ID")?.unwrap_or_else(|| "default".to_string()),
+                user_id,
+                memory_layers,
             })
         } else {
             None

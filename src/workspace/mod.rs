@@ -44,6 +44,8 @@ mod chunker;
 mod document;
 mod embeddings;
 pub mod hygiene;
+pub mod layer;
+pub mod privacy;
 #[cfg(feature = "postgres")]
 mod repository;
 mod search;
@@ -56,6 +58,17 @@ pub use embeddings::{
 #[cfg(feature = "postgres")]
 pub use repository::Repository;
 pub use search::{RankedResult, SearchConfig, SearchResult, reciprocal_rank_fusion};
+
+/// Result of a layer-aware write operation.
+///
+/// Contains the written document plus metadata about whether the write
+/// was redirected to a different layer (e.g., sensitive content redirected
+/// from shared to private).
+pub struct WriteResult {
+    pub document: MemoryDocument,
+    pub redirected: bool,
+    pub actual_layer: String,
+}
 
 use std::sync::Arc;
 
@@ -285,17 +298,22 @@ pub struct Workspace {
     storage: WorkspaceStorage,
     /// Embedding provider for semantic search.
     embeddings: Option<Arc<dyn EmbeddingProvider>>,
+    /// Memory layers this workspace has access to.
+    memory_layers: Vec<crate::workspace::layer::MemoryLayer>,
 }
 
 impl Workspace {
     /// Create a new workspace backed by a PostgreSQL connection pool.
     #[cfg(feature = "postgres")]
     pub fn new(user_id: impl Into<String>, pool: Pool) -> Self {
+        let user_id_str = user_id.into();
+        let memory_layers = crate::workspace::layer::MemoryLayer::default_for_user(&user_id_str);
         Self {
-            user_id: user_id.into(),
+            user_id: user_id_str,
             agent_id: None,
             storage: WorkspaceStorage::Repo(Repository::new(pool)),
             embeddings: None,
+            memory_layers,
         }
     }
 
@@ -303,11 +321,14 @@ impl Workspace {
     ///
     /// Use this for libSQL or any other backend that implements the Database trait.
     pub fn new_with_db(user_id: impl Into<String>, db: Arc<dyn crate::db::Database>) -> Self {
+        let user_id_str = user_id.into();
+        let memory_layers = crate::workspace::layer::MemoryLayer::default_for_user(&user_id_str);
         Self {
-            user_id: user_id.into(),
+            user_id: user_id_str,
             agent_id: None,
             storage: WorkspaceStorage::Db(db),
             embeddings: None,
+            memory_layers,
         }
     }
 
@@ -321,6 +342,19 @@ impl Workspace {
     pub fn with_embeddings(mut self, provider: Arc<dyn EmbeddingProvider>) -> Self {
         self.embeddings = Some(provider);
         self
+    }
+
+    /// Configure memory layers for this workspace.
+    ///
+    /// Also updates read_user_ids to include all layer scopes.
+    pub fn with_memory_layers(mut self, layers: Vec<crate::workspace::layer::MemoryLayer>) -> Self {
+        self.memory_layers = layers;
+        self
+    }
+
+    /// Get the configured memory layers.
+    pub fn memory_layers(&self) -> &[crate::workspace::layer::MemoryLayer] {
+        &self.memory_layers
     }
 
     /// Get the user ID.
@@ -376,7 +410,9 @@ impl Workspace {
     /// Append content to a file.
     ///
     /// Creates the file if it doesn't exist.
-    /// Adds a newline separator between existing and new content.
+    /// Uses a single `\n` separator (suitable for log-style entries).
+    /// For semantic separation (e.g., memory entries), use `append_memory()`
+    /// which uses `\n\n`.
     pub async fn append(&self, path: &str, content: &str) -> Result<(), WorkspaceError> {
         let path = normalize_path(path);
         let doc = self
@@ -393,6 +429,156 @@ impl Workspace {
         self.storage.update_document(doc.id, &new_content).await?;
         self.reindex_document(doc.id).await?;
         Ok(())
+    }
+
+    /// Write to a specific memory layer.
+    ///
+    /// Checks that the layer exists and is writable. Uses the layer's scope
+    /// as the user_id for the database write. For shared layers, sensitive
+    /// content is automatically redirected to the private layer.
+    pub async fn write_to_layer(
+        &self,
+        layer_name: &str,
+        path: &str,
+        content: &str,
+    ) -> Result<WriteResult, WorkspaceError> {
+        use crate::workspace::layer::{LayerSensitivity, MemoryLayer};
+        use crate::workspace::privacy::PrivacyClassifier;
+
+        let layer = MemoryLayer::find(&self.memory_layers, layer_name).ok_or_else(|| {
+            WorkspaceError::LayerNotFound {
+                name: layer_name.to_string(),
+            }
+        })?;
+
+        if !layer.writable {
+            return Err(WorkspaceError::LayerReadOnly {
+                name: layer_name.to_string(),
+            });
+        }
+
+        // Privacy guard: redirect sensitive content to private layer
+        if layer.sensitivity == LayerSensitivity::Shared {
+            let classifier = crate::workspace::privacy::global_classifier();
+            if classifier.is_sensitive(content) {
+                tracing::warn!(
+                    layer = layer_name,
+                    "Redirected sensitive content to private layer"
+                );
+                if let Some(private) = MemoryLayer::private_layer(&self.memory_layers) {
+                    let path = normalize_path(path);
+                    let doc = self
+                        .storage
+                        .get_or_create_document_by_path(&private.scope, self.agent_id, &path)
+                        .await?;
+                    self.storage.update_document(doc.id, content).await?;
+                    self.reindex_document(doc.id).await?;
+                    let document = self.storage.get_document_by_id(doc.id).await?;
+                    return Ok(WriteResult {
+                        document,
+                        redirected: true,
+                        actual_layer: private.name.clone(),
+                    });
+                } else {
+                    return Err(WorkspaceError::PrivacyRedirectFailed);
+                }
+            }
+        }
+
+        // Write using the layer's scope as the user_id
+        let path = normalize_path(path);
+        let doc = self
+            .storage
+            .get_or_create_document_by_path(&layer.scope, self.agent_id, &path)
+            .await?;
+        self.storage.update_document(doc.id, content).await?;
+        self.reindex_document(doc.id).await?;
+        let document = self.storage.get_document_by_id(doc.id).await?;
+        Ok(WriteResult {
+            document,
+            redirected: false,
+            actual_layer: layer_name.to_string(),
+        })
+    }
+
+    /// Write to a layer, with append semantics.
+    pub async fn append_to_layer(
+        &self,
+        layer_name: &str,
+        path: &str,
+        content: &str,
+    ) -> Result<WriteResult, WorkspaceError> {
+        use crate::workspace::layer::{LayerSensitivity, MemoryLayer};
+        use crate::workspace::privacy::PrivacyClassifier;
+
+        let layer = MemoryLayer::find(&self.memory_layers, layer_name).ok_or_else(|| {
+            WorkspaceError::LayerNotFound {
+                name: layer_name.to_string(),
+            }
+        })?;
+
+        if !layer.writable {
+            return Err(WorkspaceError::LayerReadOnly {
+                name: layer_name.to_string(),
+            });
+        }
+
+        // Privacy guard: redirect sensitive content to private layer
+        if layer.sensitivity == LayerSensitivity::Shared {
+            let classifier = crate::workspace::privacy::global_classifier();
+            if classifier.is_sensitive(content) {
+                tracing::warn!(
+                    layer = layer_name,
+                    "Redirected sensitive append to private layer"
+                );
+                if let Some(private) = MemoryLayer::private_layer(&self.memory_layers) {
+                    let path = normalize_path(path);
+                    let doc = self
+                        .storage
+                        .get_or_create_document_by_path(&private.scope, self.agent_id, &path)
+                        .await?;
+                    let existing = self.storage.get_document_by_id(doc.id).await?;
+                    let new_content = if existing.content.is_empty() {
+                        content.to_string()
+                    } else {
+                        format!("{}\n\n{}", existing.content, content)
+                    };
+                    self.storage.update_document(doc.id, &new_content).await?;
+                    self.reindex_document(doc.id).await?;
+                    let document = self.storage.get_document_by_id(doc.id).await?;
+                    return Ok(WriteResult {
+                        document,
+                        redirected: true,
+                        actual_layer: private.name.clone(),
+                    });
+                } else {
+                    return Err(WorkspaceError::PrivacyRedirectFailed);
+                }
+            }
+        }
+
+        let path = normalize_path(path);
+        let doc = self
+            .storage
+            .get_or_create_document_by_path(&layer.scope, self.agent_id, &path)
+            .await?;
+
+        // Append: read existing content and concatenate
+        let existing = self.storage.get_document_by_id(doc.id).await?;
+        let new_content = if existing.content.is_empty() {
+            content.to_string()
+        } else {
+            format!("{}\n\n{}", existing.content, content)
+        };
+
+        self.storage.update_document(doc.id, &new_content).await?;
+        self.reindex_document(doc.id).await?;
+        let document = self.storage.get_document_by_id(doc.id).await?;
+        Ok(WriteResult {
+            document,
+            redirected: false,
+            actual_layer: layer_name.to_string(),
+        })
     }
 
     /// Check if a file exists.
