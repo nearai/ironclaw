@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.11.1](https://github.com/nearai/ironclaw/compare/v0.11.0...v0.11.1) - 2026-02-23
+
+### Other
+
+- Ignore out-of-date generated CI so custom release.yml jobs are allowed
+
+## [0.11.0](https://github.com/nearai/ironclaw/compare/v0.10.0...v0.11.0) - 2026-02-23
+
+### Fixed
+
+- auto-compact and retry on ContextLengthExceeded ([#315](https://github.com/nearai/ironclaw/pull/315))
+
+### Other
+
+- *(README)* Adding badges to readme ([#316](https://github.com/nearai/ironclaw/pull/316))
+- Feat/completion ([#240](https://github.com/nearai/ironclaw/pull/240))
+
 ## [0.10.0](https://github.com/nearai/ironclaw/compare/v0.9.0...v0.10.0) - 2026-02-22
 
 ### Added
