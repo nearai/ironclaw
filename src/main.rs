@@ -276,17 +276,17 @@ async fn main() -> anyhow::Result<()> {
             };
             let jm = Arc::new(ContainerJobManager::new(job_config, token_store.clone()));
 
-        // Start the orchestrator internal API in the background
-        let orchestrator_state = OrchestratorState {
-            llm: components.llm.clone(),
-            job_manager: Arc::clone(&jm),
-            token_store,
-            job_event_tx: job_event_tx.clone(),
-            prompt_queue: Arc::clone(&prompt_queue),
-            store: components.db.clone(),
-            secrets_store: components.secrets_store.clone(),
-            user_id: "default".to_string(),
-        };
+            // Start the orchestrator internal API in the background
+            let orchestrator_state = OrchestratorState {
+                llm: components.llm.clone(),
+                job_manager: Arc::clone(&jm),
+                token_store,
+                job_event_tx: job_event_tx.clone(),
+                prompt_queue: Arc::clone(&prompt_queue),
+                store: components.db.clone(),
+                secrets_store: components.secrets_store.clone(),
+                user_id: "default".to_string(),
+            };
 
             tokio::spawn(async move {
                 if let Err(e) = OrchestratorApi::start(orchestrator_state, 50051).await {
