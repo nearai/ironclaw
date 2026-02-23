@@ -45,6 +45,8 @@ pub struct GatewayConfig {
     /// Bearer token for authentication. Random hex generated at startup if unset.
     pub auth_token: Option<String>,
     pub user_id: String,
+    /// Memory layer definitions (JSON in env var, or from external config).
+    pub memory_layers: Vec<crate::workspace::layer::MemoryLayer>,
 }
 
 /// Signal channel configuration (signal-cli daemon HTTP/JSON-RPC).
@@ -123,6 +125,20 @@ impl ChannelsConfig {
         // --- Web gateway ---
         let gateway_enabled = parse_bool_env("GATEWAY_ENABLED", cs.gateway_enabled)?;
         let gateway = if gateway_enabled {
+            let user_id = optional_env("GATEWAY_USER_ID")?
+                .or_else(|| cs.gateway_user_id.clone())
+                .unwrap_or_else(|| "default".to_string());
+
+            let memory_layers = match optional_env("MEMORY_LAYERS")? {
+                Some(json_str) => {
+                    serde_json::from_str(&json_str).map_err(|e| ConfigError::InvalidValue {
+                        key: "MEMORY_LAYERS".to_string(),
+                        message: format!("must be valid JSON array of layer objects: {e}"),
+                    })?
+                }
+                None => crate::workspace::layer::MemoryLayer::default_for_user(&user_id),
+            };
+
             Some(GatewayConfig {
                 host: optional_env("GATEWAY_HOST")?
                     .or_else(|| cs.gateway_host.clone())
@@ -133,9 +149,8 @@ impl ChannelsConfig {
                 )?,
                 auth_token: optional_env("GATEWAY_AUTH_TOKEN")?
                     .or_else(|| cs.gateway_auth_token.clone()),
-                user_id: optional_env("GATEWAY_USER_ID")?
-                    .or_else(|| cs.gateway_user_id.clone())
-                    .unwrap_or_else(|| "default".to_string()),
+                user_id,
+                memory_layers,
             })
         } else {
             None
@@ -295,6 +310,7 @@ mod tests {
             port: 3000,
             auth_token: Some("tok-abc".to_string()),
             user_id: "default".to_string(),
+            memory_layers: vec![],
         };
         assert_eq!(cfg.host, "127.0.0.1");
         assert_eq!(cfg.port, 3000);
@@ -309,6 +325,7 @@ mod tests {
             port: 3001,
             auth_token: None,
             user_id: "anon".to_string(),
+            memory_layers: vec![],
         };
         assert!(cfg.auth_token.is_none());
     }

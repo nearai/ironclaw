@@ -140,6 +140,8 @@ pub async fn memory_write_handler(
     Ok(Json(MemoryWriteResponse {
         path: req.path,
         status: "written",
+        redirected: None,
+        actual_layer: None,
     }))
 }
 
