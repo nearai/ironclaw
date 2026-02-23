@@ -11,7 +11,9 @@ FROM rust:1.92-slim-bookworm AS builder
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     pkg-config libssl-dev cmake gcc g++ \
-    && rm -rf /var/lib/apt/lists/*
+    && rm -rf /var/lib/apt/lists/* \
+    && rustup target add wasm32-wasip2 \
+    && cargo install wasm-tools
 
 WORKDIR /app
 
@@ -24,13 +26,8 @@ COPY src/ src/
 COPY tests/ tests/
 COPY migrations/ migrations/
 COPY registry/ registry/
+COPY channels-src/ channels-src/
 COPY wit/ wit/
-
-# Note: channels-src/ is intentionally omitted. WASM channel compilation
-# (Telegram, Slack, etc.) requires wasm32-wasip2 target and wasm-tools,
-# which are not installed in the builder stage. build.rs gracefully skips
-# WASM builds when channels-src/ is absent or prerequisites are missing.
-# Pre-built WASM channels can be mounted at runtime instead.
 
 RUN cargo build --release --bin ironclaw
 
