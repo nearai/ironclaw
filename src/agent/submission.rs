@@ -62,6 +62,23 @@ impl SubmissionParser {
                 args: vec![],
             };
         }
+        if lower == "/skills" {
+            return Submission::SystemCommand {
+                command: "skills".to_string(),
+                args: vec![],
+            };
+        }
+        if lower.starts_with("/skills ") {
+            let args: Vec<String> = trimmed
+                .split_whitespace()
+                .skip(1)
+                .map(|s| s.to_string())
+                .collect();
+            return Submission::SystemCommand {
+                command: "skills".to_string(),
+                args,
+            };
+        }
         if lower == "/ping" {
             return Submission::SystemCommand {
                 command: "ping".to_string(),
@@ -691,6 +708,36 @@ mod tests {
         let submission = SubmissionParser::parse("/help");
         assert!(submission.is_control());
         assert!(!submission.starts_turn());
+    }
+
+    #[test]
+    fn test_parser_system_command_skills() {
+        let submission = SubmissionParser::parse("/skills");
+        assert!(
+            matches!(submission, Submission::SystemCommand { command, args } if command == "skills" && args.is_empty())
+        );
+
+        // Case insensitive
+        let submission = SubmissionParser::parse("/SKILLS");
+        assert!(
+            matches!(submission, Submission::SystemCommand { command, .. } if command == "skills")
+        );
+    }
+
+    #[test]
+    fn test_parser_system_command_skills_search() {
+        let submission = SubmissionParser::parse("/skills search markdown");
+        assert!(
+            matches!(submission, Submission::SystemCommand { command, args }
+                if command == "skills" && args == vec!["search", "markdown"])
+        );
+
+        // Multiple words in query
+        let submission = SubmissionParser::parse("/skills search code review tools");
+        assert!(
+            matches!(submission, Submission::SystemCommand { command, args }
+                if command == "skills" && args == vec!["search", "code", "review", "tools"])
+        );
     }
 
     #[test]

@@ -34,6 +34,7 @@ pub async fn extensions_list_handler(
             authenticated: ext.authenticated,
             active: ext.active,
             tools: ext.tools,
+            needs_setup: ext.needs_setup,
         })
         .collect();
 
