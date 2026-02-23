@@ -1681,6 +1681,9 @@ impl SetupWizard {
             match installer.install_with_source_fallback(tool, false).await {
                 Ok(outcome) => {
                     print_success(&format!("Installed {}", outcome.name));
+                    for warning in &outcome.warnings {
+                        print_info(&format!("{}: {}", outcome.name, warning));
+                    }
                     installed_count += 1;
 
                     // Track auth needs
@@ -2616,8 +2619,14 @@ async fn install_selected_registry_channels(
             channels_dir.to_path_buf(),
         );
 
-        match installer.install_with_source_fallback(manifest, false).await {
-            Ok(_) => {
+        match installer
+            .install_with_source_fallback(manifest, false)
+            .await
+        {
+            Ok(outcome) => {
+                for warning in &outcome.warnings {
+                    crate::setup::prompts::print_info(&format!("{}: {}", name, warning));
+                }
                 installed.push(name.clone());
             }
             Err(e) => {

@@ -31,6 +31,33 @@ pub enum RegistryError {
     DownloadFailed { url: String, reason: String },
 
     #[error(
+        "Checksum verification failed for {url}: expected {expected_sha256}, got {actual_sha256}"
+    )]
+    ChecksumMismatch {
+        url: String,
+        expected_sha256: String,
+        actual_sha256: String,
+    },
+
+    #[error(
+        "Source fallback unavailable for '{name}' because '{source_dir}' does not exist after artifact install failed: {artifact_error}. Retry artifact download or run from a repository checkout."
+    )]
+    SourceFallbackUnavailable {
+        name: String,
+        source_dir: PathBuf,
+        artifact_error: Box<RegistryError>,
+    },
+
+    #[error(
+        "Artifact install and source fallback both failed for '{name}': artifact={artifact_error}; source={source_error}"
+    )]
+    InstallFallbackFailed {
+        name: String,
+        artifact_error: Box<RegistryError>,
+        source_error: Box<RegistryError>,
+    },
+
+    #[error(
         "Ambiguous name '{name}': exists as both {kind_a} and {kind_b}. Use '{prefix_a}/{name}' or '{prefix_b}/{name}'."
     )]
     AmbiguousName {

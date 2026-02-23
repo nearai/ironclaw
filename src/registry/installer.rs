@@ -152,17 +152,27 @@ impl RegistryInstaller {
             return self.install_from_source(manifest, force).await;
         }
 
+        let source_dir = self.repo_root.join(&manifest.source.dir);
+
         match self.install_from_artifact(manifest, force).await {
             Ok(outcome) => Ok(outcome),
-            Err(RegistryError::AlreadyInstalled { name, path }) => {
-                Err(RegistryError::AlreadyInstalled { name, path })
-            }
+            Err(artifact_err @ RegistryError::AlreadyInstalled { .. }) => Err(artifact_err),
+            Err(artifact_err @ RegistryError::ChecksumMismatch { .. }) => Err(artifact_err),
             Err(artifact_err) => {
+                if !source_dir.is_dir() {
+                    return Err(RegistryError::SourceFallbackUnavailable {
+                        name: manifest.name.clone(),
+                        source_dir,
+                        artifact_error: Box::new(artifact_err),
+                    });
+                }
+
                 tracing::warn!(
                     extension = %manifest.name,
                     error = %artifact_err,
                     "Artifact install failed; falling back to build-from-source"
                 );
+
                 match self.install_from_source(manifest, force).await {
                     Ok(mut outcome) => {
                         outcome.warnings.push(format!(
@@ -171,12 +181,10 @@ impl RegistryInstaller {
                         ));
                         Ok(outcome)
                     }
-                    Err(source_err) => Err(RegistryError::ManifestRead {
-                        path: self.repo_root.join(&manifest.source.dir),
-                        reason: format!(
-                            "artifact install failed: {}; source fallback failed: {}",
-                            artifact_err, source_err
-                        ),
+                    Err(source_err) => Err(RegistryError::InstallFallbackFailed {
+                        name: manifest.name.clone(),
+                        artifact_error: Box::new(artifact_err),
+                        source_error: Box::new(source_err),
                     }),
                 }
             }
@@ -433,9 +441,10 @@ fn verify_sha256(bytes: &[u8], expected: &str, url: &str) -> Result<(), Registry
     let actual = format!("{:x}", hasher.finalize());
 
     if actual != expected {
-        return Err(RegistryError::DownloadFailed {
+        return Err(RegistryError::ChecksumMismatch {
             url: url.to_string(),
-            reason: format!("SHA256 mismatch: expected {}, got {}", expected, actual),
+            expected_sha256: expected.to_string(),
+            actual_sha256: actual,
         });
     }
     Ok(())
@@ -556,6 +565,69 @@ fn extract_tar_gz(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::HashMap;
+
+    use crate::registry::manifest::{ArtifactSpec, SourceSpec};
+
+    fn test_manifest(
+        name: &str,
+        source_dir: &str,
+        artifact_url: Option<String>,
+        sha256: Option<&str>,
+    ) -> ExtensionManifest {
+        let mut artifacts = HashMap::new();
+        if artifact_url.is_some() || sha256.is_some() {
+            artifacts.insert(
+                "wasm32-wasip2".to_string(),
+                ArtifactSpec {
+                    url: artifact_url,
+                    sha256: sha256.map(ToString::to_string),
+                    capabilities_url: None,
+                },
+            );
+        }
+
+        ExtensionManifest {
+            name: name.to_string(),
+            display_name: name.to_string(),
+            kind: ManifestKind::Tool,
+            version: "0.1.0".to_string(),
+            description: "test manifest".to_string(),
+            keywords: Vec::new(),
+            source: SourceSpec {
+                dir: source_dir.to_string(),
+                capabilities: format!("{}.capabilities.json", name),
+                crate_name: name.to_string(),
+            },
+            artifacts,
+            auth_summary: None,
+            tags: Vec::new(),
+        }
+    }
+
+    async fn spawn_http_server_with_body(body: Vec<u8>) -> String {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind test listener");
+        let addr = listener.local_addr().expect("listener local addr");
+
+        tokio::spawn(async move {
+            if let Ok((mut stream, _)) = listener.accept().await {
+                let mut request = [0_u8; 1024];
+                let _ = stream.read(&mut request).await;
+                let headers = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    body.len()
+                );
+                let _ = stream.write_all(headers.as_bytes()).await;
+                let _ = stream.write_all(&body).await;
+            }
+        });
+
+        format!("http://{}/artifact.wasm", addr)
+    }
 
     #[test]
     fn test_installer_creation() {
@@ -587,7 +659,107 @@ mod tests {
 
     #[test]
     fn test_verify_sha256_invalid() {
-        assert!(verify_sha256(b"data", "0000", "test://url").is_err());
+        let err = verify_sha256(b"data", "0000", "test://url").expect_err("checksum mismatch");
+        assert!(matches!(err, RegistryError::ChecksumMismatch { .. }));
+    }
+
+    #[tokio::test]
+    async fn test_install_with_source_fallback_source_missing_returns_source_fallback_unavailable()
+    {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let installer = RegistryInstaller::new(
+            temp.path().to_path_buf(),
+            temp.path().join("tools"),
+            temp.path().join("channels"),
+        );
+
+        let manifest = test_manifest(
+            "demo",
+            "tools-src/missing",
+            Some("invalid-url".to_string()),
+            None,
+        );
+
+        let result = installer
+            .install_with_source_fallback(&manifest, false)
+            .await;
+        match result {
+            Err(RegistryError::SourceFallbackUnavailable {
+                source_dir,
+                artifact_error,
+                ..
+            }) => {
+                assert!(source_dir.ends_with("tools-src/missing"));
+                assert!(matches!(
+                    *artifact_error,
+                    RegistryError::DownloadFailed { .. }
+                ));
+            }
+            other => panic!("unexpected result: {:?}", other),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_install_with_source_fallback_both_fail_returns_install_fallback_failed() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let source_dir = temp.path().join("tools-src/demo");
+        std::fs::create_dir_all(&source_dir).expect("create source dir");
+
+        let installer = RegistryInstaller::new(
+            temp.path().to_path_buf(),
+            temp.path().join("tools"),
+            temp.path().join("channels"),
+        );
+
+        let manifest = test_manifest(
+            "demo",
+            "tools-src/demo",
+            Some("invalid-url".to_string()),
+            None,
+        );
+
+        let result = installer
+            .install_with_source_fallback(&manifest, false)
+            .await;
+        match result {
+            Err(RegistryError::InstallFallbackFailed {
+                artifact_error,
+                source_error,
+                ..
+            }) => {
+                assert!(matches!(
+                    *artifact_error,
+                    RegistryError::DownloadFailed { .. }
+                ));
+                assert!(matches!(*source_error, RegistryError::ManifestRead { .. }));
+            }
+            other => panic!("unexpected result: {:?}", other),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_install_with_source_fallback_checksum_mismatch_does_not_fallback() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let installer = RegistryInstaller::new(
+            temp.path().to_path_buf(),
+            temp.path().join("tools"),
+            temp.path().join("channels"),
+        );
+
+        let url = spawn_http_server_with_body(b"not-a-real-wasm".to_vec()).await;
+        let manifest = test_manifest("demo", "tools-src/missing", Some(url), Some("deadbeef"));
+
+        let result = installer
+            .install_with_source_fallback(&manifest, false)
+            .await;
+        match result {
+            Err(RegistryError::ChecksumMismatch {
+                expected_sha256, ..
+            }) => {
+                assert_eq!(expected_sha256, "deadbeef");
+            }
+            other => panic!("unexpected result: {:?}", other),
+        }
     }
 
     #[test]
