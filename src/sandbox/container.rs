@@ -490,32 +490,47 @@ impl ContainerRunner {
 ///
 /// Tries these locations in order:
 /// 1. `DOCKER_HOST` env var (bollard default)
-/// 2. `/var/run/docker.sock` (Linux default)
-/// 3. `~/.docker/run/docker.sock` (Docker Desktop on macOS)
+/// 2. `/var/run/docker.sock` (Linux default; also used by OrbStack and Podman Desktop on macOS)
+/// 3. `~/.docker/run/docker.sock` (Docker Desktop 4.13+ on macOS — primary user-owned socket)
+/// 4. `~/.colima/default/docker.sock` (Colima — popular lightweight Docker Desktop alternative)
+/// 5. `~/.rd/docker.sock` (Rancher Desktop on macOS)
 pub async fn connect_docker() -> Result<Docker> {
-    // First try bollard defaults (checks DOCKER_HOST, then /var/run/docker.sock)
+    // First try bollard defaults (checks DOCKER_HOST env var, then /var/run/docker.sock).
+    // This covers Linux, OrbStack (updates the /var/run symlink), and any user with
+    // DOCKER_HOST set to their runtime's socket.
     if let Ok(docker) = Docker::connect_with_local_defaults()
         && docker.ping().await.is_ok()
     {
         return Ok(docker);
     }
 
-    // Try Docker Desktop socket (macOS)
+    // Try well-known user-owned socket locations for macOS container runtimes.
+    // Docker Desktop 4.13+ (stabilised in 4.18) stopped creating the /var/run/docker.sock
+    // symlink by default and moved the API socket to ~/.docker/run/docker.sock.
     if let Some(home) = std::env::var_os("HOME") {
-        let desktop_sock = std::path::Path::new(&home).join(".docker/run/docker.sock");
-        if desktop_sock.exists() {
-            let sock_str = desktop_sock.to_string_lossy();
-            if let Ok(docker) =
-                Docker::connect_with_socket(&sock_str, 120, bollard::API_DEFAULT_VERSION)
-                && docker.ping().await.is_ok()
-            {
-                return Ok(docker);
+        let home = std::path::Path::new(&home);
+        let candidates = [
+            home.join(".docker/run/docker.sock"),     // Docker Desktop 4.13+
+            home.join(".colima/default/docker.sock"), // Colima
+            home.join(".rd/docker.sock"),             // Rancher Desktop
+        ];
+        for sock in &candidates {
+            if sock.exists() {
+                let sock_str = sock.to_string_lossy();
+                if let Ok(docker) =
+                    Docker::connect_with_socket(&sock_str, 120, bollard::API_DEFAULT_VERSION)
+                    && docker.ping().await.is_ok()
+                {
+                    return Ok(docker);
+                }
             }
         }
     }
 
     Err(SandboxError::DockerNotAvailable {
-        reason: "Could not connect to Docker. Tried: default socket, ~/.docker/run/docker.sock"
+        reason: "Could not connect to Docker daemon. Tried: $DOCKER_HOST, \
+            /var/run/docker.sock, ~/.docker/run/docker.sock, \
+            ~/.colima/default/docker.sock, ~/.rd/docker.sock"
             .to_string(),
     })
 }
