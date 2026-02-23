@@ -2860,26 +2860,43 @@ function renderCatalogSkillCard(entry, installedNames) {
     card.appendChild(desc);
   }
 
-  // Metadata row: score + recency
+  // Metadata row: owner, stars, downloads, recency
   var meta = document.createElement('div');
   meta.className = 'ext-meta';
   meta.style.fontSize = '11px';
   meta.style.color = '#888';
   meta.style.marginTop = '6px';
 
-  if (entry.score) {
-    var scoreSpan = document.createElement('span');
-    scoreSpan.textContent = 'relevance: ' + entry.score.toFixed(1);
-    meta.appendChild(scoreSpan);
+  function addMetaSep() {
+    if (meta.children.length > 0) {
+      meta.appendChild(document.createTextNode(' \u00b7 '));
+    }
+  }
+
+  if (entry.owner) {
+    var ownerSpan = document.createElement('span');
+    ownerSpan.textContent = 'by ' + entry.owner;
+    meta.appendChild(ownerSpan);
+  }
+
+  if (entry.stars != null) {
+    addMetaSep();
+    var starsSpan = document.createElement('span');
+    starsSpan.textContent = entry.stars + ' stars';
+    meta.appendChild(starsSpan);
+  }
+
+  if (entry.downloads != null) {
+    addMetaSep();
+    var dlSpan = document.createElement('span');
+    dlSpan.textContent = formatCompactNumber(entry.downloads) + ' downloads';
+    meta.appendChild(dlSpan);
   }
 
   if (entry.updatedAt) {
     var ago = formatTimeAgo(entry.updatedAt);
     if (ago) {
-      if (meta.children.length > 0) {
-        var sep = document.createTextNode(' \u00b7 ');
-        meta.appendChild(sep);
-      }
+      addMetaSep();
       var updatedSpan = document.createElement('span');
       updatedSpan.textContent = 'updated ' + ago;
       meta.appendChild(updatedSpan);
@@ -2918,6 +2935,12 @@ function renderCatalogSkillCard(entry, installedNames) {
 
   card.appendChild(actions);
   return card;
+}
+
+function formatCompactNumber(n) {
+  if (n >= 1000000) return (n / 1000000).toFixed(1) + 'M';
+  if (n >= 1000) return (n / 1000).toFixed(1) + 'K';
+  return '' + n;
 }
 
 function formatTimeAgo(epochMs) {

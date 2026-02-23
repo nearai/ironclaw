@@ -1460,6 +1460,7 @@ async fn main() -> anyhow::Result<()> {
         workspace,
         extension_manager,
         skill_registry,
+        skill_catalog,
         skills_config: config.skills.clone(),
         hooks,
         cost_guard,

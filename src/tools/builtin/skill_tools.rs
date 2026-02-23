@@ -158,6 +158,12 @@ impl Tool for SkillSearchTool {
         let catalog_outcome = self.catalog.search(query).await;
         let catalog_error = catalog_outcome.error.clone();
 
+        // Enrich top results with detail data (stars, downloads, owner)
+        let mut catalog_entries = catalog_outcome.results;
+        self.catalog
+            .enrich_search_results(&mut catalog_entries, 5)
+            .await;
+
         // Search locally loaded skills
         let installed_names: Vec<String> = {
             let guard = self
@@ -172,8 +178,7 @@ impl Tool for SkillSearchTool {
         };
 
         // Mark catalog entries that are already installed
-        let catalog_json: Vec<serde_json::Value> = catalog_outcome
-            .results
+        let catalog_json: Vec<serde_json::Value> = catalog_entries
             .iter()
             .map(|entry| {
                 let is_installed = installed_names.iter().any(|n| {
@@ -187,6 +192,9 @@ impl Tool for SkillSearchTool {
                     "version": entry.version,
                     "score": entry.score,
                     "installed": is_installed,
+                    "stars": entry.stars,
+                    "downloads": entry.downloads,
+                    "owner": entry.owner,
                 })
             })
             .collect();

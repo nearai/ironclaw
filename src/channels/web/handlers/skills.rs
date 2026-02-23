@@ -60,8 +60,12 @@ pub async fn skills_search_handler(
     // Search ClawHub catalog
     let catalog_outcome = catalog.search(&req.query).await;
     let catalog_error = catalog_outcome.error.clone();
-    let catalog_json: Vec<serde_json::Value> = catalog_outcome
-        .results
+
+    // Enrich top results with detail data (stars, downloads, owner)
+    let mut entries = catalog_outcome.results;
+    catalog.enrich_search_results(&mut entries, 5).await;
+
+    let catalog_json: Vec<serde_json::Value> = entries
         .into_iter()
         .map(|e| {
             serde_json::json!({
@@ -71,6 +75,9 @@ pub async fn skills_search_handler(
                 "version": e.version,
                 "score": e.score,
                 "updatedAt": e.updated_at,
+                "stars": e.stars,
+                "downloads": e.downloads,
+                "owner": e.owner,
             })
         })
         .collect();
