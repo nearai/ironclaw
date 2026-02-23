@@ -773,9 +773,6 @@ fn validate_allowed_groups_list(list: &str) -> Result<(), String> {
 /// Set up Signal channel.
 /// `Settings` is reserved for future use
 pub async fn setup_signal(_settings: &Settings) -> Result<SignalSetupResult, ChannelSetupError> {
-    // Explicitly "use" settings to satisfy static analysis
-    let _ = _settings;
-
     println!("Signal Channel Setup:");
     println!();
     print_info("Signal channel connects to a signal-cli daemon running in HTTP mode.");
