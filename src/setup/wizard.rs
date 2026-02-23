@@ -1493,7 +1493,6 @@ impl SetupWizard {
             any_installed = true;
         }
 
-        // Then try registry channels (build from source for any still missing)
         let installed_from_registry = install_selected_registry_channels(
             &channels_dir,
             &selected_wasm_channels,
@@ -1685,9 +1684,12 @@ impl SetupWizard {
                 continue; // Already installed, skip
             }
 
-            match installer.install_from_source(tool, false).await {
+            match installer.install_with_source_fallback(tool, false).await {
                 Ok(outcome) => {
                     print_success(&format!("Installed {}", outcome.name));
+                    for warning in &outcome.warnings {
+                        print_info(&format!("{}: {}", outcome.name, warning));
+                    }
                     installed_count += 1;
 
                     // Track auth needs
@@ -2657,8 +2659,6 @@ fn load_registry_catalog() -> Option<crate::registry::catalog::RegistryCatalog> 
 
 /// Install selected channels from the registry that aren't already on disk
 /// and weren't handled by the bundled installer.
-///
-/// This builds channels from source using `cargo component build`.
 async fn install_selected_registry_channels(
     channels_dir: &std::path::Path,
     selected_channels: &[String],
@@ -2703,8 +2703,14 @@ async fn install_selected_registry_channels(
             channels_dir.to_path_buf(),
         );
 
-        match installer.install_from_source(manifest, false).await {
-            Ok(_) => {
+        match installer
+            .install_with_source_fallback(manifest, false)
+            .await
+        {
+            Ok(outcome) => {
+                for warning in &outcome.warnings {
+                    crate::setup::prompts::print_info(&format!("{}: {}", name, warning));
+                }
                 installed.push(name.clone());
             }
             Err(e) => {

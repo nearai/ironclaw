@@ -27,8 +27,41 @@ pub enum RegistryError {
         path: std::path::PathBuf,
     },
 
-    #[error("Download failed for {url}: {reason}")]
+    // `url` is stored for programmatic access (logs, retries) but intentionally
+    // omitted from the Display message to avoid leaking internal artifact URLs
+    // to end users.
+    #[error("Artifact download failed: {reason}")]
     DownloadFailed { url: String, reason: String },
+
+    #[error("Invalid extension manifest for '{name}' field '{field}': {reason}")]
+    InvalidManifest {
+        name: String,
+        field: &'static str,
+        reason: String,
+    },
+
+    #[error("Checksum verification failed: expected {expected_sha256}, got {actual_sha256}")]
+    ChecksumMismatch {
+        url: String,
+        expected_sha256: String,
+        actual_sha256: String,
+    },
+
+    #[error(
+        "Source fallback unavailable for '{name}' after artifact install failed. Retry artifact download or run from a repository checkout."
+    )]
+    SourceFallbackUnavailable {
+        name: String,
+        source_dir: PathBuf,
+        artifact_error: Box<RegistryError>,
+    },
+
+    #[error("Artifact install and source fallback both failed for '{name}'.")]
+    InstallFallbackFailed {
+        name: String,
+        artifact_error: Box<RegistryError>,
+        source_error: Box<RegistryError>,
+    },
 
     #[error(
         "Ambiguous name '{name}': exists as both {kind_a} and {kind_b}. Use '{prefix_a}/{name}' or '{prefix_b}/{name}'."
