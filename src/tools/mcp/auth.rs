@@ -84,6 +84,11 @@ fn validate_url_safe(url: &str) -> Result<(), AuthError> {
 
     // Check if the host resolves to a dangerous IP address
     if let Some(host) = parsed.host_str() {
+        // Skip resolution check for localhost (which is explicitly allowed above)
+        if host == "localhost" || host == "127.0.0.1" || host == "[::1]" {
+            return Ok(());
+        }
+
         // Try to resolve the hostname to IP addresses
         if let Ok(addrs) = std::net::ToSocketAddrs::to_socket_addrs(&(host, 443)) {
             for addr in addrs {
@@ -1226,5 +1231,166 @@ mod tests {
 
         assert!(url.contains("owner=user"));
         assert!(url.contains("state=abc123"));
+    }
+
+    #[test]
+    fn test_validate_url_safe_https_allowed() {
+        // HTTPS URLs should be allowed
+        assert!(validate_url_safe("https://example.com").is_ok());
+        assert!(validate_url_safe("https://api.example.com/path").is_ok());
+        assert!(validate_url_safe("https://sub.domain.example.com:8443/path").is_ok());
+    }
+
+    #[test]
+    fn test_validate_url_safe_http_localhost_allowed() {
+        // HTTP is only allowed for localhost
+        assert!(validate_url_safe("http://localhost").is_ok());
+        assert!(validate_url_safe("http://localhost:8080").is_ok());
+        assert!(validate_url_safe("http://127.0.0.1").is_ok());
+        assert!(validate_url_safe("http://127.0.0.1:3000").is_ok());
+        assert!(validate_url_safe("http://[::1]").is_ok());
+        assert!(validate_url_safe("http://[::1]:8080").is_ok());
+    }
+
+    #[test]
+    fn test_validate_url_safe_http_remote_blocked() {
+        // HTTP to remote hosts should be blocked
+        assert!(validate_url_safe("http://example.com").is_err());
+        assert!(validate_url_safe("http://192.168.1.1").is_err());
+        assert!(validate_url_safe("http://10.0.0.1").is_err());
+    }
+
+    #[test]
+    fn test_validate_url_safe_invalid_scheme() {
+        // Only HTTP and HTTPS should be allowed
+        assert!(validate_url_safe("ftp://example.com").is_err());
+        assert!(validate_url_safe("file:///etc/passwd").is_err());
+        assert!(validate_url_safe("javascript:alert(1)").is_err());
+        assert!(validate_url_safe("data:text/html,<script>alert(1)</script>").is_err());
+    }
+
+    #[test]
+    fn test_validate_url_safe_invalid_url() {
+        // Malformed URLs should be rejected
+        assert!(validate_url_safe("not a url").is_err());
+        assert!(validate_url_safe("").is_err());
+        assert!(validate_url_safe("https://").is_err());
+    }
+
+    #[test]
+    fn test_is_dangerous_ip_loopback() {
+        use std::net::{Ipv4Addr, Ipv6Addr};
+
+        // IPv4 loopback
+        assert!(is_dangerous_ip(&IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1))));
+        assert!(is_dangerous_ip(&IpAddr::V4(Ipv4Addr::new(127, 0, 0, 2))));
+        assert!(is_dangerous_ip(&IpAddr::V4(Ipv4Addr::new(127, 255, 255, 255))));
+
+        // IPv6 loopback
+        assert!(is_dangerous_ip(&IpAddr::V6(Ipv6Addr::LOCALHOST)));
+    }
+
+    #[test]
+    fn test_is_dangerous_ip_private() {
+        use std::net::Ipv4Addr;
+
+        // 10.0.0.0/8
+        assert!(is_dangerous_ip(&IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1))));
+        assert!(is_dangerous_ip(&IpAddr::V4(Ipv4Addr::new(10, 255, 255, 255))));
+
+        // 172.16.0.0/12
+        assert!(is_dangerous_ip(&IpAddr::V4(Ipv4Addr::new(172, 16, 0, 1))));
+        assert!(is_dangerous_ip(&IpAddr::V4(Ipv4Addr::new(172, 31, 255, 255))));
+
+        // 192.168.0.0/16
+        assert!(is_dangerous_ip(&IpAddr::V4(Ipv4Addr::new(192, 168, 0, 1))));
+        assert!(is_dangerous_ip(&IpAddr::V4(Ipv4Addr::new(192, 168, 255, 255))));
+    }
+
+    #[test]
+    fn test_is_dangerous_ip_link_local() {
+        use std::net::Ipv4Addr;
+
+        // IPv4 link-local: 169.254.0.0/16 (includes AWS metadata endpoint)
+        assert!(is_dangerous_ip(&IpAddr::V4(Ipv4Addr::new(169, 254, 0, 1))));
+        assert!(is_dangerous_ip(&IpAddr::V4(Ipv4Addr::new(169, 254, 169, 254))));
+        assert!(is_dangerous_ip(&IpAddr::V4(Ipv4Addr::new(169, 254, 255, 255))));
+
+        // IPv6 link-local: fe80::/10
+        let fe80 = "fe80::1".parse::<std::net::Ipv6Addr>().unwrap();
+        assert!(is_dangerous_ip(&IpAddr::V6(fe80)));
+    }
+
+    #[test]
+    fn test_is_dangerous_ip_multicast() {
+        use std::net::Ipv4Addr;
+
+        // IPv4 multicast: 224.0.0.0/4
+        assert!(is_dangerous_ip(&IpAddr::V4(Ipv4Addr::new(224, 0, 0, 1))));
+        assert!(is_dangerous_ip(&IpAddr::V4(Ipv4Addr::new(239, 255, 255, 255))));
+
+        // IPv6 multicast: ff00::/8
+        let ff00 = "ff00::1".parse::<std::net::Ipv6Addr>().unwrap();
+        assert!(is_dangerous_ip(&IpAddr::V6(ff00)));
+    }
+
+    #[test]
+    fn test_is_dangerous_ip_broadcast() {
+        use std::net::Ipv4Addr;
+
+        // IPv4 broadcast
+        assert!(is_dangerous_ip(&IpAddr::V4(Ipv4Addr::BROADCAST)));
+    }
+
+    #[test]
+    fn test_is_dangerous_ip_documentation() {
+        use std::net::Ipv4Addr;
+
+        // TEST-NET-1: 192.0.2.0/24
+        assert!(is_dangerous_ip(&IpAddr::V4(Ipv4Addr::new(192, 0, 2, 1))));
+
+        // TEST-NET-2: 198.51.100.0/24
+        assert!(is_dangerous_ip(&IpAddr::V4(Ipv4Addr::new(198, 51, 100, 1))));
+
+        // TEST-NET-3: 203.0.113.0/24
+        assert!(is_dangerous_ip(&IpAddr::V4(Ipv4Addr::new(203, 0, 113, 1))));
+    }
+
+    #[test]
+    fn test_is_dangerous_ip_ipv6_unique_local() {
+        // IPv6 unique local: fc00::/7
+        let fc00 = "fc00::1".parse::<std::net::Ipv6Addr>().unwrap();
+        assert!(is_dangerous_ip(&IpAddr::V6(fc00)));
+
+        let fd00 = "fd00::1".parse::<std::net::Ipv6Addr>().unwrap();
+        assert!(is_dangerous_ip(&IpAddr::V6(fd00)));
+    }
+
+    #[test]
+    fn test_is_dangerous_ip_safe_public() {
+        use std::net::Ipv4Addr;
+
+        // Public IPs should not be flagged as dangerous
+        // Google DNS
+        assert!(!is_dangerous_ip(&IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8))));
+        // Cloudflare DNS
+        assert!(!is_dangerous_ip(&IpAddr::V4(Ipv4Addr::new(1, 1, 1, 1))));
+
+        // Public IPv6 should not be flagged
+        let public_v6 = "2001:4860:4860::8888".parse::<std::net::Ipv6Addr>().unwrap();
+        assert!(!is_dangerous_ip(&IpAddr::V6(public_v6)));
+    }
+
+    #[test]
+    fn test_is_dangerous_ip_edge_cases() {
+        use std::net::Ipv4Addr;
+
+        // Edge of private ranges - should be safe
+        assert!(!is_dangerous_ip(&IpAddr::V4(Ipv4Addr::new(9, 255, 255, 255))));
+        assert!(!is_dangerous_ip(&IpAddr::V4(Ipv4Addr::new(11, 0, 0, 0))));
+        assert!(!is_dangerous_ip(&IpAddr::V4(Ipv4Addr::new(172, 15, 255, 255))));
+        assert!(!is_dangerous_ip(&IpAddr::V4(Ipv4Addr::new(172, 32, 0, 0))));
+        assert!(!is_dangerous_ip(&IpAddr::V4(Ipv4Addr::new(192, 167, 255, 255))));
+        assert!(!is_dangerous_ip(&IpAddr::V4(Ipv4Addr::new(192, 169, 0, 0))));
     }
 }
