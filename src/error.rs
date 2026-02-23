@@ -331,6 +331,9 @@ pub enum WorkspaceError {
 
     #[error("Heartbeat error: {reason}")]
     HeartbeatError { reason: String },
+
+    #[error("Not found: {path}")]
+    NotFound { path: String },
 }
 
 /// Orchestrator errors (internal API, container management).

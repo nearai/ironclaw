@@ -358,6 +358,10 @@ impl AppBuilder {
             if let Some(ref emb) = embeddings {
                 ws = ws.with_embeddings(emb.clone());
             }
+            // Wire memory layers from gateway config if present
+            if let Some(ref gw) = self.config.channels.gateway {
+                ws = ws.with_memory_layers(gw.memory_layers.clone());
+            }
             let ws = Arc::new(ws);
             tools.register_memory_tools(Arc::clone(&ws));
             Some(ws)

@@ -160,6 +160,10 @@ impl Tool for MemoryWriteTool {
                     "type": "boolean",
                     "description": "If true, append to existing content. If false, replace entirely.",
                     "default": true
+                },
+                "layer": {
+                    "type": "string",
+                    "description": "Memory layer to write to (e.g. 'private', 'household', 'finance'). Defaults to 'private'."
                 }
             },
             "required": ["content"]
@@ -200,6 +204,8 @@ impl Tool for MemoryWriteTool {
             .get("append")
             .and_then(|v| v.as_bool())
             .unwrap_or(true);
+
+        let layer = params.get("layer").and_then(|v| v.as_str());
 
         let path = match target {
             "memory" => {
@@ -252,7 +258,24 @@ impl Tool for MemoryWriteTool {
                     )));
                 }
 
-                if append {
+                // When a layer is specified, route through layer-aware methods.
+                if let Some(layer_name) = layer {
+                    if append {
+                        self.workspace
+                            .append_to_layer(layer_name, path, content)
+                            .await
+                            .map_err(|e| {
+                                ToolError::ExecutionFailed(format!("Write failed: {}", e))
+                            })?;
+                    } else {
+                        self.workspace
+                            .write_to_layer(layer_name, path, content)
+                            .await
+                            .map_err(|e| {
+                                ToolError::ExecutionFailed(format!("Write failed: {}", e))
+                            })?;
+                    }
+                } else if append {
                     self.workspace
                         .append(path, content)
                         .await
@@ -270,6 +293,7 @@ impl Tool for MemoryWriteTool {
         let output = serde_json::json!({
             "status": "written",
             "path": path,
+            "layer": layer.unwrap_or("private"),
             "append": append,
             "content_length": content.len(),
         });
