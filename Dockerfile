@@ -26,6 +26,12 @@ COPY migrations/ migrations/
 COPY registry/ registry/
 COPY wit/ wit/
 
+# Note: channels-src/ is intentionally omitted. WASM channel compilation
+# (Telegram, Slack, etc.) requires wasm32-wasip2 target and wasm-tools,
+# which are not installed in the builder stage. build.rs gracefully skips
+# WASM builds when channels-src/ is absent or prerequisites are missing.
+# Pre-built WASM channels can be mounted at runtime instead.
+
 RUN cargo build --release --bin ironclaw
 
 # Stage 2: Runtime
