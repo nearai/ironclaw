@@ -268,21 +268,32 @@ impl SignalChannel {
         }
 
         let status = resp.status();
-        let bytes = resp.bytes().await.map_err(|e| ChannelError::SendFailed {
-            name: "signal".to_string(),
-            reason: format!("Failed to read RPC response: {e}"),
-        })?;
+        let mut stream = resp.bytes_stream();
+        let mut total_bytes = 0usize;
+        let mut body = Vec::new();
 
-        if bytes.len() > MAX_HTTP_RESPONSE_SIZE {
-            return Err(ChannelError::SendFailed {
+        while let Some(chunk) = stream.next().await {
+            let chunk = chunk.map_err(|e| ChannelError::SendFailed {
                 name: "signal".to_string(),
-                reason: format!(
-                    "RPC response too large: {} bytes (max {})",
-                    bytes.len(),
-                    MAX_HTTP_RESPONSE_SIZE
-                ),
-            });
+                reason: format!("Failed to read RPC response: {e}"),
+            })?;
+            let chunk_len = chunk.len();
+            total_bytes += chunk_len;
+
+            if total_bytes > MAX_HTTP_RESPONSE_SIZE {
+                return Err(ChannelError::SendFailed {
+                    name: "signal".to_string(),
+                    reason: format!(
+                        "RPC response too large: {} bytes (max {})",
+                        total_bytes, MAX_HTTP_RESPONSE_SIZE
+                    ),
+                });
+            }
+
+            body.extend_from_slice(&chunk);
         }
+
+        let bytes = body;
 
         if bytes.is_empty() {
             return Ok(None);
