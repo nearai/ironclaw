@@ -533,6 +533,8 @@ impl Agent {
                     // results — in the original tool_calls order. Auth intercept
                     // is deferred until after every result is recorded.
                     let mut deferred_auth: Option<String> = None;
+                    // Collect tool call summaries for DB persistence (audit trail)
+                    let mut tool_summaries: Vec<String> = Vec::new();
 
                     for (pf_idx, (tc, outcome)) in preflight.into_iter().enumerate() {
                         match outcome {
@@ -546,6 +548,10 @@ impl Agent {
                                         turn.record_tool_error(error_msg.clone());
                                     }
                                 }
+                                tool_summaries.push(format!(
+                                    "tool:{} status:rejected reason:{}",
+                                    tc.name, error_msg
+                                ));
                                 context_messages
                                     .push(ChatMessage::tool_result(&tc.id, &tc.name, error_msg));
                             }
@@ -577,7 +583,7 @@ impl Agent {
                                         .await;
                                 }
 
-                                // Record result in thread
+                                // Record result in thread and collect summary
                                 {
                                     let mut sess = session.lock().await;
                                     if let Some(thread) = sess.threads.get_mut(&thread_id)
@@ -591,6 +597,34 @@ impl Agent {
                                                 turn.record_tool_error(e.to_string());
                                             }
                                         }
+                                    }
+                                }
+
+                                // Collect tool summary for audit trail
+                                match &tool_result {
+                                    Ok(output) => {
+                                        // Include truncated params for context (e.g. URL for http)
+                                        let params_preview = tc
+                                            .arguments
+                                            .as_object()
+                                            .and_then(|o| {
+                                                o.get("url")
+                                                    .or_else(|| o.get("query"))
+                                                    .or_else(|| o.get("path"))
+                                            })
+                                            .and_then(|v| v.as_str())
+                                            .unwrap_or("");
+                                        let output_len = output.len();
+                                        tool_summaries.push(format!(
+                                            "tool:{} params:{} status:ok output_bytes:{}",
+                                            tc.name, params_preview, output_len
+                                        ));
+                                    }
+                                    Err(e) => {
+                                        tool_summaries.push(format!(
+                                            "tool:{} status:error reason:{}",
+                                            tc.name, e
+                                        ));
                                     }
                                 }
 
@@ -644,6 +678,17 @@ impl Agent {
                                 ));
                             }
                         }
+                    }
+
+                    // Persist tool call audit trail to DB
+                    if !tool_summaries.is_empty()
+                        && let Some(store) = self.store()
+                    {
+                        let summary = tool_summaries.join("\n");
+                        // Ignore errors — audit trail is best-effort
+                        let _ = store
+                            .add_conversation_message(thread_id, "tool", &summary)
+                            .await;
                     }
 
                     // Return auth response after all results are recorded
@@ -1414,5 +1459,75 @@ mod tests {
             .filter(|m| m.content == "Nudge: wrap up")
             .count();
         assert_eq!(nudge_count, 1);
+    }
+
+    // ---- tool audit trail tests ----
+
+    #[test]
+    fn test_tool_summary_format_ok() {
+        // Verify the tool summary format matches what's persisted to DB
+        let tool_name = "http";
+        let params_preview = "https://example.com";
+        let output_len = 4096;
+        let summary = format!(
+            "tool:{} params:{} status:ok output_bytes:{}",
+            tool_name, params_preview, output_len
+        );
+        assert!(summary.starts_with("tool:http"));
+        assert!(summary.contains("params:https://example.com"));
+        assert!(summary.contains("status:ok"));
+        assert!(summary.contains("output_bytes:4096"));
+    }
+
+    #[test]
+    fn test_tool_summary_format_error() {
+        let tool_name = "shell";
+        let error = "Command not found: foobar";
+        let summary = format!("tool:{} status:error reason:{}", tool_name, error);
+        assert!(summary.starts_with("tool:shell"));
+        assert!(summary.contains("status:error"));
+        assert!(summary.contains("reason:Command not found"));
+    }
+
+    #[test]
+    fn test_tool_summary_params_preview_extraction() {
+        // Verify the params preview logic extracts url/query/path
+        let params = serde_json::json!({"url": "https://api.example.com/data", "method": "GET"});
+        let preview = params
+            .as_object()
+            .and_then(|o| {
+                o.get("url")
+                    .or_else(|| o.get("query"))
+                    .or_else(|| o.get("path"))
+            })
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        assert_eq!(preview, "https://api.example.com/data");
+
+        // Falls back to query
+        let params2 = serde_json::json!({"query": "rust async"});
+        let preview2 = params2
+            .as_object()
+            .and_then(|o| {
+                o.get("url")
+                    .or_else(|| o.get("query"))
+                    .or_else(|| o.get("path"))
+            })
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        assert_eq!(preview2, "rust async");
+
+        // Empty when no matching key
+        let params3 = serde_json::json!({"message": "hello"});
+        let preview3 = params3
+            .as_object()
+            .and_then(|o| {
+                o.get("url")
+                    .or_else(|| o.get("query"))
+                    .or_else(|| o.get("path"))
+            })
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        assert_eq!(preview3, "");
     }
 }

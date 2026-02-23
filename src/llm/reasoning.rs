@@ -660,16 +660,25 @@ Example:
 - Be concise and direct
 - Use markdown formatting where helpful
 - For code, use appropriate code blocks with language tags
-- Call tools when they would help accomplish the task
-- Do NOT call the same tool repeatedly with similar arguments; if a tool returned unhelpful results, move on
+- **Use tools proactively.** You are an autonomous agent, not a chatbot. When the user asks for research, current information, data gathering, or any task that benefits from real-world data, call tools (e.g. `http` to fetch web pages, `memory_search` to recall prior work, `shell` to run commands). Do not answer research or factual questions from training data alone.
+- For research tasks: fetch multiple sources, cross-reference, and synthesize. Use the `http` tool to retrieve actual web pages rather than guessing content.
+- Do NOT call the same tool repeatedly with similar arguments; if a tool returned unhelpful results, try a different approach or source
 - If you have already called tools and gathered enough information, produce your final answer immediately
-- If tools return empty or irrelevant results, answer with what you already know rather than retrying
+- If tools return empty or irrelevant results after multiple attempts, answer with what you already know
+
+## Source Attribution — IMPORTANT
+When your response incorporates information obtained from tool calls (e.g. `http` fetches, `memory_search` results):
+- Include a **Sources** section at the end listing each URL or resource you actually fetched
+- When citing a fact from a fetched source, briefly attribute it (e.g. "According to the PyO3 docs..." or "From the GitHub README...")
+- If you could not fetch a source or the fetch failed, say so explicitly rather than guessing the content
+- Clearly distinguish information you retrieved via tools from your general knowledge. If you did not use any tools, do not pretend you did.
 
 ## Tool Call Style
 - Do not narrate routine, low-risk tool calls; just call the tool
 - Narrate only when it helps: multi-step work, sensitive actions, or when the user asks
 - For multi-step tasks, call independent tools in parallel when possible
 - If a tool fails, explain the error briefly and try an alternative approach
+- Prefer action over explanation: call the tool rather than describing what you would do
 
 ## Safety
 - You have no independent goals. Do not pursue self-preservation, replication, resource acquisition, or power-seeking beyond the user's request.
@@ -1776,5 +1785,97 @@ That's my plan."#;
         let calls = recover_tool_calls_from_content(content, &tools);
         assert_eq!(calls.len(), 1);
         assert_eq!(calls[0].name, "tool_list");
+    }
+
+    #[test]
+    fn test_system_prompt_contains_source_attribution() {
+        use std::sync::Arc;
+
+        use crate::config::SafetyConfig;
+        use crate::safety::SafetyLayer;
+
+        struct DummyLlm;
+        #[async_trait::async_trait]
+        impl crate::llm::LlmProvider for DummyLlm {
+            fn model_name(&self) -> &str {
+                "dummy"
+            }
+            fn cost_per_token(&self) -> (rust_decimal::Decimal, rust_decimal::Decimal) {
+                (rust_decimal::Decimal::ZERO, rust_decimal::Decimal::ZERO)
+            }
+            async fn complete(
+                &self,
+                _request: crate::llm::CompletionRequest,
+            ) -> Result<crate::llm::CompletionResponse, crate::error::LlmError> {
+                unimplemented!()
+            }
+            async fn complete_with_tools(
+                &self,
+                _request: crate::llm::ToolCompletionRequest,
+            ) -> Result<crate::llm::ToolCompletionResponse, crate::error::LlmError> {
+                unimplemented!()
+            }
+        }
+
+        let safety = Arc::new(SafetyLayer::new(&SafetyConfig {
+            max_output_length: 100_000,
+            injection_check_enabled: false,
+        }));
+        let reasoning = Reasoning::new(Arc::new(DummyLlm), safety);
+        let context = ReasoningContext::new();
+        let prompt = reasoning.build_conversation_prompt(&context);
+
+        assert!(
+            prompt.contains("Source Attribution"),
+            "System prompt should contain Source Attribution section"
+        );
+        assert!(
+            prompt.contains("Sources"),
+            "System prompt should mention Sources section"
+        );
+    }
+
+    #[test]
+    fn test_system_prompt_contains_proactive_tool_guidance() {
+        use std::sync::Arc;
+
+        use crate::config::SafetyConfig;
+        use crate::safety::SafetyLayer;
+
+        struct DummyLlm2;
+        #[async_trait::async_trait]
+        impl crate::llm::LlmProvider for DummyLlm2 {
+            fn model_name(&self) -> &str {
+                "dummy"
+            }
+            fn cost_per_token(&self) -> (rust_decimal::Decimal, rust_decimal::Decimal) {
+                (rust_decimal::Decimal::ZERO, rust_decimal::Decimal::ZERO)
+            }
+            async fn complete(
+                &self,
+                _request: crate::llm::CompletionRequest,
+            ) -> Result<crate::llm::CompletionResponse, crate::error::LlmError> {
+                unimplemented!()
+            }
+            async fn complete_with_tools(
+                &self,
+                _request: crate::llm::ToolCompletionRequest,
+            ) -> Result<crate::llm::ToolCompletionResponse, crate::error::LlmError> {
+                unimplemented!()
+            }
+        }
+
+        let safety = Arc::new(SafetyLayer::new(&SafetyConfig {
+            max_output_length: 100_000,
+            injection_check_enabled: false,
+        }));
+        let reasoning = Reasoning::new(Arc::new(DummyLlm2), safety);
+        let context = ReasoningContext::new();
+        let prompt = reasoning.build_conversation_prompt(&context);
+
+        assert!(
+            prompt.contains("Use tools proactively"),
+            "System prompt should encourage proactive tool use"
+        );
     }
 }
