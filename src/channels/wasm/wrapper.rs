@@ -250,7 +250,7 @@ impl near::agent::channel_host::Host for ChannelStoreData {
         let raw_headers: std::collections::HashMap<String, String> =
             serde_json::from_str(&headers_json).unwrap_or_default();
 
-        let headers: std::collections::HashMap<String, String> = raw_headers
+        let mut headers: std::collections::HashMap<String, String> = raw_headers
             .into_iter()
             .map(|(k, v)| {
                 (
@@ -259,6 +259,84 @@ impl near::agent::channel_host::Host for ChannelStoreData {
                 )
             })
             .collect();
+
+        // Leak-scan WASM-provided content BEFORE host-side auto-injection.
+        // Auto-injected credentials are trusted host-side values that must not
+        // be flagged by the leak detector.
+        {
+            let url_for_scan = &injected_url;
+            let header_vec: Vec<(String, String)> = headers
+                .iter()
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect();
+            let leak_detector = LeakDetector::new();
+            leak_detector
+                .scan_http_request(url_for_scan, &header_vec, body.as_deref())
+                .map_err(|e| format!("Potential secret leak blocked: {}", e))?;
+        }
+
+        // Auto-inject credentials based on capability mappings (Bearer, Header).
+        // WASM channels don't include auth headers explicitly; the host injects
+        // them based on the credential mappings in the capabilities file.
+        if let Some(http_cap) = &self.host_state.capabilities().tool_capabilities.http
+            && let Ok(parsed) = reqwest::Url::parse(&injected_url)
+            && let Some(host) = parsed.host_str()
+        {
+            for mapping in http_cap.credentials.values() {
+                let matches_host = mapping.host_patterns.iter().any(|p| {
+                    if let Some(suffix) = p.strip_prefix("*.") {
+                        host.ends_with(suffix) || host == suffix
+                    } else {
+                        host == p
+                    }
+                });
+                if !matches_host {
+                    continue;
+                }
+                let cred_key = mapping.secret_name.to_uppercase();
+                let cred_value = self.credentials.get(&cred_key);
+                if let Some(value) = cred_value {
+                    match &mapping.location {
+                        crate::secrets::CredentialLocation::AuthorizationBearer => {
+                            if !headers.contains_key("Authorization")
+                                && !headers.contains_key("authorization")
+                            {
+                                headers.insert(
+                                    "Authorization".to_string(),
+                                    format!("Bearer {}", value),
+                                );
+                                tracing::debug!(
+                                    host = %host,
+                                    "Auto-injected Bearer credential from capability mapping"
+                                );
+                            }
+                        }
+                        crate::secrets::CredentialLocation::Header {
+                            name: header_name,
+                            prefix,
+                        } => {
+                            let header_lower = header_name.to_lowercase();
+                            if !headers.contains_key(header_name)
+                                && !headers.contains_key(&header_lower)
+                            {
+                                let header_value = if let Some(pfx) = prefix {
+                                    format!("{}{}", pfx, value)
+                                } else {
+                                    value.clone()
+                                };
+                                headers.insert(header_name.clone(), header_value);
+                                tracing::debug!(
+                                    host = %host,
+                                    header = %header_name,
+                                    "Auto-injected header credential from capability mapping"
+                                );
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
 
         let headers_changed = headers
             .values()
@@ -270,15 +348,6 @@ impl near::agent::channel_host::Host for ChannelStoreData {
         );
 
         let url = injected_url;
-        let leak_detector = LeakDetector::new();
-        let header_vec: Vec<(String, String)> = headers
-            .iter()
-            .map(|(k, v)| (k.clone(), v.clone()))
-            .collect();
-
-        leak_detector
-            .scan_http_request(&url, &header_vec, body.as_deref())
-            .map_err(|e| format!("Potential secret leak blocked: {}", e))?;
 
         // Get the max response size from capabilities (default 10MB).
         let max_response_bytes = self
@@ -399,7 +468,7 @@ impl near::agent::channel_host::Host for ChannelStoreData {
 
             // Leak detection on response body (best-effort)
             if let Ok(body_str) = std::str::from_utf8(&body) {
-                leak_detector
+                LeakDetector::new()
                     .scan_and_clean(body_str)
                     .map_err(|e| format!("Potential secret leak in response: {}", e))?;
             }
@@ -558,6 +627,12 @@ pub struct WasmChannel {
     /// Consecutive response failures for health monitoring.
     /// Reset to 0 on success; emits a warning after `CONSECUTIVE_ERROR_THRESHOLD`.
     consecutive_errors: AtomicU32,
+
+    /// Shutdown sender for the Socket Mode bridge task.
+    socket_shutdown_tx: RwLock<Option<oneshot::Sender<()>>>,
+
+    /// Secrets store for Socket Mode (reads app token at bridge startup).
+    secrets_store: Option<Arc<dyn crate::secrets::SecretsStore>>,
 }
 
 impl WasmChannel {
@@ -590,6 +665,8 @@ impl WasmChannel {
             pairing_store,
             workspace_store: Arc::new(ChannelWorkspaceStore::new()),
             consecutive_errors: AtomicU32::new(0),
+            socket_shutdown_tx: RwLock::new(None),
+            secrets_store: None,
         }
     }
 
@@ -617,6 +694,15 @@ impl WasmChannel {
             config = %*config_guard,
             "Updated channel config"
         );
+    }
+
+    /// Set the secrets store for Socket Mode support.
+    ///
+    /// Must be called before `start()`. The bridge reads the app-level token
+    /// from this store at connection time — the token never enters the WASM
+    /// credential map.
+    pub fn set_secrets_store(&mut self, store: Arc<dyn crate::secrets::SecretsStore>) {
+        self.secrets_store = Some(store);
     }
 
     /// Set a credential for URL injection.
@@ -911,7 +997,7 @@ impl WasmChannel {
             path = path,
             body_len = body.len(),
             secret_validated = secret_validated,
-            "call_on_http_request invoked (webhook received)"
+            "call_on_http_request invoked"
         );
 
         // Log the body for debugging (truncated at char boundary)
@@ -1725,6 +1811,57 @@ impl WasmChannel {
         });
     }
 
+    /// Start the Socket Mode bridge if configured.
+    ///
+    /// Requires an `Arc<WasmChannel>` because the bridge needs to call
+    /// `call_on_http_request` from a spawned task. Called by `SharedWasmChannel::start()`
+    /// which has access to the Arc.
+    async fn start_socket_bridge(&self, channel_arc: Arc<WasmChannel>) {
+        let socket_config = match &self.capabilities.socket_mode {
+            Some(config) => config.clone(),
+            None => return,
+        };
+
+        // Check if the app token is available (secrets store or env var)
+        let in_secrets = if let Some(ref secrets) = self.secrets_store {
+            secrets
+                .exists("default", &socket_config.app_token_secret)
+                .await
+                .unwrap_or(false)
+        } else {
+            false
+        };
+        let env_name = socket_config.app_token_secret.to_uppercase();
+        let in_env = std::env::var(&env_name)
+            .map(|v| !v.is_empty())
+            .unwrap_or(false);
+
+        if !in_secrets && !in_env {
+            tracing::info!(
+                channel = %self.name,
+                secret = %socket_config.app_token_secret,
+                env_var = %env_name,
+                "Socket Mode app token not found — falling back to webhook mode"
+            );
+            return;
+        }
+
+        let (shutdown_tx, shutdown_rx) = oneshot::channel();
+        *self.socket_shutdown_tx.write().await = Some(shutdown_tx);
+
+        tracing::info!(
+            channel = %self.name,
+            "Starting Socket Mode bridge"
+        );
+
+        crate::channels::wasm::socket_bridge::spawn_socket_bridge(
+            channel_arc,
+            socket_config,
+            self.secrets_store.clone(),
+            shutdown_rx,
+        );
+    }
+
     /// Execute a single poll callback with a fresh WASM instance.
     ///
     /// Returns any emitted messages from the callback. Pending workspace writes
@@ -2129,6 +2266,11 @@ impl Channel for WasmChannel {
         // Stop polling by dropping the sender (receiver will complete)
         let _ = self.poll_shutdown_tx.write().await.take();
 
+        // Stop Socket Mode bridge
+        if let Some(tx) = self.socket_shutdown_tx.write().await.take() {
+            let _ = tx.send(());
+        }
+
         // Clear the message sender
         *self.message_tx.write().await = None;
 
@@ -2190,7 +2332,14 @@ impl Channel for SharedWasmChannel {
     }
 
     async fn start(&self) -> Result<MessageStream, ChannelError> {
-        self.inner.start().await
+        let stream = self.inner.start().await?;
+
+        // Start Socket Mode bridge if configured (needs Arc<WasmChannel>)
+        self.inner
+            .start_socket_bridge(Arc::clone(&self.inner))
+            .await;
+
+        Ok(stream)
     }
 
     async fn respond(
@@ -3480,6 +3629,34 @@ mod tests {
         .await
         .expect("spawn_blocking panicked");
         assert_eq!(result, 42);
+    }
+
+    #[test]
+    fn test_channel_capabilities_socket_mode_default_none() {
+        let caps = crate::channels::wasm::capabilities::ChannelCapabilities::default();
+        assert!(caps.socket_mode.is_none());
+    }
+
+    #[test]
+    fn test_channel_capabilities_with_socket_mode() {
+        let caps = crate::channels::wasm::capabilities::ChannelCapabilities {
+            socket_mode: Some(crate::channels::wasm::capabilities::SocketModeConfig {
+                open_url: "https://slack.com/api/apps.connections.open".to_string(),
+                app_token_secret: "slack_app_token".to_string(),
+                reconnect_delay_ms: 5000,
+                max_reconnect_attempts: 10,
+            }),
+            ..Default::default()
+        };
+        assert!(caps.socket_mode.is_some());
+        let socket_mode = caps.socket_mode.unwrap();
+        assert_eq!(socket_mode.app_token_secret, "slack_app_token");
+        assert_eq!(
+            socket_mode.open_url,
+            "https://slack.com/api/apps.connections.open"
+        );
+        assert_eq!(socket_mode.reconnect_delay_ms, 5000);
+        assert_eq!(socket_mode.max_reconnect_attempts, 10);
     }
 
     /// Verify a real HTTP request works using the dedicated-runtime pattern.

@@ -11,8 +11,13 @@
       },
       {
         "name": "slack_signing_secret",
-        "prompt": "Enter your Slack Signing Secret (from App Credentials)",
-        "optional": false
+        "prompt": "Enter your Slack Signing Secret (from App Credentials, optional for Socket Mode)",
+        "optional": true
+      },
+      {
+        "name": "slack_app_token",
+        "prompt": "Enter your Slack App-Level Token (xapp-...) for Socket Mode (optional)",
+        "optional": true
       }
     ]
   },
@@ -43,12 +48,18 @@
       "emit_rate_limit": {
         "messages_per_minute": 100,
         "messages_per_hour": 5000
+      },
+      "socket_mode": {
+        "open_url": "https://slack.com/api/apps.connections.open",
+        "app_token_secret": "slack_app_token",
+        "reconnect_delay_ms": 5000,
+        "max_reconnect_attempts": 10
       }
     }
   },
   "config": {
     "signing_secret_name": "slack_signing_secret",
-    "owner_id": null,
+    "owner_id": "U0AGKDRS8HJ",
     "dm_policy": "pairing",
     "allow_from": []
   }

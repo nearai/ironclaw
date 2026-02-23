@@ -86,11 +86,14 @@ mod loader;
 mod router;
 mod runtime;
 mod schema;
+mod socket_bridge;
 mod wrapper;
 
 // Core types
 pub use bundled::{available_channel_names, bundled_channel_names, install_bundled_channel};
-pub use capabilities::{ChannelCapabilities, EmitRateLimitConfig, HttpEndpointConfig, PollConfig};
+pub use capabilities::{
+    ChannelCapabilities, EmitRateLimitConfig, HttpEndpointConfig, PollConfig, SocketModeConfig,
+};
 pub use error::WasmChannelError;
 pub use host::{ChannelEmitRateLimiter, ChannelHostState, EmittedMessage};
 pub use loader::{

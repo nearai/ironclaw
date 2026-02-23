@@ -558,7 +558,7 @@ fn handle_slack_event(event: SlackEvent, team_id: Option<String>) {
             }
         }
 
-        // Direct message to the bot
+        // Direct message or threaded reply to the bot
         "message" => {
             // Skip messages from bots (including ourselves)
             if event.bot_id.is_some() {
@@ -576,12 +576,23 @@ fn handle_slack_event(event: SlackEvent, team_id: Option<String>) {
                 event.text,
                 event.ts.clone(),
             ) {
-                // Only process DMs (channel IDs starting with D)
-                if channel.starts_with('D') {
+                let is_dm = channel.starts_with('D');
+                let is_threaded_reply = event.thread_ts.is_some();
+
+                // Process DMs (channel IDs starting with D) and threaded
+                // replies in channels. Threaded replies catch approval
+                // responses ("yes"/"no") and follow-up messages in threads
+                // where the bot was @mentioned.
+                if is_dm {
                     if !check_sender_permission(&user, &channel, true) {
                         return;
                     }
                     emit_message(user, text, channel, event.thread_ts.or(Some(ts)), team_id);
+                } else if is_threaded_reply {
+                    if !check_sender_permission(&user, &channel, false) {
+                        return;
+                    }
+                    emit_message(user, text, channel, event.thread_ts, team_id);
                 }
             }
         }
