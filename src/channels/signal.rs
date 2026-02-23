@@ -92,7 +92,7 @@ pub struct SignalChannel {
 }
 
 impl SignalChannel {
-    /// Create a new Signal channel.
+    /// Create a new Signal channel with normalized config and fresh client/cache.
     pub fn new(config: SignalConfig) -> Result<Self, ChannelError> {
         let mut config = config;
         config.http_url = config.http_url.trim_end_matches('/').to_string();
@@ -103,12 +103,25 @@ impl SignalChannel {
             .map_err(|e| ChannelError::Http(e.to_string()))?;
 
         let cap = REPLY_TARGETS_CAP;
+        let reply_targets = Arc::new(RwLock::new(LruCache::new(cap)));
 
-        Ok(Self {
+        Ok(Self::from_parts(config, client, reply_targets))
+    }
+
+    /// Construct a SignalChannel from pre-validated parts.
+    ///
+    /// Used by [`new()`][Self::new] after normalization and by [`sse_listener`]
+    /// to ensure both code paths use the same constructor.
+    fn from_parts(
+        config: SignalConfig,
+        client: Client,
+        reply_targets: Arc<RwLock<LruCache<Uuid, String>>>,
+    ) -> Self {
+        Self {
             config,
             client,
-            reply_targets: Arc::new(RwLock::new(LruCache::new(cap))),
-        })
+            reply_targets,
+        }
     }
 
     /// Effective sender: prefer `sourceNumber` (E.164), fall back to `source`
@@ -590,11 +603,7 @@ async fn sse_listener(
     tx: tokio::sync::mpsc::Sender<IncomingMessage>,
     reply_targets: Arc<RwLock<LruCache<Uuid, String>>>,
 ) -> Result<(), ChannelError> {
-    let channel = SignalChannel {
-        config,
-        client,
-        reply_targets: Arc::clone(&reply_targets),
-    };
+    let channel = SignalChannel::from_parts(config, client, Arc::clone(&reply_targets));
 
     let mut url = reqwest::Url::parse(&format!("{}/api/v1/events", channel.config.http_url))
         .map_err(|e| ChannelError::StartupFailed {
