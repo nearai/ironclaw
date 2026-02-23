@@ -379,6 +379,8 @@ async fn fetch_resource_metadata(
 
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(10))
+        // Disable redirects to prevent SSRF via redirect chains
+        .redirect(reqwest::redirect::Policy::none())
         .build()
         .map_err(|e| AuthError::Http(e.to_string()))?;
 
@@ -431,6 +433,7 @@ pub async fn discover_authorization_server(
     validate_url_safe(&well_known_url)?;
 
     let client = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
         .timeout(Duration::from_secs(10))
         .build()
         .map_err(|e| AuthError::Http(e.to_string()))?;
