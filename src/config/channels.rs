@@ -51,7 +51,7 @@ pub struct SignalConfig {
     pub http_url: String,
     /// Signal account identifier (E.164 phone number, e.g. `+1234567890`).
     pub account: String,
-    /// Users allowed to interact with the bot.
+    /// Users allowed to interact with the bot in DMs.
     ///
     /// Each entry is one of:
     /// - `*` — allow everyone
@@ -60,13 +60,27 @@ pub struct SignalConfig {
     /// - `uuid:<id>` prefix form (e.g. `uuid:a1b2c3d4-e5f6-7890-abcd-ef1234567890`)
     ///
     /// An empty list denies all senders (secure by default).
-    pub allowed_users: Vec<String>,
+    pub allow_from: Vec<String>,
     /// Groups allowed to interact with the bot.
     ///
     /// - Empty list — deny all group messages (DMs only, secure by default).
     /// - `*` — allow all groups.
     /// - Specific group IDs — allow only those groups.
-    pub allowed_groups: Vec<String>,
+    pub allow_from_groups: Vec<String>,
+    /// DM policy: "open", "allowlist", or "pairing". Default: "pairing".
+    ///
+    /// - "open" — allow all DM senders (ignores allow_from for DMs)
+    /// - "allowlist" — only allow senders in allow_from list
+    /// - "pairing" — allowlist + send pairing reply to unknown users
+    pub dm_policy: String,
+    /// Group policy: "allowlist", "open", or "disabled". Default: "allowlist".
+    ///
+    /// - "disabled" — deny all group messages
+    /// - "allowlist" — check allow_from_groups and group_allow_from
+    /// - "open" — accept all group messages (respects allow_from_groups for group ID)
+    pub group_policy: String,
+    /// Allow list for group message senders. If empty, inherits from allow_from.
+    pub group_allow_from: Vec<String>,
     /// Skip messages that contain only attachments (no text).
     pub ignore_attachments: bool,
     /// Skip story messages.
@@ -103,7 +117,7 @@ impl ChannelsConfig {
                 key: "SIGNAL_ACCOUNT".to_string(),
                 message: "SIGNAL_ACCOUNT is required when SIGNAL_HTTP_URL is set".to_string(),
             })?;
-            let allowed_users = match std::env::var_os("SIGNAL_ALLOWED_USERS") {
+            let allow_from = match std::env::var_os("SIGNAL_ALLOW_FROM") {
                 None => vec![account.clone()],
                 Some(val) => {
                     let s = val.to_string_lossy();
@@ -113,11 +127,25 @@ impl ChannelsConfig {
                         .collect()
                 }
             };
+            let dm_policy =
+                optional_env("SIGNAL_DM_POLICY")?.unwrap_or_else(|| "pairing".to_string());
+            let group_policy =
+                optional_env("SIGNAL_GROUP_POLICY")?.unwrap_or_else(|| "allowlist".to_string());
             Some(SignalConfig {
                 http_url,
                 account,
-                allowed_users,
-                allowed_groups: optional_env("SIGNAL_ALLOWED_GROUPS")?
+                allow_from,
+                allow_from_groups: optional_env("SIGNAL_ALLOW_FROM_GROUPS")?
+                    .map(|s| {
+                        s.split(',')
+                            .map(|e| e.trim().to_string())
+                            .filter(|s| !s.is_empty())
+                            .collect()
+                    })
+                    .unwrap_or_default(),
+                dm_policy,
+                group_policy,
+                group_allow_from: optional_env("SIGNAL_GROUP_ALLOW_FROM")?
                     .map(|s| {
                         s.split(',')
                             .map(|e| e.trim().to_string())

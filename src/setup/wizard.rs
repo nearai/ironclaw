@@ -1560,14 +1560,20 @@ impl SetupWizard {
             self.settings.channels.signal_enabled = result.enabled;
             self.settings.channels.signal_http_url = Some(result.http_url);
             self.settings.channels.signal_account = Some(result.account);
-            self.settings.channels.signal_allowed_users = Some(result.allowed_users);
-            self.settings.channels.signal_allowed_groups = Some(result.allowed_groups);
+            self.settings.channels.signal_allow_from = Some(result.allow_from);
+            self.settings.channels.signal_allow_from_groups = Some(result.allow_from_groups);
+            self.settings.channels.signal_dm_policy = Some(result.dm_policy);
+            self.settings.channels.signal_group_policy = Some(result.group_policy);
+            self.settings.channels.signal_group_allow_from = Some(result.group_allow_from);
         } else {
             self.settings.channels.signal_enabled = false;
             self.settings.channels.signal_http_url = None;
             self.settings.channels.signal_account = None;
-            self.settings.channels.signal_allowed_users = None;
-            self.settings.channels.signal_allowed_groups = None;
+            self.settings.channels.signal_allow_from = None;
+            self.settings.channels.signal_allow_from_groups = None;
+            self.settings.channels.signal_dm_policy = None;
+            self.settings.channels.signal_group_policy = None;
+            self.settings.channels.signal_group_allow_from = None;
         }
 
         let discovered_by_name: HashMap<String, ChannelCapabilitiesFile> =
@@ -1972,12 +1978,23 @@ impl SetupWizard {
         if let Some(ref account) = self.settings.channels.signal_account {
             env_vars.push(("SIGNAL_ACCOUNT", account.clone()));
         }
-        if let Some(ref allowed_users) = self.settings.channels.signal_allowed_users {
-            env_vars.push(("SIGNAL_ALLOWED_USERS", allowed_users.clone()));
+        if let Some(ref allow_from) = self.settings.channels.signal_allow_from {
+            env_vars.push(("SIGNAL_ALLOW_FROM", allow_from.clone()));
         }
-        if let Some(ref allowed_groups) = self.settings.channels.signal_allowed_groups {
-            if !allowed_groups.is_empty() {
-                env_vars.push(("SIGNAL_ALLOWED_GROUPS", allowed_groups.clone()));
+        if let Some(ref allow_from_groups) = self.settings.channels.signal_allow_from_groups {
+            if !allow_from_groups.is_empty() {
+                env_vars.push(("SIGNAL_ALLOW_FROM_GROUPS", allow_from_groups.clone()));
+            }
+        }
+        if let Some(ref dm_policy) = self.settings.channels.signal_dm_policy {
+            env_vars.push(("SIGNAL_DM_POLICY", dm_policy.clone()));
+        }
+        if let Some(ref group_policy) = self.settings.channels.signal_group_policy {
+            env_vars.push(("SIGNAL_GROUP_POLICY", group_policy.clone()));
+        }
+        if let Some(ref group_allow_from) = self.settings.channels.signal_group_allow_from {
+            if !group_allow_from.is_empty() {
+                env_vars.push(("SIGNAL_GROUP_ALLOW_FROM", group_allow_from.clone()));
             }
         }
 

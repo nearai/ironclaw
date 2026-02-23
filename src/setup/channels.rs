@@ -647,8 +647,11 @@ pub struct SignalSetupResult {
     pub enabled: bool,
     pub http_url: String,
     pub account: String,
-    pub allowed_users: String,
-    pub allowed_groups: String,
+    pub allow_from: String,
+    pub allow_from_groups: String,
+    pub dm_policy: String,
+    pub group_policy: String,
+    pub group_allow_from: String,
 }
 
 /// Set up HTTP webhook channel.
@@ -713,7 +716,7 @@ fn validate_e164(account: &str) -> Result<(), String> {
     Ok(())
 }
 
-fn validate_allowed_users_list(list: &str) -> Result<(), String> {
+fn validate_allow_from_list(list: &str) -> Result<(), String> {
     if list.is_empty() {
         return Ok(());
     }
@@ -728,7 +731,7 @@ fn validate_allowed_users_list(list: &str) -> Result<(), String> {
         if let Some(uuid_part) = trimmed.strip_prefix("uuid:") {
             if Uuid::parse_str(uuid_part).is_err() {
                 return Err(format!(
-                    "allowed_users[{}]: '{}' is not a valid UUID (after 'uuid:' prefix)",
+                    "allow_from[{}]: '{}' is not a valid UUID (after 'uuid:' prefix)",
                     i, trimmed
                 ));
             }
@@ -741,14 +744,14 @@ fn validate_allowed_users_list(list: &str) -> Result<(), String> {
             continue;
         }
         return Err(format!(
-            "allowed_users[{}]: '{}' must be '*', E.164 phone number, UUID, or 'uuid:<id>'",
+            "allow_from[{}]: '{}' must be '*', E.164 phone number, UUID, or 'uuid:<id>'",
             i, trimmed
         ));
     }
     Ok(())
 }
 
-fn validate_allowed_groups_list(list: &str) -> Result<(), String> {
+fn validate_allow_from_groups_list(list: &str) -> Result<(), String> {
     if list.is_empty() {
         return Ok(());
     }
@@ -762,7 +765,7 @@ fn validate_allowed_groups_list(list: &str) -> Result<(), String> {
         }
         if trimmed.is_empty() {
             return Err(format!(
-                "allowed_groups[{}]: group ID cannot be empty",
+                "allow_from_groups[{}]: group ID cannot be empty",
                 i
             ));
         }
@@ -802,24 +805,42 @@ pub async fn setup_signal(_settings: &Settings) -> Result<SignalSetupResult, Cha
         return Err(ChannelSetupError::Validation(e));
     }
 
-    let allowed_users = optional_input(
-        "Allowed users (comma-separated: E.164 numbers, '*' for anyone, UUIDs or 'uuid:<id>'; empty for self-only)",
+    let allow_from = optional_input(
+        "Allow from (comma-separated: E.164 numbers, '*' for anyone, UUIDs or 'uuid:<id>'; empty for self-only)",
         Some(&format!("default: {} (self-only)", account)),
     )?
     .unwrap_or_else(|| account.clone());
 
-    let allowed_groups = optional_input(
-        "Allowed groups (comma-separated group IDs, '*' for any group; empty for none)",
+    let dm_policy = optional_input(
+        "DM policy (open, allowlist, pairing)",
+        Some("default: pairing"),
+    )?
+    .unwrap_or_else(|| "pairing".to_string());
+
+    let allow_from_groups = optional_input(
+        "Allow from groups (comma-separated group IDs, '*' for any group; empty for none)",
         Some("default: (none)"),
     )?
     .unwrap_or_default();
 
-    if let Err(e) = validate_allowed_users_list(&allowed_users) {
+    let group_policy = optional_input(
+        "Group policy (allowlist, open, disabled)",
+        Some("default: allowlist"),
+    )?
+    .unwrap_or_else(|| "allowlist".to_string());
+
+    let group_allow_from = optional_input(
+        "Group allow from (comma-separated member IDs; empty to inherit from allow_from)",
+        Some("default: (inherit from allow_from)"),
+    )?
+    .unwrap_or_default();
+
+    if let Err(e) = validate_allow_from_list(&allow_from) {
         print_error(&e);
         return Err(ChannelSetupError::Validation(e));
     }
 
-    if let Err(e) = validate_allowed_groups_list(&allowed_groups) {
+    if let Err(e) = validate_allow_from_groups_list(&allow_from_groups) {
         print_error(&e);
         return Err(ChannelSetupError::Validation(e));
     }
@@ -827,23 +848,33 @@ pub async fn setup_signal(_settings: &Settings) -> Result<SignalSetupResult, Cha
     println!();
     print_success(&format!("Signal channel configured for account: {}", account));
     print_info(&format!("HTTP URL: {}", http_url));
-    if allowed_users == account {
-        print_info("Allowed users: self-only");
+    if allow_from == account {
+        print_info("Allow from: self-only");
     } else {
-        print_info(&format!("Allowed users: {}", allowed_users));
+        print_info(&format!("Allow from: {}", allow_from));
     }
-    if allowed_groups.is_empty() {
-        print_info("Allowed groups: (none)");
+    print_info(&format!("DM policy: {}", dm_policy));
+    if allow_from_groups.is_empty() {
+        print_info("Allow from groups: (none)");
     } else {
-        print_info(&format!("Allowed groups: {}", allowed_groups));
+        print_info(&format!("Allow from groups: {}", allow_from_groups));
+    }
+    print_info(&format!("Group policy: {}", group_policy));
+    if group_allow_from.is_empty() {
+        print_info("Group allow from: (inherits from allow_from)");
+    } else {
+        print_info(&format!("Group allow from: {}", group_allow_from));
     }
 
     Ok(SignalSetupResult {
         enabled: true,
         http_url,
         account,
-        allowed_users,
-        allowed_groups,
+        allow_from,
+        allow_from_groups,
+        dm_policy,
+        group_policy,
+        group_allow_from,
     })
 }
 

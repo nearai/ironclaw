@@ -27,6 +27,7 @@ const MAX_SSE_BUFFER_SIZE: usize = 1024 * 1024;
 const MAX_SSE_EVENT_SIZE: usize = 256 * 1024;
 const MAX_HTTP_RESPONSE_SIZE: usize = 10 * 1024 * 1024;
 const MAX_REPLY_TARGETS: usize = 10000;
+const MAX_ERROR_LOG_BODY: usize = 1024;
 
 const REPLY_TARGETS_CAP: NonZeroUsize = unsafe { NonZeroUsize::new_unchecked(MAX_REPLY_TARGETS) };
 
@@ -144,13 +145,22 @@ impl SignalChannel {
 
     /// Check whether a sender is in the allowed users list.
     fn is_sender_allowed(&self, sender: &str) -> bool {
-        if self.config.allowed_users.is_empty() {
+        if self.config.allow_from.is_empty() {
             return false;
         }
         self.config
-            .allowed_users
+            .allow_from
             .iter()
             .any(|entry| entry == "*" || Self::normalize_allow_entry(entry) == Self::normalize_allow_entry(sender))
+    }
+
+    /// Get effective group allow_from list (inherits from allow_from if empty).
+    fn effective_group_allow_from(&self) -> &[String] {
+        if self.config.group_allow_from.is_empty() {
+            &self.config.allow_from
+        } else {
+            &self.config.group_allow_from
+        }
     }
 
     /// Check whether a group is in the allowed groups list.
@@ -159,13 +169,24 @@ impl SignalChannel {
     /// - `*` — allow all groups.
     /// - Specific IDs — allow only those groups.
     fn is_group_allowed(&self, group_id: &str) -> bool {
-        if self.config.allowed_groups.is_empty() {
+        if self.config.allow_from_groups.is_empty() {
             return false;
         }
         self.config
-            .allowed_groups
+            .allow_from_groups
             .iter()
             .any(|entry| entry == "*" || entry == group_id)
+    }
+
+    /// Check whether a sender is allowed for group messages.
+    fn is_group_sender_allowed(&self, sender: &str) -> bool {
+        let effective_list = self.effective_group_allow_from();
+        if effective_list.is_empty() {
+            return false;
+        }
+        effective_list
+            .iter()
+            .any(|entry| entry == "*" || Self::normalize_allow_entry(entry) == Self::normalize_allow_entry(sender))
     }
 
     /// Redact credentials from a URL for safe logging.
@@ -417,24 +438,87 @@ impl SignalChannel {
             "Signal: received message"
         );
 
-        if !self.is_sender_allowed(&sender) {
-            tracing::debug!(sender = %sender, "Signal: sender not in allowed_users, dropping");
-            return None;
-        }
-
-        // Apply group allowlist for group messages. DMs (no group_info)
-        // are always accepted — they're filtered by allowed_users above.
-        if let Some(group_id) = data_msg
+        // Check if this is a group message
+        let is_group = data_msg
             .group_info
             .as_ref()
             .and_then(|g| g.group_id.as_deref())
-        {
-            if !self.is_group_allowed(group_id) {
-                tracing::debug!(
-                    group_id = %group_id,
-                    "Signal: group not in allowed_groups, dropping"
-                );
-                return None;
+            .is_some();
+
+        // Apply group policy first (before DM policy for group messages)
+        if is_group {
+            match self.config.group_policy.as_str() {
+                "disabled" => {
+                    tracing::debug!("Signal: group messages disabled, dropping");
+                    return None;
+                }
+                "open" => {
+                    // For "open" policy, check group allowlist but not sender allowlist
+                    if let Some(group_id) = data_msg
+                        .group_info
+                        .as_ref()
+                        .and_then(|g| g.group_id.as_deref())
+                    {
+                        if !self.is_group_allowed(group_id) {
+                            tracing::debug!(
+                                group_id = %group_id,
+                                "Signal: group not in allow_from_groups, dropping"
+                            );
+                            return None;
+                        }
+                    }
+                }
+                "allowlist" | _ => {
+                    // Default to allowlist - check group AND sender
+                    if let Some(group_id) = data_msg
+                        .group_info
+                        .as_ref()
+                        .and_then(|g| g.group_id.as_deref())
+                    {
+                        if !self.is_group_allowed(group_id) {
+                            tracing::debug!(
+                                group_id = %group_id,
+                                "Signal: group not in allow_from_groups, dropping"
+                            );
+                            return None;
+                        }
+                        // Also check sender is allowed for group
+                        if !self.is_group_sender_allowed(&sender) {
+                            tracing::debug!(
+                                sender = %sender,
+                                group_id = %group_id,
+                                "Signal: sender not in group_allow_from, dropping"
+                            );
+                            return None;
+                        }
+                    }
+                }
+            }
+        } else {
+            // DM message - apply DM policy
+            match self.config.dm_policy.as_str() {
+                "open" => {
+                    // Allow all DM senders - no allow_from check needed
+                }
+                "pairing" => {
+                    // Pairing policy: check allow_from + pairing store
+                    // For now, just check allow_from; full pairing flow requires
+                    // PairingStore integration which will be added in a future PR
+                    if !self.is_sender_allowed(&sender) {
+                        tracing::debug!(
+                            sender = %sender,
+                            "Signal: sender not in allow_from with pairing policy, dropping (pairing store integration pending)"
+                        );
+                        return None;
+                    }
+                }
+                "allowlist" | _ => {
+                    // Default: check allow_from list
+                    if !self.is_sender_allowed(&sender) {
+                        tracing::debug!(sender = %sender, "Signal: sender not in allow_from, dropping");
+                        return None;
+                    }
+                }
             }
         }
 
@@ -628,8 +712,22 @@ async fn sse_listener(
             Ok(r) if r.status().is_success() => r,
             Ok(r) => {
                 let status = r.status();
-                let bytes = r.bytes().await.unwrap_or_default();
-                let body = String::from_utf8_lossy(&bytes[..bytes.len().min(1024)]);
+                let mut stream = r.bytes_stream();
+                let mut bytes = Vec::new();
+                let mut collected = 0usize;
+                while let Some(chunk) = stream.next().await {
+                    let chunk = chunk.unwrap_or_default();
+                    let remaining = MAX_ERROR_LOG_BODY.saturating_sub(collected);
+                    if remaining == 0 {
+                        break;
+                    }
+                    bytes.extend_from_slice(&chunk[..chunk.len().min(remaining)]);
+                    collected = bytes.len();
+                    if collected >= MAX_ERROR_LOG_BODY {
+                        break;
+                    }
+                }
+                let body = String::from_utf8_lossy(&bytes);
                 tracing::warn!("Signal SSE returned {status}: {body}");
                 tokio::time::sleep(retry_delay).await;
                 retry_delay = (retry_delay * 2).min(max_delay);
@@ -820,8 +918,11 @@ mod tests {
         SignalConfig {
             http_url: "http://127.0.0.1:8686".to_string(),
             account: "+1234567890".to_string(),
-            allowed_users: vec!["+1111111111".to_string()],
-            allowed_groups: vec![],
+            allow_from: vec!["+1111111111".to_string()],
+            allow_from_groups: vec![],
+            dm_policy: "allowlist".to_string(),
+            group_policy: "disabled".to_string(),
+            group_allow_from: vec![],
             ignore_attachments: false,
             ignore_stories: false,
         }
@@ -832,8 +933,11 @@ mod tests {
         SignalConfig {
             http_url: "http://127.0.0.1:8686".to_string(),
             account: "+1234567890".to_string(),
-            allowed_users: vec!["*".to_string()],
-            allowed_groups: vec![group_id.to_string()],
+            allow_from: vec!["*".to_string()],
+            allow_from_groups: vec![group_id.to_string()],
+            dm_policy: "allowlist".to_string(),
+            group_policy: "allowlist".to_string(),
+            group_allow_from: vec![],
             ignore_attachments: true,
             ignore_stories: true,
         }
@@ -869,8 +973,8 @@ mod tests {
         let ch = make_channel()?;
         assert_eq!(ch.config.http_url, "http://127.0.0.1:8686");
         assert_eq!(ch.config.account, "+1234567890");
-        assert_eq!(ch.config.allowed_users.len(), 1);
-        assert!(ch.config.allowed_groups.is_empty());
+        assert_eq!(ch.config.allow_from.len(), 1);
+        assert!(ch.config.allow_from_groups.is_empty());
         assert!(!ch.config.ignore_attachments);
         assert!(!ch.config.ignore_stories);
         Ok(())
@@ -888,7 +992,7 @@ mod tests {
     #[test]
     fn wildcard_allows_anyone() -> Result<(), ChannelError> {
         let mut config = make_config();
-        config.allowed_users = vec!["*".to_string()];
+        config.allow_from = vec!["*".to_string()];
         let ch = SignalChannel::new(config)?;
         assert!(ch.is_sender_allowed("+9999999999"));
         Ok(())
@@ -911,7 +1015,7 @@ mod tests {
     #[test]
     fn empty_allowlist_denies_all() -> Result<(), ChannelError> {
         let mut config = make_config();
-        config.allowed_users = vec![];
+        config.allow_from = vec![];
         let ch = SignalChannel::new(config)?;
         assert!(!ch.is_sender_allowed("+1111111111"));
         Ok(())
@@ -921,7 +1025,7 @@ mod tests {
     fn uuid_prefix_in_allowlist() -> Result<(), ChannelError> {
         let uuid = "a1b2c3d4-e5f6-7890-abcd-ef1234567890";
         let mut config = make_config();
-        config.allowed_users = vec![format!("uuid:{uuid}")];
+        config.allow_from = vec![format!("uuid:{uuid}")];
         let ch = SignalChannel::new(config)?;
         assert!(ch.is_sender_allowed(uuid));
         // Should not match phone numbers.
@@ -933,7 +1037,7 @@ mod tests {
     fn bare_uuid_in_allowlist() -> Result<(), ChannelError> {
         let uuid = "a1b2c3d4-e5f6-7890-abcd-ef1234567890";
         let mut config = make_config();
-        config.allowed_users = vec![uuid.to_string()];
+        config.allow_from = vec![uuid.to_string()];
         let ch = SignalChannel::new(config)?;
         assert!(ch.is_sender_allowed(uuid));
         Ok(())
@@ -942,8 +1046,8 @@ mod tests {
     #[test]
     fn group_allowlist_filtering() -> Result<(), ChannelError> {
         let mut config = make_config();
-        config.allowed_users = vec!["*".to_string()];
-        config.allowed_groups = vec!["group123".to_string()];
+        config.allow_from = vec!["*".to_string()];
+        config.allow_from_groups = vec!["group123".to_string()];
         let ch = SignalChannel::new(config)?;
         assert!(ch.is_group_allowed("group123"));
         assert!(!ch.is_group_allowed("other_group"));
@@ -953,7 +1057,7 @@ mod tests {
     #[test]
     fn group_allowlist_wildcard() -> Result<(), ChannelError> {
         let mut config = make_config();
-        config.allowed_groups = vec!["*".to_string()];
+        config.allow_from_groups = vec!["*".to_string()];
         let ch = SignalChannel::new(config)?;
         assert!(ch.is_group_allowed("any_group"));
         Ok(())
@@ -962,7 +1066,7 @@ mod tests {
     #[test]
     fn group_allowlist_empty_denies_all() -> Result<(), ChannelError> {
         let mut config = make_config();
-        config.allowed_groups = vec![];
+        config.allow_from_groups = vec![];
         let ch = SignalChannel::new(config)?;
         assert!(!ch.is_group_allowed("any_group"));
         Ok(())
@@ -976,8 +1080,8 @@ mod tests {
     }
 
     #[test]
-    fn process_envelope_dm_accepted_with_empty_allowed_groups() -> Result<(), ChannelError> {
-        // Empty allowed_groups = DMs only. DMs should be accepted.
+    fn process_envelope_dm_accepted_with_empty_allow_from_groups() -> Result<(), ChannelError> {
+        // Empty allow_from_groups = DMs only. DMs should be accepted.
         let ch = make_channel()?;
         let env = make_envelope(Some("+1111111111"), Some("Hello!"));
         assert!(ch.process_envelope(&env).is_some());
@@ -985,10 +1089,10 @@ mod tests {
     }
 
     #[test]
-    fn process_envelope_group_denied_with_empty_allowed_groups() -> Result<(), ChannelError> {
-        // Empty allowed_groups = DMs only. Group messages should be denied.
+    fn process_envelope_group_denied_with_empty_allow_from_groups() -> Result<(), ChannelError> {
+        // Empty allow_from_groups = DMs only. Group messages should be denied.
         let mut config = make_config();
-        config.allowed_users = vec!["*".to_string()];
+        config.allow_from = vec!["*".to_string()];
         let ch = SignalChannel::new(config)?;
 
         let env = Envelope {
@@ -1012,7 +1116,7 @@ mod tests {
     }
 
     #[test]
-    fn process_envelope_group_accepted_when_in_allowed_groups() -> Result<(), ChannelError> {
+    fn process_envelope_group_accepted_when_in_allow_from_groups() -> Result<(), ChannelError> {
         let ch = make_channel_with_allowed_group("group123")?;
 
         let env = Envelope {
@@ -1239,7 +1343,7 @@ mod tests {
     #[test]
     fn process_envelope_skips_stories() -> Result<(), ChannelError> {
         let mut config = make_config();
-        config.allowed_users = vec!["*".to_string()];
+        config.allow_from = vec!["*".to_string()];
         config.ignore_stories = true;
         let ch = SignalChannel::new(config)?;
         let mut env = make_envelope(Some("+1111111111"), Some("story text"));
@@ -1251,7 +1355,7 @@ mod tests {
     #[test]
     fn process_envelope_skips_attachment_only() -> Result<(), ChannelError> {
         let mut config = make_config();
-        config.allowed_users = vec!["*".to_string()];
+        config.allow_from = vec!["*".to_string()];
         config.ignore_attachments = true;
         let ch = SignalChannel::new(config)?;
         let env = Envelope {
@@ -1276,7 +1380,7 @@ mod tests {
     fn process_envelope_uuid_sender_dm() -> Result<(), ChannelError> {
         let uuid = "a1b2c3d4-e5f6-7890-abcd-ef1234567890";
         let mut config = make_config();
-        config.allowed_users = vec!["*".to_string()];
+        config.allow_from = vec!["*".to_string()];
         let ch = SignalChannel::new(config)?;
 
         let env = Envelope {
@@ -1343,10 +1447,10 @@ mod tests {
     }
 
     #[test]
-    fn process_envelope_group_not_in_allowed_groups() -> Result<(), ChannelError> {
+    fn process_envelope_group_not_in_allow_from_groups() -> Result<(), ChannelError> {
         let mut config = make_config();
-        config.allowed_users = vec!["*".to_string()];
-        config.allowed_groups = vec!["allowed_group".to_string()];
+        config.allow_from = vec!["*".to_string()];
+        config.allow_from_groups = vec!["allowed_group".to_string()];
         let ch = SignalChannel::new(config)?;
 
         let env = Envelope {
@@ -1515,8 +1619,8 @@ mod tests {
     #[test]
     fn process_envelope_metadata_group_target() -> Result<(), ChannelError> {
         let mut config = make_config();
-        config.allowed_users = vec!["*".to_string()];
-        config.allowed_groups = vec!["*".to_string()];
+        config.allow_from = vec!["*".to_string()];
+        config.allow_from_groups = vec!["*".to_string()];
         let ch = SignalChannel::new(config)?;
 
         let env = Envelope {
@@ -1548,7 +1652,7 @@ mod tests {
         // Even with ignore_attachments=true, messages that have BOTH text
         // and attachments should be processed (only attachment-only are skipped).
         let mut config = make_config();
-        config.allowed_users = vec!["*".to_string()];
+        config.allow_from = vec!["*".to_string()];
         config.ignore_attachments = true;
         let ch = SignalChannel::new(config)?;
 
@@ -1581,7 +1685,7 @@ mod tests {
         // With ignore_attachments=false, attachment-only messages should be
         // processed with the "[Attachment]" placeholder text.
         let mut config = make_config();
-        config.allowed_users = vec!["*".to_string()];
+        config.allow_from = vec!["*".to_string()];
         config.ignore_attachments = false;
         let ch = SignalChannel::new(config)?;
 
@@ -1613,7 +1717,7 @@ mod tests {
     #[test]
     fn process_envelope_source_name_sets_user_name() -> Result<(), ChannelError> {
         let mut config = make_config();
-        config.allowed_users = vec!["*".to_string()];
+        config.allow_from = vec!["*".to_string()];
         let ch = SignalChannel::new(config)?;
 
         let env = Envelope {
@@ -1638,7 +1742,7 @@ mod tests {
     #[test]
     fn process_envelope_empty_source_name_not_set() -> Result<(), ChannelError> {
         let mut config = make_config();
-        config.allowed_users = vec!["*".to_string()];
+        config.allow_from = vec!["*".to_string()];
         let ch = SignalChannel::new(config)?;
 
         let env = Envelope {
@@ -1688,8 +1792,8 @@ mod tests {
     #[test]
     fn process_envelope_group_sets_thread_id_to_uuid() -> Result<(), ChannelError> {
         let mut config = make_config();
-        config.allowed_users = vec!["*".to_string()];
-        config.allowed_groups = vec!["*".to_string()];
+        config.allow_from = vec!["*".to_string()];
+        config.allow_from_groups = vec!["*".to_string()];
         let ch = SignalChannel::new(config)?;
 
         let env = Envelope {
@@ -1720,7 +1824,7 @@ mod tests {
     #[test]
     fn process_envelope_uses_data_message_timestamp() -> Result<(), ChannelError> {
         let mut config = make_config();
-        config.allowed_users = vec!["*".to_string()];
+        config.allow_from = vec!["*".to_string()];
         let ch = SignalChannel::new(config)?;
 
         let env = Envelope {
@@ -1746,7 +1850,7 @@ mod tests {
     #[test]
     fn process_envelope_falls_back_to_envelope_timestamp() -> Result<(), ChannelError> {
         let mut config = make_config();
-        config.allowed_users = vec!["*".to_string()];
+        config.allow_from = vec!["*".to_string()];
         let ch = SignalChannel::new(config)?;
 
         let env = Envelope {
@@ -1771,7 +1875,7 @@ mod tests {
     #[test]
     fn process_envelope_generates_timestamp_when_missing() -> Result<(), ChannelError> {
         let mut config = make_config();
-        config.allowed_users = vec!["*".to_string()];
+        config.allow_from = vec!["*".to_string()];
         let ch = SignalChannel::new(config)?;
 
         let env = Envelope {
@@ -1863,9 +1967,9 @@ mod tests {
     // ── config edge cases ───────────────────────────────────────────
 
     #[test]
-    fn multiple_allowed_users() -> Result<(), ChannelError> {
+    fn multiple_allow_from() -> Result<(), ChannelError> {
         let mut config = make_config();
-        config.allowed_users = vec![
+        config.allow_from = vec![
             "+1111111111".to_string(),
             "+2222222222".to_string(),
             "a1b2c3d4-e5f6-7890-abcd-ef1234567890".to_string(),
@@ -1879,9 +1983,9 @@ mod tests {
     }
 
     #[test]
-    fn multiple_allowed_groups() -> Result<(), ChannelError> {
+    fn multiple_allow_from_groups() -> Result<(), ChannelError> {
         let mut config = make_config();
-        config.allowed_groups = vec!["group_a".to_string(), "group_b".to_string()];
+        config.allow_from_groups = vec!["group_a".to_string(), "group_b".to_string()];
         let ch = SignalChannel::new(config)?;
         assert!(ch.is_group_allowed("group_a"));
         assert!(ch.is_group_allowed("group_b"));
@@ -1893,7 +1997,7 @@ mod tests {
     fn uuid_prefix_normalization_in_allowlist() -> Result<(), ChannelError> {
         let uuid = "a1b2c3d4-e5f6-7890-abcd-ef1234567890";
         let mut config = make_config();
-        config.allowed_users = vec![format!("uuid:{uuid}"), "+1111111111".to_string()];
+        config.allow_from = vec![format!("uuid:{uuid}"), "+1111111111".to_string()];
         let ch = SignalChannel::new(config)?;
         // uuid:-prefixed entry should match bare UUID sender.
         assert!(ch.is_sender_allowed(uuid));
@@ -1911,7 +2015,7 @@ mod tests {
         // With ignore_stories=false, story messages with a data_message
         // should still be processed.
         let mut config = make_config();
-        config.allowed_users = vec!["*".to_string()];
+        config.allow_from = vec!["*".to_string()];
         config.ignore_stories = false;
         let ch = SignalChannel::new(config)?;
 

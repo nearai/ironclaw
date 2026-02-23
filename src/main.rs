@@ -380,9 +380,9 @@ async fn main() -> anyhow::Result<()> {
             url = %safe_url,
             "Signal channel enabled"
         );
-        if signal_config.allowed_users.is_empty() {
+        if signal_config.allow_from.is_empty() {
             tracing::warn!(
-                "Signal channel has empty allowed_users list - ALL messages will be DENIED."
+                "Signal channel has empty allow_from list - ALL messages will be DENIED."
             );
         }
     }
