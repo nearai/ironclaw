@@ -460,16 +460,18 @@ mod tests {
             10_000
         }
         async fn embed(&self, text: &str) -> Result<Vec<f32>, EmbeddingError> {
-            let prev = self.remaining_failures.fetch_sub(1, Ordering::SeqCst);
+            let prev = self.remaining_failures.load(Ordering::SeqCst);
             if prev > 0 {
+                self.remaining_failures.store(prev - 1, Ordering::SeqCst);
                 return Err(EmbeddingError::HttpError("simulated failure".to_string()));
             }
             let val = text.len() as f32 / 100.0;
             Ok(vec![val; self.dimension])
         }
         async fn embed_batch(&self, texts: &[String]) -> Result<Vec<Vec<f32>>, EmbeddingError> {
-            let prev = self.remaining_failures.fetch_sub(1, Ordering::SeqCst);
+            let prev = self.remaining_failures.load(Ordering::SeqCst);
             if prev > 0 {
+                self.remaining_failures.store(prev - 1, Ordering::SeqCst);
                 return Err(EmbeddingError::HttpError("simulated failure".to_string()));
             }
             texts
