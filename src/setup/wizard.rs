@@ -207,6 +207,10 @@ impl SetupWizard {
             print_step(9, total_steps, "Background Tasks");
             self.step_heartbeat()?;
             self.persist_after_step().await;
+
+            // Personal onboarding now happens conversationally during the
+            // user's first interaction with the assistant (see First Contact
+            // block in workspace/mod.rs system_prompt_for_context).
         }
 
         // Save settings and print summary

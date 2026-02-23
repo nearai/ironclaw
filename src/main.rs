@@ -1056,6 +1056,13 @@ async fn setup_wasm_channels(
 /// Check if onboarding is needed and return the reason.
 #[cfg(any(feature = "postgres", feature = "libsql"))]
 fn check_onboard_needed() -> Option<&'static str> {
+    if std::env::var("SKIP_WIZARD")
+        .map(|v| !v.is_empty() && v != "0" && v != "false")
+        .unwrap_or(false)
+    {
+        return None;
+    }
+
     let has_db = std::env::var("DATABASE_URL").is_ok()
         || std::env::var("LIBSQL_PATH").is_ok()
         || ironclaw::config::default_libsql_path().exists();
