@@ -367,13 +367,15 @@ impl RegistryInstaller {
         // Require SHA256 — refuse to install unverified binaries. Check before
         // downloading to avoid wasting bandwidth on manifests that are missing
         // checksums.
-        let expected_sha = artifact.sha256.as_ref().ok_or_else(|| {
-            RegistryError::InvalidManifest {
-                name: manifest.name.clone(),
-                field: "artifacts.wasm32-wasip2.sha256",
-                reason: "sha256 is required for artifact downloads".to_string(),
-            }
-        })?;
+        let expected_sha =
+            artifact
+                .sha256
+                .as_ref()
+                .ok_or_else(|| RegistryError::InvalidManifest {
+                    name: manifest.name.clone(),
+                    field: "artifacts.wasm32-wasip2.sha256",
+                    reason: "sha256 is required for artifact downloads".to_string(),
+                })?;
 
         let target_dir = match manifest.kind {
             ManifestKind::Tool => &self.tools_dir,
