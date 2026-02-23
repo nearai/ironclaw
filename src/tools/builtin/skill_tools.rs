@@ -311,7 +311,7 @@ impl Tool for SkillInstallTool {
             fetch_skill_content(&download_url).await?
         };
 
-        // Check for duplicates and get user_dir under a brief read lock.
+        // Check for duplicates and get install_dir under a brief read lock.
         let (user_dir, skill_name_from_parse) = {
             let guard = self
                 .registry
@@ -331,7 +331,7 @@ impl Tool for SkillInstallTool {
                 )));
             }
 
-            (guard.user_dir().to_path_buf(), skill_name)
+            (guard.install_target_dir().to_path_buf(), skill_name)
         };
 
         // Perform async I/O (write to disk, validate round-trip) with no lock held.

@@ -158,7 +158,7 @@ pub async fn skills_install_handler(
         )));
     };
 
-    // Parse, check duplicates, and get user_dir under a brief read lock.
+    // Parse, check duplicates, and get install_dir under a brief read lock.
     let (user_dir, skill_name_from_parse) = {
         let guard = registry.read().map_err(|e| {
             (
@@ -179,7 +179,7 @@ pub async fn skills_install_handler(
             ))));
         }
 
-        (guard.user_dir().to_path_buf(), skill_name)
+        (guard.install_target_dir().to_path_buf(), skill_name)
     };
 
     // Perform async I/O (write to disk, load) with no lock held.
