@@ -566,6 +566,10 @@ impl ExtensionManager {
                             fallback_error = %fallback_err,
                             "Fallback install also failed"
                         );
+                        // Forward AlreadyInstalled directly instead of wrapping
+                        if matches!(fallback_err, ExtensionError::AlreadyInstalled(_)) {
+                            return fallback_err;
+                        }
                         // Include both errors so users can diagnose the full chain
                         ExtensionError::Other(format!(
                             "Primary install failed: {}; fallback install also failed: {}",
