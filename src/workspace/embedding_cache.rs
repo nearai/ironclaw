@@ -58,6 +58,12 @@ impl CachedEmbeddingProvider {
         let config = EmbeddingCacheConfig {
             max_entries: config.max_entries.max(1),
         };
+        if config.max_entries > 100_000 {
+            tracing::warn!(
+                max_entries = config.max_entries,
+                "Embedding cache size exceeds 100,000 entries; memory usage may be significant"
+            );
+        }
         Self {
             inner,
             cache: Mutex::new(HashMap::new()),
@@ -90,6 +96,9 @@ impl CachedEmbeddingProvider {
     }
 
     /// Evict the least-recently-used entry if at capacity.
+    // TODO: O(n) scan per eviction. If max_entries grows large, switch to
+    // an ordered data structure (e.g. `IndexMap` with swap_remove, or a
+    // linked-list LRU like the `lru` crate).
     fn evict_lru(cache: &mut HashMap<String, CacheEntry>, max_entries: usize) {
         while cache.len() >= max_entries {
             let oldest_key = cache
@@ -132,7 +141,10 @@ impl EmbeddingProvider for CachedEmbeddingProvider {
                 return Ok(entry.embedding.clone());
             }
         }
-        // Lock released before HTTP call
+        // Lock released before HTTP call.
+        // NOTE: Thundering herd — multiple concurrent callers with the same
+        // uncached key will each call the inner provider. This is acceptable:
+        // embeddings are idempotent and the last writer wins in the HashMap.
 
         let embedding = self.inner.embed(text).await?;
 
@@ -417,6 +429,86 @@ mod tests {
         assert_eq!(results[0], expected_a);
         assert_eq!(results[1], expected_bb);
         assert_eq!(results[2], expected_ccc);
+    }
+
+    /// Mock embedding provider that fails the first N calls, then succeeds.
+    struct FailThenSucceedMock {
+        dimension: usize,
+        model: String,
+        remaining_failures: AtomicU32,
+    }
+
+    impl FailThenSucceedMock {
+        fn new(dimension: usize, fail_count: u32) -> Self {
+            Self {
+                dimension,
+                model: "fail-mock".to_string(),
+                remaining_failures: AtomicU32::new(fail_count),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl EmbeddingProvider for FailThenSucceedMock {
+        fn dimension(&self) -> usize {
+            self.dimension
+        }
+        fn model_name(&self) -> &str {
+            &self.model
+        }
+        fn max_input_length(&self) -> usize {
+            10_000
+        }
+        async fn embed(&self, text: &str) -> Result<Vec<f32>, EmbeddingError> {
+            let prev = self.remaining_failures.fetch_sub(1, Ordering::SeqCst);
+            if prev > 0 {
+                return Err(EmbeddingError::HttpError("simulated failure".to_string()));
+            }
+            let val = text.len() as f32 / 100.0;
+            Ok(vec![val; self.dimension])
+        }
+        async fn embed_batch(&self, texts: &[String]) -> Result<Vec<Vec<f32>>, EmbeddingError> {
+            let prev = self.remaining_failures.fetch_sub(1, Ordering::SeqCst);
+            if prev > 0 {
+                return Err(EmbeddingError::HttpError("simulated failure".to_string()));
+            }
+            texts
+                .iter()
+                .map(|t| {
+                    let val = t.len() as f32 / 100.0;
+                    Ok(vec![val; self.dimension])
+                })
+                .collect()
+        }
+    }
+
+    #[tokio::test]
+    async fn error_does_not_pollute_cache() {
+        let inner = Arc::new(FailThenSucceedMock::new(4, 1));
+        let cached =
+            CachedEmbeddingProvider::new(inner.clone(), EmbeddingCacheConfig { max_entries: 100 });
+
+        // First call fails
+        let err = cached.embed("hello").await;
+        assert!(err.is_err());
+        assert!(cached.is_empty().await, "cache should be empty after error");
+
+        // Second call succeeds and should call the inner provider (not serve stale error)
+        let result = cached.embed("hello").await;
+        assert!(result.is_ok());
+        assert_eq!(cached.len().await, 1);
+    }
+
+    #[tokio::test]
+    async fn embed_batch_empty_input() {
+        let inner = Arc::new(CountingMock::new(4, "test-model"));
+        let cached =
+            CachedEmbeddingProvider::new(inner.clone(), EmbeddingCacheConfig { max_entries: 100 });
+
+        let results = cached.embed_batch(&[]).await.unwrap();
+        assert!(results.is_empty());
+        // Inner provider should not have been called
+        assert_eq!(inner.batch_calls(), 0);
     }
 
     #[tokio::test]

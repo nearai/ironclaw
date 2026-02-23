@@ -38,9 +38,13 @@ workspace/
 ```rust
 use crate::workspace::{Workspace, OpenAiEmbeddings, paths};
 
-// Create workspace for a user
+// Create workspace for a user (wraps embeddings in a default LRU cache)
 let workspace = Workspace::new("user_123", pool)
     .with_embeddings(Arc::new(OpenAiEmbeddings::new(api_key)));
+
+// For tests: skip the cache layer (avoids unnecessary overhead with mocks)
+// let workspace = Workspace::new("user_123", pool)
+//     .with_embeddings_uncached(Arc::new(MockEmbeddings::new(1536)));
 
 // Read/write any path
 let doc = workspace.read("projects/alpha/notes.md").await?;
