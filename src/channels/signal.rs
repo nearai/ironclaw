@@ -175,7 +175,7 @@ impl SignalChannel {
         let Some(number) = recipient.strip_prefix('+') else {
             return false;
         };
-        (2..=15).contains(&number.len()) && number.chars().all(|c| c.is_ascii_digit())
+        (7..=15).contains(&number.len()) && number.chars().all(|c| c.is_ascii_digit())
     }
 
     /// Check whether a string is a valid UUID (signal-cli uses these for
