@@ -2700,7 +2700,7 @@ dependencies = [
 
 [[package]]
 name = "ironclaw"
-version = "0.10.0"
+version = "0.11.0"
 dependencies = [
  "aes-gcm",
  "aho-corasick",
@@ -4993,7 +4993,7 @@ dependencies = [
  "darling",
  "proc-macro2",
  "quote",
- "syn 2.0.114",
+ "syn 2.0.116",
 ]
 
 [[package]]
