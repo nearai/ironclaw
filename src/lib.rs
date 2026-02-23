@@ -38,6 +38,11 @@
 //! - **Prompt injection defense** - Sanitize all external data
 //! - **Continuous learning** - Improve estimates from historical data
 
+// Complexity guardrails — these are restriction lints (off by default).
+// See: https://github.com/nearai/ironclaw/issues/338
+#![warn(clippy::cognitive_complexity)]
+#![warn(clippy::too_many_lines)]
+
 pub mod agent;
 pub mod app;
 pub mod boot_screen;
