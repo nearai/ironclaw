@@ -163,7 +163,8 @@ impl Tool for MemoryWriteTool {
                 },
                 "layer": {
                     "type": "string",
-                    "description": "Memory layer to write to (e.g. 'private', 'household', 'finance'). Defaults to 'private'."
+                    "description": "Memory layer to write to (e.g. 'private', 'household', 'finance').",
+                    "default": "private"
                 }
             },
             "required": ["content"]
