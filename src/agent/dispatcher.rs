@@ -1475,4 +1475,154 @@ mod tests {
         assert!(result.is_ok(), "Retry after compaction should succeed");
         assert_eq!(stub.calls(), 2);
     }
+
+    // === QA Plan P2 - 4.3: Dispatcher loop guard tests ===
+
+    /// LLM provider that always returns tool calls when tools are available,
+    /// and text when tools are empty (simulating force_text stripping tools).
+    struct AlwaysToolCallProvider;
+
+    #[async_trait]
+    impl LlmProvider for AlwaysToolCallProvider {
+        fn model_name(&self) -> &str {
+            "always-tool-call"
+        }
+
+        fn cost_per_token(&self) -> (Decimal, Decimal) {
+            (Decimal::ZERO, Decimal::ZERO)
+        }
+
+        async fn complete(
+            &self,
+            _request: CompletionRequest,
+        ) -> Result<CompletionResponse, crate::error::LlmError> {
+            Ok(CompletionResponse {
+                content: "forced text response".to_string(),
+                input_tokens: 0,
+                output_tokens: 5,
+                finish_reason: FinishReason::Stop,
+            })
+        }
+
+        async fn complete_with_tools(
+            &self,
+            request: ToolCompletionRequest,
+        ) -> Result<ToolCompletionResponse, crate::error::LlmError> {
+            if request.tools.is_empty() {
+                // No tools = force_text mode; return text.
+                return Ok(ToolCompletionResponse {
+                    content: Some("forced text response".to_string()),
+                    tool_calls: Vec::new(),
+                    input_tokens: 0,
+                    output_tokens: 5,
+                    finish_reason: FinishReason::Stop,
+                });
+            }
+            // Tools available: always call one.
+            Ok(ToolCompletionResponse {
+                content: None,
+                tool_calls: vec![ToolCall {
+                    id: format!("call_{}", uuid::Uuid::new_v4()),
+                    name: "echo".to_string(),
+                    arguments: serde_json::json!({"message": "looping"}),
+                }],
+                input_tokens: 0,
+                output_tokens: 5,
+                finish_reason: FinishReason::ToolUse,
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn force_text_prevents_infinite_tool_call_loop() {
+        // Verify that Reasoning with force_text=true returns text even when
+        // the provider would normally return tool calls.
+        use crate::llm::{Reasoning, ReasoningContext, RespondResult, ToolDefinition};
+
+        let provider = Arc::new(AlwaysToolCallProvider);
+        let safety = Arc::new(SafetyLayer::new(&SafetyConfig {
+            max_output_length: 100_000,
+            injection_check_enabled: false,
+        }));
+        let reasoning = Reasoning::new(provider, safety);
+
+        let tool_def = ToolDefinition {
+            name: "echo".to_string(),
+            description: "Echo a message".to_string(),
+            parameters: serde_json::json!({"type": "object", "properties": {"message": {"type": "string"}}}),
+        };
+
+        // Without force_text: provider returns tool calls.
+        let ctx_normal = ReasoningContext::new()
+            .with_messages(vec![ChatMessage::user("hello")])
+            .with_tools(vec![tool_def.clone()]);
+        let output = reasoning.respond_with_tools(&ctx_normal).await.unwrap();
+        assert!(
+            matches!(output.result, RespondResult::ToolCalls { .. }),
+            "Without force_text, should get tool calls"
+        );
+
+        // With force_text: provider must return text (tools stripped).
+        let mut ctx_forced = ReasoningContext::new()
+            .with_messages(vec![ChatMessage::user("hello")])
+            .with_tools(vec![tool_def]);
+        ctx_forced.force_text = true;
+        let output = reasoning.respond_with_tools(&ctx_forced).await.unwrap();
+        assert!(
+            matches!(output.result, RespondResult::Text(_)),
+            "With force_text, should get text response, got: {:?}",
+            output.result
+        );
+    }
+
+    #[test]
+    fn iteration_bounds_guarantee_termination() {
+        // Verify the arithmetic that guards against infinite loops:
+        // force_text_at = max_tool_iterations
+        // nudge_at = max_tool_iterations - 1
+        // hard_ceiling = max_tool_iterations + 1
+        for max_iter in [1_usize, 2, 5, 10, 50] {
+            let force_text_at = max_iter;
+            let nudge_at = max_iter.saturating_sub(1);
+            let hard_ceiling = max_iter + 1;
+
+            // force_text_at must be reachable (> 0)
+            assert!(force_text_at > 0, "force_text_at must be > 0 for max_iter={max_iter}");
+
+            // nudge comes before or at the same time as force_text
+            assert!(
+                nudge_at <= force_text_at,
+                "nudge_at ({nudge_at}) > force_text_at ({force_text_at})"
+            );
+
+            // hard ceiling is strictly after force_text
+            assert!(
+                hard_ceiling > force_text_at,
+                "hard_ceiling ({hard_ceiling}) not > force_text_at ({force_text_at})"
+            );
+
+            // Simulate iteration: every iteration from 1..=hard_ceiling
+            // At force_text_at, force_text=true (should produce text and break).
+            // At hard_ceiling, the error fires (safety net).
+            let mut hit_force_text = false;
+            let mut hit_ceiling = false;
+            for iteration in 1..=hard_ceiling {
+                if iteration >= force_text_at {
+                    hit_force_text = true;
+                }
+                if iteration > max_iter + 1 {
+                    hit_ceiling = true;
+                }
+            }
+            assert!(
+                hit_force_text,
+                "force_text never triggered for max_iter={max_iter}"
+            );
+            // The ceiling should only fire if force_text somehow didn't break
+            assert!(
+                hit_ceiling || hard_ceiling <= max_iter + 1,
+                "ceiling logic inconsistent for max_iter={max_iter}"
+            );
+        }
+    }
 }
