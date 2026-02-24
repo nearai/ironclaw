@@ -588,6 +588,14 @@ async fn send_notification(
         return;
     }
 
+    tracing::info!(
+        routine = %routine_name,
+        status = %status,
+        notify_channel = ?notify.channel,
+        notify_user = %notify.user,
+        "Queueing routine notification"
+    );
+
     let icon = match status {
         RunStatus::Ok => "✅",
         RunStatus::Attention => "🔔",

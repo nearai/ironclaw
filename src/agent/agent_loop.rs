@@ -429,11 +429,25 @@ impl Agent {
                                 .and_then(|v| v.as_str())
                                 .map(|s| s.to_string());
 
+                            tracing::info!(
+                                notify_channel = ?notify_channel,
+                                user = %user,
+                                "Dispatching routine notification"
+                            );
+
                             let targeted_ok = if let Some(ref channel) = notify_channel {
-                                channels
-                                    .broadcast(channel, &user, response.clone())
-                                    .await
-                                    .is_ok()
+                                match channels.broadcast(channel, &user, response.clone()).await {
+                                    Ok(()) => true,
+                                    Err(e) => {
+                                        tracing::warn!(
+                                            channel = %channel,
+                                            user = %user,
+                                            "Targeted routine notification failed: {}",
+                                            e
+                                        );
+                                        false
+                                    }
+                                }
                             } else {
                                 false
                             };

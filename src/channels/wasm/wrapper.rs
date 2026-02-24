@@ -2011,10 +2011,16 @@ impl Channel for WasmChannel {
         };
 
         if metadata.get("user_id").is_none() {
-            metadata["user_id"] = serde_json::json!(user_id);
+            metadata["user_id"] = match user_id.parse::<i64>() {
+                Ok(id) => serde_json::json!(id),
+                Err(_) => serde_json::json!(user_id),
+            };
         }
         if metadata.get("sender_id").is_none() {
-            metadata["sender_id"] = serde_json::json!(user_id);
+            metadata["sender_id"] = match user_id.parse::<i64>() {
+                Ok(id) => serde_json::json!(id),
+                Err(_) => serde_json::json!(user_id),
+            };
         }
         if let Some(ref tid) = response.thread_id {
             if metadata.get("thread_id").is_none() {
@@ -2033,6 +2039,17 @@ impl Channel for WasmChannel {
                 metadata["chat_id"] = serde_json::json!(chat_id);
             } else {
                 metadata["chat_id"] = serde_json::json!(user_id);
+            }
+        }
+
+        // Telegram's channel metadata is strict about numeric IDs and may not
+        // have a reply context for proactive sends (routines/heartbeat).
+        if self.name == "telegram" {
+            if metadata.get("message_id").is_none() {
+                metadata["message_id"] = serde_json::Value::Null;
+            }
+            if metadata.get("is_private").is_none() {
+                metadata["is_private"] = serde_json::json!(true);
             }
         }
 
