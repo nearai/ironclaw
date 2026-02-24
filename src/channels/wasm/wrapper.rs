@@ -2173,6 +2173,14 @@ impl Channel for SharedWasmChannel {
         self.inner.respond(msg, response).await
     }
 
+    async fn broadcast(
+        &self,
+        user_id: &str,
+        response: OutgoingResponse,
+    ) -> Result<(), ChannelError> {
+        self.inner.broadcast(user_id, response).await
+    }
+
     async fn send_status(
         &self,
         status: StatusUpdate,
