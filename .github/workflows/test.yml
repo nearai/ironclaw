@@ -7,7 +7,33 @@ on:
 
 jobs:
   tests:
-    name: Run Tests
+    name: Tests (${{ matrix.name }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: all-features
+            flags: "--all-features"
+          - name: default
+            flags: ""
+          - name: libsql-only
+            flags: "--no-default-features --features libsql"
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          profile: minimal
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.name }}
+      - name: Run Tests
+        run: cargo test ${{ matrix.flags }} -- --nocapture
+
+  telegram-tests:
+    name: Telegram Channel Tests
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repository
@@ -17,7 +43,14 @@ jobs:
         with:
           profile: minimal
       - uses: Swatinem/rust-cache@v2
-      - name: Run Tests
-        run: cargo test --all-features -- --nocapture
       - name: Run Telegram Channel Tests
         run: cargo test --manifest-path channels-src/telegram/Cargo.toml -- --nocapture
+
+  docker-build:
+    name: Docker Build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+      - name: Build Docker image
+        run: docker build -t ironclaw-test:ci .

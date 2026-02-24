@@ -287,6 +287,85 @@ pub fn require_param<'a>(
         .ok_or_else(|| ToolError::InvalidParameters(format!("missing '{}' parameter", name)))
 }
 
+/// Validate a tool's `parameters_schema()` against OpenAI strict-mode rules.
+///
+/// Returns a list of validation errors. An empty list means the schema is valid.
+/// Rules enforced:
+/// 1. Top-level must have `"type": "object"`
+/// 2. Top-level must have `"properties"` as an object
+/// 3. Every key in `"required"` must exist in `"properties"`
+/// 4. Nested objects follow the same rules recursively
+/// 5. Array properties should have `"items"` defined
+///
+/// Note: properties without a `"type"` field are allowed (freeform/any-type).
+/// This is an intentional pattern used by tools like `json` and `http` for
+/// OpenAI compatibility, since union types with arrays require `items`.
+pub fn validate_tool_schema(schema: &serde_json::Value, path: &str) -> Vec<String> {
+    let mut errors = Vec::new();
+
+    // Rule 1: must have "type": "object" at this level
+    match schema.get("type").and_then(|t| t.as_str()) {
+        Some("object") => {}
+        Some(other) => {
+            errors.push(format!("{path}: expected type \"object\", got \"{other}\""));
+            return errors; // Can't check further
+        }
+        None => {
+            errors.push(format!("{path}: missing \"type\": \"object\""));
+            return errors;
+        }
+    }
+
+    // Rule 2: must have "properties" as an object
+    let properties = match schema.get("properties").and_then(|p| p.as_object()) {
+        Some(p) => p,
+        None => {
+            errors.push(format!("{path}: missing or non-object \"properties\""));
+            return errors;
+        }
+    };
+
+    // Rule 3: every key in "required" must exist in "properties"
+    if let Some(required) = schema.get("required").and_then(|r| r.as_array()) {
+        for req in required {
+            if let Some(key) = req.as_str()
+                && !properties.contains_key(key)
+            {
+                errors.push(format!(
+                    "{path}: required key \"{key}\" not found in properties"
+                ));
+            }
+        }
+    }
+
+    // Rule 4 & 5: recurse into nested objects and check arrays
+    for (key, prop) in properties {
+        let prop_path = format!("{path}.{key}");
+        if let Some(prop_type) = prop.get("type").and_then(|t| t.as_str()) {
+            match prop_type {
+                "object" => {
+                    errors.extend(validate_tool_schema(prop, &prop_path));
+                }
+                "array" => {
+                    if prop.get("items").is_none() {
+                        errors.push(format!("{prop_path}: array property missing \"items\""));
+                    } else if let Some(items) = prop.get("items") {
+                        // If items is an object type, recurse
+                        if items.get("type").and_then(|t| t.as_str()) == Some("object") {
+                            errors
+                                .extend(validate_tool_schema(items, &format!("{prop_path}.items")));
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+        // No "type" field is intentionally allowed (freeform properties)
+    }
+
+    errors
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -408,5 +487,164 @@ mod tests {
         assert!(!ApprovalRequirement::Never.is_required());
         assert!(ApprovalRequirement::UnlessAutoApproved.is_required());
         assert!(ApprovalRequirement::Always.is_required());
+    }
+
+    #[test]
+    fn test_validate_schema_valid() {
+        let schema = serde_json::json!({
+            "type": "object",
+            "properties": {
+                "name": { "type": "string", "description": "A name" }
+            },
+            "required": ["name"]
+        });
+        let errors = validate_tool_schema(&schema, "test");
+        assert!(errors.is_empty(), "unexpected errors: {errors:?}");
+    }
+
+    #[test]
+    fn test_validate_schema_missing_type() {
+        let schema = serde_json::json!({
+            "properties": {
+                "name": { "type": "string" }
+            }
+        });
+        let errors = validate_tool_schema(&schema, "test");
+        assert_eq!(errors.len(), 1);
+        assert!(errors[0].contains("missing \"type\": \"object\""));
+    }
+
+    #[test]
+    fn test_validate_schema_wrong_type() {
+        let schema = serde_json::json!({
+            "type": "string"
+        });
+        let errors = validate_tool_schema(&schema, "test");
+        assert_eq!(errors.len(), 1);
+        assert!(errors[0].contains("expected type \"object\""));
+    }
+
+    #[test]
+    fn test_validate_schema_required_not_in_properties() {
+        let schema = serde_json::json!({
+            "type": "object",
+            "properties": {
+                "name": { "type": "string" }
+            },
+            "required": ["name", "age"]
+        });
+        let errors = validate_tool_schema(&schema, "test");
+        assert_eq!(errors.len(), 1);
+        assert!(errors[0].contains("\"age\" not found in properties"));
+    }
+
+    #[test]
+    fn test_validate_schema_nested_object() {
+        let schema = serde_json::json!({
+            "type": "object",
+            "properties": {
+                "config": {
+                    "type": "object",
+                    "properties": {
+                        "key": { "type": "string" }
+                    },
+                    "required": ["key", "missing"]
+                }
+            }
+        });
+        let errors = validate_tool_schema(&schema, "test");
+        assert_eq!(errors.len(), 1);
+        assert!(errors[0].contains("test.config"));
+        assert!(errors[0].contains("\"missing\" not found"));
+    }
+
+    #[test]
+    fn test_validate_schema_array_missing_items() {
+        let schema = serde_json::json!({
+            "type": "object",
+            "properties": {
+                "tags": { "type": "array", "description": "Tags" }
+            }
+        });
+        let errors = validate_tool_schema(&schema, "test");
+        assert_eq!(errors.len(), 1);
+        assert!(errors[0].contains("array property missing \"items\""));
+    }
+
+    #[test]
+    fn test_validate_schema_array_with_items_ok() {
+        let schema = serde_json::json!({
+            "type": "object",
+            "properties": {
+                "tags": {
+                    "type": "array",
+                    "items": { "type": "string" }
+                }
+            }
+        });
+        let errors = validate_tool_schema(&schema, "test");
+        assert!(errors.is_empty(), "unexpected errors: {errors:?}");
+    }
+
+    #[test]
+    fn test_validate_schema_freeform_property_allowed() {
+        // Properties without "type" are intentionally allowed (json/http tools)
+        let schema = serde_json::json!({
+            "type": "object",
+            "properties": {
+                "data": { "description": "Any JSON value" }
+            },
+            "required": ["data"]
+        });
+        let errors = validate_tool_schema(&schema, "test");
+        assert!(
+            errors.is_empty(),
+            "freeform property should be allowed: {errors:?}"
+        );
+    }
+
+    #[test]
+    fn test_validate_schema_nested_array_items_object() {
+        let schema = serde_json::json!({
+            "type": "object",
+            "properties": {
+                "headers": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "name": { "type": "string" },
+                            "value": { "type": "string" }
+                        },
+                        "required": ["name", "value"]
+                    }
+                }
+            }
+        });
+        let errors = validate_tool_schema(&schema, "test");
+        assert!(errors.is_empty(), "unexpected errors: {errors:?}");
+    }
+
+    #[test]
+    fn test_validate_schema_nested_array_items_object_bad() {
+        let schema = serde_json::json!({
+            "type": "object",
+            "properties": {
+                "headers": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "name": { "type": "string" }
+                        },
+                        "required": ["name", "missing_field"]
+                    }
+                }
+            }
+        });
+        let errors = validate_tool_schema(&schema, "test");
+        assert_eq!(errors.len(), 1);
+        assert!(errors[0].contains("headers.items"));
+        assert!(errors[0].contains("\"missing_field\""));
     }
 }
