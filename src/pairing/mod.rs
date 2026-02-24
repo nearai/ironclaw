@@ -7,4 +7,4 @@
 
 mod store;
 
-pub use store::{PairingRequest, PairingStore, PairingStoreError};
+pub use store::{PairingRequest, PairingStore, PairingStoreError, UpsertResult};

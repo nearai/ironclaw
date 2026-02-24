@@ -87,7 +87,7 @@ pub enum RegistryError {
 /// Central catalog loaded from the `registry/` directory.
 #[derive(Debug, Clone)]
 pub struct RegistryCatalog {
-    /// All loaded manifests, keyed by "<kind>/<name>" (e.g. "tools/slack").
+    /// All loaded manifests, keyed by "<kind>/<name>" (e.g. "tools/github").
     manifests: HashMap<String, ExtensionManifest>,
 
     /// Bundle definitions from `_bundles.json`.
@@ -274,11 +274,11 @@ impl RegistryCatalog {
         results
     }
 
-    /// Get a manifest by name. Tries exact key match first ("tools/slack"),
-    /// then searches by bare name ("slack").
+    /// Get a manifest by name. Tries exact key match first ("tools/github"),
+    /// then searches by bare name ("github").
     ///
     /// If a bare name matches both a tool and a channel, returns `None`.
-    /// Use a qualified key ("tools/slack" or "channels/slack") to disambiguate.
+    /// Use a qualified key ("tools/github" or "channels/telegram") to disambiguate.
     pub fn get(&self, name: &str) -> Option<&ExtensionManifest> {
         // Try exact key first
         if let Some(m) = self.manifests.get(name) {
@@ -322,7 +322,7 @@ impl RegistryCatalog {
         }
     }
 
-    /// Get the full key ("tools/slack" or "channels/telegram") for a manifest.
+    /// Get the full key ("tools/github" or "channels/telegram") for a manifest.
     pub fn key_for(&self, name: &str) -> Option<String> {
         if self.manifests.contains_key(name) {
             return Some(name.to_string());
@@ -681,5 +681,27 @@ mod tests {
         let catalog = RegistryCatalog::load_or_embedded().unwrap();
         // At minimum, the embedded catalog from the repo should have entries
         assert!(!catalog.all().is_empty() || !catalog.bundle_names().is_empty());
+    }
+
+    #[test]
+    fn test_bundle_entries_resolve_against_real_registry() {
+        // Load the actual registry/ directory (catches stale bundle refs after renames)
+        let catalog = RegistryCatalog::load_or_embedded().unwrap();
+
+        for bundle_name in catalog.bundle_names() {
+            let (manifests, missing) = catalog.resolve_bundle(bundle_name).unwrap();
+            assert!(
+                missing.is_empty(),
+                "Bundle '{}' has unresolved entries: {:?}. \
+                 Check that _bundles.json entries match manifest name fields.",
+                bundle_name,
+                missing
+            );
+            assert!(
+                !manifests.is_empty(),
+                "Bundle '{}' resolved to zero manifests",
+                bundle_name
+            );
+        }
     }
 }
