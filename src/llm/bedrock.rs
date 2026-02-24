@@ -303,13 +303,22 @@ fn convert_messages(
                 // Accumulate tool results — they'll be flushed as a User message
                 let tool_call_id = msg.tool_call_id.as_deref().unwrap_or("unknown");
 
-                let status = if msg.content.contains("\"is_error\":true")
-                    || msg.content.contains("Error:")
-                {
-                    Some(ToolResultStatus::Error)
-                } else {
-                    Some(ToolResultStatus::Success)
-                };
+                let status =
+                    if let Ok(json) = serde_json::from_str::<serde_json::Value>(&msg.content) {
+                        if json
+                            .get("is_error")
+                            .and_then(|v| v.as_bool())
+                            .unwrap_or(false)
+                        {
+                            Some(ToolResultStatus::Error)
+                        } else {
+                            Some(ToolResultStatus::Success)
+                        }
+                    } else if msg.content.contains("Error:") {
+                        Some(ToolResultStatus::Error)
+                    } else {
+                        Some(ToolResultStatus::Success)
+                    };
 
                 let tool_result = ToolResultBlock::builder()
                     .tool_use_id(tool_call_id)
