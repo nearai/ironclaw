@@ -309,9 +309,9 @@ Mobile App
     v
 cloudflared (subprocess, managed by CloudflareTunnel)
     |
-    | HTTP localhost:3001
+    | HTTP localhost:3000
     v
-IronClaw Web Gateway (axum, bound to 127.0.0.1:3001)
+IronClaw Web Gateway (axum, bound to 127.0.0.1:3000)
     |
     | Bearer token validated by gateway auth middleware
     v
