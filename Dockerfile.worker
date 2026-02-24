@@ -42,7 +42,8 @@ COPY . .
 RUN --mount=type=cache,id=ironclaw-cargo-registry,target=/usr/local/cargo/registry \
     --mount=type=cache,id=ironclaw-cargo-git,target=/usr/local/cargo/git \
     --mount=type=cache,id=ironclaw-worker-target,target=/build/target \
-    cargo build --release --bin ironclaw
+    cargo build --release --bin ironclaw \
+    && install -D /build/target/release/ironclaw /build-out/ironclaw
 
 # ---
 
@@ -80,7 +81,7 @@ RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --de
 RUN npm install -g @anthropic-ai/claude-code@latest
 
 # Copy the binary
-COPY --from=builder /build/target/release/ironclaw /usr/local/bin/ironclaw
+COPY --from=builder /build-out/ironclaw /usr/local/bin/ironclaw
 
 # Create non-root user (UID 1000 matches the orchestrator's container config)
 RUN useradd -m -u 1000 -s /bin/bash sandbox \

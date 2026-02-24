@@ -57,7 +57,8 @@ COPY wit/ wit/
 RUN --mount=type=cache,id=ironclaw-cargo-registry,target=/usr/local/cargo/registry \
     --mount=type=cache,id=ironclaw-cargo-git,target=/usr/local/cargo/git \
     --mount=type=cache,id=ironclaw-target,target=/app/target \
-    cargo build --release --bin ironclaw
+    cargo build --release --bin ironclaw \
+    && install -D /app/target/release/ironclaw /app-out/ironclaw
 
 # Stage 2: Runtime
 FROM debian:bookworm-slim
@@ -66,7 +67,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates libssl3 \
     && rm -rf /var/lib/apt/lists/*
 
-COPY --from=builder /app/target/release/ironclaw /usr/local/bin/ironclaw
+COPY --from=builder /app-out/ironclaw /usr/local/bin/ironclaw
 COPY --from=builder /app/migrations /app/migrations
 
 # Non-root user
