@@ -157,14 +157,14 @@ When resolving review comments, use this format:
 
 ## Quick Reference: Default Values
 
-Always use these defaults in documentation:
+Unless a document explicitly describes a different value, use repo defaults:
 
 | Setting | Value | Notes |
 |---------|-------|-------|
 | GATEWAY_PORT | 3000 | Default port |
 | GATEWAY_HOST | 127.0.0.1 | Localhost only |
-| RUST_VERSION | 1.85+ | Matches README (not Cargo.toml MSRV) |
-| DATABASE_BACKEND | libsql | Zero-dependency default |
+| RUST_VERSION | 1.92 | Matches Cargo.toml `rust-version` (MSRV) |
+| DATABASE_BACKEND | postgres | Matches `DatabaseConfig` default backend |
 | SANDBOX_ENABLED | true | Secure by default |
 
 ---

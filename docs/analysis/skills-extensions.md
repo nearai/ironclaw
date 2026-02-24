@@ -109,16 +109,20 @@ Error variants:
 
 Source: `src/skills/registry.rs`
 
-`SkillRegistry` manages the in-memory set of loaded skills and the on-disk `~/.ironclaw/skills/` directory.
+`SkillRegistry` manages loaded skills and two local trust domains on disk:
 
-**Discovery** (`discover_all`): Scans two directories in priority order:
+- User skills: `~/.ironclaw/skills/` (manually managed; trusted)
+- Registry-installed skills: `~/.ironclaw/installed_skills/` (installed by registry tooling; installed trust)
+
+**Discovery** (`discover_all`): Scans directories in priority order:
 
 1. `<workspace>/skills/` — loaded as `SkillTrust::Trusted`, `SkillSource::Workspace`
 2. `~/.ironclaw/skills/` — loaded as `SkillTrust::Trusted`, `SkillSource::User`
+3. `~/.ironclaw/installed_skills/` (if configured) — loaded as `SkillTrust::Installed`
 
-On name collision, the workspace skill wins; the user skill is silently skipped. Discovery is capped at 100 skills per directory (`MAX_DISCOVERED_SKILLS`).
+On name collision, higher-priority definitions win (workspace > user > installed). Discovery is capped at 100 skills per directory (`MAX_DISCOVERED_SKILLS`).
 
-**Supported layouts**:
+**Supported layouts** (for each skills directory):
 
 - Flat: `skills/SKILL.md` directly in the skills directory
 - Subdirectory: `skills/<name>/SKILL.md`
@@ -138,19 +142,22 @@ On name collision, the workspace skill wins; the user skill is silently skipped.
 ```
 parse_skill_md(content)
   -> normalize_line_endings(content)
-  -> create ~/.ironclaw/skills/<name>/
+  -> create <install_target_dir>/<name>/
   -> write SKILL.md to disk
   -> load_and_validate_skill (validates round-trip)
   -> commit_install (in-memory append)
 ```
 
-The two-phase `prepare_install_to_disk` + `commit_install` split allows callers holding a registry lock to release the lock before the async disk write.
+`install_target_dir()` prefers `installed_dir` when configured, otherwise falls back to `user_dir`. The two-phase `prepare_install_to_disk` + `commit_install` split allows callers holding a registry lock to release the lock before the async disk write.
 
 **Remove flow** (`remove_skill`):
 
 Only `SkillSource::User` skills can be removed. `SkillSource::Workspace` and `SkillSource::Bundled` skills return `CannotRemove`. Files are deleted, then the empty directory is removed, then the in-memory entry is dropped.
 
-**Storage location**: `~/.ironclaw/skills/<name>/SKILL.md` (subdirectory layout is always used for installed skills).
+**Default storage locations**:
+
+- User-managed skills: `~/.ironclaw/skills/<name>/SKILL.md`
+- Registry-installed skills: `~/.ironclaw/installed_skills/<name>/SKILL.md`
 
 ### 2.5 Skill Catalog (`catalog.rs`)
 
