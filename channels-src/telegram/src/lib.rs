@@ -1108,7 +1108,7 @@ fn handle_message(message: TelegramMessage) {
     // Build metadata for response routing
     let metadata = TelegramMessageMetadata {
         chat_id: message.chat.id,
-        message_id: message.message_id,
+        message_id: Some(message.message_id),
         user_id: from.id,
         is_private,
     };
