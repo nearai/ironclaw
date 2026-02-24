@@ -189,13 +189,16 @@ struct TelegramMessageMetadata {
     /// Chat ID where the message was received.
     chat_id: i64,
 
-    /// Original message ID (for reply_to_message_id).
-    message_id: i64,
+    /// Original message ID (for reply_to_message_id). Optional for proactive sends.
+    #[serde(default)]
+    message_id: Option<i64>,
 
     /// User ID who sent the message.
+    #[serde(default)]
     user_id: i64,
 
     /// Whether this is a private (DM) chat.
+    #[serde(default)]
     is_private: bool,
 }
 
@@ -593,7 +596,7 @@ impl Guest for TelegramChannel {
         let result = send_message(
             metadata.chat_id,
             &response.content,
-            Some(metadata.message_id),
+            metadata.message_id,
             Some("Markdown"),
         );
 
@@ -616,7 +619,7 @@ impl Guest for TelegramChannel {
                 let msg_id = send_message(
                     metadata.chat_id,
                     &response.content,
-                    Some(metadata.message_id),
+                    metadata.message_id,
                     None,
                 )
                 .map_err(|e| format!("Plain-text retry also failed: {}", e))?;
@@ -687,7 +690,7 @@ impl Guest for TelegramChannel {
             TelegramStatusAction::Notify(prompt) => {
                 // Send user-visible status updates for actionable events.
                 if let Err(first_err) =
-                    send_message(metadata.chat_id, &prompt, Some(metadata.message_id), None)
+                    send_message(metadata.chat_id, &prompt, metadata.message_id, None)
                 {
                     channel_host::log(
                         channel_host::LogLevel::Warn,
