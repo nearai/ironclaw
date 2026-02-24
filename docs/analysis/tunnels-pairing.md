@@ -1,6 +1,6 @@
 # IronClaw Codebase Analysis — Tunnels & Mobile Pairing
 
-> Updated: 2026-02-22 | Version: v0.9.0
+> Updated: 2026-02-24 | Version: v0.11.1
 
 ## 1. Overview
 
@@ -184,6 +184,8 @@ The pairing system gates inbound direct messages from channels such as Telegram,
 
 This prevents the agent from responding to arbitrary strangers who discover or guess the Telegram bot username.
 
+As of v0.10.0, all WASM channel plugins support device pairing — not just selected channels. Telegram, Slack, Discord, and WhatsApp WASM channels all implement the pairing flow. Each WASM channel calls into the same `PairingStore` API (`upsert_request`, `is_sender_allowed`, `approve`), so the pairing behavior is consistent regardless of which channel the inbound message arrives on.
+
 ### How Pairing Works
 
 1. An unknown sender messages the bot on Telegram (or another channel).
@@ -307,9 +309,9 @@ Mobile App
     v
 cloudflared (subprocess, managed by CloudflareTunnel)
     |
-    | HTTP localhost:3000
+    | HTTP localhost:3001
     v
-IronClaw Web Gateway (axum, bound to 127.0.0.1:3000)
+IronClaw Web Gateway (axum, bound to 127.0.0.1:3001)
     |
     | Bearer token validated by gateway auth middleware
     v

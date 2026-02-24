@@ -390,6 +390,8 @@ Create `~/Library/LaunchAgents/ai.ironclaw.plist`:
         <string>/Users/YOUR_USERNAME/.local/bin/ironclaw</string>
     </array>
     
+    <!-- IMPORTANT: Generate a token first: openssl rand -hex 32 -->
+    <!-- Replace REPLACE_WITH_SECURE_TOKEN_FROM_OPENSSL_RAND with that output -->
     <key>EnvironmentVariables</key>
     <dict>
         <key>HOME</key>
@@ -400,9 +402,9 @@ Create `~/Library/LaunchAgents/ai.ironclaw.plist`:
         <string>false</string>
         <key>GATEWAY_PORT</key>
         <string>3000</string>
-        <!-- Replace YOUR_TOKEN_HERE with output of: openssl rand -hex 32 -->
+        <!-- Replace REPLACE_WITH_SECURE_TOKEN_FROM_OPENSSL_RAND with output of: openssl rand -hex 32 -->
         <key>GATEWAY_AUTH_TOKEN</key>
-        <string>YOUR_TOKEN_HERE</string>
+        <string>REPLACE_WITH_SECURE_TOKEN_FROM_OPENSSL_RAND</string>
         <key>SANDBOX_ENABLED</key>
         <string>true</string>
         <key>RUST_LOG</key>

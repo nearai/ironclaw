@@ -1,4 +1,4 @@
-# IronClaw v0.9.0 — LLM Backend System Deep Dive
+# IronClaw v0.11.1 — LLM Backend System Deep Dive
 
 > **Scope:** `src/llm/`, `src/config/llm.rs`, `src/agent/cost_guard.rs`,
 > `src/agent/context_monitor.rs`, `src/agent/compaction.rs`,
@@ -277,66 +277,9 @@ the same logical request stay on the same provider.
 
 ## 5. Smart Routing Provider
 
-`src/llm/smart_routing.rs` implements cost-optimized model selection by routing requests to cheap or primary models based on task complexity analysis.
+**`src/llm/smart_routing.rs`** (452 lines) — Added in v0.10.0
 
-### 5.1 Overview
-
-Smart routing reduces API costs by sending simple queries to cheaper models (e.g., Haiku) while reserving expensive models (e.g., Sonnet/Opus) for complex tasks:
-
-```
-User Request → Complexity Classification → Route Decision
-     ↓
-Simple (<200 chars) ──────────────→ Cheap Model
-Moderate (200-1000 chars) ────────→ Cheap Model (with optional cascade)
-Complex (>1000 chars or tool use) ─→ Primary Model
-```
-
-### 5.2 Task Complexity Classification
-
-| Complexity | Criteria | Routing Behavior |
-|------------|----------|------------------|
-| `Simple` | < 200 characters, no code indicators | Always cheap model |
-| `Moderate` | 200-1000 characters, mixed indicators | Cheap model with cascade option |
-| `Complex` | > 1000 characters OR tool use requested | Always primary model |
-
-Classification heuristics (from `classify_message()`):
-- **Simple indicators**: Short length, question marks, conversational phrases ("hello", "how are you", "what's the weather")
-- **Complex indicators**: Code blocks, file paths, URLs, analysis requests ("analyze", "implement", "debug")
-- **Tool use**: Any request with tools is always routed to primary model for reliable structured output
-
-### 5.3 Cascade Mode
-
-When `smart_routing_cascade: true` (default):
-
-1. Moderate-complexity tasks go to cheap model first
-2. Response is analyzed for uncertainty indicators:
-   - Uncertainty phrases: "I don't know", "I'm not sure", "cannot", "unable"
-   - Overly short responses (< 50 chars for non-trivial queries)
-   - Error conditions
-3. If uncertain, request is escalated to primary model
-4. Stats track cascade escalations separately
-
-### 5.4 Configuration
-
-Controlled via `NearAiConfig` in `src/config/llm.rs`:
-
-| Environment Variable | Type | Default | Description |
-|---------------------|------|---------|-------------|
-| `NEARAI_CHEAP_MODEL` | string | — | Cheap model identifier (e.g., "claude-3-haiku-20240307") |
-| `SMART_ROUTING_CASCADE` | bool | `true` | Enable cascade escalation on uncertainty |
-
-If `NEARAI_CHEAP_MODEL` is not set, smart routing is disabled and all requests go to the primary model.
-
-### 5.5 Provider Architecture
-
-```rust
-pub struct SmartRoutingProvider {
-    primary: Arc<dyn LlmProvider>,  // Expensive, capable model
-    cheap: Arc<dyn LlmProvider>,    // Fast, cheap model
-    config: SmartRoutingConfig,
-    stats: SmartRoutingStats,
-}
-```
+`SmartRoutingProvider` implements cost-optimized model selection by routing requests to cheap or primary models based on task complexity analysis.
 
 The provider wraps two `LlmProvider` instances and implements the trait itself, fitting into the standard provider chain:
 
@@ -348,27 +291,63 @@ SmartRoutingProvider → RetryProvider → CircuitBreakerProvider → ResponseCa
 Cheap Model  Primary Model
 ```
 
-### 5.6 Statistics and Observability
+### 5.1 Task Complexity Classification
 
-Atomic counters track routing decisions:
+Every incoming request is classified by `classify_message()` into one of three tiers:
 
-```rust
-pub struct SmartRoutingSnapshot {
-    pub total_requests: u64,
-    pub cheap_requests: u64,
-    pub primary_requests: u64,
-    pub cascade_escalations: u64,
-}
+| Complexity | Criteria |
+|------------|----------|
+| `Simple` | Short queries ≤200 chars; single words; keywords: `list`, `show`, `what is`, `status`, `help`, `yes`, `no`, `ping` |
+| `Moderate` | Medium length, ambiguous (falls between Simple and Complex) |
+| `Complex` | Contains code blocks (` ``` `); keywords: `implement`, `refactor`, `analyze`, `debug`, `design`, `architecture`, `optimize`; or ≥1000 chars |
+
+Additional rules:
+- Very short messages (≤10 chars) → always `Simple`, regardless of content
+- Tool use requests → always routed to primary model (reliable structured output required)
+
+### 5.2 Routing
+
+| Classification | Destination |
+|---------------|-------------|
+| `Simple` | Cheap model (`NEARAI_CHEAP_MODEL`, e.g., Claude Haiku) |
+| `Complex` | Primary model (`NEARAI_MODEL`, e.g., Claude Sonnet/Opus) |
+| `Moderate` | Cheap model, with cascade escalation if enabled |
+
+### 5.3 Cascade Mode
+
+Controlled by `SMART_ROUTING_CASCADE` (default: `true`).
+
+When enabled, `Moderate` requests go to the cheap model first. If the cheap model returns an uncertain response, the request is automatically escalated to the primary model.
+
+Uncertainty is detected by scanning the response for any of these phrases:
+- `"I'm not sure"`
+- `"I don't know"`
+- `"I'm unable to"`
+- `"I cannot"`
+- `"I can't"`
+- `"beyond my capabilities"`
+- `"I need more context"`
+- Empty response (zero-length content)
+
+### 5.4 Configuration
+
+```
+SMART_ROUTING_CASCADE=true         # Enable cascade escalation (default)
+NEARAI_CHEAP_MODEL=...             # Cheap model name for simple tasks
 ```
 
-Stats are logged at `DEBUG` level per request:
-- "Smart routing: Simple task -> cheap model"
-- "Smart routing: Complex task -> primary model"
-- "Smart routing: Escalating to primary (cheap model response uncertain)"
+If `NEARAI_CHEAP_MODEL` is not set, smart routing is disabled and all requests go to the primary model.
 
-### 5.7 Tool Use Behavior
+### 5.5 Observable Statistics
 
-`complete_with_tools()` always routes to the primary model regardless of complexity. Tool calling requires reliable structured output that cheaper models may not consistently provide.
+Internal atomic counters expose routing decisions for observability:
+
+| Counter | Description |
+|---------|-------------|
+| `total_requests` | All requests processed by the provider |
+| `cheap_requests` | Requests routed to the cheap model |
+| `primary_requests` | Requests routed to the primary model |
+| `cascade_escalations` | Cheap-model responses escalated to primary due to uncertainty |
 
 ---
 
@@ -534,6 +513,7 @@ This is implemented in `LlmConfig::resolve(settings: &Settings)`.
 | `LLM_BASE_URL` | OpenAiCompatible | Required (e.g. OpenRouter URL) |
 | `LLM_API_KEY` | OpenAiCompatible | Optional |
 | `LLM_MODEL` | OpenAiCompatible | Falls back to `selected_model` from DB |
+| `LLM_EXTRA_HEADERS` | OpenAiCompatible | Comma-separated `Key:Value` pairs injected into every HTTP request (added v0.10.0). Example: `"HTTP-Referer:https://myapp.com,X-Title:MyApp"` |
 | `TINFOIL_API_KEY` | Tinfoil | Required |
 | `TINFOIL_MODEL` | Tinfoil | Default: kimi-k2-5 |
 
@@ -592,7 +572,11 @@ cost_guard.record_llm_call(model, input_tokens, output_tokens).await;
 The separation of check and record means a single LLM call slot is evaluated
 before commitment, but the cost is only counted after actual token consumption.
 
-### 10.3 Reasoning Cost Integration
+### 10.3 Gateway Status Popover (v0.10.0)
+
+v0.10.0 added a gateway status popover in the UI that shows real-time token usage and estimated cost per session. The popover reads from the same counters updated by `CostGuard::record_llm_call()`, so the displayed figures are always consistent with the budget enforcement logic.
+
+### 10.4 Reasoning Cost Integration
 
 `Reasoning` (in `src/llm/reasoning.rs`) returns `TokenUsage` with every
 `respond_with_tools()` call. The `agent/worker.rs` passes this to
@@ -813,7 +797,7 @@ async fn evaluate(
 
 ---
 
-*Generated from IronClaw v0.9.0 source — `src/llm/`, `src/config/llm.rs`,
+*Generated from IronClaw v0.11.1 source — `src/llm/`, `src/config/llm.rs`,
 `src/agent/cost_guard.rs`, `src/agent/context_monitor.rs`,
 `src/agent/compaction.rs`, `src/estimation/`, `src/evaluation/`,
 `src/observability/`.*

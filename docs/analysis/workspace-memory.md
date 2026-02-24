@@ -1,6 +1,6 @@
 # IronClaw Codebase Analysis — Workspace, Memory & Storage
 
-> Updated: 2026-02-22 | Version: v0.9.0
+> Updated: 2026-02-24 | Version: v0.11.1
 
 ## 1. Overview
 
@@ -336,6 +336,8 @@ Paths are normalized: leading/trailing slashes stripped, double slashes collapse
 | `paths::CONTEXT_DIR` | `context/` | Identity-related context documents |
 
 Daily logs are keyed by date: `daily/2024-01-15.md`. They are created automatically and timestamped on append: `[15:32:01] entry text`.
+
+As of v0.11.0, context compaction also writes to this directory. When the agent's context window fills and compaction runs (`src/agent/compaction.rs`), an LLM-generated summary of the conversation is appended to the current day's `daily/{YYYY-MM-DD}.md` file. This integrates the compaction system with the workspace storage layer, so compacted summaries are preserved as part of the agent's long-term daily log rather than being discarded.
 
 ### Identity Files
 
