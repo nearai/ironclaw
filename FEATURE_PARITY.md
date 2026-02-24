@@ -68,7 +68,7 @@ This document tracks feature parity between IronClaw (Rust implementation) and O
 | WhatsApp | ✅ | ❌ | P1 | Baileys (Web), same-phone mode with echo detection |
 | Telegram | ✅ | ✅ | - | WASM channel(MTProto), DM pairing, caption, /start, bot_username |
 | Discord | ✅ | ❌ | P2 | discord.js, thread parent binding inheritance |
-| Signal | ✅ | ❌ | P2 | signal-cli |
+| Signal | ✅ | ✅ | P2 | signal-cli daemonPC, SSE listener HTTP/JSON-R, user/group allowlists, DM pairing |
 | Slack | ✅ | ✅ | - | WASM tool |
 | iMessage | ✅ | ❌ | P3 | BlueBubbles or Linq recommended |
 | Linq | ✅ | ❌ | P3 | Real iMessage via API, no Mac required |
@@ -120,7 +120,7 @@ This document tracks feature parity between IronClaw (Rust implementation) and O
 | Per-group tool policies | ✅ | ❌ | Allow/deny specific tools |
 | Thread isolation | ✅ | ✅ | Separate sessions per thread |
 | Per-channel media limits | ✅ | 🚧 | Caption support for media; no size limits |
-| Typing indicators | ✅ | 🚧 | TUI shows status |
+| Typing indicators | ✅ | 🚧 | TUI + Telegram typing/actionable status prompts; richer parity pending |
 | Per-channel ackReaction config | ✅ | ❌ | Customizable acknowledgement reactions |
 | Group session priming | ✅ | ❌ | Member roster injected for context |
 | Sender_id in trusted metadata | ✅ | ❌ | Exposed in system metadata |
@@ -158,7 +158,7 @@ This document tracks feature parity between IronClaw (Rust implementation) and O
 | `doctor` | ✅ | ❌ | P2 | Diagnostics |
 | `logs` | ✅ | ❌ | P3 | Query logs |
 | `update` | ✅ | ❌ | P3 | Self-update |
-| `completion` | ✅ | ❌ | P3 | Shell completion |
+| `completion` | ✅ | ✅ | - | Shell completion |
 | `/subagents spawn` | ✅ | ❌ | P3 | Spawn subagents from chat |
 | `/export-session` | ✅ | ❌ | P3 | Export current session transcript |
 
@@ -540,7 +540,6 @@ This document tracks feature parity between IronClaw (Rust implementation) and O
 
 ### P3 - Lower Priority
 - ❌ Discord channel
-- ❌ Signal channel
 - ❌ Matrix channel
 - ❌ Other messaging platforms
 - ❌ TTS/audio features

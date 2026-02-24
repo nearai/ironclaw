@@ -1,16 +1,19 @@
-//! Unified extension system for discovering, installing, authenticating, and activating
-//! MCP servers and WASM tools through conversational agent interactions.
+//! Lifecycle management for extensions: discovery, installation, authentication,
+//! and activation of channels, tools, and MCP servers.
 //!
-//! Extensions are the user-facing abstraction over MCP servers and WASM tools. The agent
-//! can search a built-in registry (or discover online), install, authenticate, and activate
-//! extensions at runtime without CLI commands.
+//! Extensions are the user-facing abstraction that unifies three runtime kinds:
+//! - **Channels** (Telegram, Slack, Discord) — messaging integrations (WASM)
+//! - **Tools** — sandboxed capabilities (WASM)
+//! - **MCP servers** — external API integrations via Model Context Protocol
+//!
+//! The agent can search a built-in registry (or discover online), install,
+//! authenticate, and activate extensions at runtime without CLI commands.
 //!
 //! ```text
-//!  User: "add notion"
-//!    -> tool_search("notion")      -> finds MCP server in registry
-//!    -> tool_install("notion")     -> saves config to mcp-servers.json
-//!    -> tool_auth("notion")        -> OAuth 2.1 flow, returns URL
-//!    -> tool_activate("notion")    -> connects, registers tools
+//!  User: "add telegram"
+//!    -> tool_search("telegram")    -> finds channel in registry
+//!    -> tool_install("telegram")   -> copies bundled WASM to channels dir
+//!    -> tool_activate("telegram")  -> configures credentials, starts channel
 //! ```
 
 pub mod discovery;
@@ -31,7 +34,7 @@ pub enum ExtensionKind {
     McpServer,
     /// Sandboxed WASM module, file-based, capabilities auth.
     WasmTool,
-    /// WASM channel module (future: dynamic activation, currently needs restart).
+    /// WASM channel module with hot-activation support.
     WasmChannel,
 }
 
@@ -61,6 +64,9 @@ pub struct RegistryEntry {
     pub keywords: Vec<String>,
     /// Where to get this extension.
     pub source: ExtensionSource,
+    /// Fallback source when the primary source fails (e.g., download 404 → build from source).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fallback_source: Option<Box<ExtensionSource>>,
     /// How authentication works.
     pub auth_hint: AuthHint,
 }
@@ -82,6 +88,9 @@ pub enum ExtensionSource {
         repo_url: String,
         #[serde(default)]
         build_dir: Option<String>,
+        /// Crate name used to locate the build artifact binary.
+        #[serde(default)]
+        crate_name: Option<String>,
     },
     /// Discovered online (not yet validated for a specific source type).
     Discovered { url: String },
@@ -169,6 +178,10 @@ pub struct ActivateResult {
     pub message: String,
 }
 
+fn default_true() -> bool {
+    true
+}
+
 /// An installed extension with its current status.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct InstalledExtension {
@@ -187,6 +200,9 @@ pub struct InstalledExtension {
     /// Whether this extension has a setup schema (required_secrets) that can be configured.
     #[serde(default)]
     pub needs_setup: bool,
+    /// Whether this extension is installed locally (false = available in registry but not installed).
+    #[serde(default = "default_true")]
+    pub installed: bool,
 }
 
 /// Error type for extension operations.
@@ -221,9 +237,6 @@ pub enum ExtensionError {
 
     #[error("Config error: {0}")]
     Config(String),
-
-    #[error("Channels require restart to activate")]
-    ChannelNeedsRestart,
 
     #[error("{0}")]
     Other(String),

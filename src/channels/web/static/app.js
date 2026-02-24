@@ -9,6 +9,7 @@ let assistantThreadId = null;
 let hasMore = false;
 let oldestTimestamp = null;
 let loadingOlder = false;
+let sseHasConnectedBefore = false;
 let jobEvents = new Map(); // job_id -> Array of events
 let jobListRefreshTimer = null;
 const JOB_EVENTS_CAP = 500;
@@ -92,7 +93,11 @@ function apiFetch(path, options) {
     opts.body = JSON.stringify(opts.body);
   }
   return fetch(path, opts).then((res) => {
-    if (!res.ok) throw new Error(res.status + ' ' + res.statusText);
+    if (!res.ok) {
+      return res.text().then(function(body) {
+        throw new Error(body || (res.status + ' ' + res.statusText));
+      });
+    }
     return res.json();
   });
 }
@@ -107,6 +112,10 @@ function connectSSE() {
   eventSource.onopen = () => {
     document.getElementById('sse-dot').classList.remove('disconnected');
     document.getElementById('sse-status').textContent = 'Connected';
+    if (sseHasConnectedBefore && currentThreadId) {
+      loadHistory();
+    }
+    sseHasConnectedBefore = true;
   };
 
   eventSource.onerror = () => {
@@ -236,6 +245,11 @@ function isCurrentThread(threadId) {
 function sendMessage() {
   const input = document.getElementById('chat-input');
   const sendBtn = document.getElementById('send-btn');
+  if (!currentThreadId) {
+    console.warn('sendMessage: no thread selected, ignoring');
+    setStatus('Waiting for thread to load...');
+    return;
+  }
   const content = input.value.trim();
   if (!content) return;
 
@@ -258,6 +272,8 @@ function sendMessage() {
 }
 
 function enableChatInput() {
+  // Don't re-enable until a thread is selected (prevents orphan messages)
+  if (!currentThreadId) return;
   const input = document.getElementById('chat-input');
   const sendBtn = document.getElementById('send-btn');
   sendBtn.disabled = false;
@@ -735,6 +751,11 @@ function loadThreads() {
     if (!currentThreadId && assistantThreadId) {
       switchToAssistant();
     }
+
+    // Enable chat input once a thread is available
+    if (currentThreadId) {
+      enableChatInput();
+    }
   }).catch(() => {});
 }
 
@@ -783,6 +804,10 @@ chatInput.addEventListener('keydown', (e) => {
 });
 chatInput.addEventListener('input', () => autoResizeTextarea(chatInput));
 
+// Disable send until a thread is selected (loadThreads will enable it)
+chatInput.disabled = true;
+document.getElementById('send-btn').disabled = true;
+
 // Infinite scroll: load older messages when scrolled near the top
 document.getElementById('chat-messages').addEventListener('scroll', function () {
   if (this.scrollTop < 100 && hasMore && !loadingOlder) {
@@ -825,6 +850,7 @@ function switchTab(tab) {
   if (tab === 'routines') loadRoutines();
   if (tab === 'logs') applyLogFilters();
   if (tab === 'extensions') loadExtensions();
+  if (tab === 'skills') loadSkills();
 }
 
 // --- Memory (filesystem tree) ---
@@ -1455,18 +1481,11 @@ function renderExtensionCard(ext) {
   actions.className = 'ext-actions';
 
   if (!ext.active) {
-    if (ext.kind === 'wasm_channel') {
-      const restartLabel = document.createElement('span');
-      restartLabel.className = 'ext-restart-label';
-      restartLabel.textContent = 'Restart to activate';
-      actions.appendChild(restartLabel);
-    } else {
-      const activateBtn = document.createElement('button');
-      activateBtn.className = 'btn-ext activate';
-      activateBtn.textContent = 'Activate';
-      activateBtn.addEventListener('click', () => activateExtension(ext.name));
-      actions.appendChild(activateBtn);
-    }
+    const activateBtn = document.createElement('button');
+    activateBtn.className = 'btn-ext activate';
+    activateBtn.textContent = 'Activate';
+    activateBtn.addEventListener('click', () => activateExtension(ext.name));
+    actions.appendChild(activateBtn);
   } else {
     const activeLabel = document.createElement('span');
     activeLabel.className = 'ext-active-label';
@@ -1490,8 +1509,10 @@ function renderExtensionCard(ext) {
 
   card.appendChild(actions);
 
-  // For active WASM channels, check for pending pairing requests
-  if (ext.active && ext.kind === 'wasm_channel') {
+  // For WASM channels, check for pending pairing requests.
+  // Show even when inactive — pairing requests can arrive via webhooks
+  // before the channel is fully activated.
+  if (ext.kind === 'wasm_channel') {
     const pairingSection = document.createElement('div');
     pairingSection.className = 'ext-pairing';
     card.appendChild(pairingSection);
@@ -2192,14 +2213,20 @@ function appendActivityEvent(terminal, eventType, data) {
         + escapeHtml(typeof data.input === 'string' ? data.input : JSON.stringify(data.input, null, 2))
         + '</pre></details>';
       break;
-    case 'tool_result':
-      el.innerHTML = '<details class="activity-tool-block activity-tool-result"><summary>'
-        + '<span class="activity-tool-icon">&#10003;</span> '
+    case 'tool_result': {
+      const trSuccess = data.success !== false;
+      const trIcon = trSuccess ? '&#10003;' : '&#10007;';
+      const trOutput = data.output || data.error || '';
+      const trClass = 'activity-tool-block activity-tool-result'
+        + (trSuccess ? '' : ' activity-tool-error');
+      el.innerHTML = '<details class="' + trClass + '"><summary>'
+        + '<span class="activity-tool-icon">' + trIcon + '</span> '
         + escapeHtml(data.tool_name || 'result')
         + '</summary><pre class="activity-tool-output">'
-        + escapeHtml(data.output || '')
+        + escapeHtml(trOutput)
         + '</pre></details>';
       break;
+    }
     case 'status':
       el.innerHTML = '<span class="activity-status">' + escapeHtml(data.message || '') + '</span>';
       break;
@@ -2207,7 +2234,7 @@ function appendActivityEvent(terminal, eventType, data) {
       el.className += ' activity-final';
       const success = data.success !== false;
       el.innerHTML = '<span class="activity-result-status" data-success="' + success + '">'
-        + escapeHtml(data.message || data.status || 'done') + '</span>';
+        + escapeHtml(data.message || data.error || data.status || 'done') + '</span>';
       if (data.session_id) {
         el.innerHTML += ' <span class="activity-session-id">session: ' + escapeHtml(data.session_id) + '</span>';
       }
@@ -2392,7 +2419,9 @@ function renderRoutineDetail(routine) {
         + '<td>' + formatDate(run.started_at) + '</td>'
         + '<td>' + formatDate(run.completed_at) + '</td>'
         + '<td><span class="badge ' + runStatusClass + '">' + escapeHtml(run.status) + '</span></td>'
-        + '<td>' + escapeHtml(run.result_summary || '-') + '</td>'
+        + '<td>' + escapeHtml(run.result_summary || '-')
+          + (run.job_id ? ' <a href="#" onclick="event.preventDefault(); switchTab(\'jobs\'); openJobDetail(\'' + run.job_id + '\')">[view job]</a>' : '')
+          + '</td>'
         + '<td>' + (run.tokens_used != null ? run.tokens_used : '-') + '</td>'
         + '</tr>';
     }
@@ -2689,6 +2718,328 @@ function addMcpServer() {
   });
 }
 
+// --- Skills ---
+
+function loadSkills() {
+  var skillsList = document.getElementById('skills-list');
+  apiFetch('/api/skills').then(function(data) {
+    if (!data.skills || data.skills.length === 0) {
+      skillsList.innerHTML = '<div class="empty-state">No skills installed</div>';
+      return;
+    }
+    skillsList.innerHTML = '';
+    for (var i = 0; i < data.skills.length; i++) {
+      skillsList.appendChild(renderSkillCard(data.skills[i]));
+    }
+  }).catch(function(err) {
+    skillsList.innerHTML = '<div class="empty-state">Failed to load skills: ' + escapeHtml(err.message) + '</div>';
+  });
+}
+
+function renderSkillCard(skill) {
+  var card = document.createElement('div');
+  card.className = 'ext-card';
+
+  var header = document.createElement('div');
+  header.className = 'ext-header';
+
+  var name = document.createElement('span');
+  name.className = 'ext-name';
+  name.textContent = skill.name;
+  header.appendChild(name);
+
+  var trust = document.createElement('span');
+  var trustClass = skill.trust.toLowerCase() === 'trusted' ? 'trust-trusted' : 'trust-installed';
+  trust.className = 'skill-trust ' + trustClass;
+  trust.textContent = skill.trust;
+  header.appendChild(trust);
+
+  var version = document.createElement('span');
+  version.className = 'skill-version';
+  version.textContent = 'v' + skill.version;
+  header.appendChild(version);
+
+  card.appendChild(header);
+
+  var desc = document.createElement('div');
+  desc.className = 'ext-desc';
+  desc.textContent = skill.description;
+  card.appendChild(desc);
+
+  if (skill.keywords && skill.keywords.length > 0) {
+    var kw = document.createElement('div');
+    kw.className = 'ext-keywords';
+    kw.textContent = 'Activates on: ' + skill.keywords.join(', ');
+    card.appendChild(kw);
+  }
+
+  var actions = document.createElement('div');
+  actions.className = 'ext-actions';
+
+  // Only show Remove for registry-installed skills, not user-placed trusted skills
+  if (skill.trust.toLowerCase() !== 'trusted') {
+    var removeBtn = document.createElement('button');
+    removeBtn.className = 'btn-ext remove';
+    removeBtn.textContent = 'Remove';
+    removeBtn.addEventListener('click', function() { removeSkill(skill.name); });
+    actions.appendChild(removeBtn);
+  }
+
+  card.appendChild(actions);
+  return card;
+}
+
+function searchClawHub() {
+  var input = document.getElementById('skill-search-input');
+  var query = input.value.trim();
+  if (!query) return;
+
+  var resultsDiv = document.getElementById('skill-search-results');
+  resultsDiv.innerHTML = '<div class="empty-state">Searching...</div>';
+
+  apiFetch('/api/skills/search', {
+    method: 'POST',
+    body: { query: query },
+  }).then(function(data) {
+    resultsDiv.innerHTML = '';
+
+    // Show registry error as a warning banner if present
+    if (data.catalog_error) {
+      var warning = document.createElement('div');
+      warning.className = 'empty-state';
+      warning.style.color = '#f0ad4e';
+      warning.style.borderLeft = '3px solid #f0ad4e';
+      warning.style.paddingLeft = '12px';
+      warning.style.marginBottom = '16px';
+      warning.textContent = 'Could not reach ClawHub registry: ' + data.catalog_error;
+      resultsDiv.appendChild(warning);
+    }
+
+    // Show catalog results
+    if (data.catalog && data.catalog.length > 0) {
+      // Build a set of installed skill names for quick lookup
+      var installedNames = {};
+      if (data.installed) {
+        for (var j = 0; j < data.installed.length; j++) {
+          installedNames[data.installed[j].name] = true;
+        }
+      }
+
+      for (var i = 0; i < data.catalog.length; i++) {
+        var card = renderCatalogSkillCard(data.catalog[i], installedNames);
+        card.style.animationDelay = (i * 0.06) + 's';
+        resultsDiv.appendChild(card);
+      }
+    }
+
+    // Show matching installed skills too
+    if (data.installed && data.installed.length > 0) {
+      for (var k = 0; k < data.installed.length; k++) {
+        var installedCard = renderSkillCard(data.installed[k]);
+        installedCard.style.animationDelay = ((data.catalog ? data.catalog.length : 0) + k) * 0.06 + 's';
+        installedCard.classList.add('skill-search-result');
+        resultsDiv.appendChild(installedCard);
+      }
+    }
+
+    if (resultsDiv.children.length === 0) {
+      resultsDiv.innerHTML = '<div class="empty-state">No skills found for "' + escapeHtml(query) + '"</div>';
+    }
+  }).catch(function(err) {
+    resultsDiv.innerHTML = '<div class="empty-state">Search failed: ' + escapeHtml(err.message) + '</div>';
+  });
+}
+
+function renderCatalogSkillCard(entry, installedNames) {
+  var card = document.createElement('div');
+  card.className = 'ext-card ext-available skill-search-result';
+
+  var header = document.createElement('div');
+  header.className = 'ext-header';
+
+  var name = document.createElement('a');
+  name.className = 'ext-name';
+  name.textContent = entry.name || entry.slug;
+  name.href = 'https://clawhub.ai/skills/' + encodeURIComponent(entry.slug);
+  name.target = '_blank';
+  name.rel = 'noopener';
+  name.style.textDecoration = 'none';
+  name.style.color = 'inherit';
+  name.title = 'View on ClawHub';
+  header.appendChild(name);
+
+  if (entry.version) {
+    var version = document.createElement('span');
+    version.className = 'skill-version';
+    version.textContent = 'v' + entry.version;
+    header.appendChild(version);
+  }
+
+  card.appendChild(header);
+
+  if (entry.description) {
+    var desc = document.createElement('div');
+    desc.className = 'ext-desc';
+    desc.textContent = entry.description;
+    card.appendChild(desc);
+  }
+
+  // Metadata row: owner, stars, downloads, recency
+  var meta = document.createElement('div');
+  meta.className = 'ext-meta';
+  meta.style.fontSize = '11px';
+  meta.style.color = '#888';
+  meta.style.marginTop = '6px';
+
+  function addMetaSep() {
+    if (meta.children.length > 0) {
+      meta.appendChild(document.createTextNode(' \u00b7 '));
+    }
+  }
+
+  if (entry.owner) {
+    var ownerSpan = document.createElement('span');
+    ownerSpan.textContent = 'by ' + entry.owner;
+    meta.appendChild(ownerSpan);
+  }
+
+  if (entry.stars != null) {
+    addMetaSep();
+    var starsSpan = document.createElement('span');
+    starsSpan.textContent = entry.stars + ' stars';
+    meta.appendChild(starsSpan);
+  }
+
+  if (entry.downloads != null) {
+    addMetaSep();
+    var dlSpan = document.createElement('span');
+    dlSpan.textContent = formatCompactNumber(entry.downloads) + ' downloads';
+    meta.appendChild(dlSpan);
+  }
+
+  if (entry.updatedAt) {
+    var ago = formatTimeAgo(entry.updatedAt);
+    if (ago) {
+      addMetaSep();
+      var updatedSpan = document.createElement('span');
+      updatedSpan.textContent = 'updated ' + ago;
+      meta.appendChild(updatedSpan);
+    }
+  }
+
+  if (meta.children.length > 0) {
+    card.appendChild(meta);
+  }
+
+  var actions = document.createElement('div');
+  actions.className = 'ext-actions';
+
+  var slug = entry.slug || entry.name;
+  var isInstalled = installedNames[entry.name] || installedNames[slug];
+
+  if (isInstalled) {
+    var label = document.createElement('span');
+    label.className = 'ext-active-label';
+    label.textContent = 'Installed';
+    actions.appendChild(label);
+  } else {
+    var installBtn = document.createElement('button');
+    installBtn.className = 'btn-ext install';
+    installBtn.textContent = 'Install';
+    installBtn.addEventListener('click', (function(s, btn) {
+      return function() {
+        if (!confirm('Install skill "' + s + '" from ClawHub?')) return;
+        btn.disabled = true;
+        btn.textContent = 'Installing...';
+        installSkill(s, null, btn);
+      };
+    })(slug, installBtn));
+    actions.appendChild(installBtn);
+  }
+
+  card.appendChild(actions);
+  return card;
+}
+
+function formatCompactNumber(n) {
+  if (n >= 1000000) return (n / 1000000).toFixed(1) + 'M';
+  if (n >= 1000) return (n / 1000).toFixed(1) + 'K';
+  return '' + n;
+}
+
+function formatTimeAgo(epochMs) {
+  var now = Date.now();
+  var diff = now - epochMs;
+  if (diff < 0) return null;
+  var minutes = Math.floor(diff / 60000);
+  if (minutes < 60) return minutes <= 1 ? 'just now' : minutes + 'm ago';
+  var hours = Math.floor(minutes / 60);
+  if (hours < 24) return hours + 'h ago';
+  var days = Math.floor(hours / 24);
+  if (days < 30) return days + 'd ago';
+  var months = Math.floor(days / 30);
+  if (months < 12) return months + 'mo ago';
+  return Math.floor(months / 12) + 'y ago';
+}
+
+function installSkill(nameOrSlug, url, btn) {
+  var body = { name: nameOrSlug };
+  if (url) body.url = url;
+
+  apiFetch('/api/skills/install', {
+    method: 'POST',
+    headers: { 'X-Confirm-Action': 'true' },
+    body: body,
+  }).then(function(res) {
+    if (res.success) {
+      showToast('Installed skill "' + nameOrSlug + '"', 'success');
+    } else {
+      showToast('Install failed: ' + (res.message || 'unknown error'), 'error');
+    }
+    loadSkills();
+    if (btn) { btn.disabled = false; btn.textContent = 'Install'; }
+  }).catch(function(err) {
+    showToast('Install failed: ' + err.message, 'error');
+    if (btn) { btn.disabled = false; btn.textContent = 'Install'; }
+  });
+}
+
+function removeSkill(name) {
+  if (!confirm('Remove skill "' + name + '"?')) return;
+  apiFetch('/api/skills/' + encodeURIComponent(name), {
+    method: 'DELETE',
+    headers: { 'X-Confirm-Action': 'true' },
+  }).then(function(res) {
+    if (res.success) {
+      showToast('Removed skill "' + name + '"', 'success');
+    } else {
+      showToast('Remove failed: ' + (res.message || 'unknown error'), 'error');
+    }
+    loadSkills();
+  }).catch(function(err) {
+    showToast('Remove failed: ' + err.message, 'error');
+  });
+}
+
+function installSkillFromForm() {
+  var name = document.getElementById('skill-install-name').value.trim();
+  if (!name) { showToast('Skill name is required', 'error'); return; }
+  var url = document.getElementById('skill-install-url').value.trim() || null;
+  if (url && !url.startsWith('https://')) {
+    showToast('URL must use HTTPS', 'error');
+    return;
+  }
+  if (!confirm('Install skill "' + name + '"?')) return;
+  installSkill(name, url, null);
+  document.getElementById('skill-install-name').value = '';
+  document.getElementById('skill-install-url').value = '';
+}
+
+// Wire up Enter key on search input
+document.getElementById('skill-search-input').addEventListener('keydown', function(e) {
+  if (e.key === 'Enter') searchClawHub();
+});
+
 // --- Keyboard shortcuts ---
 
 document.addEventListener('keydown', (e) => {
@@ -2696,10 +3047,10 @@ document.addEventListener('keydown', (e) => {
   const tag = (e.target.tagName || '').toLowerCase();
   const inInput = tag === 'input' || tag === 'textarea';
 
-  // Mod+1-5: switch tabs
-  if (mod && e.key >= '1' && e.key <= '5') {
+  // Mod+1-6: switch tabs
+  if (mod && e.key >= '1' && e.key <= '6') {
     e.preventDefault();
-    const tabs = ['chat', 'memory', 'jobs', 'routines', 'extensions'];
+    const tabs = ['chat', 'memory', 'jobs', 'routines', 'extensions', 'skills'];
     const idx = parseInt(e.key) - 1;
     if (tabs[idx]) switchTab(tabs[idx]);
     return;

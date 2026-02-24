@@ -1,7 +1,7 @@
 //! Curated in-memory catalog of known extensions with fuzzy search.
 //!
-//! The registry holds well-known MCP servers and WASM tools that can be installed
-//! via conversational commands. Online discoveries are cached here too.
+//! The registry holds well-known channels, tools, and MCP servers that can be
+//! installed via conversational commands. Online discoveries are cached here too.
 
 use tokio::sync::RwLock;
 
@@ -103,11 +103,14 @@ impl ExtensionRegistry {
             }
         }
 
-        scored.sort_by(|a, b| b.1.cmp(&a.1));
+        scored.sort_by_key(|b| std::cmp::Reverse(b.1));
         scored.into_iter().map(|(r, _)| r).collect()
     }
 
     /// Look up an entry by exact name.
+    ///
+    /// NOTE: Prefer [`get_with_kind`] when a kind hint is available, to avoid
+    /// returning the wrong entry when two entries share a name but differ in kind.
     pub async fn get(&self, name: &str) -> Option<RegistryEntry> {
         if let Some(entry) = self.entries.iter().find(|e| e.name == name) {
             return Some(entry.clone());
@@ -116,12 +119,59 @@ impl ExtensionRegistry {
         cache.iter().find(|e| e.name == name).cloned()
     }
 
+    /// Look up an entry by exact name, filtering by kind when provided.
+    ///
+    /// When `kind` is `Some(...)`, only returns an entry matching both name and
+    /// kind — never falls back to a different kind. When `kind` is `None`,
+    /// returns the first name match (same as [`get`]).
+    pub async fn get_with_kind(
+        &self,
+        name: &str,
+        kind: Option<ExtensionKind>,
+    ) -> Option<RegistryEntry> {
+        if let Some(kind) = kind {
+            if let Some(entry) = self
+                .entries
+                .iter()
+                .find(|e| e.name == name && e.kind == kind)
+            {
+                return Some(entry.clone());
+            }
+            let cache = self.discovery_cache.read().await;
+            if let Some(entry) = cache.iter().find(|e| e.name == name && e.kind == kind) {
+                return Some(entry.clone());
+            }
+            // Kind was specified but no entry matches — don't fall back to a
+            // different kind, as that would silently misroute the install.
+            return None;
+        }
+        self.get(name).await
+    }
+
+    /// Return all registry entries (builtins + cached discoveries).
+    pub async fn all_entries(&self) -> Vec<RegistryEntry> {
+        let mut entries = self.entries.clone();
+        let cache = self.discovery_cache.read().await;
+        for entry in cache.iter() {
+            if !entries
+                .iter()
+                .any(|e| e.name == entry.name && e.kind == entry.kind)
+            {
+                entries.push(entry.clone());
+            }
+        }
+        entries
+    }
+
     /// Add discovered entries to the cache.
     pub async fn cache_discovered(&self, entries: Vec<RegistryEntry>) {
         let mut cache = self.discovery_cache.write().await;
         for entry in entries {
-            // Deduplicate by name
-            if !cache.iter().any(|e| e.name == entry.name) {
+            // Deduplicate by (name, kind) — same pair as new_with_catalog()
+            if !cache
+                .iter()
+                .any(|e| e.name == entry.name && e.kind == entry.kind)
+            {
                 cache.push(entry);
             }
         }
@@ -193,6 +243,7 @@ fn builtin_entries() -> Vec<RegistryEntry> {
             source: ExtensionSource::McpUrl {
                 url: "https://mcp.notion.com/mcp".to_string(),
             },
+            fallback_source: None,
             auth_hint: AuthHint::Dcr,
         },
         RegistryEntry {
@@ -212,6 +263,7 @@ fn builtin_entries() -> Vec<RegistryEntry> {
             source: ExtensionSource::McpUrl {
                 url: "https://mcp.linear.app".to_string(),
             },
+            fallback_source: None,
             auth_hint: AuthHint::Dcr,
         },
         RegistryEntry {
@@ -230,6 +282,7 @@ fn builtin_entries() -> Vec<RegistryEntry> {
             source: ExtensionSource::McpUrl {
                 url: "https://mcp.google.com/calendar".to_string(),
             },
+            fallback_source: None,
             auth_hint: AuthHint::Dcr,
         },
         RegistryEntry {
@@ -248,6 +301,7 @@ fn builtin_entries() -> Vec<RegistryEntry> {
             source: ExtensionSource::McpUrl {
                 url: "https://mcp.google.com/drive".to_string(),
             },
+            fallback_source: None,
             auth_hint: AuthHint::Dcr,
         },
         RegistryEntry {
@@ -267,6 +321,7 @@ fn builtin_entries() -> Vec<RegistryEntry> {
             source: ExtensionSource::McpUrl {
                 url: "https://mcp.github.com".to_string(),
             },
+            fallback_source: None,
             auth_hint: AuthHint::Dcr,
         },
         RegistryEntry {
@@ -286,6 +341,7 @@ fn builtin_entries() -> Vec<RegistryEntry> {
             source: ExtensionSource::McpUrl {
                 url: "https://mcp.slack.com".to_string(),
             },
+            fallback_source: None,
             auth_hint: AuthHint::Dcr,
         },
         RegistryEntry {
@@ -305,6 +361,7 @@ fn builtin_entries() -> Vec<RegistryEntry> {
             source: ExtensionSource::McpUrl {
                 url: "https://mcp.sentry.dev/sse".to_string(),
             },
+            fallback_source: None,
             auth_hint: AuthHint::Dcr,
         },
         RegistryEntry {
@@ -324,6 +381,7 @@ fn builtin_entries() -> Vec<RegistryEntry> {
             source: ExtensionSource::McpUrl {
                 url: "https://mcp.stripe.com".to_string(),
             },
+            fallback_source: None,
             auth_hint: AuthHint::Dcr,
         },
         RegistryEntry {
@@ -343,6 +401,7 @@ fn builtin_entries() -> Vec<RegistryEntry> {
             source: ExtensionSource::McpUrl {
                 url: "https://mcp.cloudflare.com/sse".to_string(),
             },
+            fallback_source: None,
             auth_hint: AuthHint::Dcr,
         },
         RegistryEntry {
@@ -360,6 +419,7 @@ fn builtin_entries() -> Vec<RegistryEntry> {
             source: ExtensionSource::McpUrl {
                 url: "https://mcp.asana.com".to_string(),
             },
+            fallback_source: None,
             auth_hint: AuthHint::Dcr,
         },
         RegistryEntry {
@@ -378,6 +438,7 @@ fn builtin_entries() -> Vec<RegistryEntry> {
             source: ExtensionSource::McpUrl {
                 url: "https://mcp.intercom.com".to_string(),
             },
+            fallback_source: None,
             auth_hint: AuthHint::Dcr,
         },
         // WASM channels (telegram, slack, discord, whatsapp) come from the embedded
@@ -402,6 +463,7 @@ mod tests {
             source: ExtensionSource::McpUrl {
                 url: "https://example.com".to_string(),
             },
+            fallback_source: None,
             auth_hint: AuthHint::Dcr,
         };
 
@@ -424,6 +486,7 @@ mod tests {
             source: ExtensionSource::McpUrl {
                 url: "https://example.com".to_string(),
             },
+            fallback_source: None,
             auth_hint: AuthHint::Dcr,
         };
 
@@ -446,6 +509,7 @@ mod tests {
             source: ExtensionSource::McpUrl {
                 url: "https://example.com".to_string(),
             },
+            fallback_source: None,
             auth_hint: AuthHint::Dcr,
         };
 
@@ -468,6 +532,7 @@ mod tests {
             source: ExtensionSource::McpUrl {
                 url: "https://example.com".to_string(),
             },
+            fallback_source: None,
             auth_hint: AuthHint::Dcr,
         };
 
@@ -531,6 +596,7 @@ mod tests {
             source: ExtensionSource::McpUrl {
                 url: "https://custom.example.com".to_string(),
             },
+            fallback_source: None,
             auth_hint: AuthHint::Dcr,
         };
 
@@ -556,6 +622,7 @@ mod tests {
             source: ExtensionSource::McpUrl {
                 url: "https://example.com".to_string(),
             },
+            fallback_source: None,
             auth_hint: AuthHint::None,
         };
 
@@ -578,7 +645,9 @@ mod tests {
                 source: ExtensionSource::WasmBuildable {
                     repo_url: "channels-src/telegram".to_string(),
                     build_dir: Some("channels-src/telegram".to_string()),
+                    crate_name: Some("telegram-channel".to_string()),
                 },
+                fallback_source: None,
                 auth_hint: AuthHint::CapabilitiesAuth,
             },
             // This shares a name with the builtin slack-mcp but has a different kind, so both should appear
@@ -591,7 +660,9 @@ mod tests {
                 source: ExtensionSource::WasmBuildable {
                     repo_url: "tools-src/slack".to_string(),
                     build_dir: Some("tools-src/slack".to_string()),
+                    crate_name: Some("slack-tool".to_string()),
                 },
+                fallback_source: None,
                 auth_hint: AuthHint::CapabilitiesAuth,
             },
         ];
@@ -627,6 +698,7 @@ mod tests {
             source: ExtensionSource::McpUrl {
                 url: "https://other.slack.com".to_string(),
             },
+            fallback_source: None,
             auth_hint: AuthHint::Dcr,
         }];
 
@@ -636,6 +708,134 @@ mod tests {
         assert!(entry.is_some());
         // Should still be the builtin, not the override
         assert_eq!(entry.unwrap().display_name, "Slack MCP");
+    }
+
+    #[tokio::test]
+    async fn test_get_with_kind_resolves_collision() {
+        // Two entries with the same name but different kinds (the telegram collision scenario)
+        let catalog_entries = vec![
+            RegistryEntry {
+                name: "telegram".to_string(),
+                display_name: "Telegram Tool".to_string(),
+                kind: ExtensionKind::WasmTool,
+                description: "Telegram MTProto tool".to_string(),
+                keywords: vec!["messaging".into()],
+                source: ExtensionSource::WasmBuildable {
+                    repo_url: "tools-src/telegram".to_string(),
+                    build_dir: Some("tools-src/telegram".to_string()),
+                    crate_name: Some("telegram-tool".to_string()),
+                },
+                fallback_source: None,
+                auth_hint: AuthHint::CapabilitiesAuth,
+            },
+            RegistryEntry {
+                name: "telegram".to_string(),
+                display_name: "Telegram Channel".to_string(),
+                kind: ExtensionKind::WasmChannel,
+                description: "Telegram Bot API channel".to_string(),
+                keywords: vec!["messaging".into(), "bot".into()],
+                source: ExtensionSource::WasmBuildable {
+                    repo_url: "channels-src/telegram".to_string(),
+                    build_dir: Some("channels-src/telegram".to_string()),
+                    crate_name: Some("telegram-channel".to_string()),
+                },
+                fallback_source: None,
+                auth_hint: AuthHint::CapabilitiesAuth,
+            },
+        ];
+
+        let registry = ExtensionRegistry::new_with_catalog(catalog_entries);
+
+        // Without kind hint, get() returns the first match (WasmTool)
+        let entry = registry.get("telegram").await;
+        assert!(entry.is_some());
+        assert_eq!(entry.unwrap().kind, ExtensionKind::WasmTool);
+
+        // With kind hint for WasmChannel, get_with_kind() returns the channel entry
+        let entry = registry
+            .get_with_kind("telegram", Some(ExtensionKind::WasmChannel))
+            .await;
+        assert!(entry.is_some());
+        let entry = entry.unwrap();
+        assert_eq!(entry.kind, ExtensionKind::WasmChannel);
+        assert_eq!(entry.display_name, "Telegram Channel");
+
+        // With kind hint for WasmTool, get_with_kind() returns the tool entry
+        let entry = registry
+            .get_with_kind("telegram", Some(ExtensionKind::WasmTool))
+            .await;
+        assert!(entry.is_some());
+        let entry = entry.unwrap();
+        assert_eq!(entry.kind, ExtensionKind::WasmTool);
+        assert_eq!(entry.display_name, "Telegram Tool");
+
+        // Without kind hint (None), get_with_kind() falls back to first match
+        let entry = registry.get_with_kind("telegram", None).await;
+        assert!(entry.is_some());
+        assert_eq!(entry.unwrap().kind, ExtensionKind::WasmTool);
+
+        // Kind mismatch: no McpServer named "telegram" exists — must return None,
+        // not silently fall back to the WasmTool entry.
+        let entry = registry
+            .get_with_kind("telegram", Some(ExtensionKind::McpServer))
+            .await;
+        assert!(
+            entry.is_none(),
+            "Should return None when kind doesn't match, not fall back to wrong kind"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_get_with_kind_discovery_cache() {
+        let registry = ExtensionRegistry::new();
+
+        // Add two entries with the same name but different kinds to the discovery cache
+        let tool_entry = RegistryEntry {
+            name: "cached-ext".to_string(),
+            display_name: "Cached Tool".to_string(),
+            kind: ExtensionKind::WasmTool,
+            description: "A cached tool".to_string(),
+            keywords: vec![],
+            source: ExtensionSource::WasmBuildable {
+                repo_url: "tools-src/cached".to_string(),
+                build_dir: None,
+                crate_name: None,
+            },
+            fallback_source: None,
+            auth_hint: AuthHint::None,
+        };
+        let channel_entry = RegistryEntry {
+            name: "cached-ext".to_string(),
+            display_name: "Cached Channel".to_string(),
+            kind: ExtensionKind::WasmChannel,
+            description: "A cached channel".to_string(),
+            keywords: vec![],
+            source: ExtensionSource::WasmBuildable {
+                repo_url: "channels-src/cached".to_string(),
+                build_dir: None,
+                crate_name: None,
+            },
+            fallback_source: None,
+            auth_hint: AuthHint::None,
+        };
+
+        registry
+            .cache_discovered(vec![tool_entry, channel_entry])
+            .await;
+
+        // Kind-aware lookup should find the channel in the cache
+        let entry = registry
+            .get_with_kind("cached-ext", Some(ExtensionKind::WasmChannel))
+            .await;
+        assert!(entry.is_some());
+        assert_eq!(entry.unwrap().display_name, "Cached Channel");
+
+        // Kind-aware lookup should find the tool in the cache
+        let entry = registry
+            .get_with_kind("cached-ext", Some(ExtensionKind::WasmTool))
+            .await;
+        assert!(entry.is_some());
+        assert_eq!(entry.unwrap().display_name, "Cached Tool");
     }
 
     // Channel tests (telegram, slack, discord, whatsapp) require the embedded catalog

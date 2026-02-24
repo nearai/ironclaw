@@ -274,6 +274,11 @@ pub trait RoutineStore: Send + Sync {
         limit: i64,
     ) -> Result<Vec<RoutineRun>, DatabaseError>;
     async fn count_running_routine_runs(&self, routine_id: Uuid) -> Result<i64, DatabaseError>;
+    async fn link_routine_run_to_job(
+        &self,
+        run_id: Uuid,
+        job_id: Uuid,
+    ) -> Result<(), DatabaseError>;
 }
 
 #[async_trait]

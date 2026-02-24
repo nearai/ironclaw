@@ -422,7 +422,13 @@ impl LlmProvider for NearAiChatProvider {
                     reason: "No choices in response".to_string(),
                 })?;
 
-        let content = choice.message.content.unwrap_or_default();
+        // Fall back to reasoning_content when content is null (same as
+        // complete_with_tools — reasoning models may put the answer there).
+        let content = choice
+            .message
+            .content
+            .or(choice.message.reasoning_content)
+            .unwrap_or_default();
         let finish_reason = match choice.finish_reason.as_deref() {
             Some("stop") => FinishReason::Stop,
             Some("length") => FinishReason::Length,
@@ -493,7 +499,9 @@ impl LlmProvider for NearAiChatProvider {
                     reason: "No choices in response".to_string(),
                 })?;
 
-        let content = choice.message.content;
+        // Fall back to reasoning_content when content is null (e.g. GLM-5
+        // returns its answer in reasoning_content instead of content).
+        let content = choice.message.content.or(choice.message.reasoning_content);
         let tool_calls: Vec<ToolCall> = choice
             .message
             .tool_calls
@@ -781,6 +789,7 @@ fn flatten_tool_messages(messages: Vec<ChatCompletionMessage>) -> Vec<ChatComple
                 ChatCompletionMessage {
                     role: "assistant".to_string(),
                     content: Some(parts.join("\n")),
+
                     tool_call_id: None,
                     name: None,
                     tool_calls: None,
@@ -792,6 +801,7 @@ fn flatten_tool_messages(messages: Vec<ChatCompletionMessage>) -> Vec<ChatComple
                 ChatCompletionMessage {
                     role: "user".to_string(),
                     content: Some(format!("[Tool `{}` returned: {}]", tool_name, result)),
+
                     tool_call_id: None,
                     name: None,
                     tool_calls: None,
@@ -879,6 +889,10 @@ struct ChatCompletionResponseMessage {
     #[allow(dead_code)]
     role: String,
     content: Option<String>,
+    /// Some models (e.g. GLM-5) return chain-of-thought reasoning here
+    /// instead of in `content`.
+    #[serde(default)]
+    reasoning_content: Option<String>,
     tool_calls: Option<Vec<ChatCompletionToolCall>>,
 }
 
