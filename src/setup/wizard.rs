@@ -724,13 +724,24 @@ impl SetupWizard {
     async fn step_inference_provider(&mut self) -> Result<(), SetupError> {
         // Show current provider if already configured
         if let Some(ref current) = self.settings.llm_backend {
-            let display = match current.as_str() {
-                "nearai" => "NEAR AI",
-                "anthropic" => "Anthropic (Claude)",
-                "openai" => "OpenAI",
-                "ollama" => "Ollama (local)",
-                "openai_compatible" => "OpenAI-compatible endpoint",
-                other => other,
+            let is_openrouter = current == "openai_compatible"
+                && self
+                    .settings
+                    .openai_compatible_base_url
+                    .as_deref()
+                    .is_some_and(|u| u.contains("openrouter.ai"));
+
+            let display = if is_openrouter {
+                "OpenRouter"
+            } else {
+                match current.as_str() {
+                    "nearai" => "NEAR AI",
+                    "anthropic" => "Anthropic (Claude)",
+                    "openai" => "OpenAI",
+                    "ollama" => "Ollama (local)",
+                    "openai_compatible" => "OpenAI-compatible endpoint",
+                    other => other,
+                }
             };
             print_info(&format!("Current provider: {}", display));
             println!();
@@ -742,6 +753,9 @@ impl SetupWizard {
 
             if is_known && confirm("Keep current provider?", true).map_err(SetupError::Io)? {
                 // Still run the auth sub-flow in case they need to update keys
+                if is_openrouter {
+                    return self.setup_openrouter().await;
+                }
                 match current.as_str() {
                     "nearai" => return self.setup_nearai().await,
                     "anthropic" => return self.setup_anthropic().await,
@@ -853,6 +867,7 @@ impl SetupWizard {
             "llm_anthropic_api_key",
             "Anthropic API key",
             "https://console.anthropic.com/settings/keys",
+            None,
         )
         .await
     }
@@ -865,11 +880,12 @@ impl SetupWizard {
             "llm_openai_api_key",
             "OpenAI API key",
             "https://platform.openai.com/api-keys",
+            None,
         )
         .await
     }
 
-    /// Shared setup flow for API-key-based providers (Anthropic, OpenAI).
+    /// Shared setup flow for API-key-based providers (Anthropic, OpenAI, OpenRouter).
     async fn setup_api_key_provider(
         &mut self,
         backend: &str,
@@ -877,12 +893,13 @@ impl SetupWizard {
         secret_name: &str,
         prompt_label: &str,
         hint_url: &str,
+        override_display_name: Option<&str>,
     ) -> Result<(), SetupError> {
-        let display_name = match backend {
+        let display_name = override_display_name.unwrap_or(match backend {
             "anthropic" => "Anthropic",
             "openai" => "OpenAI",
             other => other,
-        };
+        });
 
         self.settings.llm_backend = Some(backend.to_string());
         if self.settings.selected_model.is_some() {
@@ -964,56 +981,20 @@ impl SetupWizard {
 
     /// OpenRouter provider setup: pre-configured OpenAI-compatible endpoint.
     ///
-    /// Sets the base URL to `https://openrouter.ai/api/v1` and prompts for
-    /// an API key. Under the hood this uses the `openai_compatible` backend.
-    ///
-    /// Inlines the API key collection (rather than delegating to
-    /// `setup_api_key_provider`) so the success message says "OpenRouter"
-    /// instead of "openai_compatible".
+    /// Sets the base URL to `https://openrouter.ai/api/v1` and delegates
+    /// API key collection to `setup_api_key_provider` with a display name
+    /// override so messages say "OpenRouter" instead of "openai_compatible".
     async fn setup_openrouter(&mut self) -> Result<(), SetupError> {
-        self.settings.llm_backend = Some("openai_compatible".to_string());
         self.settings.openai_compatible_base_url = Some("https://openrouter.ai/api/v1".to_string());
-        self.settings.selected_model = None;
-
-        // Check env var first
-        if let Ok(existing) = std::env::var("LLM_API_KEY") {
-            print_info(&format!("LLM_API_KEY found: {}", mask_api_key(&existing)));
-            if confirm("Use this key?", true).map_err(SetupError::Io)? {
-                if let Ok(ctx) = self.init_secrets_context().await {
-                    let key = SecretString::from(existing.clone());
-                    if let Err(e) = ctx.save_secret("llm_compatible_api_key", &key).await {
-                        tracing::warn!("Failed to persist env key to secrets: {}", e);
-                    }
-                }
-                self.llm_api_key = Some(SecretString::from(existing));
-                print_success("OpenRouter configured (from env)");
-                return Ok(());
-            }
-        }
-
-        println!();
-        print_info("Get your API key from: https://openrouter.ai/settings/keys");
-        println!();
-
-        let key = secret_input("OpenRouter API key").map_err(SetupError::Io)?;
-        let key_str = key.expose_secret();
-
-        if key_str.is_empty() {
-            return Err(SetupError::Config("API key cannot be empty".to_string()));
-        }
-
-        if let Ok(ctx) = self.init_secrets_context().await {
-            ctx.save_secret("llm_compatible_api_key", &key)
-                .await
-                .map_err(|e| SetupError::Config(format!("Failed to save API key: {e}")))?;
-            print_success("API key encrypted and saved");
-        } else {
-            print_info("Secrets not available. Set LLM_API_KEY in your environment.");
-        }
-
-        self.llm_api_key = Some(SecretString::from(key_str.to_string()));
-        print_success("OpenRouter configured (https://openrouter.ai/api/v1)");
-        Ok(())
+        self.setup_api_key_provider(
+            "openai_compatible",
+            "LLM_API_KEY",
+            "llm_compatible_api_key",
+            "OpenRouter API key",
+            "https://openrouter.ai/settings/keys",
+            Some("OpenRouter"),
+        )
+        .await
     }
 
     /// OpenAI-compatible provider setup: base URL + optional API key.
