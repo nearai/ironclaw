@@ -225,7 +225,7 @@ impl Sanitizer {
         }
 
         // Sort warnings by severity (critical first)
-        warnings.sort_by(|a, b| b.severity.cmp(&a.severity));
+        warnings.sort_by_key(|b| std::cmp::Reverse(b.severity));
 
         // Determine if we need to modify content
         let has_critical = warnings.iter().any(|w| w.severity == Severity::Critical);
