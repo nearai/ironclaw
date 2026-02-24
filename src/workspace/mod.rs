@@ -431,6 +431,48 @@ impl Workspace {
         Ok(())
     }
 
+    /// Resolve the target scope for a layer write, applying privacy guards.
+    ///
+    /// Validates that the layer exists and is writable. For shared layers,
+    /// checks content sensitivity and redirects to the private layer if needed.
+    ///
+    /// Returns `(scope, actual_layer_name, redirected)`.
+    fn resolve_layer_target(
+        &self,
+        layer_name: &str,
+        content: &str,
+    ) -> Result<(String, String, bool), WorkspaceError> {
+        use crate::workspace::layer::{LayerSensitivity, MemoryLayer};
+        use crate::workspace::privacy::PrivacyClassifier;
+
+        let layer = MemoryLayer::find(&self.memory_layers, layer_name).ok_or_else(|| {
+            WorkspaceError::LayerNotFound {
+                name: layer_name.to_string(),
+            }
+        })?;
+
+        if !layer.writable {
+            return Err(WorkspaceError::LayerReadOnly {
+                name: layer_name.to_string(),
+            });
+        }
+
+        if layer.sensitivity == LayerSensitivity::Shared {
+            let classifier = crate::workspace::privacy::global_classifier();
+            if classifier.is_sensitive(content) {
+                tracing::warn!(
+                    layer = layer_name,
+                    "Redirected sensitive content to private layer"
+                );
+                let private = MemoryLayer::private_layer(&self.memory_layers)
+                    .ok_or(WorkspaceError::PrivacyRedirectFailed)?;
+                return Ok((private.scope.clone(), private.name.clone(), true));
+            }
+        }
+
+        Ok((layer.scope.clone(), layer_name.to_string(), false))
+    }
+
     /// Write to a specific memory layer.
     ///
     /// Checks that the layer exists and is writable. Uses the layer's scope
@@ -442,62 +484,20 @@ impl Workspace {
         path: &str,
         content: &str,
     ) -> Result<WriteResult, WorkspaceError> {
-        use crate::workspace::layer::{LayerSensitivity, MemoryLayer};
-        use crate::workspace::privacy::PrivacyClassifier;
-
-        let layer = MemoryLayer::find(&self.memory_layers, layer_name).ok_or_else(|| {
-            WorkspaceError::LayerNotFound {
-                name: layer_name.to_string(),
-            }
-        })?;
-
-        if !layer.writable {
-            return Err(WorkspaceError::LayerReadOnly {
-                name: layer_name.to_string(),
-            });
-        }
-
-        // Privacy guard: redirect sensitive content to private layer
-        if layer.sensitivity == LayerSensitivity::Shared {
-            let classifier = crate::workspace::privacy::global_classifier();
-            if classifier.is_sensitive(content) {
-                tracing::warn!(
-                    layer = layer_name,
-                    "Redirected sensitive content to private layer"
-                );
-                if let Some(private) = MemoryLayer::private_layer(&self.memory_layers) {
-                    let path = normalize_path(path);
-                    let doc = self
-                        .storage
-                        .get_or_create_document_by_path(&private.scope, self.agent_id, &path)
-                        .await?;
-                    self.storage.update_document(doc.id, content).await?;
-                    self.reindex_document(doc.id).await?;
-                    let document = self.storage.get_document_by_id(doc.id).await?;
-                    return Ok(WriteResult {
-                        document,
-                        redirected: true,
-                        actual_layer: private.name.clone(),
-                    });
-                } else {
-                    return Err(WorkspaceError::PrivacyRedirectFailed);
-                }
-            }
-        }
-
-        // Write using the layer's scope as the user_id
+        let (scope, actual_layer, redirected) =
+            self.resolve_layer_target(layer_name, content)?;
         let path = normalize_path(path);
         let doc = self
             .storage
-            .get_or_create_document_by_path(&layer.scope, self.agent_id, &path)
+            .get_or_create_document_by_path(&scope, self.agent_id, &path)
             .await?;
         self.storage.update_document(doc.id, content).await?;
         self.reindex_document(doc.id).await?;
         let document = self.storage.get_document_by_id(doc.id).await?;
         Ok(WriteResult {
             document,
-            redirected: false,
-            actual_layer: layer_name.to_string(),
+            redirected,
+            actual_layer,
         })
     }
 
@@ -508,76 +508,26 @@ impl Workspace {
         path: &str,
         content: &str,
     ) -> Result<WriteResult, WorkspaceError> {
-        use crate::workspace::layer::{LayerSensitivity, MemoryLayer};
-        use crate::workspace::privacy::PrivacyClassifier;
-
-        let layer = MemoryLayer::find(&self.memory_layers, layer_name).ok_or_else(|| {
-            WorkspaceError::LayerNotFound {
-                name: layer_name.to_string(),
-            }
-        })?;
-
-        if !layer.writable {
-            return Err(WorkspaceError::LayerReadOnly {
-                name: layer_name.to_string(),
-            });
-        }
-
-        // Privacy guard: redirect sensitive content to private layer
-        if layer.sensitivity == LayerSensitivity::Shared {
-            let classifier = crate::workspace::privacy::global_classifier();
-            if classifier.is_sensitive(content) {
-                tracing::warn!(
-                    layer = layer_name,
-                    "Redirected sensitive append to private layer"
-                );
-                if let Some(private) = MemoryLayer::private_layer(&self.memory_layers) {
-                    let path = normalize_path(path);
-                    let doc = self
-                        .storage
-                        .get_or_create_document_by_path(&private.scope, self.agent_id, &path)
-                        .await?;
-                    let existing = self.storage.get_document_by_id(doc.id).await?;
-                    let new_content = if existing.content.is_empty() {
-                        content.to_string()
-                    } else {
-                        format!("{}\n\n{}", existing.content, content)
-                    };
-                    self.storage.update_document(doc.id, &new_content).await?;
-                    self.reindex_document(doc.id).await?;
-                    let document = self.storage.get_document_by_id(doc.id).await?;
-                    return Ok(WriteResult {
-                        document,
-                        redirected: true,
-                        actual_layer: private.name.clone(),
-                    });
-                } else {
-                    return Err(WorkspaceError::PrivacyRedirectFailed);
-                }
-            }
-        }
-
+        let (scope, actual_layer, redirected) =
+            self.resolve_layer_target(layer_name, content)?;
         let path = normalize_path(path);
         let doc = self
             .storage
-            .get_or_create_document_by_path(&layer.scope, self.agent_id, &path)
+            .get_or_create_document_by_path(&scope, self.agent_id, &path)
             .await?;
-
-        // Append: read existing content and concatenate
         let existing = self.storage.get_document_by_id(doc.id).await?;
         let new_content = if existing.content.is_empty() {
             content.to_string()
         } else {
             format!("{}\n\n{}", existing.content, content)
         };
-
         self.storage.update_document(doc.id, &new_content).await?;
         self.reindex_document(doc.id).await?;
         let document = self.storage.get_document_by_id(doc.id).await?;
         Ok(WriteResult {
             document,
-            redirected: false,
-            actual_layer: layer_name.to_string(),
+            redirected,
+            actual_layer,
         })
     }
 
