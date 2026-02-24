@@ -580,4 +580,136 @@ INJECTED="pwned"#;
         assert!(onboard.is_some(), "ONBOARD_COMPLETED must be present");
         assert_eq!(onboard.unwrap().1, "true");
     }
+
+    // === QA Plan P1 - 1.2: Bootstrap .env round-trip tests ===
+
+    #[test]
+    fn bootstrap_env_round_trips_llm_backend() {
+        let dir = tempdir().unwrap();
+        let env_path = dir.path().join(".env");
+
+        // Simulate what the wizard writes for LLM backend selection
+        let vars = [
+            ("DATABASE_BACKEND", "libsql"),
+            ("LLM_BACKEND", "openai"),
+            ("ONBOARD_COMPLETED", "true"),
+        ];
+        let mut content = String::new();
+        for (key, value) in &vars {
+            let escaped = value.replace('\\', "\\\\").replace('"', "\\\"");
+            content.push_str(&format!("{}=\"{}\"\n", key, escaped));
+        }
+        std::fs::write(&env_path, &content).unwrap();
+
+        // Verify dotenvy parses LLM_BACKEND correctly
+        let parsed: Vec<(String, String)> = dotenvy::from_path_iter(&env_path)
+            .unwrap()
+            .filter_map(|r| r.ok())
+            .collect();
+
+        let llm_backend = parsed.iter().find(|(k, _)| k == "LLM_BACKEND");
+        assert!(llm_backend.is_some(), "LLM_BACKEND must be present");
+        assert_eq!(
+            llm_backend.unwrap().1,
+            "openai",
+            "LLM_BACKEND must survive .env round-trip"
+        );
+    }
+
+    #[test]
+    fn bootstrap_env_special_chars_in_url() {
+        let dir = tempdir().unwrap();
+        let env_path = dir.path().join(".env");
+
+        // URLs with special characters that are common in database passwords
+        let url = "postgres://user:p%23ss@host:5432/db?sslmode=require";
+        let escaped = url.replace('\\', "\\\\").replace('"', "\\\"");
+        let content = format!("DATABASE_URL=\"{}\"\n", escaped);
+        std::fs::write(&env_path, &content).unwrap();
+
+        let parsed: Vec<(String, String)> = dotenvy::from_path_iter(&env_path)
+            .unwrap()
+            .filter_map(|r| r.ok())
+            .collect();
+
+        assert_eq!(parsed.len(), 1);
+        assert_eq!(parsed[0].1, url, "URL with special chars must survive");
+    }
+
+    #[test]
+    fn upsert_bootstrap_var_preserves_existing() {
+        let dir = tempdir().unwrap();
+        let env_path = dir.path().join(".env");
+
+        // Write initial content
+        let initial = "DATABASE_BACKEND=\"libsql\"\nONBOARD_COMPLETED=\"true\"\n";
+        std::fs::write(&env_path, initial).unwrap();
+
+        // Upsert a new var
+        let content = std::fs::read_to_string(&env_path).unwrap();
+        let new_line = "LLM_BACKEND=\"anthropic\"";
+        let mut result = content.clone();
+        result.push_str(new_line);
+        result.push('\n');
+        std::fs::write(&env_path, &result).unwrap();
+
+        // Parse and verify all three vars are present
+        let parsed: Vec<(String, String)> = dotenvy::from_path_iter(&env_path)
+            .unwrap()
+            .filter_map(|r| r.ok())
+            .collect();
+
+        assert_eq!(parsed.len(), 3, "should have 3 vars after upsert");
+        assert!(
+            parsed
+                .iter()
+                .any(|(k, v)| k == "DATABASE_BACKEND" && v == "libsql"),
+            "original DATABASE_BACKEND must be preserved"
+        );
+        assert!(
+            parsed
+                .iter()
+                .any(|(k, v)| k == "ONBOARD_COMPLETED" && v == "true"),
+            "original ONBOARD_COMPLETED must be preserved"
+        );
+        assert!(
+            parsed
+                .iter()
+                .any(|(k, v)| k == "LLM_BACKEND" && v == "anthropic"),
+            "new LLM_BACKEND must be present"
+        );
+    }
+
+    #[test]
+    fn bootstrap_env_all_wizard_vars_round_trip() {
+        let dir = tempdir().unwrap();
+        let env_path = dir.path().join(".env");
+
+        // Full set of vars the wizard might write
+        let vars = [
+            ("DATABASE_BACKEND", "postgres"),
+            ("DATABASE_URL", "postgres://u:p@h:5432/db"),
+            ("LLM_BACKEND", "nearai"),
+            ("ONBOARD_COMPLETED", "true"),
+            ("EMBEDDING_ENABLED", "false"),
+        ];
+        let mut content = String::new();
+        for (key, value) in &vars {
+            let escaped = value.replace('\\', "\\\\").replace('"', "\\\"");
+            content.push_str(&format!("{}=\"{}\"\n", key, escaped));
+        }
+        std::fs::write(&env_path, &content).unwrap();
+
+        let parsed: Vec<(String, String)> = dotenvy::from_path_iter(&env_path)
+            .unwrap()
+            .filter_map(|r| r.ok())
+            .collect();
+
+        assert_eq!(parsed.len(), vars.len(), "all vars must survive round-trip");
+        for (key, value) in &vars {
+            let found = parsed.iter().find(|(k, _)| k == key);
+            assert!(found.is_some(), "{key} must be present");
+            assert_eq!(&found.unwrap().1, value, "{key} value mismatch");
+        }
+    }
 }
