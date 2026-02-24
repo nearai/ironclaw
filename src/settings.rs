@@ -55,6 +55,14 @@ pub struct Settings {
     #[serde(default)]
     pub openai_compatible_base_url: Option<String>,
 
+    /// Bedrock region (when llm_backend = "bedrock").
+    #[serde(default)]
+    pub bedrock_region: Option<String>,
+
+    /// Bedrock cross-region inference prefix (when llm_backend = "bedrock").
+    #[serde(default)]
+    pub bedrock_cross_region: Option<String>,
+
     // === Step 4: Model Selection ===
     /// Currently selected model.
     #[serde(default)]

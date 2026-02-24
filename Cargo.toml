@@ -137,6 +137,11 @@ subtle = "2"  # Constant-time comparisons for token validation
 # Multi-provider LLM support
 rig-core = "0.30"
 
+# AWS Bedrock (native Converse API)
+aws-config = { version = "1", features = ["behavior-version-latest"] }
+aws-sdk-bedrockruntime = "1"
+aws-smithy-types = "1"
+
 # Docker sandbox
 bollard = "0.18"
 

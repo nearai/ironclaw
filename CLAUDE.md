@@ -403,6 +403,14 @@ SKILLS_AUTO_DISCOVER=true              # Scan skill directories on startup
 # Tinfoil private inference
 TINFOIL_API_KEY=...                    # Required when LLM_BACKEND=tinfoil
 TINFOIL_MODEL=kimi-k2-5               # Default model
+
+# AWS Bedrock (native Converse API)
+LLM_BACKEND=bedrock
+BEDROCK_REGION=us-east-1                    # AWS region
+BEDROCK_MODEL=anthropic.claude-opus-4-6-v1  # Required model ID
+BEDROCK_CROSS_REGION=us                     # Cross-region prefix (us/eu/apac/global)
+AWS_BEARER_TOKEN_BEDROCK=...                # Bedrock API key (bearer token auth)
+# AWS_PROFILE=my-profile                    # Named profile (SSO/assume-role)
 ```
 
 ### LLM Providers
@@ -416,6 +424,8 @@ IronClaw supports multiple LLM backends via the `LLM_BACKEND` env var: `nearai` 
 **OpenAI-compatible** -- Any endpoint that speaks the OpenAI API (vLLM, LiteLLM, OpenRouter, etc.). Configure with `LLM_BASE_URL`, `LLM_API_KEY` (optional), `LLM_MODEL`. Set `LLM_EXTRA_HEADERS` to inject custom HTTP headers into every request (format: `Key:Value,Key2:Value2`), useful for OpenRouter attribution headers like `HTTP-Referer` and `X-Title`.
 
 **Tinfoil** -- Private inference via `https://inference.tinfoil.sh/v1`. Runs models inside hardware-attested TEEs so neither Tinfoil nor the cloud provider can see prompts or responses. Uses the OpenAI-compatible Chat Completions API. Configure with `TINFOIL_API_KEY` and `TINFOIL_MODEL` (default: `kimi-k2-5`).
+
+**AWS Bedrock** -- Uses the native Converse API via `aws-sdk-bedrockruntime`. Supports all Bedrock auth methods: bearer token (`AWS_BEARER_TOKEN_BEDROCK`), IAM credentials (`AWS_ACCESS_KEY_ID`/`AWS_SECRET_ACCESS_KEY`), SSO profiles (`AWS_PROFILE`), and instance roles. Configure with `BEDROCK_REGION` (default: `us-east-1`), `BEDROCK_MODEL` (required, e.g., `anthropic.claude-opus-4-6-v1`), and `BEDROCK_CROSS_REGION` (optional: `us`, `eu`, `apac`, `global` for cross-region inference profiles). The SDK credential chain resolves auth automatically from the environment.
 
 ## Database
 

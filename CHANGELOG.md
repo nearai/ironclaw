@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- AWS Bedrock LLM provider via native Converse API with bearer token, IAM, and SSO auth support (feature-gated: `--features bedrock`)
+
 ## [0.13.0](https://github.com/nearai/ironclaw/compare/v0.12.0...v0.13.0) - 2026-03-02
 
 ### Added

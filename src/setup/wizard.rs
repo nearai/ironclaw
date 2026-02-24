@@ -799,6 +799,7 @@ impl SetupWizard {
                     "openai" => "OpenAI",
                     "ollama" => "Ollama (local)",
                     "openai_compatible" => "OpenAI-compatible endpoint",
+                    "bedrock" => "AWS Bedrock",
                     other => other,
                 }
             };
@@ -807,7 +808,7 @@ impl SetupWizard {
 
             let is_known = matches!(
                 current.as_str(),
-                "nearai" | "anthropic" | "openai" | "ollama" | "openai_compatible"
+                "nearai" | "anthropic" | "openai" | "ollama" | "openai_compatible" | "bedrock"
             );
 
             if is_known && confirm("Keep current provider?", true).map_err(SetupError::Io)? {
@@ -821,6 +822,7 @@ impl SetupWizard {
                     "openai" => return self.setup_openai().await,
                     "ollama" => return self.setup_ollama(),
                     "openai_compatible" => return self.setup_openai_compatible().await,
+                    "bedrock" => return self.setup_bedrock().await,
                     _ => {
                         return Err(SetupError::Config(format!(
                             "Unhandled provider: {}",
@@ -848,6 +850,7 @@ impl SetupWizard {
             "Ollama           - local models, no API key needed",
             "OpenRouter       - 200+ models via single API key",
             "OpenAI-compatible - custom endpoint (vLLM, LiteLLM, etc.)",
+            "AWS Bedrock      - Claude & other models via AWS (API key, IAM, SSO)",
         ];
 
         let choice = select_one("Provider:", options).map_err(SetupError::Io)?;
@@ -859,6 +862,7 @@ impl SetupWizard {
             3 => self.setup_ollama()?,
             4 => self.setup_openrouter().await?,
             5 => self.setup_openai_compatible().await?,
+            6 => self.setup_bedrock().await?,
             _ => return Err(SetupError::Config("Invalid provider selection".to_string())),
         }
 
@@ -1062,6 +1066,144 @@ impl SetupWizard {
         .await
     }
 
+    /// AWS Bedrock provider setup: region, auth, and cross-region config.
+    async fn setup_bedrock(&mut self) -> Result<(), SetupError> {
+        self.settings.llm_backend = Some("bedrock".to_string());
+        if self.settings.selected_model.is_some() {
+            self.settings.selected_model = None;
+        }
+
+        // Region
+        let default_region = self
+            .settings
+            .bedrock_region
+            .as_deref()
+            .unwrap_or("us-east-1");
+
+        let region_input =
+            optional_input("AWS region", Some(&format!("default: {}", default_region)))
+                .map_err(SetupError::Io)?;
+
+        let region = region_input.unwrap_or_else(|| default_region.to_string());
+        self.settings.bedrock_region = Some(region.clone());
+
+        // Auth method
+        print_info("Select authentication method:");
+        println!();
+        let auth_options = &[
+            "Bedrock API key (bearer token, simplest)",
+            "AWS default credentials (env vars, ~/.aws/credentials, IAM roles)",
+            "AWS named profile (SSO / assume-role)",
+        ];
+        let auth_choice = select_one("Auth:", auth_options).map_err(SetupError::Io)?;
+
+        match auth_choice {
+            0 => {
+                // Bedrock API key (bearer token)
+                // Check env var first
+                if let Ok(existing) = std::env::var("AWS_BEARER_TOKEN_BEDROCK")
+                    && !existing.is_empty()
+                {
+                    print_info(&format!(
+                        "AWS_BEARER_TOKEN_BEDROCK found: {}",
+                        mask_api_key(&existing)
+                    ));
+                    if confirm("Use this key?", true).map_err(SetupError::Io)? {
+                        // Persist to secrets store for future runs
+                        if let Ok(ctx) = self.init_secrets_context().await {
+                            let key = SecretString::from(existing);
+                            if let Err(e) = ctx.save_secret("bedrock_api_key", &key).await {
+                                tracing::warn!(
+                                    "Failed to persist Bedrock API key to secrets: {}",
+                                    e
+                                );
+                            }
+                        }
+                        print_success("AWS Bedrock configured (from env)");
+                        // Skip to cross-region
+                        return self.setup_bedrock_cross_region();
+                    }
+                }
+
+                println!();
+                print_info("Get your API key from: AWS Console → Bedrock → API keys");
+                println!();
+
+                let key = secret_input("Bedrock API key").map_err(SetupError::Io)?;
+                let key_str = key.expose_secret();
+
+                if key_str.is_empty() {
+                    return Err(SetupError::Config("API key cannot be empty".to_string()));
+                }
+
+                if let Ok(ctx) = self.init_secrets_context().await {
+                    ctx.save_secret("bedrock_api_key", &key)
+                        .await
+                        .map_err(|e| {
+                            SetupError::Config(format!("Failed to save API key: {}", e))
+                        })?;
+                    print_success("API key encrypted and saved");
+                } else {
+                    print_info(
+                        "Secrets not available. Set AWS_BEARER_TOKEN_BEDROCK in your environment.",
+                    );
+                }
+            }
+            1 => {
+                // Default AWS credentials
+                print_info(
+                    "Using default AWS credential chain (env vars, ~/.aws/credentials, IAM roles).",
+                );
+            }
+            2 => {
+                // Named profile
+                let profile =
+                    input("AWS profile name (from ~/.aws/config)").map_err(SetupError::Io)?;
+                if !profile.is_empty() {
+                    print_info(&format!(
+                        "Set AWS_PROFILE={} in your environment before running ironclaw.",
+                        profile
+                    ));
+                }
+            }
+            _ => return Err(SetupError::Config("Invalid auth selection".to_string())),
+        }
+
+        self.setup_bedrock_cross_region()
+    }
+
+    /// Bedrock cross-region inference prefix selection (sub-step of setup_bedrock).
+    fn setup_bedrock_cross_region(&mut self) -> Result<(), SetupError> {
+        print_info("Cross-region inference routes requests across AWS regions for capacity:");
+        println!();
+        let cross_options = &[
+            "us     - route within US regions (recommended for us-east-1)",
+            "global - route to any AWS region worldwide",
+            "eu     - route within European regions",
+            "apac   - route within Asia-Pacific regions",
+            "none   - single-region only (no cross-region routing)",
+        ];
+        let cross_choice = select_one("Cross-region:", cross_options).map_err(SetupError::Io)?;
+
+        let cross_region = match cross_choice {
+            0 => Some("us".to_string()),
+            1 => Some("global".to_string()),
+            2 => Some("eu".to_string()),
+            3 => Some("apac".to_string()),
+            4 => None,
+            _ => None,
+        };
+        self.settings.bedrock_cross_region = cross_region;
+
+        let region = self
+            .settings
+            .bedrock_region
+            .as_deref()
+            .unwrap_or("us-east-1");
+        print_success(&format!("AWS Bedrock configured (region: {})", region));
+        Ok(())
+    }
+
     /// OpenAI-compatible provider setup: base URL + optional API key.
     async fn setup_openai_compatible(&mut self) -> Result<(), SetupError> {
         self.settings.llm_backend = Some("openai_compatible".to_string());
@@ -1175,6 +1317,15 @@ impl SetupWizard {
                 self.settings.selected_model = Some(model_id.clone());
                 print_success(&format!("Selected {}", model_id));
             }
+            "bedrock" => {
+                let model_id = input("Bedrock model ID (e.g., anthropic.claude-opus-4-6-v1)")
+                    .map_err(SetupError::Io)?;
+                if model_id.is_empty() {
+                    return Err(SetupError::Config("Model ID is required".to_string()));
+                }
+                self.settings.selected_model = Some(model_id.clone());
+                print_success(&format!("Selected {}", model_id));
+            }
             _ => {
                 // NEAR AI: use existing provider list_models()
                 let fetched = self.fetch_nearai_models().await;
@@ -1278,6 +1429,7 @@ impl SetupWizard {
             ollama: None,
             openai_compatible: None,
             tinfoil: None,
+            bedrock: None,
         };
 
         match create_llm_provider(&config, session) {
@@ -2036,6 +2188,17 @@ impl SetupWizard {
         if let Some(ref url) = self.settings.ollama_base_url {
             env_vars.push(("OLLAMA_BASE_URL", url.clone()));
         }
+        if let Some(ref region) = self.settings.bedrock_region {
+            env_vars.push(("BEDROCK_REGION", region.clone()));
+        }
+        if self.settings.llm_backend.as_deref() == Some("bedrock") {
+            if let Some(ref model) = self.settings.selected_model {
+                env_vars.push(("BEDROCK_MODEL", model.clone()));
+            }
+            if let Some(ref cross) = self.settings.bedrock_cross_region {
+                env_vars.push(("BEDROCK_CROSS_REGION", cross.clone()));
+            }
+        }
 
         // Model name: same chicken-and-egg — Config::from_env() resolves the
         // model before the DB is connected, so we must persist it to .env.
@@ -2297,6 +2460,7 @@ impl SetupWizard {
                 "openai" => "OpenAI",
                 "ollama" => "Ollama",
                 "openai_compatible" => "OpenAI-compatible",
+                "bedrock" => "AWS Bedrock",
                 other => other,
             };
             println!("  Provider: {}", display);
