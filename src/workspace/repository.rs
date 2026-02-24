@@ -397,8 +397,8 @@ impl Repository {
                 chunk_index: row.get("chunk_index"),
                 content: row.get("content"),
                 embedding: None,
-                line_start: row.try_get("line_start").ok(),
-                line_end: row.try_get("line_end").ok(),
+                line_start: row.get::<_, Option<i32>>("line_start").map(|l| l as u32),
+                line_end: row.get::<_, Option<i32>>("line_end").map(|l| l as u32),
                 created_at: row.get("created_at"),
             })
             .collect())

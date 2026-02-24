@@ -281,7 +281,7 @@ impl CheckpointTracker {
         matches!(
             tool_name,
             "write" | "edit" | "append" | "memory_write" | "memory_append"
-        ) && target.contains("daily/")
+        ) && target.starts_with("daily/")
             && target.ends_with(".md")
     }
 
@@ -601,11 +601,11 @@ Never pretend to remember something you don't."#
 /// Removes or escapes characters that could break markdown structure
 /// or inject instructions when logs are later included in system prompts.
 fn sanitize_checkpoint_text(text: &str) -> String {
-    text.chars()
+    text.replace('\n', " ") // Flatten newlines FIRST (before control char filter strips them)
+        .chars()
         .filter(|c| !c.is_control() || *c == ' ')
         .collect::<String>()
         .replace('#', "\\#") // Escape markdown headers
-        .replace('\n', " ") // Flatten newlines
         .replace("---", "–––") // Prevent horizontal rules
         .replace("```", "'''") // Prevent code blocks
         .trim()
