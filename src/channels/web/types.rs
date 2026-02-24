@@ -508,6 +508,9 @@ pub struct SkillSearchResponse {
     pub catalog: Vec<serde_json::Value>,
     pub installed: Vec<SkillInfo>,
     pub registry_url: String,
+    /// If the catalog registry was unreachable or errored, a human-readable message.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub catalog_error: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]

@@ -90,6 +90,10 @@ async fn main() -> anyhow::Result<()> {
             ironclaw::bootstrap::load_ironclaw_env();
             return run_status_command().await;
         }
+        Some(Command::Completion(completion)) => {
+            init_cli_tracing();
+            return completion.run();
+        }
         Some(Command::Worker {
             job_id,
             orchestrator_url,
@@ -216,9 +220,35 @@ async fn main() -> anyhow::Result<()> {
 
     // ── Orchestrator / container job manager ────────────────────────────
 
+    // Proactive Docker detection
+    let docker_status = if config.sandbox.enabled {
+        let detection = ironclaw::sandbox::check_docker().await;
+        match detection.status {
+            ironclaw::sandbox::DockerStatus::Available => {
+                tracing::info!("Docker is available");
+            }
+            ironclaw::sandbox::DockerStatus::NotInstalled => {
+                tracing::warn!(
+                    "Docker is not installed -- sandbox disabled for this session. {}",
+                    detection.platform.install_hint()
+                );
+            }
+            ironclaw::sandbox::DockerStatus::NotRunning => {
+                tracing::warn!(
+                    "Docker is installed but not running -- sandbox disabled for this session. {}",
+                    detection.platform.start_hint()
+                );
+            }
+            ironclaw::sandbox::DockerStatus::Disabled => {}
+        }
+        detection.status
+    } else {
+        ironclaw::sandbox::DockerStatus::Disabled
+    };
+
     let job_event_tx: Option<
         tokio::sync::broadcast::Sender<(uuid::Uuid, ironclaw::channels::web::types::SseEvent)>,
-    > = if config.sandbox.enabled {
+    > = if config.sandbox.enabled && docker_status.is_ok() {
         let (tx, _) = tokio::sync::broadcast::channel(256);
         Some(tx)
     } else {
@@ -229,51 +259,52 @@ async fn main() -> anyhow::Result<()> {
         std::collections::VecDeque<ironclaw::orchestrator::api::PendingPrompt>,
     >::new()));
 
-    let container_job_manager: Option<Arc<ContainerJobManager>> = if config.sandbox.enabled {
-        let token_store = TokenStore::new();
-        let job_config = ContainerJobConfig {
-            image: config.sandbox.image.clone(),
-            memory_limit_mb: config.sandbox.memory_limit_mb,
-            cpu_shares: config.sandbox.cpu_shares,
-            orchestrator_port: 50051,
-            claude_code_api_key: std::env::var("ANTHROPIC_API_KEY").ok(),
-            claude_code_oauth_token: ironclaw::config::ClaudeCodeConfig::extract_oauth_token(),
-            claude_code_model: config.claude_code.model.clone(),
-            claude_code_max_turns: config.claude_code.max_turns,
-            claude_code_memory_limit_mb: config.claude_code.memory_limit_mb,
-            claude_code_allowed_tools: config.claude_code.allowed_tools.clone(),
-        };
-        let jm = Arc::new(ContainerJobManager::new(job_config, token_store.clone()));
+    let container_job_manager: Option<Arc<ContainerJobManager>> =
+        if config.sandbox.enabled && docker_status.is_ok() {
+            let token_store = TokenStore::new();
+            let job_config = ContainerJobConfig {
+                image: config.sandbox.image.clone(),
+                memory_limit_mb: config.sandbox.memory_limit_mb,
+                cpu_shares: config.sandbox.cpu_shares,
+                orchestrator_port: 50051,
+                claude_code_api_key: std::env::var("ANTHROPIC_API_KEY").ok(),
+                claude_code_oauth_token: ironclaw::config::ClaudeCodeConfig::extract_oauth_token(),
+                claude_code_model: config.claude_code.model.clone(),
+                claude_code_max_turns: config.claude_code.max_turns,
+                claude_code_memory_limit_mb: config.claude_code.memory_limit_mb,
+                claude_code_allowed_tools: config.claude_code.allowed_tools.clone(),
+            };
+            let jm = Arc::new(ContainerJobManager::new(job_config, token_store.clone()));
 
-        // Start the orchestrator internal API in the background
-        let orchestrator_state = OrchestratorState {
-            llm: components.llm.clone(),
-            job_manager: Arc::clone(&jm),
-            token_store,
-            job_event_tx: job_event_tx.clone(),
-            prompt_queue: Arc::clone(&prompt_queue),
-            store: components.db.clone(),
-            secrets_store: components.secrets_store.clone(),
-            user_id: "default".to_string(),
-        };
+            // Start the orchestrator internal API in the background
+            let orchestrator_state = OrchestratorState {
+                llm: components.llm.clone(),
+                job_manager: Arc::clone(&jm),
+                token_store,
+                job_event_tx: job_event_tx.clone(),
+                prompt_queue: Arc::clone(&prompt_queue),
+                store: components.db.clone(),
+                secrets_store: components.secrets_store.clone(),
+                user_id: "default".to_string(),
+            };
 
-        tokio::spawn(async move {
-            if let Err(e) = OrchestratorApi::start(orchestrator_state, 50051).await {
-                tracing::error!("Orchestrator API failed: {}", e);
+            tokio::spawn(async move {
+                if let Err(e) = OrchestratorApi::start(orchestrator_state, 50051).await {
+                    tracing::error!("Orchestrator API failed: {}", e);
+                }
+            });
+
+            if config.claude_code.enabled {
+                tracing::info!(
+                    "Claude Code sandbox mode available (model: {}, max_turns: {})",
+                    config.claude_code.model,
+                    config.claude_code.max_turns
+                );
             }
-        });
-
-        if config.claude_code.enabled {
-            tracing::info!(
-                "Claude Code sandbox mode available (model: {}, max_turns: {})",
-                config.claude_code.model,
-                config.claude_code.max_turns
-            );
-        }
-        Some(jm)
-    } else {
-        None
-    };
+            Some(jm)
+        } else {
+            None
+        };
 
     // ── Channel setup ──────────────────────────────────────────────────
 
@@ -513,8 +544,10 @@ async fn main() -> anyhow::Result<()> {
             heartbeat_enabled: config.heartbeat.enabled,
             heartbeat_interval_secs: config.heartbeat.interval_secs,
             sandbox_enabled: config.sandbox.enabled,
+            docker_status,
             claude_code_enabled: config.claude_code.enabled,
             routines_enabled: config.routines.enabled,
+            skills_enabled: config.skills.enabled,
             channels: channel_names,
             tunnel_url: active_tunnel
                 .as_ref()
@@ -554,6 +587,7 @@ async fn main() -> anyhow::Result<()> {
         workspace: components.workspace,
         extension_manager: components.extension_manager,
         skill_registry: components.skill_registry,
+        skill_catalog: components.skill_catalog,
         skills_config: config.skills.clone(),
         hooks: components.hooks,
         cost_guard: components.cost_guard,

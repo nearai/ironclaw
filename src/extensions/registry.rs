@@ -208,6 +208,7 @@ fn builtin_entries() -> Vec<RegistryEntry> {
             source: ExtensionSource::McpUrl {
                 url: "https://mcp.notion.com/mcp".to_string(),
             },
+            fallback_source: None,
             auth_hint: AuthHint::Dcr,
         },
         RegistryEntry {
@@ -227,6 +228,7 @@ fn builtin_entries() -> Vec<RegistryEntry> {
             source: ExtensionSource::McpUrl {
                 url: "https://mcp.linear.app".to_string(),
             },
+            fallback_source: None,
             auth_hint: AuthHint::Dcr,
         },
         RegistryEntry {
@@ -245,6 +247,7 @@ fn builtin_entries() -> Vec<RegistryEntry> {
             source: ExtensionSource::McpUrl {
                 url: "https://mcp.google.com/calendar".to_string(),
             },
+            fallback_source: None,
             auth_hint: AuthHint::Dcr,
         },
         RegistryEntry {
@@ -263,6 +266,7 @@ fn builtin_entries() -> Vec<RegistryEntry> {
             source: ExtensionSource::McpUrl {
                 url: "https://mcp.google.com/drive".to_string(),
             },
+            fallback_source: None,
             auth_hint: AuthHint::Dcr,
         },
         RegistryEntry {
@@ -282,6 +286,7 @@ fn builtin_entries() -> Vec<RegistryEntry> {
             source: ExtensionSource::McpUrl {
                 url: "https://mcp.github.com".to_string(),
             },
+            fallback_source: None,
             auth_hint: AuthHint::Dcr,
         },
         RegistryEntry {
@@ -301,6 +306,7 @@ fn builtin_entries() -> Vec<RegistryEntry> {
             source: ExtensionSource::McpUrl {
                 url: "https://mcp.slack.com".to_string(),
             },
+            fallback_source: None,
             auth_hint: AuthHint::Dcr,
         },
         RegistryEntry {
@@ -320,6 +326,7 @@ fn builtin_entries() -> Vec<RegistryEntry> {
             source: ExtensionSource::McpUrl {
                 url: "https://mcp.sentry.dev/sse".to_string(),
             },
+            fallback_source: None,
             auth_hint: AuthHint::Dcr,
         },
         RegistryEntry {
@@ -339,6 +346,7 @@ fn builtin_entries() -> Vec<RegistryEntry> {
             source: ExtensionSource::McpUrl {
                 url: "https://mcp.stripe.com".to_string(),
             },
+            fallback_source: None,
             auth_hint: AuthHint::Dcr,
         },
         RegistryEntry {
@@ -358,6 +366,7 @@ fn builtin_entries() -> Vec<RegistryEntry> {
             source: ExtensionSource::McpUrl {
                 url: "https://mcp.cloudflare.com/sse".to_string(),
             },
+            fallback_source: None,
             auth_hint: AuthHint::Dcr,
         },
         RegistryEntry {
@@ -375,6 +384,7 @@ fn builtin_entries() -> Vec<RegistryEntry> {
             source: ExtensionSource::McpUrl {
                 url: "https://mcp.asana.com".to_string(),
             },
+            fallback_source: None,
             auth_hint: AuthHint::Dcr,
         },
         RegistryEntry {
@@ -393,6 +403,7 @@ fn builtin_entries() -> Vec<RegistryEntry> {
             source: ExtensionSource::McpUrl {
                 url: "https://mcp.intercom.com".to_string(),
             },
+            fallback_source: None,
             auth_hint: AuthHint::Dcr,
         },
         // WASM channels (telegram, slack, discord, whatsapp) come from the embedded
@@ -417,6 +428,7 @@ mod tests {
             source: ExtensionSource::McpUrl {
                 url: "https://example.com".to_string(),
             },
+            fallback_source: None,
             auth_hint: AuthHint::Dcr,
         };
 
@@ -439,6 +451,7 @@ mod tests {
             source: ExtensionSource::McpUrl {
                 url: "https://example.com".to_string(),
             },
+            fallback_source: None,
             auth_hint: AuthHint::Dcr,
         };
 
@@ -461,6 +474,7 @@ mod tests {
             source: ExtensionSource::McpUrl {
                 url: "https://example.com".to_string(),
             },
+            fallback_source: None,
             auth_hint: AuthHint::Dcr,
         };
 
@@ -483,6 +497,7 @@ mod tests {
             source: ExtensionSource::McpUrl {
                 url: "https://example.com".to_string(),
             },
+            fallback_source: None,
             auth_hint: AuthHint::Dcr,
         };
 
@@ -546,6 +561,7 @@ mod tests {
             source: ExtensionSource::McpUrl {
                 url: "https://custom.example.com".to_string(),
             },
+            fallback_source: None,
             auth_hint: AuthHint::Dcr,
         };
 
@@ -571,6 +587,7 @@ mod tests {
             source: ExtensionSource::McpUrl {
                 url: "https://example.com".to_string(),
             },
+            fallback_source: None,
             auth_hint: AuthHint::None,
         };
 
@@ -595,6 +612,7 @@ mod tests {
                     build_dir: Some("channels-src/telegram".to_string()),
                     crate_name: Some("telegram-channel".to_string()),
                 },
+                fallback_source: None,
                 auth_hint: AuthHint::CapabilitiesAuth,
             },
             // This shares a name with the builtin slack-mcp but has a different kind, so both should appear
@@ -609,6 +627,7 @@ mod tests {
                     build_dir: Some("tools-src/slack".to_string()),
                     crate_name: Some("slack-tool".to_string()),
                 },
+                fallback_source: None,
                 auth_hint: AuthHint::CapabilitiesAuth,
             },
         ];
@@ -644,6 +663,7 @@ mod tests {
             source: ExtensionSource::McpUrl {
                 url: "https://other.slack.com".to_string(),
             },
+            fallback_source: None,
             auth_hint: AuthHint::Dcr,
         }];
 

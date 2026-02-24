@@ -58,8 +58,14 @@ pub async fn skills_search_handler(
     ))?;
 
     // Search ClawHub catalog
-    let catalog_results = catalog.search(&req.query).await;
-    let catalog_json: Vec<serde_json::Value> = catalog_results
+    let catalog_outcome = catalog.search(&req.query).await;
+    let catalog_error = catalog_outcome.error.clone();
+
+    // Enrich top results with detail data (stars, downloads, owner)
+    let mut entries = catalog_outcome.results;
+    catalog.enrich_search_results(&mut entries, 5).await;
+
+    let catalog_json: Vec<serde_json::Value> = entries
         .into_iter()
         .map(|e| {
             serde_json::json!({
@@ -68,6 +74,10 @@ pub async fn skills_search_handler(
                 "description": e.description,
                 "version": e.version,
                 "score": e.score,
+                "updatedAt": e.updated_at,
+                "stars": e.stars,
+                "downloads": e.downloads,
+                "owner": e.owner,
             })
         })
         .collect();
@@ -103,6 +113,7 @@ pub async fn skills_search_handler(
         catalog: catalog_json,
         installed,
         registry_url: catalog.registry_url().to_string(),
+        catalog_error,
     }))
 }
 
@@ -147,7 +158,7 @@ pub async fn skills_install_handler(
         )));
     };
 
-    // Parse, check duplicates, and get user_dir under a brief read lock.
+    // Parse, check duplicates, and get install_dir under a brief read lock.
     let (user_dir, skill_name_from_parse) = {
         let guard = registry.read().map_err(|e| {
             (
@@ -168,7 +179,7 @@ pub async fn skills_install_handler(
             ))));
         }
 
-        (guard.user_dir().to_path_buf(), skill_name)
+        (guard.install_target_dir().to_path_buf(), skill_name)
     };
 
     // Perform async I/O (write to disk, load) with no lock held.
