@@ -120,4 +120,71 @@ mod tests {
         // Negative cost with zero price is profitable (we get paid to do it)
         assert!(estimator.is_profitable(Decimal::ZERO, dec!(-10.0)));
     }
+
+    // === QA Plan P2 - 4.4: Value estimator boundary tests ===
+
+    #[test]
+    fn test_profitability_negative_cost() {
+        let estimator = ValueEstimator::new();
+        // Negative cost means we get paid to do the work -- always profitable
+        // with any positive price.
+        assert!(estimator.is_profitable(dec!(100.0), dec!(-50.0)));
+        assert!(estimator.is_profitable(dec!(1.0), dec!(-0.01)));
+    }
+
+    #[test]
+    fn test_profitability_cost_exceeds_price() {
+        let estimator = ValueEstimator::new();
+        // Cost exceeds price → negative margin → not profitable.
+        assert!(!estimator.is_profitable(dec!(10.0), dec!(100.0)));
+    }
+
+    #[test]
+    fn test_margin_zero_earnings() {
+        let estimator = ValueEstimator::new();
+        // Zero earnings → margin should be zero, not panic from divide-by-zero.
+        assert_eq!(
+            estimator.calculate_margin(Decimal::ZERO, dec!(50.0)),
+            Decimal::ZERO
+        );
+        assert_eq!(
+            estimator.calculate_margin(Decimal::ZERO, Decimal::ZERO),
+            Decimal::ZERO
+        );
+    }
+
+    #[test]
+    fn test_estimate_zero_cost() {
+        let estimator = ValueEstimator::new();
+        // Zero cost → value estimate should be zero (cost + 30% of zero).
+        let value = estimator.estimate("free task", Decimal::ZERO);
+        assert_eq!(value, Decimal::ZERO);
+    }
+
+    #[test]
+    fn test_minimum_vs_ideal_bid() {
+        let estimator = ValueEstimator::new();
+        let cost = dec!(100.0);
+        let min_bid = estimator.minimum_bid(cost);
+        let ideal_bid = estimator.ideal_bid(cost);
+        // Minimum bid should always be less than ideal bid.
+        assert!(min_bid < ideal_bid);
+        // Both should be above cost.
+        assert!(min_bid > cost);
+        assert!(ideal_bid > cost);
+    }
+
+    #[test]
+    fn test_profit_calculation() {
+        let estimator = ValueEstimator::new();
+        assert_eq!(
+            estimator.calculate_profit(dec!(150.0), dec!(100.0)),
+            dec!(50.0)
+        );
+        // Negative profit (loss).
+        assert_eq!(
+            estimator.calculate_profit(dec!(50.0), dec!(100.0)),
+            dec!(-50.0)
+        );
+    }
 }

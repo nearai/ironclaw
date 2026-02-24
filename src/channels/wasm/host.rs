@@ -594,4 +594,174 @@ mod tests {
             Some("200".to_string())
         );
     }
+
+    // === QA Plan P2 - 2.3: WASM channel lifecycle tests ===
+
+    #[test]
+    fn test_workspace_write_then_read_round_trip() {
+        // Full lifecycle: write in one "callback", commit, then read in a
+        // subsequent "callback" using the same store as the workspace reader.
+        use crate::channels::wasm::host::ChannelWorkspaceStore;
+        use crate::tools::wasm::{WorkspaceCapability, WorkspaceReader};
+        use std::sync::Arc;
+
+        let store = Arc::new(ChannelWorkspaceStore::new());
+
+        // --- Callback 1: write workspace data ---
+        let caps = ChannelCapabilities::for_channel("telegram");
+        let mut state = ChannelHostState::new("telegram", caps);
+
+        state
+            .workspace_write("offset", "12345".to_string())
+            .unwrap();
+        state
+            .workspace_write("state.json", r#"{"ok":true}"#.to_string())
+            .unwrap();
+
+        let writes = state.take_pending_writes();
+        assert_eq!(writes.len(), 2);
+        store.commit_writes(&writes);
+
+        // --- Callback 2: read back the data written in callback 1 ---
+        // Build capabilities with the store as the workspace reader.
+        let mut caps2 = ChannelCapabilities::for_channel("telegram");
+        caps2.tool_capabilities.workspace_read = Some(WorkspaceCapability {
+            allowed_prefixes: vec![], // empty = all paths allowed
+            reader: Some(Arc::clone(&store) as Arc<dyn WorkspaceReader>),
+        });
+        let state2 = ChannelHostState::new("telegram", caps2);
+
+        // workspace_read prefixes path with "channels/telegram/" before delegating.
+        let offset = state2.workspace_read("offset").unwrap();
+        assert_eq!(offset, Some("12345".to_string()));
+
+        let json = state2.workspace_read("state.json").unwrap();
+        assert_eq!(json, Some(r#"{"ok":true}"#.to_string()));
+
+        // Non-existent key returns None.
+        let missing = state2.workspace_read("no_such_key").unwrap();
+        assert!(missing.is_none());
+    }
+
+    #[test]
+    fn test_workspace_overwrite_across_callbacks() {
+        // Verify that a second write to the same key overwrites the first.
+        use crate::channels::wasm::host::ChannelWorkspaceStore;
+        use crate::tools::wasm::{WorkspaceCapability, WorkspaceReader};
+        use std::sync::Arc;
+
+        let store = Arc::new(ChannelWorkspaceStore::new());
+
+        // Callback 1: write initial value.
+        let caps = ChannelCapabilities::for_channel("slack");
+        let mut state = ChannelHostState::new("slack", caps);
+        state
+            .workspace_write("cursor", "100".to_string())
+            .unwrap();
+        let writes = state.take_pending_writes();
+        store.commit_writes(&writes);
+
+        // Callback 2: overwrite the same key.
+        let caps2 = ChannelCapabilities::for_channel("slack");
+        let mut state2 = ChannelHostState::new("slack", caps2);
+        state2
+            .workspace_write("cursor", "200".to_string())
+            .unwrap();
+        let writes2 = state2.take_pending_writes();
+        store.commit_writes(&writes2);
+
+        // Callback 3: read back -- should see the overwritten value.
+        let mut caps3 = ChannelCapabilities::for_channel("slack");
+        caps3.tool_capabilities.workspace_read = Some(WorkspaceCapability {
+            allowed_prefixes: vec![],
+            reader: Some(Arc::clone(&store) as Arc<dyn WorkspaceReader>),
+        });
+        let state3 = ChannelHostState::new("slack", caps3);
+
+        let value = state3.workspace_read("cursor").unwrap();
+        assert_eq!(value, Some("200".to_string()));
+    }
+
+    #[test]
+    fn test_emit_and_take_preserves_order_and_content() {
+        // Emit multiple messages, take them, verify order and content.
+        let caps = ChannelCapabilities::for_channel("discord");
+        let mut state = ChannelHostState::new("discord", caps);
+
+        let messages_data = vec![
+            ("user-a", "Hello from A"),
+            ("user-b", "Hello from B"),
+            ("user-a", "Follow-up from A"),
+        ];
+        for (uid, content) in &messages_data {
+            state
+                .emit_message(EmittedMessage::new(*uid, *content))
+                .unwrap();
+        }
+
+        assert_eq!(state.emitted_count(), 3);
+
+        let taken = state.take_emitted_messages();
+        assert_eq!(taken.len(), 3);
+
+        // Order preserved.
+        for (i, (uid, content)) in messages_data.iter().enumerate() {
+            assert_eq!(taken[i].user_id, *uid);
+            assert_eq!(taken[i].content, *content);
+        }
+
+        // Take empties the queue.
+        assert_eq!(state.emitted_count(), 0);
+        let taken2 = state.take_emitted_messages();
+        assert!(taken2.is_empty());
+    }
+
+    #[test]
+    fn test_channels_have_isolated_namespaces() {
+        // Two channels writing to the same relative path should not collide.
+        use crate::channels::wasm::host::ChannelWorkspaceStore;
+        use crate::tools::wasm::{WorkspaceCapability, WorkspaceReader};
+        use std::sync::Arc;
+
+        let store = Arc::new(ChannelWorkspaceStore::new());
+
+        // Telegram writes "offset" = "100".
+        let caps_tg = ChannelCapabilities::for_channel("telegram");
+        let mut state_tg = ChannelHostState::new("telegram", caps_tg);
+        state_tg
+            .workspace_write("offset", "100".to_string())
+            .unwrap();
+        store.commit_writes(&state_tg.take_pending_writes());
+
+        // Slack writes "offset" = "200".
+        let caps_sl = ChannelCapabilities::for_channel("slack");
+        let mut state_sl = ChannelHostState::new("slack", caps_sl);
+        state_sl
+            .workspace_write("offset", "200".to_string())
+            .unwrap();
+        store.commit_writes(&state_sl.take_pending_writes());
+
+        // Reading back: each channel sees its own value.
+        let mut caps_tg_read = ChannelCapabilities::for_channel("telegram");
+        caps_tg_read.tool_capabilities.workspace_read = Some(WorkspaceCapability {
+            allowed_prefixes: vec![],
+            reader: Some(Arc::clone(&store) as Arc<dyn WorkspaceReader>),
+        });
+        let tg_reader = ChannelHostState::new("telegram", caps_tg_read);
+        assert_eq!(
+            tg_reader.workspace_read("offset").unwrap(),
+            Some("100".to_string())
+        );
+
+        let mut caps_sl_read = ChannelCapabilities::for_channel("slack");
+        caps_sl_read.tool_capabilities.workspace_read = Some(WorkspaceCapability {
+            allowed_prefixes: vec![],
+            reader: Some(Arc::clone(&store) as Arc<dyn WorkspaceReader>),
+        });
+        let sl_reader = ChannelHostState::new("slack", caps_sl_read);
+        assert_eq!(
+            sl_reader.workspace_read("offset").unwrap(),
+            Some("200".to_string())
+        );
+    }
 }

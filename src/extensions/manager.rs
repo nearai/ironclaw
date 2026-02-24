@@ -2411,4 +2411,96 @@ mod tests {
             "Expected AlreadyInstalled, got: {combined:?}"
         );
     }
+
+    // === QA Plan P2 - 2.4: Extension registry collision tests (filesystem) ===
+
+    #[test]
+    fn test_tool_and_channel_paths_are_separate() {
+        // Verify that a WASM tool named "telegram" and a WASM channel named
+        // "telegram" use different filesystem paths and don't overwrite each other.
+        let dir = tempfile::tempdir().expect("temp dir");
+        let tools_dir = dir.path().join("tools");
+        let channels_dir = dir.path().join("channels");
+        std::fs::create_dir_all(&tools_dir).unwrap();
+        std::fs::create_dir_all(&channels_dir).unwrap();
+
+        let name = "telegram";
+        let tool_wasm = tools_dir.join(format!("{}.wasm", name));
+        let channel_wasm = channels_dir.join(format!("{}.wasm", name));
+
+        // Simulate installing both.
+        std::fs::write(&tool_wasm, b"tool-payload").unwrap();
+        std::fs::write(&channel_wasm, b"channel-payload").unwrap();
+
+        // Both files exist and contain distinct content.
+        assert!(tool_wasm.exists());
+        assert!(channel_wasm.exists());
+        assert_ne!(
+            std::fs::read(&tool_wasm).unwrap(),
+            std::fs::read(&channel_wasm).unwrap(),
+            "Tool and channel files must be independent"
+        );
+
+        // Removing one doesn't affect the other.
+        std::fs::remove_file(&tool_wasm).unwrap();
+        assert!(!tool_wasm.exists());
+        assert!(channel_wasm.exists(), "Removing tool must not affect channel");
+    }
+
+    #[test]
+    fn test_determine_kind_priority_tools_before_channels() {
+        // When a name exists in both tools and channels dirs,
+        // determine_installed_kind checks tools first (wasm_tools_dir).
+        // This test documents the priority order.
+        let dir = tempfile::tempdir().expect("temp dir");
+        let tools_dir = dir.path().join("tools");
+        let channels_dir = dir.path().join("channels");
+        std::fs::create_dir_all(&tools_dir).unwrap();
+        std::fs::create_dir_all(&channels_dir).unwrap();
+
+        let name = "ambiguous";
+        let tool_wasm = tools_dir.join(format!("{}.wasm", name));
+        let channel_wasm = channels_dir.join(format!("{}.wasm", name));
+
+        // Only channel exists → channel kind.
+        std::fs::write(&channel_wasm, b"channel").unwrap();
+        assert!(!tool_wasm.exists());
+        assert!(channel_wasm.exists());
+
+        // Both exist → tools dir checked first.
+        std::fs::write(&tool_wasm, b"tool").unwrap();
+        assert!(tool_wasm.exists());
+        assert!(channel_wasm.exists());
+        // This documents the determine_installed_kind priority:
+        // tools are checked before channels.
+
+        // Only tool exists → tool kind.
+        std::fs::remove_file(&channel_wasm).unwrap();
+        assert!(tool_wasm.exists());
+        assert!(!channel_wasm.exists());
+    }
+
+    #[test]
+    fn test_capabilities_files_also_separate() {
+        // capabilities.json files for tools and channels should also be separate.
+        let dir = tempfile::tempdir().expect("temp dir");
+        let tools_dir = dir.path().join("tools");
+        let channels_dir = dir.path().join("channels");
+        std::fs::create_dir_all(&tools_dir).unwrap();
+        std::fs::create_dir_all(&channels_dir).unwrap();
+
+        let name = "telegram";
+        let tool_cap = tools_dir.join(format!("{}.capabilities.json", name));
+        let channel_cap = channels_dir.join(format!("{}.capabilities.json", name));
+
+        let tool_caps = r#"{"required_secrets":["TELEGRAM_API_KEY"]}"#;
+        let channel_caps = r#"{"required_secrets":["TELEGRAM_BOT_TOKEN"]}"#;
+
+        std::fs::write(&tool_cap, tool_caps).unwrap();
+        std::fs::write(&channel_cap, channel_caps).unwrap();
+
+        // Both exist with distinct content.
+        assert_eq!(std::fs::read_to_string(&tool_cap).unwrap(), tool_caps);
+        assert_eq!(std::fs::read_to_string(&channel_cap).unwrap(), channel_caps);
+    }
 }

@@ -1416,4 +1416,63 @@ mod tests {
             .count();
         assert_eq!(nudge_count, 1);
     }
+
+    // === QA Plan P2 - 2.7: Context length recovery ===
+
+    #[tokio::test]
+    async fn test_context_length_recovery_via_compaction_and_retry() {
+        // Simulates the dispatcher's recovery path:
+        //   1. Provider returns ContextLengthExceeded
+        //   2. compact_messages_for_retry reduces context
+        //   3. Retry with compacted messages succeeds
+        use crate::llm::Reasoning;
+        use crate::testing::StubLlm;
+
+        let stub = Arc::new(StubLlm::failing_non_transient("ctx-bomb"));
+        let safety = Arc::new(SafetyLayer::new(&SafetyConfig {
+            max_output_length: 100_000,
+            injection_check_enabled: false,
+        }));
+
+        let reasoning = Reasoning::new(stub.clone(), safety);
+
+        // Build a fat context with lots of history.
+        let messages = vec![
+            ChatMessage::system("You are a helpful assistant."),
+            ChatMessage::user("First question"),
+            ChatMessage::assistant("First answer"),
+            ChatMessage::user("Second question"),
+            ChatMessage::assistant("Second answer"),
+            ChatMessage::user("Third question"),
+            ChatMessage::assistant("Third answer"),
+            ChatMessage::user("Current request"),
+        ];
+
+        let context = crate::llm::ReasoningContext::new()
+            .with_messages(messages.clone());
+
+        // Step 1: First call fails with ContextLengthExceeded.
+        let err = reasoning.respond_with_tools(&context).await.unwrap_err();
+        assert!(
+            matches!(err, crate::error::LlmError::ContextLengthExceeded { .. }),
+            "Expected ContextLengthExceeded, got: {:?}",
+            err
+        );
+        assert_eq!(stub.calls(), 1);
+
+        // Step 2: Compact messages (same as dispatcher lines 226).
+        let compacted = compact_messages_for_retry(&messages);
+        // Should have dropped the old history, kept system + note + last user.
+        assert!(compacted.len() < messages.len());
+        assert_eq!(compacted.last().unwrap().content, "Current request");
+
+        // Step 3: Switch provider to success and retry.
+        stub.set_failing(false);
+        let retry_context = crate::llm::ReasoningContext::new()
+            .with_messages(compacted);
+
+        let result = reasoning.respond_with_tools(&retry_context).await;
+        assert!(result.is_ok(), "Retry after compaction should succeed");
+        assert_eq!(stub.calls(), 2);
+    }
 }
