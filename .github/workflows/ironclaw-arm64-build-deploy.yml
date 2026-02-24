@@ -1,0 +1,99 @@
+name: IronClaw ARM64 Build and Deploy
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ "main" ]
+
+concurrency:
+  group: ironclaw-deploy
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Build ARM64 Binary
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install ARM64 target and linker
+        run: |
+          rustup target add aarch64-unknown-linux-gnu
+          sudo apt-get update
+          sudo apt-get install -y gcc-aarch64-linux-gnu
+
+      - name: Build release binary (ARM64)
+        env:
+          CARGO_BUILD_JOBS: "1"
+          RUSTFLAGS: "-C codegen-units=1 -C lto=off -C debuginfo=0"
+        run: |
+          cargo build --release --target aarch64-unknown-linux-gnu
+          ls -lh target/aarch64-unknown-linux-gnu/release/ironclaw
+
+      - name: Upload ARM64 artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ironclaw-arm64
+          path: target/aarch64-unknown-linux-gnu/release/ironclaw
+          if-no-files-found: error
+
+  deploy:
+    name: Deploy to Raspberry Pi via Tailscale
+    needs: build
+    runs-on: ubuntu-latest
+    environment: production
+
+    steps:
+      - name: Download build artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: ironclaw-arm64
+          path: ./dist
+
+      - name: Connect runner to Tailscale
+        uses: tailscale/github-action@v4
+        with:
+          oauth-client-id: ${{ secrets.TS_OAUTH_CLIENT_ID }}
+          oauth-secret: ${{ secrets.TS_OAUTH_SECRET }}
+          tags: tag:ci
+
+      - name: Deploy binary to Raspberry Pi
+        env:
+          PI_HOST: ${{ secrets.PI_HOST }}
+          PI_USER: ${{ secrets.PI_USER }}
+          DEPLOY_PATH: ${{ secrets.DEPLOY_PATH }}
+          SERVICE_NAME: ${{ secrets.SERVICE_NAME }}
+        run: |
+          set -euo pipefail
+          chmod +x ./dist/ironclaw
+
+          echo "Creating deploy directory on Pi..."
+          tailscale ssh ${PI_USER}@${PI_HOST} "mkdir -p ~/deploy"
+
+          echo "Copying binary to Pi..."
+          tailscale file cp ./dist/ironclaw ${PI_HOST}:~/deploy/ironclaw
+
+          echo "Installing new binary..."
+          tailscale ssh ${PI_USER}@${PI_HOST} "sudo install -m 0755 ~/deploy/ironclaw ${DEPLOY_PATH}.new"
+
+          echo "Backing up previous version (if exists)..."
+          tailscale ssh ${PI_USER}@${PI_HOST} "if [ -f ${DEPLOY_PATH} ]; then sudo cp -f ${DEPLOY_PATH} ${DEPLOY_PATH}.bak; fi"
+
+          echo "Activating new version..."
+          tailscale ssh ${PI_USER}@${PI_HOST} "sudo mv -f ${DEPLOY_PATH}.new ${DEPLOY_PATH}"
+
+          echo "Restarting service (if present)..."
+          tailscale ssh ${PI_USER}@${PI_HOST} "if systemctl list-unit-files | grep -q '^${SERVICE_NAME}\\.service'; then sudo systemctl restart ${SERVICE_NAME}; fi"
+
+          echo "Verifying deployment..."
+          tailscale ssh ${PI_USER}@${PI_HOST} "${DEPLOY_PATH} --version || true"
+
+          echo "Deployment complete."
