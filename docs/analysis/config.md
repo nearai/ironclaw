@@ -1,6 +1,6 @@
 # IronClaw Codebase Analysis — Configuration System
 
-> Updated: 2026-02-22 | Version: v0.9.0
+> Updated: 2026-02-24 | Version: v0.11.1
 
 ## 1. Overview
 
@@ -62,7 +62,7 @@ default is possible.
 | **LLM Backend** | | | | |
 | `LLM_BACKEND` | string | `nearai` | No | `nearai`, `openai`, `anthropic`, `ollama`, `openai_compatible`, or `tinfoil` |
 | `NEARAI_MODEL` | string | `fireworks::accounts/fireworks/models/llama4-maverick-instruct-basic` | No | Model name for NEAR AI |
-| `NEARAI_CHEAP_MODEL` | string | — | No | Fast/cheap model for routing, evaluation, heartbeat tasks |
+| `NEARAI_CHEAP_MODEL` | string | — | No | Optional model name for SmartRoutingProvider cheap-model path (e.g., `claude-haiku-4-20250514`). Added v0.10.0. |
 | `NEARAI_BASE_URL` | string | `https://private.near.ai` (Responses) or `https://cloud-api.near.ai` (Chat) | No | NEAR AI API base URL |
 | `NEARAI_AUTH_URL` | string | `https://private.near.ai` | No | NEAR AI auth/refresh endpoint base URL |
 | `NEARAI_SESSION_PATH` | path | `~/.ironclaw/session.json` | No | Path to NEAR AI session token file |
@@ -81,7 +81,7 @@ default is possible.
 | `LLM_BASE_URL` | string | — | If `LLM_BACKEND=openai_compatible` | Base URL for OpenAI-compatible endpoint |
 | `LLM_API_KEY` | secret | — | No | API key for OpenAI-compatible endpoint |
 | `LLM_MODEL` | string | `default` | No | Model name for OpenAI-compatible endpoint |
-| `LLM_EXTRA_HEADERS` | string | — | No | Extra HTTP headers for OpenAI-compatible provider. Format: `Key:Value,Key2:Value2` |
+| `LLM_EXTRA_HEADERS` | string | — | No | Comma-separated `Key:Value` HTTP headers injected into OpenAI-compatible provider requests. Example: `"HTTP-Referer:https://myapp.com,X-Title:MyApp"`. Added v0.10.0. |
 | `TINFOIL_API_KEY` | secret | — | If `LLM_BACKEND=tinfoil` | Tinfoil private inference API key |
 | `TINFOIL_MODEL` | string | `kimi-k2-5` | No | Tinfoil model name |
 | **LLM Resilience** | | | | |
@@ -92,7 +92,7 @@ default is possible.
 | `RESPONSE_CACHE_MAX_ENTRIES` | usize | `1000` | No | Max cached responses before LRU eviction |
 | `LLM_FAILOVER_COOLDOWN_SECS` | u64 | `300` | No | Seconds a failed provider stays in cooldown |
 | `LLM_FAILOVER_THRESHOLD` | u32 | `3` | No | Consecutive retryable failures before provider enters cooldown |
-| `SMART_ROUTING_CASCADE` | bool | `true` | No | Enable cascade escalation when cheap model returns uncertain response |
+| `SMART_ROUTING_CASCADE` | bool | `true` | No | When enabled, uncertain responses from the cheap model trigger escalation to the primary model. Added v0.10.0. |
 | **Embeddings** | | | | |
 | `EMBEDDING_ENABLED` | bool | `false` | No | Enable vector embeddings for semantic memory search |
 | `EMBEDDING_PROVIDER` | string | `nearai` | No | Provider: `openai`, `nearai`, or `ollama` |

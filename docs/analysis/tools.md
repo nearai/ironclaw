@@ -1,6 +1,6 @@
 # IronClaw Tool System — Developer Reference
 
-Version: v0.9.0
+Version: v0.11.1
 Source: `src/tools/`
 
 ---
@@ -717,7 +717,7 @@ Manage SKILL.md prompt extensions.
 
 ### 4.12 HTML to Markdown Converter (`builtin/html_converter.rs`)
 
-Two-stage pipeline for converting HTML content to clean Markdown. Used internally by the `http` tool when fetching HTML pages.
+Added in v0.10.0. Built-in tool and two-stage pipeline for converting HTML content to clean Markdown. Used internally by the `http` tool when fetching HTML pages, and exposed directly as the `html_to_markdown` built-in tool for web content ingestion and formatting.
 
 **Feature flag:** `html-to-markdown` (enabled by default)
 
@@ -741,9 +741,15 @@ let markdown = convert_html_to_markdown(html_content, "https://example.com/artic
 
 ---
 
-### 4.13 Built-in Tool Rate Limiter (`rate_limiter.rs`)
+### 4.13 Built-in Tool Rate Limiter (`src/tools/rate_limiter.rs`)
 
-Shared rate limiter for built-in tool invocations (separate from WASM tool rate limiting). Provides per-tool, per-user rate limiting using a sliding window counter.
+Added in v0.10.0. Shared rate limiter for built-in tool invocations (separate from WASM tool rate limiting). Provides per-tool, per-user sliding window rate limiting checked before every built-in tool execution.
+
+**Integration:** The `RateLimiter` is shared as `Arc<RateLimiter>` in `ToolRegistry` and is checked before every built-in tool execution.
+
+**State key:** `(user_id, tool_name)` pairs — different users and different tools maintain independent counters.
+
+**Window types:** Per-minute and per-hour sliding windows.
 
 **Scope:** Applied to built-in tools including:
 - `shell` — Shell command execution
@@ -755,6 +761,14 @@ Shared rate limiter for built-in tool invocations (separate from WASM tool rate 
 - Tracks request counts for current minute and hour windows
 - Resets counters when window expires
 - In-memory only (resets on process restart)
+
+**Per-tool configuration:**
+```rust
+pub struct ToolRateLimitConfig {
+    pub requests_per_minute: u32,
+    pub requests_per_hour: u32,
+}
+```
 
 **Default Limits:**
 | Window | Limit |
@@ -770,7 +784,7 @@ pub enum RateLimitResult {
 }
 ```
 
-**Note:** Rate limit state is in-memory only. Limits reset on process restart. This is acceptable for v1; future versions may persist to the database.
+**Note:** Rate limit state is in-memory only and resets on process restart. State is not persisted to the database.
 
 ---
 
@@ -1420,6 +1434,12 @@ Tools that are always approval-required: `http`, `shell`, `cancel_job`, `job_pro
 Shell adds `requires_approval_for()` on top of static approval, meaning any command
 matching `NEVER_AUTO_APPROVE_PATTERNS` (35 patterns) triggers an additional approval
 prompt even in contexts where static approval is bypassed.
+
+**Consolidated Tool Approval (v0.10.0):** Tool approval was refactored into a single
+param-aware method (`consolidate tool approval`). The multi-tool approval flow can
+resume after the user approves or denies a batch — approval decisions are applied
+per-tool within the batch and execution continues for approved tools without restarting
+the entire flow.
 
 ### Security Architecture Summary
 

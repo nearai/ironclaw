@@ -1,8 +1,8 @@
 # IronClaw Agent Runtime System — Deep Dive
 
-**Version:** v0.9.0
+**Version:** v0.11.1
 **Source tree:** `src/agent/` (21 files)
-**Last updated:** 2026-02-22
+**Last updated:** 2026-02-24
 
 ---
 
@@ -29,6 +29,9 @@ is injected at the host boundary so it never enters a sandboxed process.
   and calls `attempt_recovery()` automatically.
 - **Context-budget-aware** — The context monitor watches token consumption and
   triggers one of three compaction strategies before the LLM window overflows.
+  As of v0.11.0, `ContextLengthExceeded` errors from the LLM also trigger
+  auto-compact via `ContextCompactor`, after which the failed call is retried
+  automatically.
 - **Cost-safe** — A `CostGuard` enforces a daily USD budget ceiling and an
   hourly action rate limit with an `AtomicBool` fast path for zero overhead on
   the hot path.
@@ -51,6 +54,7 @@ is injected at the host boundary so it never enters a sandboxed process.
 | Scheduler | `scheduler.rs` | Job and subtask lifecycle, concurrency control |
 | Context Monitor | `context_monitor.rs` | Token budget estimation, compaction threshold checks |
 | Compaction | `compaction.rs` | Three compaction strategies for full context windows |
+| Context Compactor | `compaction.rs` | Three compaction strategies: Summarize (LLM-generated summary → `daily/{date}.md`), Truncate (drop oldest turns), MoveToWorkspace (archive); triggered on ContextLengthExceeded |
 | Cost Guard | `cost_guard.rs` | Daily budget + hourly rate enforcement |
 | Self-Repair | `self_repair.rs` | Stuck job detection and recovery; broken tool rebuild |
 | Heartbeat | `heartbeat.rs` | Proactive periodic LLM execution from `HEARTBEAT.md` |
@@ -583,6 +587,39 @@ nearly full and latency matters more than history preservation.
 
 Useful for long-running sessions where the user wants the full history
 preserved but not necessarily in the context window.
+
+### 10.4 Context Compaction (v0.11.0)
+
+**Source:** `src/agent/compaction.rs` (346 lines)
+
+In addition to the proactive threshold-based compaction described above,
+v0.11.0 introduced reactive compaction: when the LLM returns a
+`ContextLengthExceeded` error the agentic loop immediately calls
+`ContextCompactor::compact()` and retries the failed LLM call automatically.
+
+The same three strategies are available:
+
+- `Summarize { keep_recent }` — Uses the LLM (max 1024 tokens, temperature 0.3)
+  to summarize old turns, preserving the most recent `keep_recent` turns.
+  Summary is written to `daily/{YYYY-MM-DD}.md` in the workspace.
+- `Truncate { keep_recent }` — Drops the oldest turns without calling the LLM.
+  Lowest-latency option for near-full contexts.
+- `MoveToWorkspace` — Archives full turn text to the workspace daily log.
+
+All strategies return a `CompactionResult`:
+
+```rust
+pub struct CompactionResult {
+    pub turns_removed: usize,
+    pub tokens_before: usize,
+    pub tokens_after: usize,
+    pub summary_written: bool,
+    pub summary: Option<String>,
+}
+```
+
+After compaction completes, the agentic loop retries the failed LLM call
+automatically with the reduced context.
 
 ---
 

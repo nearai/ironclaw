@@ -1,6 +1,6 @@
 # IronClaw Codebase Analysis — Skills, Extensions & Hooks
 
-> Updated: 2026-02-22 | Version: v0.9.0
+> Updated: 2026-02-24 | Version: v0.11.1
 
 ## 1. Overview
 
@@ -156,7 +156,7 @@ Only `SkillSource::User` skills can be removed. `SkillSource::Workspace` and `Sk
 
 Source: `src/skills/catalog.rs`
 
-`SkillCatalog` is a runtime HTTP client for the ClawHub public registry at `https://clawhub.ai`. No compile-time entries exist; the catalog is always live.
+`SkillCatalog` is a runtime HTTP client for the ClawHub public registry. The compiled-in default backend is `https://wry-manatee-359.convex.site` (a Convex backend). No compile-time catalog entries exist; the catalog is always fetched live.
 
 **Configuration**: `CLAWHUB_REGISTRY` env var overrides the default base URL. The legacy `CLAWDHUB_REGISTRY` var is also checked as a fallback.
 
@@ -357,7 +357,22 @@ All operations flow through `ExtensionManager` (`src/extensions/manager.rs`):
 
 Search scoring: exact name match = 100 points, name contains token = 50, display name contains = 30, exact keyword match = 40, keyword contains = 20, description contains = 10.
 
-### 3.5 Online Discovery (`discovery.rs`)
+### 3.5 Embedded Registry Catalog (v0.10.0)
+
+The extension registry now ships with an embedded catalog of known extensions. This allows offline discovery of available extensions without requiring network access. The embedded catalog is updated with each release.
+
+### 3.6 WASM Bundle Install Pipeline (v0.10.0)
+
+Extensions are now installed via a download-only pipeline (`ExtensionSource::Bundled` was removed). The pipeline:
+
+1. Downloads the WASM binary from the registry
+2. Validates the bundle hash
+3. Extracts to `~/.ironclaw/extensions/{name}/`
+4. Registers in the database
+
+Onboarding integration: extensions can be installed during the `ironclaw onboard` wizard.
+
+### 3.7 Online Discovery (`discovery.rs`)
 
 `OnlineDiscovery` runs three concurrent strategies when the built-in registry has no results:
 
@@ -538,6 +553,8 @@ The extension manager implements OAuth 2.1 with PKCE (`src/tools/mcp/auth.rs`):
 
 Fallback path: if OAuth is not supported, prompt the user for a manual API token.
 
+**Remote OAuth Support (v0.10.0)**: OAuth callbacks now work on remote servers, not just localhost. This enables `ironclaw auth <extension>` to work when the agent is running headless on a remote machine.
+
 ### 5.3 WASM Tool Install Flow
 
 1. Validate URL is HTTPS
@@ -667,12 +684,14 @@ The host provides functions the channel WASM can call:
 
 | Environment Variable | Default | Description |
 |---------------------|---------|-------------|
-| `SKILLS_ENABLED` | `false` | Enable the skills system |
+| `SKILLS_ENABLED` | `true` | Enable the skills system (enabled by default as of v0.10.0) |
 | `SKILLS_DIR` | `~/.ironclaw/skills/` | User skills directory |
 | `SKILLS_MAX_ACTIVE` | `3` | Maximum simultaneously active skills |
 | `SKILLS_MAX_CONTEXT_TOKENS` | `4000` | Total prompt token budget for skills |
-| `CLAWHUB_REGISTRY` | `https://clawhub.ai` | ClawHub registry base URL |
+| `CLAWHUB_REGISTRY` | `https://wry-manatee-359.convex.site` | Overrides the compiled-in Convex backend URL for the ClawHub registry |
 | `CLAWDHUB_REGISTRY` | — | Legacy alias for `CLAWHUB_REGISTRY` |
+
+Skills are **enabled by default** as of v0.10.0 (`SKILLS_ENABLED=true`). The compiled-in registry backend is a Convex URL (`https://wry-manatee-359.convex.site`), overridable via `CLAWHUB_REGISTRY`. The skill install flow was fixed to correctly handle the registry API and WASM binary download.
 
 ### 7.2 Skill Directory Layout
 

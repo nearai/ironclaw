@@ -1,6 +1,6 @@
 # IronClaw Codebase Analysis — Worker & Orchestrator (Docker Sandbox)
 
-> Updated: 2026-02-22 | Version: v0.9.0
+> Updated: 2026-02-24 | Version: v0.11.1
 
 ## 1. Overview
 
@@ -453,7 +453,7 @@ secret is recorded in the audit trail.
 Containers use Docker `bridge` network mode. They cannot reach each other
 directly. Each container can only reach `host.docker.internal:50051` (the
 orchestrator API) and external networks (controlled by the sandbox network
-proxy allowlist when `SANDBOX_NETWORK_PROXY=true`).
+proxy allowlist configured via sandbox policy).
 
 ### Capability drop
 
