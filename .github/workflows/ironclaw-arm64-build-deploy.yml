@@ -3,7 +3,8 @@ name: IronClaw ARM64 Build and Deploy
 on:
   workflow_dispatch:
   push:
-    branches: [ "main" ]
+    tags:
+      - "v*"
 
 concurrency:
   group: ironclaw-deploy
@@ -24,18 +25,15 @@ jobs:
       - name: Cache Rust dependencies
         uses: Swatinem/rust-cache@v2
 
-      - name: Install ARM64 target and linker
-        run: |
-          rustup target add aarch64-unknown-linux-gnu
-          sudo apt-get update
-          sudo apt-get install -y gcc-aarch64-linux-gnu
+      - name: Install cross for ARM64 compilation
+        run: cargo install cross
 
       - name: Build release binary (ARM64)
         env:
           CARGO_BUILD_JOBS: "1"
           RUSTFLAGS: "-C codegen-units=1 -C lto=off -C debuginfo=0"
         run: |
-          cargo build --release --target aarch64-unknown-linux-gnu
+          cross build --release --target aarch64-unknown-linux-gnu
           ls -lh target/aarch64-unknown-linux-gnu/release/ironclaw
 
       - name: Upload ARM64 artifact
@@ -69,8 +67,8 @@ jobs:
         env:
           PI_HOST: ${{ secrets.PI_HOST }}
           PI_USER: ${{ secrets.PI_USER }}
-          DEPLOY_PATH: ${{ secrets.DEPLOY_PATH }}
-          SERVICE_NAME: ${{ secrets.SERVICE_NAME }}
+          DEPLOY_PATH: ${{ secrets.DEPLOY_PATH || '/usr/local/bin/ironclaw' }}
+          SERVICE_NAME: ${{ secrets.SERVICE_NAME || 'ironclaw' }}
         run: |
           set -euo pipefail
           chmod +x ./dist/ironclaw
@@ -78,8 +76,8 @@ jobs:
           echo "Creating deploy directory on Pi..."
           tailscale ssh ${PI_USER}@${PI_HOST} "mkdir -p ~/deploy"
 
-          echo "Copying binary to Pi..."
-          tailscale file cp ./dist/ironclaw ${PI_HOST}:~/deploy/ironclaw
+          echo "Streaming binary to Pi..."
+          tailscale ssh ${PI_USER}@${PI_HOST} "cat > ~/deploy/ironclaw && chmod +x ~/deploy/ironclaw" < ./dist/ironclaw
 
           echo "Installing new binary..."
           tailscale ssh ${PI_USER}@${PI_HOST} "sudo install -m 0755 ~/deploy/ironclaw ${DEPLOY_PATH}.new"

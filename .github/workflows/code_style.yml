@@ -12,7 +12,6 @@ jobs:
     - name: Install Rust
       uses: dtolnay/rust-toolchain@stable
       with:
-        profile: minimal
         components: rustfmt, clippy
     - uses: Swatinem/rust-cache@v2
     - name: Check formatting

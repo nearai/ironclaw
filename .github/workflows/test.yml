@@ -14,8 +14,6 @@ jobs:
         uses: actions/checkout@v6
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
-        with:
-          profile: minimal
       - uses: Swatinem/rust-cache@v2
       - name: Run Tests
         run: cargo test --all-features -- --nocapture
