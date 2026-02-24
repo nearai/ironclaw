@@ -548,6 +548,7 @@ impl SignalChannel {
     fn process_envelope(&self, envelope: &Envelope) -> Option<(IncomingMessage, String)> {
         // Skip story messages when configured.
         if self.config.ignore_stories && envelope.story_message.is_some() {
+            tracing::debug!("Signal: dropping story message");
             return None;
         }
 
@@ -557,6 +558,7 @@ impl SignalChannel {
         let has_attachments = data_msg.attachments.as_ref().is_some_and(|a| !a.is_empty());
         let has_message_text = data_msg.message.as_ref().is_some_and(|m| !m.is_empty());
         if self.config.ignore_attachments && has_attachments && !has_message_text {
+            tracing::debug!("Signal: dropping attachment-only message");
             return None;
         }
 
@@ -803,7 +805,6 @@ impl Channel for SignalChannel {
         } = &status
             && let Some(target_str) = metadata.get("signal_target").and_then(|v| v.as_str())
         {
-            let target = Self::parse_recipient_target(target_str);
             let params_json = serde_json::to_string(parameters).unwrap_or_default();
             let message = format!(
                 "⚠️ *Approval Required*\n\n\
@@ -817,32 +818,107 @@ impl Channel for SignalChannel {
                  • `no` or `n` - Deny",
                 tool_name, description, params_json, request_id, tool_name
             );
-            let params = self.build_rpc_params(&target, Some(&message));
-            let _ = self.rpc_request("send", params).await;
+            self.send_status_message(target_str, &message).await;
         }
 
         // Send status messages (Done, Awaiting approval, etc.)
-        if let StatusUpdate::Status(msg) = &status {
-            if let Some(target_str) = metadata.get("signal_target").and_then(|v| v.as_str()) {
-                let target = Self::parse_recipient_target(target_str);
-                let params = self.build_rpc_params(&target, Some(&msg));
-                let _ = self.rpc_request("send", params).await;
-            }
+        if let StatusUpdate::Status(msg) = &status
+            && let Some(target_str) = metadata.get("signal_target").and_then(|v| v.as_str())
+        {
+            self.send_status_message(target_str, msg).await;
         }
 
         // Send tool result previews to user
-        if let StatusUpdate::ToolResult { name, preview } = &status {
-            if let Some(target_str) = metadata.get("signal_target").and_then(|v| v.as_str()) {
-                let target = Self::parse_recipient_target(target_str);
-                let truncated = if preview.len() > 500 {
-                    format!("{}...", &preview[..500])
-                } else {
-                    preview.clone()
-                };
-                let message = format!("Tool '{}' result:\n{}", name, truncated);
-                let params = self.build_rpc_params(&target, Some(&message));
-                let _ = self.rpc_request("send", params).await;
+        if let StatusUpdate::ToolResult { name, preview } = &status
+            && let Some(target_str) = metadata.get("signal_target").and_then(|v| v.as_str())
+        {
+            let truncated = if preview.chars().count() > 500 {
+                let s: String = preview.chars().take(500).collect();
+                format!("{s}...")
+            } else {
+                preview.clone()
+            };
+            let message = format!("Tool '{}' result:\n{}", name, truncated);
+            self.send_status_message(target_str, &message).await;
+        }
+
+        // Send tool started notification
+        if let StatusUpdate::ToolStarted { name } = &status
+            && let Some(target_str) = metadata.get("signal_target").and_then(|v| v.as_str())
+        {
+            let message = format!("\u{25CB} Running tool: {}", name);
+            self.send_status_message(target_str, &message).await;
+        }
+
+        // Send tool completed notification
+        if let StatusUpdate::ToolCompleted { name, success } = &status
+            && let Some(target_str) = metadata.get("signal_target").and_then(|v| v.as_str())
+        {
+            let (icon, color) = if *success {
+                ("\u{25CF}", "success")
+            } else {
+                ("\u{2717}", "failed")
+            };
+            let message = format!("{} Tool '{}' completed ({})", icon, name, color);
+            self.send_status_message(target_str, &message).await;
+        }
+
+        // Send job started notification (sandbox jobs)
+        if let StatusUpdate::JobStarted {
+            job_id,
+            title,
+            browse_url,
+        } = &status
+            && let Some(target_str) = metadata.get("signal_target").and_then(|v| v.as_str())
+        {
+            let message = format!(
+                "\u{1F680} Job started: {}\nID: {}\nURL: {}",
+                title, job_id, browse_url
+            );
+            self.send_status_message(target_str, &message).await;
+        }
+
+        // Send auth required notification
+        if let StatusUpdate::AuthRequired {
+            extension_name,
+            instructions,
+            auth_url,
+            setup_url,
+        } = &status
+            && let Some(target_str) = metadata.get("signal_target").and_then(|v| v.as_str())
+        {
+            let mut message = format!("\u{1F512} Authentication required for: {}", extension_name);
+            if let Some(instr) = instructions {
+                message.push_str(&format!("\n\n{}", instr));
             }
+            if let Some(url) = auth_url {
+                message.push_str(&format!("\n\nAuth URL: {}", url));
+            }
+            if let Some(url) = setup_url {
+                message.push_str(&format!("\nSetup URL: {}", url));
+            }
+            self.send_status_message(target_str, &message).await;
+        }
+
+        // Send auth completed notification
+        if let StatusUpdate::AuthCompleted {
+            extension_name,
+            success,
+            message: msg,
+        } = &status
+            && let Some(target_str) = metadata.get("signal_target").and_then(|v| v.as_str())
+        {
+            let icon = if *success { "\u{2705}" } else { "\u{274C}" };
+            let mut message = format!(
+                "{} Authentication {} for {}",
+                icon,
+                if *success { "completed" } else { "failed" },
+                extension_name
+            );
+            if !msg.is_empty() {
+                message.push_str(&format!("\n{}", msg));
+            }
+            self.send_status_message(target_str, &message).await;
         }
 
         Ok(())
@@ -877,6 +953,16 @@ impl Channel for SignalChannel {
             Err(ChannelError::HealthCheckFailed {
                 name: format!("signal: HTTP {}", resp.status()),
             })
+        }
+    }
+}
+
+impl SignalChannel {
+    async fn send_status_message(&self, target: &str, message: &str) {
+        let target = Self::parse_recipient_target(target);
+        let params = self.build_rpc_params(&target, Some(message));
+        if let Err(e) = self.rpc_request("send", params).await {
+            tracing::warn!("Signal: failed to send status message: {}", e);
         }
     }
 }
