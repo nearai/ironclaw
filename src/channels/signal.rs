@@ -824,6 +824,7 @@ impl Channel for SignalChannel {
         // Send status messages (Done, Awaiting approval, etc.)
         if let StatusUpdate::Status(msg) = &status
             && let Some(target_str) = metadata.get("signal_target").and_then(|v| v.as_str())
+            && msg != "Done"
         {
             self.send_status_message(target_str, msg).await;
         }
