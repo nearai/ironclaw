@@ -793,6 +793,58 @@ impl Channel for SignalChannel {
             let params = self.build_rpc_params(&target, None);
             let _ = self.rpc_request("sendTyping", params).await;
         }
+
+        // Send approval prompt to user
+        if let StatusUpdate::ApprovalNeeded {
+            request_id,
+            tool_name,
+            description,
+            parameters,
+        } = &status
+            && let Some(target_str) = metadata.get("signal_target").and_then(|v| v.as_str())
+        {
+            let target = Self::parse_recipient_target(target_str);
+            let params_json = serde_json::to_string(parameters).unwrap_or_default();
+            let message = format!(
+                "⚠️ *Approval Required*\n\n\
+                 *Tool:* {}\n\
+                 *Description:* {}\n\
+                 *Parameters:*\n```\n{}\n```\n\n\
+                 *Request ID:* `{}`\n\n\
+                 Reply with:\n\
+                 • `yes` or `y` - Approve this request\n\
+                 • `always` or `a` - Approve and auto-approve future {} requests\n\
+                 • `no` or `n` - Deny",
+                tool_name, description, params_json, request_id, tool_name
+            );
+            let params = self.build_rpc_params(&target, Some(&message));
+            let _ = self.rpc_request("send", params).await;
+        }
+
+        // Send status messages (Done, Awaiting approval, etc.)
+        if let StatusUpdate::Status(msg) = &status {
+            if let Some(target_str) = metadata.get("signal_target").and_then(|v| v.as_str()) {
+                let target = Self::parse_recipient_target(target_str);
+                let params = self.build_rpc_params(&target, Some(&msg));
+                let _ = self.rpc_request("send", params).await;
+            }
+        }
+
+        // Send tool result previews to user
+        if let StatusUpdate::ToolResult { name, preview } = &status {
+            if let Some(target_str) = metadata.get("signal_target").and_then(|v| v.as_str()) {
+                let target = Self::parse_recipient_target(target_str);
+                let truncated = if preview.len() > 500 {
+                    format!("{}...", &preview[..500])
+                } else {
+                    preview.clone()
+                };
+                let message = format!("Tool '{}' result:\n{}", name, truncated);
+                let params = self.build_rpc_params(&target, Some(&message));
+                let _ = self.rpc_request("send", params).await;
+            }
+        }
+
         Ok(())
     }
 
