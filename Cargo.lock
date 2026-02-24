@@ -2700,7 +2700,7 @@ dependencies = [
 
 [[package]]
 name = "ironclaw"
-version = "0.10.0"
+version = "0.11.1"
 dependencies = [
  "aes-gcm",
  "aho-corasick",
@@ -2728,6 +2728,7 @@ dependencies = [
  "hyper 1.8.1",
  "hyper-util",
  "libsql",
+ "lru",
  "mime_guess",
  "open",
  "pgvector",
@@ -4993,7 +4994,7 @@ dependencies = [
  "darling",
  "proc-macro2",
  "quote",
- "syn 2.0.114",
+ "syn 2.0.116",
 ]
 
 [[package]]

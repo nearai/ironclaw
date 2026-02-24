@@ -8,7 +8,8 @@
 //! 5. Embeddings
 //! 6. Channel configuration
 //! 7. Extensions (tool installation from registry)
-//! 8. Heartbeat (background tasks)
+//! 8. Docker sandbox
+//! 9. Heartbeat (background tasks)
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -26,12 +27,17 @@ use crate::llm::{SessionConfig, SessionManager};
 use crate::secrets::{SecretsCrypto, SecretsStore};
 use crate::settings::{KeySource, Settings};
 use crate::setup::channels::{
-    SecretsContext, setup_http, setup_telegram, setup_tunnel, setup_wasm_channel,
+    SecretsContext, setup_http, setup_signal, setup_telegram, setup_tunnel, setup_wasm_channel,
 };
 use crate::setup::prompts::{
     confirm, input, optional_input, print_error, print_header, print_info, print_step,
     print_success, secret_input, select_many, select_one,
 };
+
+// unused const, keep commented for clarity / future use
+// const CHANNEL_INDEX_CLI: usize = 0;
+const CHANNEL_INDEX_HTTP: usize = 1;
+const CHANNEL_INDEX_SIGNAL: usize = 2;
 
 /// Setup wizard error.
 #[derive(Debug, thiserror::Error)]
@@ -140,7 +146,7 @@ impl SetupWizard {
             print_step(1, 1, "Channel Configuration");
             self.step_channels().await?;
         } else {
-            let total_steps = 8;
+            let total_steps = 9;
 
             // Step 1: Database
             print_step(1, total_steps, "Database Connection");
@@ -191,8 +197,13 @@ impl SetupWizard {
             print_step(7, total_steps, "Extensions");
             self.step_extensions().await?;
 
-            // Step 8: Heartbeat
-            print_step(8, total_steps, "Background Tasks");
+            // Step 8: Docker Sandbox
+            print_step(8, total_steps, "Docker Sandbox");
+            self.step_docker_sandbox().await?;
+            self.persist_after_step().await;
+
+            // Step 9: Heartbeat
+            print_step(9, total_steps, "Background Tasks");
             self.step_heartbeat()?;
             self.persist_after_step().await;
         }
@@ -1437,7 +1448,10 @@ impl SetupWizard {
                 "HTTP webhook".to_string(),
                 self.settings.channels.http_enabled,
             ),
+            ("Signal".to_string(), self.settings.channels.signal_enabled),
         ];
+
+        let non_wasm_count = options.len();
 
         // Add available WASM channels (installed + bundled + registry)
         for name in &wasm_channel_names {
@@ -1460,7 +1474,7 @@ impl SetupWizard {
             .iter()
             .enumerate()
             .filter_map(|(idx, name)| {
-                if selected.contains(&(idx + 2)) {
+                if selected.contains(&(non_wasm_count + idx)) {
                     Some(name.clone())
                 } else {
                     None
@@ -1487,7 +1501,6 @@ impl SetupWizard {
             any_installed = true;
         }
 
-        // Then try registry channels (build from source for any still missing)
         let installed_from_registry = install_selected_registry_channels(
             &channels_dir,
             &selected_wasm_channels,
@@ -1509,7 +1522,8 @@ impl SetupWizard {
         }
 
         // Determine if we need secrets context
-        let needs_secrets = selected.contains(&1) || !selected_wasm_channels.is_empty();
+        let needs_secrets =
+            selected.contains(&CHANNEL_INDEX_HTTP) || !selected_wasm_channels.is_empty();
         let secrets = if needs_secrets {
             match self.init_secrets_context().await {
                 Ok(ctx) => Some(ctx),
@@ -1523,8 +1537,8 @@ impl SetupWizard {
             None
         };
 
-        // HTTP is index 1
-        if selected.contains(&1) {
+        // HTTP channel
+        if selected.contains(&CHANNEL_INDEX_HTTP) {
             println!();
             if let Some(ref ctx) = secrets {
                 let result = setup_http(ctx).await?;
@@ -1537,6 +1551,29 @@ impl SetupWizard {
             }
         } else {
             self.settings.channels.http_enabled = false;
+        }
+
+        // Signal channel
+        if selected.contains(&CHANNEL_INDEX_SIGNAL) {
+            println!();
+            let result = setup_signal(&self.settings).await?;
+            self.settings.channels.signal_enabled = result.enabled;
+            self.settings.channels.signal_http_url = Some(result.http_url);
+            self.settings.channels.signal_account = Some(result.account);
+            self.settings.channels.signal_allow_from = Some(result.allow_from);
+            self.settings.channels.signal_allow_from_groups = Some(result.allow_from_groups);
+            self.settings.channels.signal_dm_policy = Some(result.dm_policy);
+            self.settings.channels.signal_group_policy = Some(result.group_policy);
+            self.settings.channels.signal_group_allow_from = Some(result.group_allow_from);
+        } else {
+            self.settings.channels.signal_enabled = false;
+            self.settings.channels.signal_http_url = None;
+            self.settings.channels.signal_account = None;
+            self.settings.channels.signal_allow_from = None;
+            self.settings.channels.signal_allow_from_groups = None;
+            self.settings.channels.signal_dm_policy = None;
+            self.settings.channels.signal_group_policy = None;
+            self.settings.channels.signal_group_allow_from = None;
         }
 
         let discovered_by_name: HashMap<String, ChannelCapabilitiesFile> =
@@ -1679,9 +1716,12 @@ impl SetupWizard {
                 continue; // Already installed, skip
             }
 
-            match installer.install_from_source(tool, false).await {
+            match installer.install_with_source_fallback(tool, false).await {
                 Ok(outcome) => {
                     print_success(&format!("Installed {}", outcome.name));
+                    for warning in &outcome.warnings {
+                        print_info(&format!("{}: {}", outcome.name, warning));
+                    }
                     installed_count += 1;
 
                     // Track auth needs
@@ -1722,7 +1762,85 @@ impl SetupWizard {
         Ok(())
     }
 
-    /// Step 8: Heartbeat configuration.
+    /// Step 8: Docker Sandbox -- check Docker installation and availability.
+    async fn step_docker_sandbox(&mut self) -> Result<(), SetupError> {
+        print_info("IronClaw can execute code, run builds, and use tools inside Docker");
+        print_info("containers. This keeps your system safe -- commands from the LLM run");
+        print_info("in an isolated sandbox with no access to your credentials, limited");
+        print_info("filesystem access, and network traffic restricted to an allowlist.");
+        println!();
+        print_info("Without Docker, code execution tools (shell, file write) run directly");
+        print_info("on your machine with no isolation.");
+        println!();
+
+        if !confirm("Enable Docker sandbox?", false).map_err(SetupError::Io)? {
+            self.settings.sandbox.enabled = false;
+            print_info("Sandbox disabled. You can enable it later with SANDBOX_ENABLED=true.");
+            return Ok(());
+        }
+
+        // Check Docker availability
+        let detection = crate::sandbox::detect::check_docker().await;
+
+        match detection.status {
+            crate::sandbox::detect::DockerStatus::Available => {
+                self.settings.sandbox.enabled = true;
+                print_success("Docker is installed and running. Sandbox enabled.");
+            }
+            crate::sandbox::detect::DockerStatus::NotInstalled
+            | crate::sandbox::detect::DockerStatus::NotRunning => {
+                println!();
+                let not_installed =
+                    detection.status == crate::sandbox::detect::DockerStatus::NotInstalled;
+                if not_installed {
+                    print_error("Docker is not installed.");
+                    print_info(detection.platform.install_hint());
+                } else {
+                    print_error("Docker is installed but not running.");
+                    print_info(detection.platform.start_hint());
+                }
+                println!();
+
+                let retry_prompt = if not_installed {
+                    "Retry after installing Docker?"
+                } else {
+                    "Retry after starting Docker?"
+                };
+                if confirm(retry_prompt, false).map_err(SetupError::Io)? {
+                    let retry = crate::sandbox::detect::check_docker().await;
+                    if retry.status.is_ok() {
+                        self.settings.sandbox.enabled = true;
+                        print_success(if not_installed {
+                            "Docker is now available. Sandbox enabled."
+                        } else {
+                            "Docker is now running. Sandbox enabled."
+                        });
+                    } else {
+                        self.settings.sandbox.enabled = false;
+                        print_info(if not_installed {
+                            "Docker still not available. Sandbox disabled for now."
+                        } else {
+                            "Docker still not responding. Sandbox disabled for now."
+                        });
+                    }
+                } else {
+                    self.settings.sandbox.enabled = false;
+                    print_info(if not_installed {
+                        "Sandbox disabled. Install Docker and set SANDBOX_ENABLED=true later."
+                    } else {
+                        "Sandbox disabled. Start Docker and set SANDBOX_ENABLED=true later."
+                    });
+                }
+            }
+            crate::sandbox::detect::DockerStatus::Disabled => {
+                self.settings.sandbox.enabled = false;
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Step 9: Heartbeat configuration.
     fn step_heartbeat(&mut self) -> Result<(), SetupError> {
         print_info("Heartbeat runs periodic background tasks (e.g., checking your calendar,");
         print_info("monitoring for notifications, running scheduled workflows).");
@@ -1851,6 +1969,33 @@ impl SetupWizard {
         // (which runs before the DB is connected) knows to skip re-onboarding.
         if self.settings.onboard_completed {
             env_vars.push(("ONBOARD_COMPLETED", "true".to_string()));
+        }
+
+        // Signal channel env vars (chicken-and-egg: config resolves before DB).
+        if let Some(ref url) = self.settings.channels.signal_http_url {
+            env_vars.push(("SIGNAL_HTTP_URL", url.clone()));
+        }
+        if let Some(ref account) = self.settings.channels.signal_account {
+            env_vars.push(("SIGNAL_ACCOUNT", account.clone()));
+        }
+        if let Some(ref allow_from) = self.settings.channels.signal_allow_from {
+            env_vars.push(("SIGNAL_ALLOW_FROM", allow_from.clone()));
+        }
+        if let Some(ref allow_from_groups) = self.settings.channels.signal_allow_from_groups
+            && !allow_from_groups.is_empty()
+        {
+            env_vars.push(("SIGNAL_ALLOW_FROM_GROUPS", allow_from_groups.clone()));
+        }
+        if let Some(ref dm_policy) = self.settings.channels.signal_dm_policy {
+            env_vars.push(("SIGNAL_DM_POLICY", dm_policy.clone()));
+        }
+        if let Some(ref group_policy) = self.settings.channels.signal_group_policy {
+            env_vars.push(("SIGNAL_GROUP_POLICY", group_policy.clone()));
+        }
+        if let Some(ref group_allow_from) = self.settings.channels.signal_group_allow_from
+            && !group_allow_from.is_empty()
+        {
+            env_vars.push(("SIGNAL_GROUP_ALLOW_FROM", group_allow_from.clone()));
         }
 
         if !env_vars.is_empty() {
@@ -2573,8 +2718,6 @@ fn load_registry_catalog() -> Option<crate::registry::catalog::RegistryCatalog> 
 
 /// Install selected channels from the registry that aren't already on disk
 /// and weren't handled by the bundled installer.
-///
-/// This builds channels from source using `cargo component build`.
 async fn install_selected_registry_channels(
     channels_dir: &std::path::Path,
     selected_channels: &[String],
@@ -2619,8 +2762,14 @@ async fn install_selected_registry_channels(
             channels_dir.to_path_buf(),
         );
 
-        match installer.install_from_source(manifest, false).await {
-            Ok(_) => {
+        match installer
+            .install_with_source_fallback(manifest, false)
+            .await
+        {
+            Ok(outcome) => {
+                for warning in &outcome.warnings {
+                    crate::setup::prompts::print_info(&format!("{}: {}", name, warning));
+                }
                 installed.push(name.clone());
             }
             Err(e) => {
