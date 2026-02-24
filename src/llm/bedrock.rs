@@ -116,19 +116,8 @@ impl LlmProvider for BedrockProvider {
             })
             .set_messages(Some(bedrock_messages));
 
-        if let Some(temp) = request.temperature {
-            builder = builder.inference_config(
-                InferenceConfiguration::builder()
-                    .temperature(temp)
-                    .set_max_tokens(request.max_tokens.map(|t| t as i32))
-                    .build(),
-            );
-        } else if let Some(max_tokens) = request.max_tokens {
-            builder = builder.inference_config(
-                InferenceConfiguration::builder()
-                    .max_tokens(max_tokens as i32)
-                    .build(),
-            );
+        if let Some(config) = build_inference_config(request.temperature, request.max_tokens) {
+            builder = builder.inference_config(config);
         }
 
         let response = builder.send().await.map_err(|e| map_sdk_error(&e))?;
@@ -172,19 +161,8 @@ impl LlmProvider for BedrockProvider {
             builder = builder.tool_config(tc);
         }
 
-        if let Some(temp) = request.temperature {
-            builder = builder.inference_config(
-                InferenceConfiguration::builder()
-                    .temperature(temp)
-                    .set_max_tokens(request.max_tokens.map(|t| t as i32))
-                    .build(),
-            );
-        } else if let Some(max_tokens) = request.max_tokens {
-            builder = builder.inference_config(
-                InferenceConfiguration::builder()
-                    .max_tokens(max_tokens as i32)
-                    .build(),
-            );
+        if let Some(config) = build_inference_config(request.temperature, request.max_tokens) {
+            builder = builder.inference_config(config);
         }
 
         let response = builder.send().await.map_err(|e| map_sdk_error(&e))?;
@@ -230,6 +208,35 @@ impl LlmProvider for BedrockProvider {
             }
         }
         Ok(())
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Inference configuration
+// ---------------------------------------------------------------------------
+
+/// Build an `InferenceConfiguration` from optional temperature and max_tokens.
+/// Returns `None` if neither is set.
+fn build_inference_config(
+    temperature: Option<f32>,
+    max_tokens: Option<u32>,
+) -> Option<InferenceConfiguration> {
+    let mut builder = InferenceConfiguration::builder();
+    let mut needs_config = false;
+
+    if let Some(temp) = temperature {
+        builder = builder.temperature(temp);
+        needs_config = true;
+    }
+    if let Some(tokens) = max_tokens {
+        builder = builder.max_tokens(tokens as i32);
+        needs_config = true;
+    }
+
+    if needs_config {
+        Some(builder.build())
+    } else {
+        None
     }
 }
 
