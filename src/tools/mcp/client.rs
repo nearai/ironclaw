@@ -18,7 +18,7 @@ use crate::tools::mcp::protocol::{
     CallToolResult, InitializeResult, ListToolsResult, McpRequest, McpResponse, McpTool,
 };
 use crate::tools::mcp::session::McpSessionManager;
-use crate::tools::tool::{Tool, ToolError, ToolOutput};
+use crate::tools::tool::{ApprovalRequirement, Tool, ToolError, ToolOutput};
 
 /// MCP client for communicating with MCP servers.
 ///
@@ -538,9 +538,13 @@ impl Tool for McpToolWrapper {
         true // MCP tools are external, always sanitize
     }
 
-    fn requires_approval(&self) -> bool {
-        // Check the destructive_hint annotation from the MCP server
-        self.tool.requires_approval()
+    fn requires_approval(&self, _params: &serde_json::Value) -> ApprovalRequirement {
+        // Delegate to the MCP protocol type's own requires_approval() bool method
+        if self.tool.requires_approval() {
+            ApprovalRequirement::UnlessAutoApproved
+        } else {
+            ApprovalRequirement::Never
+        }
     }
 }
 

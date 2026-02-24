@@ -110,6 +110,21 @@ impl WasmChannelRouter {
             .unwrap_or_else(|| "X-Webhook-Secret".to_string())
     }
 
+    /// Update the webhook secret for an already-registered channel.
+    ///
+    /// This is used when credentials are saved after a channel was registered
+    /// without a secret (e.g., loaded at startup before the user configured it).
+    pub async fn update_secret(&self, channel_name: &str, secret: String) {
+        self.secrets
+            .write()
+            .await
+            .insert(channel_name.to_string(), secret);
+        tracing::info!(
+            channel = %channel_name,
+            "Updated webhook secret for channel"
+        );
+    }
+
     /// Unregister a channel and its endpoints.
     pub async fn unregister(&self, channel_name: &str) {
         self.channels.write().await.remove(channel_name);
@@ -488,7 +503,7 @@ mod tests {
         let prepared = Arc::new(PreparedChannelModule {
             name: name.to_string(),
             description: format!("Test channel: {}", name),
-            component_bytes: Vec::new(),
+            component: None,
             limits: ResourceLimits::default(),
         });
 

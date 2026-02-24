@@ -124,11 +124,56 @@ struct DiscordMessageMetadata {
     thread_id: Option<String>,
 }
 
+/// Workspace path for persisting owner_id across WASM callbacks.
+const OWNER_ID_PATH: &str = "state/owner_id";
+/// Workspace path for persisting dm_policy across WASM callbacks.
+const DM_POLICY_PATH: &str = "state/dm_policy";
+/// Workspace path for persisting allow_from (JSON array) across WASM callbacks.
+const ALLOW_FROM_PATH: &str = "state/allow_from";
+/// Channel name for pairing store (used by pairing host APIs).
+const CHANNEL_NAME: &str = "discord";
+
+/// Channel configuration from capabilities file.
+#[derive(Debug, Deserialize)]
+struct DiscordConfig {
+    #[serde(default)]
+    #[allow(dead_code)]
+    require_signature_verification: bool,
+    #[serde(default)]
+    owner_id: Option<String>,
+    #[serde(default)]
+    dm_policy: Option<String>,
+    #[serde(default)]
+    allow_from: Option<Vec<String>>,
+}
+
 struct DiscordChannel;
 
 impl Guest for DiscordChannel {
-    fn on_start(_config_json: String) -> Result<ChannelConfig, String> {
+    fn on_start(config_json: String) -> Result<ChannelConfig, String> {
+        let config: DiscordConfig = serde_json::from_str(&config_json)
+            .map_err(|e| format!("Failed to parse config: {}", e))?;
+
         channel_host::log(channel_host::LogLevel::Info, "Discord channel starting");
+
+        // Persist owner_id so subsequent callbacks can read it
+        if let Some(ref owner_id) = config.owner_id {
+            let _ = channel_host::workspace_write(OWNER_ID_PATH, owner_id);
+            channel_host::log(
+                channel_host::LogLevel::Info,
+                &format!("Owner restriction enabled: user {}", owner_id),
+            );
+        } else {
+            let _ = channel_host::workspace_write(OWNER_ID_PATH, "");
+        }
+
+        // Persist dm_policy and allow_from for DM pairing
+        let dm_policy = config.dm_policy.as_deref().unwrap_or("pairing");
+        let _ = channel_host::workspace_write(DM_POLICY_PATH, dm_policy);
+
+        let allow_from_json = serde_json::to_string(&config.allow_from.unwrap_or_default())
+            .unwrap_or_else(|_| "[]".to_string());
+        let _ = channel_host::workspace_write(ALLOW_FROM_PATH, &allow_from_json);
 
         Ok(ChannelConfig {
             display_name: "Discord".to_string(),
@@ -169,16 +214,21 @@ impl Guest for DiscordChannel {
 
             // Application Command (slash command)
             2 => {
-                handle_slash_command(&interaction);
-                json_response(
-                    200,
-                    serde_json::json!({
-                        "type": 5,
-                        "data": {
-                            "content": "🤔 Thinking..."
-                        }
-                    }),
-                )
+                if handle_slash_command(&interaction) {
+                    json_response(200, serde_json::json!({"type": 5}))
+                } else {
+                    // Permission denied — ephemeral response
+                    json_response(
+                        200,
+                        serde_json::json!({
+                            "type": 4,
+                            "data": {
+                                "content": "You are not authorized to use this bot.",
+                                "flags": 64
+                            }
+                        }),
+                    )
+                }
             }
 
             // Message Component (buttons, selects)
@@ -270,7 +320,8 @@ impl Guest for DiscordChannel {
     }
 }
 
-fn handle_slash_command(interaction: &DiscordInteraction) {
+/// Returns true if the message was emitted, false if permission denied.
+fn handle_slash_command(interaction: &DiscordInteraction) -> bool {
     let user = interaction
         .member
         .as_ref()
@@ -286,6 +337,22 @@ fn handle_slash_command(interaction: &DiscordInteraction) {
                 .clone()
         })
         .unwrap_or_default();
+
+    // DM if no guild member context (only direct user field set)
+    let is_dm = interaction.member.is_none();
+
+    // Permission check
+    if !check_sender_permission(
+        &user_id,
+        Some(&user_name),
+        is_dm,
+        Some(&PairingReplyCtx {
+            application_id: interaction.application_id.clone(),
+            token: interaction.token.clone(),
+        }),
+    ) {
+        return false;
+    }
 
     let channel_id = interaction.channel_id.clone().unwrap_or_default();
 
@@ -322,14 +389,13 @@ fn handle_slash_command(interaction: &DiscordInteraction) {
                 channel_host::LogLevel::Error,
                 &format!("Failed to serialize metadata: {}", e),
             );
-            // Attempt to notify user of internal error
             let url = format!(
                 "https://discord.com/api/v10/webhooks/{}/{}",
                 interaction.application_id, interaction.token
             );
             let payload = serde_json::json!({
                 "content": "❌ Internal Error: Failed to process command metadata.",
-                "flags": 64 // Ephemeral
+                "flags": 64
             });
             let _ = channel_host::http_request(
                 "POST",
@@ -338,7 +404,7 @@ fn handle_slash_command(interaction: &DiscordInteraction) {
                 Some(&serde_json::to_vec(&payload).unwrap_or_default()),
                 None,
             );
-            return;
+            return true; // Error, but not a permission denial
         }
     };
 
@@ -349,10 +415,10 @@ fn handle_slash_command(interaction: &DiscordInteraction) {
         thread_id: None,
         metadata_json,
     });
+    true
 }
 
 fn handle_message_component(interaction: &DiscordInteraction, message: &DiscordMessage) {
-    // Check member first (for server contexts), then user (for DMs)
     let user = interaction
         .member
         .as_ref()
@@ -368,6 +434,11 @@ fn handle_message_component(interaction: &DiscordInteraction, message: &DiscordM
                 .clone()
         })
         .unwrap_or_default();
+
+    let is_dm = interaction.member.is_none();
+    if !check_sender_permission(&user_id, Some(&user_name), is_dm, None) {
+        return;
+    }
 
     let channel_id = message.channel_id.clone();
 
@@ -397,6 +468,145 @@ fn handle_message_component(interaction: &DiscordInteraction, message: &DiscordM
         thread_id: None,
         metadata_json,
     });
+}
+
+// ============================================================================
+// Permission & Pairing
+// ============================================================================
+
+/// Context needed to send a pairing reply via Discord webhook followup.
+struct PairingReplyCtx {
+    application_id: String,
+    token: String,
+}
+
+/// Check if a sender is permitted to interact with the bot.
+/// Returns true if allowed, false if denied (pairing reply sent if applicable).
+fn check_sender_permission(
+    user_id: &str,
+    username: Option<&str>,
+    is_dm: bool,
+    reply_ctx: Option<&PairingReplyCtx>,
+) -> bool {
+    // 1. Owner check (highest priority, applies to all contexts)
+    let owner_id = channel_host::workspace_read(OWNER_ID_PATH).filter(|s| !s.is_empty());
+    if let Some(ref owner) = owner_id {
+        if user_id != owner {
+            channel_host::log(
+                channel_host::LogLevel::Debug,
+                &format!(
+                    "Dropping interaction from non-owner user {} (owner: {})",
+                    user_id, owner
+                ),
+            );
+            return false;
+        }
+        return true;
+    }
+
+    // 2. DM policy (only for DMs when no owner_id)
+    if !is_dm {
+        return true; // Guild interactions bypass DM policy
+    }
+
+    let dm_policy =
+        channel_host::workspace_read(DM_POLICY_PATH).unwrap_or_else(|| "pairing".to_string());
+
+    if dm_policy == "open" {
+        return true;
+    }
+
+    // 3. Build merged allow list: config allow_from + pairing store
+    let mut allowed: Vec<String> = channel_host::workspace_read(ALLOW_FROM_PATH)
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or_default();
+
+    if let Ok(store_allowed) = channel_host::pairing_read_allow_from(CHANNEL_NAME) {
+        allowed.extend(store_allowed);
+    }
+
+    // 4. Check sender against allow list
+    let is_allowed = allowed.contains(&"*".to_string())
+        || allowed.contains(&user_id.to_string())
+        || username.is_some_and(|u| allowed.contains(&u.to_string()));
+
+    if is_allowed {
+        return true;
+    }
+
+    // 5. Not allowed — handle by policy
+    if dm_policy == "pairing" {
+        let meta = serde_json::json!({
+            "user_id": user_id,
+            "username": username,
+        })
+        .to_string();
+
+        match channel_host::pairing_upsert_request(CHANNEL_NAME, user_id, &meta) {
+            Ok(result) => {
+                channel_host::log(
+                    channel_host::LogLevel::Info,
+                    &format!(
+                        "Pairing request for user {}: code {}",
+                        user_id, result.code
+                    ),
+                );
+                if result.created {
+                    if let Some(ctx) = reply_ctx {
+                        let _ = send_pairing_reply(ctx, &result.code);
+                    }
+                }
+            }
+            Err(e) => {
+                channel_host::log(
+                    channel_host::LogLevel::Error,
+                    &format!("Pairing upsert failed: {}", e),
+                );
+            }
+        }
+    }
+    false
+}
+
+/// Send a pairing code as an ephemeral Discord followup message.
+fn send_pairing_reply(ctx: &PairingReplyCtx, code: &str) -> Result<(), String> {
+    let url = format!(
+        "https://discord.com/api/v10/webhooks/{}/{}",
+        ctx.application_id, ctx.token
+    );
+
+    let payload = serde_json::json!({
+        "content": format!(
+            "To pair with this bot, run: `ironclaw pairing approve discord {}`",
+            code
+        ),
+        "flags": 64 // Ephemeral — only visible to the sender
+    });
+
+    let payload_bytes =
+        serde_json::to_vec(&payload).map_err(|e| format!("Failed to serialize: {}", e))?;
+
+    let headers = serde_json::json!({"Content-Type": "application/json"});
+
+    let result = channel_host::http_request(
+        "POST",
+        &url,
+        &headers.to_string(),
+        Some(&payload_bytes),
+        None,
+    );
+
+    match result {
+        Ok(response) if response.status >= 200 && response.status < 300 => Ok(()),
+        Ok(response) => {
+            let body_str = String::from_utf8_lossy(&response.body);
+            Err(format!(
+                "Discord API error: {} - {}",
+                response.status, body_str
+            ))
+        }
+        Err(e) => Err(format!("HTTP request failed: {}", e)),
+    }
 }
 
 fn json_response(status: u16, value: serde_json::Value) -> OutgoingHttpResponse {

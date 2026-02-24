@@ -1,5 +1,5 @@
 [workspace]
-members = [".", "benchmarks"]
+members = ["."]
 exclude = [
     "channels-src/discord",
     "channels-src/telegram",
@@ -19,7 +19,7 @@ exclude = [
 
 [package]
 name = "ironclaw"
-version = "0.7.0"
+version = "0.11.1"
 edition = "2024"
 rust-version = "1.92"
 description = "Secure personal AI assistant that protects your data and expands its capabilities on the fly"
@@ -69,7 +69,7 @@ dotenvy = "0.15"
 toml = "0.8"
 
 # Core types
-uuid = { version = "1", features = ["v4", "serde"] }
+uuid = { version = "1", features = ["v4", "v5", "serde"] }
 chrono = { version = "0.4", features = ["serde"] }
 rust_decimal = { version = "1", features = ["serde", "serde-with-str", "maths"] }
 rust_decimal_macros = "1"
@@ -82,7 +82,7 @@ clap = { version = "4", features = ["derive", "env"] }
 
 # Terminal
 crossterm = "0.28"
-rustyline = { version = "17", features = ["derive", "with-file-history"] }
+rustyline = { version = "17", features = ["custom-bindings", "derive", "with-file-history"] }
 termimad = "0.34"
 
 # Channel integrations
@@ -137,6 +137,10 @@ rig-core = "0.30"
 # Docker sandbox
 bollard = "0.18"
 
+# Archive extraction for WASM extension bundles
+flate2 = "1"
+tar = "0.4"
+
 # HTTP proxy for sandboxed network access
 hyper = { version = "1.5", features = ["server", "http1", "http2"] }
 hyper-util = { version = "0.1", features = ["server", "tokio", "http1", "http2"] }
@@ -144,6 +148,12 @@ http-body-util = "0.1"
 bytes = "1"
 base64 = "0.22.1"
 mime_guess = "2.0.5"
+clap_complete = "4.5.0"
+lru = "0.16.3"
+
+# HTML to Markdown conversion (feature gated)
+html-to-markdown-rs = { version = "2.3", optional = true }
+readabilityrs = { version = "0.1.2", optional = true }
 
 # macOS keychain
 [target.'cfg(target_os = "macos")'.dependencies]
@@ -162,7 +172,7 @@ pretty_assertions = "1"
 tempfile = "3"
 
 [features]
-default = ["postgres", "libsql"]
+default = ["postgres", "libsql", "html-to-markdown"]
 postgres = [
     "dep:deadpool-postgres",
     "dep:tokio-postgres",
@@ -173,6 +183,11 @@ postgres = [
 ]
 libsql = ["dep:libsql"]
 integration = []
+html-to-markdown = ["dep:html-to-markdown-rs", "dep:readabilityrs"]
+
+[[test]]
+name = "html_to_markdown"
+required-features = ["html-to-markdown"]
 
 # The profile that 'cargo dist' will build with
 [profile.dist]
@@ -183,6 +198,8 @@ lto = "thin"
 [workspace.metadata.dist]
 # The preferred dist version to use in CI (Cargo.toml SemVer syntax)
 cargo-dist-version = "0.30.3"
+# Ignore out-of-date generated CI so custom release.yml jobs are allowed
+allow-dirty = ["ci"]
 # CI backends to support
 ci = "github"
 # The installers to generate for each app

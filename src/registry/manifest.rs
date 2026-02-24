@@ -88,10 +88,17 @@ pub struct SourceSpec {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ArtifactSpec {
     /// Download URL (null until release).
+    /// Can point to a `.wasm` file or a `.tar.gz` bundle containing both
+    /// `{name}.wasm` and `{name}.capabilities.json`.
     pub url: Option<String>,
 
-    /// Hex SHA256 of the WASM binary (null until release).
+    /// Hex SHA256 of the downloaded artifact (null until release).
     pub sha256: Option<String>,
+
+    /// Optional separate download URL for the capabilities file.
+    /// Only needed when `url` points to a bare `.wasm` file instead of a bundle.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub capabilities_url: Option<String>,
 }
 
 /// Summary of authentication requirements extracted from capabilities.
@@ -138,7 +145,7 @@ pub struct BundleDefinition {
 }
 
 /// Top-level structure of `_bundles.json`.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct BundlesFile {
     pub bundles: std::collections::HashMap<String, BundleDefinition>,
 }
@@ -147,9 +154,29 @@ impl ExtensionManifest {
     /// Convert this manifest into a [`RegistryEntry`] for use with the in-chat
     /// extension discovery system.
     pub fn to_registry_entry(&self) -> RegistryEntry {
-        let source = ExtensionSource::WasmBuildable {
+        let buildable = ExtensionSource::WasmBuildable {
             repo_url: self.source.dir.clone(),
             build_dir: Some(self.source.dir.clone()),
+            crate_name: Some(self.source.crate_name.clone()),
+        };
+
+        // Prefer pre-built artifact download when a URL is available,
+        // with build-from-source as fallback in case the download fails (e.g., 404).
+        let (source, fallback_source) = if let Some(artifact) = self.artifacts.get("wasm32-wasip2")
+        {
+            if let Some(ref url) = artifact.url {
+                (
+                    ExtensionSource::WasmDownload {
+                        wasm_url: url.clone(),
+                        capabilities_url: artifact.capabilities_url.clone(),
+                    },
+                    Some(Box::new(buildable)),
+                )
+            } else {
+                (buildable, None)
+            }
+        } else {
+            (buildable, None)
         };
 
         let auth_hint = match self.auth_summary.as_ref().and_then(|a| a.method.as_deref()) {
@@ -166,6 +193,7 @@ impl ExtensionManifest {
             description: self.description.clone(),
             keywords: self.keywords.clone(),
             source,
+            fallback_source,
             auth_hint,
         }
     }
@@ -267,5 +295,124 @@ mod tests {
     fn test_manifest_kind_display() {
         assert_eq!(ManifestKind::Tool.to_string(), "tool");
         assert_eq!(ManifestKind::Channel.to_string(), "channel");
+    }
+
+    /// When a manifest has a download URL in artifacts, to_registry_entry()
+    /// should set WasmDownload as primary source and WasmBuildable as fallback.
+    #[test]
+    fn test_manifest_with_download_url_has_buildable_fallback() {
+        let json = r#"{
+            "name": "gmail",
+            "display_name": "Gmail",
+            "kind": "tool",
+            "version": "0.1.0",
+            "description": "Gmail tool",
+            "keywords": ["email"],
+            "source": {
+                "dir": "tools-src/gmail",
+                "capabilities": "gmail-tool.capabilities.json",
+                "crate_name": "gmail-tool"
+            },
+            "artifacts": {
+                "wasm32-wasip2": {
+                    "url": "https://github.com/nearai/ironclaw/releases/latest/download/gmail-wasm32-wasip2.tar.gz",
+                    "sha256": null
+                }
+            },
+            "tags": ["default"]
+        }"#;
+
+        let manifest: ExtensionManifest = serde_json::from_str(json).expect("parse manifest");
+        let entry = manifest.to_registry_entry();
+
+        // Primary source should be WasmDownload
+        assert!(
+            matches!(&entry.source, ExtensionSource::WasmDownload { .. }),
+            "Primary source should be WasmDownload, got {:?}",
+            entry.source
+        );
+
+        // Fallback should be WasmBuildable with the source dir info
+        let fallback = entry
+            .fallback_source
+            .as_ref()
+            .expect("Should have fallback_source when download URL is set");
+        match fallback.as_ref() {
+            ExtensionSource::WasmBuildable {
+                build_dir,
+                crate_name,
+                ..
+            } => {
+                assert_eq!(build_dir.as_deref(), Some("tools-src/gmail"));
+                assert_eq!(crate_name.as_deref(), Some("gmail-tool"));
+            }
+            other => panic!("Fallback should be WasmBuildable, got {:?}", other),
+        }
+    }
+
+    /// When a manifest has null URL in artifacts, the primary source should be
+    /// WasmBuildable with no fallback.
+    #[test]
+    fn test_manifest_with_null_url_no_fallback() {
+        let json = r#"{
+            "name": "slack",
+            "display_name": "Slack",
+            "kind": "tool",
+            "version": "0.1.0",
+            "description": "Slack tool",
+            "keywords": [],
+            "source": {
+                "dir": "tools-src/slack",
+                "capabilities": "slack-tool.capabilities.json",
+                "crate_name": "slack-tool"
+            },
+            "artifacts": {
+                "wasm32-wasip2": { "url": null, "sha256": null }
+            },
+            "tags": []
+        }"#;
+
+        let manifest: ExtensionManifest = serde_json::from_str(json).expect("parse manifest");
+        let entry = manifest.to_registry_entry();
+
+        assert!(
+            matches!(&entry.source, ExtensionSource::WasmBuildable { .. }),
+            "Should use WasmBuildable when URL is null"
+        );
+        assert!(
+            entry.fallback_source.is_none(),
+            "Should have no fallback when already using WasmBuildable"
+        );
+    }
+
+    /// When a manifest has no artifacts section, should use WasmBuildable with no fallback.
+    #[test]
+    fn test_manifest_no_artifacts_no_fallback() {
+        let json = r#"{
+            "name": "custom",
+            "display_name": "Custom",
+            "kind": "tool",
+            "version": "0.1.0",
+            "description": "Custom tool",
+            "keywords": [],
+            "source": {
+                "dir": "tools-src/custom",
+                "capabilities": "custom.capabilities.json",
+                "crate_name": "custom-tool"
+            },
+            "tags": []
+        }"#;
+
+        let manifest: ExtensionManifest = serde_json::from_str(json).expect("parse manifest");
+        let entry = manifest.to_registry_entry();
+
+        assert!(
+            matches!(&entry.source, ExtensionSource::WasmBuildable { .. }),
+            "Should use WasmBuildable when no artifacts"
+        );
+        assert!(
+            entry.fallback_source.is_none(),
+            "Should have no fallback when already using WasmBuildable"
+        );
     }
 }

@@ -55,7 +55,9 @@ use tokio::process::Command;
 
 use crate::context::JobContext;
 use crate::sandbox::{SandboxManager, SandboxPolicy};
-use crate::tools::tool::{Tool, ToolDomain, ToolError, ToolOutput, require_str};
+use crate::tools::tool::{
+    ApprovalRequirement, Tool, ToolDomain, ToolError, ToolOutput, require_str,
+};
 
 /// Maximum output size before truncation (64KB).
 const MAX_OUTPUT_SIZE: usize = 64 * 1024;
@@ -696,11 +698,7 @@ impl Tool for ShellTool {
         Ok(ToolOutput::success(result, duration))
     }
 
-    fn requires_approval(&self) -> bool {
-        true // Shell commands should require approval
-    }
-
-    fn requires_approval_for(&self, params: &serde_json::Value) -> bool {
+    fn requires_approval(&self, params: &serde_json::Value) -> ApprovalRequirement {
         let cmd = params
             .get("command")
             .and_then(|c| c.as_str().map(String::from))
@@ -714,10 +712,10 @@ impl Tool for ShellTool {
         if let Some(ref cmd) = cmd
             && requires_explicit_approval(cmd)
         {
-            return true;
+            return ApprovalRequirement::Always;
         }
 
-        false
+        ApprovalRequirement::UnlessAutoApproved
     }
 
     fn requires_sanitization(&self) -> bool {
@@ -726,6 +724,10 @@ impl Tool for ShellTool {
 
     fn domain(&self) -> ToolDomain {
         ToolDomain::Container
+    }
+
+    fn rate_limit_config(&self) -> Option<crate::tools::tool::ToolRateLimitConfig> {
+        Some(crate::tools::tool::ToolRateLimitConfig::new(30, 300))
     }
 }
 
@@ -861,31 +863,46 @@ mod tests {
     }
 
     #[test]
-    fn test_requires_approval_for_destructive_command() {
+    fn test_requires_approval_destructive_command() {
+        use crate::tools::tool::ApprovalRequirement;
         let tool = ShellTool::new();
-        // Destructive commands must return true even though shell already
-        // requires base approval -- the distinction matters for auto-approve override.
-        assert!(tool.requires_approval_for(&serde_json::json!({"command": "rm -rf /tmp"})));
-        assert!(tool.requires_approval_for(
-            &serde_json::json!({"command": "git push --force origin main"})
-        ));
-        assert!(tool.requires_approval_for(&serde_json::json!({"command": "DROP TABLE users;"})));
+        // Destructive commands must return Always to bypass auto-approve.
+        assert_eq!(
+            tool.requires_approval(&serde_json::json!({"command": "rm -rf /tmp"})),
+            ApprovalRequirement::Always
+        );
+        assert_eq!(
+            tool.requires_approval(&serde_json::json!({"command": "git push --force origin main"})),
+            ApprovalRequirement::Always
+        );
+        assert_eq!(
+            tool.requires_approval(&serde_json::json!({"command": "DROP TABLE users;"})),
+            ApprovalRequirement::Always
+        );
     }
 
     #[test]
-    fn test_requires_approval_for_safe_command() {
+    fn test_requires_approval_safe_command() {
+        use crate::tools::tool::ApprovalRequirement;
         let tool = ShellTool::new();
-        // Safe commands should not override auto-approval; only destructive ones do.
-        assert!(!tool.requires_approval_for(&serde_json::json!({"command": "cargo build"})));
-        assert!(!tool.requires_approval_for(&serde_json::json!({"command": "echo hello"})));
+        // Safe commands return UnlessAutoApproved (can be auto-approved).
+        assert_eq!(
+            tool.requires_approval(&serde_json::json!({"command": "cargo build"})),
+            ApprovalRequirement::UnlessAutoApproved
+        );
+        assert_eq!(
+            tool.requires_approval(&serde_json::json!({"command": "echo hello"})),
+            ApprovalRequirement::UnlessAutoApproved
+        );
     }
 
     #[test]
-    fn test_requires_approval_for_string_encoded_args() {
+    fn test_requires_approval_string_encoded_args() {
+        use crate::tools::tool::ApprovalRequirement;
         let tool = ShellTool::new();
         // When arguments are string-encoded JSON (rare LLM behavior).
         let args = serde_json::Value::String(r#"{"command": "rm -rf /tmp/stuff"}"#.to_string());
-        assert!(tool.requires_approval_for(&args));
+        assert_eq!(tool.requires_approval(&args), ApprovalRequirement::Always);
     }
 
     #[test]

@@ -20,7 +20,7 @@ pub async fn extensions_list_handler(
     ))?;
 
     let installed = ext_mgr
-        .list(None)
+        .list(None, false)
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
@@ -34,6 +34,7 @@ pub async fn extensions_list_handler(
             authenticated: ext.authenticated,
             active: ext.active,
             tools: ext.tools,
+            needs_setup: ext.needs_setup,
         })
         .collect();
 

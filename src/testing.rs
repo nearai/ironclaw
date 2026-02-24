@@ -168,7 +168,6 @@ impl LlmProvider for StubLlm {
             input_tokens: 10,
             output_tokens: 5,
             finish_reason: FinishReason::Stop,
-            response_id: None,
         })
     }
 
@@ -186,7 +185,6 @@ impl LlmProvider for StubLlm {
             input_tokens: 10,
             output_tokens: 5,
             finish_reason: FinishReason::Stop,
-            response_id: None,
         })
     }
 }
@@ -291,6 +289,7 @@ impl TestHarnessBuilder {
             workspace: None,
             extension_manager: None,
             skill_registry: None,
+            skill_catalog: None,
             skills_config: SkillsConfig::default(),
             hooks,
             cost_guard,

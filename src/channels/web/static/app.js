@@ -9,6 +9,7 @@ let assistantThreadId = null;
 let hasMore = false;
 let oldestTimestamp = null;
 let loadingOlder = false;
+let sseHasConnectedBefore = false;
 let jobEvents = new Map(); // job_id -> Array of events
 let jobListRefreshTimer = null;
 const JOB_EVENTS_CAP = 500;
@@ -29,16 +30,25 @@ function authenticate() {
       sessionStorage.setItem('ironclaw_token', token);
       document.getElementById('auth-screen').style.display = 'none';
       document.getElementById('app').style.display = 'flex';
-      // Strip token from URL so it's not visible in the address bar
+      // Strip token and log_level from URL so they're not visible in the address bar
       const cleaned = new URL(window.location);
+      const urlLogLevel = cleaned.searchParams.get('log_level');
       cleaned.searchParams.delete('token');
+      cleaned.searchParams.delete('log_level');
       window.history.replaceState({}, '', cleaned.pathname + cleaned.search);
       connectSSE();
       connectLogSSE();
       startGatewayStatusPolling();
+      checkTeeStatus();
       loadThreads();
       loadMemoryTree();
       loadJobs();
+      // Apply URL log_level param if present, otherwise just sync the dropdown
+      if (urlLogLevel) {
+        setServerLogLevel(urlLogLevel);
+      } else {
+        loadServerLogLevel();
+      }
     })
     .catch(() => {
       sessionStorage.removeItem('ironclaw_token');
@@ -83,7 +93,11 @@ function apiFetch(path, options) {
     opts.body = JSON.stringify(opts.body);
   }
   return fetch(path, opts).then((res) => {
-    if (!res.ok) throw new Error(res.status + ' ' + res.statusText);
+    if (!res.ok) {
+      return res.text().then(function(body) {
+        throw new Error(body || (res.status + ' ' + res.statusText));
+      });
+    }
     return res.json();
   });
 }
@@ -98,6 +112,10 @@ function connectSSE() {
   eventSource.onopen = () => {
     document.getElementById('sse-dot').classList.remove('disconnected');
     document.getElementById('sse-status').textContent = 'Connected';
+    if (sseHasConnectedBefore && currentThreadId) {
+      loadHistory();
+    }
+    sseHasConnectedBefore = true;
   };
 
   eventSource.onerror = () => {
@@ -227,6 +245,11 @@ function isCurrentThread(threadId) {
 function sendMessage() {
   const input = document.getElementById('chat-input');
   const sendBtn = document.getElementById('send-btn');
+  if (!currentThreadId) {
+    console.warn('sendMessage: no thread selected, ignoring');
+    setStatus('Waiting for thread to load...');
+    return;
+  }
   const content = input.value.trim();
   if (!content) return;
 
@@ -249,6 +272,8 @@ function sendMessage() {
 }
 
 function enableChatInput() {
+  // Don't re-enable until a thread is selected (prevents orphan messages)
+  if (!currentThreadId) return;
   const input = document.getElementById('chat-input');
   const sendBtn = document.getElementById('send-btn');
   sendBtn.disabled = false;
@@ -726,6 +751,11 @@ function loadThreads() {
     if (!currentThreadId && assistantThreadId) {
       switchToAssistant();
     }
+
+    // Enable chat input once a thread is available
+    if (currentThreadId) {
+      enableChatInput();
+    }
   }).catch(() => {});
 }
 
@@ -774,6 +804,10 @@ chatInput.addEventListener('keydown', (e) => {
 });
 chatInput.addEventListener('input', () => autoResizeTextarea(chatInput));
 
+// Disable send until a thread is selected (loadThreads will enable it)
+chatInput.disabled = true;
+document.getElementById('send-btn').disabled = true;
+
 // Infinite scroll: load older messages when scrolled near the top
 document.getElementById('chat-messages').addEventListener('scroll', function () {
   if (this.scrollTop < 100 && hasMore && !loadingOlder) {
@@ -816,6 +850,7 @@ function switchTab(tab) {
   if (tab === 'routines') loadRoutines();
   if (tab === 'logs') applyLogFilters();
   if (tab === 'extensions') loadExtensions();
+  if (tab === 'skills') loadSkills();
 }
 
 // --- Memory (filesystem tree) ---
@@ -1167,25 +1202,77 @@ function applyLogFilters() {
   }
 }
 
+// --- Server-side log level control ---
+
+function setServerLogLevel(level) {
+  apiFetch('/api/logs/level', {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ level: level }),
+  })
+    .then(r => r.json())
+    .then(data => {
+      document.getElementById('logs-server-level').value = data.level;
+    })
+    .catch(err => console.error('Failed to set server log level:', err));
+}
+
+function loadServerLogLevel() {
+  apiFetch('/api/logs/level')
+    .then(r => r.json())
+    .then(data => {
+      document.getElementById('logs-server-level').value = data.level;
+    })
+    .catch(() => {}); // ignore if not available
+}
+
 // --- Extensions ---
 
 function loadExtensions() {
   const extList = document.getElementById('extensions-list');
+  const wasmList = document.getElementById('available-wasm-list');
+  const mcpList = document.getElementById('mcp-servers-list');
   const toolsTbody = document.getElementById('tools-tbody');
   const toolsEmpty = document.getElementById('tools-empty');
 
-  // Fetch both in parallel
+  // Fetch all three in parallel
   Promise.all([
     apiFetch('/api/extensions').catch(() => ({ extensions: [] })),
     apiFetch('/api/extensions/tools').catch(() => ({ tools: [] })),
-  ]).then(([extData, toolData]) => {
-    // Render extensions
+    apiFetch('/api/extensions/registry').catch(function(err) { console.warn('registry fetch failed:', err); return { entries: [] }; }),
+  ]).then(([extData, toolData, registryData]) => {
+    // Render installed extensions
     if (extData.extensions.length === 0) {
       extList.innerHTML = '<div class="empty-state">No extensions installed</div>';
     } else {
       extList.innerHTML = '';
       for (const ext of extData.extensions) {
         extList.appendChild(renderExtensionCard(ext));
+      }
+    }
+
+    // Split registry entries by kind
+    var wasmEntries = registryData.entries.filter(function(e) { return e.kind !== 'mcp_server' && !e.installed; });
+    var mcpEntries = registryData.entries.filter(function(e) { return e.kind === 'mcp_server'; });
+
+    // Available WASM extensions
+    if (wasmEntries.length === 0) {
+      wasmList.innerHTML = '<div class="empty-state">No additional WASM extensions available</div>';
+    } else {
+      wasmList.innerHTML = '';
+      for (const entry of wasmEntries) {
+        wasmList.appendChild(renderAvailableExtensionCard(entry));
+      }
+    }
+
+    // MCP servers (show both installed and uninstalled)
+    if (mcpEntries.length === 0) {
+      mcpList.innerHTML = '<div class="empty-state">No MCP servers available</div>';
+    } else {
+      mcpList.innerHTML = '';
+      for (const entry of mcpEntries) {
+        var installedExt = extData.extensions.find(function(e) { return e.name === entry.name; });
+        mcpList.appendChild(renderMcpServerCard(entry, installedExt));
       }
     }
 
@@ -1200,6 +1287,148 @@ function loadExtensions() {
       ).join('');
     }
   });
+}
+
+function renderAvailableExtensionCard(entry) {
+  const card = document.createElement('div');
+  card.className = 'ext-card ext-available';
+
+  const header = document.createElement('div');
+  header.className = 'ext-header';
+
+  const name = document.createElement('span');
+  name.className = 'ext-name';
+  name.textContent = entry.display_name;
+  header.appendChild(name);
+
+  const kind = document.createElement('span');
+  kind.className = 'ext-kind kind-' + entry.kind;
+  kind.textContent = entry.kind;
+  header.appendChild(kind);
+
+  card.appendChild(header);
+
+  const desc = document.createElement('div');
+  desc.className = 'ext-desc';
+  desc.textContent = entry.description;
+  card.appendChild(desc);
+
+  if (entry.keywords && entry.keywords.length > 0) {
+    const kw = document.createElement('div');
+    kw.className = 'ext-keywords';
+    kw.textContent = entry.keywords.join(', ');
+    card.appendChild(kw);
+  }
+
+  const actions = document.createElement('div');
+  actions.className = 'ext-actions';
+
+  const installBtn = document.createElement('button');
+  installBtn.className = 'btn-ext install';
+  installBtn.textContent = 'Install';
+  installBtn.addEventListener('click', function() {
+    installBtn.disabled = true;
+    installBtn.textContent = 'Installing...';
+    apiFetch('/api/extensions/install', {
+      method: 'POST',
+      body: { name: entry.name, kind: entry.kind },
+    }).then(function(res) {
+      if (res.success) {
+        showToast('Installed ' + entry.display_name, 'success');
+      } else {
+        showToast('Install: ' + (res.message || 'unknown error'), 'error');
+      }
+      loadExtensions();
+    }).catch(function(err) {
+      showToast('Install failed: ' + err.message, 'error');
+      loadExtensions();
+    });
+  });
+  actions.appendChild(installBtn);
+
+  card.appendChild(actions);
+  return card;
+}
+
+function renderMcpServerCard(entry, installedExt) {
+  var card = document.createElement('div');
+  card.className = 'ext-card' + (installedExt ? '' : ' ext-available');
+
+  var header = document.createElement('div');
+  header.className = 'ext-header';
+
+  var name = document.createElement('span');
+  name.className = 'ext-name';
+  name.textContent = entry.display_name;
+  header.appendChild(name);
+
+  var kind = document.createElement('span');
+  kind.className = 'ext-kind kind-mcp_server';
+  kind.textContent = 'mcp_server';
+  header.appendChild(kind);
+
+  if (installedExt) {
+    var authDot = document.createElement('span');
+    authDot.className = 'ext-auth-dot ' + (installedExt.authenticated ? 'authed' : 'unauthed');
+    authDot.title = installedExt.authenticated ? 'Authenticated' : 'Not authenticated';
+    header.appendChild(authDot);
+  }
+
+  card.appendChild(header);
+
+  var desc = document.createElement('div');
+  desc.className = 'ext-desc';
+  desc.textContent = entry.description;
+  card.appendChild(desc);
+
+  var actions = document.createElement('div');
+  actions.className = 'ext-actions';
+
+  if (installedExt) {
+    if (!installedExt.active) {
+      var activateBtn = document.createElement('button');
+      activateBtn.className = 'btn-ext activate';
+      activateBtn.textContent = 'Activate';
+      activateBtn.addEventListener('click', function() { activateExtension(installedExt.name); });
+      actions.appendChild(activateBtn);
+    } else {
+      var activeLabel = document.createElement('span');
+      activeLabel.className = 'ext-active-label';
+      activeLabel.textContent = 'Active';
+      actions.appendChild(activeLabel);
+    }
+    var removeBtn = document.createElement('button');
+    removeBtn.className = 'btn-ext remove';
+    removeBtn.textContent = 'Remove';
+    removeBtn.addEventListener('click', function() { removeExtension(installedExt.name); });
+    actions.appendChild(removeBtn);
+  } else {
+    var installBtn = document.createElement('button');
+    installBtn.className = 'btn-ext install';
+    installBtn.textContent = 'Install';
+    installBtn.addEventListener('click', function() {
+      installBtn.disabled = true;
+      installBtn.textContent = 'Installing...';
+      apiFetch('/api/extensions/install', {
+        method: 'POST',
+        body: { name: entry.name, kind: entry.kind },
+      }).then(function(res) {
+        if (res.success) {
+          showToast('Installed ' + entry.display_name, 'success');
+        } else {
+          showToast('Install: ' + (res.message || 'unknown error'), 'error');
+        }
+        loadExtensions();
+      }).catch(function(err) {
+        showToast('Install failed: ' + err.message, 'error');
+        loadExtensions();
+      });
+    });
+    actions.appendChild(installBtn);
+  }
+
+  card.appendChild(actions);
+  return card;
 }
 
 function renderExtensionCard(ext) {
@@ -1264,6 +1493,14 @@ function renderExtensionCard(ext) {
     actions.appendChild(activeLabel);
   }
 
+  if (ext.needs_setup) {
+    const configBtn = document.createElement('button');
+    configBtn.className = 'btn-ext configure';
+    configBtn.textContent = ext.authenticated ? 'Reconfigure' : 'Configure';
+    configBtn.addEventListener('click', () => showConfigureModal(ext.name));
+    actions.appendChild(configBtn);
+  }
+
   const removeBtn = document.createElement('button');
   removeBtn.className = 'btn-ext remove';
   removeBtn.textContent = 'Remove';
@@ -1271,6 +1508,17 @@ function renderExtensionCard(ext) {
   actions.appendChild(removeBtn);
 
   card.appendChild(actions);
+
+  // For WASM channels, check for pending pairing requests.
+  // Show even when inactive — pairing requests can arrive via webhooks
+  // before the channel is fully activated.
+  if (ext.kind === 'wasm_channel') {
+    const pairingSection = document.createElement('div');
+    pairingSection.className = 'ext-pairing';
+    card.appendChild(pairingSection);
+    loadPairingRequests(ext.name, pairingSection);
+  }
+
   return card;
 }
 
@@ -1286,7 +1534,7 @@ function activateExtension(name) {
         showToast('Opening authentication for ' + name, 'info');
         window.open(res.auth_url, '_blank');
       } else if (res.awaiting_token) {
-        showToast(res.instructions || 'Please provide an API token for ' + name, 'info');
+        showConfigureModal(name);
       } else {
         showToast('Activate failed: ' + res.message, 'error');
       }
@@ -1307,6 +1555,189 @@ function removeExtension(name) {
       loadExtensions();
     })
     .catch((err) => showToast('Remove failed: ' + err.message, 'error'));
+}
+
+function showConfigureModal(name) {
+  apiFetch('/api/extensions/' + encodeURIComponent(name) + '/setup')
+    .then((setup) => {
+      if (!setup.secrets || setup.secrets.length === 0) {
+        showToast('No configuration needed for ' + name, 'info');
+        return;
+      }
+      renderConfigureModal(name, setup.secrets);
+    })
+    .catch((err) => showToast('Failed to load setup: ' + err.message, 'error'));
+}
+
+function renderConfigureModal(name, secrets) {
+  closeConfigureModal();
+  const overlay = document.createElement('div');
+  overlay.className = 'configure-overlay';
+  overlay.addEventListener('click', (e) => {
+    if (e.target === overlay) closeConfigureModal();
+  });
+
+  const modal = document.createElement('div');
+  modal.className = 'configure-modal';
+
+  const header = document.createElement('h3');
+  header.textContent = 'Configure ' + name;
+  modal.appendChild(header);
+
+  const form = document.createElement('div');
+  form.className = 'configure-form';
+
+  const fields = [];
+  for (const secret of secrets) {
+    const field = document.createElement('div');
+    field.className = 'configure-field';
+
+    const label = document.createElement('label');
+    label.textContent = secret.prompt;
+    if (secret.optional) {
+      const opt = document.createElement('span');
+      opt.className = 'field-optional';
+      opt.textContent = ' (optional)';
+      label.appendChild(opt);
+    }
+    field.appendChild(label);
+
+    const inputRow = document.createElement('div');
+    inputRow.className = 'configure-input-row';
+
+    const input = document.createElement('input');
+    input.type = 'password';
+    input.name = secret.name;
+    input.placeholder = secret.provided ? '(already set — leave empty to keep)' : '';
+    input.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') submitConfigureModal(name, fields);
+    });
+    inputRow.appendChild(input);
+
+    if (secret.provided) {
+      const badge = document.createElement('span');
+      badge.className = 'field-provided';
+      badge.textContent = 'Set';
+      inputRow.appendChild(badge);
+    }
+    if (secret.auto_generate && !secret.provided) {
+      const hint = document.createElement('span');
+      hint.className = 'field-autogen';
+      hint.textContent = 'Auto-generated if empty';
+      inputRow.appendChild(hint);
+    }
+
+    field.appendChild(inputRow);
+    form.appendChild(field);
+    fields.push({ name: secret.name, input: input });
+  }
+
+  modal.appendChild(form);
+
+  const actions = document.createElement('div');
+  actions.className = 'configure-actions';
+
+  const submitBtn = document.createElement('button');
+  submitBtn.className = 'btn-ext activate';
+  submitBtn.textContent = 'Save';
+  submitBtn.addEventListener('click', () => submitConfigureModal(name, fields));
+  actions.appendChild(submitBtn);
+
+  const cancelBtn = document.createElement('button');
+  cancelBtn.className = 'btn-ext remove';
+  cancelBtn.textContent = 'Cancel';
+  cancelBtn.addEventListener('click', closeConfigureModal);
+  actions.appendChild(cancelBtn);
+
+  modal.appendChild(actions);
+  overlay.appendChild(modal);
+  document.body.appendChild(overlay);
+
+  if (fields.length > 0) fields[0].input.focus();
+}
+
+function submitConfigureModal(name, fields) {
+  const secrets = {};
+  for (const f of fields) {
+    if (f.input.value.trim()) {
+      secrets[f.name] = f.input.value.trim();
+    }
+  }
+
+  apiFetch('/api/extensions/' + encodeURIComponent(name) + '/setup', {
+    method: 'POST',
+    body: { secrets },
+  })
+    .then((res) => {
+      closeConfigureModal();
+      if (res.success) {
+        showToast(res.message, 'success');
+      } else {
+        showToast(res.message || 'Configuration failed', 'error');
+      }
+      loadExtensions();
+    })
+    .catch((err) => {
+      showToast('Configuration failed: ' + err.message, 'error');
+    });
+}
+
+function closeConfigureModal() {
+  const existing = document.querySelector('.configure-overlay');
+  if (existing) existing.remove();
+}
+
+// --- Pairing ---
+
+function loadPairingRequests(channel, container) {
+  apiFetch('/api/pairing/' + encodeURIComponent(channel))
+    .then(data => {
+      container.innerHTML = '';
+      if (!data.requests || data.requests.length === 0) return;
+
+      const heading = document.createElement('div');
+      heading.className = 'pairing-heading';
+      heading.textContent = 'Pending pairing requests';
+      container.appendChild(heading);
+
+      data.requests.forEach(req => {
+        const row = document.createElement('div');
+        row.className = 'pairing-row';
+
+        const code = document.createElement('span');
+        code.className = 'pairing-code';
+        code.textContent = req.code;
+        row.appendChild(code);
+
+        const sender = document.createElement('span');
+        sender.className = 'pairing-sender';
+        sender.textContent = 'from ' + req.sender_id;
+        row.appendChild(sender);
+
+        const btn = document.createElement('button');
+        btn.className = 'btn-ext activate';
+        btn.textContent = 'Approve';
+        btn.addEventListener('click', () => approvePairing(channel, req.code, container));
+        row.appendChild(btn);
+
+        container.appendChild(row);
+      });
+    })
+    .catch(() => {});
+}
+
+function approvePairing(channel, code, container) {
+  apiFetch('/api/pairing/' + encodeURIComponent(channel) + '/approve', {
+    method: 'POST',
+    body: { code },
+  }).then(res => {
+    if (res.success) {
+      showToast('Pairing approved', 'success');
+      loadPairingRequests(channel, container);
+    } else {
+      showToast(res.message || 'Approve failed', 'error');
+    }
+  }).catch(err => showToast('Error: ' + err.message, 'error'));
 }
 
 // --- Jobs ---
@@ -1782,14 +2213,20 @@ function appendActivityEvent(terminal, eventType, data) {
         + escapeHtml(typeof data.input === 'string' ? data.input : JSON.stringify(data.input, null, 2))
         + '</pre></details>';
       break;
-    case 'tool_result':
-      el.innerHTML = '<details class="activity-tool-block activity-tool-result"><summary>'
-        + '<span class="activity-tool-icon">&#10003;</span> '
+    case 'tool_result': {
+      const trSuccess = data.success !== false;
+      const trIcon = trSuccess ? '&#10003;' : '&#10007;';
+      const trOutput = data.output || data.error || '';
+      const trClass = 'activity-tool-block activity-tool-result'
+        + (trSuccess ? '' : ' activity-tool-error');
+      el.innerHTML = '<details class="' + trClass + '"><summary>'
+        + '<span class="activity-tool-icon">' + trIcon + '</span> '
         + escapeHtml(data.tool_name || 'result')
         + '</summary><pre class="activity-tool-output">'
-        + escapeHtml(data.output || '')
+        + escapeHtml(trOutput)
         + '</pre></details>';
       break;
+    }
     case 'status':
       el.innerHTML = '<span class="activity-status">' + escapeHtml(data.message || '') + '</span>';
       break;
@@ -1797,7 +2234,7 @@ function appendActivityEvent(terminal, eventType, data) {
       el.className += ' activity-final';
       const success = data.success !== false;
       el.innerHTML = '<span class="activity-result-status" data-success="' + success + '">'
-        + escapeHtml(data.message || data.status || 'done') + '</span>';
+        + escapeHtml(data.message || data.error || data.status || 'done') + '</span>';
       if (data.session_id) {
         el.innerHTML += ' <span class="activity-session-id">session: ' + escapeHtml(data.session_id) + '</span>';
       }
@@ -1982,7 +2419,9 @@ function renderRoutineDetail(routine) {
         + '<td>' + formatDate(run.started_at) + '</td>'
         + '<td>' + formatDate(run.completed_at) + '</td>'
         + '<td><span class="badge ' + runStatusClass + '">' + escapeHtml(run.status) + '</span></td>'
-        + '<td>' + escapeHtml(run.result_summary || '-') + '</td>'
+        + '<td>' + escapeHtml(run.result_summary || '-')
+          + (run.job_id ? ' <a href="#" onclick="event.preventDefault(); switchTab(\'jobs\'); openJobDetail(\'' + run.job_id + '\')">[view job]</a>' : '')
+          + '</td>'
         + '<td>' + (run.tokens_used != null ? run.tokens_used : '-') + '</td>'
         + '</tr>';
     }
@@ -2049,13 +2488,72 @@ function startGatewayStatusPolling() {
   gatewayStatusInterval = setInterval(fetchGatewayStatus, 30000);
 }
 
+function formatTokenCount(n) {
+  if (n == null || n === 0) return '0';
+  if (n >= 1000000) return (n / 1000000).toFixed(1) + 'M';
+  if (n >= 1000) return (n / 1000).toFixed(1) + 'k';
+  return '' + n;
+}
+
+function formatCost(costStr) {
+  if (!costStr) return '$0.00';
+  var n = parseFloat(costStr);
+  if (n < 0.01) return '$' + n.toFixed(4);
+  return '$' + n.toFixed(2);
+}
+
+function shortModelName(model) {
+  // Strip provider prefix and shorten common model names
+  var m = model.indexOf('/') >= 0 ? model.split('/').pop() : model;
+  // Shorten dated suffixes
+  m = m.replace(/-20\d{6}$/, '');
+  return m;
+}
+
 function fetchGatewayStatus() {
-  apiFetch('/api/gateway/status').then((data) => {
-    const popover = document.getElementById('gateway-popover');
-    popover.innerHTML = '<div class="gw-stat"><span>SSE clients</span><span>' + (data.sse_clients || 0) + '</span></div>'
-      + '<div class="gw-stat"><span>Log clients</span><span>' + (data.log_clients || 0) + '</span></div>'
-      + '<div class="gw-stat"><span>Uptime</span><span>' + formatDuration(data.uptime_secs) + '</span></div>';
-  }).catch(() => {});
+  apiFetch('/api/gateway/status').then(function(data) {
+    var popover = document.getElementById('gateway-popover');
+    var html = '';
+
+    // Connection info
+    html += '<div class="gw-section-label">Connections</div>';
+    html += '<div class="gw-stat"><span>SSE</span><span>' + (data.sse_connections || 0) + '</span></div>';
+    html += '<div class="gw-stat"><span>WebSocket</span><span>' + (data.ws_connections || 0) + '</span></div>';
+    html += '<div class="gw-stat"><span>Uptime</span><span>' + formatDuration(data.uptime_secs) + '</span></div>';
+
+    // Cost tracker
+    if (data.daily_cost != null) {
+      html += '<div class="gw-divider"></div>';
+      html += '<div class="gw-section-label">Cost Today</div>';
+      html += '<div class="gw-stat"><span>Spent</span><span>' + formatCost(data.daily_cost) + '</span></div>';
+      if (data.actions_this_hour != null) {
+        html += '<div class="gw-stat"><span>Actions/hr</span><span>' + data.actions_this_hour + '</span></div>';
+      }
+    }
+
+    // Per-model token usage
+    if (data.model_usage && data.model_usage.length > 0) {
+      html += '<div class="gw-divider"></div>';
+      html += '<div class="gw-section-label">Token Usage</div>';
+      data.model_usage.sort(function(a, b) {
+        return (b.input_tokens + b.output_tokens) - (a.input_tokens + a.output_tokens);
+      });
+      for (var i = 0; i < data.model_usage.length; i++) {
+        var m = data.model_usage[i];
+        var name = escapeHtml(shortModelName(m.model));
+        html += '<div class="gw-model-row">'
+          + '<span class="gw-model-name">' + name + '</span>'
+          + '<span class="gw-model-cost">' + escapeHtml(formatCost(m.cost)) + '</span>'
+          + '</div>';
+        html += '<div class="gw-token-detail">'
+          + '<span>in: ' + formatTokenCount(m.input_tokens) + '</span>'
+          + '<span>out: ' + formatTokenCount(m.output_tokens) + '</span>'
+          + '</div>';
+      }
+    }
+
+    popover.innerHTML = html;
+  }).catch(function() {});
 }
 
 // Show/hide popover on hover
@@ -2066,33 +2564,481 @@ document.getElementById('gateway-status-trigger').addEventListener('mouseleave',
   document.getElementById('gateway-popover').classList.remove('visible');
 });
 
+// --- TEE attestation ---
+
+let teeInfo = null;
+let teeReportCache = null;
+let teeReportLoading = false;
+
+function teeApiBase() {
+  var parts = window.location.hostname.split('.');
+  if (parts.length < 2) return null;
+  var domain = parts.slice(1).join('.');
+  return window.location.protocol + '//api.' + domain;
+}
+
+function teeInstanceName() {
+  return window.location.hostname.split('.')[0];
+}
+
+function checkTeeStatus() {
+  var base = teeApiBase();
+  if (!base) return;
+  var name = teeInstanceName();
+  fetch(base + '/instances/' + encodeURIComponent(name) + '/attestation').then(function(res) {
+    if (!res.ok) throw new Error(res.status);
+    return res.json();
+  }).then(function(data) {
+    teeInfo = data;
+    document.getElementById('tee-shield').style.display = 'flex';
+  }).catch(function() {});
+}
+
+function fetchTeeReport() {
+  if (teeReportCache) {
+    renderTeePopover(teeReportCache);
+    return;
+  }
+  if (teeReportLoading) return;
+  teeReportLoading = true;
+  var base = teeApiBase();
+  if (!base) return;
+  var popover = document.getElementById('tee-popover');
+  popover.innerHTML = '<div class="tee-popover-loading">Loading attestation report...</div>';
+  fetch(base + '/attestation/report').then(function(res) {
+    if (!res.ok) throw new Error(res.status);
+    return res.json();
+  }).then(function(data) {
+    teeReportCache = data;
+    renderTeePopover(data);
+  }).catch(function() {
+    popover.innerHTML = '<div class="tee-popover-loading">Could not load attestation report</div>';
+  }).finally(function() {
+    teeReportLoading = false;
+  });
+}
+
+function renderTeePopover(report) {
+  var popover = document.getElementById('tee-popover');
+  var digest = (teeInfo && teeInfo.image_digest) || 'N/A';
+  var fingerprint = report.tls_certificate_fingerprint || 'N/A';
+  var reportData = report.report_data || '';
+  var vmConfig = report.vm_config || 'N/A';
+  var truncated = reportData.length > 32 ? reportData.slice(0, 32) + '...' : reportData;
+  popover.innerHTML = '<div class="tee-popover-title">'
+    + '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>'
+    + 'TEE Attestation</div>'
+    + '<div class="tee-field"><div class="tee-field-label">Image Digest</div>'
+    + '<div class="tee-field-value">' + escapeHtml(digest) + '</div></div>'
+    + '<div class="tee-field"><div class="tee-field-label">TLS Certificate Fingerprint</div>'
+    + '<div class="tee-field-value">' + escapeHtml(fingerprint) + '</div></div>'
+    + '<div class="tee-field"><div class="tee-field-label">Report Data</div>'
+    + '<div class="tee-field-value">' + escapeHtml(truncated) + '</div></div>'
+    + '<div class="tee-field"><div class="tee-field-label">VM Config</div>'
+    + '<div class="tee-field-value">' + escapeHtml(vmConfig) + '</div></div>'
+    + '<div class="tee-popover-actions">'
+    + '<button class="tee-btn-copy" onclick="copyTeeReport()">Copy Full Report</button></div>';
+}
+
+function copyTeeReport() {
+  if (!teeReportCache) return;
+  var combined = Object.assign({}, teeReportCache, teeInfo || {});
+  navigator.clipboard.writeText(JSON.stringify(combined, null, 2)).then(function() {
+    showToast('Attestation report copied', 'success');
+  }).catch(function() {
+    showToast('Failed to copy report', 'error');
+  });
+}
+
+document.getElementById('tee-shield').addEventListener('mouseenter', function() {
+  fetchTeeReport();
+  document.getElementById('tee-popover').classList.add('visible');
+});
+document.getElementById('tee-shield').addEventListener('mouseleave', function() {
+  document.getElementById('tee-popover').classList.remove('visible');
+});
+
 // --- Extension install ---
 
-function installExtension() {
-  const name = document.getElementById('ext-install-name').value.trim();
+function installWasmExtension() {
+  var name = document.getElementById('wasm-install-name').value.trim();
   if (!name) {
     showToast('Extension name is required', 'error');
     return;
   }
-  const url = document.getElementById('ext-install-url').value.trim();
-  const kind = document.getElementById('ext-install-kind').value;
+  var url = document.getElementById('wasm-install-url').value.trim();
+  if (!url) {
+    showToast('URL to .tar.gz bundle is required', 'error');
+    return;
+  }
 
   apiFetch('/api/extensions/install', {
     method: 'POST',
-    body: { name, url: url || undefined, kind },
-  }).then((res) => {
+    body: { name: name, url: url, kind: 'wasm_tool' },
+  }).then(function(res) {
     if (res.success) {
       showToast('Installed ' + name, 'success');
-      document.getElementById('ext-install-name').value = '';
-      document.getElementById('ext-install-url').value = '';
+      document.getElementById('wasm-install-name').value = '';
+      document.getElementById('wasm-install-url').value = '';
       loadExtensions();
     } else {
       showToast('Install failed: ' + (res.message || 'unknown error'), 'error');
     }
-  }).catch((err) => {
+  }).catch(function(err) {
     showToast('Install failed: ' + err.message, 'error');
   });
 }
+
+function addMcpServer() {
+  var name = document.getElementById('mcp-install-name').value.trim();
+  if (!name) {
+    showToast('Server name is required', 'error');
+    return;
+  }
+  var url = document.getElementById('mcp-install-url').value.trim();
+  if (!url) {
+    showToast('MCP server URL is required', 'error');
+    return;
+  }
+
+  apiFetch('/api/extensions/install', {
+    method: 'POST',
+    body: { name: name, url: url, kind: 'mcp_server' },
+  }).then(function(res) {
+    if (res.success) {
+      showToast('Added MCP server ' + name, 'success');
+      document.getElementById('mcp-install-name').value = '';
+      document.getElementById('mcp-install-url').value = '';
+      loadExtensions();
+    } else {
+      showToast('Failed to add MCP server: ' + (res.message || 'unknown error'), 'error');
+    }
+  }).catch(function(err) {
+    showToast('Failed to add MCP server: ' + err.message, 'error');
+  });
+}
+
+// --- Skills ---
+
+function loadSkills() {
+  var skillsList = document.getElementById('skills-list');
+  apiFetch('/api/skills').then(function(data) {
+    if (!data.skills || data.skills.length === 0) {
+      skillsList.innerHTML = '<div class="empty-state">No skills installed</div>';
+      return;
+    }
+    skillsList.innerHTML = '';
+    for (var i = 0; i < data.skills.length; i++) {
+      skillsList.appendChild(renderSkillCard(data.skills[i]));
+    }
+  }).catch(function(err) {
+    skillsList.innerHTML = '<div class="empty-state">Failed to load skills: ' + escapeHtml(err.message) + '</div>';
+  });
+}
+
+function renderSkillCard(skill) {
+  var card = document.createElement('div');
+  card.className = 'ext-card';
+
+  var header = document.createElement('div');
+  header.className = 'ext-header';
+
+  var name = document.createElement('span');
+  name.className = 'ext-name';
+  name.textContent = skill.name;
+  header.appendChild(name);
+
+  var trust = document.createElement('span');
+  var trustClass = skill.trust.toLowerCase() === 'trusted' ? 'trust-trusted' : 'trust-installed';
+  trust.className = 'skill-trust ' + trustClass;
+  trust.textContent = skill.trust;
+  header.appendChild(trust);
+
+  var version = document.createElement('span');
+  version.className = 'skill-version';
+  version.textContent = 'v' + skill.version;
+  header.appendChild(version);
+
+  card.appendChild(header);
+
+  var desc = document.createElement('div');
+  desc.className = 'ext-desc';
+  desc.textContent = skill.description;
+  card.appendChild(desc);
+
+  if (skill.keywords && skill.keywords.length > 0) {
+    var kw = document.createElement('div');
+    kw.className = 'ext-keywords';
+    kw.textContent = 'Activates on: ' + skill.keywords.join(', ');
+    card.appendChild(kw);
+  }
+
+  var actions = document.createElement('div');
+  actions.className = 'ext-actions';
+
+  // Only show Remove for registry-installed skills, not user-placed trusted skills
+  if (skill.trust.toLowerCase() !== 'trusted') {
+    var removeBtn = document.createElement('button');
+    removeBtn.className = 'btn-ext remove';
+    removeBtn.textContent = 'Remove';
+    removeBtn.addEventListener('click', function() { removeSkill(skill.name); });
+    actions.appendChild(removeBtn);
+  }
+
+  card.appendChild(actions);
+  return card;
+}
+
+function searchClawHub() {
+  var input = document.getElementById('skill-search-input');
+  var query = input.value.trim();
+  if (!query) return;
+
+  var resultsDiv = document.getElementById('skill-search-results');
+  resultsDiv.innerHTML = '<div class="empty-state">Searching...</div>';
+
+  apiFetch('/api/skills/search', {
+    method: 'POST',
+    body: { query: query },
+  }).then(function(data) {
+    resultsDiv.innerHTML = '';
+
+    // Show registry error as a warning banner if present
+    if (data.catalog_error) {
+      var warning = document.createElement('div');
+      warning.className = 'empty-state';
+      warning.style.color = '#f0ad4e';
+      warning.style.borderLeft = '3px solid #f0ad4e';
+      warning.style.paddingLeft = '12px';
+      warning.style.marginBottom = '16px';
+      warning.textContent = 'Could not reach ClawHub registry: ' + data.catalog_error;
+      resultsDiv.appendChild(warning);
+    }
+
+    // Show catalog results
+    if (data.catalog && data.catalog.length > 0) {
+      // Build a set of installed skill names for quick lookup
+      var installedNames = {};
+      if (data.installed) {
+        for (var j = 0; j < data.installed.length; j++) {
+          installedNames[data.installed[j].name] = true;
+        }
+      }
+
+      for (var i = 0; i < data.catalog.length; i++) {
+        var card = renderCatalogSkillCard(data.catalog[i], installedNames);
+        card.style.animationDelay = (i * 0.06) + 's';
+        resultsDiv.appendChild(card);
+      }
+    }
+
+    // Show matching installed skills too
+    if (data.installed && data.installed.length > 0) {
+      for (var k = 0; k < data.installed.length; k++) {
+        var installedCard = renderSkillCard(data.installed[k]);
+        installedCard.style.animationDelay = ((data.catalog ? data.catalog.length : 0) + k) * 0.06 + 's';
+        installedCard.classList.add('skill-search-result');
+        resultsDiv.appendChild(installedCard);
+      }
+    }
+
+    if (resultsDiv.children.length === 0) {
+      resultsDiv.innerHTML = '<div class="empty-state">No skills found for "' + escapeHtml(query) + '"</div>';
+    }
+  }).catch(function(err) {
+    resultsDiv.innerHTML = '<div class="empty-state">Search failed: ' + escapeHtml(err.message) + '</div>';
+  });
+}
+
+function renderCatalogSkillCard(entry, installedNames) {
+  var card = document.createElement('div');
+  card.className = 'ext-card ext-available skill-search-result';
+
+  var header = document.createElement('div');
+  header.className = 'ext-header';
+
+  var name = document.createElement('a');
+  name.className = 'ext-name';
+  name.textContent = entry.name || entry.slug;
+  name.href = 'https://clawhub.ai/skills/' + encodeURIComponent(entry.slug);
+  name.target = '_blank';
+  name.rel = 'noopener';
+  name.style.textDecoration = 'none';
+  name.style.color = 'inherit';
+  name.title = 'View on ClawHub';
+  header.appendChild(name);
+
+  if (entry.version) {
+    var version = document.createElement('span');
+    version.className = 'skill-version';
+    version.textContent = 'v' + entry.version;
+    header.appendChild(version);
+  }
+
+  card.appendChild(header);
+
+  if (entry.description) {
+    var desc = document.createElement('div');
+    desc.className = 'ext-desc';
+    desc.textContent = entry.description;
+    card.appendChild(desc);
+  }
+
+  // Metadata row: owner, stars, downloads, recency
+  var meta = document.createElement('div');
+  meta.className = 'ext-meta';
+  meta.style.fontSize = '11px';
+  meta.style.color = '#888';
+  meta.style.marginTop = '6px';
+
+  function addMetaSep() {
+    if (meta.children.length > 0) {
+      meta.appendChild(document.createTextNode(' \u00b7 '));
+    }
+  }
+
+  if (entry.owner) {
+    var ownerSpan = document.createElement('span');
+    ownerSpan.textContent = 'by ' + entry.owner;
+    meta.appendChild(ownerSpan);
+  }
+
+  if (entry.stars != null) {
+    addMetaSep();
+    var starsSpan = document.createElement('span');
+    starsSpan.textContent = entry.stars + ' stars';
+    meta.appendChild(starsSpan);
+  }
+
+  if (entry.downloads != null) {
+    addMetaSep();
+    var dlSpan = document.createElement('span');
+    dlSpan.textContent = formatCompactNumber(entry.downloads) + ' downloads';
+    meta.appendChild(dlSpan);
+  }
+
+  if (entry.updatedAt) {
+    var ago = formatTimeAgo(entry.updatedAt);
+    if (ago) {
+      addMetaSep();
+      var updatedSpan = document.createElement('span');
+      updatedSpan.textContent = 'updated ' + ago;
+      meta.appendChild(updatedSpan);
+    }
+  }
+
+  if (meta.children.length > 0) {
+    card.appendChild(meta);
+  }
+
+  var actions = document.createElement('div');
+  actions.className = 'ext-actions';
+
+  var slug = entry.slug || entry.name;
+  var isInstalled = installedNames[entry.name] || installedNames[slug];
+
+  if (isInstalled) {
+    var label = document.createElement('span');
+    label.className = 'ext-active-label';
+    label.textContent = 'Installed';
+    actions.appendChild(label);
+  } else {
+    var installBtn = document.createElement('button');
+    installBtn.className = 'btn-ext install';
+    installBtn.textContent = 'Install';
+    installBtn.addEventListener('click', (function(s, btn) {
+      return function() {
+        if (!confirm('Install skill "' + s + '" from ClawHub?')) return;
+        btn.disabled = true;
+        btn.textContent = 'Installing...';
+        installSkill(s, null, btn);
+      };
+    })(slug, installBtn));
+    actions.appendChild(installBtn);
+  }
+
+  card.appendChild(actions);
+  return card;
+}
+
+function formatCompactNumber(n) {
+  if (n >= 1000000) return (n / 1000000).toFixed(1) + 'M';
+  if (n >= 1000) return (n / 1000).toFixed(1) + 'K';
+  return '' + n;
+}
+
+function formatTimeAgo(epochMs) {
+  var now = Date.now();
+  var diff = now - epochMs;
+  if (diff < 0) return null;
+  var minutes = Math.floor(diff / 60000);
+  if (minutes < 60) return minutes <= 1 ? 'just now' : minutes + 'm ago';
+  var hours = Math.floor(minutes / 60);
+  if (hours < 24) return hours + 'h ago';
+  var days = Math.floor(hours / 24);
+  if (days < 30) return days + 'd ago';
+  var months = Math.floor(days / 30);
+  if (months < 12) return months + 'mo ago';
+  return Math.floor(months / 12) + 'y ago';
+}
+
+function installSkill(nameOrSlug, url, btn) {
+  var body = { name: nameOrSlug };
+  if (url) body.url = url;
+
+  apiFetch('/api/skills/install', {
+    method: 'POST',
+    headers: { 'X-Confirm-Action': 'true' },
+    body: body,
+  }).then(function(res) {
+    if (res.success) {
+      showToast('Installed skill "' + nameOrSlug + '"', 'success');
+    } else {
+      showToast('Install failed: ' + (res.message || 'unknown error'), 'error');
+    }
+    loadSkills();
+    if (btn) { btn.disabled = false; btn.textContent = 'Install'; }
+  }).catch(function(err) {
+    showToast('Install failed: ' + err.message, 'error');
+    if (btn) { btn.disabled = false; btn.textContent = 'Install'; }
+  });
+}
+
+function removeSkill(name) {
+  if (!confirm('Remove skill "' + name + '"?')) return;
+  apiFetch('/api/skills/' + encodeURIComponent(name), {
+    method: 'DELETE',
+    headers: { 'X-Confirm-Action': 'true' },
+  }).then(function(res) {
+    if (res.success) {
+      showToast('Removed skill "' + name + '"', 'success');
+    } else {
+      showToast('Remove failed: ' + (res.message || 'unknown error'), 'error');
+    }
+    loadSkills();
+  }).catch(function(err) {
+    showToast('Remove failed: ' + err.message, 'error');
+  });
+}
+
+function installSkillFromForm() {
+  var name = document.getElementById('skill-install-name').value.trim();
+  if (!name) { showToast('Skill name is required', 'error'); return; }
+  var url = document.getElementById('skill-install-url').value.trim() || null;
+  if (url && !url.startsWith('https://')) {
+    showToast('URL must use HTTPS', 'error');
+    return;
+  }
+  if (!confirm('Install skill "' + name + '"?')) return;
+  installSkill(name, url, null);
+  document.getElementById('skill-install-name').value = '';
+  document.getElementById('skill-install-url').value = '';
+}
+
+// Wire up Enter key on search input
+document.getElementById('skill-search-input').addEventListener('keydown', function(e) {
+  if (e.key === 'Enter') searchClawHub();
+});
 
 // --- Keyboard shortcuts ---
 
@@ -2104,7 +3050,7 @@ document.addEventListener('keydown', (e) => {
   // Mod+1-6: switch tabs
   if (mod && e.key >= '1' && e.key <= '6') {
     e.preventDefault();
-    const tabs = ['chat', 'memory', 'jobs', 'routines', 'logs', 'extensions'];
+    const tabs = ['chat', 'memory', 'jobs', 'routines', 'extensions', 'skills'];
     const idx = parseInt(e.key) - 1;
     if (tabs[idx]) switchTab(tabs[idx]);
     return;

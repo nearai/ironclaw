@@ -40,9 +40,17 @@ impl Agent {
         thread_id: Uuid,
         initial_messages: Vec<ChatMessage>,
     ) -> Result<AgenticLoopResult, Error> {
+        // Detect group chat from channel metadata (needed before loading system prompt)
+        let is_group_chat = message
+            .metadata
+            .get("chat_type")
+            .and_then(|v| v.as_str())
+            .is_some_and(|t| t == "group" || t == "channel" || t == "supergroup");
+
         // Load workspace system prompt (identity files: AGENTS.md, SOUL.md, etc.)
+        // In group chats, MEMORY.md is excluded to prevent leaking personal context.
         let system_prompt = if let Some(ws) = self.workspace() {
-            match ws.system_prompt().await {
+            match ws.system_prompt_for_context(is_group_chat).await {
                 Ok(prompt) if !prompt.is_empty() => Some(prompt),
                 Ok(_) => None,
                 Err(e) => {
@@ -94,7 +102,10 @@ impl Agent {
             None
         };
 
-        let mut reasoning = Reasoning::new(self.llm().clone(), self.safety().clone());
+        let mut reasoning = Reasoning::new(self.llm().clone(), self.safety().clone())
+            .with_channel(message.channel.clone())
+            .with_model_name(self.llm().active_model_name())
+            .with_group_chat(is_group_chat);
         if let Some(prompt) = system_prompt {
             reasoning = reasoning.with_system_prompt(prompt);
         }
@@ -108,14 +119,21 @@ impl Agent {
         // Create a JobContext for tool execution (chat doesn't have a real job)
         let job_ctx = JobContext::with_user(&message.user_id, "chat", "Interactive chat session");
 
-        const MAX_TOOL_ITERATIONS: usize = 10;
+        let max_tool_iterations = self.config.max_tool_iterations;
+        // Force a text-only response on the last iteration to guarantee termination
+        // instead of hard-erroring. The penultimate iteration also gets a nudge
+        // message so the LLM knows it should wrap up.
+        let force_text_at = max_tool_iterations;
+        let nudge_at = max_tool_iterations.saturating_sub(1);
         let mut iteration = 0;
         loop {
             iteration += 1;
-            if iteration > MAX_TOOL_ITERATIONS {
+            // Hard ceiling one past the forced-text iteration (should never be reached
+            // since force_text_at guarantees a text response, but kept as a safety net).
+            if iteration > max_tool_iterations + 1 {
                 return Err(crate::error::LlmError::InvalidResponse {
                     provider: "agent".to_string(),
-                    reason: format!("Exceeded maximum tool iterations ({})", MAX_TOOL_ITERATIONS),
+                    reason: format!("Exceeded maximum tool iterations ({max_tool_iterations})"),
                 }
                 .into());
             }
@@ -143,6 +161,19 @@ impl Agent {
                 .into());
             }
 
+            // Inject a nudge message when approaching the iteration limit so the
+            // LLM is aware it should produce a final answer on the next turn.
+            if iteration == nudge_at {
+                context_messages.push(ChatMessage::system(
+                    "You are approaching the tool call limit. \
+                     Provide your best final answer on the next response \
+                     using the information you have gathered so far. \
+                     Do not call any more tools.",
+                ));
+            }
+
+            let force_text = iteration >= force_text_at;
+
             // Refresh tool definitions each iteration so newly built tools become visible
             let tool_defs = self.tools().tool_definitions().await;
 
@@ -162,8 +193,9 @@ impl Agent {
                 tool_defs
             };
 
-            // Call LLM with current context
-            let context = ReasoningContext::new()
+            // Call LLM with current context; force_text drops tools to guarantee a
+            // text response on the final iteration.
+            let mut context = ReasoningContext::new()
                 .with_messages(context_messages.clone())
                 .with_tools(tool_defs)
                 .with_metadata({
@@ -171,8 +203,55 @@ impl Agent {
                     m.insert("thread_id".to_string(), thread_id.to_string());
                     m
                 });
+            context.force_text = force_text;
 
-            let output = reasoning.respond_with_tools(&context).await?;
+            if force_text {
+                tracing::info!(
+                    iteration,
+                    "Forcing text-only response (iteration limit reached)"
+                );
+            }
+
+            let output = match reasoning.respond_with_tools(&context).await {
+                Ok(output) => output,
+                Err(crate::error::LlmError::ContextLengthExceeded { used, limit }) => {
+                    tracing::warn!(
+                        used,
+                        limit,
+                        iteration,
+                        "Context length exceeded, compacting messages and retrying"
+                    );
+
+                    // Compact: keep system messages + last user message + current turn
+                    context_messages = compact_messages_for_retry(&context_messages);
+
+                    // Rebuild context with compacted messages
+                    let mut retry_context = ReasoningContext::new()
+                        .with_messages(context_messages.clone())
+                        .with_tools(if force_text {
+                            Vec::new()
+                        } else {
+                            context.available_tools.clone()
+                        })
+                        .with_metadata(context.metadata.clone());
+                    retry_context.force_text = force_text;
+
+                    reasoning
+                        .respond_with_tools(&retry_context)
+                        .await
+                        .map_err(|retry_err| {
+                            tracing::error!(
+                                original_used = used,
+                                original_limit = limit,
+                                retry_error = %retry_err,
+                                "Retry after auto-compaction also failed"
+                            );
+                            // Propagate the actual retry error so callers see the real failure
+                            crate::error::Error::from(retry_err)
+                        })?
+                }
+                Err(e) => return Err(e.into()),
+            };
 
             // Record cost and track token usage
             let model_name = self.llm().active_model_name();
@@ -182,6 +261,7 @@ impl Agent {
                     &model_name,
                     output.usage.input_tokens,
                     output.usage.output_tokens,
+                    Some(self.llm().cost_per_token()),
                 )
                 .await;
             tracing::debug!(
@@ -255,31 +335,8 @@ impl Agent {
                     for (idx, original_tc) in tool_calls.iter().enumerate() {
                         let mut tc = original_tc.clone();
 
-                        // Check if tool requires approval
-                        if let Some(tool) = self.tools().get(&tc.name).await
-                            && tool.requires_approval()
-                        {
-                            let mut is_auto_approved = {
-                                let sess = session.lock().await;
-                                sess.is_tool_auto_approved(&tc.name)
-                            };
-
-                            // Override auto-approval for destructive parameters
-                            if is_auto_approved && tool.requires_approval_for(&tc.arguments) {
-                                tracing::info!(
-                                    tool = %tc.name,
-                                    "Parameters require explicit approval despite auto-approve"
-                                );
-                                is_auto_approved = false;
-                            }
-
-                            if !is_auto_approved {
-                                approval_needed = Some((idx, tc, tool));
-                                break; // remaining tools are deferred
-                            }
-                        }
-
-                        // Hook: BeforeToolCall
+                        // Hook: BeforeToolCall (runs before approval so hooks can
+                        // modify parameters — approval is checked on final params)
                         let event = crate::hooks::HookEvent::ToolCall {
                             tool_name: tc.name.clone(),
                             parameters: tc.arguments.clone(),
@@ -320,6 +377,27 @@ impl Agent {
                                 }
                             },
                             _ => {}
+                        }
+
+                        // Check if tool requires approval on the final (post-hook)
+                        // parameters. Skipped when auto_approve_tools is set.
+                        if !self.config.auto_approve_tools
+                            && let Some(tool) = self.tools().get(&tc.name).await
+                        {
+                            use crate::tools::ApprovalRequirement;
+                            let needs_approval = match tool.requires_approval(&tc.arguments) {
+                                ApprovalRequirement::Never => false,
+                                ApprovalRequirement::UnlessAutoApproved => {
+                                    let sess = session.lock().await;
+                                    !sess.is_tool_auto_approved(&tc.name)
+                                }
+                                ApprovalRequirement::Always => true,
+                            };
+
+                            if needs_approval {
+                                approval_needed = Some((idx, tc, tool));
+                                break; // remaining tools are deferred
+                            }
                         }
 
                         let preflight_idx = preflight.len();
@@ -752,6 +830,58 @@ pub(super) fn check_auth_required(
     Some((name, instructions))
 }
 
+/// Compact messages for retry after a context-length-exceeded error.
+///
+/// Keeps all `System` messages (which carry the system prompt and instructions),
+/// finds the last `User` message, and retains it plus every subsequent message
+/// (the current turn's assistant tool calls and tool results). A short note is
+/// inserted so the LLM knows earlier history was dropped.
+fn compact_messages_for_retry(messages: &[ChatMessage]) -> Vec<ChatMessage> {
+    use crate::llm::Role;
+
+    let mut compacted = Vec::new();
+
+    // Find the last User message index
+    let last_user_idx = messages.iter().rposition(|m| m.role == Role::User);
+
+    if let Some(idx) = last_user_idx {
+        // Keep System messages that appear BEFORE the last User message.
+        // System messages after that point (e.g. nudges) are included in the
+        // slice extension below, avoiding duplication.
+        for msg in &messages[..idx] {
+            if msg.role == Role::System {
+                compacted.push(msg.clone());
+            }
+        }
+
+        // Only add a compaction note if there was earlier history that is being dropped
+        if idx > 0 {
+            compacted.push(ChatMessage::system(
+                "[Note: Earlier conversation history was automatically compacted \
+                 to fit within the context window. The most recent exchange is preserved below.]",
+            ));
+        }
+
+        // Keep the last User message and everything after it
+        compacted.extend_from_slice(&messages[idx..]);
+    } else {
+        // No user messages found (shouldn't happen normally); keep everything,
+        // with system messages first to preserve prompt ordering.
+        for msg in messages {
+            if msg.role == Role::System {
+                compacted.push(msg.clone());
+            }
+        }
+        for msg in messages {
+            if msg.role != Role::System {
+                compacted.push(msg.clone());
+            }
+        }
+    }
+
+    compacted
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
@@ -799,7 +929,6 @@ mod tests {
                 input_tokens: 0,
                 output_tokens: 0,
                 finish_reason: FinishReason::Stop,
-                response_id: None,
             })
         }
 
@@ -813,7 +942,6 @@ mod tests {
                 input_tokens: 0,
                 output_tokens: 0,
                 finish_reason: FinishReason::Stop,
-                response_id: None,
             })
         }
     }
@@ -832,6 +960,7 @@ mod tests {
             workspace: None,
             extension_manager: None,
             skill_registry: None,
+            skill_catalog: None,
             skills_config: SkillsConfig::default(),
             hooks: Arc::new(HookRegistry::new()),
             cost_guard: Arc::new(CostGuard::new(CostGuardConfig::default())),
@@ -850,9 +979,11 @@ mod tests {
                 allow_local_tools: false,
                 max_cost_per_day_cents: None,
                 max_actions_per_hour: None,
+                max_tool_iterations: 50,
+                auto_approve_tools: false,
             },
             deps,
-            ChannelManager::new(),
+            Arc::new(ChannelManager::new()),
             None,
             None,
             None,
@@ -880,9 +1011,9 @@ mod tests {
     }
 
     #[test]
-    fn test_shell_destructive_command_requires_approval_for() {
-        // ShellTool::requires_approval_for should detect destructive commands.
-        // This exercises the same code path used inline in run_agentic_loop.
+    fn test_shell_destructive_command_requires_explicit_approval() {
+        // requires_explicit_approval() detects destructive commands that
+        // should return ApprovalRequirement::Always from ShellTool.
         use crate::tools::builtin::shell::requires_explicit_approval;
 
         let destructive_cmds = [
@@ -1110,5 +1241,179 @@ mod tests {
         .await;
 
         assert!(result.is_err());
+    }
+
+    // ---- compact_messages_for_retry tests ----
+
+    use super::compact_messages_for_retry;
+    use crate::llm::{ChatMessage, Role};
+
+    #[test]
+    fn test_compact_keeps_system_and_last_user_exchange() {
+        let messages = vec![
+            ChatMessage::system("You are a helpful assistant."),
+            ChatMessage::user("First question"),
+            ChatMessage::assistant("First answer"),
+            ChatMessage::user("Second question"),
+            ChatMessage::assistant("Second answer"),
+            ChatMessage::user("Third question"),
+            ChatMessage::assistant_with_tool_calls(
+                None,
+                vec![ToolCall {
+                    id: "call_1".to_string(),
+                    name: "echo".to_string(),
+                    arguments: serde_json::json!({"message": "hi"}),
+                }],
+            ),
+            ChatMessage::tool_result("call_1", "echo", "hi"),
+        ];
+
+        let compacted = compact_messages_for_retry(&messages);
+
+        // Should have: system prompt + compaction note + last user msg + tool call + tool result
+        assert_eq!(compacted.len(), 5);
+        assert_eq!(compacted[0].role, Role::System);
+        assert_eq!(compacted[0].content, "You are a helpful assistant.");
+        assert_eq!(compacted[1].role, Role::System); // compaction note
+        assert!(compacted[1].content.contains("compacted"));
+        assert_eq!(compacted[2].role, Role::User);
+        assert_eq!(compacted[2].content, "Third question");
+        assert_eq!(compacted[3].role, Role::Assistant); // tool call
+        assert_eq!(compacted[4].role, Role::Tool); // tool result
+    }
+
+    #[test]
+    fn test_compact_preserves_multiple_system_messages() {
+        let messages = vec![
+            ChatMessage::system("System prompt"),
+            ChatMessage::system("Skill context"),
+            ChatMessage::user("Old question"),
+            ChatMessage::assistant("Old answer"),
+            ChatMessage::system("Nudge message"),
+            ChatMessage::user("Current question"),
+        ];
+
+        let compacted = compact_messages_for_retry(&messages);
+
+        // 3 system messages + compaction note + last user message
+        assert_eq!(compacted.len(), 5);
+        assert_eq!(compacted[0].content, "System prompt");
+        assert_eq!(compacted[1].content, "Skill context");
+        assert_eq!(compacted[2].content, "Nudge message");
+        assert!(compacted[3].content.contains("compacted")); // note
+        assert_eq!(compacted[4].content, "Current question");
+    }
+
+    #[test]
+    fn test_compact_single_user_message_keeps_everything() {
+        let messages = vec![
+            ChatMessage::system("System prompt"),
+            ChatMessage::user("Only question"),
+        ];
+
+        let compacted = compact_messages_for_retry(&messages);
+
+        // system + compaction note + user
+        assert_eq!(compacted.len(), 3);
+        assert_eq!(compacted[0].content, "System prompt");
+        assert!(compacted[1].content.contains("compacted"));
+        assert_eq!(compacted[2].content, "Only question");
+    }
+
+    #[test]
+    fn test_compact_no_user_messages_keeps_non_system() {
+        let messages = vec![
+            ChatMessage::system("System prompt"),
+            ChatMessage::assistant("Stray assistant message"),
+        ];
+
+        let compacted = compact_messages_for_retry(&messages);
+
+        // system + assistant (no user message found, keeps all non-system)
+        assert_eq!(compacted.len(), 2);
+        assert_eq!(compacted[0].role, Role::System);
+        assert_eq!(compacted[1].role, Role::Assistant);
+    }
+
+    #[test]
+    fn test_compact_drops_old_history_but_keeps_current_turn_tools() {
+        // Simulate a multi-turn conversation where the current turn has
+        // multiple tool calls and results.
+        let messages = vec![
+            ChatMessage::system("System prompt"),
+            ChatMessage::user("Question 1"),
+            ChatMessage::assistant("Answer 1"),
+            ChatMessage::user("Question 2"),
+            ChatMessage::assistant("Answer 2"),
+            ChatMessage::user("Question 3"),
+            ChatMessage::assistant("Answer 3"),
+            ChatMessage::user("Current question"),
+            ChatMessage::assistant_with_tool_calls(
+                None,
+                vec![
+                    ToolCall {
+                        id: "c1".to_string(),
+                        name: "http".to_string(),
+                        arguments: serde_json::json!({}),
+                    },
+                    ToolCall {
+                        id: "c2".to_string(),
+                        name: "echo".to_string(),
+                        arguments: serde_json::json!({}),
+                    },
+                ],
+            ),
+            ChatMessage::tool_result("c1", "http", "response data"),
+            ChatMessage::tool_result("c2", "echo", "echoed"),
+        ];
+
+        let compacted = compact_messages_for_retry(&messages);
+
+        // system + note + user + assistant(tool_calls) + tool_result + tool_result
+        assert_eq!(compacted.len(), 6);
+        assert_eq!(compacted[0].content, "System prompt");
+        assert!(compacted[1].content.contains("compacted"));
+        assert_eq!(compacted[2].content, "Current question");
+        assert!(compacted[3].tool_calls.is_some()); // assistant with tool calls
+        assert_eq!(compacted[4].name.as_deref(), Some("http"));
+        assert_eq!(compacted[5].name.as_deref(), Some("echo"));
+    }
+
+    #[test]
+    fn test_compact_no_duplicate_system_after_last_user() {
+        // A system nudge message injected AFTER the last user message must
+        // not be duplicated — it should only appear once (via extend_from_slice).
+        let messages = vec![
+            ChatMessage::system("System prompt"),
+            ChatMessage::user("Question"),
+            ChatMessage::system("Nudge: wrap up"),
+            ChatMessage::assistant_with_tool_calls(
+                None,
+                vec![ToolCall {
+                    id: "c1".to_string(),
+                    name: "echo".to_string(),
+                    arguments: serde_json::json!({}),
+                }],
+            ),
+            ChatMessage::tool_result("c1", "echo", "done"),
+        ];
+
+        let compacted = compact_messages_for_retry(&messages);
+
+        // system prompt + note + user + nudge + assistant + tool_result = 6
+        assert_eq!(compacted.len(), 6);
+        assert_eq!(compacted[0].content, "System prompt");
+        assert!(compacted[1].content.contains("compacted"));
+        assert_eq!(compacted[2].content, "Question");
+        assert_eq!(compacted[3].content, "Nudge: wrap up"); // not duplicated
+        assert_eq!(compacted[4].role, Role::Assistant);
+        assert_eq!(compacted[5].role, Role::Tool);
+
+        // Verify "Nudge: wrap up" appears exactly once
+        let nudge_count = compacted
+            .iter()
+            .filter(|m| m.content == "Nudge: wrap up")
+            .count();
+        assert_eq!(nudge_count, 1);
     }
 }

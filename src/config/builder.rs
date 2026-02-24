@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 use std::time::Duration;
 
-use crate::config::helpers::{optional_env, parse_optional_env};
+use crate::config::helpers::{optional_env, parse_bool_env, parse_optional_env};
 use crate::error::ConfigError;
 
 /// Builder mode configuration.
@@ -34,25 +34,11 @@ impl Default for BuilderModeConfig {
 impl BuilderModeConfig {
     pub(crate) fn resolve() -> Result<Self, ConfigError> {
         Ok(Self {
-            enabled: optional_env("BUILDER_ENABLED")?
-                .map(|s| s.parse())
-                .transpose()
-                .map_err(|e| ConfigError::InvalidValue {
-                    key: "BUILDER_ENABLED".to_string(),
-                    message: format!("must be 'true' or 'false': {e}"),
-                })?
-                .unwrap_or(true),
+            enabled: parse_bool_env("BUILDER_ENABLED", true)?,
             build_dir: optional_env("BUILDER_DIR")?.map(PathBuf::from),
             max_iterations: parse_optional_env("BUILDER_MAX_ITERATIONS", 20)?,
             timeout_secs: parse_optional_env("BUILDER_TIMEOUT_SECS", 600)?,
-            auto_register: optional_env("BUILDER_AUTO_REGISTER")?
-                .map(|s| s.parse())
-                .transpose()
-                .map_err(|e| ConfigError::InvalidValue {
-                    key: "BUILDER_AUTO_REGISTER".to_string(),
-                    message: format!("must be 'true' or 'false': {e}"),
-                })?
-                .unwrap_or(true),
+            auto_register: parse_bool_env("BUILDER_AUTO_REGISTER", true)?,
         })
     }
 

@@ -68,8 +68,10 @@ pub enum SkillRegistryError {
 pub struct SkillRegistry {
     /// All loaded skills.
     skills: Vec<LoadedSkill>,
-    /// User skills directory (~/.ironclaw/skills/).
+    /// User skills directory (~/.ironclaw/skills/). Skills here are Trusted.
     user_dir: PathBuf,
+    /// Registry-installed skills directory (~/.ironclaw/installed_skills/). Skills here are Installed.
+    installed_dir: Option<PathBuf>,
     /// Optional workspace skills directory.
     workspace_dir: Option<PathBuf>,
 }
@@ -80,8 +82,20 @@ impl SkillRegistry {
         Self {
             skills: Vec::new(),
             user_dir,
+            installed_dir: None,
             workspace_dir: None,
         }
+    }
+
+    /// Set the registry-installed skills directory.
+    ///
+    /// Skills installed via ClawHub or the skill tools are written here and
+    /// loaded with `SkillTrust::Installed` (read-only tool access). This
+    /// directory is separate from the user dir so that trust levels survive
+    /// restarts correctly.
+    pub fn with_installed_dir(mut self, dir: PathBuf) -> Self {
+        self.installed_dir = Some(dir);
+        self
     }
 
     /// Set a workspace skills directory.
@@ -95,6 +109,7 @@ impl SkillRegistry {
     /// Discovery order (earlier wins on name collision):
     /// 1. Workspace skills directory (if set) -- Trusted
     /// 2. User skills directory -- Trusted
+    /// 3. Installed skills directory (if set) -- Installed
     pub async fn discover_all(&mut self) -> Vec<String> {
         let mut loaded_names: Vec<String> = Vec::new();
         let mut seen: HashSet<String> = HashSet::new();
@@ -127,6 +142,25 @@ impl SkillRegistry {
             seen.insert(name.clone());
             loaded_names.push(name);
             self.skills.push(skill);
+        }
+
+        // 3. Installed skills (registry-installed, lowest priority)
+        if let Some(inst_dir) = self.installed_dir.clone() {
+            let inst_skills = self
+                .discover_from_dir(&inst_dir, SkillTrust::Installed, SkillSource::User)
+                .await;
+            for (name, skill) in inst_skills {
+                if seen.contains(&name) {
+                    tracing::debug!(
+                        "Skipping installed skill '{}' (overridden by user/workspace)",
+                        name
+                    );
+                    continue;
+                }
+                seen.insert(name.clone());
+                loaded_names.push(name);
+                self.skills.push(skill);
+            }
         }
 
         loaded_names
@@ -197,7 +231,7 @@ impl SkillRegistry {
                     let source = make_source(path.clone());
                     match self.load_skill_md(&skill_md, trust, source).await {
                         Ok((name, skill)) => {
-                            tracing::info!("Loaded skill: {}", name);
+                            tracing::debug!("Loaded skill: {}", name);
                             results.push((name, skill));
                         }
                         Err(e) => {
@@ -423,6 +457,20 @@ impl SkillRegistry {
     /// Get the user skills directory path.
     pub fn user_dir(&self) -> &Path {
         &self.user_dir
+    }
+
+    /// Get the installed skills directory path, if configured.
+    pub fn installed_dir(&self) -> Option<&Path> {
+        self.installed_dir.as_deref()
+    }
+
+    /// Get the directory where new registry installs should be written.
+    ///
+    /// Returns the installed_dir if configured (preferred), otherwise falls
+    /// back to user_dir. In practice, the installed_dir is always set when
+    /// the app is running; the fallback exists for test registries.
+    pub fn install_target_dir(&self) -> &Path {
+        self.installed_dir.as_deref().unwrap_or(&self.user_dir)
     }
 }
 
@@ -947,5 +995,71 @@ mod tests {
         let h1 = compute_hash("hello");
         let h2 = compute_hash("world");
         assert_ne!(h1, h2);
+    }
+
+    /// Skills in the installed_dir are discovered with SkillTrust::Installed,
+    /// not Trusted. This ensures registry-installed skills do not gain full
+    /// tool access after an agent restart.
+    #[tokio::test]
+    async fn test_installed_dir_uses_installed_trust() {
+        let user_dir = tempfile::tempdir().unwrap();
+        let inst_dir = tempfile::tempdir().unwrap();
+
+        // Place a skill in the installed dir
+        let skill_dir = inst_dir.path().join("registry-skill");
+        fs::create_dir(&skill_dir).unwrap();
+        fs::write(
+            skill_dir.join("SKILL.md"),
+            "---\nname: registry-skill\nversion: \"1.2.3\"\n---\n\nInstalled prompt.\n",
+        )
+        .unwrap();
+
+        let mut registry = SkillRegistry::new(user_dir.path().to_path_buf())
+            .with_installed_dir(inst_dir.path().to_path_buf());
+        let loaded = registry.discover_all().await;
+
+        assert_eq!(loaded, vec!["registry-skill"]);
+        let skill = registry.find_by_name("registry-skill").unwrap();
+        assert_eq!(
+            skill.trust,
+            SkillTrust::Installed,
+            "installed_dir skills must be Installed"
+        );
+        assert_eq!(skill.manifest.version, "1.2.3");
+    }
+
+    /// install_target_dir() returns installed_dir when set, user_dir otherwise.
+    #[test]
+    fn test_install_target_dir_prefers_installed_dir() {
+        let user_dir = PathBuf::from("/tmp/user-skills");
+        let inst_dir = PathBuf::from("/tmp/installed-skills");
+
+        let registry = SkillRegistry::new(user_dir.clone()).with_installed_dir(inst_dir.clone());
+        assert_eq!(registry.install_target_dir(), inst_dir.as_path());
+
+        let registry_no_inst = SkillRegistry::new(user_dir.clone());
+        assert_eq!(registry_no_inst.install_target_dir(), user_dir.as_path());
+    }
+
+    /// User skills (user_dir) remain Trusted even when installed_dir is set.
+    #[tokio::test]
+    async fn test_user_dir_stays_trusted_with_installed_dir() {
+        let user_dir = tempfile::tempdir().unwrap();
+        let inst_dir = tempfile::tempdir().unwrap();
+
+        let skill_dir = user_dir.path().join("my-skill");
+        fs::create_dir(&skill_dir).unwrap();
+        fs::write(
+            skill_dir.join("SKILL.md"),
+            "---\nname: my-skill\n---\n\nUser prompt.\n",
+        )
+        .unwrap();
+
+        let mut registry = SkillRegistry::new(user_dir.path().to_path_buf())
+            .with_installed_dir(inst_dir.path().to_path_buf());
+        registry.discover_all().await;
+
+        let skill = registry.find_by_name("my-skill").unwrap();
+        assert_eq!(skill.trust, SkillTrust::Trusted);
     }
 }

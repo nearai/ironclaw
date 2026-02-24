@@ -9,6 +9,58 @@ use thiserror::Error;
 
 use crate::context::JobContext;
 
+/// How much approval a specific tool invocation requires.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ApprovalRequirement {
+    /// No approval needed.
+    Never,
+    /// Needs approval, but session auto-approve can bypass.
+    UnlessAutoApproved,
+    /// Always needs explicit approval (even if auto-approved).
+    Always,
+}
+
+impl ApprovalRequirement {
+    /// Whether this invocation requires approval in contexts where
+    /// auto-approve is irrelevant (e.g. autonomous worker/scheduler).
+    pub fn is_required(&self) -> bool {
+        !matches!(self, Self::Never)
+    }
+}
+
+/// Per-tool rate limit configuration for built-in tool invocations.
+///
+/// Controls how many times a tool can be invoked per user, per time window.
+/// Read-only tools (echo, time, json, file_read, etc.) should NOT be rate limited.
+/// Write/external tools (shell, http, file_write, memory_write, create_job) should be.
+#[derive(Debug, Clone)]
+pub struct ToolRateLimitConfig {
+    /// Maximum invocations per minute.
+    pub requests_per_minute: u32,
+    /// Maximum invocations per hour.
+    pub requests_per_hour: u32,
+}
+
+impl ToolRateLimitConfig {
+    /// Create a config with explicit limits.
+    pub fn new(requests_per_minute: u32, requests_per_hour: u32) -> Self {
+        Self {
+            requests_per_minute,
+            requests_per_hour,
+        }
+    }
+}
+
+impl Default for ToolRateLimitConfig {
+    /// Default: 60 requests/minute, 1000 requests/hour (generous for WASM HTTP).
+    fn default() -> Self {
+        Self {
+            requests_per_minute: 60,
+            requests_per_hour: 1000,
+        }
+    }
+}
+
 /// Where a tool should execute: orchestrator process or inside a container.
 ///
 /// Orchestrator tools run in the main agent process (memory access, job mgmt, etc).
@@ -160,31 +212,14 @@ pub trait Tool: Send + Sync {
         true
     }
 
-    /// Whether this tool requires explicit user approval before execution.
+    /// Whether this tool invocation requires user approval.
     ///
-    /// Returns false by default since most tools run in a sandboxed/virtualized
-    /// environment. Only tools that make external network calls or perform
-    /// destructive operations should return true.
-    ///
-    /// When true, the agent will prompt the user for confirmation before
-    /// executing this tool.
-    fn requires_approval(&self) -> bool {
-        false
-    }
-
-    /// Whether this specific invocation should override auto-approval.
-    ///
-    /// This method is called after checking `requires_approval()` and finding that
-    /// the tool is auto-approved for this session. Return `true` to force approval
-    /// for this specific invocation despite auto-approval (for example, for
-    /// destructive operations like `rm -rf` or `git push --force`).
-    ///
-    /// Return `false` to allow auto-approval to proceed normally.
-    ///
-    /// The default returns `false`. Override only if you need parameter-aware
-    /// approval gating.
-    fn requires_approval_for(&self, _params: &serde_json::Value) -> bool {
-        false
+    /// Returns `Never` by default (most tools run in a sandboxed environment).
+    /// Override to return `UnlessAutoApproved` for tools that need approval
+    /// but can be session-auto-approved, or `Always` for invocations that
+    /// must always prompt (e.g. destructive shell commands, HTTP with auth).
+    fn requires_approval(&self, _params: &serde_json::Value) -> ApprovalRequirement {
+        ApprovalRequirement::Never
     }
 
     /// Maximum time this tool is allowed to run before the caller kills it.
@@ -202,6 +237,22 @@ pub trait Tool: Send + Sync {
     /// Default: `Orchestrator` (safe for the main process).
     fn domain(&self) -> ToolDomain {
         ToolDomain::Orchestrator
+    }
+
+    /// Per-invocation rate limit for this tool.
+    ///
+    /// Return `Some(config)` to throttle how often this tool can be called per user.
+    /// Read-only tools (echo, time, json, file_read, memory_search, etc.) should
+    /// return `None`. Write/external tools (shell, http, file_write, memory_write,
+    /// create_job) should return sensible limits to prevent runaway agents.
+    ///
+    /// Rate limits are per-user, per-tool, and in-memory (reset on restart).
+    /// This is orthogonal to `requires_approval()` — a tool can be both
+    /// approval-gated and rate limited. Rate limit is checked first (cheaper).
+    ///
+    /// Default: `None` (no rate limiting).
+    fn rate_limit_config(&self) -> Option<ToolRateLimitConfig> {
+        None
     }
 
     /// Get the tool schema for LLM function calling.
@@ -347,9 +398,15 @@ mod tests {
     }
 
     #[test]
-    fn test_requires_approval_for_default() {
+    fn test_requires_approval_default() {
         let tool = EchoTool;
-        // Default requires_approval_for() returns false, allowing auto-approval.
-        assert!(!tool.requires_approval_for(&serde_json::json!({"message": "hi"})));
+        // Default requires_approval() returns Never.
+        assert_eq!(
+            tool.requires_approval(&serde_json::json!({"message": "hi"})),
+            ApprovalRequirement::Never
+        );
+        assert!(!ApprovalRequirement::Never.is_required());
+        assert!(ApprovalRequirement::UnlessAutoApproved.is_required());
+        assert!(ApprovalRequirement::Always.is_required());
     }
 }

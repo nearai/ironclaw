@@ -286,8 +286,8 @@ impl Tool for <Name>Tool {
         false // Set true if tool processes external data
     }
 
-    fn requires_approval(&self) -> bool {
-        false // Set true if tool is destructive or contacts external services
+    fn requires_approval(&self, _params: &serde_json::Value) -> crate::tools::tool::ApprovalRequirement {
+        crate::tools::tool::ApprovalRequirement::Never // Set to UnlessAutoApproved or Always as needed
     }
 }
 ```

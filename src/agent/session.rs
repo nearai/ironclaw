@@ -185,10 +185,6 @@ pub struct Thread {
     /// Pending auth token request (thread is in auth mode).
     #[serde(default)]
     pub pending_auth: Option<PendingAuth>,
-    /// Last NEAR AI response ID for response chaining. Persisted to DB
-    /// metadata so we can resume chaining across restarts.
-    #[serde(default)]
-    pub last_response_id: Option<String>,
 }
 
 impl Thread {
@@ -205,7 +201,6 @@ impl Thread {
             metadata: serde_json::Value::Null,
             pending_approval: None,
             pending_auth: None,
-            last_response_id: None,
         }
     }
 
@@ -222,7 +217,6 @@ impl Thread {
             metadata: serde_json::Value::Null,
             pending_approval: None,
             pending_auth: None,
-            last_response_id: None,
         }
     }
 
@@ -863,7 +857,6 @@ mod tests {
 
         thread.start_turn("hello");
         thread.complete_turn("world");
-        thread.last_response_id = Some("resp_abc123".to_string());
 
         let json = serde_json::to_string(&thread).unwrap();
         let restored: Thread = serde_json::from_str(&json).unwrap();
@@ -873,7 +866,6 @@ mod tests {
         assert_eq!(restored.turns.len(), 1);
         assert_eq!(restored.turns[0].user_input, "hello");
         assert_eq!(restored.turns[0].response, Some("world".to_string()));
-        assert_eq!(restored.last_response_id, Some("resp_abc123".to_string()));
     }
 
     #[test]

@@ -10,6 +10,7 @@
 pub mod builder;
 pub mod builtin;
 pub mod mcp;
+pub mod rate_limiter;
 pub mod wasm;
 
 mod registry;
@@ -20,5 +21,6 @@ pub use builder::{
     LlmSoftwareBuilder, SoftwareBuilder, SoftwareType, Template, TemplateEngine, TemplateType,
     TestCase, TestHarness, TestResult, TestSuite, ValidationError, ValidationResult, WasmValidator,
 };
+pub use rate_limiter::RateLimiter;
 pub use registry::ToolRegistry;
-pub use tool::{Tool, ToolDomain, ToolError, ToolOutput};
+pub use tool::{ApprovalRequirement, Tool, ToolDomain, ToolError, ToolOutput, ToolRateLimitConfig};

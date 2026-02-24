@@ -37,12 +37,14 @@ use tokio::sync::{RwLock, mpsc, oneshot};
 use tokio_stream::wrappers::ReceiverStream;
 use uuid::Uuid;
 use wasmtime::Store;
-use wasmtime::component::{Component, Linker};
+use wasmtime::component::Linker;
 use wasmtime_wasi::{ResourceTable, WasiCtx, WasiCtxBuilder, WasiView};
 
 use crate::channels::wasm::capabilities::ChannelCapabilities;
 use crate::channels::wasm::error::WasmChannelError;
-use crate::channels::wasm::host::{ChannelEmitRateLimiter, ChannelHostState, EmittedMessage};
+use crate::channels::wasm::host::{
+    ChannelEmitRateLimiter, ChannelHostState, ChannelWorkspaceStore, EmittedMessage,
+};
 use crate::channels::wasm::router::RegisteredEndpoint;
 use crate::channels::wasm::runtime::{PreparedChannelModule, WasmChannelRuntime};
 use crate::channels::wasm::schema::ChannelConfig;
@@ -547,6 +549,10 @@ pub struct WasmChannel {
 
     /// Pairing store for DM pairing (guest access control).
     pairing_store: Arc<PairingStore>,
+
+    /// In-memory workspace store persisting writes across callback invocations.
+    /// Ensures WASM channels can maintain state (e.g., polling offsets) between ticks.
+    workspace_store: Arc<ChannelWorkspaceStore>,
 }
 
 impl WasmChannel {
@@ -577,6 +583,7 @@ impl WasmChannel {
             credentials: Arc::new(RwLock::new(HashMap::new())),
             typing_task: RwLock::new(None),
             pairing_store,
+            workspace_store: Arc::new(ChannelWorkspaceStore::new()),
         }
     }
 
@@ -632,6 +639,26 @@ impl WasmChannel {
     /// Get the registered endpoints.
     pub async fn endpoints(&self) -> Vec<RegisteredEndpoint> {
         self.endpoints.read().await.clone()
+    }
+
+    /// Inject the workspace store as the reader into a capabilities clone.
+    ///
+    /// Ensures `workspace_read` capability is present with the store as its reader,
+    /// so WASM callbacks can read previously written workspace state.
+    fn inject_workspace_reader(
+        capabilities: &ChannelCapabilities,
+        store: &Arc<ChannelWorkspaceStore>,
+    ) -> ChannelCapabilities {
+        let mut caps = capabilities.clone();
+        let ws_cap = caps
+            .tool_capabilities
+            .workspace_read
+            .get_or_insert_with(|| crate::tools::wasm::WorkspaceCapability {
+                allowed_prefixes: Vec::new(),
+                reader: None,
+            });
+        ws_cap.reader = Some(Arc::clone(store) as Arc<dyn crate::tools::wasm::WorkspaceReader>);
+        caps
     }
 
     /// Add channel host functions to the linker using generated bindings.
@@ -698,9 +725,13 @@ impl WasmChannel {
     ) -> Result<SandboxedChannel, WasmChannelError> {
         let engine = runtime.engine();
 
-        // Compile the component (uses cached bytes)
-        let component = Component::new(engine, prepared.component_bytes())
-            .map_err(|e| WasmChannelError::Compilation(e.to_string()))?;
+        // Use the pre-compiled component (no recompilation needed)
+        let component = prepared
+            .component()
+            .ok_or_else(|| {
+                WasmChannelError::Compilation("No compiled component available".to_string())
+            })?
+            .clone();
 
         // Create linker and add host functions
         let mut linker = Linker::new(engine);
@@ -749,9 +780,14 @@ impl WasmChannel {
     /// Execute the on_start callback.
     ///
     /// Returns the channel configuration for HTTP endpoint registration.
-    async fn call_on_start(&self) -> Result<ChannelConfig, WasmChannelError> {
+    /// Call the WASM module's `on_start` callback.
+    ///
+    /// Typically called once during `start()`, but can be called again after
+    /// credentials are refreshed to re-trigger webhook registration and
+    /// other one-time setup that depends on credentials.
+    pub async fn call_on_start(&self) -> Result<ChannelConfig, WasmChannelError> {
         // If no WASM bytes, return default config (for testing)
-        if self.prepared.component_bytes.is_empty() {
+        if self.prepared.component().is_none() {
             tracing::info!(
                 channel = %self.name,
                 "WASM channel on_start called (no WASM module, returning defaults)"
@@ -765,12 +801,13 @@ impl WasmChannel {
 
         let runtime = Arc::clone(&self.runtime);
         let prepared = Arc::clone(&self.prepared);
-        let capabilities = self.capabilities.clone();
+        let capabilities = Self::inject_workspace_reader(&self.capabilities, &self.workspace_store);
         let config_json = self.config_json.read().await.clone();
         let timeout = self.runtime.config().callback_timeout;
         let channel_name = self.name.clone();
         let credentials = self.get_credentials().await;
         let pairing_store = self.pairing_store.clone();
+        let workspace_store = self.workspace_store.clone();
 
         // Execute in blocking task with timeout
         let result = tokio::time::timeout(timeout, async move {
@@ -801,8 +838,13 @@ impl WasmChannel {
                     }
                 };
 
-                let host_state =
+                let mut host_state =
                     Self::extract_host_state(&mut store, &prepared.name, &capabilities);
+
+                // Commit pending workspace writes to the persistent store
+                let pending_writes = host_state.take_pending_writes();
+                workspace_store.commit_writes(&pending_writes);
+
                 Ok((config, host_state))
             })
             .await
@@ -885,7 +927,7 @@ impl WasmChannel {
         );
 
         // If no WASM bytes, return 200 OK (for testing)
-        if self.prepared.component_bytes.is_empty() {
+        if self.prepared.component().is_none() {
             tracing::debug!(
                 channel = %self.name,
                 method = method,
@@ -897,10 +939,11 @@ impl WasmChannel {
 
         let runtime = Arc::clone(&self.runtime);
         let prepared = Arc::clone(&self.prepared);
-        let capabilities = self.capabilities.clone();
+        let capabilities = Self::inject_workspace_reader(&self.capabilities, &self.workspace_store);
         let timeout = self.runtime.config().callback_timeout;
         let credentials = self.get_credentials().await;
         let pairing_store = self.pairing_store.clone();
+        let workspace_store = self.workspace_store.clone();
 
         // Prepare request data
         let method = method.to_string();
@@ -940,8 +983,13 @@ impl WasmChannel {
                     .map_err(|e| Self::map_wasm_error(e, &prepared.name, prepared.limits.fuel))?;
 
                 let response = convert_http_response(wit_response);
-                let host_state =
+                let mut host_state =
                     Self::extract_host_state(&mut store, &prepared.name, &capabilities);
+
+                // Commit pending workspace writes to the persistent store
+                let pending_writes = host_state.take_pending_writes();
+                workspace_store.commit_writes(&pending_writes);
+
                 Ok((response, host_state))
             })
             .await
@@ -979,7 +1027,7 @@ impl WasmChannel {
     /// Called periodically if polling is configured.
     pub async fn call_on_poll(&self) -> Result<(), WasmChannelError> {
         // If no WASM bytes, do nothing (for testing)
-        if self.prepared.component_bytes.is_empty() {
+        if self.prepared.component().is_none() {
             tracing::debug!(
                 channel = %self.name,
                 "WASM channel on_poll called (no WASM module)"
@@ -989,11 +1037,12 @@ impl WasmChannel {
 
         let runtime = Arc::clone(&self.runtime);
         let prepared = Arc::clone(&self.prepared);
-        let capabilities = self.capabilities.clone();
+        let capabilities = Self::inject_workspace_reader(&self.capabilities, &self.workspace_store);
         let timeout = self.runtime.config().callback_timeout;
         let channel_name = self.name.clone();
         let credentials = self.get_credentials().await;
         let pairing_store = self.pairing_store.clone();
+        let workspace_store = self.workspace_store.clone();
 
         // Execute in blocking task with timeout
         let result = tokio::time::timeout(timeout, async move {
@@ -1013,8 +1062,13 @@ impl WasmChannel {
                     .call_on_poll(&mut store)
                     .map_err(|e| Self::map_wasm_error(e, &prepared.name, prepared.limits.fuel))?;
 
-                let host_state =
+                let mut host_state =
                     Self::extract_host_state(&mut store, &prepared.name, &capabilities);
+
+                // Commit pending workspace writes to the persistent store
+                let pending_writes = host_state.take_pending_writes();
+                workspace_store.commit_writes(&pending_writes);
+
                 Ok(((), host_state))
             })
             .await
@@ -1073,7 +1127,7 @@ impl WasmChannel {
         );
 
         // If no WASM bytes, do nothing (for testing)
-        if self.prepared.component_bytes.is_empty() {
+        if self.prepared.component().is_none() {
             tracing::debug!(
                 channel = %self.name,
                 message_id = %message_id,
@@ -1191,7 +1245,7 @@ impl WasmChannel {
         metadata: &serde_json::Value,
     ) -> Result<(), WasmChannelError> {
         // If no WASM bytes, do nothing (for testing)
-        if self.prepared.component_bytes.is_empty() {
+        if self.prepared.component().is_none() {
             return Ok(());
         }
 
@@ -1262,7 +1316,7 @@ impl WasmChannel {
         timeout: Duration,
         wit_update: wit_channel::StatusUpdate,
     ) -> Result<(), WasmChannelError> {
-        if prepared.component_bytes.is_empty() {
+        if prepared.component().is_none() {
             return Ok(());
         }
 
@@ -1321,13 +1375,25 @@ impl WasmChannel {
     /// that repeats the call every 4 seconds (Telegram's typing indicator
     /// expires after ~5s).
     ///
-    /// On Done/Interrupted/Status: cancels the repeat task, fires on_status once.
+    /// On terminal or user-action-required states: cancels the repeat task,
+    /// then fires on_status once.
+    ///
+    /// On intermediate progress states (tool/auth/job/status updates), keeps
+    /// the typing repeater running and fires on_status once.
     /// On StreamChunk: no-op (too noisy).
     async fn handle_status_update(
         &self,
         status: StatusUpdate,
         metadata: &serde_json::Value,
     ) -> Result<(), ChannelError> {
+        fn is_terminal_text_status(msg: &str) -> bool {
+            let trimmed = msg.trim();
+            trimmed.eq_ignore_ascii_case("done")
+                || trimmed.eq_ignore_ascii_case("interrupted")
+                || trimmed.eq_ignore_ascii_case("awaiting approval")
+                || trimmed.eq_ignore_ascii_case("rejected")
+        }
+
         match &status {
             StatusUpdate::Thinking(_) => {
                 // Cancel any existing typing task
@@ -1388,10 +1454,98 @@ impl WasmChannel {
             StatusUpdate::StreamChunk(_) => {
                 // No-op, too noisy
             }
-            _ => {
-                // Done, Interrupted, Status, ToolStarted, ToolCompleted: cancel and fire once
+            StatusUpdate::ApprovalNeeded {
+                tool_name,
+                description,
+                parameters,
+                ..
+            } => {
+                // WASM channels (Telegram, Slack, etc.) cannot render
+                // interactive approval overlays.  Send the approval prompt
+                // as an actual message so the user can reply yes/no.
                 self.cancel_typing_task().await;
 
+                let params_preview = parameters
+                    .as_object()
+                    .map(|obj| {
+                        obj.iter()
+                            .map(|(k, v)| {
+                                let val = match v {
+                                    serde_json::Value::String(s) => {
+                                        if s.chars().count() > 80 {
+                                            let truncated: String = s.chars().take(77).collect();
+                                            format!("\"{}...\"", truncated)
+                                        } else {
+                                            format!("\"{}\"", s)
+                                        }
+                                    }
+                                    other => {
+                                        let s = other.to_string();
+                                        if s.chars().count() > 80 {
+                                            let truncated: String = s.chars().take(77).collect();
+                                            format!("{}...", truncated)
+                                        } else {
+                                            s
+                                        }
+                                    }
+                                };
+                                format!("  {}: {}", k, val)
+                            })
+                            .collect::<Vec<_>>()
+                            .join("\n")
+                    })
+                    .unwrap_or_default();
+
+                let prompt = format!(
+                    "Approval needed: {tool_name}\n\
+                     {description}\n\
+                     \n\
+                     Parameters:\n\
+                     {params_preview}\n\
+                     \n\
+                     Reply \"yes\" to approve, \"no\" to deny, or \"always\" to auto-approve."
+                );
+
+                let metadata_json = serde_json::to_string(metadata).unwrap_or_default();
+                if let Err(e) = self
+                    .call_on_respond(uuid::Uuid::new_v4(), &prompt, None, &metadata_json)
+                    .await
+                {
+                    tracing::warn!(
+                        channel = %self.name,
+                        error = %e,
+                        "Failed to send approval prompt via on_respond, falling back to on_status"
+                    );
+                    // Fall back to status update (typing indicator)
+                    let _ = self.call_on_status(&status, metadata).await;
+                }
+            }
+            StatusUpdate::AuthRequired { .. } => {
+                // Waiting on user action: stop typing and fire once.
+                self.cancel_typing_task().await;
+
+                if let Err(e) = self.call_on_status(&status, metadata).await {
+                    tracing::debug!(
+                        channel = %self.name,
+                        error = %e,
+                        "on_status failed (best-effort)"
+                    );
+                }
+            }
+            StatusUpdate::Status(msg) if is_terminal_text_status(msg) => {
+                // Waiting on user or terminal states: stop typing and fire once.
+                self.cancel_typing_task().await;
+
+                if let Err(e) = self.call_on_status(&status, metadata).await {
+                    tracing::debug!(
+                        channel = %self.name,
+                        error = %e,
+                        "on_status failed (best-effort)"
+                    );
+                }
+            }
+            _ => {
+                // Intermediate progress status: keep any existing typing task alive.
                 if let Err(e) = self.call_on_status(&status, metadata).await {
                     tracing::debug!(
                         channel = %self.name,
@@ -1501,6 +1655,7 @@ impl WasmChannel {
         let credentials = self.credentials.clone();
         let pairing_store = self.pairing_store.clone();
         let callback_timeout = self.runtime.config().callback_timeout;
+        let workspace_store = self.workspace_store.clone();
 
         tokio::spawn(async move {
             let mut interval_timer = tokio::time::interval(interval);
@@ -1523,6 +1678,7 @@ impl WasmChannel {
                             &credentials,
                             pairing_store.clone(),
                             callback_timeout,
+                            &workspace_store,
                         ).await;
 
                         match result {
@@ -1565,7 +1721,10 @@ impl WasmChannel {
 
     /// Execute a single poll callback with a fresh WASM instance.
     ///
-    /// Returns any emitted messages from the callback.
+    /// Returns any emitted messages from the callback. Pending workspace writes
+    /// are committed to the shared `ChannelWorkspaceStore` so state persists
+    /// across poll ticks (e.g., Telegram polling offset).
+    #[allow(clippy::too_many_arguments)]
     async fn execute_poll(
         channel_name: &str,
         runtime: &Arc<WasmChannelRuntime>,
@@ -1574,9 +1733,10 @@ impl WasmChannel {
         credentials: &RwLock<HashMap<String, String>>,
         pairing_store: Arc<PairingStore>,
         timeout: Duration,
+        workspace_store: &Arc<ChannelWorkspaceStore>,
     ) -> Result<Vec<EmittedMessage>, WasmChannelError> {
         // Skip if no WASM bytes (testing mode)
-        if prepared.component_bytes.is_empty() {
+        if prepared.component().is_none() {
             tracing::debug!(
                 channel = %channel_name,
                 "WASM channel on_poll called (no WASM module)"
@@ -1586,9 +1746,10 @@ impl WasmChannel {
 
         let runtime = Arc::clone(runtime);
         let prepared = Arc::clone(prepared);
-        let capabilities = capabilities.clone();
+        let capabilities = Self::inject_workspace_reader(capabilities, workspace_store);
         let credentials_snapshot = credentials.read().await.clone();
         let channel_name_owned = channel_name.to_string();
+        let workspace_store = Arc::clone(workspace_store);
 
         // Execute in blocking task with timeout
         let result = tokio::time::timeout(timeout, async move {
@@ -1608,8 +1769,13 @@ impl WasmChannel {
                     .call_on_poll(&mut store)
                     .map_err(|e| Self::map_wasm_error(e, &prepared.name, prepared.limits.fuel))?;
 
-                let host_state =
+                let mut host_state =
                     Self::extract_host_state(&mut store, &prepared.name, &capabilities);
+
+                // Commit pending workspace writes to the persistent store
+                let pending_writes = host_state.take_pending_writes();
+                workspace_store.commit_writes(&pending_writes);
+
                 Ok(host_state)
             })
             .await
@@ -1994,6 +2160,16 @@ fn convert_http_response(wit: wit_channel::OutgoingHttpResponse) -> HttpResponse
 }
 
 /// Convert a StatusUpdate + metadata into the WIT StatusUpdate type.
+fn truncate_status_text(input: &str, max_chars: usize) -> String {
+    let mut iter = input.chars();
+    let truncated: String = iter.by_ref().take(max_chars).collect();
+    if iter.next().is_some() {
+        format!("{}...", truncated)
+    } else {
+        truncated
+    }
+}
+
 fn status_to_wit(status: &StatusUpdate, metadata: &serde_json::Value) -> wit_channel::StatusUpdate {
     let metadata_json = serde_json::to_string(metadata).unwrap_or_default();
 
@@ -2005,17 +2181,25 @@ fn status_to_wit(status: &StatusUpdate, metadata: &serde_json::Value) -> wit_cha
         },
         StatusUpdate::ToolStarted { name } => wit_channel::StatusUpdate {
             status: wit_channel::StatusType::ToolStarted,
-            message: name.clone(),
+            message: format!("Tool started: {}", name),
             metadata_json,
         },
         StatusUpdate::ToolCompleted { name, success } => wit_channel::StatusUpdate {
             status: wit_channel::StatusType::ToolCompleted,
-            message: format!("{}: {}", name, if *success { "ok" } else { "failed" }),
+            message: format!(
+                "Tool completed: {} ({})",
+                name,
+                if *success { "ok" } else { "failed" }
+            ),
             metadata_json,
         },
         StatusUpdate::ToolResult { name, preview } => wit_channel::StatusUpdate {
-            status: wit_channel::StatusType::ToolCompleted,
-            message: format!("{}: {}", name, preview),
+            status: wit_channel::StatusType::ToolResult,
+            message: format!(
+                "Tool result: {}\n{}",
+                name,
+                truncate_status_text(preview, 280)
+            ),
             metadata_json,
         },
         StatusUpdate::StreamChunk(chunk) => wit_channel::StatusUpdate {
@@ -2024,11 +2208,16 @@ fn status_to_wit(status: &StatusUpdate, metadata: &serde_json::Value) -> wit_cha
             metadata_json,
         },
         StatusUpdate::Status(msg) => {
-            // Map well-known status strings to WIT types
-            let status_type = match msg.as_str() {
-                "Done" => wit_channel::StatusType::Done,
-                "Interrupted" => wit_channel::StatusType::Interrupted,
-                _ => wit_channel::StatusType::Thinking,
+            // Map well-known status strings to WIT types (case-insensitive
+            // to stay consistent with is_terminal_text_status and the
+            // Telegram-side classify_status_update).
+            let trimmed = msg.trim();
+            let status_type = if trimmed.eq_ignore_ascii_case("done") {
+                wit_channel::StatusType::Done
+            } else if trimmed.eq_ignore_ascii_case("interrupted") {
+                wit_channel::StatusType::Interrupted
+            } else {
+                wit_channel::StatusType::Status
             };
             wit_channel::StatusUpdate {
                 status: status_type,
@@ -2037,34 +2226,62 @@ fn status_to_wit(status: &StatusUpdate, metadata: &serde_json::Value) -> wit_cha
             }
         }
         StatusUpdate::ApprovalNeeded {
+            request_id,
             tool_name,
             description,
             ..
         } => wit_channel::StatusUpdate {
-            status: wit_channel::StatusType::Thinking,
-            message: format!("Approval needed: {} - {}", tool_name, description),
+            status: wit_channel::StatusType::ApprovalNeeded,
+            message: format!(
+                "Approval needed for tool '{}'. {}\nRequest ID: {}\nReply with: yes (or /approve), no (or /deny), or always (or /always).",
+                tool_name, description, request_id
+            ),
             metadata_json,
         },
-        StatusUpdate::JobStarted { job_id, title, .. } => wit_channel::StatusUpdate {
-            status: wit_channel::StatusType::Thinking,
-            message: format!("Job started: {} ({})", title, job_id),
+        StatusUpdate::JobStarted {
+            job_id,
+            title,
+            browse_url,
+        } => wit_channel::StatusUpdate {
+            status: wit_channel::StatusType::JobStarted,
+            message: format!("Job started: {} ({})\n{}", title, job_id, browse_url),
             metadata_json,
         },
-        StatusUpdate::AuthRequired { extension_name, .. } => wit_channel::StatusUpdate {
-            status: wit_channel::StatusType::Thinking,
-            message: format!("Auth required: {}", extension_name),
+        StatusUpdate::AuthRequired {
+            extension_name,
+            instructions,
+            auth_url,
+            setup_url,
+        } => wit_channel::StatusUpdate {
+            status: wit_channel::StatusType::AuthRequired,
+            message: {
+                let mut lines = vec![format!("Authentication required for {}.", extension_name)];
+                if let Some(text) = instructions
+                    && !text.trim().is_empty()
+                {
+                    lines.push(text.trim().to_string());
+                }
+                if let Some(url) = auth_url {
+                    lines.push(format!("Auth URL: {}", url));
+                }
+                if let Some(url) = setup_url {
+                    lines.push(format!("Setup URL: {}", url));
+                }
+                lines.join("\n")
+            },
             metadata_json,
         },
         StatusUpdate::AuthCompleted {
             extension_name,
             success,
-            ..
+            message,
         } => wit_channel::StatusUpdate {
-            status: wit_channel::StatusType::Thinking,
+            status: wit_channel::StatusType::AuthCompleted,
             message: format!(
-                "Auth {}: {}",
+                "Authentication {} for {}. {}",
                 if *success { "completed" } else { "failed" },
-                extension_name
+                extension_name,
+                message
             ),
             metadata_json,
         },
@@ -2080,6 +2297,12 @@ fn clone_wit_status_update(update: &wit_channel::StatusUpdate) -> wit_channel::S
             wit_channel::StatusType::Interrupted => wit_channel::StatusType::Interrupted,
             wit_channel::StatusType::ToolStarted => wit_channel::StatusType::ToolStarted,
             wit_channel::StatusType::ToolCompleted => wit_channel::StatusType::ToolCompleted,
+            wit_channel::StatusType::ToolResult => wit_channel::StatusType::ToolResult,
+            wit_channel::StatusType::ApprovalNeeded => wit_channel::StatusType::ApprovalNeeded,
+            wit_channel::StatusType::Status => wit_channel::StatusType::Status,
+            wit_channel::StatusType::JobStarted => wit_channel::StatusType::JobStarted,
+            wit_channel::StatusType::AuthRequired => wit_channel::StatusType::AuthRequired,
+            wit_channel::StatusType::AuthCompleted => wit_channel::StatusType::AuthCompleted,
         },
         message: update.message.clone(),
         metadata_json: update.metadata_json.clone(),
@@ -2149,7 +2372,7 @@ mod tests {
         let prepared = Arc::new(PreparedChannelModule {
             name: "test".to_string(),
             description: "Test channel".to_string(),
-            component_bytes: Vec::new(),
+            component: None,
             limits: ResourceLimits::default(),
         });
 
@@ -2214,7 +2437,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_execute_poll_no_wasm_returns_empty() {
-        // When there's no WASM module (empty component_bytes), execute_poll
+        // When there's no WASM module (None component), execute_poll
         // should return an empty vector of messages
         let config = WasmChannelRuntimeConfig::for_testing();
         let runtime = Arc::new(WasmChannelRuntime::new(config).unwrap());
@@ -2222,13 +2445,15 @@ mod tests {
         let prepared = Arc::new(PreparedChannelModule {
             name: "poll-test".to_string(),
             description: "Test channel".to_string(),
-            component_bytes: Vec::new(), // No WASM bytes
+            component: None, // No WASM module
             limits: ResourceLimits::default(),
         });
 
         let capabilities = ChannelCapabilities::for_channel("poll-test").with_polling(1000);
         let credentials = Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new()));
         let timeout = std::time::Duration::from_secs(5);
+
+        let workspace_store = Arc::new(crate::channels::wasm::host::ChannelWorkspaceStore::new());
 
         let result = WasmChannel::execute_poll(
             "poll-test",
@@ -2238,6 +2463,7 @@ mod tests {
             &credentials,
             Arc::new(PairingStore::new()),
             timeout,
+            &workspace_store,
         )
         .await;
 
@@ -2321,7 +2547,7 @@ mod tests {
         let prepared = Arc::new(PreparedChannelModule {
             name: "poll-channel".to_string(),
             description: "Polling test channel".to_string(),
-            component_bytes: Vec::new(),
+            component: None,
             limits: ResourceLimits::default(),
         });
 
@@ -2415,6 +2641,100 @@ mod tests {
             .await;
 
         // Typing task should be cancelled
+        assert!(channel.typing_task.read().await.is_none());
+
+        channel.shutdown().await.expect("Shutdown should succeed");
+    }
+
+    #[tokio::test]
+    async fn test_typing_task_persists_on_tool_started() {
+        let channel = create_test_channel();
+        let _stream = channel.start().await.expect("Channel should start");
+
+        let metadata = serde_json::json!({"chat_id": 123});
+
+        // Start typing
+        let _ = channel
+            .send_status(
+                crate::channels::StatusUpdate::Thinking("Processing...".into()),
+                &metadata,
+            )
+            .await;
+        assert!(channel.typing_task.read().await.is_some());
+
+        // Intermediate tool status should not cancel typing
+        let _ = channel
+            .send_status(
+                crate::channels::StatusUpdate::ToolStarted {
+                    name: "http_request".into(),
+                },
+                &metadata,
+            )
+            .await;
+
+        assert!(channel.typing_task.read().await.is_some());
+
+        channel.shutdown().await.expect("Shutdown should succeed");
+    }
+
+    #[tokio::test]
+    async fn test_typing_task_cancelled_on_approval_needed() {
+        let channel = create_test_channel();
+        let _stream = channel.start().await.expect("Channel should start");
+
+        let metadata = serde_json::json!({"chat_id": 123});
+
+        // Start typing
+        let _ = channel
+            .send_status(
+                crate::channels::StatusUpdate::Thinking("Processing...".into()),
+                &metadata,
+            )
+            .await;
+        assert!(channel.typing_task.read().await.is_some());
+
+        // Approval-needed should stop typing while waiting for user action
+        let _ = channel
+            .send_status(
+                crate::channels::StatusUpdate::ApprovalNeeded {
+                    request_id: "req-1".into(),
+                    tool_name: "http_request".into(),
+                    description: "Fetch weather".into(),
+                    parameters: serde_json::json!({"url": "https://wttr.in"}),
+                },
+                &metadata,
+            )
+            .await;
+
+        assert!(channel.typing_task.read().await.is_none());
+
+        channel.shutdown().await.expect("Shutdown should succeed");
+    }
+
+    #[tokio::test]
+    async fn test_typing_task_cancelled_on_awaiting_approval_status() {
+        let channel = create_test_channel();
+        let _stream = channel.start().await.expect("Channel should start");
+
+        let metadata = serde_json::json!({"chat_id": 123});
+
+        // Start typing
+        let _ = channel
+            .send_status(
+                crate::channels::StatusUpdate::Thinking("Processing...".into()),
+                &metadata,
+            )
+            .await;
+        assert!(channel.typing_task.read().await.is_some());
+
+        // Legacy terminal status string should also cancel typing
+        let _ = channel
+            .send_status(
+                crate::channels::StatusUpdate::Status("Awaiting approval".into()),
+                &metadata,
+            )
+            .await;
+
         assert!(channel.typing_task.read().await.is_none());
 
         channel.shutdown().await.expect("Shutdown should succeed");
@@ -2544,6 +2864,27 @@ mod tests {
     }
 
     #[test]
+    fn test_status_to_wit_done_case_insensitive() {
+        use super::status_to_wit;
+
+        let metadata = serde_json::json!(null);
+
+        // lowercase
+        let wit = status_to_wit(
+            &crate::channels::StatusUpdate::Status("done".into()),
+            &metadata,
+        );
+        assert!(matches!(wit.status, super::wit_channel::StatusType::Done));
+
+        // with whitespace
+        let wit = status_to_wit(
+            &crate::channels::StatusUpdate::Status(" Done ".into()),
+            &metadata,
+        );
+        assert!(matches!(wit.status, super::wit_channel::StatusType::Done));
+    }
+
+    #[test]
     fn test_status_to_wit_interrupted() {
         use super::status_to_wit;
 
@@ -2556,6 +2897,311 @@ mod tests {
         assert!(matches!(
             wit.status,
             super::wit_channel::StatusType::Interrupted
+        ));
+    }
+
+    #[test]
+    fn test_status_to_wit_interrupted_case_insensitive() {
+        use super::status_to_wit;
+
+        let metadata = serde_json::json!(null);
+
+        // lowercase
+        let wit = status_to_wit(
+            &crate::channels::StatusUpdate::Status("interrupted".into()),
+            &metadata,
+        );
+        assert!(matches!(
+            wit.status,
+            super::wit_channel::StatusType::Interrupted
+        ));
+
+        // with whitespace
+        let wit = status_to_wit(
+            &crate::channels::StatusUpdate::Status(" Interrupted ".into()),
+            &metadata,
+        );
+        assert!(matches!(
+            wit.status,
+            super::wit_channel::StatusType::Interrupted
+        ));
+    }
+
+    #[test]
+    fn test_status_to_wit_generic_status() {
+        use super::status_to_wit;
+
+        let metadata = serde_json::json!(null);
+        let wit = status_to_wit(
+            &crate::channels::StatusUpdate::Status("Awaiting approval".into()),
+            &metadata,
+        );
+
+        assert!(matches!(wit.status, super::wit_channel::StatusType::Status));
+        assert_eq!(wit.message, "Awaiting approval");
+    }
+
+    #[test]
+    fn test_status_to_wit_auth_required() {
+        use super::status_to_wit;
+
+        let metadata = serde_json::json!({"chat_id": 42});
+        let wit = status_to_wit(
+            &crate::channels::StatusUpdate::AuthRequired {
+                extension_name: "weather".to_string(),
+                instructions: Some("Paste your token".to_string()),
+                auth_url: Some("https://example.com/auth".to_string()),
+                setup_url: None,
+            },
+            &metadata,
+        );
+
+        assert!(matches!(
+            wit.status,
+            super::wit_channel::StatusType::AuthRequired
+        ));
+        assert!(wit.message.contains("Authentication required for weather"));
+        assert!(wit.message.contains("Paste your token"));
+    }
+
+    #[test]
+    fn test_status_to_wit_tool_started() {
+        use super::status_to_wit;
+
+        let metadata = serde_json::json!({"chat_id": 7});
+        let wit = status_to_wit(
+            &crate::channels::StatusUpdate::ToolStarted {
+                name: "http_request".to_string(),
+            },
+            &metadata,
+        );
+
+        assert!(matches!(
+            wit.status,
+            super::wit_channel::StatusType::ToolStarted
+        ));
+        assert_eq!(wit.message, "Tool started: http_request");
+    }
+
+    #[test]
+    fn test_status_to_wit_tool_completed_success() {
+        use super::status_to_wit;
+
+        let metadata = serde_json::json!(null);
+        let wit = status_to_wit(
+            &crate::channels::StatusUpdate::ToolCompleted {
+                name: "http_request".to_string(),
+                success: true,
+            },
+            &metadata,
+        );
+
+        assert!(matches!(
+            wit.status,
+            super::wit_channel::StatusType::ToolCompleted
+        ));
+        assert_eq!(wit.message, "Tool completed: http_request (ok)");
+    }
+
+    #[test]
+    fn test_status_to_wit_tool_completed_failure() {
+        use super::status_to_wit;
+
+        let metadata = serde_json::json!(null);
+        let wit = status_to_wit(
+            &crate::channels::StatusUpdate::ToolCompleted {
+                name: "http_request".to_string(),
+                success: false,
+            },
+            &metadata,
+        );
+
+        assert!(matches!(
+            wit.status,
+            super::wit_channel::StatusType::ToolCompleted
+        ));
+        assert_eq!(wit.message, "Tool completed: http_request (failed)");
+    }
+
+    #[test]
+    fn test_status_to_wit_tool_result() {
+        use super::status_to_wit;
+
+        let metadata = serde_json::json!(null);
+        let wit = status_to_wit(
+            &crate::channels::StatusUpdate::ToolResult {
+                name: "http_request".to_string(),
+                preview: "{".to_string() + "\"temperature\": 22}",
+            },
+            &metadata,
+        );
+
+        assert!(matches!(
+            wit.status,
+            super::wit_channel::StatusType::ToolResult
+        ));
+        assert!(wit.message.starts_with("Tool result: http_request\n"));
+    }
+
+    #[test]
+    fn test_status_to_wit_tool_result_truncates_preview() {
+        use super::status_to_wit;
+
+        let metadata = serde_json::json!(null);
+        let long_preview = "x".repeat(400);
+        let wit = status_to_wit(
+            &crate::channels::StatusUpdate::ToolResult {
+                name: "big_tool".to_string(),
+                preview: long_preview,
+            },
+            &metadata,
+        );
+
+        assert!(matches!(
+            wit.status,
+            super::wit_channel::StatusType::ToolResult
+        ));
+        assert!(wit.message.ends_with("..."));
+    }
+
+    #[test]
+    fn test_status_to_wit_job_started() {
+        use super::status_to_wit;
+
+        let metadata = serde_json::json!({"chat_id": 1});
+        let wit = status_to_wit(
+            &crate::channels::StatusUpdate::JobStarted {
+                job_id: "job-1".to_string(),
+                title: "Daily sync".to_string(),
+                browse_url: "https://example.com/jobs/job-1".to_string(),
+            },
+            &metadata,
+        );
+
+        assert!(matches!(
+            wit.status,
+            super::wit_channel::StatusType::JobStarted
+        ));
+        assert!(wit.message.contains("Daily sync"));
+        assert!(wit.message.contains("https://example.com/jobs/job-1"));
+    }
+
+    #[test]
+    fn test_status_to_wit_auth_completed_success() {
+        use super::status_to_wit;
+
+        let metadata = serde_json::json!(null);
+        let wit = status_to_wit(
+            &crate::channels::StatusUpdate::AuthCompleted {
+                extension_name: "weather".to_string(),
+                success: true,
+                message: "Token saved".to_string(),
+            },
+            &metadata,
+        );
+
+        assert!(matches!(
+            wit.status,
+            super::wit_channel::StatusType::AuthCompleted
+        ));
+        assert!(wit.message.contains("Authentication completed"));
+        assert!(wit.message.contains("Token saved"));
+    }
+
+    #[test]
+    fn test_status_to_wit_auth_completed_failure() {
+        use super::status_to_wit;
+
+        let metadata = serde_json::json!(null);
+        let wit = status_to_wit(
+            &crate::channels::StatusUpdate::AuthCompleted {
+                extension_name: "weather".to_string(),
+                success: false,
+                message: "Invalid token".to_string(),
+            },
+            &metadata,
+        );
+
+        assert!(matches!(
+            wit.status,
+            super::wit_channel::StatusType::AuthCompleted
+        ));
+        assert!(wit.message.contains("Authentication failed"));
+        assert!(wit.message.contains("Invalid token"));
+    }
+
+    #[test]
+    fn test_status_to_wit_approval_needed() {
+        use super::status_to_wit;
+
+        let metadata = serde_json::json!({"chat_id": 42});
+        let wit = status_to_wit(
+            &crate::channels::StatusUpdate::ApprovalNeeded {
+                request_id: "req-123".to_string(),
+                tool_name: "http_request".to_string(),
+                description: "Fetch weather data".to_string(),
+                parameters: serde_json::json!({"url": "https://api.weather.test"}),
+            },
+            &metadata,
+        );
+
+        assert!(matches!(
+            wit.status,
+            super::wit_channel::StatusType::ApprovalNeeded
+        ));
+        assert!(wit.message.contains("http_request"));
+        assert!(wit.message.contains("/approve"));
+    }
+
+    #[test]
+    fn test_approval_prompt_roundtrip_submission_aliases() {
+        use super::status_to_wit;
+        use crate::agent::submission::{Submission, SubmissionParser};
+
+        let metadata = serde_json::json!({"chat_id": 42});
+        let wit = status_to_wit(
+            &crate::channels::StatusUpdate::ApprovalNeeded {
+                request_id: "req-321".to_string(),
+                tool_name: "http_request".to_string(),
+                description: "Fetch weather data".to_string(),
+                parameters: serde_json::json!({"url": "https://api.weather.test"}),
+            },
+            &metadata,
+        );
+
+        assert!(matches!(
+            wit.status,
+            super::wit_channel::StatusType::ApprovalNeeded
+        ));
+        assert!(wit.message.contains("/approve"));
+        assert!(wit.message.contains("/deny"));
+        assert!(wit.message.contains("/always"));
+
+        let approve = SubmissionParser::parse("/approve");
+        assert!(matches!(
+            approve,
+            Submission::ApprovalResponse {
+                approved: true,
+                always: false
+            }
+        ));
+
+        let deny = SubmissionParser::parse("/deny");
+        assert!(matches!(
+            deny,
+            Submission::ApprovalResponse {
+                approved: false,
+                always: false
+            }
+        ));
+
+        let always = SubmissionParser::parse("/always");
+        assert!(matches!(
+            always,
+            Submission::ApprovalResponse {
+                approved: true,
+                always: true
+            }
         ));
     }
 
@@ -2573,6 +3219,78 @@ mod tests {
         assert!(matches!(cloned.status, wit_channel::StatusType::Thinking));
         assert_eq!(cloned.message, "hello");
         assert_eq!(cloned.metadata_json, "{\"a\":1}");
+    }
+
+    #[test]
+    fn test_clone_wit_status_update_approval_needed() {
+        use super::{clone_wit_status_update, wit_channel};
+
+        let original = wit_channel::StatusUpdate {
+            status: wit_channel::StatusType::ApprovalNeeded,
+            message: "approval needed".to_string(),
+            metadata_json: "{\"chat_id\":42}".to_string(),
+        };
+
+        let cloned = clone_wit_status_update(&original);
+        assert!(matches!(
+            cloned.status,
+            wit_channel::StatusType::ApprovalNeeded
+        ));
+        assert_eq!(cloned.message, "approval needed");
+        assert_eq!(cloned.metadata_json, "{\"chat_id\":42}");
+    }
+
+    #[test]
+    fn test_clone_wit_status_update_auth_completed() {
+        use super::{clone_wit_status_update, wit_channel};
+
+        let original = wit_channel::StatusUpdate {
+            status: wit_channel::StatusType::AuthCompleted,
+            message: "auth complete".to_string(),
+            metadata_json: "{}".to_string(),
+        };
+
+        let cloned = clone_wit_status_update(&original);
+        assert!(matches!(
+            cloned.status,
+            wit_channel::StatusType::AuthCompleted
+        ));
+        assert_eq!(cloned.message, "auth complete");
+    }
+
+    #[test]
+    fn test_clone_wit_status_update_all_variants() {
+        use super::{clone_wit_status_update, wit_channel};
+
+        let variants = vec![
+            wit_channel::StatusType::Thinking,
+            wit_channel::StatusType::Done,
+            wit_channel::StatusType::Interrupted,
+            wit_channel::StatusType::ToolStarted,
+            wit_channel::StatusType::ToolCompleted,
+            wit_channel::StatusType::ToolResult,
+            wit_channel::StatusType::ApprovalNeeded,
+            wit_channel::StatusType::Status,
+            wit_channel::StatusType::JobStarted,
+            wit_channel::StatusType::AuthRequired,
+            wit_channel::StatusType::AuthCompleted,
+        ];
+
+        for status in variants {
+            let original = wit_channel::StatusUpdate {
+                status,
+                message: "sample".to_string(),
+                metadata_json: "{}".to_string(),
+            };
+            let cloned = clone_wit_status_update(&original);
+
+            assert_eq!(
+                std::mem::discriminant(&cloned.status),
+                std::mem::discriminant(&original.status)
+            );
+            assert_eq!(cloned.message, "sample");
+            assert_eq!(cloned.metadata_json, "{}");
+        }
     }
 
     #[test]

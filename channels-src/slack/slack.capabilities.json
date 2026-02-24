@@ -2,6 +2,20 @@
   "type": "channel",
   "name": "slack",
   "description": "Slack Events API channel for receiving and responding to Slack messages",
+  "setup": {
+    "required_secrets": [
+      {
+        "name": "slack_bot_token",
+        "prompt": "Enter your Slack Bot OAuth Token (xoxb-...)",
+        "optional": false
+      },
+      {
+        "name": "slack_signing_secret",
+        "prompt": "Enter your Slack Signing Secret (from App Credentials)",
+        "optional": false
+      }
+    ]
+  },
   "capabilities": {
     "http": {
       "allowlist": [
@@ -33,6 +47,9 @@
     }
   },
   "config": {
-    "signing_secret_name": "slack_signing_secret"
+    "signing_secret_name": "slack_signing_secret",
+    "owner_id": null,
+    "dm_policy": "pairing",
+    "allow_from": []
   }
 }

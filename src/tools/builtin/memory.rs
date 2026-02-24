@@ -285,6 +285,10 @@ impl Tool for MemoryWriteTool {
     fn requires_sanitization(&self) -> bool {
         false // Internal tool
     }
+
+    fn rate_limit_config(&self) -> Option<crate::tools::tool::ToolRateLimitConfig> {
+        Some(crate::tools::tool::ToolRateLimitConfig::new(20, 200))
+    }
 }
 
 /// Tool for reading workspace files.

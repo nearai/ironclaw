@@ -212,6 +212,41 @@ pub struct ChannelSettings {
     #[serde(default)]
     pub http_host: Option<String>,
 
+    /// Whether Signal channel is enabled.
+    #[serde(default)]
+    pub signal_enabled: bool,
+
+    /// Signal HTTP URL (signal-cli daemon endpoint).
+    #[serde(default)]
+    pub signal_http_url: Option<String>,
+
+    /// Signal account (E.164 phone number).
+    #[serde(default)]
+    pub signal_account: Option<String>,
+
+    /// Signal allow from list for DMs (comma-separated E.164 phone numbers).
+    /// Comma-separated identifiers: E.164 phone numbers, `*`, bare UUIDs, or `uuid:<id>` entries.
+    /// Defaults to the configured account.
+    #[serde(default)]
+    pub signal_allow_from: Option<String>,
+
+    /// Signal allow from groups (comma-separated group IDs).
+    #[serde(default)]
+    pub signal_allow_from_groups: Option<String>,
+
+    /// Signal DM policy: "open", "allowlist", or "pairing". Default: "pairing".
+    #[serde(default)]
+    pub signal_dm_policy: Option<String>,
+
+    /// Signal group policy: "allowlist", "open", or "disabled". Default: "allowlist".
+    #[serde(default)]
+    pub signal_group_policy: Option<String>,
+
+    /// Signal group allow from (comma-separated group member IDs).
+    /// If empty, inherits from signal_allow_from.
+    #[serde(default)]
+    pub signal_group_allow_from: Option<String>,
+
     /// Telegram owner user ID. When set, the bot only responds to this user.
     /// Captured during setup by having the user message the bot.
     #[serde(default)]
@@ -302,6 +337,14 @@ pub struct AgentSettings {
     /// longer than this are pruned from memory.
     #[serde(default = "default_session_idle_timeout")]
     pub session_idle_timeout_secs: u64,
+
+    /// Maximum tool-call iterations per agentic loop invocation (default: 50).
+    #[serde(default = "default_max_tool_iterations")]
+    pub max_tool_iterations: usize,
+
+    /// When true, skip tool approval checks entirely. For benchmarks/CI.
+    #[serde(default)]
+    pub auto_approve_tools: bool,
 }
 
 fn default_agent_name() -> String {
@@ -332,6 +375,10 @@ fn default_max_repair_attempts() -> u32 {
     3
 }
 
+fn default_max_tool_iterations() -> usize {
+    50
+}
+
 fn default_true() -> bool {
     true
 }
@@ -347,6 +394,8 @@ impl Default for AgentSettings {
             repair_check_interval_secs: default_repair_interval(),
             max_repair_attempts: default_max_repair_attempts(),
             session_idle_timeout_secs: default_session_idle_timeout(),
+            max_tool_iterations: default_max_tool_iterations(),
+            auto_approve_tools: false,
         }
     }
 }
@@ -1259,9 +1308,11 @@ mod tests {
         let from_db = Settings::from_db_map(&db_map);
 
         // Step 1 of the new wizard run: user enters a NEW database_url
-        let mut step1_settings = Settings::default();
-        step1_settings.database_backend = Some("postgres".to_string());
-        step1_settings.database_url = Some("postgres://new-host/ironclaw".to_string());
+        let step1_settings = Settings {
+            database_backend: Some("postgres".to_string()),
+            database_url: Some("postgres://new-host/ironclaw".to_string()),
+            ..Settings::default()
+        };
 
         // Wizard flow: load DB → merge_from(step1_overrides)
         let mut current = step1_settings.clone();

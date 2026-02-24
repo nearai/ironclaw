@@ -202,6 +202,12 @@ pub enum ToolError {
     #[error("Tool {name} requires authentication")]
     AuthRequired { name: String },
 
+    #[error("Tool {name} is rate limited, retry after {retry_after:?}")]
+    RateLimited {
+        name: String,
+        retry_after: Option<Duration>,
+    },
+
     #[error("Tool builder failed: {0}")]
     BuilderFailed(String),
 }
@@ -400,6 +406,9 @@ pub enum RoutineError {
 
     #[error("LLM call failed: {reason}")]
     LlmFailed { reason: String },
+
+    #[error("Failed to dispatch full job: {reason}")]
+    JobDispatchFailed { reason: String },
 
     #[error("LLM returned empty content")]
     EmptyResponse,

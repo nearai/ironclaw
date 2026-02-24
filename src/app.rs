@@ -22,6 +22,7 @@ use crate::skills::SkillRegistry;
 use crate::skills::catalog::SkillCatalog;
 use crate::tools::ToolRegistry;
 use crate::tools::mcp::McpSessionManager;
+use crate::tools::wasm::SharedCredentialRegistry;
 use crate::tools::wasm::WasmToolRuntime;
 use crate::workspace::{EmbeddingProvider, Workspace};
 
@@ -48,6 +49,8 @@ pub struct AppComponents {
     pub skill_catalog: Option<Arc<SkillCatalog>>,
     pub cost_guard: Arc<crate::agent::cost_guard::CostGuard>,
     pub session: Arc<SessionManager>,
+    pub catalog_entries: Vec<crate::extensions::RegistryEntry>,
+    pub dev_loaded_tool_names: Vec<String>,
 }
 
 /// Options that control optional init phases.
@@ -200,9 +203,13 @@ impl AppBuilder {
 
         self.session.attach_store(db.clone(), "default").await;
 
-        if let Err(e) = db.cleanup_stale_sandbox_jobs().await {
-            tracing::warn!("Failed to cleanup stale sandbox jobs: {}", e);
-        }
+        // Fire-and-forget housekeeping — no need to block startup.
+        let db_cleanup = db.clone();
+        tokio::spawn(async move {
+            if let Err(e) = db_cleanup.cleanup_stale_sandbox_jobs().await {
+                tracing::warn!("Failed to cleanup stale sandbox jobs: {}", e);
+            }
+        });
 
         self.db = Some(db);
         Ok(())
@@ -285,94 +292,14 @@ impl AppBuilder {
 
     /// Phase 3: Initialize LLM provider chain.
     ///
-    /// Creates the primary provider, then wraps with failover, circuit
-    /// breaker, and response cache as configured.
+    /// Delegates to `build_provider_chain` which applies all decorators
+    /// (retry, smart routing, failover, circuit breaker, response cache).
     #[allow(clippy::type_complexity)]
     pub fn init_llm(
         &self,
     ) -> Result<(Arc<dyn LlmProvider>, Option<Arc<dyn LlmProvider>>), anyhow::Error> {
-        use crate::llm::{
-            CachedProvider, CircuitBreakerConfig, CircuitBreakerProvider, CooldownConfig,
-            FailoverProvider, ResponseCacheConfig, create_cheap_llm_provider, create_llm_provider,
-            create_llm_provider_with_config,
-        };
-
-        let llm = create_llm_provider(&self.config.llm, self.session.clone())?;
-        tracing::info!("LLM provider initialized: {}", llm.model_name());
-
-        // Wrap in failover if a fallback model is configured
-        let llm: Arc<dyn LlmProvider> = if let Some(fallback_model) =
-            self.config.llm.nearai.fallback_model.as_ref()
-        {
-            if fallback_model == &self.config.llm.nearai.model {
-                tracing::warn!(
-                    "fallback_model is the same as primary model, failover may not be effective"
-                );
-            }
-            let mut fallback_config = self.config.llm.nearai.clone();
-            fallback_config.model = fallback_model.clone();
-            let fallback = create_llm_provider_with_config(&fallback_config, self.session.clone())?;
-            tracing::info!(
-                primary = %llm.model_name(),
-                fallback = %fallback.model_name(),
-                "LLM failover enabled"
-            );
-            let cooldown_config = CooldownConfig {
-                cooldown_duration: std::time::Duration::from_secs(
-                    self.config.llm.nearai.failover_cooldown_secs,
-                ),
-                failure_threshold: self.config.llm.nearai.failover_cooldown_threshold,
-            };
-            Arc::new(FailoverProvider::with_cooldown(
-                vec![llm, fallback],
-                cooldown_config,
-            )?)
-        } else {
-            llm
-        };
-
-        // Wrap in circuit breaker if configured
-        let llm: Arc<dyn LlmProvider> =
-            if let Some(threshold) = self.config.llm.nearai.circuit_breaker_threshold {
-                let cb_config = CircuitBreakerConfig {
-                    failure_threshold: threshold,
-                    recovery_timeout: std::time::Duration::from_secs(
-                        self.config.llm.nearai.circuit_breaker_recovery_secs,
-                    ),
-                    ..CircuitBreakerConfig::default()
-                };
-                tracing::info!(
-                    threshold,
-                    recovery_secs = self.config.llm.nearai.circuit_breaker_recovery_secs,
-                    "LLM circuit breaker enabled"
-                );
-                Arc::new(CircuitBreakerProvider::new(llm, cb_config))
-            } else {
-                llm
-            };
-
-        // Wrap in response cache if configured
-        let llm: Arc<dyn LlmProvider> = if self.config.llm.nearai.response_cache_enabled {
-            let rc_config = ResponseCacheConfig {
-                ttl: std::time::Duration::from_secs(self.config.llm.nearai.response_cache_ttl_secs),
-                max_entries: self.config.llm.nearai.response_cache_max_entries,
-            };
-            tracing::info!(
-                ttl_secs = self.config.llm.nearai.response_cache_ttl_secs,
-                max_entries = self.config.llm.nearai.response_cache_max_entries,
-                "LLM response cache enabled"
-            );
-            Arc::new(CachedProvider::new(llm, rc_config))
-        } else {
-            llm
-        };
-
-        // Cheap LLM for lightweight tasks
-        let cheap_llm = create_cheap_llm_provider(&self.config.llm, self.session.clone())?;
-        if let Some(ref cheap) = cheap_llm {
-            tracing::info!("Cheap LLM provider initialized: {}", cheap.model_name());
-        }
-
+        let (llm, cheap_llm) =
+            crate::llm::build_provider_chain(&self.config.llm, self.session.clone())?;
         Ok((llm, cheap_llm))
     }
 
@@ -389,55 +316,41 @@ impl AppBuilder {
         ),
         anyhow::Error,
     > {
-        use crate::workspace::{NearAiEmbeddings, OpenAiEmbeddings};
-
         let safety = Arc::new(SafetyLayer::new(&self.config.safety));
         tracing::info!("Safety layer initialized");
 
-        let tools = Arc::new(ToolRegistry::new());
-        tools.register_builtin_tools();
-        tracing::info!("Registered {} built-in tools", tools.count());
-
-        // Create embeddings provider if configured
-        let embeddings: Option<Arc<dyn EmbeddingProvider>> = if self.config.embeddings.enabled {
-            match self.config.embeddings.provider.as_str() {
-                "nearai" => {
-                    tracing::info!(
-                        "Embeddings enabled via NEAR AI (model: {})",
-                        self.config.embeddings.model
-                    );
-                    Some(Arc::new(
-                        NearAiEmbeddings::new(
-                            &self.config.llm.nearai.base_url,
-                            self.session.clone(),
-                        )
-                        .with_model(&self.config.embeddings.model, 1536),
-                    ))
-                }
-                _ => {
-                    if let Some(api_key) = self.config.embeddings.openai_api_key() {
-                        tracing::info!(
-                            "Embeddings enabled via OpenAI (model: {})",
-                            self.config.embeddings.model
-                        );
-                        Some(Arc::new(OpenAiEmbeddings::with_model(
-                            api_key,
-                            &self.config.embeddings.model,
-                            match self.config.embeddings.model.as_str() {
-                                "text-embedding-3-large" => 3072,
-                                _ => 1536,
-                            },
-                        )))
-                    } else {
-                        tracing::warn!("Embeddings configured but OPENAI_API_KEY not set");
-                        None
-                    }
-                }
-            }
+        // Initialize tool registry with credential injection support
+        let credential_registry = Arc::new(SharedCredentialRegistry::new());
+        let tools = if let Some(ref ss) = self.secrets_store {
+            Arc::new(
+                ToolRegistry::new()
+                    .with_credentials(Arc::clone(&credential_registry), Arc::clone(ss)),
+            )
         } else {
-            tracing::info!("Embeddings disabled (set OPENAI_API_KEY or EMBEDDING_ENABLED=true)");
-            None
+            Arc::new(ToolRegistry::new())
         };
+        tools.register_builtin_tools();
+
+        // Create embeddings provider using the unified method
+        let embeddings = self
+            .config
+            .embeddings
+            .create_provider(&self.config.llm.nearai.base_url, self.session.clone());
+
+        // Warn if libSQL backend is used with non-1536 embedding dimension.
+        if self.config.database.backend == crate::config::DatabaseBackend::LibSql
+            && self.config.embeddings.enabled
+            && self.config.embeddings.dimension != 1536
+        {
+            tracing::warn!(
+                configured_dimension = self.config.embeddings.dimension,
+                "Embedding dimension {} is not 1536. The libSQL schema uses \
+                 F32_BLOB(1536) which requires exactly 1536 dimensions. \
+                 Embedding storage will fail. Use PostgreSQL or set \
+                 EMBEDDING_DIMENSION=1536.",
+                self.config.embeddings.dimension
+            );
+        }
 
         // Register memory tools if database is available
         let workspace = if let Some(ref db) = self.db {
@@ -479,6 +392,8 @@ impl AppBuilder {
             Arc<McpSessionManager>,
             Option<Arc<WasmToolRuntime>>,
             Option<Arc<ExtensionManager>>,
+            Vec<crate::extensions::RegistryEntry>,
+            Vec<String>,
         ),
         anyhow::Error,
     > {
@@ -508,6 +423,8 @@ impl AppBuilder {
             let tools = Arc::clone(tools);
             let wasm_config = self.config.wasm.clone();
             async move {
+                let mut dev_loaded_tool_names: Vec<String> = Vec::new();
+
                 if let Some(ref runtime) = wasm_tool_runtime {
                     let mut loader = WasmToolLoader::new(Arc::clone(runtime), Arc::clone(&tools));
                     if let Some(ref secrets) = secrets_store {
@@ -538,10 +455,11 @@ impl AppBuilder {
 
                     match load_dev_tools(&loader, &wasm_config.tools_dir).await {
                         Ok(results) => {
-                            if !results.loaded.is_empty() {
+                            dev_loaded_tool_names.extend(results.loaded.iter().cloned());
+                            if !dev_loaded_tool_names.is_empty() {
                                 tracing::info!(
                                     "Loaded {} dev WASM tools from build artifacts",
-                                    results.loaded.len()
+                                    dev_loaded_tool_names.len()
                                 );
                             }
                         }
@@ -550,6 +468,8 @@ impl AppBuilder {
                         }
                     }
                 }
+
+                dev_loaded_tool_names
             }
         };
 
@@ -654,13 +574,46 @@ impl AppBuilder {
             }
         };
 
-        tokio::join!(wasm_tools_future, mcp_servers_future);
+        let (dev_loaded_tool_names, _) = tokio::join!(wasm_tools_future, mcp_servers_future);
 
-        // Create extension manager
-        let extension_manager = if let Some(ref secrets) = self.secrets_store {
+        // Load registry catalog entries for extension discovery
+        let catalog_entries = match crate::registry::RegistryCatalog::load_or_embedded() {
+            Ok(catalog) => {
+                let entries: Vec<_> = catalog
+                    .all()
+                    .iter()
+                    .map(|m| m.to_registry_entry())
+                    .collect();
+                tracing::info!(
+                    count = entries.len(),
+                    "Loaded registry catalog entries for extension discovery"
+                );
+                entries
+            }
+            Err(e) => {
+                tracing::warn!("Failed to load registry catalog: {}", e);
+                Vec::new()
+            }
+        };
+
+        // Create extension manager. Use ephemeral in-memory secrets if no
+        // persistent store is configured (listing/install/activate still work).
+        let ext_secrets: Arc<dyn crate::secrets::SecretsStore + Send + Sync> = if let Some(ref s) =
+            self.secrets_store
+        {
+            Arc::clone(s)
+        } else {
+            use crate::secrets::{InMemorySecretsStore, SecretsCrypto};
+            let ephemeral_key =
+                secrecy::SecretString::from(crate::secrets::keychain::generate_master_key_hex());
+            let crypto = Arc::new(SecretsCrypto::new(ephemeral_key).expect("ephemeral crypto"));
+            tracing::debug!("Using ephemeral in-memory secrets store for extension manager");
+            Arc::new(InMemorySecretsStore::new(crypto))
+        };
+        let extension_manager = {
             let manager = Arc::new(ExtensionManager::new(
                 Arc::clone(&mcp_session_manager),
-                Arc::clone(secrets),
+                ext_secrets,
                 Arc::clone(tools),
                 Some(Arc::clone(hooks)),
                 wasm_tool_runtime.clone(),
@@ -669,27 +622,28 @@ impl AppBuilder {
                 self.config.tunnel.public_url.clone(),
                 "default".to_string(),
                 self.db.clone(),
+                catalog_entries.clone(),
             ));
             tools.register_extension_tools(Arc::clone(&manager));
             tracing::info!("Extension manager initialized with in-chat discovery tools");
             Some(manager)
-        } else {
-            tracing::debug!(
-                "Extension manager not available (no secrets store). \
-                 Extension tools won't be registered."
-            );
-            None
         };
 
-        // Register dev tools if local tools are enabled
-        if self.config.agent.allow_local_tools {
+        // register_builder_tool() already calls register_dev_tools() internally,
+        // so only register them here when the builder didn't already do it.
+        let builder_registered_dev_tools = self.config.builder.enabled
+            && (self.config.agent.allow_local_tools || !self.config.sandbox.enabled);
+        if self.config.agent.allow_local_tools && !builder_registered_dev_tools {
             tools.register_dev_tools();
-            tracing::info!(
-                "Local tools enabled (allow_local_tools=true), dev tools registered directly"
-            );
         }
 
-        Ok((mcp_session_manager, wasm_tool_runtime, extension_manager))
+        Ok((
+            mcp_session_manager,
+            wasm_tool_runtime,
+            extension_manager,
+            catalog_entries,
+            dev_loaded_tool_names,
+        ))
     }
 
     /// Run all init phases in order and return the assembled components.
@@ -703,15 +657,17 @@ impl AppBuilder {
         // Create hook registry early so runtime extension activation can register hooks.
         let hooks = Arc::new(HookRegistry::new());
 
-        let (mcp_session_manager, wasm_tool_runtime, extension_manager) =
-            self.init_extensions(&tools, &hooks).await?;
+        let (
+            mcp_session_manager,
+            wasm_tool_runtime,
+            extension_manager,
+            catalog_entries,
+            dev_loaded_tool_names,
+        ) = self.init_extensions(&tools, &hooks).await?;
 
         // Seed workspace and backfill embeddings
         if let Some(ref ws) = workspace {
             match ws.seed_if_empty().await {
-                Ok(count) if count > 0 => {
-                    tracing::info!("Workspace seeded with {} core files", count);
-                }
                 Ok(_) => {}
                 Err(e) => {
                     tracing::warn!("Failed to seed workspace: {}", e);
@@ -719,21 +675,25 @@ impl AppBuilder {
             }
 
             if embeddings.is_some() {
-                match ws.backfill_embeddings().await {
-                    Ok(count) if count > 0 => {
-                        tracing::info!("Backfilled embeddings for {} chunks", count);
+                let ws_bg = Arc::clone(ws);
+                tokio::spawn(async move {
+                    match ws_bg.backfill_embeddings().await {
+                        Ok(count) if count > 0 => {
+                            tracing::info!("Backfilled embeddings for {} chunks", count);
+                        }
+                        Ok(_) => {}
+                        Err(e) => {
+                            tracing::warn!("Failed to backfill embeddings: {}", e);
+                        }
                     }
-                    Ok(_) => {}
-                    Err(e) => {
-                        tracing::warn!("Failed to backfill embeddings: {}", e);
-                    }
-                }
+                });
             }
         }
 
         // Skills system
         let (skill_registry, skill_catalog) = if self.config.skills.enabled {
-            let mut registry = SkillRegistry::new(self.config.skills.local_dir.clone());
+            let mut registry = SkillRegistry::new(self.config.skills.local_dir.clone())
+                .with_installed_dir(self.config.skills.installed_dir.clone());
             let loaded = registry.discover_all().await;
             if !loaded.is_empty() {
                 tracing::info!("Loaded {} skill(s): {}", loaded.len(), loaded.join(", "));
@@ -779,6 +739,8 @@ impl AppBuilder {
             skill_catalog,
             cost_guard,
             session: self.session,
+            catalog_entries,
+            dev_loaded_tool_names,
         })
     }
 }

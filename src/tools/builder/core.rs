@@ -45,7 +45,7 @@ use crate::llm::{
 };
 use crate::safety::SafetyLayer;
 use crate::tools::ToolRegistry;
-use crate::tools::tool::{Tool, ToolError, ToolOutput};
+use crate::tools::tool::{ApprovalRequirement, Tool, ToolError, ToolOutput};
 
 /// Requirement specification for building software.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -798,10 +798,10 @@ Create alongside the .wasm file to grant capabilities:
         match (&requirement.software_type, &requirement.language) {
             (SoftwareType::WasmTool, Language::Rust) => {
                 // WASM output location
-                project_dir.join(format!(
-                    "target/wasm32-wasip2/release/{}.wasm",
-                    requirement.name.replace('-', "_")
-                ))
+                crate::tools::wasm::wasm_artifact_path(
+                    project_dir,
+                    &requirement.name.replace('-', "_"),
+                )
             }
             (SoftwareType::CliBinary, Language::Rust) => project_dir.join(format!(
                 "target/release/{}",
@@ -1019,8 +1019,8 @@ impl Tool for BuildSoftwareTool {
         Ok(ToolOutput::success(output, start.elapsed()))
     }
 
-    fn requires_approval(&self) -> bool {
-        true // Building software should require approval
+    fn requires_approval(&self, _params: &serde_json::Value) -> ApprovalRequirement {
+        ApprovalRequirement::UnlessAutoApproved
     }
 }
 

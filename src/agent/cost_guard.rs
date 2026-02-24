@@ -4,7 +4,7 @@
 //! to prevent runaway agents from burning through API credits. Especially
 //! important for daemon/heartbeat modes where the agent acts autonomously.
 
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Instant;
 
@@ -53,6 +53,14 @@ impl std::fmt::Display for CostLimitExceeded {
     }
 }
 
+/// Per-model token usage counters.
+#[derive(Debug, Clone, Default)]
+pub struct ModelTokens {
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    pub cost: Decimal,
+}
+
 /// Tracks costs and action rates, enforcing configurable limits.
 ///
 /// Thread-safe; designed to be shared via `Arc<CostGuard>`.
@@ -67,6 +75,9 @@ pub struct CostGuard {
 
     /// Flag set when daily budget is exceeded to short-circuit checks.
     budget_exceeded: AtomicBool,
+
+    /// Per-model token usage since startup.
+    model_tokens: Mutex<HashMap<String, ModelTokens>>,
 }
 
 struct DailyCost {
@@ -85,6 +96,7 @@ impl CostGuard {
             }),
             action_window: Mutex::new(VecDeque::new()),
             budget_exceeded: AtomicBool::new(false),
+            model_tokens: Mutex::new(HashMap::new()),
         }
     }
 
@@ -139,14 +151,19 @@ impl CostGuard {
     /// Record a completed LLM action: its token costs and the action timestamp.
     ///
     /// Call this AFTER an LLM call completes so that costs are tracked.
+    ///
+    /// When `cost_per_token` is `Some`, those rates are used directly (provider-
+    /// sourced pricing). When `None`, falls back to the static `costs::model_cost`
+    /// lookup table, then `costs::default_cost`.
     pub async fn record_llm_call(
         &self,
         model: &str,
         input_tokens: u32,
         output_tokens: u32,
+        cost_per_token: Option<(Decimal, Decimal)>,
     ) -> Decimal {
-        let (input_rate, output_rate) =
-            costs::model_cost(model).unwrap_or_else(costs::default_cost);
+        let (input_rate, output_rate) = cost_per_token
+            .unwrap_or_else(|| costs::model_cost(model).unwrap_or_else(costs::default_cost));
         let cost =
             input_rate * Decimal::from(input_tokens) + output_rate * Decimal::from(output_tokens);
 
@@ -192,6 +209,15 @@ impl CostGuard {
             window.push_back(Instant::now());
         }
 
+        // Track per-model token usage
+        {
+            let mut tokens = self.model_tokens.lock().await;
+            let entry = tokens.entry(model.to_string()).or_default();
+            entry.input_tokens += u64::from(input_tokens);
+            entry.output_tokens += u64::from(output_tokens);
+            entry.cost += cost;
+        }
+
         cost
     }
 
@@ -215,6 +241,11 @@ impl CostGuard {
         }
         window.len() as u64
     }
+
+    /// Per-model token usage since startup.
+    pub async fn model_usage(&self) -> HashMap<String, ModelTokens> {
+        self.model_tokens.lock().await.clone()
+    }
 }
 
 /// Convert a Decimal USD amount to whole cents (truncated).
@@ -235,7 +266,9 @@ mod tests {
         assert!(guard.check_allowed().await.is_ok());
 
         // Record a big call, still allowed
-        guard.record_llm_call("gpt-4o", 100_000, 100_000).await;
+        guard
+            .record_llm_call("gpt-4o", 100_000, 100_000, None)
+            .await;
         assert!(guard.check_allowed().await.is_ok());
     }
 
@@ -252,7 +285,7 @@ mod tests {
         // Record a call that costs more than $0.01
         // gpt-4o: input=$0.0000025/tok, output=$0.00001/tok
         // 10000 input + 10000 output = $0.025 + $0.10 = $0.125
-        guard.record_llm_call("gpt-4o", 10_000, 10_000).await;
+        guard.record_llm_call("gpt-4o", 10_000, 10_000, None).await;
 
         // Now should be blocked
         let result = guard.check_allowed().await;
@@ -275,7 +308,7 @@ mod tests {
         // First 3 actions allowed
         for _ in 0..3 {
             assert!(guard.check_allowed().await.is_ok());
-            guard.record_llm_call("gpt-4o", 10, 10).await;
+            guard.record_llm_call("gpt-4o", 10, 10, None).await;
         }
 
         // 4th should be blocked
@@ -296,7 +329,7 @@ mod tests {
 
         assert_eq!(guard.daily_spend().await, Decimal::ZERO);
 
-        let cost = guard.record_llm_call("gpt-4o", 1000, 500).await;
+        let cost = guard.record_llm_call("gpt-4o", 1000, 500, None).await;
         assert!(cost > Decimal::ZERO);
         assert_eq!(guard.daily_spend().await, cost);
     }
@@ -307,8 +340,8 @@ mod tests {
 
         assert_eq!(guard.actions_this_hour().await, 0);
 
-        guard.record_llm_call("gpt-4o", 10, 10).await;
-        guard.record_llm_call("gpt-4o", 10, 10).await;
+        guard.record_llm_call("gpt-4o", 10, 10, None).await;
+        guard.record_llm_call("gpt-4o", 10, 10, None).await;
 
         assert_eq!(guard.actions_this_hour().await, 2);
     }
@@ -335,5 +368,38 @@ mod tests {
         };
         assert!(rate.to_string().contains("101 actions"));
         assert!(rate.to_string().contains("100 allowed"));
+    }
+
+    #[tokio::test]
+    async fn test_model_usage_per_model_tracking() {
+        let guard = CostGuard::new(CostGuardConfig::default());
+
+        // Initially empty
+        assert!(guard.model_usage().await.is_empty());
+
+        // Record calls for two different models
+        guard.record_llm_call("gpt-4o", 1000, 500, None).await;
+        guard.record_llm_call("gpt-4o", 2000, 1000, None).await;
+        guard
+            .record_llm_call("claude-3-5-sonnet-20241022", 500, 200, None)
+            .await;
+
+        let usage = guard.model_usage().await;
+        assert_eq!(usage.len(), 2);
+
+        let gpt = usage.get("gpt-4o").expect("gpt-4o should be tracked");
+        assert_eq!(gpt.input_tokens, 3000);
+        assert_eq!(gpt.output_tokens, 1500);
+        assert!(gpt.cost > Decimal::ZERO);
+
+        let claude = usage
+            .get("claude-3-5-sonnet-20241022")
+            .expect("claude should be tracked");
+        assert_eq!(claude.input_tokens, 500);
+        assert_eq!(claude.output_tokens, 200);
+        assert!(claude.cost > Decimal::ZERO);
+
+        // Costs should differ since models have different pricing
+        assert_ne!(gpt.cost, claude.cost);
     }
 }

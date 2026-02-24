@@ -87,20 +87,6 @@ impl Agent {
             thread.restore_from_messages(chat_messages);
         }
 
-        // Restore response chain from conversation metadata
-        if let Some(store) = self.store()
-            && let Ok(Some(metadata)) = store.get_conversation_metadata(thread_uuid).await
-            && let Some(rid) = metadata
-                .get("last_response_id")
-                .and_then(|v| v.as_str())
-                .map(String::from)
-        {
-            thread.last_response_id = Some(rid.clone());
-            self.llm()
-                .seed_response_chain(&thread_uuid.to_string(), rid);
-            tracing::debug!("Restored response chain for thread {}", thread_uuid);
-        }
-
         // Insert into session and register with session manager
         {
             let mut sess = session.lock().await;
@@ -228,7 +214,7 @@ impl Agent {
                     )
                     .await;
 
-                let compactor = ContextCompactor::new(self.llm().clone());
+                let compactor = ContextCompactor::new(self.llm().clone(), self.safety().clone());
                 if let Err(e) = compactor
                     .compact(thread, strategy, self.workspace().map(|w| w.as_ref()))
                     .await
@@ -265,6 +251,10 @@ impl Agent {
             thread.start_turn(content);
             thread.messages()
         };
+
+        // Persist user message to DB immediately so it survives crashes
+        self.persist_user_message(thread_id, &message.user_id, content)
+            .await;
 
         // Send thinking status
         let _ = self
@@ -325,7 +315,6 @@ impl Agent {
                 };
 
                 thread.complete_turn(&response);
-                self.persist_response_chain(thread);
                 let _ = self
                     .channels
                     .send_status(
@@ -335,8 +324,9 @@ impl Agent {
                     )
                     .await;
 
-                // Fire-and-forget: persist turn to DB
-                self.persist_turn(thread_id, &message.user_id, content, Some(&response));
+                // Persist assistant response (user message already persisted at turn start)
+                self.persist_assistant_response(thread_id, &message.user_id, &response)
+                    .await;
 
                 Ok(SubmissionResult::response(response))
             }
@@ -364,92 +354,73 @@ impl Agent {
             }
             Err(e) => {
                 thread.fail_turn(e.to_string());
-
-                // Persist the user message even on failure
-                self.persist_turn(thread_id, &message.user_id, content, None);
-
+                // User message already persisted at turn start; nothing else to save
                 Ok(SubmissionResult::error(e.to_string()))
             }
         }
     }
 
-    /// Fire-and-forget: persist a turn (user message + optional assistant response) to the DB.
-    pub(super) fn persist_turn(
+    /// Persist the user message to the DB at turn start (before the agentic loop).
+    ///
+    /// This ensures the user message is durable even if the process crashes
+    /// mid-response. Call this right after `thread.start_turn()`.
+    pub(super) async fn persist_user_message(
         &self,
         thread_id: Uuid,
         user_id: &str,
         user_input: &str,
-        response: Option<&str>,
     ) {
         let store = match self.store() {
             Some(s) => Arc::clone(s),
             None => return,
         };
 
-        let user_id = user_id.to_string();
-        let user_input = user_input.to_string();
-        let response = response.map(String::from);
+        if let Err(e) = store
+            .ensure_conversation(thread_id, "gateway", user_id, None)
+            .await
+        {
+            tracing::warn!("Failed to ensure conversation {}: {}", thread_id, e);
+            return;
+        }
 
-        tokio::spawn(async move {
-            if let Err(e) = store
-                .ensure_conversation(thread_id, "gateway", &user_id, None)
-                .await
-            {
-                tracing::warn!("Failed to ensure conversation {}: {}", thread_id, e);
-                return;
-            }
-
-            if let Err(e) = store
-                .add_conversation_message(thread_id, "user", &user_input)
-                .await
-            {
-                tracing::warn!("Failed to persist user message: {}", e);
-                return;
-            }
-
-            if let Some(ref resp) = response
-                && let Err(e) = store
-                    .add_conversation_message(thread_id, "assistant", resp)
-                    .await
-            {
-                tracing::warn!("Failed to persist assistant message: {}", e);
-            }
-        });
+        if let Err(e) = store
+            .add_conversation_message(thread_id, "user", user_input)
+            .await
+        {
+            tracing::warn!("Failed to persist user message: {}", e);
+        }
     }
 
-    /// Sync the provider's response chain ID to the thread and DB metadata.
+    /// Persist the assistant response to the DB after the agentic loop completes.
     ///
-    /// Call after a successful agentic loop to persist the latest
-    /// `previous_response_id` so chaining survives restarts.
-    pub(super) fn persist_response_chain(&self, thread: &mut crate::agent::session::Thread) {
-        let tid = thread.id.to_string();
-        let response_id = match self.llm().get_response_chain_id(&tid) {
-            Some(rid) => rid,
-            None => return,
-        };
-
-        // Update in-memory thread
-        thread.last_response_id = Some(response_id.clone());
-
-        // Fire-and-forget DB write
+    /// Re-ensures the conversation row exists so that assistant responses are
+    /// still persisted even if `persist_user_message` failed transiently at
+    /// turn start (e.g. a brief DB blip that resolved before response time).
+    pub(super) async fn persist_assistant_response(
+        &self,
+        thread_id: Uuid,
+        user_id: &str,
+        response: &str,
+    ) {
         let store = match self.store() {
             Some(s) => Arc::clone(s),
             None => return,
         };
-        let thread_id = thread.id;
-        tokio::spawn(async move {
-            let val = serde_json::json!(response_id);
-            if let Err(e) = store
-                .update_conversation_metadata_field(thread_id, "last_response_id", &val)
-                .await
-            {
-                tracing::warn!(
-                    "Failed to persist response chain for thread {}: {}",
-                    thread_id,
-                    e
-                );
-            }
-        });
+
+        if let Err(e) = store
+            .ensure_conversation(thread_id, "gateway", user_id, None)
+            .await
+        {
+            tracing::warn!("Failed to ensure conversation {}: {}", thread_id, e);
+            return;
+        }
+
+        if let Err(e) = store
+            .add_conversation_message(thread_id, "assistant", response)
+            .await
+        {
+            tracing::warn!("Failed to persist assistant message: {}", e);
+        }
     }
 
     pub(super) async fn process_undo(
@@ -562,7 +533,7 @@ impl Agent {
                 crate::agent::context_monitor::CompactionStrategy::Summarize { keep_recent: 5 },
             );
 
-        let compactor = ContextCompactor::new(self.llm().clone());
+        let compactor = ContextCompactor::new(self.llm().clone(), self.safety().clone());
         match compactor
             .compact(thread, strategy, self.workspace().map(|w| w.as_ref()))
             .await
@@ -799,19 +770,18 @@ impl Agent {
             )> = None;
 
             for (idx, tc) in deferred_tool_calls.iter().enumerate() {
-                if let Some(tool) = self.tools().get(&tc.name).await
-                    && tool.requires_approval()
-                {
-                    let is_auto_approved = {
-                        let sess = session.lock().await;
-                        let mut approved = sess.is_tool_auto_approved(&tc.name);
-                        if approved && tool.requires_approval_for(&tc.arguments) {
-                            approved = false;
+                if let Some(tool) = self.tools().get(&tc.name).await {
+                    use crate::tools::ApprovalRequirement;
+                    let needs_approval = match tool.requires_approval(&tc.arguments) {
+                        ApprovalRequirement::Never => false,
+                        ApprovalRequirement::UnlessAutoApproved => {
+                            let sess = session.lock().await;
+                            !sess.is_tool_auto_approved(&tc.name)
                         }
-                        approved
+                        ApprovalRequirement::Always => true,
                     };
 
-                    if !is_auto_approved {
+                    if needs_approval {
                         approval_needed = Some((idx, tc.clone(), tool));
                         break; // remaining tools stay deferred
                     }
@@ -1069,12 +1039,10 @@ impl Agent {
 
             match result {
                 Ok(AgenticLoopResult::Response(response)) => {
-                    let user_input = thread.last_turn().map(|t| t.user_input.clone());
                     thread.complete_turn(&response);
-                    if let Some(input) = user_input {
-                        self.persist_turn(thread_id, &message.user_id, &input, Some(&response));
-                    }
-                    self.persist_response_chain(thread);
+                    // User message already persisted at turn start; save assistant response
+                    self.persist_assistant_response(thread_id, &message.user_id, &response)
+                        .await;
                     let _ = self
                         .channels
                         .send_status(
@@ -1109,11 +1077,8 @@ impl Agent {
                     })
                 }
                 Err(e) => {
-                    let user_input = thread.last_turn().map(|t| t.user_input.clone());
                     thread.fail_turn(e.to_string());
-                    if let Some(input) = user_input {
-                        self.persist_turn(thread_id, &message.user_id, &input, None);
-                    }
+                    // User message already persisted at turn start
                     Ok(SubmissionResult::error(e.to_string()))
                 }
             }
@@ -1127,12 +1092,11 @@ impl Agent {
             {
                 let mut sess = session.lock().await;
                 if let Some(thread) = sess.threads.get_mut(&thread_id) {
-                    let user_input = thread.last_turn().map(|t| t.user_input.clone());
                     thread.clear_pending_approval();
                     thread.complete_turn(&rejection);
-                    if let Some(input) = user_input {
-                        self.persist_turn(thread_id, &message.user_id, &input, Some(&rejection));
-                    }
+                    // User message already persisted at turn start; save rejection response
+                    self.persist_assistant_response(thread_id, &message.user_id, &rejection)
+                        .await;
                 }
             }
 
@@ -1167,13 +1131,11 @@ impl Agent {
         {
             let mut sess = session.lock().await;
             if let Some(thread) = sess.threads.get_mut(&thread_id) {
-                let user_input = thread.last_turn().map(|t| t.user_input.clone());
                 thread.enter_auth_mode(ext_name.clone());
                 thread.complete_turn(&instructions);
-                if let Some(input) = user_input {
-                    self.persist_turn(thread_id, &message.user_id, &input, Some(&instructions));
-                }
-                self.persist_response_chain(thread);
+                // User message already persisted at turn start; save auth instructions
+                self.persist_assistant_response(thread_id, &message.user_id, &instructions)
+                    .await;
             }
         }
         let _ = self
