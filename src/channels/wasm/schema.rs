@@ -585,4 +585,43 @@ mod tests {
             64
         );
     }
+
+    // ── Category 5: Discord Capabilities Setup & Configuration ──────────
+
+    #[test]
+    fn test_discord_capabilities_has_public_key_secret() {
+        let json = include_str!("../../../channels-src/discord/discord.capabilities.json");
+        let file = ChannelCapabilitiesFile::from_json(json).unwrap();
+
+        let secret_names: Vec<&str> = file
+            .setup
+            .required_secrets
+            .iter()
+            .map(|s| s.name.as_str())
+            .collect();
+
+        assert!(
+            secret_names.contains(&"discord_public_key"),
+            "discord.capabilities.json must include discord_public_key in setup.required_secrets, \
+             found: {:?}",
+            secret_names
+        );
+    }
+
+    #[test]
+    fn test_discord_capabilities_secrets_allowlist() {
+        let json = include_str!("../../../channels-src/discord/discord.capabilities.json");
+        let file = ChannelCapabilitiesFile::from_json(json).unwrap();
+
+        let caps = file.to_capabilities();
+        let secrets_caps = caps
+            .tool_capabilities
+            .secrets
+            .expect("Discord should have secrets capability");
+
+        assert!(
+            secrets_caps.is_allowed("discord_public_key"),
+            "discord_public_key must be in the secrets allowlist"
+        );
+    }
 }

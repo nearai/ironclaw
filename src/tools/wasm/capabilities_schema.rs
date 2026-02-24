@@ -754,4 +754,127 @@ mod tests {
         assert!(auth.display_name.is_none());
         assert!(auth.setup_url.is_none());
     }
+
+    // ── Category 1: Header field name alias ─────────────────────────────
+
+    #[test]
+    fn test_header_location_with_name_field() {
+        let json = r#"{
+            "http": {
+                "allowlist": [{ "host": "discord.com" }],
+                "credentials": {
+                    "bot_token": {
+                        "secret_name": "discord_bot_token",
+                        "location": { "type": "header", "name": "Authorization", "prefix": "Bot " },
+                        "host_patterns": ["discord.com"]
+                    }
+                }
+            }
+        }"#;
+
+        let caps = CapabilitiesFile::from_json(json).unwrap();
+        let http = caps.http.unwrap();
+        let cred = http.credentials.get("bot_token").unwrap();
+        match &cred.location {
+            CredentialLocationSchema::Header { name, prefix } => {
+                assert_eq!(name, "Authorization");
+                assert_eq!(prefix, &Some("Bot ".to_string()));
+            }
+            _ => panic!("Expected Header location"),
+        }
+    }
+
+    #[test]
+    fn test_header_location_with_header_name_alias() {
+        // Uses "header_name" instead of "name" — should parse via serde alias
+        let json = r#"{
+            "http": {
+                "allowlist": [{ "host": "discord.com" }],
+                "credentials": {
+                    "bot_token": {
+                        "secret_name": "discord_bot_token",
+                        "location": { "type": "header", "header_name": "Authorization", "prefix": "Bot " },
+                        "host_patterns": ["discord.com"]
+                    }
+                }
+            }
+        }"#;
+
+        let caps = CapabilitiesFile::from_json(json).unwrap();
+        let http = caps.http.unwrap();
+        let cred = http.credentials.get("bot_token").unwrap();
+        match &cred.location {
+            CredentialLocationSchema::Header { name, prefix } => {
+                assert_eq!(name, "Authorization");
+                assert_eq!(prefix, &Some("Bot ".to_string()));
+            }
+            _ => panic!("Expected Header location"),
+        }
+    }
+
+    #[test]
+    fn test_discord_capabilities_file_parses() {
+        // Full Discord capabilities JSON — tests end-to-end parsing
+        let json = r#"{
+            "type": "channel",
+            "name": "discord",
+            "description": "Discord channel",
+            "setup": {
+                "required_secrets": [
+                    {
+                        "name": "discord_bot_token",
+                        "prompt": "Enter your Discord Bot Token",
+                        "optional": false
+                    },
+                    {
+                        "name": "discord_public_key",
+                        "prompt": "Enter your Discord Public Key",
+                        "optional": false
+                    }
+                ]
+            },
+            "capabilities": {
+                "http": {
+                    "allowlist": [{ "host": "discord.com", "path_prefix": "/api/v10" }],
+                    "credentials": {
+                        "discord_bot_token": {
+                            "secret_name": "discord_bot_token",
+                            "location": { "type": "header", "name": "Authorization", "prefix": "Bot " },
+                            "host_patterns": ["discord.com"]
+                        }
+                    }
+                }
+            },
+            "config": {
+                "require_signature_verification": true
+            }
+        }"#;
+
+        // This must not panic — parsing should succeed
+        let caps = CapabilitiesFile::from_json(json).unwrap();
+        let http = caps.http.unwrap();
+        assert!(http.credentials.contains_key("discord_bot_token"));
+    }
+
+    #[test]
+    fn test_header_location_missing_name_fails() {
+        // Neither "name" nor "header_name" provided — should fail
+        let json = r#"{
+            "http": {
+                "allowlist": [{ "host": "example.com" }],
+                "credentials": {
+                    "api_key": {
+                        "secret_name": "my_key",
+                        "location": { "type": "header", "prefix": "Key " },
+                        "host_patterns": ["example.com"]
+                    }
+                }
+            }
+        }"#;
+
+        assert!(
+            CapabilitiesFile::from_json(json).is_err(),
+            "Header without name or header_name should fail deserialization"
+        );
+    }
 }

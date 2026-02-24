@@ -153,6 +153,8 @@ clap_complete = "4.5.0"
 # HTML to Markdown conversion (feature gated)
 html-to-markdown-rs = { version = "2.3", optional = true }
 readabilityrs = { version = "0.1.2", optional = true }
+ed25519-dalek = { version = "2.2.0", features = ["std"] }
+hex = "0.4.3"
 
 # macOS keychain
 [target.'cfg(target_os = "macos")'.dependencies]

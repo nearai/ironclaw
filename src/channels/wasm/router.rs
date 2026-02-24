@@ -174,6 +174,22 @@ impl WasmChannelRouter {
     pub async fn list_paths(&self) -> Vec<String> {
         self.path_to_channel.read().await.keys().cloned().collect()
     }
+
+    /// Register an Ed25519 public key for signature verification.
+    ///
+    /// Channels with a registered key will have Discord-style Ed25519
+    /// signature validation performed before forwarding to WASM.
+    pub async fn register_signature_key(&self, _channel_name: &str, _public_key_hex: &str) {
+        // STUB: intentionally does nothing to fail tests during Red phase
+    }
+
+    /// Get the signature verification key for a channel.
+    ///
+    /// Returns `None` if no key is registered (no signature check needed).
+    pub async fn get_signature_key(&self, _channel_name: &str) -> Option<String> {
+        // STUB: intentionally returns None to fail tests during Red phase
+        None
+    }
 }
 
 impl Default for WasmChannelRouter {
@@ -643,5 +659,61 @@ mod tests {
             .register(channel2, vec![], Some("secret456".to_string()), None)
             .await;
         assert_eq!(router.get_secret_header("slack").await, "X-Webhook-Secret");
+    }
+
+    // ── Category 3: Router Signature Key Management ─────────────────────
+
+    #[tokio::test]
+    async fn test_register_and_get_signature_key() {
+        let router = WasmChannelRouter::new();
+        let channel = create_test_channel("discord");
+
+        router.register(channel, vec![], None, None).await;
+
+        let fake_pub_key = "a]b1c2d3e4f5a6b7c8d9e0f1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b1";
+        router
+            .register_signature_key("discord", fake_pub_key)
+            .await;
+
+        let key = router.get_signature_key("discord").await;
+        assert_eq!(key, Some(fake_pub_key.to_string()));
+    }
+
+    #[tokio::test]
+    async fn test_no_signature_key_returns_none() {
+        let router = WasmChannelRouter::new();
+        let channel = create_test_channel("slack");
+        router.register(channel, vec![], None, None).await;
+
+        // Slack has no signature key registered
+        let key = router.get_signature_key("slack").await;
+        assert!(key.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_unregister_removes_signature_key() {
+        let router = WasmChannelRouter::new();
+        let channel = create_test_channel("discord");
+
+        let endpoints = vec![RegisteredEndpoint {
+            channel_name: "discord".to_string(),
+            path: "/webhook/discord".to_string(),
+            methods: vec!["POST".to_string()],
+            require_secret: false,
+        }];
+
+        router.register(channel, endpoints, None, None).await;
+        router
+            .register_signature_key("discord", "deadbeef")
+            .await;
+
+        // Key should exist
+        assert!(router.get_signature_key("discord").await.is_some());
+
+        // Unregister
+        router.unregister("discord").await;
+
+        // Key should be gone
+        assert!(router.get_signature_key("discord").await.is_none());
     }
 }
