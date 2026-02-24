@@ -62,14 +62,22 @@ fn main() {
         return;
     }
 
-    let raw_wasm = channel_dir.join("target/wasm32-wasip2/release/telegram_channel.wasm");
-    if !raw_wasm.exists() {
+    // When the channel is built from the workspace root (which this build script
+    // does), Cargo writes artifacts to the workspace target dir, not
+    // `channels-src/telegram/target`. Keep the older path as a fallback.
+    let raw_wasm_candidates = [
+        root.join("target/wasm32-wasip2/release/telegram_channel.wasm"),
+        channel_dir.join("target/wasm32-wasip2/release/telegram_channel.wasm"),
+    ];
+    let raw_wasm = raw_wasm_candidates.iter().find(|p| p.exists()).cloned();
+
+    let Some(raw_wasm) = raw_wasm else {
         eprintln!(
-            "cargo:warning=Telegram WASM output not found at {:?}",
-            raw_wasm
+            "cargo:warning=Telegram WASM output not found. Checked: {:?}",
+            raw_wasm_candidates
         );
         return;
-    }
+    };
 
     // Convert to component and strip (wasm-tools)
     let component_ok = Command::new("wasm-tools")
