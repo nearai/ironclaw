@@ -19,6 +19,7 @@ use uuid::Uuid;
 use crate::channels::{Channel, IncomingMessage, MessageStream, OutgoingResponse, StatusUpdate};
 use crate::config::SignalConfig;
 use crate::error::ChannelError;
+use crate::pairing::PairingStore;
 
 const GROUP_TARGET_PREFIX: &str = "group:";
 const SIGNAL_HEALTH_ENDPOINT: &str = "/api/v1/check";
@@ -148,10 +149,127 @@ impl SignalChannel {
         if self.config.allow_from.is_empty() {
             return false;
         }
-        self.config
-            .allow_from
-            .iter()
-            .any(|entry| entry == "*" || Self::normalize_allow_entry(entry) == Self::normalize_allow_entry(sender))
+        self.config.allow_from.iter().any(|entry| {
+            entry == "*"
+                || Self::normalize_allow_entry(entry) == Self::normalize_allow_entry(sender)
+        })
+    }
+
+    /// Check if sender is allowed via config allow_from OR pairing store.
+    fn is_sender_allowed_with_pairing(&self, sender: &str) -> bool {
+        if self.is_sender_allowed(sender) {
+            return true;
+        }
+        let store = PairingStore::new();
+        if let Ok(allowed) = store.read_allow_from("signal") {
+            return allowed.iter().any(|entry| entry == "*" || entry == sender);
+        }
+        false
+    }
+
+    /// Handle pairing request for unapproved sender.
+    /// Returns Ok(true) if message should be allowed (was already paired),
+    /// Ok(false) if message was blocked but pairing request was processed.
+    fn handle_pairing_request(&self, sender: &str, source_name: Option<&str>) -> Result<bool, ()> {
+        let store = PairingStore::new();
+        let meta = serde_json::json!({
+            "sender": sender,
+            "name": source_name,
+        });
+
+        match store.upsert_request("signal", sender, Some(meta)) {
+            Ok(result) => {
+                tracing::info!(
+                    sender = %sender,
+                    code = %result.code,
+                    "Signal: pairing request upserted"
+                );
+                if result.created {
+                    let message = format!(
+                        "To pair with this bot, run: `ironclaw pairing approve signal {}`",
+                        result.code
+                    );
+                    let http_url = self.config.http_url.clone();
+                    let account = self.config.account.clone();
+                    let sender_owned = sender.to_string();
+                    let message_owned = message.clone();
+                    tokio::spawn(async move {
+                        if let Err(e) = Self::send_pairing_reply_async(
+                            &http_url,
+                            &account,
+                            &sender_owned,
+                            &message_owned,
+                        )
+                        .await
+                        {
+                            tracing::error!(sender = %sender_owned, error = %e, "Signal: failed to send pairing reply");
+                        }
+                    });
+                }
+                Ok(false)
+            }
+            Err(e) => {
+                tracing::error!(sender = %sender, error = %e, "Signal: pairing upsert failed");
+                Err(())
+            }
+        }
+    }
+
+    /// Send a pairing reply message to the sender (async helper for spawned task).
+    async fn send_pairing_reply_async(
+        http_url: &str,
+        account: &str,
+        recipient: &str,
+        message: &str,
+    ) -> Result<(), ChannelError> {
+        let client = Client::builder()
+            .connect_timeout(Duration::from_secs(10))
+            .build()
+            .map_err(|e| ChannelError::Http(e.to_string()))?;
+
+        let target = Self::parse_recipient_target(recipient);
+        let params = Self::build_rpc_params_static(http_url, account, &target, Some(message));
+
+        let url = format!("{}/api/v1/rpc", http_url);
+        let id = Uuid::new_v4().to_string();
+
+        let body = serde_json::json!({
+            "jsonrpc": "2.0",
+            "method": "send",
+            "params": params,
+            "id": id,
+        });
+
+        let resp = client
+            .post(&url)
+            .timeout(Duration::from_secs(30))
+            .header("Content-Type", "application/json")
+            .json(&body)
+            .send()
+            .await
+            .map_err(|e| ChannelError::SendFailed {
+                name: "signal".to_string(),
+                reason: format!("RPC request failed to {}: {e}", Self::redact_url(&url)),
+            })?;
+
+        let status = resp.status();
+        let is_success = status.is_success();
+
+        if status.as_u16() == 201 {
+            return Ok(());
+        }
+
+        if !is_success {
+            let bytes = resp.bytes().await.unwrap_or_default();
+            let truncated_len = bytes.len().min(MAX_ERROR_LOG_BODY);
+            let truncated_body = String::from_utf8_lossy(&bytes[..truncated_len]);
+            return Err(ChannelError::SendFailed {
+                name: "signal".to_string(),
+                reason: format!("HTTP error {}: {}", status.as_u16(), truncated_body),
+            });
+        }
+
+        Ok(())
     }
 
     /// Get effective group allow_from list (inherits from allow_from if empty).
@@ -184,9 +302,10 @@ impl SignalChannel {
         if effective_list.is_empty() {
             return false;
         }
-        effective_list
-            .iter()
-            .any(|entry| entry == "*" || Self::normalize_allow_entry(entry) == Self::normalize_allow_entry(sender))
+        effective_list.iter().any(|entry| {
+            entry == "*"
+                || Self::normalize_allow_entry(entry) == Self::normalize_allow_entry(sender)
+        })
     }
 
     /// Redact credentials from a URL for safe logging.
@@ -339,11 +458,7 @@ impl SignalChannel {
             let truncated_body = String::from_utf8_lossy(&bytes[..truncated_len]);
             return Err(ChannelError::SendFailed {
                 name: "signal".to_string(),
-                reason: format!(
-                    "HTTP error {}: {}",
-                    status.as_u16(),
-                    truncated_body
-                ),
+                reason: format!("HTTP error {}: {}", status.as_u16(), truncated_body),
             });
         }
 
@@ -389,6 +504,37 @@ impl SignalChannel {
                 let mut params = serde_json::json!({
                     "groupId": group_id,
                     "account": &self.config.account,
+                });
+                if let Some(msg) = message {
+                    params["message"] = serde_json::Value::String(msg.to_string());
+                }
+                params
+            }
+        }
+    }
+
+    /// Build JSON-RPC params for a send/typing call (static version).
+    fn build_rpc_params_static(
+        _http_url: &str,
+        account: &str,
+        target: &RecipientTarget,
+        message: Option<&str>,
+    ) -> serde_json::Value {
+        match target {
+            RecipientTarget::Direct(id) => {
+                let mut params = serde_json::json!({
+                    "recipient": [id],
+                    "account": account,
+                });
+                if let Some(msg) = message {
+                    params["message"] = serde_json::Value::String(msg.to_string());
+                }
+                params
+            }
+            RecipientTarget::Group(group_id) => {
+                let mut params = serde_json::json!({
+                    "groupId": group_id,
+                    "account": account,
                 });
                 if let Some(msg) = message {
                     params["message"] = serde_json::Value::String(msg.to_string());
@@ -502,14 +648,19 @@ impl SignalChannel {
                 }
                 "pairing" => {
                     // Pairing policy: check allow_from + pairing store
-                    // For now, just check allow_from; full pairing flow requires
-                    // PairingStore integration which will be added in a future PR
-                    if !self.is_sender_allowed(&sender) {
-                        tracing::debug!(
-                            sender = %sender,
-                            "Signal: sender not in allow_from with pairing policy, dropping (pairing store integration pending)"
-                        );
-                        return None;
+                    if !self.is_sender_allowed_with_pairing(&sender) {
+                        // Handle pairing request - this will create a request and send reply if new
+                        match self.handle_pairing_request(&sender, envelope.source_name.as_deref())
+                        {
+                            Ok(_) => {
+                                // Pairing request processed (new or existing), drop the message
+                                return None;
+                            }
+                            Err(()) => {
+                                // Error processing pairing, drop message
+                                return None;
+                            }
+                        }
                     }
                 }
                 "allowlist" | _ => {
@@ -1621,6 +1772,7 @@ mod tests {
         let mut config = make_config();
         config.allow_from = vec!["*".to_string()];
         config.allow_from_groups = vec!["*".to_string()];
+        config.group_policy = "allowlist".to_string();
         let ch = SignalChannel::new(config)?;
 
         let env = Envelope {
@@ -1681,7 +1833,8 @@ mod tests {
     }
 
     #[test]
-    fn process_envelope_attachment_only_not_skipped_when_ignore_disabled() -> Result<(), ChannelError> {
+    fn process_envelope_attachment_only_not_skipped_when_ignore_disabled()
+    -> Result<(), ChannelError> {
         // With ignore_attachments=false, attachment-only messages should be
         // processed with the "[Attachment]" placeholder text.
         let mut config = make_config();
@@ -1706,7 +1859,10 @@ mod tests {
         // With ignore_attachments=false, attachment-only messages are now
         // processed with a placeholder "[Attachment]" text.
         let result = ch.process_envelope(&env);
-        assert!(result.is_some(), "Attachment-only should be processed when ignore_attachments=false");
+        assert!(
+            result.is_some(),
+            "Attachment-only should be processed when ignore_attachments=false"
+        );
         let (msg, _) = result.unwrap();
         assert_eq!(msg.content, "[Attachment]");
         Ok(())
@@ -1785,7 +1941,11 @@ mod tests {
         let (msg, _) = ch.process_envelope(&env).unwrap();
         // DMs now set thread_id to a deterministic UUID derived from phone number
         let expected_thread_id = SignalChannel::thread_id_from_identifier("+1111111111");
-        assert_eq!(msg.thread_id, Some(expected_thread_id), "DMs should set thread_id to UUID");
+        assert_eq!(
+            msg.thread_id,
+            Some(expected_thread_id),
+            "DMs should set thread_id to UUID"
+        );
         Ok(())
     }
 
@@ -1794,6 +1954,7 @@ mod tests {
         let mut config = make_config();
         config.allow_from = vec!["*".to_string()];
         config.allow_from_groups = vec!["*".to_string()];
+        config.group_policy = "allowlist".to_string();
         let ch = SignalChannel::new(config)?;
 
         let env = Envelope {
@@ -1815,7 +1976,11 @@ mod tests {
         let (msg, _) = ch.process_envelope(&env).unwrap();
         // Groups now set thread_id to a deterministic UUID derived from group ID
         let expected_thread_id = SignalChannel::thread_id_from_identifier("group:grp999");
-        assert_eq!(msg.thread_id, Some(expected_thread_id), "Groups should set thread_id to UUID");
+        assert_eq!(
+            msg.thread_id,
+            Some(expected_thread_id),
+            "Groups should set thread_id to UUID"
+        );
         Ok(())
     }
 
@@ -1950,7 +2115,7 @@ mod tests {
     #[test]
     fn is_e164_valid_numbers() {
         assert!(SignalChannel::is_e164("+12345678901"));
-        assert!(SignalChannel::is_e164("+44")); // min 2 digits after +
+        assert!(SignalChannel::is_e164("+1234567")); // min 7 digits after +
         assert!(SignalChannel::is_e164("+123456789012345")); // max 15 digits
     }
 

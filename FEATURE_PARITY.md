@@ -68,7 +68,7 @@ This document tracks feature parity between IronClaw (Rust implementation) and O
 | WhatsApp | ✅ | ❌ | P1 | Baileys (Web), same-phone mode with echo detection |
 | Telegram | ✅ | ✅ | - | WASM channel(MTProto), DM pairing, caption, /start, bot_username |
 | Discord | ✅ | ❌ | P2 | discord.js, thread parent binding inheritance |
-| Signal | ✅ | ✅ | P2 | signal-cli daemon HTTP/JSON-RPC, SSE listener, user/group allowlists |
+| Signal | ✅ | ✅ | P2 | signal-cli daemonPC, SSE listener HTTP/JSON-R, user/group allowlists, DM pairing |
 | Slack | ✅ | ✅ | - | WASM tool |
 | iMessage | ✅ | ❌ | P3 | BlueBubbles or Linq recommended |
 | Linq | ✅ | ❌ | P3 | Real iMessage via API, no Mac required |

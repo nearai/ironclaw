@@ -846,7 +846,10 @@ pub async fn setup_signal(_settings: &Settings) -> Result<SignalSetupResult, Cha
     }
 
     println!();
-    print_success(&format!("Signal channel configured for account: {}", account));
+    print_success(&format!(
+        "Signal channel configured for account: {}",
+        account
+    ));
     print_info(&format!("HTTP URL: {}", http_url));
     if allow_from == account {
         print_info("Allow from: self-only");
