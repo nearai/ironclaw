@@ -191,9 +191,10 @@ impl ExtensionManager {
         kind_hint: Option<ExtensionKind>,
     ) -> Result<InstallResult, ExtensionError> {
         tracing::info!(extension = %name, url = ?url, kind = ?kind_hint, "Installing extension");
+        Self::validate_extension_name(name)?;
 
-        // If we have a registry entry, use it
-        if let Some(entry) = self.registry.get(name).await {
+        // If we have a registry entry, use it (prefer kind_hint to resolve collisions)
+        if let Some(entry) = self.registry.get_with_kind(name, kind_hint).await {
             return self.install_from_entry(&entry).await.map_err(|e| {
                 tracing::error!(extension = %name, error = %e, "Extension install failed");
                 e
@@ -245,6 +246,7 @@ impl ExtensionManager {
 
     /// Activate an installed (and optionally authenticated) extension.
     pub async fn activate(&self, name: &str) -> Result<ActivateResult, ExtensionError> {
+        Self::validate_extension_name(name)?;
         let kind = self.determine_installed_kind(name).await?;
 
         match kind {
@@ -399,6 +401,7 @@ impl ExtensionManager {
 
     /// Remove an installed extension.
     pub async fn remove(&self, name: &str) -> Result<String, ExtensionError> {
+        Self::validate_extension_name(name)?;
         let kind = self.determine_installed_kind(name).await?;
 
         match kind {
@@ -1732,14 +1735,6 @@ impl ExtensionManager {
             )));
         }
 
-        // Validate name to prevent path traversal
-        if name.contains('/') || name.contains('\\') || name.contains("..") || name.contains('\0') {
-            return Err(ExtensionError::ActivationFailed(format!(
-                "Invalid channel name '{}': contains path separator or traversal characters",
-                name
-            )));
-        }
-
         // Load the channel from files
         let wasm_path = self.wasm_channels_dir.join(format!("{}.wasm", name));
         let cap_path = self
@@ -2031,6 +2026,17 @@ impl ExtensionManager {
             "'{}' is not installed as an MCP server, WASM tool, or WASM channel",
             name
         )))
+    }
+
+    /// Reject names containing path separators or traversal sequences.
+    fn validate_extension_name(name: &str) -> Result<(), ExtensionError> {
+        if name.contains('/') || name.contains('\\') || name.contains("..") || name.contains('\0') {
+            return Err(ExtensionError::InstallFailed(format!(
+                "Invalid extension name '{}': contains path separator or traversal characters",
+                name
+            )));
+        }
+        Ok(())
     }
 
     async fn cleanup_expired_auths(&self) {

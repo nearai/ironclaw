@@ -32,7 +32,7 @@
         "tools/gmail",
         "tools/google-calendar",
         "tools/google-drive",
-        "tools/slack",
+        "tools/slack-tool",
         "channels/telegram",
         "channels/slack"
       ],
