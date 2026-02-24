@@ -147,6 +147,7 @@ impl RoutineEngine {
 
     /// Check all due cron routines and fire them. Called by the cron ticker.
     pub async fn check_cron_triggers(&self) {
+        tracing::info!("Routine cron ticker: checking due routines");
         let routines = match self.store.list_due_cron_routines().await {
             Ok(r) => r,
             Err(e) => {
@@ -154,6 +155,8 @@ impl RoutineEngine {
                 return;
             }
         };
+
+        tracing::info!(due_count = routines.len(), "Routine cron ticker: due routines loaded");
 
         for routine in routines {
             if self.running_count.load(Ordering::Relaxed) >= self.config.max_concurrent_routines {
@@ -604,6 +607,8 @@ async fn send_notification(
             "source": "routine",
             "routine_name": routine_name,
             "status": status.to_string(),
+            "notify_channel": notify.channel,
+            "notify_user": notify.user,
         }),
     };
 
@@ -621,10 +626,13 @@ pub fn spawn_cron_ticker(
         let mut ticker = tokio::time::interval(interval);
         // Skip immediate first tick
         ticker.tick().await;
+        tracing::info!(interval_secs = interval.as_secs(), "Routine cron ticker task started");
 
         loop {
             ticker.tick().await;
+            tracing::info!("Routine cron ticker tick");
             engine.check_cron_triggers().await;
+            tracing::info!("Routine cron ticker tick complete");
         }
     })
 }
