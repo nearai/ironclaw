@@ -1997,6 +1997,61 @@ impl Channel for WasmChannel {
         Ok(())
     }
 
+    async fn broadcast(
+        &self,
+        user_id: &str,
+        response: OutgoingResponse,
+    ) -> Result<(), ChannelError> {
+        // Proactive notifications (routines/heartbeat) have no originating incoming
+        // message, so synthesize routing metadata for WASM channels.
+        let mut metadata = if response.metadata.is_object() {
+            response.metadata.clone()
+        } else {
+            serde_json::json!({})
+        };
+
+        if metadata.get("user_id").is_none() {
+            metadata["user_id"] = serde_json::json!(user_id);
+        }
+        if metadata.get("sender_id").is_none() {
+            metadata["sender_id"] = serde_json::json!(user_id);
+        }
+        if let Some(ref tid) = response.thread_id {
+            if metadata.get("thread_id").is_none() {
+                metadata["thread_id"] = serde_json::json!(tid);
+            }
+            if metadata.get("chat_id").is_none() {
+                if let Ok(chat_id) = tid.parse::<i64>() {
+                    metadata["chat_id"] = serde_json::json!(chat_id);
+                } else {
+                    metadata["chat_id"] = serde_json::json!(tid);
+                }
+            }
+        }
+        if metadata.get("chat_id").is_none() {
+            if let Ok(chat_id) = user_id.parse::<i64>() {
+                metadata["chat_id"] = serde_json::json!(chat_id);
+            } else {
+                metadata["chat_id"] = serde_json::json!(user_id);
+            }
+        }
+
+        let metadata_json = serde_json::to_string(&metadata).unwrap_or_default();
+        self.call_on_respond(
+            uuid::Uuid::new_v4(),
+            &response.content,
+            response.thread_id.as_deref(),
+            &metadata_json,
+        )
+        .await
+        .map_err(|e| ChannelError::SendFailed {
+            name: self.name.clone(),
+            reason: e.to_string(),
+        })?;
+
+        Ok(())
+    }
+
     async fn send_status(
         &self,
         status: StatusUpdate,
