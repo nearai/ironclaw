@@ -1,5 +1,5 @@
 {
-  "name": "slack",
+  "name": "slack-tool",
   "display_name": "Slack",
   "kind": "tool",
   "version": "0.1.0",
