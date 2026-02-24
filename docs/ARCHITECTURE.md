@@ -1,6 +1,6 @@
 # IronClaw — Master Architecture Document
 
-> Updated: 2026-02-22 (v0.9.0) | Comprehensive reference for contributors
+> Updated: 2026-02-24 (v0.11.1) | Comprehensive reference for contributors
 
 ---
 
@@ -29,7 +29,7 @@ The binary is a single self-contained executable. There is no separate daemon ma
 
 IronClaw differs from TypeScript-based AI gateways in several important ways. First, it compiles to a native binary with no Node.js or Python runtime requirement. Second, it uses libsql (an embedded SQLite fork by Turso) or PostgreSQL as its storage layer, both exposed through a single `Database` trait abstraction with approximately sixty async methods. Third, multi-LLM support is provided by `rig-core`, a Rust framework that abstracts over OpenAI, Anthropic, Ollama, and OpenAI-compatible endpoints. NEAR AI is supported natively through a custom `NearAiProvider` that uses the Responses API with session-token authentication and response chaining for efficient multi-turn conversations. Tinfoil private inference, which runs models in hardware-attested TEEs, is also supported via the OpenAI-compatible Chat Completions API.
 
-The channel abstraction is the core extensibility point for message ingestion. A `Channel` trait with five lifecycle methods (`start`, `respond`, `send_status`, `broadcast`, `health_check`) allows any input source to feed the same agent loop. Implemented channels include an interactive REPL channel (rustyline + termimad), an HTTP webhook server, a web gateway with SSE/WebSocket streaming and a single-page browser UI, and a WASM channel runtime that loads compiled channel implementations at startup. A `ChannelManager` merges all active streams via `futures::stream::select_all` and provides a single injection sender for background tasks to push synthetic messages into the agent loop without being full Channel implementations.
+The channel abstraction is the core extensibility point for message ingestion. A `Channel` trait with five lifecycle methods (`start`, `respond`, `send_status`, `broadcast`, `health_check`) allows any input source to feed the same agent loop. Implemented channels include an interactive REPL channel (rustyline + termimad), an HTTP webhook server, a web gateway with SSE/WebSocket streaming and a single-page browser UI, and a WASM channel runtime that loads compiled channel implementations at startup (hot-activation without restart supported since v0.10.0). A `ChannelManager` merges all active streams via `futures::stream::select_all` and provides a single injection sender for background tasks to push synthetic messages into the agent loop without being full Channel implementations. Startup time was optimized from ~15s to ~2s in v0.10.0 through lazy subsystem initialization.
 
 ---
 
@@ -84,9 +84,14 @@ The channel abstraction is the core extensibility point for message ingestion. A
 │  ┌──────────────────────────────────────────────────────────────────────────┐  │
 │  │                    Arc<dyn LlmProvider> chain                            │  │
 │  │                                                                          │  │
-│  │  ┌──────────────┐   ┌──────────────────┐   ┌──────────────────────────┐ │  │
-│  │  │CachedProvider│──▶│CircuitBreaker    │──▶│ FailoverProvider         │ │  │
-│  │  │(response TTL)│   │(failure threshold│   │ (primary + fallback)     │ │  │
+│  │  ┌────────────────────┐                                                  │  │
+│  │  │SmartRoutingProvider│ (Simple/Moderate/Complex → cheap vs primary,     │  │
+│  │  │                    │  cascade escalation for uncertain responses)      │  │
+│  │  └─────────┬──────────┘                                                  │  │
+│  │            │                                                              │  │
+│  │  ┌─────────▼────┐   ┌──────────────────┐   ┌──────────────────────────┐ │  │
+│  │  │RetryProvider │──▶│CircuitBreaker    │──▶│ FailoverProvider         │ │  │
+│  │  │              │   │(failure threshold│   │ (primary + fallback)     │ │  │
 │  │  └──────────────┘   └──────────────────┘   └──────────────┬───────────┘ │  │
 │  │                                                            │             │  │
 │  │  ┌─────────────────────────────────────────────────────────▼──────────┐ │  │
@@ -155,8 +160,8 @@ The following table lists every source module directory and the key top-level fi
 
 | Module | Path | Purpose |
 |--------|------|---------|
-| `agent` | `src/agent/` | Core agent orchestration: main event loop, session management, job scheduling, self-repair, heartbeat, routine engine, context compaction, undo/redo, skill selection, cost guardrails |
-| `channels` | `src/channels/` | Multi-channel input abstraction: `Channel` trait, `ChannelManager` (stream merge), HTTP webhook, web gateway (axum + SSE + WebSocket), WASM channel runtime, REPL |
+| `agent` | `src/agent/` | Core agent orchestration: main event loop, session management, job scheduling, self-repair, heartbeat, routine engine, context compaction (**Context Compactor** (`agent/compaction.rs`): three strategies — Summarize (LLM summary → workspace daily log), Truncate (drop oldest turns), MoveToWorkspace (archive full turns); triggered automatically on ContextLengthExceeded), undo/redo, skill selection, cost guardrails |
+| `channels` | `src/channels/` | Multi-channel input abstraction: `Channel` trait, `ChannelManager` (stream merge), HTTP webhook, web gateway (axum + SSE + WebSocket), WASM channel runtime (hot-activate without restart since v0.10.0; all WASM channels support device pairing and channel-context-injected prompts for group chat privacy), REPL |
 | `cli` | `src/cli/` | CLI command surface: onboarding, config, tool, mcp, memory, pairing, service, doctor, status |
 | `config` | `src/config/` | Configuration loading from environment, DB settings table, and optional TOML overlay. Sub-modules per domain: agent, builder, channels, database, embeddings, heartbeat, llm, routines, safety, sandbox, secrets, skills, tunnel, wasm |
 | `context` | `src/context/` | Per-job state isolation: `JobState` state machine (Pending → InProgress → Completed/Failed/Stuck), `JobContext`, `ContextManager` for concurrent job tracking |
@@ -166,7 +171,7 @@ The following table lists every source module directory and the key top-level fi
 | `extensions` | `src/extensions/` | `ExtensionManager`: coordinates MCP server auth and activation, WASM tool install/remove, registers in-chat discovery tools |
 | `history` | `src/history/` | Persistence for conversation threads and analytics: PostgreSQL repositories, aggregation queries (JobStats, ToolStats) |
 | `hooks` | `src/hooks/` | `HookRegistry` for Inbound/Outbound message interception: hooks can modify, reject, or pass through messages at the agent loop boundary |
-| `llm` | `src/llm/` | LLM provider chain: `LlmProvider` trait, `NearAiChatProvider` (Chat Completions, dual auth: session token + API key), `SmartRoutingProvider` (routes Simple/Moderate/Complex requests to cheap vs primary model), `RigAdapter` (rig-core bridge for OpenAI/Anthropic/Ollama/Tinfoil), `FailoverProvider`, `CircuitBreakerProvider`, `CachedProvider`, `RetryProvider`, session token management |
+| `llm` | `src/llm/` | LLM provider chain: `LlmProvider` trait, `NearAiChatProvider` (Chat Completions, dual auth: session token + API key), `SmartRoutingProvider` (classifies queries as Simple/Moderate/Complex and routes to cheap vs primary models, with cascade escalation for uncertain responses; sits at top of chain: `SmartRoutingProvider → RetryProvider → CircuitBreakerProvider → CachedProvider → FailoverProvider → backend`), `RigAdapter` (rig-core bridge for OpenAI/Anthropic/Ollama/Tinfoil), `FailoverProvider`, `CircuitBreakerProvider`, `CachedProvider`, `RetryProvider`, session token management |
 | `observability` | `src/observability/` | Tracing and metrics backend configuration |
 | `orchestrator` | `src/orchestrator/` | Internal HTTP API served to Docker sandbox containers: LLM proxy endpoint, job event streaming, per-job bearer token auth, `ContainerJobManager` (bollard lifecycle) |
 | `pairing` | `src/pairing/` | Device pairing and authentication helpers for remote channel setup |
@@ -176,7 +181,7 @@ The following table lists every source module directory and the key top-level fi
 | `secrets` | `src/secrets/` | Encrypted credential storage: AES-256-GCM encryption, HKDF-SHA256 per-secret key derivation, PostgreSQL backend (libSQL not supported for encrypted store), OS keychain integration (macOS: security-framework, Linux: secret-service/KWallet) |
 | `setup` | `src/setup/` | 7-step interactive onboarding wizard: database backend selection, NEAR AI authentication, secrets master key setup, channel configuration |
 | `skills` | `src/skills/` | SKILL.md prompt extension system: `SkillRegistry` (discover, install, remove), deterministic scorer (keywords/tags/regex), `SkillTrust` model (Trusted vs Installed), tool attenuation (trust-based ceiling), gating requirements (bins/env/config), `SkillCatalog` (ClawHub HTTP client) |
-| `tools` | `src/tools/` | Extensible tool system: `Tool` trait, `ToolRegistry` (shadowing protection for built-in names), built-in tools (echo, time, json, http, shell, file ops, memory, job mgmt, routines, extensions, skills, `HtmlConverter` (HTML-to-Markdown, two-stage: readability extraction + markdown conversion; feature-gated `html-to-markdown`)), WASM sandbox (wasmtime component model, fuel metering, memory limits), MCP client (JSON-RPC over HTTP), dynamic software builder |
+| `tools` | `src/tools/` | Extensible tool system: `Tool` trait, `ToolRegistry` (shadowing protection for built-in names; shared `Arc<RateLimiter>` for per-tool per-user sliding window rate limiting via **RateLimiter** (`tools/rate_limiter.rs`) — per-minute and per-hour windows), built-in tools (echo, time, json, http, shell, file ops, memory, job mgmt, routines, extensions, skills, `HtmlConverter` (**HTML-to-Markdown** built-in conversion — two-stage: readability extraction + markdown conversion; feature-gated `html-to-markdown`)), WASM sandbox (wasmtime component model, fuel metering, memory limits), MCP client (JSON-RPC over HTTP), dynamic software builder |
 | `tunnel` | `src/tunnel/` | Tunnel/ngrok-style public URL provisioning for webhook channels |
 | `worker` | `src/worker/` | Runs inside Docker containers: `Worker` execution loop, tool calls via LLM reasoning, Claude Code bridge (spawns `claude` CLI), orchestrator HTTP client, proxy LLM provider that forwards requests through orchestrator |
 | `workspace` | `src/workspace/` | Persistent memory (OpenClaw-inspired): path-based document store, content chunking (800 tokens, 15% overlap), `EmbeddingProvider` trait (OpenAI, NEAR AI, Ollama), hybrid FTS+vector search via Reciprocal Rank Fusion, identity file injection into system prompt, heartbeat checklist |
@@ -259,7 +264,7 @@ src/main.rs
     │        │       └──▶ channels::web::auth  (Bearer token, constant-time compare)
     │        ├──▶ channels::http     (HttpChannel, axum webhook)
     │        ├──▶ channels::repl     (ReplChannel, rustyline)
-    │        ├──▶ channels::wasm     (WASM channel runtime; loads channels-src/: Telegram, Slack, Discord, WhatsApp)
+    │        ├──▶ channels::wasm     (WASM channel runtime; loads channels-src/: Telegram, Slack, Discord, WhatsApp; hot-activate v0.10.0; device pairing + channel-aware prompts)
     │        └──▶ cli                 (clap command routing)
     │
     └──▶ agent (Agent)
@@ -808,8 +813,8 @@ File counts for each module directory (`.rs` files only, excluding tests in sepa
 | Module | Directory | `.rs` Files |
 |--------|-----------|------------|
 | `agent` | `src/agent/` | 21 |
-| `channels` | `src/channels/` | 35+ |
-| `cli` | `src/cli/` | 11 |
+| `channels` | `src/channels/` | 33 |
+| `cli` | `src/cli/` | 12 |
 | `config` | `src/config/` | 17 |
 | `context` | `src/context/` | 4 |
 | `db` | `src/db/` | 11 |
@@ -822,19 +827,19 @@ File counts for each module directory (`.rs` files only, excluding tests in sepa
 | `observability` | `src/observability/` | 5 |
 | `orchestrator` | `src/orchestrator/` | 4 |
 | `pairing` | `src/pairing/` | 2 |
-| `registry` | `src/registry/` | 4 |
-| `safety` | `src/safety/` | 5 |
+| `registry` | `src/registry/` | 6 |
+| `safety` | `src/safety/` | 6 |
 | `sandbox` | `src/sandbox/` | 9 |
 | `secrets` | `src/secrets/` | 5 |
 | `setup` | `src/setup/` | 4 |
 | `skills` | `src/skills/` | 7 |
-| `tools` | `src/tools/` | 45+ |
+| `tools` | `src/tools/` | 41 |
 | `tunnel` | `src/tunnel/` | 6 |
 | `worker` | `src/worker/` | 5 |
 | `workspace` | `src/workspace/` | 7 |
 | **Top-level files** | `src/*.rs` | 11 (`main.rs`, `lib.rs`, `app.rs`, `bootstrap.rs`, `service.rs`, `error.rs`, `settings.rs`, `util.rs`, `boot_screen.rs`, `testing.rs`, `tracing_fmt.rs`) |
 
-> **Note**: File counts updated for v0.9.0. The tools module now includes 12 files in `builtin/`, 13 files in `wasm/`, and additional builder/mcp files.
+> **Note**: File counts are pinned to the `v0.11.1` release tag snapshot. The tools module includes 13 files in `builtin/`, 13 files in `wasm/`, plus builder/mcp support modules.
 
 The `tools` module is one of the largest modules, reflecting the breadth of the tool system: built-ins, a full WASM runtime, an MCP client, a software builder, and the registry/trait definitions. The `channels` module includes REPL, web gateway, HTTP, and WASM channel runtime implementations.
 
@@ -868,4 +873,4 @@ The `tools` module is one of the largest modules, reflecting the breadth of the 
 
 ---
 
-*Document generated from source code inspection of IronClaw v0.9.0 (`src/` directory). For module-level specifications, see `src/setup/README.md`, `src/workspace/README.md`, and `src/tools/README.md`.*
+*Document generated from source code inspection of IronClaw v0.11.1 (`src/` directory). For module-level specifications, see `src/setup/README.md`, `src/workspace/README.md`, and `src/tools/README.md`.*
