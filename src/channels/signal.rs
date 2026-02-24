@@ -30,7 +30,7 @@ const MAX_HTTP_RESPONSE_SIZE: usize = 10 * 1024 * 1024;
 const MAX_REPLY_TARGETS: usize = 10000;
 const MAX_ERROR_LOG_BODY: usize = 1024;
 
-const REPLY_TARGETS_CAP: NonZeroUsize = unsafe { NonZeroUsize::new_unchecked(MAX_REPLY_TARGETS) };
+const REPLY_TARGETS_CAP: NonZeroUsize = NonZeroUsize::new(MAX_REPLY_TARGETS).unwrap();
 
 /// Recipient classification for outbound messages.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -408,16 +408,16 @@ impl SignalChannel {
         }
 
         // Reject obviously oversized responses before buffering.
-        if let Some(len) = resp.content_length() {
-            if len as usize > MAX_HTTP_RESPONSE_SIZE {
-                return Err(ChannelError::SendFailed {
-                    name: "signal".to_string(),
-                    reason: format!(
-                        "RPC response Content-Length too large: {} bytes (max {})",
-                        len, MAX_HTTP_RESPONSE_SIZE
-                    ),
-                });
-            }
+        if let Some(len) = resp.content_length()
+            && len as usize > MAX_HTTP_RESPONSE_SIZE
+        {
+            return Err(ChannelError::SendFailed {
+                name: "signal".to_string(),
+                reason: format!(
+                    "RPC response Content-Length too large: {} bytes (max {})",
+                    len, MAX_HTTP_RESPONSE_SIZE
+                ),
+            });
         }
 
         let status = resp.status();
@@ -604,17 +604,16 @@ impl SignalChannel {
                         .group_info
                         .as_ref()
                         .and_then(|g| g.group_id.as_deref())
+                        && !self.is_group_allowed(group_id)
                     {
-                        if !self.is_group_allowed(group_id) {
-                            tracing::debug!(
-                                group_id = %group_id,
-                                "Signal: group not in allow_from_groups, dropping"
-                            );
-                            return None;
-                        }
+                        tracing::debug!(
+                            group_id = %group_id,
+                            "Signal: group not in allow_from_groups, dropping"
+                        );
+                        return None;
                     }
                 }
-                "allowlist" | _ => {
+                "allowlist" => {
                     // Default to allowlist - check group AND sender
                     if let Some(group_id) = data_msg
                         .group_info
@@ -639,13 +638,12 @@ impl SignalChannel {
                         }
                     }
                 }
+                _ => {}
             }
         } else {
             // DM message - apply DM policy
             match self.config.dm_policy.as_str() {
-                "open" => {
-                    // Allow all DM senders - no allow_from check needed
-                }
+                "open" => {}
                 "pairing" => {
                     // Pairing policy: check allow_from + pairing store
                     if !self.is_sender_allowed_with_pairing(&sender) {
@@ -663,13 +661,14 @@ impl SignalChannel {
                         }
                     }
                 }
-                "allowlist" | _ => {
+                "allowlist" => {
                     // Default: check allow_from list
                     if !self.is_sender_allowed(&sender) {
                         tracing::debug!(sender = %sender, "Signal: sender not in allow_from, dropping");
                         return None;
                     }
                 }
+                _ => {}
             }
         }
 
@@ -698,10 +697,10 @@ impl SignalChannel {
         let mut msg = IncomingMessage::new("signal", &sender, text).with_metadata(metadata);
 
         // Use sourceName as display name if available.
-        if let Some(ref name) = envelope.source_name {
-            if !name.is_empty() {
-                msg = msg.with_user_name(name);
-            }
+        if let Some(ref name) = envelope.source_name
+            && !name.is_empty()
+        {
+            msg = msg.with_user_name(name);
         }
 
         // Use a deterministic UUID as thread_id for all conversations.
@@ -787,13 +786,12 @@ impl Channel for SignalChannel {
         metadata: &serde_json::Value,
     ) -> Result<(), ChannelError> {
         // Send typing indicator for thinking status.
-        if matches!(status, StatusUpdate::Thinking(_)) {
-            if let Some(target_str) = metadata.get("signal_target").and_then(|v| v.as_str()) {
-                let target = Self::parse_recipient_target(target_str);
-                let params = self.build_rpc_params(&target, None);
-                // Best-effort: don't fail the agent loop on typing errors.
-                let _ = self.rpc_request("sendTyping", params).await;
-            }
+        if matches!(status, StatusUpdate::Thinking(_))
+            && let Some(target_str) = metadata.get("signal_target").and_then(|v| v.as_str())
+        {
+            let target = Self::parse_recipient_target(target_str);
+            let params = self.build_rpc_params(&target, None);
+            let _ = self.rpc_request("sendTyping", params).await;
         }
         Ok(())
     }
@@ -1003,22 +1001,19 @@ async fn sse_listener(
                     if !current_data.is_empty() {
                         match serde_json::from_str::<SseEnvelope>(&current_data) {
                             Ok(sse) => {
-                                if let Some(ref envelope) = sse.envelope {
-                                    if let Some((msg, target)) = channel.process_envelope(envelope)
+                                if let Some(ref envelope) = sse.envelope
+                                    && let Some((msg, target)) = channel.process_envelope(envelope)
+                                {
+                                    // Store reply target for respond().
+                                    // LruCache automatically evicts the
+                                    // least-recently-used entry when full.
                                     {
-                                        // Store reply target for respond().
-                                        // LruCache automatically evicts the
-                                        // least-recently-used entry when full.
-                                        {
-                                            let mut targets = reply_targets.write().await;
-                                            targets.put(msg.id, target);
-                                        }
-                                        if tx.send(msg).await.is_err() {
-                                            tracing::debug!(
-                                                "Signal SSE: receiver dropped, exiting"
-                                            );
-                                            return Ok(());
-                                        }
+                                        let mut targets = reply_targets.write().await;
+                                        targets.put(msg.id, target);
+                                    }
+                                    if tx.send(msg).await.is_err() {
+                                        tracing::debug!("Signal SSE: receiver dropped, exiting");
+                                        return Ok(());
                                     }
                                 }
                             }
@@ -1044,15 +1039,13 @@ async fn sse_listener(
         }
 
         // Process any trailing data before reconnect.
-        if !current_data.is_empty() {
-            if let Ok(sse) = serde_json::from_str::<SseEnvelope>(&current_data) {
-                if let Some(ref envelope) = sse.envelope {
-                    if let Some((msg, target)) = channel.process_envelope(envelope) {
-                        reply_targets.write().await.put(msg.id, target);
-                        let _ = tx.send(msg).await;
-                    }
-                }
-            }
+        if !current_data.is_empty()
+            && let Ok(sse) = serde_json::from_str::<SseEnvelope>(&current_data)
+            && let Some(ref envelope) = sse.envelope
+            && let Some((msg, target)) = channel.process_envelope(envelope)
+        {
+            reply_targets.write().await.put(msg.id, target);
+            let _ = tx.send(msg).await;
         }
 
         tracing::debug!("Signal SSE stream ended, reconnecting with backoff...");

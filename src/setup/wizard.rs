@@ -1981,10 +1981,10 @@ impl SetupWizard {
         if let Some(ref allow_from) = self.settings.channels.signal_allow_from {
             env_vars.push(("SIGNAL_ALLOW_FROM", allow_from.clone()));
         }
-        if let Some(ref allow_from_groups) = self.settings.channels.signal_allow_from_groups {
-            if !allow_from_groups.is_empty() {
-                env_vars.push(("SIGNAL_ALLOW_FROM_GROUPS", allow_from_groups.clone()));
-            }
+        if let Some(ref allow_from_groups) = self.settings.channels.signal_allow_from_groups
+            && !allow_from_groups.is_empty()
+        {
+            env_vars.push(("SIGNAL_ALLOW_FROM_GROUPS", allow_from_groups.clone()));
         }
         if let Some(ref dm_policy) = self.settings.channels.signal_dm_policy {
             env_vars.push(("SIGNAL_DM_POLICY", dm_policy.clone()));
@@ -1992,10 +1992,10 @@ impl SetupWizard {
         if let Some(ref group_policy) = self.settings.channels.signal_group_policy {
             env_vars.push(("SIGNAL_GROUP_POLICY", group_policy.clone()));
         }
-        if let Some(ref group_allow_from) = self.settings.channels.signal_group_allow_from {
-            if !group_allow_from.is_empty() {
-                env_vars.push(("SIGNAL_GROUP_ALLOW_FROM", group_allow_from.clone()));
-            }
+        if let Some(ref group_allow_from) = self.settings.channels.signal_group_allow_from
+            && !group_allow_from.is_empty()
+        {
+            env_vars.push(("SIGNAL_GROUP_ALLOW_FROM", group_allow_from.clone()));
         }
 
         if !env_vars.is_empty() {
