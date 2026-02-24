@@ -3,7 +3,7 @@
 > **AI Agent Use**: Optimized for code review, bug triage, and targeted fixes.
 > Jump directly to the section relevant to the error or task — no narrative reading required.
 
-**Source**: IronClaw v0.9.0 · `~/src/ironclaw/` · ~115K lines Rust
+**Source**: IronClaw v0.11.1 (`ebb4ce95`) · `~/src/ironclaw/` · ~113K Rust lines in `src/` (~129K repo-wide)
 
 ---
 
@@ -39,7 +39,7 @@
 | Per-job LLM reasoning loop | `src/agent/worker.rs` |
 | Stuck job detection / recovery | `src/agent/self_repair.rs` |
 | Session / conversation model | `src/agent/session.rs` |
-| Context window compaction | `src/agent/compaction.rs` |
+| Context window compaction / ContextCompactor (v0.11.0) | `src/agent/compaction.rs` |
 | Memory pressure monitoring | `src/agent/context_monitor.rs` |
 | Routine (cron/event/webhook) engine | `src/agent/routine_engine.rs` |
 | Proactive heartbeat logic | `src/agent/heartbeat.rs` |
@@ -68,6 +68,7 @@
 | WASM credential injection | `src/tools/wasm/credential_injector.rs` |
 | Dynamic tool builder | `src/tools/builder/core.rs` |
 | MCP client (HTTP only) | `src/tools/mcp/client.rs` |
+| RateLimiter for tools (v0.10.0) | `src/tools/rate_limiter.rs` |
 | Prompt injection sanitizer | `src/safety/sanitizer.rs` |
 | Input validator | `src/safety/validator.rs` |
 | Policy rules engine | `src/safety/policy.rs` |
@@ -76,7 +77,7 @@
 | LLM provider trait | `src/llm/provider.rs` |
 | LLM provider factory / backend enum | `src/llm/mod.rs` |
 | NEAR AI provider (Chat Completions, dual auth) | `src/llm/nearai_chat.rs` |
-| Smart routing (cheap/primary cascade) | `src/llm/smart_routing.rs` |
+| SmartRoutingProvider / cheap-primary cascade (v0.10.0) | `src/llm/smart_routing.rs` |
 | Circuit breaker | `src/llm/circuit_breaker.rs` |
 | Retry + exponential backoff | `src/llm/retry.rs` |
 | Multi-provider failover | `src/llm/failover.rs` |
@@ -285,8 +286,8 @@ Config struct: `src/config/mod.rs` · `INJECTED_VARS: OnceLock<HashMap<String,St
 | `LLM_BASE_URL` | URL | — | Yes (openai_compatible) | Custom base URL |
 | `LLM_API_KEY` | string | — | No | |
 | `LLM_MODEL` | string | `default` | No | Falls back to selected model from settings |
-| `LLM_EXTRA_HEADERS` | string | — | No | Extra HTTP headers injected into every LLM request. Format: `Key:Value,Key2:Value2`. Useful for OpenRouter attribution. |
-| `NEARAI_CHEAP_MODEL` | string | — | No | Cheap model for smart routing, evaluation, heartbeat tasks |
+| `LLM_EXTRA_HEADERS` | string | — | No | Comma-separated `Key:Value` headers for OpenAI-compatible providers. Added v0.10.0. |
+| `NEARAI_CHEAP_MODEL` | string | — | No | Cheap model for SmartRoutingProvider (e.g., `claude-haiku-4-20250514`). Added v0.10.0. |
 | `TINFOIL_API_KEY` | string | — | Yes (tinfoil) | |
 | `TINFOIL_MODEL` | string | `kimi-k2-5` | No | |
 
@@ -302,7 +303,7 @@ Config struct: `src/config/mod.rs` · `INJECTED_VARS: OnceLock<HashMap<String,St
 | `RESPONSE_CACHE_MAX_ENTRIES` | usize | `1000` | Cache size cap |
 | `LLM_FAILOVER_COOLDOWN_SECS` | u64 | `300` | Provider cooldown after repeated failures |
 | `LLM_FAILOVER_THRESHOLD` | u32 | `3` | Failures before provider cooldown |
-| `SMART_ROUTING_CASCADE` | bool | `true` | Cheap-model cascade behavior |
+| `SMART_ROUTING_CASCADE` | bool | `true` | `true` (default) to escalate uncertain cheap-model responses to primary. Added v0.10.0. |
 
 ### 4.4 Agent
 
@@ -438,20 +439,27 @@ Config struct: `src/config/mod.rs` · `INJECTED_VARS: OnceLock<HashMap<String,St
 - Otherwise → session token auth via `SessionManager` with auto-renewal on 401 (base URL defaults to `https://private.near.ai`)
 - Both modes use Chat Completions API (`/v1/chat/completions`) with tool-message flattening
 
-**Five-tier wrapper chain** (all backends):
+**Provider chain** (all backends, outermost to innermost):
 
 ```
-Request → SmartRoutingProvider → RetryProvider → CircuitBreakerProvider → ResponseCacheProvider → FailoverProvider → actual backend
+Request → SmartRoutingProvider → RetryProvider → CircuitBreakerProvider → CachedProvider → FailoverProvider → backend
 ```
 
 Source: `src/llm/smart_routing.rs`, `src/llm/retry.rs`, `src/llm/circuit_breaker.rs`, `src/llm/response_cache.rs`, `src/llm/failover.rs`
 
-**SmartRoutingProvider** (`src/llm/smart_routing.rs`): Routes requests to cheap vs primary model based on message complexity.
+**SmartRoutingProvider** (`src/llm/smart_routing.rs`, added v0.10.0): Sits at the top of the chain. Routes requests to cheap vs primary model based on message complexity classification.
 - `Simple` (greetings, yes/no, ≤200 chars, simple keywords) → cheap model (`NEARAI_CHEAP_MODEL`)
 - `Complex` (code blocks, implementation/refactor/debug/analyze keywords, >1000 chars) → primary model
-- `Moderate` (everything else) → cheap model first; if response contains uncertainty phrases → escalate to primary (cascade)
+- `Moderate` (everything else) → cheap model first; if response contains uncertainty phrases → escalate to primary (cascade escalation, controlled by `SMART_ROUTING_CASCADE`)
 - Tool calls (`complete_with_tools`) always go to primary — reliable structured output required
 - Config: `SMART_ROUTING_CASCADE=true` (enable cascade), `simple_max_chars=200`, `complex_min_chars=1000`
+
+**Context Compaction** (`src/agent/compaction.rs`, added v0.11.0): Triggered automatically when the LLM backend returns `ContextLengthExceeded`. Three strategies are available:
+- `Summarize` — sends the current conversation to the LLM with a summarization prompt and replaces history with the summary
+- `Truncate` — drops the oldest messages until the context fits within the model's limit
+- `MoveToWorkspace` — serializes the full conversation to a workspace document (persistent memory) and starts a fresh context with a reference
+
+After compaction completes, the failed LLM request is automatically retried with the compacted context.
 
 ---
 
@@ -1061,4 +1069,4 @@ sqlite3 ~/.ironclaw/ironclaw.db "SELECT id, status, created_at FROM agent_jobs O
 
 ---
 
-*Source: IronClaw v0.9.0 · Docs: github.com/mudrii/ironclaw-docs · Generated: 2026-02-22*
+*Source: IronClaw v0.11.1 (`ebb4ce95`) · Docs: github.com/mudrii/ironclaw-docs · Generated: 2026-02-24*
