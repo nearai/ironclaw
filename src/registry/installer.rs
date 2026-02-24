@@ -364,18 +364,17 @@ impl RegistryInstaller {
 
         validate_artifact_url(&manifest.name, "artifacts.wasm32-wasip2.url", url)?;
 
-        // Require SHA256 — refuse to install unverified binaries. Check before
-        // downloading to avoid wasting bandwidth on manifests that are missing
-        // checksums.
-        let expected_sha =
-            artifact
-                .sha256
-                .as_ref()
-                .ok_or_else(|| RegistryError::InvalidManifest {
-                    name: manifest.name.clone(),
-                    field: "artifacts.wasm32-wasip2.sha256",
-                    reason: "sha256 is required for artifact downloads".to_string(),
-                })?;
+        // Prefer SHA256 verification, but allow legacy `releases/latest/download`
+        // manifests from GitHub that omit checksums (the bundled registry uses
+        // this format today). Keep strict rejection for other URLs.
+        let expected_sha = artifact.sha256.as_deref();
+        if expected_sha.is_none() && !allows_missing_artifact_sha(url) {
+            return Err(RegistryError::InvalidManifest {
+                name: manifest.name.clone(),
+                field: "artifacts.wasm32-wasip2.sha256",
+                reason: "sha256 is required for artifact downloads".to_string(),
+            });
+        }
 
         let target_dir = match manifest.kind {
             ManifestKind::Tool => &self.tools_dir,
@@ -401,7 +400,9 @@ impl RegistryInstaller {
             manifest.kind, manifest.display_name
         );
         let bytes = download_artifact(url).await?;
-        verify_sha256(&bytes, expected_sha, url)?;
+        if let Some(expected_sha) = expected_sha {
+            verify_sha256(&bytes, expected_sha, url)?;
+        }
 
         let target_caps = target_dir.join(format!("{}.capabilities.json", manifest.name));
 
@@ -467,6 +468,12 @@ impl RegistryInstaller {
         println!("  Installed to {}", target_wasm.display());
 
         let mut warnings = Vec::new();
+        if expected_sha.is_none() {
+            warnings.push(format!(
+                "Installed '{}' without SHA256 verification (legacy GitHub latest artifact).",
+                manifest.name
+            ));
+        }
         if !has_capabilities {
             warnings.push(format!(
                 "No capabilities file found for '{}'. Auth and hooks may not work.",
@@ -610,6 +617,16 @@ fn verify_sha256(bytes: &[u8], expected: &str, url: &str) -> Result<(), Registry
         });
     }
     Ok(())
+}
+
+fn allows_missing_artifact_sha(url: &str) -> bool {
+    let Ok(parsed) = url::Url::parse(url) else {
+        return false;
+    };
+
+    matches!(parsed.host_str(), Some("github.com"))
+        && parsed.scheme() == "https"
+        && parsed.path().contains("/releases/latest/download/")
 }
 
 /// Check if bytes start with gzip magic number (0x1f 0x8b).
@@ -884,7 +901,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_install_from_artifact_rejects_null_sha256() {
+    async fn test_install_from_artifact_rejects_null_sha256_for_non_latest_release_url() {
         let temp = tempfile::tempdir().expect("tempdir");
         let installer = RegistryInstaller::new(
             temp.path().to_path_buf(),
@@ -897,7 +914,7 @@ mod tests {
             "demo",
             "tools-src/demo",
             Some(
-                "https://github.com/nearai/ironclaw/releases/latest/download/demo-wasm32-wasip2.tar.gz".to_string(),
+                "https://github.com/nearai/ironclaw/releases/download/v0.11.1/demo-wasm32-wasip2.tar.gz".to_string(),
             ),
             None, // sha256 = null
         );
@@ -910,6 +927,22 @@ mod tests {
             }
             other => panic!("unexpected result: {:?}", other),
         }
+    }
+
+    #[test]
+    fn test_allows_missing_artifact_sha_for_github_latest_release_downloads() {
+        assert!(allows_missing_artifact_sha(
+            "https://github.com/nearai/ironclaw/releases/latest/download/telegram-wasm32-wasip2.tar.gz"
+        ));
+        assert!(allows_missing_artifact_sha(
+            "https://github.com/WynnD/ironclaw/releases/latest/download/demo.tar.gz"
+        ));
+        assert!(!allows_missing_artifact_sha(
+            "https://github.com/nearai/ironclaw/releases/download/v0.11.1/demo.tar.gz"
+        ));
+        assert!(!allows_missing_artifact_sha(
+            "https://example.com/releases/latest/download/demo.tar.gz"
+        ));
     }
 
     #[test]

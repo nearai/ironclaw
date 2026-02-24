@@ -1,3 +1,5 @@
+# syntax=docker/dockerfile:1.7
+
 # Multi-stage Dockerfile for the IronClaw worker container.
 #
 # This image runs the ironclaw binary in worker mode inside Docker containers.
@@ -9,13 +11,38 @@
 # The image includes common development tools so workers can build software,
 # run tests, and execute shell commands.
 
-FROM rust:1.92-bookworm AS builder
+FROM rust:1.92-bookworm AS chef
+
+RUN cargo install cargo-chef
+
+WORKDIR /build
+
+FROM chef AS planner
 
 WORKDIR /build
 COPY . .
 
+# Generate dependency recipe for cargo-chef
+RUN cargo chef prepare --recipe-path recipe.json
+
+FROM chef AS builder
+
+WORKDIR /build
+
+COPY --from=planner /build/recipe.json /build/recipe.json
+
+RUN --mount=type=cache,id=ironclaw-cargo-registry,target=/usr/local/cargo/registry \
+    --mount=type=cache,id=ironclaw-cargo-git,target=/usr/local/cargo/git \
+    --mount=type=cache,id=ironclaw-worker-target,target=/build/target \
+    cargo chef cook --release --bin ironclaw --recipe-path recipe.json
+
+COPY . .
+
 # Build only the ironclaw binary (release mode)
-RUN cargo build --release --bin ironclaw
+RUN --mount=type=cache,id=ironclaw-cargo-registry,target=/usr/local/cargo/registry \
+    --mount=type=cache,id=ironclaw-cargo-git,target=/usr/local/cargo/git \
+    --mount=type=cache,id=ironclaw-worker-target,target=/build/target \
+    cargo build --release --bin ironclaw
 
 # ---
 
