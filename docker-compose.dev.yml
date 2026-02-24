@@ -1,0 +1,71 @@
+# Dev environment: IronClaw + Postgres + Jaeger with OTEL tracing.
+#
+# Usage:
+#   docker compose -f docker-compose.dev.yml up --build
+#
+# Then open:
+#   Web UI:  http://localhost:3001/?token=localdev
+#   Jaeger:  http://localhost:16686
+#
+# LLM credentials: put NEARAI_API_KEY, OPENAI_API_KEY, or similar in .env
+# (IronClaw starts without them, but LLM calls will fail).
+
+services:
+  postgres:
+    image: pgvector/pgvector:pg16
+    # Uncomment to access PG from host (pick a free port):
+    # ports: ["5434:5432"]
+    environment:
+      POSTGRES_DB: ironclaw
+      POSTGRES_USER: ironclaw
+      POSTGRES_PASSWORD: ironclaw  # dev-only
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ironclaw"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  jaeger:
+    image: jaegertracing/jaeger:2.15.1
+    ports:
+      - "4317:4317"    # OTLP gRPC
+      - "16686:16686"  # Jaeger UI
+    environment:
+      COLLECTOR_OTLP_ENABLED: "true"
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:16686/"]
+      interval: 2s
+      timeout: 5s
+      retries: 15
+
+  ironclaw:
+    build:
+      context: .
+      args:
+        CARGO_FEATURES: "postgres,libsql,html-to-markdown,otel"
+    ports:
+      - "3001:3001"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      jaeger:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgres://ironclaw:ironclaw@postgres:5432/ironclaw
+      OBSERVABILITY_BACKEND: otel
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://jaeger:4317
+      OTEL_SERVICE_NAME: ironclaw
+      CLI_ENABLED: "false"         # no TTY in Docker — disable REPL to prevent EOF shutdown
+      GATEWAY_ENABLED: "true"
+      GATEWAY_HOST: "0.0.0.0"
+      GATEWAY_PORT: "3001"
+      GATEWAY_AUTH_TOKEN: localdev
+      RUST_LOG: ironclaw=info
+    env_file:
+      - path: .env
+        required: false
+
+volumes:
+  pgdata:
