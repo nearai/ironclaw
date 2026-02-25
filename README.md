@@ -10,8 +10,6 @@
 
 <p align="center">
   <a href="#license"><img src="https://img.shields.io/badge/license-MIT%20OR%20Apache%202.0-blue.svg" alt="License: MIT OR Apache-2.0" /></a>
-  <a href="https://t.me/clawyerAI"><img src="https://img.shields.io/badge/Telegram-%40clawyerAI-26A5E4?style=flat&logo=telegram&logoColor=white" alt="Telegram: @clawyerAI" /></a>
-  <a href="https://www.reddit.com/r/clawyerAI/"><img src="https://img.shields.io/badge/Reddit-r%2FclawyerAI-FF4500?style=flat&logo=reddit&logoColor=white" alt="Reddit: r/clawyerAI" /></a>
 </p>
 
 <p align="center">
