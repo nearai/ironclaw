@@ -71,6 +71,10 @@ pub struct CachedProvider {
     config: ResponseCacheConfig,
     /// Total `complete()` calls (hits + misses) for periodic stats logging.
     request_count: AtomicU64,
+    /// Running total of cache hits, independent of entry lifecycle.
+    /// Never decremented on eviction, so `hit_rate_pct` in stats doesn't
+    /// drift down as entries expire or are LRU-evicted.
+    total_hit_count: AtomicU64,
 }
 
 impl CachedProvider {
@@ -81,6 +85,7 @@ impl CachedProvider {
             cache: Mutex::new(HashMap::new()),
             config,
             request_count: AtomicU64::new(0),
+            total_hit_count: AtomicU64::new(0),
         }
     }
 
@@ -97,14 +102,12 @@ impl CachedProvider {
             .is_empty()
     }
 
-    /// Total cache hits across all entries.
+    /// Total cache hits since this provider was created.
+    ///
+    /// Backed by an atomic counter that is never decremented on eviction,
+    /// so the value is accurate even under high eviction pressure.
     pub fn total_hits(&self) -> u64 {
-        self.cache
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .values()
-            .map(|e| e.hit_count)
-            .sum()
+        self.total_hit_count.load(Ordering::Relaxed)
     }
 
     /// Clear all cached entries.
@@ -113,11 +116,12 @@ impl CachedProvider {
     }
 
     /// Emit a cache statistics log line if `req_no` is a multiple of
-    /// [`STATS_LOG_EVERY_N`]. Must be called while holding the cache lock so
-    /// that hit counts and entry count are consistent.
-    fn maybe_log_stats(guard: &HashMap<String, CacheEntry>, req_no: u64) {
+    /// [`STATS_LOG_EVERY_N`]. `total_hits` must come from the `total_hit_count`
+    /// atomic so it accurately reflects hits that occurred on since-evicted
+    /// entries. Must be called while holding the cache lock so that
+    /// `entry_count` is consistent with the snapshot.
+    fn maybe_log_stats(guard: &HashMap<String, CacheEntry>, req_no: u64, total_hits: u64) {
         if req_no.is_multiple_of(STATS_LOG_EVERY_N) {
-            let total_hits: u64 = guard.values().map(|e| e.hit_count).sum();
             let hit_rate = total_hits as f64 / req_no as f64 * 100.0;
             tracing::info!(
                 total_requests = req_no,
@@ -194,11 +198,10 @@ impl LlmProvider for CachedProvider {
                     // Clone now so we can release the mutable borrow before stats.
                     let cached_response = entry.response.clone();
                     tracing::debug!(hits = hit_count, "response cache hit");
-                    if req_no.is_multiple_of(STATS_LOG_EVERY_N) {
-                        // Drop the mutable borrow of `entry` before reading `guard` immutably.
-                        let _ = entry;
-                        Self::maybe_log_stats(&guard, req_no);
-                    }
+                    // Drop the mutable borrow of `entry` before reading `guard` immutably.
+                    let _ = entry;
+                    let total_hits = self.total_hit_count.fetch_add(1, Ordering::Relaxed) + 1;
+                    Self::maybe_log_stats(&guard, req_no, total_hits);
                     return Ok(cached_response);
                 }
                 // Expired, remove it
@@ -207,11 +210,22 @@ impl LlmProvider for CachedProvider {
         }
 
         // Cache miss — call the real provider.
-        let response = self.inner.complete(request).await?;
+        let result = self.inner.complete(request).await;
 
         // Store result and maybe log stats, all within one lock acquisition.
+        // Stats are logged even on provider error so milestone intervals are
+        // not silently skipped.
         {
             let mut guard = self.cache.lock().unwrap_or_else(|e| e.into_inner());
+            let total_hits = self.total_hit_count.load(Ordering::Relaxed);
+
+            let response = match result {
+                Err(e) => {
+                    Self::maybe_log_stats(&guard, req_no, total_hits);
+                    return Err(e);
+                }
+                Ok(r) => r,
+            };
 
             // Evict expired entries
             guard.retain(|_, entry| now.duration_since(entry.created_at) < self.config.ttl);
@@ -240,10 +254,9 @@ impl LlmProvider for CachedProvider {
                 },
             );
 
-            Self::maybe_log_stats(&guard, req_no);
+            Self::maybe_log_stats(&guard, req_no, total_hits);
+            Ok(response)
         }
-
-        Ok(response)
     }
 
     async fn complete_with_tools(
@@ -284,6 +297,7 @@ mod tests {
     use std::sync::atomic::{AtomicU32, Ordering};
 
     use rust_decimal::Decimal;
+    use tracing_test::traced_test;
 
     use crate::error::LlmError;
     use crate::llm::provider::{
@@ -643,5 +657,122 @@ mod tests {
         let result = cached.set_model("new-model");
         assert!(result.is_err());
         assert_eq!(cached.len(), 1, "cache unaffected by failed set_model");
+    }
+
+    /// `hit_rate_pct` stays accurate even after entries are evicted.
+    /// The `total_hit_count` atomic is never decremented on eviction.
+    #[tokio::test]
+    async fn total_hits_survives_eviction() {
+        let stub = Arc::new(StubLlm::new("response"));
+        // max_entries = 1 so the first entry is LRU-evicted when a second arrives.
+        let cached = CachedProvider::new(
+            stub.clone(),
+            ResponseCacheConfig {
+                ttl: Duration::from_secs(60),
+                max_entries: 1,
+            },
+        );
+
+        // Populate the cache and score a hit.
+        cached.complete(simple_request()).await.unwrap();
+        cached.complete(simple_request()).await.unwrap();
+        assert_eq!(cached.total_hits(), 1);
+
+        // Add a different request — LRU evicts the first entry.
+        cached.complete(different_request()).await.unwrap();
+        assert_eq!(cached.len(), 1, "first entry was evicted");
+
+        // The hit from the evicted entry must still be counted.
+        assert_eq!(cached.total_hits(), 1, "hit count survives eviction");
+    }
+
+    /// A stats line is emitted exactly at the 100th request.
+    #[tokio::test]
+    #[traced_test]
+    async fn stats_logged_at_request_100() {
+        let stub = Arc::new(StubLlm::new("response"));
+        let cached = CachedProvider::new(
+            stub.clone(),
+            ResponseCacheConfig {
+                ttl: Duration::from_secs(60),
+                max_entries: 2000,
+            },
+        );
+
+        // 99 distinct requests — no stats line yet.
+        for i in 0..99u32 {
+            let req = CompletionRequest {
+                messages: vec![ChatMessage::user(format!("request {i}"))],
+                model: None,
+                max_tokens: None,
+                temperature: None,
+                stop_sequences: None,
+                metadata: Default::default(),
+            };
+            cached.complete(req).await.unwrap();
+        }
+        assert!(
+            !logs_contain("LLM response cache statistics"),
+            "no stats before request 100"
+        );
+
+        // 100th request triggers the first stats line.
+        let req = CompletionRequest {
+            messages: vec![ChatMessage::user("request 99")],
+            model: None,
+            max_tokens: None,
+            temperature: None,
+            stop_sequences: None,
+            metadata: Default::default(),
+        };
+        cached.complete(req).await.unwrap();
+        assert!(
+            logs_contain("LLM response cache statistics"),
+            "stats emitted at request 100"
+        );
+    }
+
+    /// Stats are emitted even when the inner provider returns an error.
+    #[tokio::test]
+    #[traced_test]
+    async fn stats_logged_on_provider_error_at_interval() {
+        let stub = Arc::new(StubLlm::new("response"));
+        let cached = CachedProvider::new(
+            stub.clone(),
+            ResponseCacheConfig {
+                ttl: Duration::from_secs(60),
+                max_entries: 2000,
+            },
+        );
+
+        // 99 successful requests.
+        for i in 0..99u32 {
+            let req = CompletionRequest {
+                messages: vec![ChatMessage::user(format!("req {i}"))],
+                model: None,
+                max_tokens: None,
+                temperature: None,
+                stop_sequences: None,
+                metadata: Default::default(),
+            };
+            cached.complete(req).await.unwrap();
+        }
+
+        // 100th request fails — stats must still be logged.
+        stub.set_failing(true);
+        let req = CompletionRequest {
+            messages: vec![ChatMessage::user("req 99")],
+            model: None,
+            max_tokens: None,
+            temperature: None,
+            stop_sequences: None,
+            metadata: Default::default(),
+        };
+        let result = cached.complete(req).await;
+        assert!(result.is_err());
+        assert!(
+            logs_contain("LLM response cache statistics"),
+            "stats emitted even when provider errors on request 100"
+        );
     }
 }
