@@ -1224,10 +1224,7 @@ mod tests {
             // Map should be at or near capacity (some tasks may share IDs in theory,
             // but in practice each spawned task gets a unique ID).
             let len_before = failover.provider_for_task.lock().unwrap().len();
-            assert!(
-                len_before > 0,
-                "Expected entries in map, got 0"
-            );
+            assert!(len_before > 0, "Expected entries in map, got 0");
 
             // Now one more insert should trigger eviction.
             let f = Arc::clone(&failover);

@@ -153,8 +153,7 @@ async fn test_otel_e2e_spans_arrive_in_jaeger() {
         .expect("chat span must exist");
     let tags = chat_span["tags"].as_array().expect("tags should be array");
     let has_provider = tags.iter().any(|t| {
-        t["key"].as_str() == Some("gen_ai.provider.name")
-            && t["value"].as_str() == Some("test")
+        t["key"].as_str() == Some("gen_ai.provider.name") && t["value"].as_str() == Some("test")
     });
     assert!(
         has_provider,

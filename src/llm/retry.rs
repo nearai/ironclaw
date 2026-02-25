@@ -389,10 +389,7 @@ mod tests {
             fn cost_per_token(&self) -> (Decimal, Decimal) {
                 (Decimal::ZERO, Decimal::ZERO)
             }
-            async fn complete(
-                &self,
-                _: CompletionRequest,
-            ) -> Result<CompletionResponse, LlmError> {
+            async fn complete(&self, _: CompletionRequest) -> Result<CompletionResponse, LlmError> {
                 unimplemented!()
             }
             async fn complete_with_tools(

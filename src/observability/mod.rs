@@ -52,10 +52,7 @@ impl ObservabilityConfig {
         use crate::config::helpers::{optional_env, parse_string_env};
 
         Ok(Self {
-            backend: parse_string_env(
-                "OBSERVABILITY_BACKEND",
-                &settings.observability.backend,
-            )?,
+            backend: parse_string_env("OBSERVABILITY_BACKEND", &settings.observability.backend)?,
             otel_endpoint: optional_env("OTEL_EXPORTER_OTLP_ENDPOINT")?
                 .or_else(|| settings.observability.otel_endpoint.clone()),
             otel_protocol: optional_env("OTEL_EXPORTER_OTLP_PROTOCOL")?
@@ -323,9 +320,7 @@ mod tests {
     #[test]
     fn observability_settings_db_round_trip() {
         let mut settings = crate::settings::Settings::default();
-        settings
-            .set("observability.backend", "log+otel")
-            .unwrap();
+        settings.set("observability.backend", "log+otel").unwrap();
         settings
             .set("observability.otel_endpoint", "http://jaeger:4317")
             .unwrap();

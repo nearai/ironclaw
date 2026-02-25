@@ -7,7 +7,9 @@ use std::collections::HashMap;
 use std::sync::Mutex;
 
 use opentelemetry::Context;
-use opentelemetry::trace::{Span as _, SpanKind, Status, TraceContextExt, Tracer, TracerProvider as _};
+use opentelemetry::trace::{
+    Span as _, SpanKind, Status, TraceContextExt, Tracer, TracerProvider as _,
+};
 use opentelemetry::{KeyValue, global};
 use opentelemetry_otlp::WithExportConfig;
 use opentelemetry_sdk::Resource;
@@ -159,29 +161,17 @@ impl Observer for OtelObserver {
             } => {
                 if let Some(cx) = self.lock_spans().remove("llm") {
                     let span = cx.span();
-                    span.set_attribute(KeyValue::new(
-                        "gen_ai.provider.name",
-                        provider.clone(),
-                    ));
-                    span.set_attribute(KeyValue::new(
-                        "gen_ai.response.model",
-                        model.clone(),
-                    ));
+                    span.set_attribute(KeyValue::new("gen_ai.provider.name", provider.clone()));
+                    span.set_attribute(KeyValue::new("gen_ai.response.model", model.clone()));
                     span.set_attribute(KeyValue::new(
                         "ironclaw.response.duration_ms",
                         duration.as_millis() as i64,
                     ));
                     if let Some(it) = input_tokens {
-                        span.set_attribute(KeyValue::new(
-                            "gen_ai.usage.input_tokens",
-                            *it as i64,
-                        ));
+                        span.set_attribute(KeyValue::new("gen_ai.usage.input_tokens", *it as i64));
                     }
                     if let Some(ot) = output_tokens {
-                        span.set_attribute(KeyValue::new(
-                            "gen_ai.usage.output_tokens",
-                            *ot as i64,
-                        ));
+                        span.set_attribute(KeyValue::new("gen_ai.usage.output_tokens", *ot as i64));
                     }
                     if let Some(reasons) = finish_reasons {
                         let arr: Vec<opentelemetry::StringValue> =
@@ -249,8 +239,7 @@ impl Observer for OtelObserver {
                     ));
                     span.set_attribute(KeyValue::new("ironclaw.tool.success", *success));
                     if !success {
-                        let msg =
-                            error_message.as_deref().unwrap_or("tool execution failed");
+                        let msg = error_message.as_deref().unwrap_or("tool execution failed");
                         span.set_status(Status::error(msg.to_string()));
                         span.set_attribute(KeyValue::new("error.message", msg.to_string()));
                     }
@@ -344,16 +333,14 @@ impl Observer for OtelObserver {
                         ));
                     }
                     if let Some(cost) = total_cost_usd {
-                        span.set_attribute(KeyValue::new(
-                            "ironclaw.usage.total_cost_usd",
-                            *cost,
-                        ));
+                        span.set_attribute(KeyValue::new("ironclaw.usage.total_cost_usd", *cost));
                     }
                     span.end();
                 }
             }
 
             ObserverEvent::Error { component, message } => {
+                let parent_cx = Self::agent_context(&self.lock_spans());
                 let mut span = self
                     .tracer
                     .span_builder("error")
@@ -362,7 +349,7 @@ impl Observer for OtelObserver {
                         KeyValue::new("ironclaw.component", component.clone()),
                         KeyValue::new("error.message", message.clone()),
                     ])
-                    .start(&self.tracer);
+                    .start_with_context(&self.tracer, &parent_cx);
                 span.set_status(Status::error(message.clone()));
                 span.end();
             }
@@ -636,7 +623,12 @@ mod tests {
         // HeartbeatTick → 1 span
         // Error → 1 span
         // Total: 7
-        assert_eq!(spans.len(), 7, "Expected exactly 7 spans, got {}", spans.len());
+        assert_eq!(
+            spans.len(),
+            7,
+            "Expected exactly 7 spans, got {}",
+            spans.len()
+        );
     }
 
     #[test]
@@ -763,7 +755,11 @@ mod tests {
 
         obs.flush();
         let spans = exporter.get_finished_spans().unwrap();
-        assert_eq!(spans.len(), 3, "agent + channel_message + heartbeat = 3 spans");
+        assert_eq!(
+            spans.len(),
+            3,
+            "agent + channel_message + heartbeat = 3 spans"
+        );
 
         let agent_span = spans.iter().find(|s| s.name == "invoke_agent").unwrap();
         let agent_span_id = agent_span.span_context.span_id();
@@ -778,6 +774,46 @@ mod tests {
         assert_eq!(
             heartbeat_span.parent_span_id, agent_span_id,
             "HeartbeatTick span should be a child of the agent span, not an orphaned root"
+        );
+    }
+
+    /// Regression test for f-1 (PR #334 review): Error spans should be
+    /// children of the agent span, not orphaned roots.
+    ///
+    /// Before the fix, the `ObserverEvent::Error` handler used
+    /// `.start(&self.tracer)` (implicitly `Context::current()` as parent),
+    /// while every other event handler correctly used `agent_context()` +
+    /// `start_with_context()`. This made Error spans appear as disconnected
+    /// root spans in Jaeger, breaking the trace hierarchy.
+    #[test]
+    fn error_span_is_child_of_agent() {
+        let (obs, exporter) = test_observer();
+
+        obs.record_event(&ObserverEvent::AgentStart {
+            provider: "test".into(),
+            model: "m".into(),
+        });
+        obs.record_event(&ObserverEvent::Error {
+            component: "llm".into(),
+            message: "connection refused".into(),
+        });
+        obs.record_event(&ObserverEvent::AgentEnd {
+            duration: Duration::from_secs(1),
+            tokens_used: None,
+            total_cost_usd: None,
+        });
+
+        obs.flush();
+        let spans = exporter.get_finished_spans().unwrap();
+        assert_eq!(spans.len(), 2, "agent + error = 2 spans");
+
+        let agent_span = spans.iter().find(|s| s.name == "invoke_agent").unwrap();
+        let agent_span_id = agent_span.span_context.span_id();
+
+        let error_span = spans.iter().find(|s| s.name == "error").unwrap();
+        assert_eq!(
+            error_span.parent_span_id, agent_span_id,
+            "Error span should be a child of the agent span, not an orphaned root"
         );
     }
 

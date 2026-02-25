@@ -393,10 +393,13 @@ mod tests {
 
         // Events recorded through deps.observer should appear in the handle.
         use crate::observability::traits::ObserverEvent;
-        harness.deps.observer.record_event(&ObserverEvent::AgentStart {
-            provider: "test".into(),
-            model: "test-model".into(),
-        });
+        harness
+            .deps
+            .observer
+            .record_event(&ObserverEvent::AgentStart {
+                provider: "test".into(),
+                model: "test-model".into(),
+            });
         let captured = events.lock().unwrap();
         assert_eq!(captured.len(), 1);
         assert!(matches!(captured[0], ObserverEvent::AgentStart { .. }));

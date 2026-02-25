@@ -607,9 +607,10 @@ impl AppBuilder {
             use crate::secrets::{InMemorySecretsStore, SecretsCrypto};
             let ephemeral_key =
                 secrecy::SecretString::from(crate::secrets::keychain::generate_master_key_hex());
-            let crypto = Arc::new(SecretsCrypto::new(ephemeral_key).map_err(|e| {
-                anyhow::anyhow!("ephemeral crypto init failed: {e}")
-            })?);
+            let crypto = Arc::new(
+                SecretsCrypto::new(ephemeral_key)
+                    .map_err(|e| anyhow::anyhow!("ephemeral crypto init failed: {e}"))?,
+            );
             tracing::debug!("Using ephemeral in-memory secrets store for extension manager");
             Arc::new(InMemorySecretsStore::new(crypto))
         };

@@ -37,8 +37,7 @@ impl RecordingObserver {
 
     /// Create a new recording observer with a shared flush counter.
     #[allow(clippy::type_complexity)]
-    pub fn with_flush_counter(
-    ) -> (
+    pub fn with_flush_counter() -> (
         Self,
         Arc<Mutex<Vec<ObserverEvent>>>,
         Arc<Mutex<Vec<ObserverMetric>>>,
@@ -125,19 +124,10 @@ mod tests {
     #[test]
     fn tracks_flush_calls() {
         let (obs, _, _, flush_count) = RecordingObserver::with_flush_counter();
-        assert_eq!(
-            flush_count.load(std::sync::atomic::Ordering::Relaxed),
-            0
-        );
+        assert_eq!(flush_count.load(std::sync::atomic::Ordering::Relaxed), 0);
         obs.flush();
-        assert_eq!(
-            flush_count.load(std::sync::atomic::Ordering::Relaxed),
-            1
-        );
+        assert_eq!(flush_count.load(std::sync::atomic::Ordering::Relaxed), 1);
         obs.flush();
-        assert_eq!(
-            flush_count.load(std::sync::atomic::Ordering::Relaxed),
-            2
-        );
+        assert_eq!(flush_count.load(std::sync::atomic::Ordering::Relaxed), 2);
     }
 }

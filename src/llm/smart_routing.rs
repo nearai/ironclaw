@@ -10,7 +10,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::Mutex;
-use std::sync::atomic::{AtomicU64, AtomicU8, Ordering};
+use std::sync::atomic::{AtomicU8, AtomicU64, Ordering};
 
 use async_trait::async_trait;
 
@@ -885,10 +885,7 @@ mod tests {
 
             // Map should be at or near capacity.
             let len_before = router.routed_for_task.lock().unwrap().len();
-            assert!(
-                len_before > 0,
-                "Expected entries in map, got 0"
-            );
+            assert!(len_before > 0, "Expected entries in map, got 0");
 
             // One more insert should trigger eviction.
             let r = Arc::clone(&router);

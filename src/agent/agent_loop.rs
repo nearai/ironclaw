@@ -495,10 +495,11 @@ impl Agent {
             };
 
             // H8: Emit inbound channel message event.
-            self.observer().record_event(&crate::observability::ObserverEvent::ChannelMessage {
-                channel: message.channel.clone(),
-                direction: "inbound".to_string(),
-            });
+            self.observer()
+                .record_event(&crate::observability::ObserverEvent::ChannelMessage {
+                    channel: message.channel.clone(),
+                    direction: "inbound".to_string(),
+                });
 
             match self.handle_message(&message).await {
                 Ok(Some(response)) if !response.is_empty() => {
@@ -516,26 +517,26 @@ impl Agent {
                         }
                         Ok(crate::hooks::HookOutcome::Continue {
                             modified: Some(new_content),
-                        }) => {
-                            Some(self
-                                .channels
+                        }) => Some(
+                            self.channels
                                 .respond(&message, OutgoingResponse::text(new_content))
-                                .await)
-                        }
-                        _ => {
-                            Some(self
-                                .channels
+                                .await,
+                        ),
+                        _ => Some(
+                            self.channels
                                 .respond(&message, OutgoingResponse::text(response))
-                                .await)
-                        }
+                                .await,
+                        ),
                     };
                     // H8: Emit outbound event only after response was actually sent.
                     match send_result {
                         Some(Ok(())) => {
-                            self.observer().record_event(&crate::observability::ObserverEvent::ChannelMessage {
-                                channel: message.channel.clone(),
-                                direction: "outbound".to_string(),
-                            });
+                            self.observer().record_event(
+                                &crate::observability::ObserverEvent::ChannelMessage {
+                                    channel: message.channel.clone(),
+                                    direction: "outbound".to_string(),
+                                },
+                            );
                         }
                         Some(Err(e)) => {
                             tracing::error!(
@@ -794,8 +795,7 @@ mod tests {
         use crate::testing::TestHarnessBuilder;
 
         // Build test deps with a recording observer that tracks flush calls.
-        let (observer, _events, _metrics, flush_count) =
-            RecordingObserver::with_flush_counter();
+        let (observer, _events, _metrics, flush_count) = RecordingObserver::with_flush_counter();
 
         let harness = TestHarnessBuilder::new()
             .with_observer(Arc::new(observer))
@@ -949,10 +949,10 @@ mod tests {
         };
         use crate::config::{AgentConfig, SafetyConfig, SkillsConfig};
         use crate::error::ChannelError;
+        use crate::hooks::hook::HookFailureMode;
         use crate::hooks::{
             Hook, HookContext, HookError, HookEvent, HookOutcome, HookPoint, HookRegistry,
         };
-        use crate::hooks::hook::HookFailureMode;
         use crate::observability::recording::RecordingObserver;
         use crate::observability::traits::ObserverEvent;
         use crate::safety::SafetyLayer;
@@ -1011,10 +1011,7 @@ mod tests {
                 _msg: &IncomingMessage,
                 response: OutgoingResponse,
             ) -> Result<(), ChannelError> {
-                self.sent
-                    .lock()
-                    .unwrap()
-                    .push(response.content.clone());
+                self.sent.lock().unwrap().push(response.content.clone());
                 // Clone the stored result
                 match &*self.respond_result.lock().unwrap() {
                     Ok(()) => Ok(()),
@@ -1037,10 +1034,20 @@ mod tests {
 
         #[async_trait]
         impl Hook for RejectOutbound {
-            fn name(&self) -> &str { "reject-outbound" }
-            fn hook_points(&self) -> &[HookPoint] { &[HookPoint::BeforeOutbound] }
-            fn failure_mode(&self) -> HookFailureMode { HookFailureMode::FailClosed }
-            async fn execute(&self, _event: &HookEvent, _ctx: &HookContext) -> Result<HookOutcome, HookError> {
+            fn name(&self) -> &str {
+                "reject-outbound"
+            }
+            fn hook_points(&self) -> &[HookPoint] {
+                &[HookPoint::BeforeOutbound]
+            }
+            fn failure_mode(&self) -> HookFailureMode {
+                HookFailureMode::FailClosed
+            }
+            async fn execute(
+                &self,
+                _event: &HookEvent,
+                _ctx: &HookContext,
+            ) -> Result<HookOutcome, HookError> {
                 Ok(HookOutcome::reject("blocked by test hook"))
             }
         }
@@ -1052,15 +1059,25 @@ mod tests {
 
         impl ModifyOutbound {
             fn new(replacement: &str) -> Self {
-                Self { replacement: replacement.to_string() }
+                Self {
+                    replacement: replacement.to_string(),
+                }
             }
         }
 
         #[async_trait]
         impl Hook for ModifyOutbound {
-            fn name(&self) -> &str { "modify-outbound" }
-            fn hook_points(&self) -> &[HookPoint] { &[HookPoint::BeforeOutbound] }
-            async fn execute(&self, _event: &HookEvent, _ctx: &HookContext) -> Result<HookOutcome, HookError> {
+            fn name(&self) -> &str {
+                "modify-outbound"
+            }
+            fn hook_points(&self) -> &[HookPoint] {
+                &[HookPoint::BeforeOutbound]
+            }
+            async fn execute(
+                &self,
+                _event: &HookEvent,
+                _ctx: &HookContext,
+            ) -> Result<HookOutcome, HookError> {
                 Ok(HookOutcome::modify(self.replacement.clone()))
             }
         }
@@ -1070,11 +1087,23 @@ mod tests {
 
         #[async_trait]
         impl Hook for FailClosedHook {
-            fn name(&self) -> &str { "fail-closed" }
-            fn hook_points(&self) -> &[HookPoint] { &[HookPoint::BeforeOutbound] }
-            fn failure_mode(&self) -> HookFailureMode { HookFailureMode::FailClosed }
-            async fn execute(&self, _event: &HookEvent, _ctx: &HookContext) -> Result<HookOutcome, HookError> {
-                Err(HookError::ExecutionFailed { reason: "simulated hook failure".to_string() })
+            fn name(&self) -> &str {
+                "fail-closed"
+            }
+            fn hook_points(&self) -> &[HookPoint] {
+                &[HookPoint::BeforeOutbound]
+            }
+            fn failure_mode(&self) -> HookFailureMode {
+                HookFailureMode::FailClosed
+            }
+            async fn execute(
+                &self,
+                _event: &HookEvent,
+                _ctx: &HookContext,
+            ) -> Result<HookOutcome, HookError> {
+                Err(HookError::ExecutionFailed {
+                    reason: "simulated hook failure".to_string(),
+                })
             }
         }
 
@@ -1083,11 +1112,23 @@ mod tests {
 
         #[async_trait]
         impl Hook for FailOpenHook {
-            fn name(&self) -> &str { "fail-open" }
-            fn hook_points(&self) -> &[HookPoint] { &[HookPoint::BeforeOutbound] }
-            fn failure_mode(&self) -> HookFailureMode { HookFailureMode::FailOpen }
-            async fn execute(&self, _event: &HookEvent, _ctx: &HookContext) -> Result<HookOutcome, HookError> {
-                Err(HookError::ExecutionFailed { reason: "simulated hook failure".to_string() })
+            fn name(&self) -> &str {
+                "fail-open"
+            }
+            fn hook_points(&self) -> &[HookPoint] {
+                &[HookPoint::BeforeOutbound]
+            }
+            fn failure_mode(&self) -> HookFailureMode {
+                HookFailureMode::FailOpen
+            }
+            async fn execute(
+                &self,
+                _event: &HookEvent,
+                _ctx: &HookContext,
+            ) -> Result<HookOutcome, HookError> {
+                Err(HookError::ExecutionFailed {
+                    reason: "simulated hook failure".to_string(),
+                })
             }
         }
 
@@ -1147,7 +1188,11 @@ mod tests {
                 make_agent_config(),
                 deps,
                 cm.clone(),
-                None, None, None, None, None,
+                None,
+                None,
+                None,
+                None,
+                None,
             );
 
             (agent, events)
@@ -1158,26 +1203,46 @@ mod tests {
 
         #[async_trait]
         impl Channel for ArcChannel {
-            fn name(&self) -> &str { self.0.name() }
-            async fn start(&self) -> Result<MessageStream, ChannelError> { self.0.start().await }
-            async fn respond(&self, msg: &IncomingMessage, response: OutgoingResponse) -> Result<(), ChannelError> {
+            fn name(&self) -> &str {
+                self.0.name()
+            }
+            async fn start(&self) -> Result<MessageStream, ChannelError> {
+                self.0.start().await
+            }
+            async fn respond(
+                &self,
+                msg: &IncomingMessage,
+                response: OutgoingResponse,
+            ) -> Result<(), ChannelError> {
                 self.0.respond(msg, response).await
             }
-            async fn health_check(&self) -> Result<(), ChannelError> { self.0.health_check().await }
+            async fn health_check(&self) -> Result<(), ChannelError> {
+                self.0.health_check().await
+            }
         }
 
         /// Helper to count outbound events.
         fn count_outbound_events(events: &[ObserverEvent]) -> usize {
-            events.iter().filter(|e| matches!(e,
-                ObserverEvent::ChannelMessage { direction, .. } if direction == "outbound"
-            )).count()
+            events
+                .iter()
+                .filter(|e| {
+                    matches!(e,
+                        ObserverEvent::ChannelMessage { direction, .. } if direction == "outbound"
+                    )
+                })
+                .count()
         }
 
         /// Helper to count inbound events.
         fn count_inbound_events(events: &[ObserverEvent]) -> usize {
-            events.iter().filter(|e| matches!(e,
-                ObserverEvent::ChannelMessage { direction, .. } if direction == "inbound"
-            )).count()
+            events
+                .iter()
+                .filter(|e| {
+                    matches!(e,
+                        ObserverEvent::ChannelMessage { direction, .. } if direction == "inbound"
+                    )
+                })
+                .count()
         }
 
         /// Send a single message followed by /quit and run the agent loop.
@@ -1212,8 +1277,16 @@ mod tests {
 
             let recorded = send_and_run(agent, events, "test-ch", "/ping").await;
 
-            assert_eq!(count_inbound_events(&recorded), 2, "should have 2 inbound events (ping + quit)");
-            assert_eq!(count_outbound_events(&recorded), 1, "should have 1 outbound event");
+            assert_eq!(
+                count_inbound_events(&recorded),
+                2,
+                "should have 2 inbound events (ping + quit)"
+            );
+            assert_eq!(
+                count_outbound_events(&recorded),
+                1,
+                "should have 1 outbound event"
+            );
         }
 
         #[tokio::test]
@@ -1225,24 +1298,44 @@ mod tests {
 
             let recorded = send_and_run(agent, events, "test-ch", "/ping").await;
 
-            assert_eq!(count_inbound_events(&recorded), 2, "should have 2 inbound events (ping + quit)");
-            assert_eq!(count_outbound_events(&recorded), 0, "hook rejected: should have 0 outbound events");
-            assert!(channel.sent_contents().is_empty(), "nothing should be sent to channel");
+            assert_eq!(
+                count_inbound_events(&recorded),
+                2,
+                "should have 2 inbound events (ping + quit)"
+            );
+            assert_eq!(
+                count_outbound_events(&recorded),
+                0,
+                "hook rejected: should have 0 outbound events"
+            );
+            assert!(
+                channel.sent_contents().is_empty(),
+                "nothing should be sent to channel"
+            );
         }
 
         #[tokio::test]
         async fn outbound_event_emitted_when_hook_modifies() {
             let channel = Arc::new(StubChannel::ok("test-ch"));
             let hooks = Arc::new(HookRegistry::new());
-            hooks.register(Arc::new(ModifyOutbound::new("Modified response"))).await;
+            hooks
+                .register(Arc::new(ModifyOutbound::new("Modified response")))
+                .await;
             let (agent, events) = build_agent(channel.clone(), hooks, "Original").await;
 
             let recorded = send_and_run(agent, events, "test-ch", "/ping").await;
 
-            assert_eq!(count_outbound_events(&recorded), 1, "should have 1 outbound event for modified content");
+            assert_eq!(
+                count_outbound_events(&recorded),
+                1,
+                "should have 1 outbound event for modified content"
+            );
             let sent = channel.sent_contents();
             assert_eq!(sent.len(), 1);
-            assert_eq!(sent[0], "Modified response", "channel should receive the modified content");
+            assert_eq!(
+                sent[0], "Modified response",
+                "channel should receive the modified content"
+            );
         }
 
         #[tokio::test]
@@ -1253,8 +1346,16 @@ mod tests {
 
             let recorded = send_and_run(agent, events, "test-ch", "/ping").await;
 
-            assert_eq!(count_inbound_events(&recorded), 2, "should have 2 inbound events (ping + quit)");
-            assert_eq!(count_outbound_events(&recorded), 0, "send failed: should have 0 outbound events");
+            assert_eq!(
+                count_inbound_events(&recorded),
+                2,
+                "should have 2 inbound events (ping + quit)"
+            );
+            assert_eq!(
+                count_outbound_events(&recorded),
+                0,
+                "send failed: should have 0 outbound events"
+            );
         }
 
         #[tokio::test]
@@ -1266,9 +1367,20 @@ mod tests {
 
             let recorded = send_and_run(agent, events, "test-ch", "/ping").await;
 
-            assert_eq!(count_inbound_events(&recorded), 2, "should have 2 inbound events (ping + quit)");
-            assert_eq!(count_outbound_events(&recorded), 0, "fail-closed hook: should have 0 outbound events");
-            assert!(channel.sent_contents().is_empty(), "nothing should be sent to channel");
+            assert_eq!(
+                count_inbound_events(&recorded),
+                2,
+                "should have 2 inbound events (ping + quit)"
+            );
+            assert_eq!(
+                count_outbound_events(&recorded),
+                0,
+                "fail-closed hook: should have 0 outbound events"
+            );
+            assert!(
+                channel.sent_contents().is_empty(),
+                "nothing should be sent to channel"
+            );
         }
 
         #[tokio::test]
@@ -1280,9 +1392,20 @@ mod tests {
 
             let recorded = send_and_run(agent, events, "test-ch", "/ping").await;
 
-            assert_eq!(count_inbound_events(&recorded), 2, "should have 2 inbound events (ping + quit)");
-            assert_eq!(count_outbound_events(&recorded), 1, "fail-open hook: should still emit outbound event");
-            assert!(!channel.sent_contents().is_empty(), "message should be sent to channel");
+            assert_eq!(
+                count_inbound_events(&recorded),
+                2,
+                "should have 2 inbound events (ping + quit)"
+            );
+            assert_eq!(
+                count_outbound_events(&recorded),
+                1,
+                "fail-open hook: should still emit outbound event"
+            );
+            assert!(
+                !channel.sent_contents().is_empty(),
+                "message should be sent to channel"
+            );
         }
 
         #[tokio::test]
@@ -1311,9 +1434,15 @@ mod tests {
 
             // 4 inbound events: 3 messages + 1 /quit
             assert_eq!(inbound, 4, "should have 4 inbound events (3 msgs + quit)");
-            assert_eq!(outbound, 3, "should have 3 outbound events (all sends succeeded)");
-            assert_eq!(channel.sent_contents().len(), 3, "3 messages sent to channel");
+            assert_eq!(
+                outbound, 3,
+                "should have 3 outbound events (all sends succeeded)"
+            );
+            assert_eq!(
+                channel.sent_contents().len(),
+                3,
+                "3 messages sent to channel"
+            );
         }
     }
-
 }

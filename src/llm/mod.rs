@@ -262,7 +262,11 @@ fn create_openai_compatible_provider(config: &LlmConfig) -> Result<Arc<dyn LlmPr
         compat.base_url,
         compat.model
     );
-    Ok(Arc::new(RigAdapter::new(model, &compat.model, "openai_compatible")))
+    Ok(Arc::new(RigAdapter::new(
+        model,
+        &compat.model,
+        "openai_compatible",
+    )))
 }
 
 /// Create a cheap/fast LLM provider for lightweight tasks (heartbeat, routing, evaluation).

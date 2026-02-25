@@ -2123,10 +2123,7 @@ mod tests {
                     std::time::Duration::ZERO,
                 ))
             }
-            fn requires_approval(
-                &self,
-                _params: &serde_json::Value,
-            ) -> ApprovalRequirement {
+            fn requires_approval(&self, _params: &serde_json::Value) -> ApprovalRequirement {
                 ApprovalRequirement::Always
             }
         }
@@ -2167,7 +2164,8 @@ mod tests {
                 }
                 async fn start(
                     &self,
-                ) -> Result<crate::channels::MessageStream, crate::error::ChannelError> {
+                ) -> Result<crate::channels::MessageStream, crate::error::ChannelError>
+                {
                     let msgs = vec![
                         IncomingMessage {
                             id: uuid::Uuid::new_v4(),
@@ -2221,8 +2219,7 @@ mod tests {
                 auto_approve_tools: auto_approve,
             };
 
-            let agent =
-                Agent::new(config, harness.deps, channels, None, None, None, None, None);
+            let agent = Agent::new(config, harness.deps, channels, None, None, None, None, None);
             let _ = agent.run().await;
 
             let captured = events.lock().unwrap();
@@ -2306,8 +2303,7 @@ mod tests {
                 echo_call("call_3"),
             ]));
 
-            let counts =
-                run_and_extract_turn_counts(llm, tools_with_approval().await, false).await;
+            let counts = run_and_extract_turn_counts(llm, tools_with_approval().await, false).await;
 
             assert!(!counts.is_empty(), "Expected at least one TurnComplete");
             assert_eq!(
@@ -2326,8 +2322,7 @@ mod tests {
                 echo_call("call_3"),
             ]));
 
-            let counts =
-                run_and_extract_turn_counts(llm, tools_with_approval().await, false).await;
+            let counts = run_and_extract_turn_counts(llm, tools_with_approval().await, false).await;
 
             assert!(!counts.is_empty(), "Expected at least one TurnComplete");
             assert_eq!(
@@ -2347,8 +2342,7 @@ mod tests {
                 echo_call("call_3"),
             ]));
 
-            let counts =
-                run_and_extract_turn_counts(llm, tools_builtin_only(), false).await;
+            let counts = run_and_extract_turn_counts(llm, tools_builtin_only(), false).await;
 
             assert!(!counts.is_empty(), "Expected at least one TurnComplete");
             assert_eq!(
@@ -2368,8 +2362,7 @@ mod tests {
                 echo_call("call_3"),
             ]));
 
-            let counts =
-                run_and_extract_turn_counts(llm, tools_with_approval().await, true).await;
+            let counts = run_and_extract_turn_counts(llm, tools_with_approval().await, true).await;
 
             assert!(!counts.is_empty(), "Expected at least one TurnComplete");
             assert_eq!(
@@ -2397,9 +2390,11 @@ mod tests {
             ]));
 
             let hooks = Arc::new(crate::hooks::HookRegistry::new());
-            hooks.register(Arc::new(RejectToolHook {
-                tool_name: "blocked_tool".to_string(),
-            })).await;
+            hooks
+                .register(Arc::new(RejectToolHook {
+                    tool_name: "blocked_tool".to_string(),
+                }))
+                .await;
 
             let counts = run_and_extract_turn_counts_with_hooks(
                 llm,

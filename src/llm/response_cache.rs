@@ -467,17 +467,11 @@ mod tests {
 
         // First call: cache miss — response should NOT be marked cached
         let r1 = cached.complete(simple_request()).await.unwrap();
-        assert!(
-            !r1.cached,
-            "Cache miss response must have cached=false"
-        );
+        assert!(!r1.cached, "Cache miss response must have cached=false");
 
         // Second call: cache hit — response MUST be marked cached
         let r2 = cached.complete(simple_request()).await.unwrap();
-        assert!(
-            r2.cached,
-            "Cache hit response must have cached=true"
-        );
+        assert!(r2.cached, "Cache hit response must have cached=true");
 
         // Content should still be the same
         assert_eq!(r2.content, "cached response");

@@ -535,8 +535,8 @@ impl LlmProvider for NearAiChatProvider {
             .unwrap_or_default()
             .into_iter()
             .map(|tc| {
-                let arguments = serde_json::from_str(&tc.function.arguments)
-                    .unwrap_or_else(|err| {
+                let arguments =
+                    serde_json::from_str(&tc.function.arguments).unwrap_or_else(|err| {
                         let boundary =
                             crate::util::floor_char_boundary(&tc.function.arguments, 200);
                         tracing::warn!(
