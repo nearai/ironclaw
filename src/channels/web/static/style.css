@@ -146,6 +146,7 @@ body {
 /* Tab Bar */
 .tab-bar {
   display: flex;
+  align-items: center;
   background: rgba(9, 9, 11, 0.75);
   backdrop-filter: blur(16px);
   -webkit-backdrop-filter: blur(16px);
@@ -154,6 +155,17 @@ body {
   padding: 0 16px;
   gap: 0;
   flex-shrink: 0;
+}
+
+.tab-mobile-select {
+  display: none;
+  background: var(--bg-elevated);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 8px 10px;
+  font-size: 13px;
+  min-width: 0;
 }
 
 .tab-bar button:not(.status-logs-btn) {
@@ -1837,6 +1849,43 @@ body {
   gap: 12px;
 }
 
+.extensions-note {
+  margin: 0 0 10px;
+  color: var(--text-secondary);
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+.extensions-note code {
+  font-family: var(--font-mono);
+  color: var(--text);
+}
+
+.always-approved-list {
+  margin-top: 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.always-approved-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 10px 12px;
+  background: var(--bg-secondary);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+}
+
+.always-approved-name {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: var(--text);
+  overflow-wrap: anywhere;
+}
+
 .ext-card {
   background: var(--bg-secondary);
   border: 1px solid var(--border);
@@ -2912,17 +2961,36 @@ mark {
 /* --- Mobile responsive --- */
 
 @media (max-width: 768px) {
-  /* Tab bar: horizontal scroll */
+  /* Tab bar: use a compact selector instead of horizontal scrolling */
   .tab-bar {
-    overflow-x: auto;
-    -webkit-overflow-scrolling: touch;
+    overflow-x: visible;
     padding: 0 8px;
+    gap: 8px;
+    min-height: 48px;
   }
 
-  .tab-bar button:not(.status-logs-btn) {
-    padding: 8px 12px;
-    font-size: 13px;
-    white-space: nowrap;
+  .tab-mobile-select {
+    display: block;
+    flex: 1;
+  }
+
+  .tab-bar button[data-tab],
+  .tab-bar .spacer,
+  .tab-bar .status-logs-btn {
+    display: none;
+  }
+
+  .tab-bar .status {
+    margin-left: auto;
+    min-width: auto;
+  }
+
+  .tab-bar .status span {
+    display: none;
+  }
+
+  .tee-shield {
+    display: none !important;
   }
 
   /* Chat messages: wider */

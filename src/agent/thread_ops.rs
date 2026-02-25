@@ -21,7 +21,115 @@ use crate::context::JobContext;
 use crate::error::Error;
 use crate::llm::ChatMessage;
 
+const AUTO_APPROVED_TOOLS_SETTING_KEY: &str = "agent.auto_approved_tools";
+const AUTO_APPROVED_TOOLS_LOADED_META_KEY: &str = "_auto_approved_tools_db_loaded";
+
 impl Agent {
+    /// Load persisted "always allow" tool approvals from the DB settings table
+    /// into the in-memory session exactly once per session instance.
+    async fn load_persisted_auto_approved_tools(
+        &self,
+        user_id: &str,
+        session: &Arc<Mutex<Session>>,
+    ) {
+        let store = match self.store() {
+            Some(s) => Arc::clone(s),
+            None => return,
+        };
+
+        // Fast path: already loaded for this in-memory session.
+        {
+            let sess = session.lock().await;
+            if sess
+                .metadata
+                .get(AUTO_APPROVED_TOOLS_LOADED_META_KEY)
+                .and_then(|v| v.as_bool())
+                == Some(true)
+            {
+                return;
+            }
+        }
+
+        let stored = match store
+            .get_setting(user_id, AUTO_APPROVED_TOOLS_SETTING_KEY)
+            .await
+        {
+            Ok(v) => v,
+            Err(e) => {
+                tracing::warn!(
+                    user_id = %user_id,
+                    key = AUTO_APPROVED_TOOLS_SETTING_KEY,
+                    error = %e,
+                    "Failed to load persisted auto-approved tools"
+                );
+                None
+            }
+        };
+
+        let mut loaded_tools: Vec<String> = Vec::new();
+        if let Some(value) = stored {
+            match value {
+                serde_json::Value::Array(items) => {
+                    for item in items {
+                        if let Some(name) = item.as_str() {
+                            loaded_tools.push(name.to_string());
+                        }
+                    }
+                }
+                other => {
+                    tracing::warn!(
+                        user_id = %user_id,
+                        key = AUTO_APPROVED_TOOLS_SETTING_KEY,
+                        value = %other,
+                        "Ignoring malformed persisted auto-approved tools (expected JSON string array)"
+                    );
+                }
+            }
+        }
+
+        let mut sess = session.lock().await;
+        for tool_name in loaded_tools {
+            sess.auto_approve_tool(tool_name);
+        }
+        if !sess.metadata.is_object() {
+            sess.metadata = serde_json::json!({});
+        }
+        if let Some(meta) = sess.metadata.as_object_mut() {
+            meta.insert(
+                AUTO_APPROVED_TOOLS_LOADED_META_KEY.to_string(),
+                serde_json::Value::Bool(true),
+            );
+        }
+    }
+
+    /// Persist the current session's "always allow" tool approvals to the DB.
+    async fn persist_auto_approved_tools(&self, user_id: &str, session: &Arc<Mutex<Session>>) {
+        let store = match self.store() {
+            Some(s) => Arc::clone(s),
+            None => return,
+        };
+
+        let mut tool_names: Vec<String> = {
+            let sess = session.lock().await;
+            sess.auto_approved_tools.iter().cloned().collect()
+        };
+        tool_names.sort();
+        tool_names.dedup();
+
+        let value = serde_json::json!(tool_names);
+        if let Err(e) = store
+            .set_setting(user_id, AUTO_APPROVED_TOOLS_SETTING_KEY, &value)
+            .await
+        {
+            tracing::warn!(
+                user_id = %user_id,
+                key = AUTO_APPROVED_TOOLS_SETTING_KEY,
+                error = %e,
+                "Failed to persist auto-approved tools"
+            );
+        }
+    }
+
     /// Hydrate a historical thread from DB into memory if not already present.
     ///
     /// Called before `resolve_thread` so that the session manager finds the
@@ -118,6 +226,11 @@ impl Agent {
         thread_id: Uuid,
         content: &str,
     ) -> Result<SubmissionResult, Error> {
+        // Load persisted session-scoped "always allow" approvals before any
+        // approval checks run in the agent loop.
+        self.load_persisted_auto_approved_tools(&message.user_id, &session)
+            .await;
+
         // First check thread state without holding lock during I/O
         let thread_state = {
             let sess = session.lock().await;
@@ -582,6 +695,11 @@ impl Agent {
         approved: bool,
         always: bool,
     ) -> Result<SubmissionResult, Error> {
+        // Keep the in-memory session synchronized with any persisted "always allow"
+        // approvals before we process the user's approval response.
+        self.load_persisted_auto_approved_tools(&message.user_id, &session)
+            .await;
+
         // Get pending approval for this thread
         let pending = {
             let mut sess = session.lock().await;
@@ -626,6 +744,9 @@ impl Agent {
                     pending.tool_name,
                     sess.id
                 );
+                drop(sess);
+                self.persist_auto_approved_tools(&message.user_id, &session)
+                    .await;
             }
 
             // Reset thread state to processing

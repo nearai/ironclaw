@@ -374,6 +374,17 @@ pub struct InstallExtensionRequest {
     pub kind: Option<String>,
 }
 
+#[derive(Debug, Serialize)]
+pub struct AlwaysApprovedToolsResponse {
+    pub tools: Vec<String>,
+    pub setting_key: &'static str,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct AlwaysApprovedToolRequest {
+    pub tool_name: String,
+}
+
 // --- Extension Setup ---
 
 #[derive(Debug, Serialize)]

@@ -69,6 +69,104 @@ fn normalize_schema_strict(schema: &JsonValue) -> JsonValue {
     schema
 }
 
+/// Recursively clean a JSON Schema without applying OpenAI strict-mode rewrites.
+///
+/// This is used for providers (notably Gemini) that reject or mishandle the
+/// OpenAI strict transformation (making every field required + nullable). We
+/// still prune invalid `required` entries so downstream provider validators
+/// don't reject schemas with stale required keys.
+fn normalize_schema_lenient(schema: &JsonValue) -> JsonValue {
+    let mut schema = schema.clone();
+    normalize_schema_lenient_recursive(&mut schema);
+    schema
+}
+
+fn normalize_schema_lenient_recursive(schema: &mut JsonValue) {
+    let obj = match schema.as_object_mut() {
+        Some(o) => o,
+        None => return,
+    };
+
+    // Recurse into combinators: anyOf, oneOf, allOf
+    for key in &["anyOf", "oneOf", "allOf"] {
+        if let Some(JsonValue::Array(variants)) = obj.get_mut(*key) {
+            for variant in variants.iter_mut() {
+                normalize_schema_lenient_recursive(variant);
+            }
+        }
+    }
+
+    // Recurse into array items
+    if let Some(items) = obj.get_mut("items") {
+        normalize_schema_lenient_recursive(items);
+    }
+
+    // Recurse into map value schemas
+    if let Some(additional_properties) = obj.get_mut("additionalProperties") {
+        normalize_schema_lenient_recursive(additional_properties);
+    }
+
+    // Recurse into `not`, `if`, `then`, `else`
+    for key in &["not", "if", "then", "else"] {
+        if let Some(sub) = obj.get_mut(*key) {
+            normalize_schema_lenient_recursive(sub);
+        }
+    }
+
+    // Recurse into object properties
+    if let Some(JsonValue::Object(props)) = obj.get_mut("properties") {
+        for prop_schema in props.values_mut() {
+            normalize_schema_lenient_recursive(prop_schema);
+        }
+    }
+
+    prune_required_to_defined_properties(obj);
+}
+
+/// Ensure every `required` entry refers to an existing key in `properties`.
+///
+/// Some providers (and/or proxy schema translators) are stricter than others
+/// and reject object schemas if `required` references a property that is not
+/// present. We defensively filter such entries here.
+fn prune_required_to_defined_properties(obj: &mut serde_json::Map<String, JsonValue>) {
+    let Some(props) = obj.get("properties").and_then(|p| p.as_object()) else {
+        return;
+    };
+
+    let allowed: HashSet<String> = props.keys().cloned().collect();
+
+    let filtered_required = obj.get("required").and_then(|r| r.as_array()).map(|arr| {
+        arr.iter()
+            .filter_map(|v| v.as_str())
+            .filter(|name| allowed.contains(*name))
+            .map(|s| JsonValue::String(s.to_string()))
+            .collect::<Vec<JsonValue>>()
+    });
+
+    if let Some(filtered) = filtered_required {
+        if filtered.is_empty() {
+            obj.remove("required");
+        } else {
+            obj.insert("required".to_string(), JsonValue::Array(filtered));
+        }
+    }
+}
+
+fn should_use_strict_tool_schema(model_name: &str) -> bool {
+    // Gemini (including OpenRouter `google/gemini-*` models) has stricter
+    // function-schema validation and is not compatible with our OpenAI strict
+    // rewrite in all cases. Keep the original schema shape for Gemini.
+    !model_name.to_ascii_lowercase().contains("gemini")
+}
+
+fn normalize_tool_parameters_for_model(model_name: &str, schema: &JsonValue) -> JsonValue {
+    if should_use_strict_tool_schema(model_name) {
+        normalize_schema_strict(schema)
+    } else {
+        normalize_schema_lenient(schema)
+    }
+}
+
 fn normalize_schema_recursive(schema: &mut JsonValue) {
     let obj = match schema.as_object_mut() {
         Some(o) => o,
@@ -87,6 +185,11 @@ fn normalize_schema_recursive(schema: &mut JsonValue) {
     // Recurse into array items
     if let Some(items) = obj.get_mut("items") {
         normalize_schema_recursive(items);
+    }
+
+    // Recurse into map value schemas
+    if let Some(additional_properties) = obj.get_mut("additionalProperties") {
+        normalize_schema_recursive(additional_properties);
     }
 
     // Recurse into `not`, `if`, `then`, `else`
@@ -167,6 +270,7 @@ fn normalize_schema_recursive(schema: &mut JsonValue) {
     // Set required to ALL property keys
     let required_value: Vec<JsonValue> = all_keys.into_iter().map(JsonValue::String).collect();
     obj.insert("required".to_string(), JsonValue::Array(required_value));
+    prune_required_to_defined_properties(obj);
 }
 
 /// Make a property schema nullable for OpenAI strict mode.
@@ -292,13 +396,13 @@ fn normalized_tool_call_id(raw: Option<&str>, seed: usize) -> String {
 ///
 /// Applies OpenAI strict-mode schema normalization to ensure all tool
 /// parameter schemas comply with OpenAI's function calling requirements.
-fn convert_tools(tools: &[IronToolDefinition]) -> Vec<RigToolDefinition> {
+fn convert_tools(model_name: &str, tools: &[IronToolDefinition]) -> Vec<RigToolDefinition> {
     tools
         .iter()
         .map(|t| RigToolDefinition {
             name: t.name.clone(),
             description: t.description.clone(),
-            parameters: normalize_schema_strict(&t.parameters),
+            parameters: normalize_tool_parameters_for_model(model_name, &t.parameters),
         })
         .collect()
 }
@@ -468,7 +572,7 @@ where
         let mut messages = request.messages;
         crate::llm::provider::sanitize_tool_messages(&mut messages);
         let (preamble, history) = convert_messages(&messages);
-        let tools = convert_tools(&request.tools);
+        let tools = convert_tools(&self.model_name, &request.tools);
         let tool_choice = convert_tool_choice(request.tool_choice.as_deref());
 
         let rig_req = build_rig_request(
@@ -661,10 +765,107 @@ mod tests {
                 }
             }),
         }];
-        let rig_tools = convert_tools(&tools);
+        let rig_tools = convert_tools("openai/gpt-4.1-mini", &tools);
         assert_eq!(rig_tools.len(), 1);
         assert_eq!(rig_tools[0].name, "search");
         assert_eq!(rig_tools[0].description, "Search the web");
+    }
+
+    #[test]
+    fn test_convert_tools_gemini_keeps_original_optional_shape() {
+        let tools = vec![IronToolDefinition {
+            name: "demo".to_string(),
+            description: "demo".to_string(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "required_field": {"type": "string"},
+                    "optional_field": {"type": "integer"}
+                },
+                "required": ["required_field"]
+            }),
+        }];
+
+        let rig_tools = convert_tools("google/gemini-3-flash-preview", &tools);
+        let params = &rig_tools[0].parameters;
+
+        assert_eq!(params["required"], serde_json::json!(["required_field"]));
+        assert_eq!(
+            params["properties"]["optional_field"]["type"],
+            serde_json::json!("integer")
+        );
+        assert!(
+            params.get("additionalProperties").is_none(),
+            "Gemini path should avoid OpenAI strict rewrites"
+        );
+    }
+
+    #[test]
+    fn test_convert_tools_non_gemini_applies_strict_rewrite() {
+        let tools = vec![IronToolDefinition {
+            name: "demo".to_string(),
+            description: "demo".to_string(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "required_field": {"type": "string"},
+                    "optional_field": {"type": "integer"}
+                },
+                "required": ["required_field"]
+            }),
+        }];
+
+        let rig_tools = convert_tools("openai/gpt-4.1", &tools);
+        let params = &rig_tools[0].parameters;
+
+        assert_eq!(params["additionalProperties"], serde_json::json!(false));
+        assert_eq!(
+            params["required"],
+            serde_json::json!(["optional_field", "required_field"])
+        );
+        assert_eq!(
+            params["properties"]["optional_field"]["type"],
+            serde_json::json!(["integer", "null"])
+        );
+    }
+
+    #[test]
+    fn test_normalize_schema_lenient_prunes_stale_required_recursively() {
+        let schema = serde_json::json!({
+            "type": "object",
+            "properties": {
+                "dashboard": {
+                    "type": "object",
+                    "properties": {
+                        "widgets": {
+                            "type": "array",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "id": {"type": "string"},
+                                    "title": {"type": "string"}
+                                },
+                                "required": ["id", "missing_widget_prop", "title"]
+                            }
+                        }
+                    },
+                    "required": ["widgets", "missing_dashboard_prop"]
+                }
+            },
+            "required": ["dashboard", "missing_root_prop"]
+        });
+
+        let normalized = normalize_schema_lenient(&schema);
+
+        assert_eq!(normalized["required"], serde_json::json!(["dashboard"]));
+        assert_eq!(
+            normalized["properties"]["dashboard"]["required"],
+            serde_json::json!(["widgets"])
+        );
+        assert_eq!(
+            normalized["properties"]["dashboard"]["properties"]["widgets"]["items"]["required"],
+            serde_json::json!(["id", "title"])
+        );
     }
 
     #[test]

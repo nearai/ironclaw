@@ -156,7 +156,10 @@ impl RoutineEngine {
             }
         };
 
-        tracing::info!(due_count = routines.len(), "Routine cron ticker: due routines loaded");
+        tracing::info!(
+            due_count = routines.len(),
+            "Routine cron ticker: due routines loaded"
+        );
 
         for routine in routines {
             if self.running_count.load(Ordering::Relaxed) >= self.config.max_concurrent_routines {
@@ -634,7 +637,10 @@ pub fn spawn_cron_ticker(
         let mut ticker = tokio::time::interval(interval);
         // Skip immediate first tick
         ticker.tick().await;
-        tracing::info!(interval_secs = interval.as_secs(), "Routine cron ticker task started");
+        tracing::info!(
+            interval_secs = interval.as_secs(),
+            "Routine cron ticker task started"
+        );
 
         loop {
             ticker.tick().await;

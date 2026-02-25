@@ -40,6 +40,8 @@ use crate::orchestrator::job_manager::ContainerJobManager;
 use crate::tools::ToolRegistry;
 use crate::workspace::Workspace;
 
+const AUTO_APPROVED_TOOLS_SETTING_KEY: &str = "agent.auto_approved_tools";
+
 /// Shared prompt queue: maps job IDs to pending follow-up prompts for Claude Code bridges.
 pub type PromptQueue = Arc<
     tokio::sync::Mutex<
@@ -225,6 +227,15 @@ pub async fn start_server(
         .route("/api/extensions", get(extensions_list_handler))
         .route("/api/extensions/tools", get(extensions_tools_handler))
         .route("/api/extensions/registry", get(extensions_registry_handler))
+        .route(
+            "/api/extensions/always-approved-tools",
+            get(extensions_always_approved_tools_handler)
+                .post(extensions_always_approved_tools_add_handler),
+        )
+        .route(
+            "/api/extensions/always-approved-tools/{tool_name}",
+            axum::routing::delete(extensions_always_approved_tools_remove_handler),
+        )
         .route("/api/extensions/install", post(extensions_install_handler))
         .route(
             "/api/extensions/{name}/activate",
@@ -292,6 +303,13 @@ pub async fn start_server(
     // Static file routes (no auth, served from embedded strings)
     let statics = Router::new()
         .route("/", get(index_handler))
+        .route("/chat", get(index_handler))
+        .route("/memory", get(index_handler))
+        .route("/jobs", get(index_handler))
+        .route("/routines", get(index_handler))
+        .route("/extensions", get(index_handler))
+        .route("/skills", get(index_handler))
+        .route("/logs", get(index_handler))
         .route("/style.css", get(css_handler))
         .route("/app.js", get(js_handler))
         .route("/favicon.ico", get(favicon_handler));
@@ -1757,6 +1775,157 @@ async fn extensions_tools_handler(
         .collect();
 
     Ok(Json(ToolListResponse { tools }))
+}
+
+async fn load_always_approved_tools_from_db(
+    state: &GatewayState,
+) -> Result<Vec<String>, (StatusCode, String)> {
+    let store = state.store.as_ref().ok_or((
+        StatusCode::SERVICE_UNAVAILABLE,
+        "Database store not available".to_string(),
+    ))?;
+
+    let value = store
+        .get_setting(&state.user_id, AUTO_APPROVED_TOOLS_SETTING_KEY)
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Failed to load always-approved tools: {}", e),
+            )
+        })?;
+
+    let Some(value) = value else {
+        return Ok(Vec::new());
+    };
+
+    let arr = value.as_array().ok_or((
+        StatusCode::INTERNAL_SERVER_ERROR,
+        format!(
+            "Setting '{}' is not a JSON array",
+            AUTO_APPROVED_TOOLS_SETTING_KEY
+        ),
+    ))?;
+
+    let mut tools = Vec::new();
+    for item in arr {
+        let Some(name) = item.as_str() else {
+            return Err((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!(
+                    "Setting '{}' contains a non-string entry",
+                    AUTO_APPROVED_TOOLS_SETTING_KEY
+                ),
+            ));
+        };
+        tools.push(name.to_string());
+    }
+
+    tools.sort();
+    tools.dedup();
+    Ok(tools)
+}
+
+async fn save_always_approved_tools_to_db(
+    state: &GatewayState,
+    tools: &[String],
+) -> Result<(), (StatusCode, String)> {
+    let store = state.store.as_ref().ok_or((
+        StatusCode::SERVICE_UNAVAILABLE,
+        "Database store not available".to_string(),
+    ))?;
+
+    let value = serde_json::Value::Array(
+        tools
+            .iter()
+            .map(|t| serde_json::Value::String(t.clone()))
+            .collect(),
+    );
+
+    store
+        .set_setting(&state.user_id, AUTO_APPROVED_TOOLS_SETTING_KEY, &value)
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Failed to save always-approved tools: {}", e),
+            )
+        })
+}
+
+fn normalize_tool_name(raw: &str) -> Result<String, (StatusCode, String)> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Err((StatusCode::BAD_REQUEST, "tool_name is required".to_string()));
+    }
+    if trimmed.len() > 256 {
+        return Err((StatusCode::BAD_REQUEST, "tool_name too long".to_string()));
+    }
+    if trimmed.chars().any(|c| c.is_control()) {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "tool_name contains control characters".to_string(),
+        ));
+    }
+    Ok(trimmed.to_string())
+}
+
+async fn extensions_always_approved_tools_handler(
+    State(state): State<Arc<GatewayState>>,
+) -> Result<Json<AlwaysApprovedToolsResponse>, (StatusCode, String)> {
+    let tools = load_always_approved_tools_from_db(&state).await?;
+    Ok(Json(AlwaysApprovedToolsResponse {
+        tools,
+        setting_key: AUTO_APPROVED_TOOLS_SETTING_KEY,
+    }))
+}
+
+async fn extensions_always_approved_tools_add_handler(
+    State(state): State<Arc<GatewayState>>,
+    Json(req): Json<AlwaysApprovedToolRequest>,
+) -> Result<Json<ActionResponse>, (StatusCode, String)> {
+    let tool_name = normalize_tool_name(&req.tool_name)?;
+    let mut tools = load_always_approved_tools_from_db(&state).await?;
+
+    if tools.iter().any(|t| t == &tool_name) {
+        return Ok(Json(ActionResponse::ok(format!(
+            "'{}' is already always-approved",
+            tool_name
+        ))));
+    }
+
+    tools.push(tool_name.clone());
+    tools.sort();
+    tools.dedup();
+    save_always_approved_tools_to_db(&state, &tools).await?;
+
+    Ok(Json(ActionResponse::ok(format!(
+        "Added '{}' to always-approved tools",
+        tool_name
+    ))))
+}
+
+async fn extensions_always_approved_tools_remove_handler(
+    State(state): State<Arc<GatewayState>>,
+    Path(tool_name): Path<String>,
+) -> Result<Json<ActionResponse>, (StatusCode, String)> {
+    let tool_name = normalize_tool_name(&tool_name)?;
+    let mut tools = load_always_approved_tools_from_db(&state).await?;
+    let original_len = tools.len();
+    tools.retain(|t| t != &tool_name);
+
+    if tools.len() == original_len {
+        return Ok(Json(ActionResponse::ok(format!(
+            "'{}' was not in always-approved tools",
+            tool_name
+        ))));
+    }
+
+    save_always_approved_tools_to_db(&state, &tools).await?;
+    Ok(Json(ActionResponse::ok(format!(
+        "Removed '{}' from always-approved tools",
+        tool_name
+    ))))
 }
 
 async fn extensions_install_handler(

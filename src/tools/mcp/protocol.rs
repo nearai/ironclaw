@@ -34,22 +34,23 @@ fn default_input_schema() -> serde_json::Value {
 
 /// Annotations for an MCP tool that provide hints about its behavior.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct McpToolAnnotations {
     /// Hint that this tool performs destructive operations that cannot be undone.
     /// Tools with this hint set to true should require user approval before execution.
-    #[serde(default)]
+    #[serde(default, alias = "destructive_hint")]
     pub destructive_hint: bool,
 
     /// Hint that this tool may have side effects beyond its return value.
-    #[serde(default)]
+    #[serde(default, alias = "side_effects_hint")]
     pub side_effects_hint: bool,
 
     /// Hint that this tool performs read-only operations.
-    #[serde(default)]
+    #[serde(default, alias = "read_only_hint")]
     pub read_only_hint: bool,
 
     /// Hint about the expected execution time category.
-    #[serde(default)]
+    #[serde(default, alias = "execution_time_hint")]
     pub execution_time_hint: Option<ExecutionTimeHint>,
 }
 
@@ -68,10 +69,11 @@ pub enum ExecutionTimeHint {
 impl McpTool {
     /// Check if this tool requires user approval based on its annotations.
     pub fn requires_approval(&self) -> bool {
-        self.annotations
-            .as_ref()
-            .map(|a| a.destructive_hint)
-            .unwrap_or(false)
+        match self.annotations.as_ref() {
+            // Conservative default: only explicitly read-only tools skip approval.
+            Some(a) if a.read_only_hint && !a.side_effects_hint && !a.destructive_hint => false,
+            Some(_) | None => true,
+        }
     }
 }
 
@@ -380,5 +382,67 @@ mod tests {
 
         let required = tool.input_schema.get("required").expect("has required");
         assert!(required.as_array().expect("is array").len() == 2);
+    }
+
+    #[test]
+    fn test_mcp_annotations_camel_case_deserialize_and_gate() {
+        let json = serde_json::json!({
+            "name": "write_doc",
+            "description": "Writes a document",
+            "inputSchema": { "type": "object", "properties": {} },
+            "annotations": {
+                "sideEffectsHint": true,
+                "readOnlyHint": false,
+                "destructiveHint": false,
+                "executionTimeHint": "medium"
+            }
+        });
+
+        let tool: McpTool = serde_json::from_value(json).expect("deserialize McpTool");
+        let ann = tool.annotations.as_ref().expect("annotations");
+        assert!(ann.side_effects_hint);
+        assert_eq!(ann.execution_time_hint, Some(ExecutionTimeHint::Medium));
+        assert!(tool.requires_approval());
+    }
+
+    #[test]
+    fn test_mcp_annotations_snake_case_alias_still_deserializes() {
+        let json = serde_json::json!({
+            "name": "legacy_tool",
+            "annotations": {
+                "destructive_hint": true
+            }
+        });
+
+        let tool: McpTool = serde_json::from_value(json).expect("deserialize McpTool");
+        assert!(
+            tool.annotations
+                .as_ref()
+                .expect("annotations")
+                .destructive_hint
+        );
+        assert!(tool.requires_approval());
+    }
+
+    #[test]
+    fn test_mcp_tool_requires_approval_conservative_default_and_read_only_opt_out() {
+        let no_annotations = McpTool {
+            name: "unknown".to_string(),
+            description: String::new(),
+            input_schema: default_input_schema(),
+            annotations: None,
+        };
+        assert!(no_annotations.requires_approval());
+
+        let read_only = McpTool {
+            name: "read".to_string(),
+            description: String::new(),
+            input_schema: default_input_schema(),
+            annotations: Some(McpToolAnnotations {
+                read_only_hint: true,
+                ..Default::default()
+            }),
+        };
+        assert!(!read_only.requires_approval());
     }
 }

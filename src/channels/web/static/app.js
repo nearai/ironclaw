@@ -14,6 +14,63 @@ let jobEvents = new Map(); // job_id -> Array of events
 let jobListRefreshTimer = null;
 const JOB_EVENTS_CAP = 500;
 const MEMORY_SEARCH_QUERY_MAX_LENGTH = 100;
+const WEB_TABS = ['chat', 'memory', 'jobs', 'routines', 'extensions', 'skills', 'logs'];
+const WEB_TABS_SET = new Set(WEB_TABS);
+
+function normalizeTabName(tab) {
+  if (!tab) return null;
+  const normalized = String(tab).trim().toLowerCase();
+  return WEB_TABS_SET.has(normalized) ? normalized : null;
+}
+
+function tabFromPathname(pathname) {
+  let path = pathname || '/';
+  if (path.length > 1) path = path.replace(/\/+$/, '');
+  if (path === '/' || path === '') return null;
+  const parts = path.split('/').filter(Boolean);
+  if (parts.length !== 1) return null;
+  return normalizeTabName(parts[0]);
+}
+
+function getRequestedTabFromLocation() {
+  const pathTab = tabFromPathname(window.location.pathname);
+  if (pathTab) return pathTab;
+
+  const params = new URLSearchParams(window.location.search);
+  const queryTab = normalizeTabName(params.get('tab'));
+  if (queryTab) return queryTab;
+
+  const hashTab = normalizeTabName(window.location.hash.replace(/^#/, ''));
+  if (hashTab) return hashTab;
+
+  return 'chat';
+}
+
+function pathForTab(tab) {
+  return tab === 'chat' ? '/' : '/' + tab;
+}
+
+function syncTabUrl(tab, options) {
+  const opts = options || {};
+  const url = new URL(window.location.href);
+  const targetPath = pathForTab(tab);
+  const needsUpdate =
+    url.pathname !== targetPath || url.searchParams.has('tab') || (url.hash && url.hash !== '#');
+  if (!needsUpdate) return;
+
+  url.pathname = targetPath;
+  url.searchParams.delete('tab');
+  url.hash = '';
+
+  const next = url.pathname + url.search;
+  if (opts.replace) window.history.replaceState({}, '', next);
+  else window.history.pushState({}, '', next);
+}
+
+function syncMobileTabSelect(tab) {
+  const el = document.getElementById('tab-mobile-select');
+  if (el && el.value !== tab) el.value = tab;
+}
 
 // --- Auth ---
 
@@ -49,6 +106,9 @@ function authenticate() {
       } else {
         loadServerLogLevel();
       }
+
+      const initialTab = getRequestedTabFromLocation();
+      switchTab(initialTab, { replaceHistory: true });
     })
     .catch(() => {
       sessionStorage.removeItem('ironclaw_token');
@@ -836,22 +896,31 @@ document.querySelectorAll('.tab-bar button[data-tab]').forEach((btn) => {
   });
 });
 
-function switchTab(tab) {
-  currentTab = tab;
+function switchTab(tab, options) {
+  const opts = options || {};
+  const nextTab = normalizeTabName(tab) || 'chat';
+  currentTab = nextTab;
   document.querySelectorAll('.tab-bar button[data-tab]').forEach((b) => {
-    b.classList.toggle('active', b.getAttribute('data-tab') === tab);
+    b.classList.toggle('active', b.getAttribute('data-tab') === nextTab);
   });
   document.querySelectorAll('.tab-panel').forEach((p) => {
-    p.classList.toggle('active', p.id === 'tab-' + tab);
+    p.classList.toggle('active', p.id === 'tab-' + nextTab);
   });
+  syncMobileTabSelect(nextTab);
+  if (!opts.skipHistory) syncTabUrl(nextTab, { replace: !!opts.replaceHistory });
 
-  if (tab === 'memory') loadMemoryTree();
-  if (tab === 'jobs') loadJobs();
-  if (tab === 'routines') loadRoutines();
-  if (tab === 'logs') applyLogFilters();
-  if (tab === 'extensions') loadExtensions();
-  if (tab === 'skills') loadSkills();
+  if (nextTab === 'memory') loadMemoryTree();
+  if (nextTab === 'jobs') loadJobs();
+  if (nextTab === 'routines') loadRoutines();
+  if (nextTab === 'logs') applyLogFilters();
+  if (nextTab === 'extensions') loadExtensions();
+  if (nextTab === 'skills') loadSkills();
 }
+
+window.addEventListener('popstate', () => {
+  const tab = getRequestedTabFromLocation();
+  if (tab !== currentTab) switchTab(tab, { skipHistory: true });
+});
 
 // --- Memory (filesystem tree) ---
 
@@ -1232,15 +1301,20 @@ function loadExtensions() {
   const extList = document.getElementById('extensions-list');
   const wasmList = document.getElementById('available-wasm-list');
   const mcpList = document.getElementById('mcp-servers-list');
+  const alwaysApprovedList = document.getElementById('always-approved-tools-list');
   const toolsTbody = document.getElementById('tools-tbody');
   const toolsEmpty = document.getElementById('tools-empty');
 
-  // Fetch all three in parallel
+  // Fetch all extension-related views in parallel
   Promise.all([
     apiFetch('/api/extensions').catch(() => ({ extensions: [] })),
     apiFetch('/api/extensions/tools').catch(() => ({ tools: [] })),
     apiFetch('/api/extensions/registry').catch(function(err) { console.warn('registry fetch failed:', err); return { entries: [] }; }),
-  ]).then(([extData, toolData, registryData]) => {
+    apiFetch('/api/extensions/always-approved-tools').catch(function(err) {
+      console.warn('always-approved tools fetch failed:', err);
+      return { tools: [], error: err.message || String(err) };
+    }),
+  ]).then(([extData, toolData, registryData, alwaysApprovedData]) => {
     // Render installed extensions
     if (extData.extensions.length === 0) {
       extList.innerHTML = '<div class="empty-state">No extensions installed</div>';
@@ -1276,6 +1350,8 @@ function loadExtensions() {
       }
     }
 
+    renderAlwaysApprovedTools(alwaysApprovedList, alwaysApprovedData);
+
     // Render tools
     if (toolData.tools.length === 0) {
       toolsTbody.innerHTML = '';
@@ -1287,6 +1363,93 @@ function loadExtensions() {
       ).join('');
     }
   });
+}
+
+function renderAlwaysApprovedTools(container, data) {
+  if (!container) return;
+
+  var tools = Array.isArray(data && data.tools) ? data.tools.slice() : [];
+  tools.sort();
+
+  if (data && data.error) {
+    container.innerHTML = '<div class="empty-state">Unavailable: ' + escapeHtml(data.error) + '</div>';
+    return;
+  }
+
+  if (tools.length === 0) {
+    container.innerHTML = '<div class="empty-state">No always-approved tools saved</div>';
+    return;
+  }
+
+  container.innerHTML = '';
+  for (var i = 0; i < tools.length; i++) {
+    container.appendChild(renderAlwaysApprovedToolRow(tools[i]));
+  }
+}
+
+function renderAlwaysApprovedToolRow(toolName) {
+  var row = document.createElement('div');
+  row.className = 'always-approved-row';
+
+  var name = document.createElement('code');
+  name.className = 'always-approved-name';
+  name.textContent = toolName;
+  row.appendChild(name);
+
+  var removeBtn = document.createElement('button');
+  removeBtn.className = 'btn-ext remove';
+  removeBtn.textContent = 'Remove';
+  removeBtn.addEventListener('click', function() {
+    removeAlwaysApprovedTool(toolName);
+  });
+  row.appendChild(removeBtn);
+
+  return row;
+}
+
+function addAlwaysApprovedTool() {
+  var input = document.getElementById('always-approved-tool-input');
+  if (!input) return;
+  var toolName = input.value.trim();
+  if (!toolName) {
+    showToast('Enter a tool name', 'error');
+    input.focus();
+    return;
+  }
+
+  apiFetch('/api/extensions/always-approved-tools', {
+    method: 'POST',
+    body: { tool_name: toolName },
+  })
+    .then(function(res) {
+      if (res.success) {
+        input.value = '';
+        showToast(res.message || ('Added ' + toolName), 'success');
+        loadExtensions();
+      } else {
+        showToast(res.message || 'Failed to add tool', 'error');
+      }
+    })
+    .catch(function(err) {
+      showToast('Failed to add tool: ' + err.message, 'error');
+    });
+}
+
+function removeAlwaysApprovedTool(toolName) {
+  apiFetch('/api/extensions/always-approved-tools/' + encodeURIComponent(toolName), {
+    method: 'DELETE',
+  })
+    .then(function(res) {
+      if (res.success) {
+        showToast(res.message || ('Removed ' + toolName), 'success');
+        loadExtensions();
+      } else {
+        showToast(res.message || 'Failed to remove tool', 'error');
+      }
+    })
+    .catch(function(err) {
+      showToast('Failed to remove tool: ' + err.message, 'error');
+    });
 }
 
 function renderAvailableExtensionCard(entry) {

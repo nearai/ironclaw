@@ -37,6 +37,15 @@
   <div id="app">
     <!-- Tab Bar -->
     <div class="tab-bar">
+      <select id="tab-mobile-select" class="tab-mobile-select" aria-label="Select tab" onchange="switchTab(this.value)">
+        <option value="chat">Chat</option>
+        <option value="memory">Memory</option>
+        <option value="jobs">Jobs</option>
+        <option value="routines">Routines</option>
+        <option value="extensions">Extensions</option>
+        <option value="skills">Skills</option>
+        <option value="logs">Logs</option>
+      </select>
       <button class="active" data-tab="chat">Chat</button>
       <button data-tab="memory">Memory</button>
       <button data-tab="jobs">Jobs</button>
@@ -220,6 +229,24 @@
             <input type="text" id="mcp-install-name" placeholder="Server name">
             <input type="text" id="mcp-install-url" placeholder="MCP server URL (https://...)">
             <button onclick="addMcpServer()">Add</button>
+          </div>
+        </div>
+        <div class="extensions-section">
+          <h3>Always-Approved MCP Tools</h3>
+          <div class="extensions-note">
+            Stored in <code>agent.auto_approved_tools</code>. Add or remove tool names to control "Always allow" approvals.
+          </div>
+          <div class="ext-install-form">
+            <input
+              type="text"
+              id="always-approved-tool-input"
+              placeholder="Tool name (e.g. github_get_issue)"
+              onkeydown="if (event.key === 'Enter') addAlwaysApprovedTool()"
+            >
+            <button onclick="addAlwaysApprovedTool()">Add</button>
+          </div>
+          <div class="always-approved-list" id="always-approved-tools-list">
+            <div class="empty-state">Loading...</div>
           </div>
         </div>
         <div class="extensions-section">
