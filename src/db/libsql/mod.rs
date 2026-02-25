@@ -292,6 +292,22 @@ impl Database for LibSqlBackend {
         conn.execute_batch(libsql_migrations::SCHEMA)
             .await
             .map_err(|e| DatabaseError::Migration(format!("libSQL migration failed: {}", e)))?;
+
+        // Incremental migrations for existing databases (ignore "duplicate column" errors).
+        let incremental =
+            ["ALTER TABLE job_actions ADD COLUMN retry_attempts INTEGER NOT NULL DEFAULT 0"];
+        for stmt in &incremental {
+            match conn.execute(stmt, ()).await {
+                Ok(_) => {}
+                Err(e) if e.to_string().contains("duplicate column") => {}
+                Err(e) => {
+                    return Err(DatabaseError::Migration(format!(
+                        "Incremental migration failed: {e}"
+                    )));
+                }
+            }
+        }
+
         Ok(())
     }
 }

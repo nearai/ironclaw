@@ -307,8 +307,9 @@ impl Store {
             r#"
             INSERT INTO job_actions (
                 id, job_id, sequence_num, tool_name, input, output_raw, output_sanitized,
-                sanitization_warnings, cost, duration_ms, success, error_message, created_at
-            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+                sanitization_warnings, cost, duration_ms, success, error_message, created_at,
+                retry_attempts
+            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
             "#,
             &[
                 &action.id,
@@ -324,6 +325,7 @@ impl Store {
                 &action.success,
                 &action.error,
                 &action.executed_at,
+                &(action.retry_attempts as i32),
             ],
         )
         .await?;
@@ -339,7 +341,8 @@ impl Store {
             .query(
                 r#"
                 SELECT id, sequence_num, tool_name, input, output_raw, output_sanitized,
-                       sanitization_warnings, cost, duration_ms, success, error_message, created_at
+                       sanitization_warnings, cost, duration_ms, success, error_message, created_at,
+                       retry_attempts
                 FROM job_actions WHERE job_id = $1 ORDER BY sequence_num
                 "#,
                 &[&job_id],
@@ -365,6 +368,7 @@ impl Store {
                 success: row.get("success"),
                 error: row.get("error_message"),
                 executed_at: row.get("created_at"),
+                retry_attempts: row.get::<_, i32>("retry_attempts") as u32,
             });
         }
 

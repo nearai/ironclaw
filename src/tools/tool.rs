@@ -73,6 +73,15 @@ pub enum ToolDomain {
     Container,
 }
 
+/// Whether a tool error is transient (may succeed on retry) or permanent (will never succeed).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ToolErrorKind {
+    /// Error is transient — retrying the same call may succeed.
+    Transient,
+    /// Error is permanent — retrying will not help.
+    Permanent,
+}
+
 /// Error type for tool execution.
 #[derive(Debug, Error)]
 pub enum ToolError {
@@ -96,6 +105,63 @@ pub enum ToolError {
 
     #[error("Sandbox error: {0}")]
     Sandbox(String),
+}
+
+impl ToolError {
+    /// Classify this error as transient or permanent.
+    pub fn kind(&self) -> ToolErrorKind {
+        match self {
+            Self::RateLimited(_)
+            | Self::ExternalService(_)
+            | Self::Timeout(_)
+            | Self::Sandbox(_) => ToolErrorKind::Transient,
+            Self::InvalidParameters(_) | Self::ExecutionFailed(_) | Self::NotAuthorized(_) => {
+                ToolErrorKind::Permanent
+            }
+        }
+    }
+
+    /// Extract a server-suggested retry delay from a `RateLimited` error.
+    pub fn retry_after(&self) -> Option<Duration> {
+        match self {
+            Self::RateLimited(d) => *d,
+            _ => None,
+        }
+    }
+}
+
+/// Configuration for tool-level retry with exponential backoff.
+///
+/// Named `ToolRetryConfig` to avoid collision with `llm::retry::RetryConfig`.
+#[derive(Debug, Clone)]
+pub struct ToolRetryConfig {
+    /// Maximum number of retry attempts (not counting the initial attempt).
+    pub max_retries: u32,
+    /// Base delay before the first retry.
+    pub base_delay: Duration,
+    /// Maximum delay between retries (cap for exponential growth).
+    pub max_delay: Duration,
+}
+
+impl Default for ToolRetryConfig {
+    /// Default: 5 retries, 2s base delay, 30s max delay.
+    fn default() -> Self {
+        Self {
+            max_retries: 5,
+            base_delay: Duration::from_secs(2),
+            max_delay: Duration::from_secs(30),
+        }
+    }
+}
+
+impl ToolRetryConfig {
+    /// Preset for sandbox/container tools: fewer retries to avoid long waits.
+    pub fn sandbox() -> Self {
+        Self {
+            max_retries: 2,
+            ..Self::default()
+        }
+    }
 }
 
 /// Output from a tool execution.
@@ -255,6 +321,17 @@ pub trait Tool: Send + Sync {
         None
     }
 
+    /// Override the default retry configuration for this tool.
+    ///
+    /// Return `Some(config)` to customize retry behavior (max retries, delays).
+    /// Return `None` to use the default configuration based on `domain()`.
+    ///
+    /// Default: `None` (uses `ToolRetryConfig::default()` for orchestrator tools,
+    /// `ToolRetryConfig::sandbox()` for container tools).
+    fn retry_config(&self) -> Option<ToolRetryConfig> {
+        None
+    }
+
     /// Get the tool schema for LLM function calling.
     fn schema(&self) -> ToolSchema {
         ToolSchema {
@@ -408,5 +485,73 @@ mod tests {
         assert!(!ApprovalRequirement::Never.is_required());
         assert!(ApprovalRequirement::UnlessAutoApproved.is_required());
         assert!(ApprovalRequirement::Always.is_required());
+    }
+
+    #[test]
+    fn test_tool_error_kind_transient() {
+        assert_eq!(
+            ToolError::RateLimited(None).kind(),
+            ToolErrorKind::Transient
+        );
+        assert_eq!(
+            ToolError::RateLimited(Some(Duration::from_secs(5))).kind(),
+            ToolErrorKind::Transient
+        );
+        assert_eq!(
+            ToolError::ExternalService("503".into()).kind(),
+            ToolErrorKind::Transient
+        );
+        assert_eq!(
+            ToolError::Timeout(Duration::from_secs(60)).kind(),
+            ToolErrorKind::Transient
+        );
+        assert_eq!(
+            ToolError::Sandbox("container crashed".into()).kind(),
+            ToolErrorKind::Transient
+        );
+    }
+
+    #[test]
+    fn test_tool_error_kind_permanent() {
+        assert_eq!(
+            ToolError::InvalidParameters("bad".into()).kind(),
+            ToolErrorKind::Permanent
+        );
+        assert_eq!(
+            ToolError::ExecutionFailed("logic error".into()).kind(),
+            ToolErrorKind::Permanent
+        );
+        assert_eq!(
+            ToolError::NotAuthorized("forbidden".into()).kind(),
+            ToolErrorKind::Permanent
+        );
+    }
+
+    #[test]
+    fn test_retry_after_extraction() {
+        let d = Duration::from_secs(5);
+        assert_eq!(ToolError::RateLimited(Some(d)).retry_after(), Some(d));
+        assert_eq!(ToolError::RateLimited(None).retry_after(), None);
+        assert_eq!(ToolError::ExternalService("err".into()).retry_after(), None);
+        assert_eq!(
+            ToolError::InvalidParameters("bad".into()).retry_after(),
+            None
+        );
+    }
+
+    #[test]
+    fn test_tool_retry_config_defaults() {
+        let cfg = ToolRetryConfig::default();
+        assert_eq!(cfg.max_retries, 5);
+        assert_eq!(cfg.base_delay, Duration::from_secs(2));
+        assert_eq!(cfg.max_delay, Duration::from_secs(30));
+    }
+
+    #[test]
+    fn test_tool_retry_config_sandbox() {
+        let cfg = ToolRetryConfig::sandbox();
+        assert_eq!(cfg.max_retries, 2);
+        assert_eq!(cfg.base_delay, Duration::from_secs(2));
+        assert_eq!(cfg.max_delay, Duration::from_secs(30));
     }
 }

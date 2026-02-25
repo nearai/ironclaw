@@ -722,14 +722,37 @@ pub(super) async fn execute_chat_tool_standalone(
         "Tool call started"
     );
 
-    // Execute with per-tool timeout
+    // Execute with per-tool timeout and retry on transient errors
     let timeout = tool.execution_timeout();
+    let retry_config = crate::tools::retry::effective_retry_config(tool.as_ref());
     let start = std::time::Instant::now();
-    let result = tokio::time::timeout(timeout, async {
-        tool.execute(params.clone(), job_ctx).await
+    let timeout_result = tokio::time::timeout(timeout, async {
+        crate::tools::retry::retry_tool_execute(
+            tool.as_ref(),
+            params,
+            job_ctx,
+            &retry_config,
+            timeout,
+        )
+        .await
     })
     .await;
     let elapsed = start.elapsed();
+
+    // Unpack the timeout + retry layers
+    let result = match timeout_result {
+        Ok(outcome) => {
+            if outcome.retry_attempts > 0 {
+                tracing::debug!(
+                    tool = %tool_name,
+                    retry_attempts = outcome.retry_attempts,
+                    "Tool call completed after retries"
+                );
+            }
+            Ok(outcome.result)
+        }
+        Err(_) => Err(()),
+    };
 
     match &result {
         Ok(Ok(output)) => {
@@ -761,7 +784,7 @@ pub(super) async fn execute_chat_tool_standalone(
     }
 
     let result = result
-        .map_err(|_| crate::error::ToolError::Timeout {
+        .map_err(|()| crate::error::ToolError::Timeout {
             name: tool_name.to_string(),
             timeout,
         })?

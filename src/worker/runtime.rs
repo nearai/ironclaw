@@ -419,14 +419,36 @@ Work independently to complete this job. Report when done."#,
             return Err(format!("invalid parameters: {}", details));
         }
 
-        // Execute with per-tool timeout
+        // Execute with per-tool timeout and retry on transient errors
         let tool_timeout = tool.execution_timeout();
-        let result = tokio::time::timeout(tool_timeout, tool.execute(params.clone(), &ctx)).await;
+        let retry_config = crate::tools::retry::effective_retry_config(tool.as_ref());
+        let result = tokio::time::timeout(tool_timeout, async {
+            crate::tools::retry::retry_tool_execute(
+                tool.as_ref(),
+                params,
+                &ctx,
+                &retry_config,
+                tool_timeout,
+            )
+            .await
+        })
+        .await;
 
         match result {
-            Ok(Ok(output)) => serde_json::to_string_pretty(&output.result)
-                .map_err(|e| format!("serialization error: {}", e)),
-            Ok(Err(e)) => Err(e.to_string()),
+            Ok(outcome) => {
+                if outcome.retry_attempts > 0 {
+                    tracing::debug!(
+                        tool = %tool_name,
+                        retry_attempts = outcome.retry_attempts,
+                        "Worker tool call completed after retries"
+                    );
+                }
+                match outcome.result {
+                    Ok(output) => serde_json::to_string_pretty(&output.result)
+                        .map_err(|e| format!("serialization error: {}", e)),
+                    Err(e) => Err(e.to_string()),
+                }
+            }
             Err(_) => Err("tool execution timed out".to_string()),
         }
     }

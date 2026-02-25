@@ -19,6 +19,7 @@ use crate::llm::{
 use crate::safety::SafetyLayer;
 use crate::tools::ToolRegistry;
 use crate::tools::rate_limiter::RateLimitResult;
+use crate::tools::retry::{effective_retry_config, retry_tool_execute};
 
 /// Shared dependencies for worker execution.
 ///
@@ -574,14 +575,38 @@ Report when the job is complete or if you encounter issues you cannot resolve."#
             "Tool call started"
         );
 
-        // Execute with per-tool timeout and timing
+        // Execute with per-tool timeout, retry, and timing
         let tool_timeout = tool.execution_timeout();
+        let retry_config = effective_retry_config(tool.as_ref());
         let start = std::time::Instant::now();
-        let result = tokio::time::timeout(tool_timeout, async {
-            tool.execute(params.clone(), &job_ctx).await
+        let timeout_result = tokio::time::timeout(tool_timeout, async {
+            retry_tool_execute(
+                tool.as_ref(),
+                &params,
+                &job_ctx,
+                &retry_config,
+                tool_timeout,
+            )
+            .await
         })
         .await;
         let elapsed = start.elapsed();
+
+        // Unpack the timeout + retry layers
+        let (result, retry_attempts) = match timeout_result {
+            Ok(outcome) => {
+                let attempts = outcome.retry_attempts;
+                if attempts > 0 {
+                    tracing::debug!(
+                        tool = %tool_name,
+                        retry_attempts = attempts,
+                        "Tool call completed after retries"
+                    );
+                }
+                (Ok(outcome.result), attempts)
+            }
+            Err(_) => (Err(()), 0),
+        };
 
         match &result {
             Ok(Ok(output)) => {
@@ -621,11 +646,10 @@ Report when the job is complete or if you encounter issues you cannot resolve."#
                 match deps
                     .context_manager
                     .update_memory(job_id, |mem| {
-                        let rec = mem.create_action(tool_name, params.clone()).succeed(
-                            output_str.clone(),
-                            output.result.clone(),
-                            elapsed,
-                        );
+                        let rec = mem
+                            .create_action(tool_name, params.clone())
+                            .succeed(output_str.clone(), output.result.clone(), elapsed)
+                            .with_retry_attempts(retry_attempts);
                         mem.record_action(rec.clone());
                         rec
                     })
@@ -644,7 +668,8 @@ Report when the job is complete or if you encounter issues you cannot resolve."#
                     .update_memory(job_id, |mem| {
                         let rec = mem
                             .create_action(tool_name, params.clone())
-                            .fail(e.to_string(), elapsed);
+                            .fail(e.to_string(), elapsed)
+                            .with_retry_attempts(retry_attempts);
                         mem.record_action(rec.clone());
                         rec
                     })
@@ -663,7 +688,8 @@ Report when the job is complete or if you encounter issues you cannot resolve."#
                     .update_memory(job_id, |mem| {
                         let rec = mem
                             .create_action(tool_name, params.clone())
-                            .fail("Execution timeout", elapsed);
+                            .fail("Execution timeout", elapsed)
+                            .with_retry_attempts(retry_attempts);
                         mem.record_action(rec.clone());
                         rec
                     })
@@ -689,7 +715,7 @@ Report when the job is complete or if you encounter issues you cannot resolve."#
 
         // Handle the result
         let output = result
-            .map_err(|_| crate::error::ToolError::Timeout {
+            .map_err(|()| crate::error::ToolError::Timeout {
                 name: tool_name.to_string(),
                 timeout: tool_timeout,
             })?
