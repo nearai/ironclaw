@@ -144,16 +144,22 @@ impl SessionManager {
                 let sess = session.lock().await;
                 if sess.threads.contains_key(&ext_uuid) {
                     drop(sess);
-                    // Register mapping so future lookups are fast
+
                     let mut thread_map = self.thread_map.write().await;
-                    thread_map.insert(key, ext_uuid);
-                    drop(thread_map);
-                    // Ensure undo manager exists
-                    let mut undo_managers = self.undo_managers.write().await;
-                    undo_managers
-                        .entry(ext_uuid)
-                        .or_insert_with(|| Arc::new(Mutex::new(UndoManager::new())));
-                    return (session, ext_uuid);
+                    // Re-check after acquiring write lock to prevent race condition
+                    // where another task mapped this UUID between our read and write.
+                    if !thread_map.values().any(|&v| v == ext_uuid) {
+                        thread_map.insert(key, ext_uuid);
+                        drop(thread_map);
+                        // Ensure undo manager exists
+                        let mut undo_managers = self.undo_managers.write().await;
+                        undo_managers
+                            .entry(ext_uuid)
+                            .or_insert_with(|| Arc::new(Mutex::new(UndoManager::new())));
+                        return (session, ext_uuid);
+                    }
+                    // If it was mapped elsewhere while we were unlocked, fall through
+                    // to create a new thread, preserving channel isolation.
                 }
             }
         }
