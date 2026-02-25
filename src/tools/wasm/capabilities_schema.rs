@@ -89,21 +89,11 @@ impl CapabilitiesFile {
     /// This promotes the inner fields so callers can access them uniformly.
     fn resolve_nested(mut self) -> Self {
         if let Some(inner) = self.capabilities.take() {
-            if self.http.is_none() {
-                self.http = inner.http;
-            }
-            if self.secrets.is_none() {
-                self.secrets = inner.secrets;
-            }
-            if self.tool_invoke.is_none() {
-                self.tool_invoke = inner.tool_invoke;
-            }
-            if self.workspace.is_none() {
-                self.workspace = inner.workspace;
-            }
-            if self.auth.is_none() {
-                self.auth = inner.auth;
-            }
+            self.http = self.http.or(inner.http);
+            self.secrets = self.secrets.or(inner.secrets);
+            self.tool_invoke = self.tool_invoke.or(inner.tool_invoke);
+            self.workspace = self.workspace.or(inner.workspace);
+            self.auth = self.auth.or(inner.auth);
         }
         self
     }

@@ -29,16 +29,12 @@ pub fn verify_discord_signature(
     let Ok(key_bytes) = hex::decode(public_key_hex) else {
         return false;
     };
-    let Ok(sig_array): Result<[u8; 64], _> = sig_bytes.try_into() else {
+    let Ok(signature) = Signature::from_slice(&sig_bytes) else {
         return false;
     };
-    let Ok(key_array): Result<[u8; 32], _> = key_bytes.try_into() else {
+    let Ok(verifying_key) = VerifyingKey::try_from(key_bytes.as_slice()) else {
         return false;
     };
-    let Ok(verifying_key) = VerifyingKey::from_bytes(&key_array) else {
-        return false;
-    };
-    let signature = Signature::from_bytes(&sig_array);
 
     let mut message = Vec::with_capacity(timestamp.len() + body.len());
     message.extend_from_slice(timestamp.as_bytes());
