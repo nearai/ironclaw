@@ -408,12 +408,10 @@ mod tests {
         let job_id = cm.create_job("Stuck job", "desc").await.unwrap();
 
         // Transition to InProgress, then to Stuck.
-        cm.update_context(job_id, |ctx| {
-            ctx.transition_to(JobState::InProgress, None)
-        })
-        .await
-        .unwrap()
-        .unwrap();
+        cm.update_context(job_id, |ctx| ctx.transition_to(JobState::InProgress, None))
+            .await
+            .unwrap()
+            .unwrap();
         cm.update_context(job_id, |ctx| {
             ctx.transition_to(JobState::Stuck, Some("timed out".to_string()))
         })
@@ -433,18 +431,14 @@ mod tests {
         let job_id = cm.create_job("Repairable", "desc").await.unwrap();
 
         // Move to InProgress -> Stuck.
-        cm.update_context(job_id, |ctx| {
-            ctx.transition_to(JobState::InProgress, None)
-        })
-        .await
-        .unwrap()
-        .unwrap();
-        cm.update_context(job_id, |ctx| {
-            ctx.transition_to(JobState::Stuck, None)
-        })
-        .await
-        .unwrap()
-        .unwrap();
+        cm.update_context(job_id, |ctx| ctx.transition_to(JobState::InProgress, None))
+            .await
+            .unwrap()
+            .unwrap();
+        cm.update_context(job_id, |ctx| ctx.transition_to(JobState::Stuck, None))
+            .await
+            .unwrap()
+            .unwrap();
 
         let repair = DefaultSelfRepair::new(Arc::clone(&cm), Duration::from_secs(60), 3);
 

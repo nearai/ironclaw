@@ -2444,7 +2444,10 @@ mod tests {
         // Removing one doesn't affect the other.
         std::fs::remove_file(&tool_wasm).unwrap();
         assert!(!tool_wasm.exists());
-        assert!(channel_wasm.exists(), "Removing tool must not affect channel");
+        assert!(
+            channel_wasm.exists(),
+            "Removing tool must not affect channel"
+        );
     }
 
     #[test]

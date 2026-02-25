@@ -334,11 +334,8 @@ mod tests {
             .map(|i| {
                 let mgr = std::sync::Arc::clone(&manager);
                 tokio::spawn(async move {
-                    mgr.create_job(
-                        format!("Job {i}"),
-                        format!("Desc {i}"),
-                    )
-                    .await
+                    mgr.create_job(format!("Job {i}"), format!("Desc {i}"))
+                        .await
                 })
             })
             .collect();
@@ -362,7 +359,10 @@ mod tests {
 
         // First, create 5 jobs and make them active.
         for i in 0..5 {
-            let id = manager.create_job(format!("Job {i}"), "desc").await.unwrap();
+            let id = manager
+                .create_job(format!("Job {i}"), "desc")
+                .await
+                .unwrap();
             manager
                 .update_context(id, |ctx| {
                     ctx.transition_to(crate::context::JobState::InProgress, None)
@@ -376,9 +376,7 @@ mod tests {
         let handles: Vec<_> = (0..10)
             .map(|i| {
                 let mgr = std::sync::Arc::clone(&manager);
-                tokio::spawn(async move {
-                    mgr.create_job(format!("Overflow {i}"), "desc").await
-                })
+                tokio::spawn(async move { mgr.create_job(format!("Overflow {i}"), "desc").await })
             })
             .collect();
 
@@ -456,7 +454,10 @@ mod tests {
         // Create 10 jobs.
         let mut job_ids = Vec::new();
         for i in 0..10 {
-            let id = manager.create_job(format!("Job {i}"), "desc").await.unwrap();
+            let id = manager
+                .create_job(format!("Job {i}"), "desc")
+                .await
+                .unwrap();
             job_ids.push(id);
         }
 
@@ -476,7 +477,9 @@ mod tests {
 
         for handle in handles {
             let result = handle.await.expect("task should not panic");
-            result.expect("update should succeed").expect("transition should succeed");
+            result
+                .expect("update should succeed")
+                .expect("transition should succeed");
         }
 
         // All 10 should now be InProgress.

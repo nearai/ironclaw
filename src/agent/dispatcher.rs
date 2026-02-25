@@ -1448,8 +1448,7 @@ mod tests {
             ChatMessage::user("Current request"),
         ];
 
-        let context = crate::llm::ReasoningContext::new()
-            .with_messages(messages.clone());
+        let context = crate::llm::ReasoningContext::new().with_messages(messages.clone());
 
         // Step 1: First call fails with ContextLengthExceeded.
         let err = reasoning.respond_with_tools(&context).await.unwrap_err();
@@ -1468,8 +1467,7 @@ mod tests {
 
         // Step 3: Switch provider to success and retry.
         stub.set_failing(false);
-        let retry_context = crate::llm::ReasoningContext::new()
-            .with_messages(compacted);
+        let retry_context = crate::llm::ReasoningContext::new().with_messages(compacted);
 
         let result = reasoning.respond_with_tools(&retry_context).await;
         assert!(result.is_ok(), "Retry after compaction should succeed");
@@ -1587,7 +1585,10 @@ mod tests {
             let hard_ceiling = max_iter + 1;
 
             // force_text_at must be reachable (> 0)
-            assert!(force_text_at > 0, "force_text_at must be > 0 for max_iter={max_iter}");
+            assert!(
+                force_text_at > 0,
+                "force_text_at must be > 0 for max_iter={max_iter}"
+            );
 
             // nudge comes before or at the same time as force_text
             assert!(

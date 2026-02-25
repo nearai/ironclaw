@@ -655,18 +655,14 @@ mod tests {
         // Callback 1: write initial value.
         let caps = ChannelCapabilities::for_channel("slack");
         let mut state = ChannelHostState::new("slack", caps);
-        state
-            .workspace_write("cursor", "100".to_string())
-            .unwrap();
+        state.workspace_write("cursor", "100".to_string()).unwrap();
         let writes = state.take_pending_writes();
         store.commit_writes(&writes);
 
         // Callback 2: overwrite the same key.
         let caps2 = ChannelCapabilities::for_channel("slack");
         let mut state2 = ChannelHostState::new("slack", caps2);
-        state2
-            .workspace_write("cursor", "200".to_string())
-            .unwrap();
+        state2.workspace_write("cursor", "200".to_string()).unwrap();
         let writes2 = state2.take_pending_writes();
         store.commit_writes(&writes2);
 

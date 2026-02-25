@@ -718,24 +718,24 @@ mod tests {
         let all = registry.all_entries().await;
 
         // Both should exist since they have different kinds.
-        let channel = all.iter().find(|e| {
-            e.name == "telegram" && e.kind == ExtensionKind::WasmChannel
-        });
-        let tool = all.iter().find(|e| {
-            e.name == "telegram" && e.kind == ExtensionKind::WasmTool
-        });
+        let channel = all
+            .iter()
+            .find(|e| e.name == "telegram" && e.kind == ExtensionKind::WasmChannel);
+        let tool = all
+            .iter()
+            .find(|e| e.name == "telegram" && e.kind == ExtensionKind::WasmTool);
 
         assert!(channel.is_some(), "Channel entry missing");
         assert!(tool.is_some(), "Tool entry missing");
 
         // Search should return both.
         let results = registry.search("telegram").await;
-        let channel_hit = results.iter().any(|r| {
-            r.entry.name == "telegram" && r.entry.kind == ExtensionKind::WasmChannel
-        });
-        let tool_hit = results.iter().any(|r| {
-            r.entry.name == "telegram" && r.entry.kind == ExtensionKind::WasmTool
-        });
+        let channel_hit = results
+            .iter()
+            .any(|r| r.entry.name == "telegram" && r.entry.kind == ExtensionKind::WasmChannel);
+        let tool_hit = results
+            .iter()
+            .any(|r| r.entry.name == "telegram" && r.entry.kind == ExtensionKind::WasmTool);
         assert!(channel_hit, "Search should find channel");
         assert!(tool_hit, "Search should find tool");
     }
