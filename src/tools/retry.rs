@@ -26,6 +26,7 @@ pub struct ToolRetryOutcome {
 /// Calculate exponential backoff delay with 25% jitter, capped at `max_delay`.
 ///
 /// Formula: `base_delay * 2^attempt`, then add uniform jitter in [-25%, +25%].
+/// A hard floor of 100ms prevents degenerate tight-loop retries.
 fn backoff_delay(config: &ToolRetryConfig, attempt: u32) -> Duration {
     let base_ms = config.base_delay.as_millis() as u64;
     let exp_ms = base_ms.saturating_mul(2u64.saturating_pow(attempt));
