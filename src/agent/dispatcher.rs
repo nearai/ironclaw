@@ -1030,9 +1030,10 @@ mod tests {
 
     #[test]
     fn test_shell_destructive_command_requires_explicit_approval() {
-        // requires_explicit_approval() detects destructive commands that
-        // should return ApprovalRequirement::Always from ShellTool.
-        use crate::tools::builtin::shell::requires_explicit_approval;
+        // classify_command_risk() classifies destructive commands as High, which
+        // maps to ApprovalRequirement::Always in ShellTool::requires_approval().
+        use crate::tools::builtin::shell::classify_command_risk;
+        use crate::tools::RiskLevel;
 
         let destructive_cmds = [
             "rm -rf /tmp/test",
@@ -1040,18 +1041,20 @@ mod tests {
             "git reset --hard HEAD~5",
         ];
         for cmd in &destructive_cmds {
-            assert!(
-                requires_explicit_approval(cmd),
-                "'{}' should require explicit approval",
+            assert_eq!(
+                classify_command_risk(cmd),
+                RiskLevel::High,
+                "'{}' should be classified High risk",
                 cmd
             );
         }
 
         let safe_cmds = ["git status", "cargo build", "ls -la"];
         for cmd in &safe_cmds {
-            assert!(
-                !requires_explicit_approval(cmd),
-                "'{}' should not require explicit approval",
+            assert_ne!(
+                classify_command_risk(cmd),
+                RiskLevel::High,
+                "'{}' should not be High risk",
                 cmd
             );
         }

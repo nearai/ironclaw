@@ -598,10 +598,11 @@ Report when the job is complete or if you encounter issues you cannot resolve."#
             .into());
         }
 
-        tracing::debug!(
+        let risk = tool.risk_level_for(&params);
+        tracing::info!(
             tool = %tool_name,
-            params = %params,
             job = %job_id,
+            risk = ?risk,
             "Tool call started"
         );
 
