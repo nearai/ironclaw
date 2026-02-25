@@ -137,7 +137,7 @@ impl ToolError {
 pub struct ToolRetryConfig {
     /// Maximum number of retry attempts (not counting the initial attempt).
     pub max_retries: u32,
-    /// Base delay before the first retry.
+    /// Base delay before the first retry (effective minimum: 100ms).
     pub base_delay: Duration,
     /// Maximum delay between retries (cap for exponential growth).
     pub max_delay: Duration,
