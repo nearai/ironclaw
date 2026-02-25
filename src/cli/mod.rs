@@ -11,6 +11,7 @@
 //! - Active health diagnostics (`doctor`)
 //! - Checking system health (`status`)
 
+mod completion;
 mod config;
 mod doctor;
 mod mcp;
@@ -22,6 +23,7 @@ mod service;
 pub mod status;
 mod tool;
 
+pub use completion::Completion;
 pub use config::{ConfigCommand, run_config_command};
 pub use doctor::run_doctor_command;
 pub use mcp::{McpCommand, run_mcp_command};
@@ -118,6 +120,9 @@ pub enum Command {
     /// Show system health and diagnostics
     Status,
 
+    /// Generate shell completion scripts
+    Completion(Completion),
+
     /// Run as a sandboxed worker inside a Docker container (internal use).
     /// This is invoked automatically by the orchestrator, not by users directly.
     Worker {
@@ -159,5 +164,20 @@ impl Cli {
     /// Check if we should run the agent (default behavior or explicit `run` command).
     pub fn should_run_agent(&self) -> bool {
         matches!(self.command, None | Some(Command::Run))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clap::CommandFactory;
+
+    #[test]
+    fn test_version() {
+        let cmd = Cli::command();
+        assert_eq!(
+            cmd.get_version().unwrap_or("unknown"),
+            env!("CARGO_PKG_VERSION")
+        );
     }
 }

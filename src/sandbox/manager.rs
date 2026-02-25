@@ -460,7 +460,7 @@ mod tests {
     #[test]
     fn test_builder_defaults() {
         let manager = SandboxManagerBuilder::new().build();
-        assert!(!manager.config.enabled); // Disabled by default
+        assert!(manager.config.enabled); // Enabled by default (startup check disables if Docker unavailable)
     }
 
     #[test]

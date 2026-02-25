@@ -407,6 +407,9 @@ pub enum RoutineError {
     #[error("LLM call failed: {reason}")]
     LlmFailed { reason: String },
 
+    #[error("Failed to dispatch full job: {reason}")]
+    JobDispatchFailed { reason: String },
+
     #[error("LLM returned empty content")]
     EmptyResponse,
 

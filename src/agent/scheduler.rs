@@ -81,6 +81,50 @@ impl Scheduler {
         }
     }
 
+    /// Create, persist, and schedule a job in one shot.
+    ///
+    /// This is the preferred entry point for dispatching new jobs. It:
+    /// 1. Creates the job context via `ContextManager`
+    /// 2. Optionally applies metadata (e.g. `max_iterations`)
+    /// 3. Persists the job to the database (so FK references from
+    ///    `job_actions` / `llm_calls` work immediately)
+    /// 4. Schedules the job for worker execution
+    ///
+    /// Returns the new job ID.
+    pub async fn dispatch_job(
+        &self,
+        user_id: &str,
+        title: &str,
+        description: &str,
+        metadata: Option<serde_json::Value>,
+    ) -> Result<Uuid, JobError> {
+        let job_id = self
+            .context_manager
+            .create_job_for_user(user_id, title, description)
+            .await?;
+
+        // Apply metadata if provided
+        if let Some(meta) = metadata {
+            self.context_manager
+                .update_context(job_id, |ctx| {
+                    ctx.metadata = meta;
+                })
+                .await?;
+        }
+
+        // Persist to DB before scheduling so the worker's FK references are valid
+        if let Some(ref store) = self.store {
+            let ctx = self.context_manager.get_context(job_id).await?;
+            store.save_job(&ctx).await.map_err(|e| JobError::Failed {
+                id: job_id,
+                reason: format!("failed to persist job: {e}"),
+            })?;
+        }
+
+        self.schedule(job_id).await?;
+        Ok(job_id)
+    }
+
     /// Schedule a job for execution.
     pub async fn schedule(&self, job_id: Uuid) -> Result<(), JobError> {
         // Hold write lock for the entire check-insert sequence to prevent

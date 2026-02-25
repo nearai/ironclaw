@@ -1936,12 +1936,6 @@ body {
   font-weight: 500;
 }
 
-.ext-restart-label {
-  font-size: 12px;
-  color: var(--text-secondary);
-  font-style: italic;
-}
-
 .btn-ext {
   padding: 4px 10px;
   border-radius: var(--radius);
@@ -2244,6 +2238,14 @@ body {
 
 .activity-tool-result .activity-tool-icon {
   color: var(--success);
+}
+
+.activity-tool-error .activity-tool-icon {
+  color: var(--danger);
+}
+
+.activity-tool-error summary {
+  color: var(--danger);
 }
 
 .activity-tool-input,
@@ -2805,6 +2807,82 @@ mark {
 
 .ext-install-form button:active {
   transform: scale(0.98);
+}
+
+/* --- Skills tab --- */
+
+.skill-search-box {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  margin-bottom: 12px;
+}
+
+.skill-search-box input {
+  flex: 1;
+  padding: 8px 12px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  color: var(--text);
+  font-size: 13px;
+}
+
+.skill-search-box input:focus {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px rgba(52, 211, 153, 0.1);
+}
+
+.skill-search-box button {
+  padding: 8px 20px;
+  background: var(--accent);
+  color: #09090b;
+  border: none;
+  border-radius: var(--radius);
+  cursor: pointer;
+  font-size: 13px;
+  font-weight: 600;
+  transition: background 0.2s, transform 0.2s;
+}
+
+.skill-search-box button:hover {
+  background: var(--accent-hover);
+  transform: translateY(-1px);
+}
+
+.skill-trust {
+  font-size: 10px;
+  padding: 2px 6px;
+  border-radius: 8px;
+  font-weight: 500;
+  text-transform: uppercase;
+  letter-spacing: 0.3px;
+}
+
+.skill-trust.trust-trusted {
+  background: rgba(52, 211, 153, 0.15);
+  color: var(--success);
+}
+
+.skill-trust.trust-installed {
+  background: rgba(96, 165, 250, 0.15);
+  color: #60a5fa;
+}
+
+.skill-version {
+  font-size: 11px;
+  color: var(--text-secondary);
+  font-family: var(--font-mono);
+}
+
+@keyframes skillFadeIn {
+  from { opacity: 0; transform: translateY(8px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+.skill-search-result {
+  animation: skillFadeIn 0.3s ease-out both;
 }
 
 /* --- Activity toolbar --- */
