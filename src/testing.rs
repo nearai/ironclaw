@@ -321,6 +321,7 @@ impl TestHarnessBuilder {
             workspace: None,
             extension_manager: None,
             skill_registry: None,
+            skill_catalog: None,
             skills_config: SkillsConfig::default(),
             hooks,
             cost_guard,

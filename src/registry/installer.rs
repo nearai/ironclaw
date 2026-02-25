@@ -1,11 +1,147 @@
 //! Install extensions from the registry: build-from-source or download pre-built artifacts.
 
-use std::path::{Path, PathBuf};
+use std::net::IpAddr;
+use std::path::{Component, Path, PathBuf};
 
 use tokio::fs;
 
 use crate::registry::catalog::RegistryError;
 use crate::registry::manifest::{BundleDefinition, ExtensionManifest, ManifestKind};
+
+// GitHub-only by design. New trusted hosts (e.g. a NEAR AI CDN) must be
+// explicitly added here; unknown hosts fall back to source build with a
+// warning rather than surfacing a clear "host not allowed" error.
+const ALLOWED_ARTIFACT_HOSTS: &[&str] = &[
+    "github.com",
+    "objects.githubusercontent.com",
+    "github-releases.githubusercontent.com",
+    "raw.githubusercontent.com",
+];
+
+fn should_attempt_source_fallback(err: &RegistryError) -> bool {
+    !matches!(
+        err,
+        RegistryError::AlreadyInstalled { .. }
+            | RegistryError::ChecksumMismatch { .. }
+            | RegistryError::InvalidManifest { .. }
+    )
+}
+
+fn is_allowed_artifact_host(host: &str) -> bool {
+    ALLOWED_ARTIFACT_HOSTS
+        .iter()
+        .any(|allowed| host.eq_ignore_ascii_case(allowed))
+        || host.ends_with(".githubusercontent.com")
+}
+
+fn validate_artifact_url(
+    manifest_name: &str,
+    field: &'static str,
+    url: &str,
+) -> Result<(), RegistryError> {
+    let parsed = reqwest::Url::parse(url).map_err(|e| RegistryError::InvalidManifest {
+        name: manifest_name.to_string(),
+        field,
+        reason: format!("invalid URL: {}", e),
+    })?;
+
+    if parsed.scheme() != "https" {
+        return Err(RegistryError::InvalidManifest {
+            name: manifest_name.to_string(),
+            field,
+            reason: "URL must use https".to_string(),
+        });
+    }
+
+    let host = parsed
+        .host_str()
+        .ok_or_else(|| RegistryError::InvalidManifest {
+            name: manifest_name.to_string(),
+            field,
+            reason: "URL host is missing".to_string(),
+        })?;
+
+    if host.parse::<IpAddr>().is_ok() || !is_allowed_artifact_host(host) {
+        return Err(RegistryError::InvalidManifest {
+            name: manifest_name.to_string(),
+            field,
+            reason: format!("host '{}' is not allowed", host),
+        });
+    }
+
+    Ok(())
+}
+
+fn validate_manifest_install_inputs(manifest: &ExtensionManifest) -> Result<(), RegistryError> {
+    let is_valid_name = !manifest.name.is_empty()
+        && manifest
+            .name
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-' || c == '_');
+
+    if !is_valid_name {
+        return Err(RegistryError::InvalidManifest {
+            name: manifest.name.clone(),
+            field: "name",
+            reason: "name must contain only lowercase letters, digits, '-' or '_'".to_string(),
+        });
+    }
+
+    let expected_prefix = match manifest.kind {
+        ManifestKind::Tool => "tools-src/",
+        ManifestKind::Channel => "channels-src/",
+    };
+
+    if !manifest.source.dir.starts_with(expected_prefix) {
+        return Err(RegistryError::InvalidManifest {
+            name: manifest.name.clone(),
+            field: "source.dir",
+            reason: format!("must start with '{}'", expected_prefix),
+        });
+    }
+
+    let source_path = Path::new(&manifest.source.dir);
+    let has_unsafe_component = source_path.components().any(|component| {
+        matches!(
+            component,
+            Component::ParentDir | Component::RootDir | Component::Prefix(_) | Component::CurDir
+        )
+    });
+
+    if source_path.is_absolute() || has_unsafe_component {
+        return Err(RegistryError::InvalidManifest {
+            name: manifest.name.clone(),
+            field: "source.dir",
+            reason: "must be a safe relative path without traversal segments".to_string(),
+        });
+    }
+
+    let has_path_separator = manifest.source.capabilities.contains('/')
+        || manifest.source.capabilities.contains('\\')
+        || manifest.source.capabilities.contains("..");
+
+    if has_path_separator {
+        return Err(RegistryError::InvalidManifest {
+            name: manifest.name.clone(),
+            field: "source.capabilities",
+            reason: "must be a file name without path separators".to_string(),
+        });
+    }
+
+    Ok(())
+}
+
+fn download_failure_reason(error: &reqwest::Error) -> String {
+    if error.is_timeout() {
+        "request timed out".to_string()
+    } else if error.is_connect() {
+        "connection failed".to_string()
+    } else if error.is_request() {
+        "request failed".to_string()
+    } else {
+        "network error".to_string()
+    }
+}
 
 /// Result of installing a single extension from the registry.
 #[derive(Debug)]
@@ -57,6 +193,8 @@ impl RegistryInstaller {
         manifest: &ExtensionManifest,
         force: bool,
     ) -> Result<InstallOutcome, RegistryError> {
+        validate_manifest_install_inputs(manifest)?;
+
         let source_dir = self.repo_root.join(&manifest.source.dir);
         if !source_dir.exists() {
             return Err(RegistryError::ManifestRead {
@@ -137,6 +275,67 @@ impl RegistryInstaller {
         })
     }
 
+    pub async fn install_with_source_fallback(
+        &self,
+        manifest: &ExtensionManifest,
+        force: bool,
+    ) -> Result<InstallOutcome, RegistryError> {
+        // Validate upfront so we fail fast on bad manifests regardless of
+        // which install path runs, without relying on inner methods to
+        // catch it first.
+        validate_manifest_install_inputs(manifest)?;
+
+        let has_artifact = manifest
+            .artifacts
+            .get("wasm32-wasip2")
+            .and_then(|a| a.url.as_ref())
+            .is_some();
+
+        if !has_artifact {
+            return self.install_from_source(manifest, force).await;
+        }
+
+        let source_dir = self.repo_root.join(&manifest.source.dir);
+
+        match self.install_from_artifact(manifest, force).await {
+            Ok(outcome) => Ok(outcome),
+            Err(artifact_err) => {
+                if !should_attempt_source_fallback(&artifact_err) {
+                    return Err(artifact_err);
+                }
+
+                if !source_dir.is_dir() {
+                    return Err(RegistryError::SourceFallbackUnavailable {
+                        name: manifest.name.clone(),
+                        source_dir,
+                        artifact_error: Box::new(artifact_err),
+                    });
+                }
+
+                tracing::warn!(
+                    extension = %manifest.name,
+                    error = %artifact_err,
+                    "Artifact install failed; falling back to build-from-source"
+                );
+
+                match self.install_from_source(manifest, force).await {
+                    Ok(mut outcome) => {
+                        outcome.warnings.push(format!(
+                            "Artifact install failed ({}); installed via source fallback.",
+                            artifact_err
+                        ));
+                        Ok(outcome)
+                    }
+                    Err(source_err) => Err(RegistryError::InstallFallbackFailed {
+                        name: manifest.name.clone(),
+                        artifact_error: Box::new(artifact_err),
+                        source_error: Box::new(source_err),
+                    }),
+                }
+            }
+        }
+    }
+
     /// Download and install a pre-built artifact.
     ///
     /// Supports two formats:
@@ -147,6 +346,8 @@ impl RegistryInstaller {
         manifest: &ExtensionManifest,
         force: bool,
     ) -> Result<InstallOutcome, RegistryError> {
+        validate_manifest_install_inputs(manifest)?;
+
         let artifact = manifest.artifacts.get("wasm32-wasip2").ok_or_else(|| {
             RegistryError::ExtensionNotFound(format!(
                 "No wasm32-wasip2 artifact for '{}'",
@@ -160,6 +361,21 @@ impl RegistryInstaller {
                 manifest.name
             ))
         })?;
+
+        validate_artifact_url(&manifest.name, "artifacts.wasm32-wasip2.url", url)?;
+
+        // Require SHA256 — refuse to install unverified binaries. Check before
+        // downloading to avoid wasting bandwidth on manifests that are missing
+        // checksums.
+        let expected_sha =
+            artifact
+                .sha256
+                .as_ref()
+                .ok_or_else(|| RegistryError::InvalidManifest {
+                    name: manifest.name.clone(),
+                    field: "artifacts.wasm32-wasip2.sha256",
+                    reason: "sha256 is required for artifact downloads".to_string(),
+                })?;
 
         let target_dir = match manifest.kind {
             ManifestKind::Tool => &self.tools_dir,
@@ -185,16 +401,7 @@ impl RegistryInstaller {
             manifest.kind, manifest.display_name
         );
         let bytes = download_artifact(url).await?;
-
-        // Verify SHA256 if provided, warn otherwise
-        if let Some(expected_sha) = &artifact.sha256 {
-            verify_sha256(&bytes, expected_sha, url)?;
-        } else {
-            println!(
-                "WARNING: No SHA256 checksum for '{}'; download is not cryptographically verified.",
-                manifest.name
-            );
-        }
+        verify_sha256(&bytes, expected_sha, url)?;
 
         let target_caps = target_dir.join(format!("{}.capabilities.json", manifest.name));
 
@@ -214,6 +421,11 @@ impl RegistryInstaller {
             // 1. Separate capabilities_url in the artifact
             // 2. Source tree (legacy, requires repo)
             if let Some(ref caps_url) = artifact.capabilities_url {
+                validate_artifact_url(
+                    &manifest.name,
+                    "artifacts.wasm32-wasip2.capabilities_url",
+                    caps_url,
+                )?;
                 const MAX_CAPS_SIZE: usize = 1024 * 1024; // 1 MB
                 match download_artifact(caps_url).await {
                     Ok(caps_bytes) if caps_bytes.len() <= MAX_CAPS_SIZE => {
@@ -360,14 +572,18 @@ async fn download_artifact(url: &str) -> Result<bytes::Bytes, RegistryError> {
         .await
         .map_err(|e| RegistryError::DownloadFailed {
             url: url.to_string(),
-            reason: format!("request failed: {}", e),
+            reason: download_failure_reason(&e),
         })?;
 
     let response = response
         .error_for_status()
         .map_err(|e| RegistryError::DownloadFailed {
             url: url.to_string(),
-            reason: e.to_string(),
+            reason: format!(
+                "http status {}",
+                e.status()
+                    .map_or("unknown".to_string(), |status| status.as_u16().to_string())
+            ),
         })?;
 
     response
@@ -375,7 +591,7 @@ async fn download_artifact(url: &str) -> Result<bytes::Bytes, RegistryError> {
         .await
         .map_err(|e| RegistryError::DownloadFailed {
             url: url.to_string(),
-            reason: format!("failed to read body: {}", e),
+            reason: format!("failed to read response body: {}", e),
         })
 }
 
@@ -387,9 +603,10 @@ fn verify_sha256(bytes: &[u8], expected: &str, url: &str) -> Result<(), Registry
     let actual = format!("{:x}", hasher.finalize());
 
     if actual != expected {
-        return Err(RegistryError::DownloadFailed {
+        return Err(RegistryError::ChecksumMismatch {
             url: url.to_string(),
-            reason: format!("SHA256 mismatch: expected {}, got {}", expected, actual),
+            expected_sha256: expected.to_string(),
+            actual_sha256: actual,
         });
     }
     Ok(())
@@ -510,6 +727,55 @@ fn extract_tar_gz(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::HashMap;
+
+    use crate::registry::manifest::{ArtifactSpec, SourceSpec};
+
+    fn test_manifest(
+        name: &str,
+        source_dir: &str,
+        artifact_url: Option<String>,
+        sha256: Option<&str>,
+    ) -> ExtensionManifest {
+        test_manifest_with_kind(name, source_dir, artifact_url, sha256, ManifestKind::Tool)
+    }
+
+    fn test_manifest_with_kind(
+        name: &str,
+        source_dir: &str,
+        artifact_url: Option<String>,
+        sha256: Option<&str>,
+        kind: ManifestKind,
+    ) -> ExtensionManifest {
+        let mut artifacts = HashMap::new();
+        if artifact_url.is_some() || sha256.is_some() {
+            artifacts.insert(
+                "wasm32-wasip2".to_string(),
+                ArtifactSpec {
+                    url: artifact_url,
+                    sha256: sha256.map(ToString::to_string),
+                    capabilities_url: None,
+                },
+            );
+        }
+
+        ExtensionManifest {
+            name: name.to_string(),
+            display_name: name.to_string(),
+            kind,
+            version: "0.1.0".to_string(),
+            description: "test manifest".to_string(),
+            keywords: Vec::new(),
+            source: SourceSpec {
+                dir: source_dir.to_string(),
+                capabilities: format!("{}.capabilities.json", name),
+                crate_name: name.to_string(),
+            },
+            artifacts,
+            auth_summary: None,
+            tags: Vec::new(),
+        }
+    }
 
     #[test]
     fn test_installer_creation() {
@@ -541,7 +807,140 @@ mod tests {
 
     #[test]
     fn test_verify_sha256_invalid() {
-        assert!(verify_sha256(b"data", "0000", "test://url").is_err());
+        let err = verify_sha256(b"data", "0000", "test://url").expect_err("checksum mismatch");
+        assert!(matches!(err, RegistryError::ChecksumMismatch { .. }));
+    }
+
+    #[tokio::test]
+    async fn test_install_from_source_rejects_path_traversal_name() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let installer = RegistryInstaller::new(
+            temp.path().to_path_buf(),
+            temp.path().join("tools"),
+            temp.path().join("channels"),
+        );
+
+        let manifest = test_manifest("../evil", "tools-src/evil", None, None);
+
+        let result = installer.install_from_source(&manifest, false).await;
+        match result {
+            Err(RegistryError::InvalidManifest { field, .. }) => {
+                assert_eq!(field, "name");
+            }
+            other => panic!("unexpected result: {:?}", other),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_install_from_artifact_rejects_non_https_url() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let installer = RegistryInstaller::new(
+            temp.path().to_path_buf(),
+            temp.path().join("tools"),
+            temp.path().join("channels"),
+        );
+
+        let manifest = test_manifest(
+            "demo",
+            "tools-src/demo",
+            Some(
+                "http://github.com/nearai/ironclaw/releases/latest/download/demo.wasm".to_string(),
+            ),
+            None,
+        );
+
+        let result = installer.install_from_artifact(&manifest, false).await;
+        match result {
+            Err(RegistryError::InvalidManifest { field, .. }) => {
+                assert_eq!(field, "artifacts.wasm32-wasip2.url");
+            }
+            other => panic!("unexpected result: {:?}", other),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_install_from_artifact_rejects_disallowed_host() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let installer = RegistryInstaller::new(
+            temp.path().to_path_buf(),
+            temp.path().join("tools"),
+            temp.path().join("channels"),
+        );
+
+        let manifest = test_manifest(
+            "demo",
+            "tools-src/demo",
+            Some("https://169.254.169.254/latest/meta-data".to_string()),
+            None,
+        );
+
+        let result = installer.install_from_artifact(&manifest, false).await;
+        match result {
+            Err(RegistryError::InvalidManifest { field, .. }) => {
+                assert_eq!(field, "artifacts.wasm32-wasip2.url");
+            }
+            other => panic!("unexpected result: {:?}", other),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_install_from_artifact_rejects_null_sha256() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let installer = RegistryInstaller::new(
+            temp.path().to_path_buf(),
+            temp.path().join("tools"),
+            temp.path().join("channels"),
+        );
+
+        // Valid URL but no sha256 — should be rejected before any download attempt
+        let manifest = test_manifest(
+            "demo",
+            "tools-src/demo",
+            Some(
+                "https://github.com/nearai/ironclaw/releases/latest/download/demo-wasm32-wasip2.tar.gz".to_string(),
+            ),
+            None, // sha256 = null
+        );
+
+        let result = installer.install_from_artifact(&manifest, false).await;
+        match result {
+            Err(RegistryError::InvalidManifest { field, reason, .. }) => {
+                assert_eq!(field, "artifacts.wasm32-wasip2.sha256");
+                assert!(reason.contains("required"), "reason: {}", reason);
+            }
+            other => panic!("unexpected result: {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_should_attempt_source_fallback_policy() {
+        let download = RegistryError::DownloadFailed {
+            url: "https://github.com/nearai/ironclaw/releases/latest/download/demo.wasm"
+                .to_string(),
+            reason: "http status 404".to_string(),
+        };
+        assert!(should_attempt_source_fallback(&download));
+
+        let already = RegistryError::AlreadyInstalled {
+            name: "demo".to_string(),
+            path: PathBuf::from("/tmp/demo.wasm"),
+        };
+        assert!(!should_attempt_source_fallback(&already));
+
+        let checksum = RegistryError::ChecksumMismatch {
+            url: "https://github.com/nearai/ironclaw/releases/latest/download/demo.wasm"
+                .to_string(),
+            expected_sha256: "deadbeef".to_string(),
+            actual_sha256: "feedface".to_string(),
+        };
+        assert!(!should_attempt_source_fallback(&checksum));
+
+        let invalid = RegistryError::InvalidManifest {
+            name: "demo".to_string(),
+            field: "artifacts.wasm32-wasip2.url",
+            reason: "host not allowed".to_string(),
+        };
+        assert!(!should_attempt_source_fallback(&invalid));
     }
 
     #[test]
@@ -585,6 +984,66 @@ mod tests {
         assert!(wasm_path.exists());
         assert!(caps_path.exists());
         assert!(result.has_capabilities);
+    }
+
+    #[tokio::test]
+    async fn test_install_from_source_rejects_wrong_prefix_for_channel() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let installer = RegistryInstaller::new(
+            temp.path().to_path_buf(),
+            temp.path().join("tools"),
+            temp.path().join("channels"),
+        );
+
+        // Channel manifest with tools-src/ prefix should be rejected
+        let manifest = test_manifest_with_kind(
+            "telegram",
+            "tools-src/telegram",
+            None,
+            None,
+            ManifestKind::Channel,
+        );
+
+        let result = installer.install_from_source(&manifest, false).await;
+        match result {
+            Err(RegistryError::InvalidManifest { field, reason, .. }) => {
+                assert_eq!(field, "source.dir");
+                assert!(reason.contains("channels-src/"), "reason: {}", reason);
+            }
+            other => panic!("unexpected result: {:?}", other),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_install_from_source_accepts_correct_channel_prefix() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let installer = RegistryInstaller::new(
+            temp.path().to_path_buf(),
+            temp.path().join("tools"),
+            temp.path().join("channels"),
+        );
+
+        // Channel manifest with channels-src/ prefix should pass validation
+        // (will fail later because source dir doesn't exist, which is fine)
+        let manifest = test_manifest_with_kind(
+            "telegram",
+            "channels-src/telegram",
+            None,
+            None,
+            ManifestKind::Channel,
+        );
+
+        let result = installer.install_from_source(&manifest, false).await;
+        match result {
+            Err(RegistryError::ManifestRead { reason, .. }) => {
+                assert!(
+                    reason.contains("source directory does not exist"),
+                    "reason: {}",
+                    reason
+                );
+            }
+            other => panic!("unexpected result: {:?}", other),
+        }
     }
 
     #[test]

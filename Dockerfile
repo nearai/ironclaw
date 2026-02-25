@@ -14,20 +14,22 @@ FROM rust:1.92-slim-bookworm AS builder
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     pkg-config libssl-dev cmake gcc g++ protobuf-compiler \
-    && rm -rf /var/lib/apt/lists/*
+    && rm -rf /var/lib/apt/lists/* \
+    && rustup target add wasm32-wasip2 \
+    && cargo install wasm-tools
 
 WORKDIR /app
 
 # Copy manifests and build script first for layer caching
 COPY Cargo.toml Cargo.lock build.rs ./
 
-# Copy source, tests (needed for [[test]] manifest entries), and build artifacts
+# Copy source, build script, tests, and supporting directories
 COPY src/ src/
 COPY tests/ tests/
 COPY migrations/ migrations/
-COPY wit/ wit/
 COPY registry/ registry/
 COPY channels-src/ channels-src/
+COPY wit/ wit/
 
 # Default features match the standard build; override with --build-arg for OTEL etc.
 ARG CARGO_FEATURES="postgres,libsql,html-to-markdown"

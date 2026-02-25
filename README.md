@@ -106,6 +106,15 @@ curl --proto '=https' --tlsv1.2 -LsSf https://github.com/nearai/ironclaw/release
 </details>
 
 <details>
+  <summary>Install via Homebrew (macOS/Linux)</summary>
+
+```sh
+brew install ironclaw
+```
+
+</details>
+
+<details>
   <summary>Compile the source code (Cargo on Windows, Linux, macOS)</summary>
 
 Install it with `cargo`, just make sure you have [Rust](https://rustup.rs) installed on your computer.

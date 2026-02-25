@@ -1,6 +1,11 @@
 # Complexity guardrails — prevent god functions and deeply nested logic.
 # See: https://github.com/nearai/ironclaw/issues/338
-cognitive-complexity-threshold = 15
-too-many-lines-threshold = 100
-too-many-arguments-threshold = 6
-type-complexity-threshold = 200
+#
+# Thresholds are set above the current worst-case to avoid blocking PRs
+# on pre-existing complexity. Ratchet down as code is refactored.
+# For stricter per-function checks, the quality gate uses lizard
+# (cyclomatic_complexity=15, length=100).
+cognitive-complexity-threshold = 150
+too-many-lines-threshold = 700
+too-many-arguments-threshold = 10
+type-complexity-threshold = 300

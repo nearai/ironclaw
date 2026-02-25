@@ -68,6 +68,7 @@ pub struct AgentDeps {
     pub workspace: Option<Arc<Workspace>>,
     pub extension_manager: Option<Arc<ExtensionManager>>,
     pub skill_registry: Option<Arc<std::sync::RwLock<SkillRegistry>>>,
+    pub skill_catalog: Option<Arc<crate::skills::catalog::SkillCatalog>>,
     pub skills_config: SkillsConfig,
     pub hooks: Arc<HookRegistry>,
     /// Cost enforcement guardrails (daily budget, hourly rate limits).
@@ -178,6 +179,10 @@ impl Agent {
 
     pub(super) fn skill_registry(&self) -> Option<&Arc<std::sync::RwLock<SkillRegistry>>> {
         self.deps.skill_registry.as_ref()
+    }
+
+    pub(super) fn skill_catalog(&self) -> Option<&Arc<crate::skills::catalog::SkillCatalog>> {
+        self.deps.skill_catalog.as_ref()
     }
 
     /// Select active skills for a message using deterministic prefiltering.
@@ -1131,6 +1136,7 @@ mod tests {
                 workspace: None,
                 extension_manager: None,
                 skill_registry: None,
+                skill_catalog: None,
                 skills_config: SkillsConfig::default(),
                 hooks,
                 cost_guard: Arc::new(CostGuard::new(CostGuardConfig::default())),
