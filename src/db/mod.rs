@@ -370,7 +370,28 @@ pub trait WorkspaceStore: Send + Sync {
         chunk_index: i32,
         content: &str,
         embedding: Option<&[f32]>,
+        chunk_version: i32,
     ) -> Result<Uuid, WorkspaceError>;
+
+    /// Get document IDs that have chunks with version less than the target.
+    ///
+    /// Used to find documents that need re-indexing after chunk parameters change.
+    /// Returns up to `limit` document IDs to enable batched re-indexing.
+    async fn get_documents_with_stale_chunks(
+        &self,
+        user_id: &str,
+        agent_id: Option<Uuid>,
+        target_version: i32,
+        limit: usize,
+    ) -> Result<Vec<Uuid>, WorkspaceError>;
+
+    /// Mark a document for re-indexing by resetting its chunk versions to 0.
+    ///
+    /// Used for recovery when `reindex_document` fails mid-way: ensures the
+    /// document will be picked up by `get_documents_with_stale_chunks` on
+    /// the next hygiene pass.
+    async fn mark_document_for_reindex(&self, document_id: Uuid) -> Result<(), WorkspaceError>;
+
     async fn update_chunk_embedding(
         &self,
         chunk_id: Uuid,
