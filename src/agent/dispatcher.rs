@@ -1626,4 +1626,265 @@ mod tests {
             );
         }
     }
+
+    /// LLM provider that always returns calls to a nonexistent tool, regardless
+    /// of whether tools are available. When tools are stripped (force_text), it
+    /// returns text.
+    struct FailingToolCallProvider;
+
+    #[async_trait]
+    impl LlmProvider for FailingToolCallProvider {
+        fn model_name(&self) -> &str {
+            "failing-tool-call"
+        }
+
+        fn cost_per_token(&self) -> (Decimal, Decimal) {
+            (Decimal::ZERO, Decimal::ZERO)
+        }
+
+        async fn complete(
+            &self,
+            _request: CompletionRequest,
+        ) -> Result<CompletionResponse, crate::error::LlmError> {
+            Ok(CompletionResponse {
+                content: "forced text".to_string(),
+                input_tokens: 0,
+                output_tokens: 2,
+                finish_reason: FinishReason::Stop,
+            })
+        }
+
+        async fn complete_with_tools(
+            &self,
+            request: ToolCompletionRequest,
+        ) -> Result<ToolCompletionResponse, crate::error::LlmError> {
+            if request.tools.is_empty() {
+                return Ok(ToolCompletionResponse {
+                    content: Some("forced text".to_string()),
+                    tool_calls: Vec::new(),
+                    input_tokens: 0,
+                    output_tokens: 2,
+                    finish_reason: FinishReason::Stop,
+                });
+            }
+            // Always call a tool that does not exist in the registry.
+            Ok(ToolCompletionResponse {
+                content: None,
+                tool_calls: vec![ToolCall {
+                    id: format!("call_{}", uuid::Uuid::new_v4()),
+                    name: "nonexistent_tool".to_string(),
+                    arguments: serde_json::json!({}),
+                }],
+                input_tokens: 0,
+                output_tokens: 5,
+                finish_reason: FinishReason::ToolUse,
+            })
+        }
+    }
+
+    /// Helper to build a test Agent with a custom LLM provider and
+    /// `max_tool_iterations` override.
+    fn make_test_agent_with_llm(
+        llm: Arc<dyn LlmProvider>,
+        max_tool_iterations: usize,
+    ) -> Agent {
+        let deps = AgentDeps {
+            store: None,
+            llm,
+            cheap_llm: None,
+            safety: Arc::new(SafetyLayer::new(&SafetyConfig {
+                max_output_length: 100_000,
+                injection_check_enabled: false,
+            })),
+            tools: Arc::new(ToolRegistry::new()),
+            workspace: None,
+            extension_manager: None,
+            skill_registry: None,
+            skill_catalog: None,
+            skills_config: SkillsConfig::default(),
+            hooks: Arc::new(HookRegistry::new()),
+            cost_guard: Arc::new(CostGuard::new(CostGuardConfig::default())),
+        };
+
+        Agent::new(
+            AgentConfig {
+                name: "test-agent".to_string(),
+                max_parallel_jobs: 1,
+                job_timeout: Duration::from_secs(60),
+                stuck_threshold: Duration::from_secs(60),
+                repair_check_interval: Duration::from_secs(30),
+                max_repair_attempts: 1,
+                use_planning: false,
+                session_idle_timeout: Duration::from_secs(300),
+                allow_local_tools: false,
+                max_cost_per_day_cents: None,
+                max_actions_per_hour: None,
+                max_tool_iterations,
+                auto_approve_tools: true,
+            },
+            deps,
+            Arc::new(ChannelManager::new()),
+            None,
+            None,
+            None,
+            Some(Arc::new(ContextManager::new(1))),
+            None,
+        )
+    }
+
+    /// Regression test for the infinite loop bug (PR #252) where `continue`
+    /// skipped the index increment. When every tool call fails (e.g., tool not
+    /// found), the dispatcher must still advance through all calls and
+    /// eventually terminate via the force_text / max_iterations guard.
+    #[tokio::test]
+    async fn test_dispatcher_terminates_with_all_tool_calls_failing() {
+        use crate::agent::session::Session;
+        use crate::channels::IncomingMessage;
+        use crate::llm::ChatMessage;
+        use tokio::sync::Mutex;
+
+        let agent = make_test_agent_with_llm(Arc::new(FailingToolCallProvider), 5);
+
+        let session = Arc::new(Mutex::new(Session::new("test-user")));
+
+        // Initialize a thread in the session so the loop can record tool calls.
+        let thread_id = {
+            let mut sess = session.lock().await;
+            sess.create_thread().id
+        };
+
+        let message = IncomingMessage::new("test", "test-user", "do something");
+        let initial_messages = vec![ChatMessage::user("do something")];
+
+        // The dispatcher must terminate within 5 seconds. If there is an
+        // infinite loop bug (e.g., index not advancing on tool failure), the
+        // timeout will fire and the test will fail.
+        let result = tokio::time::timeout(
+            Duration::from_secs(5),
+            agent.run_agentic_loop(&message, session, thread_id, initial_messages),
+        )
+        .await;
+
+        assert!(
+            result.is_ok(),
+            "Dispatcher timed out -- possible infinite loop when all tool calls fail"
+        );
+
+        // The loop should complete (either with a text response from force_text,
+        // or an error from the hard ceiling). Both are acceptable termination.
+        let inner = result.unwrap();
+        assert!(
+            inner.is_ok(),
+            "Dispatcher returned an error: {:?}",
+            inner.err()
+        );
+    }
+
+    /// Verify that the max_iterations guard terminates the loop even when the
+    /// LLM always returns tool calls and those calls succeed.
+    #[tokio::test]
+    async fn test_dispatcher_terminates_with_max_iterations() {
+        use crate::agent::session::Session;
+        use crate::channels::IncomingMessage;
+        use crate::llm::ChatMessage;
+        use crate::tools::builtin::EchoTool;
+        use tokio::sync::Mutex;
+
+        // Use AlwaysToolCallProvider which calls "echo" on every turn.
+        // Register the echo tool so the calls succeed.
+        let llm: Arc<dyn LlmProvider> = Arc::new(AlwaysToolCallProvider);
+        let max_iter = 3;
+        let agent = {
+            let deps = AgentDeps {
+                store: None,
+                llm,
+                cheap_llm: None,
+                safety: Arc::new(SafetyLayer::new(&SafetyConfig {
+                    max_output_length: 100_000,
+                    injection_check_enabled: false,
+                })),
+                tools: {
+                    let registry = Arc::new(ToolRegistry::new());
+                    registry.register_sync(Arc::new(EchoTool));
+                    registry
+                },
+                workspace: None,
+                extension_manager: None,
+                skill_registry: None,
+                skill_catalog: None,
+                skills_config: SkillsConfig::default(),
+                hooks: Arc::new(HookRegistry::new()),
+                cost_guard: Arc::new(CostGuard::new(CostGuardConfig::default())),
+            };
+
+            Agent::new(
+                AgentConfig {
+                    name: "test-agent".to_string(),
+                    max_parallel_jobs: 1,
+                    job_timeout: Duration::from_secs(60),
+                    stuck_threshold: Duration::from_secs(60),
+                    repair_check_interval: Duration::from_secs(30),
+                    max_repair_attempts: 1,
+                    use_planning: false,
+                    session_idle_timeout: Duration::from_secs(300),
+                    allow_local_tools: false,
+                    max_cost_per_day_cents: None,
+                    max_actions_per_hour: None,
+                    max_tool_iterations: max_iter,
+                    auto_approve_tools: true,
+                },
+                deps,
+                Arc::new(ChannelManager::new()),
+                None,
+                None,
+                None,
+                Some(Arc::new(ContextManager::new(1))),
+                None,
+            )
+        };
+
+        let session = Arc::new(Mutex::new(Session::new("test-user")));
+        let thread_id = {
+            let mut sess = session.lock().await;
+            sess.create_thread().id
+        };
+
+        let message = IncomingMessage::new("test", "test-user", "keep calling tools");
+        let initial_messages = vec![ChatMessage::user("keep calling tools")];
+
+        // Even with an LLM that always wants to call tools, the dispatcher
+        // must terminate within the timeout thanks to force_text at
+        // max_tool_iterations.
+        let result = tokio::time::timeout(
+            Duration::from_secs(5),
+            agent.run_agentic_loop(&message, session, thread_id, initial_messages),
+        )
+        .await;
+
+        assert!(
+            result.is_ok(),
+            "Dispatcher timed out -- max_iterations guard failed to terminate the loop"
+        );
+
+        // Should get a successful text response (force_text kicks in).
+        let inner = result.unwrap();
+        assert!(
+            inner.is_ok(),
+            "Dispatcher returned an error: {:?}",
+            inner.err()
+        );
+
+        // Verify we got a text response.
+        match inner.unwrap() {
+            super::AgenticLoopResult::Response(text) => {
+                assert!(
+                    !text.is_empty(),
+                    "Expected non-empty forced text response"
+                );
+            }
+            super::AgenticLoopResult::NeedApproval { .. } => {
+                panic!("Expected text response, got NeedApproval");
+            }
+        }
+    }
 }
