@@ -1,25 +1,32 @@
+# SRE Tools
 
-# Google
+WASM tools for the elastic-elk AI-SRE pod. Each tool lives in its own directory with a `Cargo.toml`, a `*.capabilities.json` declaring HTTP allowlists and credential requirements, and a `src/lib.rs` WASM implementation.
 
-All Google tools share `google_oauth_token` for authentication.
+## Status
 
-- [x] Gmail - search, read, send, draft, reply to emails
-- [x] Google Calendar - list, create, update, delete events
-- [x] Google Drive - search, access, upload, share files; supports org and personal drives
-- [x] Google Sheets - create spreadsheets, read/write/append values, manage sheets, format cells
-- [x] Google Docs - create, read, edit documents; text formatting, paragraphs, tables, lists
-- [x] Google Slides - create, read, edit presentations; shapes, images, text formatting, thumbnails, templates
-- [ ] Google Cloud - work with cloud instances, storage, allow to spin up and configure new instances, shut them down
+- [x] GitHub — issue, PR, and alert management (`github/`)
+- [x] Slack — incident notifications and channel messaging (`slack/`)
+- [x] Okta — identity and SSO (`okta/`)
+- [ ] Elasticsearch — log and metric queries (`elasticsearch/`) ← Phase 1
+- [ ] kubectl — Kubernetes cluster inspection and remediation (`kubectl/`) ← Phase 2
+- [ ] AWS — CloudWatch alarms, EC2, ECS/EKS read-only (`aws/`) ← Phase 3
 
-# Instant messengers
+## Tool Structure
 
-For all messengers: receive notifications of new messages, read contacts, groups and 1:1 messages, send messages on behalf of the user. This is different from the channel because operates from the specific user's account. Be careful with accessing user's messages, make sure messages are kept unread.
+```
+tools-src/<name>/
+├── Cargo.toml
+├── README.md
+├── <name>-tool.capabilities.json
+└── src/
+    └── lib.rs
+```
 
-- [x] Slack - post messages, read channels, manage conversations
-- [x] Telegram - user-mode via direct MTProto over HTTPS (contacts, messages, send, search, forward, delete); no Docker needed
-- [ ] WhatsApp - Cloud API for messaging via Meta Business platform
-- [ ] Signal - messaging (note: no official public API exists)
+## Capabilities Schema
 
-# Transportation
-
-- [ ] Uber - call a car to specific destination from current place, check the status of the car/ride including stream the current position, support ordering food as well
+Each `*.capabilities.json` declares:
+- `http.allowlist` — permitted outbound hosts, path prefixes, and HTTP methods
+- `http.credentials` — secrets injected as headers (bearer, basic, or custom)
+- `http.rate_limit` — requests per minute / hour
+- `secrets.allowed_names` — secret keys this tool may access
+- `auth` — optional OAuth or manual token setup instructions
