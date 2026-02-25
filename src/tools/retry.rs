@@ -127,14 +127,9 @@ pub async fn retry_tool_execute(
         }
     }
 
-    // Should not be reached, but handle gracefully
-    ToolRetryOutcome {
-        result: Err(ToolError::ExecutionFailed(
-            "retry loop exited unexpectedly".to_string(),
-        )),
-        retry_attempts,
-        total_duration: start.elapsed(),
-    }
+    // The loop is guaranteed to return: the `if attempt == config.max_retries` check
+    // ensures we return on the final iteration.
+    unreachable!("retry loop should always return from within its body")
 }
 
 /// Determine the effective retry config for a tool.
