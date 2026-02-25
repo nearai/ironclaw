@@ -80,6 +80,9 @@ pub enum WasmChannelError {
 
     #[error("HTTP request error: {0}")]
     HttpRequest(String),
+
+    #[error("Channel {name} socket mode error: {reason}")]
+    SocketMode { name: String, reason: String },
 }
 
 impl From<crate::tools::wasm::WasmError> for WasmChannelError {

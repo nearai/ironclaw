@@ -1389,12 +1389,15 @@ impl ExtensionManager {
             if secret.optional {
                 continue;
             }
-            if !self
+            let in_store = self
                 .secrets
                 .exists(&self.user_id, &secret.name)
                 .await
-                .unwrap_or(false)
-            {
+                .unwrap_or(false);
+            let in_env = std::env::var(secret.name.to_uppercase())
+                .map(|v| !v.is_empty())
+                .unwrap_or(false);
+            if !in_store && !in_env {
                 all_provided = false;
                 break;
             }

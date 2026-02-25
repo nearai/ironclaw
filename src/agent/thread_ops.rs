@@ -582,20 +582,50 @@ impl Agent {
         approved: bool,
         always: bool,
     ) -> Result<SubmissionResult, Error> {
-        // Get pending approval for this thread
-        let pending = {
+        // Get pending approval for this thread, or search other threads in the
+        // session. This handles the common case in Slack/Telegram DMs where the
+        // approval prompt is sent as a threaded reply but the user responds in
+        // the main chat, creating a different thread key.
+        let (pending, actual_thread_id) = {
             let mut sess = session.lock().await;
-            let thread = sess
-                .threads
-                .get_mut(&thread_id)
-                .ok_or_else(|| Error::from(crate::error::JobError::NotFound { id: thread_id }))?;
 
-            if thread.state != ThreadState::AwaitingApproval {
-                return Ok(SubmissionResult::error("No pending approval request."));
+            // First: check the resolved thread directly
+            if let Some(thread) = sess.threads.get_mut(&thread_id) {
+                if thread.state == ThreadState::AwaitingApproval {
+                    let p = thread.take_pending_approval();
+                    if p.is_some() {
+                        (p, thread_id)
+                    } else {
+                        (None, thread_id)
+                    }
+                } else {
+                    // Resolved thread isn't awaiting approval — search session
+                    // for any thread that is (single-user assistant typically
+                    // has only one pending approval at a time).
+                    let mut found = None;
+                    for (&tid, t) in sess.threads.iter_mut() {
+                        if tid != thread_id && t.state == ThreadState::AwaitingApproval {
+                            let p = t.take_pending_approval();
+                            if p.is_some() {
+                                found = Some((p, tid));
+                                break;
+                            }
+                        }
+                    }
+                    match found {
+                        Some((p, tid)) => (p, tid),
+                        None => {
+                            return Ok(SubmissionResult::error("No pending approval request."));
+                        }
+                    }
+                }
+            } else {
+                return Err(Error::from(crate::error::JobError::NotFound {
+                    id: thread_id,
+                }));
             }
-
-            thread.take_pending_approval()
         };
+        let thread_id = actual_thread_id;
 
         let pending = match pending {
             Some(p) => p,
@@ -1352,5 +1382,109 @@ impl Agent {
         } else {
             Ok(SubmissionResult::error("Checkpoint not found."))
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use uuid::Uuid;
+
+    use crate::agent::session::{PendingApproval, Session, ThreadState};
+    use crate::llm::ChatMessage;
+
+    #[test]
+    fn test_cross_thread_approval_search() {
+        let mut session = Session::new("user-1");
+
+        // Create two threads
+        let thread_a_id = session.create_thread().id;
+        let thread_b_id = session.create_thread().id;
+
+        // Put thread B into AwaitingApproval state
+        let pending = PendingApproval {
+            request_id: Uuid::new_v4(),
+            tool_name: "shell".to_string(),
+            parameters: serde_json::json!({"command": "ls"}),
+            description: "List files".to_string(),
+            tool_call_id: "call_abc".to_string(),
+            context_messages: vec![ChatMessage::user("list files please")],
+            deferred_tool_calls: vec![],
+        };
+        session
+            .threads
+            .get_mut(&thread_b_id)
+            .unwrap()
+            .await_approval(pending);
+
+        // Thread A is Idle, thread B is AwaitingApproval
+        assert_eq!(
+            session.threads.get(&thread_a_id).unwrap().state,
+            ThreadState::Idle
+        );
+        assert_eq!(
+            session.threads.get(&thread_b_id).unwrap().state,
+            ThreadState::AwaitingApproval
+        );
+
+        // Simulate cross-thread search: starting from thread A's perspective,
+        // iterate all threads to find one that is AwaitingApproval.
+        let mut found_thread_id = None;
+        for (&tid, thread) in &session.threads {
+            if tid != thread_a_id && thread.state == ThreadState::AwaitingApproval {
+                found_thread_id = Some(tid);
+                break;
+            }
+        }
+
+        assert_eq!(found_thread_id, Some(thread_b_id));
+
+        // Take the pending approval from the found thread
+        let taken = session
+            .threads
+            .get_mut(&thread_b_id)
+            .unwrap()
+            .take_pending_approval();
+        assert!(taken.is_some());
+        assert_eq!(taken.unwrap().tool_name, "shell");
+    }
+
+    #[test]
+    fn test_direct_thread_approval() {
+        let mut session = Session::new("user-1");
+        let thread_id = session.create_thread().id;
+
+        let request_id = Uuid::new_v4();
+        let pending = PendingApproval {
+            request_id,
+            tool_name: "http_request".to_string(),
+            parameters: serde_json::json!({"url": "https://example.com"}),
+            description: "Fetch a URL".to_string(),
+            tool_call_id: "call_xyz".to_string(),
+            context_messages: vec![
+                ChatMessage::user("fetch example.com"),
+                ChatMessage::assistant("I will fetch that URL for you."),
+            ],
+            deferred_tool_calls: vec![],
+        };
+
+        // Put thread into AwaitingApproval
+        let thread = session.threads.get_mut(&thread_id).unwrap();
+        thread.await_approval(pending);
+        assert_eq!(thread.state, ThreadState::AwaitingApproval);
+        assert!(thread.pending_approval.is_some());
+
+        // Take the approval
+        let taken = thread.take_pending_approval();
+        assert!(taken.is_some());
+
+        let approval = taken.unwrap();
+        assert_eq!(approval.request_id, request_id);
+        assert_eq!(approval.tool_name, "http_request");
+        assert_eq!(approval.tool_call_id, "call_xyz");
+        assert_eq!(approval.context_messages.len(), 2);
+
+        // After taking, it should be gone
+        assert!(thread.pending_approval.is_none());
+        assert!(thread.take_pending_approval().is_none());
     }
 }

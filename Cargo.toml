@@ -141,6 +141,9 @@ bollard = "0.18"
 flate2 = "1"
 tar = "0.4"
 
+# WebSocket client for Slack Socket Mode
+tokio-tungstenite = { version = "0.26", features = ["rustls-tls-native-roots"] }
+
 # HTTP proxy for sandboxed network access
 hyper = { version = "1.5", features = ["server", "http1", "http2"] }
 hyper-util = { version = "0.1", features = ["server", "tokio", "http1", "http2"] }
@@ -166,7 +169,7 @@ zbus = "4"
 
 [dev-dependencies]
 tokio-test = "0.4"
-tokio-tungstenite = "0.26"
+tokio-tungstenite = { version = "0.26", features = ["rustls-tls-native-roots"] }
 testcontainers-modules = { version = "0.11", features = ["postgres"] }
 pretty_assertions = "1"
 tempfile = "3"

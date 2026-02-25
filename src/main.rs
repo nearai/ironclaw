@@ -595,6 +595,13 @@ async fn main() -> anyhow::Result<()> {
             )
             .await;
         tracing::info!("Channel runtime wired into extension manager for hot-activation");
+
+        // Tell extension manager which WASM channels are active so `list()` reports correctly.
+        if !loaded_wasm_channel_names.is_empty() {
+            ext_mgr
+                .set_active_channels(loaded_wasm_channel_names.clone())
+                .await;
+        }
     }
 
     let deps = AgentDeps {
@@ -874,6 +881,15 @@ async fn setup_wasm_channels(
 
         let secret_header = loaded.webhook_secret_header().map(|s| s.to_string());
 
+        // Capture the Socket Mode app token secret name so we can exclude it
+        // from credential injection (it must never enter the WASM credential map).
+        let socket_mode_app_token_secret = loaded
+            .capabilities_file
+            .as_ref()
+            .and_then(|f| f.capabilities.channel.as_ref())
+            .and_then(|c| c.socket_mode.as_ref())
+            .map(|sm| sm.app_token_secret.clone());
+
         let webhook_path = format!("/webhook/{}", channel_name);
         let endpoints = vec![RegisteredEndpoint {
             channel_name: channel_name.clone(),
@@ -882,7 +898,14 @@ async fn setup_wasm_channels(
             require_secret: webhook_secret.is_some(),
         }];
 
-        let channel_arc = Arc::new(loaded.channel);
+        let mut channel = loaded.channel;
+
+        // Provide secrets store to the channel for Socket Mode support
+        if let Some(secrets) = secrets_store {
+            channel.set_secrets_store(Arc::clone(secrets) as Arc<dyn SecretsStore + Send + Sync>);
+        }
+
+        let channel_arc = Arc::new(channel);
 
         {
             let mut config_updates = std::collections::HashMap::new();
@@ -936,8 +959,16 @@ async fn setup_wasm_channels(
             .await;
         has_webhook_channels = true;
 
-        if let Some(secrets) = secrets_store {
-            match inject_channel_credentials(&channel_arc, secrets.as_ref(), &channel_name).await {
+        {
+            let exclude_secrets: Vec<String> = socket_mode_app_token_secret.into_iter().collect();
+            match inject_channel_credentials(
+                &channel_arc,
+                secrets_store.as_deref(),
+                &channel_name,
+                &exclude_secrets,
+            )
+            .await
+            {
                 Ok(count) => {
                     if count > 0 {
                         tracing::info!(
@@ -1013,50 +1044,107 @@ fn check_onboard_needed() -> Option<&'static str> {
 
 /// Inject credentials for a channel based on naming convention.
 ///
-/// Looks for secrets matching the pattern `{channel_name}_*` and injects them
-/// as credential placeholders (e.g., `telegram_bot_token` -> `{TELEGRAM_BOT_TOKEN}`).
+/// Looks for secrets matching the pattern `{channel_name}_*` in the secrets store
+/// first, then falls back to environment variables with the UPPER_CASE name
+/// (e.g., `slack_bot_token` -> env var `SLACK_BOT_TOKEN`).
+///
+/// Secrets listed in `exclude_secrets` are skipped (e.g., Socket Mode app tokens
+/// that must never enter the WASM credential map).
 async fn inject_channel_credentials(
     channel: &Arc<ironclaw::channels::wasm::WasmChannel>,
-    secrets: &dyn SecretsStore,
+    secrets: Option<&(dyn SecretsStore + Send + Sync)>,
     channel_name: &str,
+    exclude_secrets: &[String],
 ) -> anyhow::Result<usize> {
-    let all_secrets = secrets
-        .list("default")
-        .await
-        .map_err(|e| anyhow::anyhow!("Failed to list secrets: {}", e))?;
-
     let prefix = format!("{}_", channel_name);
     let mut count = 0;
+    let mut injected_names: std::collections::HashSet<String> = std::collections::HashSet::new();
 
-    for secret_meta in all_secrets {
-        if !secret_meta.name.starts_with(&prefix) {
-            continue;
-        }
+    // Phase 1: Inject from secrets store (if available)
+    if let Some(secrets) = secrets {
+        let all_secrets = secrets
+            .list("default")
+            .await
+            .map_err(|e| anyhow::anyhow!("Failed to list secrets: {}", e))?;
 
-        let decrypted = match secrets.get_decrypted("default", &secret_meta.name).await {
-            Ok(d) => d,
-            Err(e) => {
-                tracing::warn!(
+        for secret_meta in all_secrets {
+            if !secret_meta.name.starts_with(&prefix) {
+                continue;
+            }
+
+            if exclude_secrets.contains(&secret_meta.name) {
+                tracing::debug!(
+                    channel = %channel_name,
                     secret = %secret_meta.name,
-                    error = %e,
-                    "Failed to decrypt secret for channel credential injection"
+                    "Skipping excluded secret from credential injection"
                 );
                 continue;
             }
-        };
 
-        let placeholder = secret_meta.name.to_uppercase();
+            let decrypted = match secrets.get_decrypted("default", &secret_meta.name).await {
+                Ok(d) => d,
+                Err(e) => {
+                    tracing::warn!(
+                        secret = %secret_meta.name,
+                        error = %e,
+                        "Failed to decrypt secret for channel credential injection"
+                    );
+                    continue;
+                }
+            };
+
+            let placeholder = secret_meta.name.to_uppercase();
+
+            tracing::debug!(
+                channel = %channel_name,
+                secret = %secret_meta.name,
+                placeholder = %placeholder,
+                "Injecting credential from secrets store"
+            );
+
+            channel
+                .set_credential(&placeholder, decrypted.expose().to_string())
+                .await;
+            injected_names.insert(secret_meta.name.clone());
+            count += 1;
+        }
+    }
+
+    // Phase 2: Fall back to environment variables for any matching env vars
+    // not already injected from the secrets store.
+    for (key, value) in std::env::vars() {
+        let lower_key = key.to_lowercase();
+        if !lower_key.starts_with(&prefix) {
+            continue;
+        }
+
+        // Already injected from secrets store
+        if injected_names.contains(&lower_key) {
+            continue;
+        }
+
+        // Skip excluded secrets
+        if exclude_secrets.contains(&lower_key) {
+            tracing::debug!(
+                channel = %channel_name,
+                env_var = %key,
+                "Skipping excluded env var from credential injection"
+            );
+            continue;
+        }
+
+        if value.is_empty() {
+            continue;
+        }
 
         tracing::debug!(
             channel = %channel_name,
-            secret = %secret_meta.name,
-            placeholder = %placeholder,
-            "Injecting credential"
+            env_var = %key,
+            placeholder = %key,
+            "Injecting credential from environment variable"
         );
 
-        channel
-            .set_credential(&placeholder, decrypted.expose().to_string())
-            .await;
+        channel.set_credential(&key, value).await;
         count += 1;
     }
 

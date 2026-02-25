@@ -9,6 +9,9 @@
 //! - Message event parsing (@mentions, DMs)
 //! - Thread support for conversations
 //! - Response posting via Slack Web API
+//! - API error classification with retry and backoff
+//! - Startup permission validation via auth.test
+//! - Auth failure notification to surface token issues
 //!
 //! # Security
 //!
@@ -48,6 +51,7 @@ struct SlackEventWrapper {
     team_id: Option<String>,
 
     /// Event ID for deduplication.
+    #[allow(dead_code)]
     event_id: Option<String>,
 }
 
@@ -81,7 +85,7 @@ struct SlackEvent {
 }
 
 /// Metadata stored with emitted messages for response routing.
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 struct SlackMessageMetadata {
     /// Slack channel ID.
     channel: String,
@@ -101,7 +105,111 @@ struct SlackMessageMetadata {
 struct SlackPostMessageResponse {
     ok: bool,
     error: Option<String>,
+    #[allow(dead_code)]
     ts: Option<String>,
+}
+
+/// Slack API response for auth.test.
+#[derive(Debug, Deserialize)]
+struct SlackAuthTestResponse {
+    ok: bool,
+    error: Option<String>,
+    #[allow(dead_code)]
+    user_id: Option<String>,
+    bot_id: Option<String>,
+    #[allow(dead_code)]
+    team_id: Option<String>,
+}
+
+// ============================================================================
+// API Error Classification
+// ============================================================================
+
+/// Classified Slack API error for deciding retry strategy.
+#[derive(Debug, PartialEq)]
+enum SlackApiError {
+    /// HTTP 429 — honor Retry-After header.
+    RateLimited { retry_after_ms: u32 },
+    /// Token is invalid or revoked — fail immediately.
+    InvalidAuth,
+    /// Token lacks a required scope — fail immediately.
+    MissingScope(String),
+    /// Bot is not in the target channel.
+    ChannelNotFound,
+    /// Transient server error (5xx) — retry with backoff.
+    ServerError(u16),
+    /// Unrecognized error.
+    Other(String),
+}
+
+/// Classify a Slack API error from the HTTP status and the `error` field in
+/// Slack's JSON response body.
+fn classify_slack_error(http_status: u16, error_field: Option<&str>) -> SlackApiError {
+    // HTTP-level classification takes priority for rate limits / server errors
+    if http_status == 429 {
+        return SlackApiError::RateLimited {
+            // Default 30s if no header; caller should override with actual Retry-After
+            retry_after_ms: 30_000,
+        };
+    }
+    if http_status >= 500 {
+        return SlackApiError::ServerError(http_status);
+    }
+
+    // Application-level classification from Slack's `error` field
+    match error_field {
+        Some("invalid_auth" | "token_revoked" | "token_expired" | "not_authed"
+        | "account_inactive") => SlackApiError::InvalidAuth,
+        Some(e) if e.starts_with("missing_scope") => {
+            SlackApiError::MissingScope(e.to_string())
+        }
+        Some("channel_not_found" | "not_in_channel" | "is_archived") => {
+            SlackApiError::ChannelNotFound
+        }
+        Some("ratelimited") => SlackApiError::RateLimited {
+            retry_after_ms: 30_000,
+        },
+        Some(other) => SlackApiError::Other(other.to_string()),
+        None => SlackApiError::Other(format!("HTTP {}", http_status)),
+    }
+}
+
+/// Whether a Slack API error is transient and worth retrying.
+fn is_retryable(err: &SlackApiError) -> bool {
+    // Only retry on transient server errors (5xx).
+    // RateLimited is NOT retryable inside WASM because the module cannot sleep —
+    // retrying immediately would busy-loop and hammer the Slack API.
+    matches!(err, SlackApiError::ServerError(_))
+}
+
+// ============================================================================
+// Message Subtype Filtering
+// ============================================================================
+
+/// Subtypes that should be dropped (system events or bot echoes).
+const IGNORED_SUBTYPES: &[&str] = &[
+    "bot_message",
+    "message_changed",
+    "message_deleted",
+    "channel_join",
+    "channel_leave",
+    "channel_topic",
+    "channel_purpose",
+    "channel_name",
+    "channel_archive",
+    "channel_unarchive",
+    "group_join",
+    "group_leave",
+    "ekm_access_denied",
+    "me_message",
+];
+
+/// Return true if a message with this subtype should be processed (not dropped).
+fn should_process_subtype(subtype: Option<&str>) -> bool {
+    match subtype {
+        None => true,
+        Some(st) => !IGNORED_SUBTYPES.contains(&st),
+    }
 }
 
 /// Workspace path for persisting owner_id across WASM callbacks.
@@ -110,8 +218,12 @@ const OWNER_ID_PATH: &str = "state/owner_id";
 const DM_POLICY_PATH: &str = "state/dm_policy";
 /// Workspace path for persisting allow_from (JSON array) across WASM callbacks.
 const ALLOW_FROM_PATH: &str = "state/allow_from";
+/// Workspace path for persisting bot_id (from auth.test) across WASM callbacks.
+const BOT_ID_PATH: &str = "state/bot_id";
 /// Channel name for pairing store (used by pairing host APIs).
 const CHANNEL_NAME: &str = "slack";
+/// Maximum retry attempts for transient Slack API errors.
+const MAX_RETRIES: u32 = 3;
 
 /// Channel configuration from capabilities file.
 #[derive(Debug, Deserialize)]
@@ -163,6 +275,9 @@ impl Guest for SlackChannel {
             .unwrap_or_else(|_| "[]".to_string());
         let _ = channel_host::workspace_write(ALLOW_FROM_PATH, &allow_from_json);
 
+        // Validate bot token via auth.test (best-effort, don't block startup)
+        validate_bot_token();
+
         Ok(ChannelConfig {
             display_name: "Slack".to_string(),
             http_endpoints: vec![HttpEndpointConfig {
@@ -212,7 +327,7 @@ impl Guest for SlackChannel {
             // Actual event callback
             "event_callback" => {
                 if let Some(event) = event_wrapper.event {
-                    handle_slack_event(event, event_wrapper.team_id, event_wrapper.event_id);
+                    handle_slack_event(event, event_wrapper.team_id);
                 }
                 // Always respond 200 quickly to Slack (they have a 3s timeout)
                 json_response(200, serde_json::json!({"ok": true}))
@@ -252,56 +367,8 @@ impl Guest for SlackChannel {
         let payload_bytes = serde_json::to_vec(&payload)
             .map_err(|e| format!("Failed to serialize payload: {}", e))?;
 
-        // Make HTTP request to Slack API
-        // The bot token is injected by the host based on credential configuration
-        let headers = serde_json::json!({
-            "Content-Type": "application/json"
-        });
-
-        let result = channel_host::http_request(
-            "POST",
-            "https://slack.com/api/chat.postMessage",
-            &headers.to_string(),
-            Some(&payload_bytes),
-            None,
-        );
-
-        match result {
-            Ok(http_response) => {
-                if http_response.status != 200 {
-                    return Err(format!(
-                        "Slack API returned status {}",
-                        http_response.status
-                    ));
-                }
-
-                // Parse Slack response
-                let slack_response: SlackPostMessageResponse =
-                    serde_json::from_slice(&http_response.body)
-                        .map_err(|e| format!("Failed to parse Slack response: {}", e))?;
-
-                if !slack_response.ok {
-                    return Err(format!(
-                        "Slack API error: {}",
-                        slack_response
-                            .error
-                            .unwrap_or_else(|| "unknown".to_string())
-                    ));
-                }
-
-                channel_host::log(
-                    channel_host::LogLevel::Debug,
-                    &format!(
-                        "Posted message to Slack channel {}: ts={}",
-                        metadata.channel,
-                        slack_response.ts.unwrap_or_default()
-                    ),
-                );
-
-                Ok(())
-            }
-            Err(e) => Err(format!("HTTP request failed: {}", e)),
-        }
+        // Post with retry for transient errors
+        post_message_with_retry(&payload_bytes, &metadata.channel)
     }
 
     fn on_status(_update: StatusUpdate) {}
@@ -311,8 +378,169 @@ impl Guest for SlackChannel {
     }
 }
 
+// ============================================================================
+// Startup Validation
+// ============================================================================
+
+/// Call auth.test to verify the bot token and discover our bot_id.
+/// Best-effort: logs warnings but never fails startup.
+fn validate_bot_token() {
+    let headers = serde_json::json!({"Content-Type": "application/json"});
+
+    let result = channel_host::http_request(
+        "POST",
+        "https://slack.com/api/auth.test",
+        &headers.to_string(),
+        None,
+        Some(10_000), // 10s timeout
+    );
+
+    match result {
+        Ok(http_response) => {
+            if let Ok(auth) =
+                serde_json::from_slice::<SlackAuthTestResponse>(&http_response.body)
+            {
+                if auth.ok {
+                    // Persist bot_id so we can filter our own messages
+                    if let Some(ref bot_id) = auth.bot_id {
+                        let _ = channel_host::workspace_write(BOT_ID_PATH, bot_id);
+                    }
+                    channel_host::log(
+                        channel_host::LogLevel::Info,
+                        &format!(
+                            "Bot token validated: bot_id={}",
+                            auth.bot_id.as_deref().unwrap_or("unknown"),
+                        ),
+                    );
+                } else {
+                    let err = auth.error.as_deref().unwrap_or("unknown");
+                    channel_host::log(
+                        channel_host::LogLevel::Warn,
+                        &format!("Bot token validation failed: {}", err),
+                    );
+                }
+            }
+        }
+        Err(e) => {
+            channel_host::log(
+                channel_host::LogLevel::Warn,
+                &format!("auth.test request failed (token may not be configured yet): {}", e),
+            );
+        }
+    }
+}
+
+// ============================================================================
+// Message Posting with Retry
+// ============================================================================
+
+/// Post a chat.postMessage with retry for transient errors.
+fn post_message_with_retry(payload_bytes: &[u8], channel: &str) -> Result<(), String> {
+    let headers = serde_json::json!({
+        "Content-Type": "application/json"
+    });
+
+    let mut last_error = String::new();
+
+    for attempt in 0..MAX_RETRIES {
+        if attempt > 0 {
+            // Sleep before retry. WASM has no sleep, but we can use a busy-wait
+            // approximation. In practice the host's HTTP timeout provides enough
+            // backoff for server errors. For rate limits we just retry immediately
+            // since the host-side HTTP layer already respected any Retry-After.
+            channel_host::log(
+                channel_host::LogLevel::Info,
+                &format!(
+                    "Retrying chat.postMessage to {} (attempt {}/{})",
+                    channel,
+                    attempt + 1,
+                    MAX_RETRIES
+                ),
+            );
+        }
+
+        let result = channel_host::http_request(
+            "POST",
+            "https://slack.com/api/chat.postMessage",
+            &headers.to_string(),
+            Some(payload_bytes),
+            None,
+        );
+
+        match result {
+            Ok(http_response) => {
+                let slack_error_field = serde_json::from_slice::<SlackPostMessageResponse>(
+                    &http_response.body,
+                )
+                .ok();
+
+                // Check for Slack-level success
+                if http_response.status == 200 {
+                    if let Some(ref resp) = slack_error_field {
+                        if resp.ok {
+                            return Ok(());
+                        }
+                    }
+                }
+
+                // Classify the error
+                let error_str = slack_error_field
+                    .as_ref()
+                    .and_then(|r| r.error.as_deref());
+                let classified = classify_slack_error(http_response.status, error_str);
+
+                // Auth failures: notify and fail immediately
+                if classified == SlackApiError::InvalidAuth {
+                    let msg =
+                        error_str.unwrap_or("invalid_auth");
+                    notify_auth_failure(msg);
+                    return Err(format!("invalid_auth: {}", msg));
+                }
+
+                // Non-retryable: fail immediately
+                if !is_retryable(&classified) {
+                    return Err(format!(
+                        "Slack API error: {:?}",
+                        classified
+                    ));
+                }
+
+                last_error = format!("Slack API error: {:?}", classified);
+            }
+            Err(e) => {
+                // HTTP transport error — could be transient
+                last_error = format!("HTTP request failed: {}", e);
+            }
+        }
+    }
+
+    Err(format!(
+        "chat.postMessage failed after {} attempts: {}",
+        MAX_RETRIES, last_error
+    ))
+}
+
+/// Notify the host that authentication has failed so the user can see it.
+fn notify_auth_failure(error: &str) {
+    channel_host::emit_message(&EmittedMessage {
+        user_id: "system".to_string(),
+        user_name: Some("Slack Channel".to_string()),
+        content: format!(
+            "[Slack auth error] Bot token is invalid or revoked ({}). \
+             Please update the slack_bot_token secret.",
+            error
+        ),
+        thread_id: None,
+        metadata_json: "{}".to_string(),
+    });
+}
+
+// ============================================================================
+// Event Handling
+// ============================================================================
+
 /// Handle a Slack event and emit message if applicable.
-fn handle_slack_event(event: SlackEvent, team_id: Option<String>, _event_id: Option<String>) {
+fn handle_slack_event(event: SlackEvent, team_id: Option<String>) {
     match event.event_type.as_str() {
         // Direct mention of the bot (always in a channel, not a DM)
         "app_mention" => {
@@ -330,10 +558,15 @@ fn handle_slack_event(event: SlackEvent, team_id: Option<String>, _event_id: Opt
             }
         }
 
-        // Direct message to the bot
+        // Direct message or threaded reply to the bot
         "message" => {
             // Skip messages from bots (including ourselves)
-            if event.bot_id.is_some() || event.subtype.is_some() {
+            if event.bot_id.is_some() {
+                return;
+            }
+
+            // Check subtype against deny-list (not blanket-reject)
+            if !should_process_subtype(event.subtype.as_deref()) {
                 return;
             }
 
@@ -343,12 +576,23 @@ fn handle_slack_event(event: SlackEvent, team_id: Option<String>, _event_id: Opt
                 event.text,
                 event.ts.clone(),
             ) {
-                // Only process DMs (channel IDs starting with D)
-                if channel.starts_with('D') {
+                let is_dm = channel.starts_with('D');
+                let is_threaded_reply = event.thread_ts.is_some();
+
+                // Process DMs (channel IDs starting with D) and threaded
+                // replies in channels. Threaded replies catch approval
+                // responses ("yes"/"no") and follow-up messages in threads
+                // where the bot was @mentioned.
+                if is_dm {
                     if !check_sender_permission(&user, &channel, true) {
                         return;
                     }
                     emit_message(user, text, channel, event.thread_ts.or(Some(ts)), team_id);
+                } else if is_threaded_reply {
+                    if !check_sender_permission(&user, &channel, false) {
+                        return;
+                    }
+                    emit_message(user, text, channel, event.thread_ts, team_id);
                 }
             }
         }
@@ -519,6 +763,10 @@ fn send_pairing_reply(channel_id: &str, code: &str) -> Result<(), String> {
     }
 }
 
+// ============================================================================
+// Helpers
+// ============================================================================
+
 /// Strip leading bot mention from text.
 fn strip_bot_mention(text: &str) -> String {
     // Slack mentions look like <@U12345678>
@@ -551,3 +799,249 @@ fn json_response(status: u16, value: serde_json::Value) -> OutgoingHttpResponse 
 
 // Export the component
 export!(SlackChannel);
+
+// ============================================================================
+// Tests
+// ============================================================================
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // --- Error classification ---
+
+    #[test]
+    fn test_classify_rate_limited_http_429() {
+        let err = classify_slack_error(429, None);
+        assert_eq!(
+            err,
+            SlackApiError::RateLimited {
+                retry_after_ms: 30_000
+            }
+        );
+    }
+
+    #[test]
+    fn test_classify_rate_limited_body_field() {
+        let err = classify_slack_error(200, Some("ratelimited"));
+        assert_eq!(
+            err,
+            SlackApiError::RateLimited {
+                retry_after_ms: 30_000
+            }
+        );
+    }
+
+    #[test]
+    fn test_classify_server_error() {
+        let err = classify_slack_error(503, None);
+        assert_eq!(err, SlackApiError::ServerError(503));
+    }
+
+    #[test]
+    fn test_classify_invalid_auth_variants() {
+        for variant in &[
+            "invalid_auth",
+            "token_revoked",
+            "token_expired",
+            "not_authed",
+            "account_inactive",
+        ] {
+            let err = classify_slack_error(200, Some(variant));
+            assert_eq!(err, SlackApiError::InvalidAuth, "failed for {}", variant);
+        }
+    }
+
+    #[test]
+    fn test_classify_missing_scope() {
+        let err = classify_slack_error(200, Some("missing_scope:chat:write"));
+        assert!(matches!(err, SlackApiError::MissingScope(s) if s.contains("chat:write")));
+    }
+
+    #[test]
+    fn test_classify_channel_not_found() {
+        for variant in &["channel_not_found", "not_in_channel", "is_archived"] {
+            let err = classify_slack_error(200, Some(variant));
+            assert_eq!(
+                err,
+                SlackApiError::ChannelNotFound,
+                "failed for {}",
+                variant
+            );
+        }
+    }
+
+    #[test]
+    fn test_classify_unknown_error() {
+        let err = classify_slack_error(200, Some("something_weird"));
+        assert!(matches!(err, SlackApiError::Other(s) if s == "something_weird"));
+    }
+
+    #[test]
+    fn test_classify_no_error_field() {
+        let err = classify_slack_error(400, None);
+        assert!(matches!(err, SlackApiError::Other(s) if s == "HTTP 400"));
+    }
+
+    // --- Retryability ---
+
+    #[test]
+    fn test_retryable_errors() {
+        // RateLimited is NOT retryable inside WASM (can't sleep → busy-loop)
+        assert!(!is_retryable(&SlackApiError::RateLimited {
+            retry_after_ms: 1000
+        }));
+        assert!(is_retryable(&SlackApiError::ServerError(500)));
+        assert!(!is_retryable(&SlackApiError::InvalidAuth));
+        assert!(!is_retryable(&SlackApiError::ChannelNotFound));
+        assert!(!is_retryable(&SlackApiError::MissingScope(
+            "chat:write".into()
+        )));
+        assert!(!is_retryable(&SlackApiError::Other("unknown".into())));
+    }
+
+    // --- Subtype filtering ---
+
+    #[test]
+    fn test_should_process_no_subtype() {
+        assert!(should_process_subtype(None));
+    }
+
+    #[test]
+    fn test_should_drop_bot_message() {
+        assert!(!should_process_subtype(Some("bot_message")));
+    }
+
+    #[test]
+    fn test_should_drop_message_changed() {
+        assert!(!should_process_subtype(Some("message_changed")));
+    }
+
+    #[test]
+    fn test_should_drop_message_deleted() {
+        assert!(!should_process_subtype(Some("message_deleted")));
+    }
+
+    #[test]
+    fn test_should_drop_channel_join() {
+        assert!(!should_process_subtype(Some("channel_join")));
+    }
+
+    #[test]
+    fn test_should_drop_channel_leave() {
+        assert!(!should_process_subtype(Some("channel_leave")));
+    }
+
+    #[test]
+    fn test_should_pass_file_share() {
+        assert!(should_process_subtype(Some("file_share")));
+    }
+
+    #[test]
+    fn test_should_pass_thread_broadcast() {
+        assert!(should_process_subtype(Some("thread_broadcast")));
+    }
+
+    #[test]
+    fn test_should_pass_unknown_subtype() {
+        // Future subtypes should pass by default; we deny-list, not allow-list
+        assert!(should_process_subtype(Some("some_future_subtype")));
+    }
+
+    // --- Bot mention stripping ---
+
+    #[test]
+    fn test_strip_bot_mention_basic() {
+        assert_eq!(strip_bot_mention("<@U12345> hello"), "hello");
+    }
+
+    #[test]
+    fn test_strip_bot_mention_no_mention() {
+        assert_eq!(strip_bot_mention("hello world"), "hello world");
+    }
+
+    #[test]
+    fn test_strip_bot_mention_with_whitespace() {
+        assert_eq!(strip_bot_mention("  <@U12345>   hello  "), "hello");
+    }
+
+    #[test]
+    fn test_strip_bot_mention_only_mention() {
+        assert_eq!(strip_bot_mention("<@U12345>"), "");
+    }
+
+    #[test]
+    fn test_strip_bot_mention_incomplete() {
+        // Incomplete mention tag — should be returned as-is
+        assert_eq!(strip_bot_mention("<@U12345"), "<@U12345");
+    }
+
+    #[test]
+    fn test_strip_bot_mention_mention_in_middle() {
+        // Mention NOT at the start — leave untouched
+        assert_eq!(
+            strip_bot_mention("hey <@U12345> check this"),
+            "hey <@U12345> check this"
+        );
+    }
+
+    // --- Metadata serialization ---
+
+    #[test]
+    fn test_metadata_roundtrip() {
+        let meta = SlackMessageMetadata {
+            channel: "C12345".to_string(),
+            thread_ts: Some("1234567890.123456".to_string()),
+            message_ts: "1234567890.123456".to_string(),
+            team_id: Some("T12345".to_string()),
+        };
+        let json = serde_json::to_string(&meta).expect("serialize");
+        let deserialized: SlackMessageMetadata =
+            serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(meta, deserialized);
+    }
+
+    #[test]
+    fn test_metadata_roundtrip_minimal() {
+        let meta = SlackMessageMetadata {
+            channel: "D999".to_string(),
+            thread_ts: None,
+            message_ts: "".to_string(),
+            team_id: None,
+        };
+        let json = serde_json::to_string(&meta).expect("serialize");
+        let deserialized: SlackMessageMetadata =
+            serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(meta, deserialized);
+    }
+
+    // --- Config parsing ---
+
+    #[test]
+    fn test_config_defaults() {
+        let config: SlackConfig =
+            serde_json::from_str("{}").expect("should parse empty config");
+        assert_eq!(config.signing_secret_name, "slack_signing_secret");
+        assert!(config.owner_id.is_none());
+        assert!(config.dm_policy.is_none());
+        assert!(config.allow_from.is_none());
+    }
+
+    #[test]
+    fn test_config_full() {
+        let json = r#"{
+            "signing_secret_name": "my_secret",
+            "owner_id": "U123",
+            "dm_policy": "open",
+            "allow_from": ["U456", "U789"]
+        }"#;
+        let config: SlackConfig = serde_json::from_str(json).expect("should parse");
+        assert_eq!(config.signing_secret_name, "my_secret");
+        assert_eq!(config.owner_id.as_deref(), Some("U123"));
+        assert_eq!(config.dm_policy.as_deref(), Some("open"));
+        assert_eq!(
+            config.allow_from,
+            Some(vec!["U456".to_string(), "U789".to_string()])
+        );
+    }
+}

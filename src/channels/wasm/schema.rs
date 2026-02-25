@@ -169,6 +169,15 @@ impl ChannelCapabilitiesSchema {
             if let Some(timeout_secs) = channel.callback_timeout_secs {
                 caps.callback_timeout = Duration::from_secs(timeout_secs);
             }
+
+            if let Some(sm) = &channel.socket_mode {
+                caps.socket_mode = Some(crate::channels::wasm::capabilities::SocketModeConfig {
+                    open_url: sm.open_url.clone(),
+                    app_token_secret: sm.app_token_secret.clone(),
+                    reconnect_delay_ms: sm.reconnect_delay_ms,
+                    max_reconnect_attempts: sm.max_reconnect_attempts,
+                });
+            }
         }
 
         caps
@@ -209,6 +218,10 @@ pub struct ChannelSpecificCapabilitiesSchema {
     /// Webhook configuration (secret header, etc.).
     #[serde(default)]
     pub webhook: Option<WebhookSchema>,
+
+    /// Socket Mode configuration (WebSocket-based event delivery).
+    #[serde(default)]
+    pub socket_mode: Option<SocketModeSchema>,
 }
 
 /// Webhook configuration schema.
@@ -230,6 +243,41 @@ pub struct WebhookSchema {
     /// Default: "{channel_name}_webhook_secret"
     #[serde(default)]
     pub secret_name: Option<String>,
+}
+
+/// Socket Mode configuration schema.
+///
+/// Enables WebSocket-based event delivery instead of webhooks.
+/// The host manages the WebSocket connection and bridges events into the
+/// existing WASM `on_http_request` callback.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SocketModeSchema {
+    /// URL for `apps.connections.open` (default: Slack's API).
+    #[serde(default = "default_socket_open_url")]
+    pub open_url: String,
+
+    /// Secret name for the app-level token (xapp-...).
+    pub app_token_secret: String,
+
+    /// Base reconnect delay in milliseconds (default: 5000).
+    #[serde(default = "default_reconnect_delay")]
+    pub reconnect_delay_ms: u64,
+
+    /// Maximum reconnection attempts before giving up (default: 10).
+    #[serde(default = "default_max_reconnects")]
+    pub max_reconnect_attempts: u32,
+}
+
+fn default_socket_open_url() -> String {
+    "https://slack.com/api/apps.connections.open".to_string()
+}
+
+fn default_reconnect_delay() -> u64 {
+    5000
+}
+
+fn default_max_reconnects() -> u32 {
+    10
 }
 
 /// Setup configuration schema.
@@ -584,5 +632,103 @@ mod tests {
                 .length,
             64
         );
+    }
+
+    #[test]
+    fn test_parse_socket_mode_config() {
+        let json = r#"{
+            "name": "slack",
+            "capabilities": {
+                "channel": {
+                    "allowed_paths": ["/webhook/slack"],
+                    "socket_mode": {
+                        "open_url": "https://slack.com/api/apps.connections.open",
+                        "app_token_secret": "slack_app_token",
+                        "reconnect_delay_ms": 3000,
+                        "max_reconnect_attempts": 5
+                    }
+                }
+            }
+        }"#;
+
+        let file = ChannelCapabilitiesFile::from_json(json).unwrap();
+        let channel = file.capabilities.channel.as_ref().unwrap();
+        let sm = channel.socket_mode.as_ref().unwrap();
+
+        assert_eq!(sm.open_url, "https://slack.com/api/apps.connections.open");
+        assert_eq!(sm.app_token_secret, "slack_app_token");
+        assert_eq!(sm.reconnect_delay_ms, 3000);
+        assert_eq!(sm.max_reconnect_attempts, 5);
+    }
+
+    #[test]
+    fn test_parse_socket_mode_defaults() {
+        let json = r#"{
+            "name": "slack",
+            "capabilities": {
+                "channel": {
+                    "socket_mode": {
+                        "app_token_secret": "slack_app_token"
+                    }
+                }
+            }
+        }"#;
+
+        let file = ChannelCapabilitiesFile::from_json(json).unwrap();
+        let channel = file.capabilities.channel.as_ref().unwrap();
+        let sm = channel.socket_mode.as_ref().unwrap();
+
+        assert!(sm.open_url.starts_with("https://slack.com"));
+        assert_eq!(sm.app_token_secret, "slack_app_token");
+        assert_eq!(sm.reconnect_delay_ms, 5000);
+        assert_eq!(sm.max_reconnect_attempts, 10);
+    }
+
+    #[test]
+    fn test_socket_mode_to_capabilities() {
+        let json = r#"{
+            "name": "slack",
+            "capabilities": {
+                "channel": {
+                    "socket_mode": {
+                        "open_url": "https://slack.com/api/apps.connections.open",
+                        "app_token_secret": "slack_app_token",
+                        "reconnect_delay_ms": 3000,
+                        "max_reconnect_attempts": 5
+                    }
+                }
+            }
+        }"#;
+
+        let file = ChannelCapabilitiesFile::from_json(json).unwrap();
+        let caps = file.to_capabilities();
+
+        let sm = caps.socket_mode.as_ref().unwrap();
+        assert_eq!(sm.open_url, "https://slack.com/api/apps.connections.open");
+        assert_eq!(sm.app_token_secret, "slack_app_token");
+        assert_eq!(sm.reconnect_delay_ms, 3000);
+        assert_eq!(sm.max_reconnect_attempts, 5);
+    }
+
+    #[test]
+    fn test_parse_without_socket_mode_backward_compat() {
+        let json = r#"{
+            "name": "slack",
+            "capabilities": {
+                "channel": {
+                    "allowed_paths": ["/webhook/slack"],
+                    "allow_polling": false
+                }
+            }
+        }"#;
+
+        let file = ChannelCapabilitiesFile::from_json(json).unwrap();
+        let channel = file.capabilities.channel.as_ref().unwrap();
+
+        assert!(channel.socket_mode.is_none());
+
+        // Also verify to_capabilities() produces None
+        let caps = file.to_capabilities();
+        assert!(caps.socket_mode.is_none());
     }
 }
