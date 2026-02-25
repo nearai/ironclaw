@@ -261,45 +261,7 @@ fn builtin_entries() -> Vec<RegistryEntry> {
                 "bugs".into(),
             ],
             source: ExtensionSource::McpUrl {
-                url: "https://mcp.linear.app".to_string(),
-            },
-            fallback_source: None,
-            auth_hint: AuthHint::Dcr,
-        },
-        RegistryEntry {
-            name: "google-calendar".to_string(),
-            display_name: "Google Calendar".to_string(),
-            kind: ExtensionKind::McpServer,
-            description: "Connect to Google Calendar for managing events, schedules, and reminders"
-                .to_string(),
-            keywords: vec![
-                "calendar".into(),
-                "events".into(),
-                "schedule".into(),
-                "meetings".into(),
-                "google".into(),
-            ],
-            source: ExtensionSource::McpUrl {
-                url: "https://mcp.google.com/calendar".to_string(),
-            },
-            fallback_source: None,
-            auth_hint: AuthHint::Dcr,
-        },
-        RegistryEntry {
-            name: "google-drive".to_string(),
-            display_name: "Google Drive".to_string(),
-            kind: ExtensionKind::McpServer,
-            description: "Connect to Google Drive for file management, search, and document access"
-                .to_string(),
-            keywords: vec![
-                "drive".into(),
-                "files".into(),
-                "documents".into(),
-                "storage".into(),
-                "google".into(),
-            ],
-            source: ExtensionSource::McpUrl {
-                url: "https://mcp.google.com/drive".to_string(),
+                url: "https://mcp.linear.app/sse".to_string(),
             },
             fallback_source: None,
             auth_hint: AuthHint::Dcr,
@@ -319,7 +281,7 @@ fn builtin_entries() -> Vec<RegistryEntry> {
                 "issues".into(),
             ],
             source: ExtensionSource::McpUrl {
-                url: "https://mcp.github.com".to_string(),
+                url: "https://api.githubcopilot.com/mcp/".to_string(),
             },
             fallback_source: None,
             auth_hint: AuthHint::Dcr,
@@ -359,7 +321,7 @@ fn builtin_entries() -> Vec<RegistryEntry> {
                 "performance".into(),
             ],
             source: ExtensionSource::McpUrl {
-                url: "https://mcp.sentry.dev/sse".to_string(),
+                url: "https://mcp.sentry.dev/mcp".to_string(),
             },
             fallback_source: None,
             auth_hint: AuthHint::Dcr,
@@ -399,7 +361,7 @@ fn builtin_entries() -> Vec<RegistryEntry> {
                 "infrastructure".into(),
             ],
             source: ExtensionSource::McpUrl {
-                url: "https://mcp.cloudflare.com/sse".to_string(),
+                url: "https://mcp.cloudflare.com/mcp".to_string(),
             },
             fallback_source: None,
             auth_hint: AuthHint::Dcr,
@@ -417,7 +379,7 @@ fn builtin_entries() -> Vec<RegistryEntry> {
                 "team".into(),
             ],
             source: ExtensionSource::McpUrl {
-                url: "https://mcp.asana.com".to_string(),
+                url: "https://mcp.asana.com/v2/mcp".to_string(),
             },
             fallback_source: None,
             auth_hint: AuthHint::Dcr,
@@ -436,7 +398,7 @@ fn builtin_entries() -> Vec<RegistryEntry> {
                 "helpdesk".into(),
             ],
             source: ExtensionSource::McpUrl {
-                url: "https://mcp.intercom.com".to_string(),
+                url: "https://mcp.intercom.com/mcp".to_string(),
             },
             fallback_source: None,
             auth_hint: AuthHint::Dcr,
