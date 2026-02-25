@@ -503,7 +503,7 @@ function addToolCard(name) {
   }, 100);
 
   if (!_activeToolCards[name]) _activeToolCards[name] = [];
-  _activeToolCards[name].push({ card, startTime, timer: timerInterval, duration, icon });
+  _activeToolCards[name].push({ card, startTime, timer: timerInterval, duration, icon, finalDuration: null });
 
   const container = document.getElementById('chat-messages');
   container.scrollTop = container.scrollHeight;
@@ -524,6 +524,7 @@ function completeToolCard(name, success) {
 
   clearInterval(entry.timer);
   const elapsed = (Date.now() - entry.startTime) / 1000;
+  entry.finalDuration = elapsed;
   entry.duration.textContent = elapsed < 10 ? elapsed.toFixed(1) + 's' : Math.floor(elapsed) + 's';
   entry.icon.innerHTML = success
     ? '<span class="activity-icon-success">&#10003;</span>'
@@ -570,8 +571,14 @@ function finalizeActivityGroup() {
   for (const tname in _activeToolCards) {
     const tentries = _activeToolCards[tname];
     for (let j = 0; j < tentries.length; j++) {
+      const entry = tentries[j];
       toolCount++;
-      totalDuration += (Date.now() - tentries[j].startTime) / 1000;
+      if (entry.finalDuration !== null) {
+        totalDuration += entry.finalDuration;
+      } else {
+        // Tool was still running when finalized
+        totalDuration += (Date.now() - entry.startTime) / 1000;
+      }
     }
   }
 
