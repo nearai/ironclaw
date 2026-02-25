@@ -59,4 +59,119 @@ mod tests {
         let cloned = state.clone();
         assert_eq!(cloned.token, "test-token");
     }
+
+    // === QA Plan - Web gateway auth tests ===
+
+    use axum::Router;
+    use axum::body::Body;
+    use axum::middleware;
+    use axum::routing::get;
+    use tower::ServiceExt;
+
+    async fn dummy_handler() -> &'static str {
+        "ok"
+    }
+
+    fn test_app(token: &str) -> Router {
+        let state = AuthState {
+            token: token.to_string(),
+        };
+        Router::new()
+            .route("/test", get(dummy_handler))
+            .layer(middleware::from_fn_with_state(state, auth_middleware))
+    }
+
+    #[tokio::test]
+    async fn test_valid_bearer_token_passes() {
+        let app = test_app("secret-token");
+        let req = Request::builder()
+            .uri("/test")
+            .header("Authorization", "Bearer secret-token")
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn test_invalid_bearer_token_rejected() {
+        let app = test_app("secret-token");
+        let req = Request::builder()
+            .uri("/test")
+            .header("Authorization", "Bearer wrong-token")
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn test_missing_auth_header_falls_through_to_query() {
+        let app = test_app("secret-token");
+        let req = Request::builder()
+            .uri("/test?token=secret-token")
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn test_query_param_invalid_token_rejected() {
+        let app = test_app("secret-token");
+        let req = Request::builder()
+            .uri("/test?token=wrong-token")
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn test_no_auth_at_all_rejected() {
+        let app = test_app("secret-token");
+        let req = Request::builder().uri("/test").body(Body::empty()).unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn test_bearer_prefix_case_sensitivity() {
+        // The middleware uses `strip_prefix("Bearer ")` which is case-sensitive.
+        // Lowercase "bearer" should NOT match, resulting in a 401.
+        let app = test_app("secret-token");
+        let req = Request::builder()
+            .uri("/test")
+            .header("Authorization", "bearer secret-token")
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn test_empty_bearer_token_rejected() {
+        let app = test_app("secret-token");
+        let req = Request::builder()
+            .uri("/test")
+            .header("Authorization", "Bearer ")
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn test_token_with_whitespace_rejected() {
+        // Extra space after "Bearer " means the token value starts with a space,
+        // which should not match the expected token.
+        let app = test_app("secret-token");
+        let req = Request::builder()
+            .uri("/test")
+            .header("Authorization", "Bearer  secret-token")
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    }
 }
