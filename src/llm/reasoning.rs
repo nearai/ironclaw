@@ -734,9 +734,29 @@ Example:
 - No markdown tables. Use Slack formatting: *bold*, _italic_, `code`.\n\
 - Prefer threaded replies when responding to older messages."
             }
-            _ => return String::new(),
+            _ => {
+                return String::new();
+            }
         };
-        format!("\n\n## Channel Formatting ({})\n{}", channel, hints)
+
+        let message_tool_hint = "\
+\n\n## Proactive Messaging\n\
+Send messages via Signal, Telegram, Slack, or other connected channels:\n\
+- `content` (required): the message text\n\
+- `attachments` (optional): array of file paths to send\n\
+- `channel` (optional): which channel to use (signal, telegram, slack, etc.)\n\
+- `target` (optional): who to send to (phone number, group ID, etc.)\n\
+\nOmit both `channel` and `target` to send to the current conversation.\n\
+Examples (tool calls use JSON format):\n\
+- Reply here: {\"content\": \"Hi!\"}\n\
+- Send file here: {\"content\": \"Here's the file\", \"attachments\": [\"/path/to/file.txt\"]}\n\
+- Message a different user: {\"channel\": \"signal\", \"target\": \"+1234567890\", \"content\": \"Hi!\"}\n\
+- Message a different group: {\"channel\": \"signal\", \"target\": \"group:abc123\", \"content\": \"Hi!\"}";
+
+        format!(
+            "\n\n## Channel Formatting ({})\n{}{}",
+            channel, hints, message_tool_hint
+        )
     }
 
     fn build_runtime_section(&self) -> String {

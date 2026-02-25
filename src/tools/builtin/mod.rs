@@ -7,6 +7,7 @@ mod http;
 mod job;
 mod json;
 mod memory;
+mod message;
 pub mod routine;
 pub(crate) mod shell;
 pub mod skill_tools;
@@ -24,6 +25,7 @@ pub use job::{
 };
 pub use json::JsonTool;
 pub use memory::{MemoryReadTool, MemorySearchTool, MemoryTreeTool, MemoryWriteTool};
+pub use message::MessageTool;
 pub use routine::{
     RoutineCreateTool, RoutineDeleteTool, RoutineHistoryTool, RoutineListTool, RoutineUpdateTool,
 };

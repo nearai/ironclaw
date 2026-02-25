@@ -550,6 +550,44 @@ impl SignalChannel {
         }
     }
 
+    /// Validate that attachment paths don't contain path traversal sequences.
+    fn validate_attachment_paths(paths: &[String]) -> Result<(), ChannelError> {
+        for path in paths {
+            if path.contains("..") {
+                return Err(ChannelError::InvalidMessage(format!(
+                    "Attachment path contains forbidden sequence: {}",
+                    path
+                )));
+            }
+        }
+        Ok(())
+    }
+
+    /// Send a message with attachments (if any).
+    /// Combines text and attachments into a single RPC call when both are present.
+    async fn send_with_attachments(
+        &self,
+        target: &RecipientTarget,
+        content: &str,
+        attachments: &[String],
+    ) -> Result<(), ChannelError> {
+        Self::validate_attachment_paths(attachments)?;
+
+        if attachments.is_empty() {
+            let params = self.build_rpc_params(target, Some(content), None);
+            self.rpc_request("send", params).await?;
+        } else if content.is_empty() {
+            // Attachments only - send all in a single call with no message text
+            let params = self.build_rpc_params(target, None, Some(attachments));
+            self.rpc_request("send", params).await?;
+        } else {
+            // Both text and attachments - send in a single RPC call
+            let params = self.build_rpc_params(target, Some(content), Some(attachments));
+            self.rpc_request("send", params).await?;
+        }
+        Ok(())
+    }
+
     /// Build JSON-RPC params for a send/typing call (static version).
     fn build_rpc_params_static(
         _http_url: &str,
@@ -832,40 +870,11 @@ impl Channel for SignalChannel {
         .unwrap_or_else(|| msg.user_id.clone());
 
         let target = Self::parse_recipient_target(&target_str);
-        let attachments = &response.attachments;
 
-        // Handle attachments: if we have attachments, we need special handling
-        let result: Result<(), ChannelError> = if !attachments.is_empty() {
-            // If no text but have attachments, send each with path as message
-            if response.content.is_empty() {
-                for attachment in attachments {
-                    let params = self.build_rpc_params(
-                        &target,
-                        Some(attachment),
-                        Some(std::slice::from_ref(attachment)),
-                    );
-                    self.rpc_request("send", params).await?;
-                }
-            } else {
-                // If we have both text and attachments, send text first, then each attachment
-                let text_params = self.build_rpc_params(&target, Some(&response.content), None);
-                self.rpc_request("send", text_params).await?;
-
-                for attachment in attachments {
-                    let params = self.build_rpc_params(
-                        &target,
-                        Some(attachment),
-                        Some(std::slice::from_ref(attachment)),
-                    );
-                    self.rpc_request("send", params).await?;
-                }
-            }
-            Ok(())
-        } else {
-            // No attachments - original behavior
-            let params = self.build_rpc_params(&target, Some(&response.content), None);
-            self.rpc_request("send", params).await.map(|_| ())
-        };
+        // Use shared helper for sending with attachments (includes validation)
+        let result = self
+            .send_with_attachments(&target, &response.content, &response.attachments)
+            .await;
 
         // Clean up stored target regardless of success or failure.
         self.reply_targets.write().await.pop(&msg.id);
@@ -1031,43 +1040,10 @@ impl Channel for SignalChannel {
         response: OutgoingResponse,
     ) -> Result<(), ChannelError> {
         let target = Self::parse_recipient_target(user_id);
-        let attachments = &response.attachments;
 
-        // Handle attachments: if we have attachments, we need special handling
-        if !attachments.is_empty() {
-            // If no text but have attachments, send each with path as message
-            if response.content.is_empty() {
-                for attachment in attachments {
-                    let params = self.build_rpc_params(
-                        &target,
-                        Some(attachment),
-                        Some(std::slice::from_ref(attachment)),
-                    );
-                    self.rpc_request("send", params).await?;
-                }
-                return Ok(());
-            }
-
-            // If we have both text and attachments, send text first, then each attachment
-            let text_params = self.build_rpc_params(&target, Some(&response.content), None);
-            self.rpc_request("send", text_params).await?;
-
-            for attachment in attachments {
-                let params = self.build_rpc_params(
-                    &target,
-                    Some(attachment),
-                    Some(std::slice::from_ref(attachment)),
-                );
-                self.rpc_request("send", params).await?;
-            }
-
-            return Ok(());
-        }
-
-        // No attachments - original behavior
-        let params = self.build_rpc_params(&target, Some(&response.content), None);
-        self.rpc_request("send", params).await?;
-        Ok(())
+        // Use shared helper for sending with attachments (includes validation)
+        self.send_with_attachments(&target, &response.content, &response.attachments)
+            .await
     }
 
     async fn health_check(&self) -> Result<(), ChannelError> {
@@ -2641,5 +2617,41 @@ mod tests {
         let ch = SignalChannel::new(config)?;
         assert_eq!(ch.config.http_url, "http://127.0.0.1:8686");
         Ok(())
+    }
+
+    // ── attachment path validation ───────────────────────────────────
+
+    #[test]
+    fn validate_attachment_paths_rejects_double_dot() {
+        let paths = vec!["../etc/passwd".to_string()];
+        let result = SignalChannel::validate_attachment_paths(&paths);
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("forbidden") || err.contains(".."));
+    }
+
+    #[test]
+    fn validate_attachment_paths_accepts_normal_paths() {
+        let paths = vec![
+            "/tmp/file.txt".to_string(),
+            "documents/report.pdf".to_string(),
+            "images/photo.png".to_string(),
+        ];
+        let result = SignalChannel::validate_attachment_paths(&paths);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn validate_attachment_paths_rejects_nested_traversal() {
+        let paths = vec!["foo/../bar/../../secret.txt".to_string()];
+        let result = SignalChannel::validate_attachment_paths(&paths);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn validate_attachment_paths_empty_ok() {
+        let paths: Vec<String> = vec![];
+        let result = SignalChannel::validate_attachment_paths(&paths);
+        assert!(result.is_ok());
     }
 }
