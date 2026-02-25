@@ -4,26 +4,30 @@ import pytest
 from helpers import SEL
 
 
+XSS_PAYLOAD = (
+    'Here is some content: <script>alert("xss")</script> and '
+    '<img src=x onerror="alert(1)"> and '
+    '<iframe src="javascript:alert(2)"></iframe> end of content.'
+)
+
+
 async def test_html_injection_sanitized(page):
-    """XSS vectors in LLM responses should be sanitized, not rendered."""
-    # Send a message that triggers the mock LLM to return HTML content
-    chat_input = page.locator(SEL["chat_input"])
-    await chat_input.fill("html test")
-    await chat_input.press("Enter")
+    """XSS vectors in assistant messages should be sanitized by renderMarkdown."""
+    # Inject an assistant message with XSS vectors directly via JS.
+    # This tests the sanitization pipeline (renderMarkdown → sanitizeRenderedHtml)
+    # without depending on the full LLM round-trip.
+    await page.evaluate(
+        "content => addMessage('assistant', content)", XSS_PAYLOAD
+    )
 
-    # Wait for assistant response
     assistant_msg = page.locator(SEL["message_assistant"]).last
-    await assistant_msg.wait_for(state="visible", timeout=15000)
+    await assistant_msg.wait_for(state="visible", timeout=5000)
 
-    # Get the rendered HTML of the assistant message
     inner_html = await assistant_msg.inner_html()
 
-    # The sanitizer should have removed these dangerous elements
     # Script tags must be stripped
     assert "<script>" not in inner_html.lower(), \
         "Script tags were not sanitized from the response"
-    assert "alert(" not in inner_html.lower() or "alert(" in (await assistant_msg.text_content()).lower(), \
-        "Script code was rendered as executable HTML"
 
     # iframes must be stripped
     assert "<iframe" not in inner_html.lower(), \
@@ -33,7 +37,7 @@ async def test_html_injection_sanitized(page):
     assert "onerror=" not in inner_html.lower(), \
         "Event handler attributes were not sanitized"
 
-    # The text content should still contain the safe parts
+    # The safe text content should still be present
     text = await assistant_msg.text_content()
     assert "content" in text.lower(), \
         "Safe text was lost during sanitization"
@@ -46,7 +50,6 @@ async def test_user_message_not_html_rendered(page):
     await chat_input.fill(dangerous_input)
     await chat_input.press("Enter")
 
-    # Wait briefly for the message to appear
     user_msg = page.locator(SEL["message_user"]).last
     await user_msg.wait_for(state="visible", timeout=5000)
 
@@ -55,32 +58,24 @@ async def test_user_message_not_html_rendered(page):
     assert "<img" in text, \
         "User message HTML should be shown as plain text, not stripped"
 
-    # The inner HTML should have the text escaped
+    # The inner HTML should have the text escaped (< becomes &lt;)
     inner = await user_msg.inner_html()
-    # If properly escaped, the < should be &lt; in innerHTML
-    assert "&lt;img" in inner or "<img" not in inner or "textContent" in inner, \
+    assert "&lt;img" in inner, \
         "User message was rendered as HTML instead of plain text"
 
 
-async def test_no_script_execution_in_response(page):
-    """Verify that script tags in responses don't actually execute."""
-    # Set up a detection mechanism
-    await page.evaluate("window.__xss_test = false")
+async def test_no_script_elements_after_injection(page):
+    """Verify that script tags in responses don't create DOM script elements."""
+    await page.evaluate(
+        "content => addMessage('assistant', content)", XSS_PAYLOAD
+    )
 
-    # Send message triggering HTML response
-    chat_input = page.locator(SEL["chat_input"])
-    await chat_input.fill("html test")
-    await chat_input.press("Enter")
-
-    # Wait for response
     assistant_msg = page.locator(SEL["message_assistant"]).last
-    await assistant_msg.wait_for(state="visible", timeout=15000)
+    await assistant_msg.wait_for(state="visible", timeout=5000)
 
     # Wait a moment for any scripts to potentially execute
-    await page.wait_for_timeout(1000)
+    await page.wait_for_timeout(500)
 
-    # Check our detection flag - if XSS worked, alert() would have fired
-    # (We can't easily detect alert(), but we can check for DOM injection)
     # Verify no <script> elements exist in the chat messages
     script_count = await page.locator("#chat-messages script").count()
     assert script_count == 0, \
