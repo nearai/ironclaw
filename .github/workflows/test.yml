@@ -1,4 +1,5 @@
 name: Run Tests
+
 on:
   pull_request:
   push:
@@ -9,6 +10,20 @@ jobs:
   tests:
     name: Run Tests
     runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: ironclaw_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
     steps:
       - name: Checkout repository
         uses: actions/checkout@v6
@@ -18,6 +33,8 @@ jobs:
           profile: minimal
       - uses: Swatinem/rust-cache@v2
       - name: Run Tests
+        env:
+          DATABASE_URL: postgres://postgres:postgres@localhost:5432/ironclaw_test
         run: cargo test --all-features -- --nocapture
       - name: Run Telegram Channel Tests
         run: cargo test --manifest-path channels-src/telegram/Cargo.toml -- --nocapture
