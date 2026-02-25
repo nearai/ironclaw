@@ -317,10 +317,11 @@ async fn auth_server(name: String, user_id: String) -> anyhow::Result<()> {
         }
         Err(crate::tools::mcp::auth::AuthError::NotSupported) => {
             println!();
-            println!("  ✗ Server does not support OAuth authentication.");
+            println!("  ✗ Automatic OAuth setup is not available for this server.");
             println!();
             println!("  The server may require a different authentication method,");
-            println!("  or you may need to configure OAuth manually:");
+            println!("  or it may support OAuth without dynamic client registration.");
+            println!("  In that case, configure OAuth manually with a client ID:");
             println!();
             println!("    ironclaw mcp remove {}", name);
             println!(

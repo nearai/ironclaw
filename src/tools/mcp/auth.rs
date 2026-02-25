@@ -199,6 +199,13 @@ impl PkceChallenge {
     }
 }
 
+/// Extract the origin (scheme + host + optional port) from an MCP server URL.
+fn extract_origin(server_url: &str) -> Result<String, AuthError> {
+    let parsed = reqwest::Url::parse(server_url)
+        .map_err(|e| AuthError::DiscoveryFailed(format!("Invalid server URL: {}", e)))?;
+    Ok(parsed.origin().ascii_serialization())
+}
+
 /// Discover protected resource metadata from an MCP server.
 pub async fn discover_protected_resource(
     server_url: &str,
@@ -208,11 +215,8 @@ pub async fn discover_protected_resource(
         .build()
         .map_err(|e| AuthError::Http(e.to_string()))?;
 
-    // Parse the server URL to extract the origin (scheme + host + port)
-    // The .well-known endpoints are always at the root of the origin, not under any path
-    let parsed = reqwest::Url::parse(server_url)
-        .map_err(|e| AuthError::DiscoveryFailed(format!("Invalid server URL: {}", e)))?;
-    let origin = parsed.origin().ascii_serialization();
+    // The .well-known endpoints are always at the root of the origin, not under any path.
+    let origin = extract_origin(server_url)?;
 
     // Try the well-known endpoint at the origin root
     let well_known_url = format!("{}/.well-known/oauth-protected-resource", origin);
@@ -280,17 +284,8 @@ pub async fn discover_oauth_endpoints(
         return Ok((auth_url.clone(), token_url.clone()));
     }
 
-    // Try to discover from the server
-    let resource_meta = discover_protected_resource(&server_config.url).await?;
-
-    // Get the first authorization server
-    let auth_server_url = resource_meta
-        .authorization_servers
-        .first()
-        .ok_or_else(|| AuthError::DiscoveryFailed("No authorization servers listed".to_string()))?;
-
-    // Discover the authorization server metadata
-    let auth_meta = discover_authorization_server(auth_server_url).await?;
+    // Discover from the server (with fallback to direct auth-server metadata on the origin).
+    let auth_meta = discover_full_oauth_metadata(&server_config.url).await?;
 
     Ok((auth_meta.authorization_endpoint, auth_meta.token_endpoint))
 }
@@ -301,17 +296,21 @@ pub async fn discover_oauth_endpoints(
 pub async fn discover_full_oauth_metadata(
     server_url: &str,
 ) -> Result<AuthorizationServerMetadata, AuthError> {
-    // Try to discover from the server
-    let resource_meta = discover_protected_resource(server_url).await?;
-
-    // Get the first authorization server
-    let auth_server_url = resource_meta
-        .authorization_servers
-        .first()
-        .ok_or_else(|| AuthError::DiscoveryFailed("No authorization servers listed".to_string()))?;
-
-    // Discover the authorization server metadata
-    discover_authorization_server(auth_server_url).await
+    match discover_protected_resource(server_url).await {
+        Ok(resource_meta) => {
+            let auth_server_url = resource_meta.authorization_servers.first().ok_or_else(|| {
+                AuthError::DiscoveryFailed("No authorization servers listed".to_string())
+            })?;
+            discover_authorization_server(auth_server_url).await
+        }
+        Err(AuthError::NotSupported) => {
+            // Some providers expose authorization-server metadata directly on the
+            // origin but do not publish oauth-protected-resource metadata.
+            let origin = extract_origin(server_url)?;
+            discover_authorization_server(&origin).await
+        }
+        Err(e) => Err(e),
+    }
 }
 
 /// Perform Dynamic Client Registration with an authorization server.
@@ -854,5 +853,17 @@ mod tests {
 
         assert!(url.contains("owner=user"));
         assert!(url.contains("state=abc123"));
+    }
+
+    #[test]
+    fn test_extract_origin_from_server_url() {
+        assert_eq!(
+            extract_origin("https://mcp.linear.app/mcp").unwrap(),
+            "https://mcp.linear.app"
+        );
+        assert_eq!(
+            extract_origin("https://example.com:8443/nested/path").unwrap(),
+            "https://example.com:8443"
+        );
     }
 }

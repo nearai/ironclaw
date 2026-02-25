@@ -261,7 +261,7 @@ fn builtin_entries() -> Vec<RegistryEntry> {
                 "bugs".into(),
             ],
             source: ExtensionSource::McpUrl {
-                url: "https://mcp.linear.app".to_string(),
+                url: "https://mcp.linear.app/mcp".to_string(),
             },
             fallback_source: None,
             auth_hint: AuthHint::Dcr,
