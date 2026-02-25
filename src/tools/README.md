@@ -18,7 +18,7 @@ WASM tools are the preferred way to add new capabilities. They run in a sandboxe
 2. Implement the WIT interface (`wit/tool.wit`)
 3. Create `<name>.capabilities.json` declaring required permissions
 4. Build with `cargo build --target wasm32-wasip2 --release`
-5. Install with `ironclaw tool install path/to/tool.wasm`
+5. Install with `clawyer tool install path/to/tool.wasm`
 
 See `tools-src/` for examples.
 
@@ -94,7 +94,7 @@ For services without OAuth or when OAuth isn't configured:
 
 #### Auth Flow Priority
 
-When running `ironclaw tool auth <tool>`:
+When running `clawyer tool auth <tool>`:
 
 1. Check `env_var` - if set in environment, use it directly
 2. Check `oauth` - if configured, open browser for OAuth flow
@@ -104,9 +104,9 @@ The agent reads auth config from the tool's capabilities file and provides the a
 
 ### WASM Tools vs MCP Servers: When to Use Which
 
-Both are first-class in the extension system (`ironclaw tool install` handles both), but they have different strengths.
+Both are first-class in the extension system (`clawyer tool install` handles both), but they have different strengths.
 
-**WASM Tools (IronClaw native)**
+**WASM Tools (cLawyer native)**
 
 - Sandboxed: fuel metering, memory limits, no access except what's allowlisted
 - Credentials injected by host runtime, tool code never sees the actual token
@@ -120,7 +120,7 @@ Both are first-class in the extension system (`ironclaw tool install` handles bo
 - Growing ecosystem of pre-built servers (GitHub, Notion, Postgres, etc.)
 - Any language (TypeScript/Python most common)
 - Can do websockets, streaming, background polling
-- Cost: external process with full system access (no sandbox), manages own credentials, IronClaw can't prevent leaks
+- Cost: external process with full system access (no sandbox), manages own credentials, cLawyer can't prevent leaks
 
 **Decision guide:**
 

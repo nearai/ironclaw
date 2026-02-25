@@ -1,34 +1,42 @@
-//! Bootstrap helpers for IronClaw.
+//! Bootstrap helpers for cLawyer.
 //!
 //! The only setting that truly needs disk persistence before the database is
 //! available is `DATABASE_URL` (chicken-and-egg: can't connect to DB without
 //! it). Everything else is auto-detected or read from env vars.
 //!
-//! File: `~/.ironclaw/.env` (standard dotenvy format)
+//! File: `~/.clawyer/.env` (standard dotenvy format)
 
 use std::path::PathBuf;
 
-/// Path to the IronClaw-specific `.env` file: `~/.ironclaw/.env`.
+/// Path to the cLawyer-specific `.env` file: `~/.clawyer/.env`.
 pub fn ironclaw_env_path() -> PathBuf {
+    dirs::home_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join(".clawyer")
+        .join(".env")
+}
+
+fn legacy_ironclaw_env_path() -> PathBuf {
     dirs::home_dir()
         .unwrap_or_else(|| PathBuf::from("."))
         .join(".ironclaw")
         .join(".env")
 }
 
-/// Load env vars from `~/.ironclaw/.env` (in addition to the standard `.env`).
+/// Load env vars from `~/.clawyer/.env` (in addition to the standard `.env`).
 ///
 /// Call this **after** `dotenvy::dotenv()` so that the standard `./.env`
-/// takes priority over `~/.ironclaw/.env`. dotenvy never overwrites
+/// takes priority over `~/.clawyer/.env`. dotenvy never overwrites
 /// existing env vars, so the effective priority is:
 ///
-///   explicit env vars > `./.env` > `~/.ironclaw/.env`
+///   explicit env vars > `./.env` > `~/.clawyer/.env`
 ///
-/// If `~/.ironclaw/.env` doesn't exist but the legacy `bootstrap.json` does,
+/// If `~/.clawyer/.env` doesn't exist but the legacy `bootstrap.json` does,
 /// extracts `DATABASE_URL` from it and writes the `.env` file (one-time
 /// upgrade from the old config format).
 pub fn load_ironclaw_env() {
     let path = ironclaw_env_path();
+    let legacy_path = legacy_ironclaw_env_path();
 
     if !path.exists() {
         // One-time upgrade: extract DATABASE_URL from legacy bootstrap.json
@@ -37,6 +45,8 @@ pub fn load_ironclaw_env() {
 
     if path.exists() {
         let _ = dotenvy::from_path(&path);
+    } else if legacy_path.exists() {
+        let _ = dotenvy::from_path(&legacy_path);
     }
 }
 
@@ -81,7 +91,7 @@ fn migrate_bootstrap_json_to_env(env_path: &std::path::Path) {
     }
 }
 
-/// Write database bootstrap vars to `~/.ironclaw/.env`.
+/// Write database bootstrap vars to `~/.clawyer/.env`.
 ///
 /// These settings form the chicken-and-egg layer: they must be available
 /// from the filesystem (env vars) BEFORE any database connection, because
@@ -108,7 +118,7 @@ pub fn save_bootstrap_env(vars: &[(&str, &str)]) -> std::io::Result<()> {
     Ok(())
 }
 
-/// Update or add a single variable in `~/.ironclaw/.env`, preserving existing content.
+/// Update or add a single variable in `~/.clawyer/.env`, preserving existing content.
 ///
 /// Unlike `save_bootstrap_env` (which overwrites the entire file), this
 /// reads the current `.env`, replaces the line for `key` if it exists,
@@ -166,7 +176,7 @@ fn restrict_file_permissions(_path: &std::path::Path) -> std::io::Result<()> {
     Ok(())
 }
 
-/// Write `DATABASE_URL` to `~/.ironclaw/.env`.
+/// Write `DATABASE_URL` to `~/.clawyer/.env`.
 ///
 /// Convenience wrapper around `save_bootstrap_env` for single-value migration
 /// paths. Prefer `save_bootstrap_env` for new code.
@@ -174,7 +184,7 @@ pub fn save_database_url(url: &str) -> std::io::Result<()> {
     save_bootstrap_env(&[("DATABASE_URL", url)])
 }
 
-/// One-time migration of legacy `~/.ironclaw/settings.json` into the database.
+/// One-time migration of legacy `~/.clawyer/settings.json` into the database.
 ///
 /// Only runs when a `settings.json` exists on disk AND the DB has no settings
 /// yet. After the wizard writes directly to the DB, this path is only hit by
@@ -185,10 +195,17 @@ pub async fn migrate_disk_to_db(
     store: &dyn crate::db::Database,
     user_id: &str,
 ) -> Result<(), MigrationError> {
-    let ironclaw_dir = dirs::home_dir()
+    let clawyer_dir = dirs::home_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join(".clawyer");
+    let legacy_dir = dirs::home_dir()
         .unwrap_or_else(|| PathBuf::from("."))
         .join(".ironclaw");
-    let legacy_settings_path = ironclaw_dir.join("settings.json");
+    let legacy_settings_path = if clawyer_dir.join("settings.json").exists() {
+        clawyer_dir.join("settings.json")
+    } else {
+        legacy_dir.join("settings.json")
+    };
 
     if !legacy_settings_path.exists() {
         tracing::debug!("No legacy settings.json found, skipping disk-to-DB migration");
@@ -221,7 +238,7 @@ pub async fn migrate_disk_to_db(
         tracing::info!("Migrated {} settings to database", db_map.len());
     }
 
-    // 2. Write DATABASE_URL to ~/.ironclaw/.env
+    // 2. Write DATABASE_URL to ~/.clawyer/.env
     if let Some(ref url) = settings.database_url {
         save_database_url(url)
             .map_err(|e| MigrationError::Io(format!("Failed to write .env: {}", e)))?;
@@ -229,7 +246,11 @@ pub async fn migrate_disk_to_db(
     }
 
     // 3. Migrate mcp-servers.json if it exists
-    let mcp_path = ironclaw_dir.join("mcp-servers.json");
+    let mcp_path = if clawyer_dir.join("mcp-servers.json").exists() {
+        clawyer_dir.join("mcp-servers.json")
+    } else {
+        legacy_dir.join("mcp-servers.json")
+    };
     if mcp_path.exists() {
         match std::fs::read_to_string(&mcp_path) {
             Ok(content) => match serde_json::from_str::<serde_json::Value>(&content) {
@@ -258,7 +279,11 @@ pub async fn migrate_disk_to_db(
     }
 
     // 4. Migrate session.json if it exists
-    let session_path = ironclaw_dir.join("session.json");
+    let session_path = if clawyer_dir.join("session.json").exists() {
+        clawyer_dir.join("session.json")
+    } else {
+        legacy_dir.join("session.json")
+    };
     if session_path.exists() {
         match std::fs::read_to_string(&session_path) {
             Ok(content) => match serde_json::from_str::<serde_json::Value>(&content) {
@@ -290,7 +315,11 @@ pub async fn migrate_disk_to_db(
     rename_to_migrated(&legacy_settings_path);
 
     // 6. Clean up old bootstrap.json if it exists (superseded by .env)
-    let old_bootstrap = ironclaw_dir.join("bootstrap.json");
+    let old_bootstrap = if clawyer_dir.join("bootstrap.json").exists() {
+        clawyer_dir.join("bootstrap.json")
+    } else {
+        legacy_dir.join("bootstrap.json")
+    };
     if old_bootstrap.exists() {
         rename_to_migrated(&old_bootstrap);
         tracing::info!("Renamed old bootstrap.json to .migrated");
@@ -415,9 +444,9 @@ INJECTED="pwned"#;
     }
 
     #[test]
-    fn test_ironclaw_env_path() {
+    fn test_clawyer_env_path() {
         let path = ironclaw_env_path();
-        assert!(path.ends_with(".ironclaw/.env"));
+        assert!(path.ends_with(".clawyer/.env"));
     }
 
     #[test]

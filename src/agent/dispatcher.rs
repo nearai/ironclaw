@@ -81,6 +81,14 @@ impl Agent {
                     trust_label = trust_label,
                     "Skill activated"
                 );
+                crate::legal::audit::record(
+                    "skill_activated",
+                    serde_json::json!({
+                        "skill_name": skill.name(),
+                        "skill_version": skill.version(),
+                        "trust": skill.trust.to_string(),
+                    }),
+                );
 
                 let safe_name = crate::skills::escape_xml_attr(skill.name());
                 let safe_version = crate::skills::escape_xml_attr(skill.version());
@@ -105,6 +113,7 @@ impl Agent {
         let mut reasoning = Reasoning::new(self.llm().clone(), self.safety().clone())
             .with_channel(message.channel.clone())
             .with_model_name(self.llm().active_model_name())
+            .with_legal_config(self.deps.legal_config.clone())
             .with_group_chat(is_group_chat);
         if let Some(prompt) = system_prompt {
             reasoning = reasoning.with_system_prompt(prompt);
@@ -385,16 +394,32 @@ impl Agent {
                             && let Some(tool) = self.tools().get(&tc.name).await
                         {
                             use crate::tools::ApprovalRequirement;
-                            let needs_approval = match tool.requires_approval(&tc.arguments) {
-                                ApprovalRequirement::Never => false,
-                                ApprovalRequirement::UnlessAutoApproved => {
-                                    let sess = session.lock().await;
-                                    !sess.is_tool_auto_approved(&tc.name)
+                            let legal_forced = crate::legal::policy::requires_explicit_approval(
+                                &self.deps.legal_config,
+                                &tc.name,
+                            );
+                            let needs_approval = if legal_forced {
+                                true
+                            } else {
+                                match tool.requires_approval(&tc.arguments) {
+                                    ApprovalRequirement::Never => false,
+                                    ApprovalRequirement::UnlessAutoApproved => {
+                                        let sess = session.lock().await;
+                                        !sess.is_tool_auto_approved(&tc.name)
+                                    }
+                                    ApprovalRequirement::Always => true,
                                 }
-                                ApprovalRequirement::Always => true,
                             };
 
                             if needs_approval {
+                                crate::legal::audit::inc_approval_required();
+                                crate::legal::audit::record(
+                                    "approval_required",
+                                    serde_json::json!({
+                                        "tool_name": tc.name,
+                                        "legal_forced": legal_forced,
+                                    }),
+                                );
                                 approval_needed = Some((idx, tc, tool));
                                 break; // remaining tools are deferred
                             }
@@ -962,6 +987,9 @@ mod tests {
             skill_registry: None,
             skill_catalog: None,
             skills_config: SkillsConfig::default(),
+            legal_config:
+                crate::config::LegalConfig::resolve(&crate::settings::Settings::default())
+                    .expect("default legal config should resolve"),
             hooks: Arc::new(HookRegistry::new()),
             cost_guard: Arc::new(CostGuard::new(CostGuardConfig::default())),
         };

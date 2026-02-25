@@ -1,6 +1,6 @@
 //! WASM channel loader for loading channels from files or directories.
 //!
-//! Loads WASM channel modules from the filesystem (default: ~/.ironclaw/channels/).
+//! Loads WASM channel modules from the filesystem (default: ~/.clawyer/channels/).
 //! Each channel consists of:
 //! - `<name>.wasm` - The compiled WASM component
 //! - `<name>.capabilities.json` - Channel capabilities and configuration
@@ -346,12 +346,12 @@ pub struct DiscoveredChannel {
 
 /// Get the default channels directory path.
 ///
-/// Returns ~/.ironclaw/channels/
+/// Returns ~/.clawyer/channels/
 #[allow(dead_code)]
 pub fn default_channels_dir() -> PathBuf {
     dirs::home_dir()
         .unwrap_or_else(|| PathBuf::from("."))
-        .join(".ironclaw")
+        .join(".clawyer")
         .join("channels")
 }
 

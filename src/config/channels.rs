@@ -13,7 +13,7 @@ pub struct ChannelsConfig {
     pub http: Option<HttpConfig>,
     pub gateway: Option<GatewayConfig>,
     pub signal: Option<SignalConfig>,
-    /// Directory containing WASM channel modules (default: ~/.ironclaw/channels/).
+    /// Directory containing WASM channel modules (default: ~/.clawyer/channels/).
     pub wasm_channels_dir: std::path::PathBuf,
     /// Whether WASM channels are enabled.
     pub wasm_channels_enabled: bool,
@@ -191,10 +191,10 @@ impl ChannelsConfig {
     }
 }
 
-/// Get the default channels directory (~/.ironclaw/channels/).
+/// Get the default channels directory (~/.clawyer/channels/).
 fn default_channels_dir() -> PathBuf {
     dirs::home_dir()
         .unwrap_or_else(|| PathBuf::from("."))
-        .join(".ironclaw")
+        .join(".clawyer")
         .join("channels")
 }

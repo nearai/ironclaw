@@ -120,12 +120,21 @@ impl Tool for MemorySearchTool {
 /// across sessions: decisions, preferences, facts, lessons learned.
 pub struct MemoryWriteTool {
     workspace: Arc<Workspace>,
+    legal: Option<crate::config::LegalConfig>,
 }
 
 impl MemoryWriteTool {
     /// Create a new memory write tool.
     pub fn new(workspace: Arc<Workspace>) -> Self {
-        Self { workspace }
+        Self {
+            workspace,
+            legal: None,
+        }
+    }
+
+    pub fn with_legal_policy(mut self, legal: crate::config::LegalConfig) -> Self {
+        self.legal = Some(legal);
+        self
     }
 }
 
@@ -186,6 +195,30 @@ impl Tool for MemoryWriteTool {
             .and_then(|v| v.as_str())
             .unwrap_or("daily_log");
 
+        let matter_prefix = if let Some(legal) = self
+            .legal
+            .as_ref()
+            .filter(|l| l.enabled && l.require_matter_context)
+        {
+            let matter_id = legal
+                .active_matter
+                .as_deref()
+                .ok_or_else(|| {
+                    ToolError::NotAuthorized(
+                        "No active matter selected. Re-run with --matter <matter_id>.".to_string(),
+                    )
+                })?
+                .trim();
+            if matter_id.is_empty() {
+                return Err(ToolError::NotAuthorized(
+                    "Active matter is empty. Re-run with --matter <matter_id>.".to_string(),
+                ));
+            }
+            Some(crate::legal::matter::matter_prefix(legal, matter_id))
+        } else {
+            None
+        };
+
         // Reject writes to identity files that are loaded into the system prompt.
         // An attacker could use prompt injection to trick the agent into overwriting
         // these, poisoning future conversations.
@@ -203,39 +236,54 @@ impl Tool for MemoryWriteTool {
 
         let path = match target {
             "memory" => {
+                let matter_memory_path = matter_prefix
+                    .as_ref()
+                    .map(|p| format!("{}/{}", p, paths::MEMORY))
+                    .unwrap_or_else(|| paths::MEMORY.to_string());
                 if append {
                     self.workspace
-                        .append_memory(content)
+                        .append(&matter_memory_path, content)
                         .await
                         .map_err(|e| ToolError::ExecutionFailed(format!("Write failed: {}", e)))?;
                 } else {
                     self.workspace
-                        .write(paths::MEMORY, content)
+                        .write(&matter_memory_path, content)
                         .await
                         .map_err(|e| ToolError::ExecutionFailed(format!("Write failed: {}", e)))?;
                 }
-                paths::MEMORY.to_string()
+                matter_memory_path
             }
             "daily_log" => {
+                let today_path = format!("daily/{}.md", chrono::Utc::now().format("%Y-%m-%d"));
+                let path = matter_prefix
+                    .as_ref()
+                    .map(|p| format!("{}/{}", p, today_path))
+                    .unwrap_or(today_path);
+                let timestamped =
+                    format!("[{}] {}", chrono::Utc::now().format("%H:%M:%S"), content);
                 self.workspace
-                    .append_daily_log(content)
+                    .append(&path, &timestamped)
                     .await
                     .map_err(|e| ToolError::ExecutionFailed(format!("Write failed: {}", e)))?;
-                format!("daily/{}.md", chrono::Utc::now().format("%Y-%m-%d"))
+                path
             }
             "heartbeat" => {
+                let heartbeat_path = matter_prefix
+                    .as_ref()
+                    .map(|p| format!("{}/{}", p, paths::HEARTBEAT))
+                    .unwrap_or_else(|| paths::HEARTBEAT.to_string());
                 if append {
                     self.workspace
-                        .append(paths::HEARTBEAT, content)
+                        .append(&heartbeat_path, content)
                         .await
                         .map_err(|e| ToolError::ExecutionFailed(format!("Write failed: {}", e)))?;
                 } else {
                     self.workspace
-                        .write(paths::HEARTBEAT, content)
+                        .write(&heartbeat_path, content)
                         .await
                         .map_err(|e| ToolError::ExecutionFailed(format!("Write failed: {}", e)))?;
                 }
-                paths::HEARTBEAT.to_string()
+                heartbeat_path
             }
             path => {
                 // Protect identity files from LLM overwrites (prompt injection defense).
@@ -252,18 +300,34 @@ impl Tool for MemoryWriteTool {
                     )));
                 }
 
+                let resolved_path = if let Some(prefix) = matter_prefix.as_ref() {
+                    let normalized = path.trim_start_matches('/');
+                    if normalized.starts_with(&format!("{}/", prefix)) {
+                        normalized.to_string()
+                    } else if normalized.starts_with("matters/") {
+                        return Err(ToolError::NotAuthorized(format!(
+                            "Path '{}' is outside the active matter scope '{}'",
+                            path, prefix
+                        )));
+                    } else {
+                        format!("{}/{}", prefix, normalized)
+                    }
+                } else {
+                    path.to_string()
+                };
+
                 if append {
                     self.workspace
-                        .append(path, content)
+                        .append(&resolved_path, content)
                         .await
                         .map_err(|e| ToolError::ExecutionFailed(format!("Write failed: {}", e)))?;
                 } else {
                     self.workspace
-                        .write(path, content)
+                        .write(&resolved_path, content)
                         .await
                         .map_err(|e| ToolError::ExecutionFailed(format!("Write failed: {}", e)))?;
                 }
-                path.to_string()
+                resolved_path
             }
         };
 

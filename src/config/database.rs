@@ -50,7 +50,7 @@ pub struct DatabaseConfig {
     pub pool_size: usize,
 
     // -- libSQL fields --
-    /// Path to local libSQL database file (default: ~/.ironclaw/ironclaw.db).
+    /// Path to local libSQL database file (default: ~/.clawyer/clawyer.db).
     pub libsql_path: Option<PathBuf>,
     /// Turso cloud URL for remote sync (optional).
     pub libsql_url: Option<String>,
@@ -71,7 +71,7 @@ impl DatabaseConfig {
 
         // PostgreSQL URL is required only when using the postgres backend.
         // For libsql backend, default to an empty placeholder.
-        // DATABASE_URL is loaded from ~/.ironclaw/.env via dotenvy early in startup.
+        // DATABASE_URL is loaded from ~/.clawyer/.env via dotenvy early in startup.
         let url = optional_env("DATABASE_URL")?
             .or_else(|| {
                 if backend == DatabaseBackend::LibSql {
@@ -82,7 +82,7 @@ impl DatabaseConfig {
             })
             .ok_or_else(|| ConfigError::MissingRequired {
                 key: "DATABASE_URL".to_string(),
-                hint: "Run 'ironclaw onboard' or set DATABASE_URL environment variable".to_string(),
+                hint: "Run 'clawyer onboard' or set DATABASE_URL environment variable".to_string(),
             })?;
 
         let pool_size = parse_optional_env("DATABASE_POOL_SIZE", 10)?;
@@ -121,10 +121,10 @@ impl DatabaseConfig {
     }
 }
 
-/// Default libSQL database path (~/.ironclaw/ironclaw.db).
+/// Default libSQL database path (~/.clawyer/clawyer.db).
 pub fn default_libsql_path() -> PathBuf {
     dirs::home_dir()
         .unwrap_or_else(|| PathBuf::from("."))
-        .join(".ironclaw")
-        .join("ironclaw.db")
+        .join(".clawyer")
+        .join("clawyer.db")
 }

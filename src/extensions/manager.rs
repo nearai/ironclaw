@@ -486,7 +486,7 @@ impl ExtensionManager {
                 }
 
                 Ok(format!(
-                    "Removed channel '{}'. Restart IronClaw for the change to take effect.",
+                    "Removed channel '{}'. Restart cLawyer for the change to take effect.",
                     name
                 ))
             }
@@ -1022,7 +1022,7 @@ impl ExtensionManager {
                 ExtensionError::InstallFailed(format!(
                     "'{}' requires building from source. Build artifact not found. \
                          Run `cargo component build --release` in {} first, \
-                         or use `ironclaw registry install {}`.",
+                         or use `clawyer registry install {}`.",
                     name,
                     resolved_dir.display(),
                     name,
@@ -1713,8 +1713,7 @@ impl ExtensionManager {
             let rt_guard = self.channel_runtime.read().await;
             let rt = rt_guard.as_ref().ok_or_else(|| {
                 ExtensionError::ActivationFailed(
-                    "WASM channel runtime not configured. Restart IronClaw to activate."
-                        .to_string(),
+                    "WASM channel runtime not configured. Restart cLawyer to activate.".to_string(),
                 )
             })?;
             (
@@ -2186,7 +2185,7 @@ impl ExtensionManager {
                 );
                 Ok(format!(
                     "Configuration saved for '{}'. \
-                     Automatic activation failed ({}), restart IronClaw to activate.",
+                     Automatic activation failed ({}), restart cLawyer to activate.",
                     name, e
                 ))
             }

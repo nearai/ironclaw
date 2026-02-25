@@ -80,6 +80,8 @@ pub struct ToolRegistry {
     secrets_store: Option<Arc<dyn SecretsStore + Send + Sync>>,
     /// Shared rate limiter for built-in tool invocations.
     rate_limiter: RateLimiter,
+    /// Optional legal policy profile.
+    legal: Option<crate::config::LegalConfig>,
 }
 
 impl ToolRegistry {
@@ -91,6 +93,7 @@ impl ToolRegistry {
             credential_registry: None,
             secrets_store: None,
             rate_limiter: RateLimiter::new(),
+            legal: None,
         }
     }
 
@@ -102,6 +105,12 @@ impl ToolRegistry {
     ) -> Self {
         self.credential_registry = Some(credential_registry);
         self.secrets_store = Some(secrets_store);
+        self
+    }
+
+    /// Attach legal policy settings used by built-in tools.
+    pub fn with_legal_policy(mut self, legal: crate::config::LegalConfig) -> Self {
+        self.legal = Some(legal);
         self
     }
 
@@ -212,6 +221,9 @@ impl ToolRegistry {
         if let (Some(cr), Some(ss)) = (&self.credential_registry, &self.secrets_store) {
             http = http.with_credentials(Arc::clone(cr), Arc::clone(ss));
         }
+        if let Some(ref legal) = self.legal {
+            http = http.with_legal_policy(legal.clone());
+        }
         self.register_sync(Arc::new(http));
 
         tracing::info!("Registered {} built-in tools", self.count());
@@ -258,7 +270,11 @@ impl ToolRegistry {
     pub fn register_dev_tools(&self) {
         self.register_sync(Arc::new(ShellTool::new()));
         self.register_sync(Arc::new(ReadFileTool::new()));
-        self.register_sync(Arc::new(WriteFileTool::new()));
+        let mut write_file = WriteFileTool::new();
+        if let Some(ref legal) = self.legal {
+            write_file = write_file.with_legal_policy(legal.clone());
+        }
+        self.register_sync(Arc::new(write_file));
         self.register_sync(Arc::new(ListDirTool::new()));
         self.register_sync(Arc::new(ApplyPatchTool::new()));
 
@@ -271,7 +287,11 @@ impl ToolRegistry {
     /// `register_builtin_tools()` if you have a workspace available.
     pub fn register_memory_tools(&self, workspace: Arc<Workspace>) {
         self.register_sync(Arc::new(MemorySearchTool::new(Arc::clone(&workspace))));
-        self.register_sync(Arc::new(MemoryWriteTool::new(Arc::clone(&workspace))));
+        let mut write_tool = MemoryWriteTool::new(Arc::clone(&workspace));
+        if let Some(ref legal) = self.legal {
+            write_tool = write_tool.with_legal_policy(legal.clone());
+        }
+        self.register_sync(Arc::new(write_tool));
         self.register_sync(Arc::new(MemoryReadTool::new(Arc::clone(&workspace))));
         self.register_sync(Arc::new(MemoryTreeTool::new(workspace)));
 

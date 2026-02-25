@@ -8,7 +8,7 @@
 //! # Example: Loading from Directory
 //!
 //! ```text
-//! ~/.ironclaw/tools/
+//! ~/.clawyer/tools/
 //! ├── slack.wasm
 //! ├── slack.capabilities.json
 //! ├── github.wasm
@@ -17,7 +17,7 @@
 //!
 //! ```ignore
 //! let loader = WasmToolLoader::new(runtime, registry);
-//! loader.load_from_dir(Path::new("~/.ironclaw/tools/")).await?;
+//! loader.load_from_dir(Path::new("~/.clawyer/tools/")).await?;
 //! ```
 //!
 //! # Dev Mode
@@ -478,7 +478,7 @@ pub async fn discover_dev_tools() -> Result<HashMap<String, DiscoveredTool>, std
 /// Load WASM tools from build artifacts in `tools-src/`.
 ///
 /// In dev mode, tools can be loaded directly from their build output without
-/// needing to install them to `~/.ironclaw/tools/` first. Build artifacts
+/// needing to install them to `~/.clawyer/tools/` first. Build artifacts
 /// that are newer than installed copies take priority.
 ///
 /// Set `IRONCLAW_TOOLS_SRC` env var to override the source directory.

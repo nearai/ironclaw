@@ -18,7 +18,7 @@ use crate::sandbox::connect_docker;
 /// Which mode a sandbox container runs in.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum JobMode {
-    /// Standard IronClaw worker with proxied LLM calls.
+    /// Standard cLawyer worker with proxied LLM calls.
     Worker,
     /// Claude Code bridge that spawns the `claude` CLI directly.
     ClaudeCode,
@@ -70,7 +70,7 @@ pub struct ContainerJobConfig {
 impl Default for ContainerJobConfig {
     fn default() -> Self {
         Self {
-            image: "ironclaw-worker:latest".to_string(),
+            image: "clawyer-worker:latest".to_string(),
             memory_limit_mb: 2048,
             cpu_shares: 1024,
             orchestrator_port: 50051,
@@ -131,7 +131,7 @@ pub struct CompletionResult {
     pub message: Option<String>,
 }
 
-/// Validate that a project directory is under `~/.ironclaw/projects/`.
+/// Validate that a project directory is under `~/.clawyer/projects/`.
 ///
 /// Returns the canonicalized path if valid. Creates the base directory if
 /// it doesn't exist (so the prefix check always runs).
@@ -141,7 +141,7 @@ pub struct CompletionResult {
 /// There is a time-of-check/time-of-use gap between `canonicalize()` here
 /// and the actual Docker `binds.push()` in the caller. In a multi-tenant
 /// system a malicious actor could swap a symlink after validation. This is
-/// acceptable in IronClaw's single-tenant design where the user controls
+/// acceptable in cLawyer's single-tenant design where the user controls
 /// the filesystem.
 fn validate_bind_mount_path(
     dir: &std::path::Path,
@@ -162,7 +162,7 @@ fn validate_bind_mount_path(
         job_id,
         reason: "could not determine home directory for path validation".to_string(),
     })?;
-    let projects_base = home.join(".ironclaw").join("projects");
+    let projects_base = home.join(".clawyer").join("projects");
 
     // Ensure the base exists so canonicalize always succeeds.
     std::fs::create_dir_all(&projects_base).map_err(|e| {
@@ -319,7 +319,7 @@ impl ContainerJobManager {
             format!("IRONCLAW_ORCHESTRATOR_URL={}", orchestrator_url),
         ];
 
-        // Build volume mounts (validate project_dir stays within ~/.ironclaw/projects/)
+        // Build volume mounts (validate project_dir stays within ~/.clawyer/projects/)
         let mut binds = Vec::new();
         if let Some(ref dir) = project_dir {
             let canonical = validate_bind_mount_path(dir, job_id)?;
@@ -407,8 +407,8 @@ impl ContainerJobManager {
         };
 
         let container_name = match mode {
-            JobMode::Worker => format!("ironclaw-worker-{}", job_id),
-            JobMode::ClaudeCode => format!("ironclaw-claude-{}", job_id),
+            JobMode::Worker => format!("clawyer-worker-{}", job_id),
+            JobMode::ClaudeCode => format!("clawyer-claude-{}", job_id),
         };
         let options = CreateContainerOptions {
             name: container_name,
@@ -617,7 +617,7 @@ mod tests {
 
     #[test]
     fn test_validate_bind_mount_valid_path() {
-        let base = dirs::home_dir().unwrap().join(".ironclaw").join("projects");
+        let base = dirs::home_dir().unwrap().join(".clawyer").join("projects");
         std::fs::create_dir_all(&base).unwrap();
 
         let test_dir = base.join("test_validate_bind");

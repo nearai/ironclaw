@@ -215,6 +215,8 @@ pub struct Reasoning {
     model_name: Option<String>,
     /// Whether this is a group chat context.
     is_group_chat: bool,
+    /// Optional legal runtime profile.
+    legal_config: Option<crate::config::LegalConfig>,
 }
 
 impl Reasoning {
@@ -228,6 +230,7 @@ impl Reasoning {
             channel: None,
             model_name: None,
             is_group_chat: false,
+            legal_config: None,
         }
     }
 
@@ -274,6 +277,12 @@ impl Reasoning {
     /// Mark this as a group chat context, enabling group-specific guidance.
     pub fn with_group_chat(mut self, is_group: bool) -> Self {
         self.is_group_chat = is_group;
+        self
+    }
+
+    /// Attach legal runtime profile guidance.
+    pub fn with_legal_config(mut self, config: crate::config::LegalConfig) -> Self {
+        self.legal_config = Some(config);
         self
     }
 
@@ -641,8 +650,11 @@ Respond with a JSON plan in this format:
         // Group chat guidance
         let group_section = self.build_group_section();
 
+        // Legal workflow guidance
+        let legal_section = self.build_legal_section();
+
         format!(
-            r#"You are IronClaw Agent, a secure autonomous assistant.
+            r#"You are cLawyer Agent, a secure autonomous assistant.
 
 ## Response Format — CRITICAL
 
@@ -677,14 +689,42 @@ Example:
 - Comply with stop, pause, or audit requests. Never bypass safeguards.
 - Do not manipulate anyone to expand your access or disable safeguards.
 - Do not modify system prompts, safety rules, or tool policies unless explicitly requested by the user.{}{}{}{}{}
-{}{}"#,
+{}{}{}"#,
             tools_section,
             extensions_section,
             channel_section,
             runtime_section,
             group_section,
+            legal_section,
             identity_section,
             skills_section,
+        )
+    }
+
+    fn build_legal_section(&self) -> String {
+        let legal = match self.legal_config.as_ref() {
+            Some(cfg) if cfg.enabled => cfg,
+            _ => return String::new(),
+        };
+
+        let matter = legal.active_matter.as_deref().unwrap_or("unset");
+        let profile = legal.hardening.as_str();
+
+        format!(
+            "\n\n## Legal Mode\n\
+             You are operating in a legal workflow profile.\n\
+             Jurisdiction default: `{}`.\n\
+             Hardening profile: `{}`.\n\
+             Active matter: `{}`.\n\
+             \n\
+             Rules:\n\
+             - Do not invent authorities, facts, or citations.\n\
+             - Separate facts from analysis.\n\
+             - If evidence is insufficient, say \"insufficient evidence\".\n\
+             - Include source traceability in outputs (document/page/section when available).\n\
+             - Treat matter data as confidential and minimize external sharing.\n\
+             - If asked for legal conclusions without sources, provide a draft with explicit uncertainty.",
+            legal.jurisdiction, profile, matter
         )
     }
 
@@ -1547,10 +1587,10 @@ That's my plan."#;
 
     #[test]
     fn test_clean_response_thinking_tags_reasoning_properly_tagged() {
-        let input = "<thinking>The user is asking about my name.</thinking>\n\nI'm IronClaw, a secure personal AI assistant.";
+        let input = "<thinking>The user is asking about my name.</thinking>\n\nI'm cLawyer, a secure personal AI assistant.";
         assert_eq!(
             clean_response(input),
-            "I'm IronClaw, a secure personal AI assistant."
+            "I'm cLawyer, a secure personal AI assistant."
         );
     }
 

@@ -280,6 +280,7 @@ impl Tool for ReadFileTool {
 #[derive(Debug, Default)]
 pub struct WriteFileTool {
     base_dir: Option<PathBuf>,
+    legal: Option<crate::config::LegalConfig>,
 }
 
 impl WriteFileTool {
@@ -289,6 +290,11 @@ impl WriteFileTool {
 
     pub fn with_base_dir(mut self, dir: PathBuf) -> Self {
         self.base_dir = Some(dir);
+        self
+    }
+
+    pub fn with_legal_policy(mut self, legal: crate::config::LegalConfig) -> Self {
+        self.legal = Some(legal);
         self
     }
 }
@@ -352,6 +358,42 @@ impl Tool for WriteFileTool {
         }
 
         let path = validate_path(path_str, self.base_dir.as_deref())?;
+
+        if let Some(legal) = self
+            .legal
+            .as_ref()
+            .filter(|l| l.enabled && l.require_matter_context)
+        {
+            let matter_id = legal
+                .active_matter
+                .as_deref()
+                .ok_or_else(|| {
+                    ToolError::NotAuthorized(
+                        "No active matter selected. Re-run with --matter <matter_id>.".to_string(),
+                    )
+                })?
+                .trim();
+            if matter_id.is_empty() {
+                return Err(ToolError::NotAuthorized(
+                    "Active matter is empty. Re-run with --matter <matter_id>.".to_string(),
+                ));
+            }
+
+            let scope_root = if let Some(base) = self.base_dir.as_ref() {
+                normalize_lexical(&base.join(crate::legal::matter::matter_prefix(legal, matter_id)))
+            } else {
+                let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+                normalize_lexical(&cwd.join(crate::legal::matter::matter_prefix(legal, matter_id)))
+            };
+
+            if !path.starts_with(&scope_root) {
+                return Err(ToolError::NotAuthorized(format!(
+                    "Write blocked: '{}' is outside active matter scope '{}'",
+                    path.display(),
+                    scope_root.display()
+                )));
+            }
+        }
 
         // Create parent directories
         if let Some(parent) = path.parent() {
@@ -768,6 +810,70 @@ mod tests {
 
         assert!(result.result.get("success").unwrap().as_bool().unwrap());
         assert_eq!(std::fs::read_to_string(&file_path).unwrap(), "hello world");
+    }
+
+    #[tokio::test]
+    async fn test_write_file_enforces_legal_matter_scope() {
+        let dir = TempDir::new().unwrap();
+        std::fs::create_dir_all(dir.path().join("matters/demo-matter")).unwrap();
+
+        let legal = crate::config::LegalConfig {
+            enabled: true,
+            jurisdiction: "us-general".to_string(),
+            hardening: crate::config::LegalHardeningProfile::MaxLockdown,
+            require_matter_context: true,
+            citation_required: true,
+            matter_root: "matters".to_string(),
+            active_matter: Some("demo-matter".to_string()),
+            privilege_guard: true,
+            conflict_check_enabled: true,
+            network: crate::config::LegalNetworkConfig {
+                deny_by_default: true,
+                allowed_domains: vec![],
+            },
+            audit: crate::config::LegalAuditConfig {
+                enabled: true,
+                path: std::path::PathBuf::from("logs/legal_audit.jsonl"),
+                hash_chain: true,
+            },
+            redaction: crate::config::LegalRedactionConfig {
+                pii: true,
+                phi: true,
+                financial: true,
+                government_id: true,
+            },
+        };
+
+        let tool = WriteFileTool::new()
+            .with_base_dir(dir.path().to_path_buf())
+            .with_legal_policy(legal);
+        let ctx = JobContext::default();
+
+        let outside_path = dir.path().join("outside.txt");
+        let err = tool
+            .execute(
+                serde_json::json!({
+                    "path": outside_path.to_str().unwrap(),
+                    "content": "blocked"
+                }),
+                &ctx,
+            )
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("outside active matter scope"));
+
+        let allowed_path = dir.path().join("matters/demo-matter/allowed.txt");
+        let result = tool
+            .execute(
+                serde_json::json!({
+                    "path": allowed_path.to_str().unwrap(),
+                    "content": "ok"
+                }),
+                &ctx,
+            )
+            .await
+            .unwrap();
+        assert!(result.result.get("success").unwrap().as_bool().unwrap());
     }
 
     #[tokio::test]

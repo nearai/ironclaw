@@ -467,7 +467,7 @@ pub async fn fetch_skill_content(url: &str) -> Result<String, ToolError> {
 
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(15))
-        .user_agent("ironclaw/0.1")
+        .user_agent("clawyer/0.1")
         .redirect(reqwest::redirect::Policy::none())
         .build()
         .map_err(|e| ToolError::ExecutionFailed(format!("HTTP client error: {}", e)))?;

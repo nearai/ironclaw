@@ -30,6 +30,7 @@ pub struct HttpTool {
     client: Client,
     credential_registry: Option<Arc<SharedCredentialRegistry>>,
     secrets_store: Option<Arc<dyn SecretsStore + Send + Sync>>,
+    legal: Option<crate::config::LegalConfig>,
 }
 
 impl HttpTool {
@@ -45,6 +46,7 @@ impl HttpTool {
             client,
             credential_registry: None,
             secrets_store: None,
+            legal: None,
         }
     }
 
@@ -56,6 +58,12 @@ impl HttpTool {
     ) -> Self {
         self.credential_registry = Some(registry);
         self.secrets_store = Some(secrets_store);
+        self
+    }
+
+    /// Attach legal policy controls.
+    pub fn with_legal_policy(mut self, legal: crate::config::LegalConfig) -> Self {
+        self.legal = Some(legal);
         self
     }
 }
@@ -254,6 +262,26 @@ impl Tool for HttpTool {
         let url = require_str(&params, "url")?;
         let mut parsed_url = validate_url(url)?;
 
+        if let Some(ref legal) = self.legal
+            && !crate::legal::policy::is_network_domain_allowed(
+                legal,
+                parsed_url.host_str().unwrap_or_default(),
+            )
+        {
+            crate::legal::audit::inc_blocked_action();
+            crate::legal::audit::record(
+                "network_domain_blocked",
+                serde_json::json!({
+                    "url": parsed_url.as_str(),
+                    "host": parsed_url.host_str(),
+                }),
+            );
+            return Err(ToolError::NotAuthorized(format!(
+                "Domain '{}' is not in the legal allowlist. Add it with --allow-domain and explicitly approve the request.",
+                parsed_url.host_str().unwrap_or_default()
+            )));
+        }
+
         // Parse headers
         let mut headers_vec = parse_headers_param(params.get("headers"))?;
 
@@ -442,6 +470,19 @@ impl Tool for HttpTool {
     }
 
     fn requires_approval(&self, params: &serde_json::Value) -> ApprovalRequirement {
+        if let Some(ref legal) = self.legal {
+            if legal.privilege_guard
+                && legal
+                    .active_matter
+                    .as_deref()
+                    .is_some_and(|m| !m.trim().is_empty())
+            {
+                return ApprovalRequirement::Always;
+            }
+            if crate::legal::policy::is_max_lockdown(legal) {
+                return ApprovalRequirement::Always;
+            }
+        }
         // 1. Manual auth headers/query params in LLM params
         if crate::safety::params_contain_manual_credentials(params) {
             return ApprovalRequirement::Always;

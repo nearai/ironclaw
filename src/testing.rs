@@ -8,7 +8,7 @@
 //! # Usage
 //!
 //! ```rust,no_run
-//! use ironclaw::testing::TestHarnessBuilder;
+//! use clawyer::testing::TestHarnessBuilder;
 //!
 //! #[tokio::test]
 //! async fn test_something() {
@@ -248,9 +248,10 @@ impl TestHarnessBuilder {
     #[cfg(feature = "libsql")]
     pub async fn build(self) -> TestHarness {
         use crate::agent::cost_guard::{CostGuard, CostGuardConfig};
-        use crate::config::{SafetyConfig, SkillsConfig};
+        use crate::config::{LegalConfig, SafetyConfig, SkillsConfig};
         use crate::hooks::HookRegistry;
         use crate::safety::SafetyLayer;
+        use crate::settings::Settings;
 
         let (db, temp_dir) = if let Some(db) = self.db {
             // Caller provided a DB; create a dummy temp dir to satisfy the struct.
@@ -291,6 +292,8 @@ impl TestHarnessBuilder {
             skill_registry: None,
             skill_catalog: None,
             skills_config: SkillsConfig::default(),
+            legal_config: LegalConfig::resolve(&Settings::default())
+                .expect("default legal config should resolve"),
             hooks,
             cost_guard,
         };

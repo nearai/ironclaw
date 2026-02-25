@@ -1,6 +1,6 @@
 //! Worker mode for running inside Docker containers.
 //!
-//! When `ironclaw worker` is invoked, the binary starts in worker mode:
+//! When `clawyer worker` is invoked, the binary starts in worker mode:
 //! - Connects to the orchestrator over HTTP
 //! - Uses a `ProxyLlmProvider` that routes LLM calls through the orchestrator
 //! - Runs container-safe tools (shell, file ops, patch)
@@ -10,7 +10,7 @@
 //! ┌────────────────────────────────┐
 //! │        Docker Container         │
 //! │                                 │
-//! │  ironclaw worker                │
+//! │  clawyer worker                │
 //! │    ├─ ProxyLlmProvider ─────────┼──▶ Orchestrator /worker/{id}/llm/complete
 //! │    ├─ SafetyLayer               │
 //! │    ├─ ToolRegistry              │

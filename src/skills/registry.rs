@@ -2,7 +2,7 @@
 //!
 //! Skills are discovered from two filesystem locations:
 //! 1. Workspace skills directory (`<workspace>/skills/`) -- Trusted
-//! 2. User skills directory (`~/.ironclaw/skills/`) -- Trusted
+//! 2. User skills directory (`~/.clawyer/skills/`) -- Trusted
 //!
 //! Both flat (`skills/SKILL.md`) and subdirectory (`skills/<name>/SKILL.md`)
 //! layouts are supported. Earlier locations win on name collision (workspace
@@ -68,12 +68,18 @@ pub enum SkillRegistryError {
 pub struct SkillRegistry {
     /// All loaded skills.
     skills: Vec<LoadedSkill>,
-    /// User skills directory (~/.ironclaw/skills/). Skills here are Trusted.
+    /// User skills directory (~/.clawyer/skills/). Skills here are Trusted.
     user_dir: PathBuf,
-    /// Registry-installed skills directory (~/.ironclaw/installed_skills/). Skills here are Installed.
+    /// Registry-installed skills directory (~/.clawyer/installed_skills/). Skills here are Installed.
     installed_dir: Option<PathBuf>,
+    /// Bundled first-party skills directory.
+    bundled_dir: Option<PathBuf>,
     /// Optional workspace skills directory.
     workspace_dir: Option<PathBuf>,
+    /// Trust used for workspace skills.
+    workspace_trust: SkillTrust,
+    /// Trust used for user skills.
+    user_trust: SkillTrust,
 }
 
 impl SkillRegistry {
@@ -83,7 +89,10 @@ impl SkillRegistry {
             skills: Vec::new(),
             user_dir,
             installed_dir: None,
+            bundled_dir: None,
             workspace_dir: None,
+            workspace_trust: SkillTrust::Trusted,
+            user_trust: SkillTrust::Trusted,
         }
     }
 
@@ -104,22 +113,36 @@ impl SkillRegistry {
         self
     }
 
+    /// Set bundled first-party skills directory.
+    pub fn with_bundled_dir(mut self, dir: PathBuf) -> Self {
+        self.bundled_dir = Some(dir);
+        self
+    }
+
+    /// Set trust level for non-bundled skills (workspace and user directories).
+    pub fn with_non_bundled_trust(mut self, trust: SkillTrust) -> Self {
+        self.workspace_trust = trust;
+        self.user_trust = trust;
+        self
+    }
+
     /// Discover and load skills from all configured directories.
     ///
     /// Discovery order (earlier wins on name collision):
-    /// 1. Workspace skills directory (if set) -- Trusted
-    /// 2. User skills directory -- Trusted
-    /// 3. Installed skills directory (if set) -- Installed
+    /// 1. Bundled skills directory (if set) -- Trusted
+    /// 2. Workspace skills directory (if set) -- configurable trust
+    /// 3. User skills directory -- configurable trust
+    /// 4. Installed skills directory (if set) -- Installed
     pub async fn discover_all(&mut self) -> Vec<String> {
         let mut loaded_names: Vec<String> = Vec::new();
         let mut seen: HashSet<String> = HashSet::new();
 
-        // 1. Workspace skills (highest priority)
-        if let Some(ws_dir) = self.workspace_dir.clone() {
-            let ws_skills = self
-                .discover_from_dir(&ws_dir, SkillTrust::Trusted, SkillSource::Workspace)
+        // 1. Bundled skills (highest priority, trusted)
+        if let Some(bundled_dir) = self.bundled_dir.clone() {
+            let bundled_skills = self
+                .discover_from_dir(&bundled_dir, SkillTrust::Trusted, SkillSource::Bundled)
                 .await;
-            for (name, skill) in ws_skills {
+            for (name, skill) in bundled_skills {
                 if seen.contains(&name) {
                     continue;
                 }
@@ -129,14 +152,30 @@ impl SkillRegistry {
             }
         }
 
-        // 2. User skills
+        // 2. Workspace skills
+        if let Some(ws_dir) = self.workspace_dir.clone() {
+            let ws_skills = self
+                .discover_from_dir(&ws_dir, self.workspace_trust, SkillSource::Workspace)
+                .await;
+            for (name, skill) in ws_skills {
+                if seen.contains(&name) {
+                    tracing::debug!("Skipping workspace skill '{}' (overridden)", name);
+                    continue;
+                }
+                seen.insert(name.clone());
+                loaded_names.push(name);
+                self.skills.push(skill);
+            }
+        }
+
+        // 3. User skills
         let user_dir = self.user_dir.clone();
         let user_skills = self
-            .discover_from_dir(&user_dir, SkillTrust::Trusted, SkillSource::User)
+            .discover_from_dir(&user_dir, self.user_trust, SkillSource::User)
             .await;
         for (name, skill) in user_skills {
             if seen.contains(&name) {
-                tracing::debug!("Skipping user skill '{}' (overridden by workspace)", name);
+                tracing::debug!("Skipping user skill '{}' (overridden)", name);
                 continue;
             }
             seen.insert(name.clone());
@@ -144,7 +183,7 @@ impl SkillRegistry {
             self.skills.push(skill);
         }
 
-        // 3. Installed skills (registry-installed, lowest priority)
+        // 4. Installed skills (registry-installed, lowest priority)
         if let Some(inst_dir) = self.installed_dir.clone() {
             let inst_skills = self
                 .discover_from_dir(&inst_dir, SkillTrust::Installed, SkillSource::User)
@@ -538,11 +577,13 @@ async fn load_and_validate_skill(
     let manifest = parsed.manifest;
     let prompt_content = parsed.prompt_content;
 
+    validate_bundled_legal_metadata(&manifest, &source)?;
+
     // Check gating requirements
     if let Some(ref meta) = manifest.metadata
-        && let Some(ref openclaw) = meta.openclaw
+        && let Some(ref clawyer) = meta.clawyer
     {
-        let result = gating::check_requirements(&openclaw.requires).await;
+        let result = gating::check_requirements(&clawyer.requires).await;
         if !result.passed {
             return Err(SkillRegistryError::GatingFailed {
                 name: manifest.name.clone(),
@@ -596,6 +637,46 @@ async fn load_and_validate_skill(
     };
 
     Ok((name, skill))
+}
+
+fn validate_bundled_legal_metadata(
+    manifest: &crate::skills::SkillManifest,
+    source: &SkillSource,
+) -> Result<(), SkillRegistryError> {
+    if !matches!(source, SkillSource::Bundled(_)) || !manifest.name.starts_with("legal-") {
+        return Ok(());
+    }
+
+    let meta = manifest
+        .metadata
+        .as_ref()
+        .ok_or_else(|| SkillRegistryError::ParseError {
+            name: manifest.name.clone(),
+            reason: "bundled legal skills require metadata".to_string(),
+        })?;
+
+    if meta.domain.as_deref() != Some("legal") {
+        return Err(SkillRegistryError::ParseError {
+            name: manifest.name.clone(),
+            reason: "bundled legal skills must declare metadata.domain=legal".to_string(),
+        });
+    }
+
+    if meta.requires_matter != Some(true) {
+        return Err(SkillRegistryError::ParseError {
+            name: manifest.name.clone(),
+            reason: "bundled legal skills must declare metadata.requires_matter=true".to_string(),
+        });
+    }
+
+    if meta.citation_mode.as_deref() != Some("required") {
+        return Err(SkillRegistryError::ParseError {
+            name: manifest.name.clone(),
+            reason: "bundled legal skills must declare metadata.citation_mode=required".to_string(),
+        });
+    }
+
+    Ok(())
 }
 
 /// Compute SHA-256 hash of content in the format "sha256:hex...".
@@ -696,7 +777,7 @@ mod tests {
 
         fs::write(
             skill_dir.join("SKILL.md"),
-            "---\nname: gated-skill\nmetadata:\n  openclaw:\n    requires:\n      bins: [\"__nonexistent_bin__\"]\n---\n\nGated prompt.\n",
+            "---\nname: gated-skill\nmetadata:\n  clawyer:\n    requires:\n      bins: [\"__nonexistent_bin__\"]\n---\n\nGated prompt.\n",
         ).unwrap();
 
         let mut registry = SkillRegistry::new(dir.path().to_path_buf());

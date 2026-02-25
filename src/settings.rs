@@ -1,6 +1,6 @@
 //! User settings persistence.
 //!
-//! Stores user preferences in ~/.ironclaw/settings.json.
+//! Stores user preferences in ~/.clawyer/settings.json.
 //! Settings are loaded with env var > settings.json > default priority.
 
 use std::path::PathBuf;
@@ -97,6 +97,10 @@ pub struct Settings {
     /// Builder configuration.
     #[serde(default)]
     pub builder: BuilderSettings,
+
+    /// Legal workflow and hardening configuration.
+    #[serde(default)]
+    pub legal: LegalSettings,
 }
 
 /// Source for the secrets master key.
@@ -348,7 +352,7 @@ pub struct AgentSettings {
 }
 
 fn default_agent_name() -> String {
-    "ironclaw".to_string()
+    "clawyer".to_string()
 }
 
 fn default_max_parallel_jobs() -> u32 {
@@ -511,7 +515,7 @@ fn default_sandbox_cpu_shares() -> u32 {
 }
 
 fn default_sandbox_image() -> String {
-    "ironclaw-worker:latest".to_string()
+    "clawyer-worker:latest".to_string()
 }
 
 impl Default for SandboxSettings {
@@ -598,6 +602,164 @@ impl Default for BuilderSettings {
     }
 }
 
+/// Legal workflow profile and hardening settings.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LegalSettings {
+    /// Enable legal-mode constraints and templates.
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+
+    /// Default jurisdiction profile.
+    #[serde(default = "default_legal_jurisdiction")]
+    pub jurisdiction: String,
+
+    /// Hardening mode: "max_lockdown" or "standard".
+    #[serde(default = "default_legal_hardening")]
+    pub hardening: String,
+
+    /// Require an active matter context before substantive work.
+    #[serde(default = "default_true")]
+    pub require_matter_context: bool,
+
+    /// Require citations in generated legal work product.
+    #[serde(default = "default_true")]
+    pub citation_required: bool,
+
+    /// Root directory for matter-scoped artifacts.
+    #[serde(default = "default_matter_root")]
+    pub matter_root: String,
+
+    /// Active matter ID for this runtime (optional).
+    #[serde(default)]
+    pub active_matter: Option<String>,
+
+    /// Treat matter files as confidential by default.
+    #[serde(default = "default_true")]
+    pub privilege_guard: bool,
+
+    /// Enable conflict checks against conflicts.json.
+    #[serde(default = "default_true")]
+    pub conflict_check_enabled: bool,
+
+    /// Network controls for legal mode.
+    #[serde(default)]
+    pub network: LegalNetworkSettings,
+
+    /// Audit log controls.
+    #[serde(default)]
+    pub audit: LegalAuditSettings,
+
+    /// Redaction controls for sensitive classes.
+    #[serde(default)]
+    pub redaction: LegalRedactionSettings,
+}
+
+fn default_legal_jurisdiction() -> String {
+    "us-general".to_string()
+}
+
+fn default_legal_hardening() -> String {
+    "max_lockdown".to_string()
+}
+
+fn default_matter_root() -> String {
+    "matters".to_string()
+}
+
+impl Default for LegalSettings {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            jurisdiction: default_legal_jurisdiction(),
+            hardening: default_legal_hardening(),
+            require_matter_context: true,
+            citation_required: true,
+            matter_root: default_matter_root(),
+            active_matter: None,
+            privilege_guard: true,
+            conflict_check_enabled: true,
+            network: LegalNetworkSettings::default(),
+            audit: LegalAuditSettings::default(),
+            redaction: LegalRedactionSettings::default(),
+        }
+    }
+}
+
+/// Legal network controls.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LegalNetworkSettings {
+    /// Deny outbound network access unless a domain is explicitly allowlisted.
+    #[serde(default = "default_true")]
+    pub deny_by_default: bool,
+
+    /// Allowed domains (exact host or suffix match).
+    #[serde(default)]
+    pub allowed_domains: Vec<String>,
+}
+
+impl Default for LegalNetworkSettings {
+    fn default() -> Self {
+        Self {
+            deny_by_default: true,
+            allowed_domains: Vec::new(),
+        }
+    }
+}
+
+/// Legal audit settings.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LegalAuditSettings {
+    /// Enable append-only legal audit logging.
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+
+    /// Relative path for the JSONL audit stream.
+    #[serde(default = "default_legal_audit_path")]
+    pub path: String,
+
+    /// Enable event hash chaining for tamper evidence.
+    #[serde(default = "default_true")]
+    pub hash_chain: bool,
+}
+
+fn default_legal_audit_path() -> String {
+    "logs/legal_audit.jsonl".to_string()
+}
+
+impl Default for LegalAuditSettings {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            path: default_legal_audit_path(),
+            hash_chain: true,
+        }
+    }
+}
+
+/// Legal redaction settings for sensitive classes.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LegalRedactionSettings {
+    #[serde(default = "default_true")]
+    pub pii: bool,
+    #[serde(default = "default_true")]
+    pub phi: bool,
+    #[serde(default = "default_true")]
+    pub financial: bool,
+    #[serde(default = "default_true")]
+    pub government_id: bool,
+}
+
+impl Default for LegalRedactionSettings {
+    fn default() -> Self {
+        Self {
+            pii: true,
+            phi: true,
+            financial: true,
+            government_id: true,
+        }
+    }
+}
+
 impl Settings {
     /// Reconstruct Settings from a flat key-value map (as stored in the DB).
     ///
@@ -654,8 +816,16 @@ impl Settings {
         map
     }
 
-    /// Get the default settings file path (~/.ironclaw/settings.json).
+    /// Get the default settings file path (~/.clawyer/settings.json).
     pub fn default_path() -> std::path::PathBuf {
+        dirs::home_dir()
+            .unwrap_or_else(|| std::path::PathBuf::from("."))
+            .join(".clawyer")
+            .join("settings.json")
+    }
+
+    /// Get the legacy settings path (~/.ironclaw/settings.json).
+    fn legacy_path() -> std::path::PathBuf {
         dirs::home_dir()
             .unwrap_or_else(|| std::path::PathBuf::from("."))
             .join(".ironclaw")
@@ -664,7 +834,17 @@ impl Settings {
 
     /// Load settings from disk, returning default if not found.
     pub fn load() -> Self {
-        Self::load_from(&Self::default_path())
+        let path = Self::default_path();
+        if path.exists() {
+            return Self::load_from(&path);
+        }
+
+        let legacy = Self::legacy_path();
+        if legacy.exists() {
+            return Self::load_from(&legacy);
+        }
+
+        Self::default()
     }
 
     /// Load settings from a specific path (used by bootstrap legacy migration).
@@ -675,11 +855,11 @@ impl Settings {
         }
     }
 
-    /// Default TOML config file path (~/.ironclaw/config.toml).
+    /// Default TOML config file path (~/.clawyer/config.toml).
     pub fn default_toml_path() -> PathBuf {
         dirs::home_dir()
             .unwrap_or_else(|| PathBuf::from("."))
-            .join(".ironclaw")
+            .join(".clawyer")
             .join("config.toml")
     }
 
@@ -705,13 +885,13 @@ impl Settings {
             .map_err(|e| format!("failed to serialize settings: {}", e))?;
 
         let content = format!(
-            "# IronClaw configuration file.\n\
+            "# cLawyer configuration file.\n\
              #\n\
              # Priority: env var > this file > database settings > defaults.\n\
              # Uncomment and edit values to override defaults.\n\
-             # Run `ironclaw config init` to regenerate this file.\n\
+             # Run `clawyer config init` to regenerate this file.\n\
              #\n\
-             # Documentation: https://github.com/nearai/ironclaw\n\
+             # Documentation: https://github.com/nearai/cLawyer\n\
              \n\
              {raw}"
         );
@@ -987,7 +1167,7 @@ mod tests {
     fn test_get_setting() {
         let settings = Settings::default();
 
-        assert_eq!(settings.get("agent.name"), Some("ironclaw".to_string()));
+        assert_eq!(settings.get("agent.name"), Some("clawyer".to_string()));
         assert_eq!(
             settings.get("agent.max_parallel_jobs"),
             Some("5".to_string())
@@ -1016,7 +1196,7 @@ mod tests {
 
         settings.agent.name = "custom".to_string();
         settings.reset("agent.name").unwrap();
-        assert_eq!(settings.agent.name, "ironclaw");
+        assert_eq!(settings.agent.name, "clawyer");
     }
 
     #[test]
@@ -1191,7 +1371,7 @@ mod tests {
         Settings::default().save_toml(&path).unwrap();
         let content = std::fs::read_to_string(&path).unwrap();
 
-        assert!(content.starts_with("# IronClaw configuration file."));
+        assert!(content.starts_with("# cLawyer configuration file."));
         assert!(content.contains("[agent]"));
         assert!(content.contains("[heartbeat]"));
     }
@@ -1234,9 +1414,9 @@ mod tests {
     }
 
     #[test]
-    fn default_toml_path_under_ironclaw() {
+    fn default_toml_path_under_clawyer() {
         let path = Settings::default_toml_path();
-        assert!(path.to_string_lossy().contains(".ironclaw"));
+        assert!(path.to_string_lossy().contains(".clawyer"));
         assert!(path.to_string_lossy().ends_with("config.toml"));
     }
 

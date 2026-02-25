@@ -510,6 +510,47 @@ fn default_patterns() -> Vec<LeakPattern> {
             severity: LeakSeverity::High,
             action: LeakAction::Redact,
         },
+        // US Social Security Number
+        LeakPattern {
+            name: "us_ssn".to_string(),
+            regex: Regex::new(r"\b\d{3}-\d{2}-\d{4}\b").unwrap(),
+            severity: LeakSeverity::High,
+            action: LeakAction::Redact,
+        },
+        // Credit card number-like sequence
+        LeakPattern {
+            name: "credit_card_like".to_string(),
+            regex: Regex::new(r"\b(?:\d[ -]?){13,19}\b").unwrap(),
+            severity: LeakSeverity::Medium,
+            action: LeakAction::Redact,
+        },
+        // Labeled bank account/routing patterns
+        LeakPattern {
+            name: "routing_number_labeled".to_string(),
+            regex: Regex::new(r"(?i)\brouting(?:\s+number)?[:\s]*\d{9}\b").unwrap(),
+            severity: LeakSeverity::High,
+            action: LeakAction::Redact,
+        },
+        LeakPattern {
+            name: "account_number_labeled".to_string(),
+            regex: Regex::new(r"(?i)\baccount(?:\s+number)?[:\s]*\d{6,17}\b").unwrap(),
+            severity: LeakSeverity::High,
+            action: LeakAction::Redact,
+        },
+        // Labeled government/medical identifiers
+        LeakPattern {
+            name: "drivers_license_labeled".to_string(),
+            regex: Regex::new(r"(?i)\bdriver'?s?\s+license[:\s]*[A-Z0-9-]{5,20}\b").unwrap(),
+            severity: LeakSeverity::Medium,
+            action: LeakAction::Redact,
+        },
+        LeakPattern {
+            name: "medical_record_labeled".to_string(),
+            regex: Regex::new(r"(?i)\b(?:mrn|medical\s+record\s+number)[:\s]*[A-Z0-9-]{5,20}\b")
+                .unwrap(),
+            severity: LeakSeverity::Medium,
+            action: LeakAction::Redact,
+        },
         // High entropy hex (potential secrets, warn only)
         // Uses word boundary since look-around isn't supported in the regex crate.
         // This catches standalone 64-char hex strings (like SHA256 hashes used as secrets).
@@ -716,5 +757,41 @@ mod tests {
 
         let result = detector.scan_http_request("https://api.example.com/exfil", &[], Some(&body));
         assert!(result.is_err(), "binary body should still be scanned");
+    }
+
+    #[test]
+    fn test_redact_ssn() {
+        let detector = LeakDetector::new();
+        let content = "Client SSN is 123-45-6789.";
+
+        let result = detector.scan(content);
+        assert!(
+            result.matches.iter().any(|m| m.pattern_name == "us_ssn"),
+            "Expected SSN detector to match"
+        );
+        assert!(!result.should_block, "SSNs should redact, not hard-block");
+        let redacted = result.redacted_content.expect("redacted output");
+        assert!(redacted.contains("[REDACTED]"));
+    }
+
+    #[test]
+    fn test_redact_routing_and_account_number_labels() {
+        let detector = LeakDetector::new();
+        let content = "routing number: 021000021 account number: 123456789012";
+
+        let result = detector.scan(content);
+        assert!(
+            result
+                .matches
+                .iter()
+                .any(|m| m.pattern_name == "routing_number_labeled")
+        );
+        assert!(
+            result
+                .matches
+                .iter()
+                .any(|m| m.pattern_name == "account_number_labeled")
+        );
+        assert!(!result.should_block);
     }
 }

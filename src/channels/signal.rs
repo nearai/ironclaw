@@ -202,7 +202,7 @@ impl SignalChannel {
                 );
                 if result.created {
                     let message = format!(
-                        "To pair with this bot, run: `ironclaw pairing approve signal {}`",
+                        "To pair with this bot, run: `clawyer pairing approve signal {}`",
                         result.code
                     );
                     let http_url = self.config.http_url.clone();

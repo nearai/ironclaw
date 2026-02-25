@@ -53,6 +53,7 @@ pub mod evaluation;
 pub mod extensions;
 pub mod history;
 pub mod hooks;
+pub mod legal;
 pub mod llm;
 pub mod observability;
 pub mod orchestrator;

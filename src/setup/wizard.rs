@@ -10,6 +10,7 @@
 //! 7. Extensions (tool installation from registry)
 //! 8. Docker sandbox
 //! 9. Heartbeat (background tasks)
+//! 10. Legal workflow profile
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -76,7 +77,7 @@ pub struct SetupConfig {
     pub channels_only: bool,
 }
 
-/// Interactive setup wizard for IronClaw.
+/// Interactive setup wizard for cLawyer.
 pub struct SetupWizard {
     config: SetupConfig,
     settings: Settings,
@@ -137,7 +138,7 @@ impl SetupWizard {
     /// settings are loaded from the database after Step 1 establishes a
     /// connection, so users don't have to re-enter everything.
     pub async fn run(&mut self) -> Result<(), SetupError> {
-        print_header("IronClaw Setup Wizard");
+        print_header("cLawyer Setup Wizard");
 
         if self.config.channels_only {
             // Channels-only mode: reconnect to existing DB and load settings
@@ -146,7 +147,7 @@ impl SetupWizard {
             print_step(1, 1, "Channel Configuration");
             self.step_channels().await?;
         } else {
-            let total_steps = 9;
+            let total_steps = 10;
 
             // Step 1: Database
             print_step(1, total_steps, "Database Connection");
@@ -206,6 +207,11 @@ impl SetupWizard {
             print_step(9, total_steps, "Background Tasks");
             self.step_heartbeat()?;
             self.persist_after_step().await;
+
+            // Step 10: Legal profile
+            print_step(10, total_steps, "Legal Workflow Profile");
+            self.step_legal_profile()?;
+            self.persist_after_step().await;
         }
 
         // Save settings and print summary
@@ -239,7 +245,7 @@ impl SetupWizard {
 
         #[allow(unreachable_code)]
         Err(SetupError::Database(
-            "No database configured. Run full setup first (ironclaw onboard).".to_string(),
+            "No database configured. Run full setup first (clawyer onboard).".to_string(),
         ))
     }
 
@@ -248,7 +254,7 @@ impl SetupWizard {
     async fn reconnect_postgres(&mut self) -> Result<(), SetupError> {
         let url = std::env::var("DATABASE_URL").map_err(|_| {
             SetupError::Database(
-                "DATABASE_URL not set. Run full setup first (ironclaw onboard).".to_string(),
+                "DATABASE_URL not set. Run full setup first (clawyer onboard).".to_string(),
             )
         })?;
 
@@ -480,7 +486,7 @@ impl SetupWizard {
         }
 
         println!();
-        print_info("IronClaw uses an embedded SQLite database (libSQL).");
+        print_info("cLawyer uses an embedded SQLite database (libSQL).");
         print_info("No external database server required.");
         println!();
 
@@ -1467,7 +1473,7 @@ impl SetupWizard {
         // Discover available WASM channels
         let channels_dir = dirs::home_dir()
             .ok_or_else(|| SetupError::Config("Could not determine home directory".into()))?
-            .join(".ironclaw/channels");
+            .join(".clawyer/channels");
 
         let mut discovered_channels = discover_wasm_channels(&channels_dir).await;
         let installed_names: HashSet<String> = discovered_channels
@@ -1675,7 +1681,7 @@ impl SetupWizard {
             Some(c) => c,
             None => {
                 print_info("Extension registry not found. Skipping tool installation.");
-                print_info("Install tools manually with: ironclaw tool install <path>");
+                print_info("Install tools manually with: clawyer tool install <path>");
                 return Ok(());
             }
         };
@@ -1693,13 +1699,13 @@ impl SetupWizard {
 
         print_info("Available tools from the extension registry:");
         print_info("Select which tools to install. You can install more later with:");
-        print_info("  ironclaw registry install <name>");
+        print_info("  clawyer registry install <name>");
         println!();
 
         // Check which tools are already installed
         let tools_dir = dirs::home_dir()
             .ok_or_else(|| SetupError::Config("Could not determine home directory".into()))?
-            .join(".ironclaw/tools");
+            .join(".clawyer/tools");
 
         let installed_tools = discover_installed_tools(&tools_dir).await;
 
@@ -1741,7 +1747,7 @@ impl SetupWizard {
             tools_dir.clone(),
             dirs::home_dir()
                 .unwrap_or_default()
-                .join(".ironclaw/channels"),
+                .join(".clawyer/channels"),
         );
 
         let mut installed_count = 0;
@@ -1768,7 +1774,7 @@ impl SetupWizard {
                     {
                         let provider = auth.provider.as_deref().unwrap_or(&tool.name);
                         // Only mention unique providers (Google tools share auth)
-                        let hint = format!("  {} - ironclaw tool auth {}", provider, tool.name);
+                        let hint = format!("  {} - clawyer tool auth {}", provider, tool.name);
                         if !auth_needed
                             .iter()
                             .any(|h| h.starts_with(&format!("  {} -", provider)))
@@ -1801,7 +1807,7 @@ impl SetupWizard {
 
     /// Step 8: Docker Sandbox -- check Docker installation and availability.
     async fn step_docker_sandbox(&mut self) -> Result<(), SetupError> {
-        print_info("IronClaw can execute code, run builds, and use tools inside Docker");
+        print_info("cLawyer can execute code, run builds, and use tools inside Docker");
         print_info("containers. This keeps your system safe -- commands from the LLM run");
         print_info("in an isolated sandbox with no access to your credentials, limited");
         print_info("filesystem access, and network traffic restricted to an allowlist.");
@@ -1916,6 +1922,111 @@ impl SetupWizard {
         Ok(())
     }
 
+    /// Step 10: Legal profile defaults for law-firm workflows.
+    fn step_legal_profile(&mut self) -> Result<(), SetupError> {
+        print_info("cLawyer applies legal-first hardening defaults for confidential matters.");
+        print_info("These settings can be changed later with `clawyer config set ...`.");
+        println!();
+
+        if !confirm("Enable legal workflow profile?", true).map_err(SetupError::Io)? {
+            self.settings.legal.enabled = false;
+            print_info("Legal workflow profile disabled.");
+            return Ok(());
+        }
+
+        self.settings.legal.enabled = true;
+
+        let jurisdiction = optional_input("Default jurisdiction", Some("default: us-general"))
+            .map_err(SetupError::Io)?;
+        self.settings.legal.jurisdiction = jurisdiction
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| "us-general".to_string());
+
+        let current_matter_root = self.settings.legal.matter_root.clone();
+        let matter_root = optional_input(
+            "Matter root directory",
+            Some(&format!("default: {}", current_matter_root)),
+        )
+        .map_err(SetupError::Io)?;
+        self.settings.legal.matter_root = matter_root
+            .map(|s| s.trim().trim_matches('/').to_string())
+            .filter(|s| !s.is_empty())
+            .unwrap_or(current_matter_root);
+
+        let hardening_choice = select_one(
+            "Hardening strictness:",
+            &[
+                "max_lockdown (recommended): approval gates + strict tool controls",
+                "standard: legal profile enabled with lighter restrictions",
+            ],
+        )
+        .map_err(SetupError::Io)?;
+        self.settings.legal.hardening = if hardening_choice == 0 {
+            "max_lockdown".to_string()
+        } else {
+            "standard".to_string()
+        };
+
+        let network_choice = select_one(
+            "Outbound network policy:",
+            &[
+                "deny_by_default (recommended): explicit domain allowlist required",
+                "allow_by_default: unrestricted outbound domains",
+            ],
+        )
+        .map_err(SetupError::Io)?;
+        self.settings.legal.network.deny_by_default = network_choice == 0;
+
+        let allowed_domains = optional_input(
+            "Allowed outbound domains (comma-separated)",
+            Some("optional, e.g. courtlistener.com, sec.gov"),
+        )
+        .map_err(SetupError::Io)?;
+        self.settings.legal.network.allowed_domains = allowed_domains
+            .unwrap_or_default()
+            .split(',')
+            .map(crate::legal::policy::normalize_domain)
+            .filter(|d| !d.is_empty())
+            .collect();
+
+        let audit_path = optional_input("Audit log path", Some("default: logs/legal_audit.jsonl"))
+            .map_err(SetupError::Io)?;
+        if let Some(path) = audit_path
+            && !path.trim().is_empty()
+        {
+            self.settings.legal.audit.path = path.trim().to_string();
+        }
+        self.settings.legal.audit.enabled = true;
+        self.settings.legal.audit.hash_chain = true;
+
+        self.settings.legal.require_matter_context = confirm(
+            "Require active matter context for substantive legal tasks?",
+            true,
+        )
+        .map_err(SetupError::Io)?;
+        self.settings.legal.citation_required =
+            confirm("Require citations for legal/factual assertions?", true)
+                .map_err(SetupError::Io)?;
+        self.settings.legal.privilege_guard = confirm(
+            "Enable privilege guard (treat matter files as confidential by default)?",
+            true,
+        )
+        .map_err(SetupError::Io)?;
+        self.settings.legal.conflict_check_enabled =
+            confirm("Enable conflict checks using local conflicts.json?", true)
+                .map_err(SetupError::Io)?;
+
+        print_success(&format!(
+            "Legal profile configured: jurisdiction={}, hardening={}, matter_root={}",
+            self.settings.legal.jurisdiction,
+            self.settings.legal.hardening,
+            self.settings.legal.matter_root
+        ));
+
+        Ok(())
+    }
+
     /// Persist current settings to the database.
     ///
     /// Returns `Ok(true)` if settings were saved, `Ok(false)` if no database
@@ -1963,7 +2074,7 @@ impl SetupWizard {
         Ok(saved)
     }
 
-    /// Write bootstrap environment variables to `~/.ironclaw/.env`.
+    /// Write bootstrap environment variables to `~/.clawyer/.env`.
     ///
     /// These are the chicken-and-egg settings needed before the database is
     /// connected (DATABASE_BACKEND, DATABASE_URL, LLM_BACKEND, etc.).
@@ -2180,7 +2291,7 @@ impl SetupWizard {
         let _ = loaded;
     }
 
-    /// Save settings to the database and `~/.ironclaw/.env`, then print summary.
+    /// Save settings to the database and `~/.clawyer/.env`, then print summary.
     async fn save_and_summarize(&mut self) -> Result<(), SetupError> {
         self.settings.onboard_completed = true;
 
@@ -2299,13 +2410,32 @@ impl SetupWizard {
             );
         }
 
+        if self.settings.legal.enabled {
+            println!(
+                "  Legal profile: {} ({})",
+                self.settings.legal.jurisdiction, self.settings.legal.hardening
+            );
+            println!("  Matter root: {}", self.settings.legal.matter_root);
+            println!(
+                "  Network policy: {}",
+                if self.settings.legal.network.deny_by_default {
+                    "deny_by_default"
+                } else {
+                    "allow_by_default"
+                }
+            );
+            println!("  Audit log: {}", self.settings.legal.audit.path);
+        } else {
+            println!("  Legal profile: disabled");
+        }
+
         println!();
         println!("To start the agent, run:");
-        println!("  ironclaw");
+        println!("  clawyer");
         println!();
         println!("To change settings later:");
-        println!("  ironclaw config set <setting> <value>");
-        println!("  ironclaw onboard");
+        println!("  clawyer config set <setting> <value>");
+        println!("  clawyer onboard");
         println!();
 
         Ok(())
@@ -2795,7 +2925,7 @@ async fn install_selected_registry_channels(
 
         let installer = crate::registry::installer::RegistryInstaller::new(
             repo_root.clone(),
-            dirs::home_dir().unwrap_or_default().join(".ironclaw/tools"),
+            dirs::home_dir().unwrap_or_default().join(".clawyer/tools"),
             channels_dir.to_path_buf(),
         );
 
@@ -3066,7 +3196,7 @@ mod tests {
     #[tokio::test]
     async fn test_discover_wasm_channels_nonexistent_dir() {
         let channels =
-            discover_wasm_channels(std::path::Path::new("/tmp/ironclaw_nonexistent_dir")).await;
+            discover_wasm_channels(std::path::Path::new("/tmp/clawyer_nonexistent_dir")).await;
         assert!(channels.is_empty());
     }
 

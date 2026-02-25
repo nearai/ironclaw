@@ -30,7 +30,7 @@ impl Default for SandboxModeConfig {
             timeout_secs: 120,
             memory_limit_mb: 2048,
             cpu_shares: 1024,
-            image: "ironclaw-worker:latest".to_string(),
+            image: "clawyer-worker:latest".to_string(),
             auto_pull_image: true,
             extra_allowed_domains: Vec::new(),
         }
@@ -49,7 +49,7 @@ impl SandboxModeConfig {
             timeout_secs: parse_optional_env("SANDBOX_TIMEOUT_SECS", 120)?,
             memory_limit_mb: parse_optional_env("SANDBOX_MEMORY_LIMIT_MB", 2048)?,
             cpu_shares: parse_optional_env("SANDBOX_CPU_SHARES", 1024)?,
-            image: parse_string_env("SANDBOX_IMAGE", "ironclaw-worker:latest")?,
+            image: parse_string_env("SANDBOX_IMAGE", "clawyer-worker:latest")?,
             auto_pull_image: parse_bool_env("SANDBOX_AUTO_PULL", true)?,
             extra_allowed_domains: extra_domains,
         })

@@ -67,7 +67,7 @@ fn convert_test_pages_to_markdown() {
         let url = metadata.url.as_deref().unwrap_or(&default_url).to_string();
 
         let html = std::fs::read_to_string(&source_html).expect("read source.html");
-        let markdown = ironclaw::tools::builtin::convert_html_to_markdown(&html, &url)
+        let markdown = clawyer::tools::builtin::convert_html_to_markdown(&html, &url)
             .expect("convert_html_to_markdown failed");
 
         let expected_md_path = path.join("expected.md");

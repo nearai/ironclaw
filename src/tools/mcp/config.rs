@@ -1,7 +1,7 @@
 //! MCP server configuration.
 //!
 //! Stores configuration for connecting to hosted MCP servers.
-//! Configuration is persisted at ~/.ironclaw/mcp-servers.json.
+//! Configuration is persisted at ~/.clawyer/mcp-servers.json.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -253,7 +253,7 @@ impl From<ConfigError> for ToolError {
 pub fn default_config_path() -> PathBuf {
     dirs::home_dir()
         .unwrap_or_else(|| PathBuf::from("."))
-        .join(".ironclaw")
+        .join(".clawyer")
         .join("mcp-servers.json")
 }
 

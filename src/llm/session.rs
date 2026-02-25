@@ -1,7 +1,7 @@
 //! Session management for NEAR AI authentication.
 //!
 //! Handles session token persistence, expiration detection, and renewal via
-//! OAuth flow. Tokens are stored in `~/.ironclaw/session.json` and refreshed
+//! OAuth flow. Tokens are stored in `~/.clawyer/session.json` and refreshed
 //! automatically when expired.
 
 use std::path::PathBuf;
@@ -31,7 +31,7 @@ pub struct SessionData {
 pub struct SessionConfig {
     /// Base URL for auth endpoints (e.g., https://private.near.ai).
     pub auth_base_url: String,
-    /// Path to session file (e.g., ~/.ironclaw/session.json).
+    /// Path to session file (e.g., ~/.clawyer/session.json).
     pub session_path: PathBuf,
 }
 
@@ -44,11 +44,11 @@ impl Default for SessionConfig {
     }
 }
 
-/// Get the default session file path (~/.ironclaw/session.json).
+/// Get the default session file path (~/.clawyer/session.json).
 pub fn default_session_path() -> PathBuf {
     dirs::home_dir()
         .unwrap_or_else(|| PathBuf::from("."))
-        .join(".ironclaw")
+        .join(".clawyer")
         .join("session.json")
 }
 
@@ -380,7 +380,7 @@ impl SessionManager {
     /// Prompts the user to enter a NEAR AI Cloud API key from
     /// cloud.near.ai. The key is set as `NEARAI_API_KEY` env var so
     /// `LlmConfig::resolve()` auto-selects ChatCompletions mode, and
-    /// saved to `~/.ironclaw/.env` for persistence across restarts.
+    /// saved to `~/.clawyer/.env` for persistence across restarts.
     /// No session token is saved and no `/v1/users/me` validation is
     /// performed (different auth model).
     async fn api_key_login(&self) -> Result<(), LlmError> {
@@ -418,7 +418,7 @@ impl SessionManager {
             std::env::set_var("NEARAI_API_KEY", &key);
         }
 
-        // Persist to ~/.ironclaw/.env so the key survives restarts
+        // Persist to ~/.clawyer/.env so the key survives restarts
         // (bootstrap layer — available before DB is connected).
         // Uses upsert to avoid clobbering existing bootstrap vars.
         if let Err(e) = crate::bootstrap::upsert_bootstrap_var("NEARAI_API_KEY", &key) {
@@ -695,6 +695,6 @@ mod tests {
     fn test_default_session_path() {
         let path = default_session_path();
         assert!(path.ends_with("session.json"));
-        assert!(path.to_string_lossy().contains(".ironclaw"));
+        assert!(path.to_string_lossy().contains(".clawyer"));
     }
 }

@@ -1,6 +1,6 @@
 //! Pairing store: pending requests and allowFrom list.
 //!
-//! Stored in ~/.ironclaw/{channel}-pairing.json and {channel}-allowFrom.json.
+//! Stored in ~/.clawyer/{channel}-pairing.json and {channel}-allowFrom.json.
 
 use std::collections::HashSet;
 use std::fs;
@@ -72,7 +72,7 @@ struct AllowFromStoreFile {
 fn default_pairing_dir() -> PathBuf {
     dirs::home_dir()
         .unwrap_or_else(|| PathBuf::from("."))
-        .join(".ironclaw")
+        .join(".clawyer")
 }
 
 fn safe_channel_key(channel: &str) -> Result<String, PairingStoreError> {
@@ -172,7 +172,7 @@ pub struct PairingStore {
 }
 
 impl PairingStore {
-    /// Create a new pairing store using default directory (~/.ironclaw).
+    /// Create a new pairing store using default directory (~/.clawyer).
     pub fn new() -> Self {
         Self {
             base_dir: default_pairing_dir(),

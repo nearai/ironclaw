@@ -77,9 +77,25 @@ impl SafetyLayer {
                 if cleaned != content {
                     was_modified = true;
                     content = cleaned;
+                    crate::legal::audit::inc_redaction_event();
+                    crate::legal::audit::record(
+                        "redaction_event",
+                        serde_json::json!({
+                            "tool_name": tool_name,
+                            "reason": "leak_detector",
+                        }),
+                    );
                 }
             }
             Err(_) => {
+                crate::legal::audit::inc_blocked_action();
+                crate::legal::audit::record(
+                    "output_blocked",
+                    serde_json::json!({
+                        "tool_name": tool_name,
+                        "reason": "potential_secret_leakage",
+                    }),
+                );
                 return SanitizedOutput {
                     content: "[Output blocked due to potential secret leakage]".to_string(),
                     warnings: vec![],
@@ -94,6 +110,14 @@ impl SafetyLayer {
             .iter()
             .any(|rule| rule.action == crate::safety::PolicyAction::Block)
         {
+            crate::legal::audit::inc_blocked_action();
+            crate::legal::audit::record(
+                "output_blocked",
+                serde_json::json!({
+                    "tool_name": tool_name,
+                    "reason": "safety_policy",
+                }),
+            );
             return SanitizedOutput {
                 content: "[Output blocked by safety policy]".to_string(),
                 warnings: vec![],

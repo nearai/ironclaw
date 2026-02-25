@@ -37,13 +37,17 @@ pub use service::{ServiceCommand, run_service_command};
 pub use status::run_status_command;
 pub use tool::{ToolCommand, run_tool_command};
 
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+pub enum LegalProfileArg {
+    Standard,
+    MaxLockdown,
+}
 
 #[derive(Parser, Debug)]
-#[command(name = "ironclaw")]
-#[command(
-    about = "Secure personal AI assistant that protects your data and expands its capabilities"
-)]
+#[command(name = "clawyer")]
+#[command(about = "Secure legal AI assistant with matter-scoped workflows and hardening controls")]
 #[command(version)]
 pub struct Cli {
     #[command(subcommand)]
@@ -68,6 +72,22 @@ pub struct Cli {
     /// Skip first-run onboarding check
     #[arg(long, global = true)]
     pub no_onboard: bool,
+
+    /// Active legal matter ID for this session.
+    #[arg(long, global = true)]
+    pub matter: Option<String>,
+
+    /// Legal jurisdiction profile (default: us-general).
+    #[arg(long, global = true)]
+    pub jurisdiction: Option<String>,
+
+    /// Legal hardening profile (default: max-lockdown).
+    #[arg(long, value_enum, global = true)]
+    pub legal_profile: Option<LegalProfileArg>,
+
+    /// Add an allowed outbound domain in legal deny-by-default mode.
+    #[arg(long = "allow-domain", global = true)]
+    pub allow_domain: Vec<String>,
 }
 
 #[derive(Subcommand, Debug)]

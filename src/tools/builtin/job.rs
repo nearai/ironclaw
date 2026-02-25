@@ -183,7 +183,7 @@ impl CreateJobTool {
 
             if !exists {
                 return Err(ToolError::ExecutionFailed(format!(
-                    "secret '{}' not found. Store it first via 'ironclaw tool auth' or the web UI.",
+                    "secret '{}' not found. Store it first via 'clawyer tool auth' or the web UI.",
                     secret_name
                 )));
             }
@@ -556,17 +556,17 @@ fn validate_env_var_name(name: &str) -> Result<(), ToolError> {
 fn projects_base() -> PathBuf {
     dirs::home_dir()
         .unwrap_or_else(|| PathBuf::from("."))
-        .join(".ironclaw")
+        .join(".clawyer")
         .join("projects")
 }
 
 /// Resolve the project directory, creating it if it doesn't exist.
 ///
-/// Auto-creates `~/.ironclaw/projects/{project_id}/` so every sandbox job has a
+/// Auto-creates `~/.clawyer/projects/{project_id}/` so every sandbox job has a
 /// persistent bind mount that survives container teardown.
 ///
 /// When an explicit path is provided (e.g. job restarts reusing the old dir),
-/// it is validated to fall within `~/.ironclaw/projects/` after canonicalization.
+/// it is validated to fall within `~/.clawyer/projects/` after canonicalization.
 fn resolve_project_dir(
     explicit: Option<PathBuf>,
     project_id: Uuid,
@@ -670,18 +670,18 @@ impl Tool for CreateJobTool {
                     "mode": {
                         "type": "string",
                         "enum": ["worker", "claude_code"],
-                        "description": "Execution mode. 'worker' (default) uses the IronClaw sub-agent. \
+                        "description": "Execution mode. 'worker' (default) uses the cLawyer sub-agent. \
                                         'claude_code' uses Claude Code CLI for full agentic software engineering."
                     },
                     "project_dir": {
                         "type": "string",
                         "description": "Path to an existing project directory to mount into the container. \
-                                        Must be under ~/.ironclaw/projects/. If omitted, a fresh directory is created."
+                                        Must be under ~/.clawyer/projects/. If omitted, a fresh directory is created."
                     },
                     "credentials": {
                         "type": "object",
                         "description": "Map of secret names to env var names. Each secret must exist in the \
-                                        secrets store (via 'ironclaw tool auth' or web UI). Example: \
+                                        secrets store (via 'clawyer tool auth' or web UI). Example: \
                                         {\"github_token\": \"GITHUB_TOKEN\", \"npm_token\": \"NPM_TOKEN\"}",
                         "additionalProperties": { "type": "string" }
                     }

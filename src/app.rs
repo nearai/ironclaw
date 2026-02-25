@@ -1,4 +1,4 @@
-//! Application builder for initializing core IronClaw components.
+//! Application builder for initializing core cLawyer components.
 //!
 //! Extracts the mechanical initialization phases from `main.rs` into a
 //! reusable builder so that:
@@ -188,9 +188,12 @@ impl AppBuilder {
         }
 
         let toml_path = self.toml_path.as_deref();
+        let pre_db_legal = self.config.legal.clone();
         match Config::from_db_with_toml(db.as_ref(), "default", toml_path).await {
             Ok(db_config) => {
                 self.config = db_config;
+                // Keep early legal runtime overrides (CLI/env-derived) intact.
+                self.config.legal = pre_db_legal;
                 tracing::info!("Configuration reloaded from database");
             }
             Err(e) => {
@@ -274,9 +277,11 @@ impl AppBuilder {
             // Re-resolve config with newly available keys
             if let Some(ref db) = self.db {
                 let toml_path = self.toml_path.as_deref();
+                let pre_refresh_legal = self.config.legal.clone();
                 match Config::from_db_with_toml(db.as_ref(), "default", toml_path).await {
                     Ok(refreshed) => {
                         self.config = refreshed;
+                        self.config.legal = pre_refresh_legal;
                         tracing::debug!("LlmConfig re-resolved after secret injection");
                     }
                     Err(e) => {
@@ -324,10 +329,11 @@ impl AppBuilder {
         let tools = if let Some(ref ss) = self.secrets_store {
             Arc::new(
                 ToolRegistry::new()
+                    .with_legal_policy(self.config.legal.clone())
                     .with_credentials(Arc::clone(&credential_registry), Arc::clone(ss)),
             )
         } else {
-            Arc::new(ToolRegistry::new())
+            Arc::new(ToolRegistry::new().with_legal_policy(self.config.legal.clone()))
         };
         tools.register_builtin_tools();
 
@@ -544,7 +550,7 @@ impl AppBuilder {
                                             {
                                                 tracing::warn!(
                                                     "MCP server '{}' requires authentication. \
-                                                     Run: ironclaw mcp auth {}",
+                                                     Run: clawyer mcp auth {}",
                                                     server_name,
                                                     server_name
                                                 );
@@ -648,6 +654,8 @@ impl AppBuilder {
 
     /// Run all init phases in order and return the assembled components.
     pub async fn build_all(mut self) -> Result<AppComponents, anyhow::Error> {
+        crate::legal::audit::init(&self.config.legal.audit);
+
         self.init_database().await?;
         self.init_secrets().await?;
 
@@ -674,6 +682,12 @@ impl AppBuilder {
                 }
             }
 
+            if let Err(e) =
+                crate::legal::matter::seed_legal_workspace(ws.as_ref(), &self.config.legal).await
+            {
+                tracing::warn!("Failed to seed legal workspace scaffolding: {}", e);
+            }
+
             if embeddings.is_some() {
                 let ws_bg = Arc::clone(ws);
                 tokio::spawn(async move {
@@ -693,7 +707,13 @@ impl AppBuilder {
         // Skills system
         let (skill_registry, skill_catalog) = if self.config.skills.enabled {
             let mut registry = SkillRegistry::new(self.config.skills.local_dir.clone())
-                .with_installed_dir(self.config.skills.installed_dir.clone());
+                .with_installed_dir(self.config.skills.installed_dir.clone())
+                .with_bundled_dir(self.config.skills.bundled_dir.clone());
+            if self.config.legal.enabled
+                && self.config.legal.hardening == crate::config::LegalHardeningProfile::MaxLockdown
+            {
+                registry = registry.with_non_bundled_trust(crate::skills::SkillTrust::Installed);
+            }
             let loaded = registry.discover_all().await;
             if !loaded.is_empty() {
                 tracing::info!("Loaded {} skill(s): {}", loaded.len(), loaded.join(", "));

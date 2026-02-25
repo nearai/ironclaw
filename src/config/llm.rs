@@ -137,7 +137,7 @@ pub struct NearAiConfig {
     pub base_url: String,
     /// Base URL for auth/refresh endpoints (default: https://private.near.ai)
     pub auth_base_url: String,
-    /// Path to session file (default: ~/.ironclaw/session.json)
+    /// Path to session file (default: ~/.clawyer/session.json)
     pub session_path: PathBuf,
     /// API key for NEAR AI Cloud. When set, uses API key auth; otherwise uses session token auth.
     pub api_key: Option<SecretString>,
@@ -371,11 +371,11 @@ fn parse_extra_headers(val: &str) -> Result<Vec<(String, String)>, ConfigError> 
     Ok(headers)
 }
 
-/// Get the default session file path (~/.ironclaw/session.json).
+/// Get the default session file path (~/.clawyer/session.json).
 fn default_session_path() -> PathBuf {
     dirs::home_dir()
         .unwrap_or_else(|| PathBuf::from("."))
-        .join(".ironclaw")
+        .join(".clawyer")
         .join("session.json")
 }
 

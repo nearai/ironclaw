@@ -89,7 +89,7 @@ pub fn callback_url() -> String {
 ///
 /// ```bash
 /// export OAUTH_CALLBACK_HOST=203.0.113.10
-/// ironclaw login
+/// clawyer login
 /// # Opens: http://203.0.113.10:9876/auth/callback
 /// ```
 pub fn callback_host() -> String {
@@ -300,7 +300,7 @@ pub fn landing_html(provider_name: &str, success: bool) -> String {
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>IronClaw - {heading}</title>
+<title>cLawyer - {heading}</title>
 <style>
   * {{ margin:0; padding:0; box-sizing:border-box }}
   body {{
@@ -346,7 +346,7 @@ pub fn landing_html(provider_name: &str, success: bool) -> String {
     {icon}
     <h1>{heading}</h1>
     <p>{subtitle}</p>
-    <div class="brand">IronClaw</div>
+    <div class="brand">cLawyer</div>
   </div>
 </body>
 </html>"#,
@@ -491,7 +491,7 @@ mod tests {
         let html = landing_html("Google", true);
         assert!(html.contains("Google Connected"));
         assert!(html.contains("charset"));
-        assert!(html.contains("IronClaw"));
+        assert!(html.contains("cLawyer"));
         assert!(html.contains("#22c55e")); // green accent
         assert!(!html.contains("Failed"));
     }
@@ -508,7 +508,7 @@ mod tests {
         let html = landing_html("Notion", false);
         assert!(html.contains("Authorization Failed"));
         assert!(html.contains("charset"));
-        assert!(html.contains("IronClaw"));
+        assert!(html.contains("cLawyer"));
         assert!(html.contains("#ef4444")); // red accent
         assert!(!html.contains("Connected"));
     }

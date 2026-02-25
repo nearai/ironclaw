@@ -682,7 +682,7 @@ pub async fn setup_http(secrets: &SecretsContext) -> Result<HttpSetupResult, Cha
             .save_secret("http_webhook_secret", &SecretString::from(secret))
             .await?;
         print_success("Webhook secret generated and saved to database");
-        print_info("Retrieve it later with: ironclaw secret get http_webhook_secret");
+        print_info("Retrieve it later with: clawyer secret get http_webhook_secret");
     }
 
     print_success(&format!("HTTP webhook will listen on {}:{}", host, port));

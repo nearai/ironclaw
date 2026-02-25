@@ -218,7 +218,7 @@ pub struct BuilderConfig {
 impl Default for BuilderConfig {
     fn default() -> Self {
         Self {
-            build_dir: std::env::temp_dir().join("ironclaw-builds"),
+            build_dir: std::env::temp_dir().join("clawyer-builds"),
             max_iterations: 10,
             timeout: Duration::from_secs(600), // 10 minutes
             cleanup_on_failure: false,         // Keep for debugging

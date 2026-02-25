@@ -144,8 +144,8 @@ You are a writing assistant. When the user asks to write or edit...
         assert!(result.prompt_content.starts_with("You are a writing"));
 
         let meta = result.manifest.metadata.unwrap();
-        let openclaw = meta.openclaw.unwrap();
-        assert_eq!(openclaw.requires.bins, vec!["vale"]);
+        let clawyer = meta.clawyer.unwrap();
+        assert_eq!(clawyer.requires.bins, vec!["vale"]);
     }
 
     #[test]

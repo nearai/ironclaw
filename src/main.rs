@@ -1,11 +1,11 @@
-//! IronClaw - Main entry point.
+//! cLawyer - Main entry point.
 
 use std::sync::Arc;
 
 use clap::Parser;
 use tracing_subscriber::EnvFilter;
 
-use ironclaw::{
+use clawyer::{
     agent::{Agent, AgentDeps},
     app::{AppBuilder, AppBuilderFlags},
     channels::{
@@ -18,7 +18,7 @@ use ironclaw::{
         web::log_layer::LogBroadcaster,
     },
     cli::{
-        Cli, Command, run_mcp_command, run_pairing_command, run_service_command,
+        Cli, Command, LegalProfileArg, run_mcp_command, run_pairing_command, run_service_command,
         run_status_command, run_tool_command,
     },
     config::Config,
@@ -33,7 +33,7 @@ use ironclaw::{
 };
 
 #[cfg(any(feature = "postgres", feature = "libsql"))]
-use ironclaw::setup::{SetupConfig, SetupWizard};
+use clawyer::setup::{SetupConfig, SetupWizard};
 
 /// Initialize tracing for simple CLI commands (warn level, no fancy layers).
 fn init_cli_tracing() {
@@ -56,11 +56,11 @@ async fn main() -> anyhow::Result<()> {
         }
         Some(Command::Config(config_cmd)) => {
             init_cli_tracing();
-            return ironclaw::cli::run_config_command(config_cmd.clone()).await;
+            return clawyer::cli::run_config_command(config_cmd.clone()).await;
         }
         Some(Command::Registry(registry_cmd)) => {
             init_cli_tracing();
-            return ironclaw::cli::run_registry_command(registry_cmd.clone()).await;
+            return clawyer::cli::run_registry_command(registry_cmd.clone()).await;
         }
         Some(Command::Mcp(mcp_cmd)) => {
             init_cli_tracing();
@@ -81,13 +81,13 @@ async fn main() -> anyhow::Result<()> {
         Some(Command::Doctor) => {
             init_cli_tracing();
             let _ = dotenvy::dotenv();
-            ironclaw::bootstrap::load_ironclaw_env();
-            return ironclaw::cli::run_doctor_command().await;
+            clawyer::bootstrap::load_ironclaw_env();
+            return clawyer::cli::run_doctor_command().await;
         }
         Some(Command::Status) => {
             init_cli_tracing();
             let _ = dotenvy::dotenv();
-            ironclaw::bootstrap::load_ironclaw_env();
+            clawyer::bootstrap::load_ironclaw_env();
             return run_status_command().await;
         }
         Some(Command::Completion(completion)) => {
@@ -116,7 +116,7 @@ async fn main() -> anyhow::Result<()> {
             channels_only,
         }) => {
             let _ = dotenvy::dotenv();
-            ironclaw::bootstrap::load_ironclaw_env();
+            clawyer::bootstrap::load_ironclaw_env();
 
             #[cfg(any(feature = "postgres", feature = "libsql"))]
             {
@@ -144,7 +144,7 @@ async fn main() -> anyhow::Result<()> {
     // Load .env files early so DATABASE_URL (and any other vars) are
     // available to all subsequent env-based config resolution.
     let _ = dotenvy::dotenv();
-    ironclaw::bootstrap::load_ironclaw_env();
+    clawyer::bootstrap::load_ironclaw_env();
 
     // Enhanced first-run detection
     #[cfg(any(feature = "postgres", feature = "libsql"))]
@@ -159,19 +159,21 @@ async fn main() -> anyhow::Result<()> {
 
     // Load initial config from env + disk + optional TOML (before DB is available)
     let toml_path = cli.config.as_deref();
-    let config = match Config::from_env_with_toml(toml_path).await {
+    let mut config = match Config::from_env_with_toml(toml_path).await {
         Ok(c) => c,
-        Err(ironclaw::error::ConfigError::MissingRequired { key, hint }) => {
+        Err(clawyer::error::ConfigError::MissingRequired { key, hint }) => {
             eprintln!("Configuration error: Missing required setting '{}'", key);
             eprintln!("  {}", hint);
             eprintln!();
             eprintln!(
-                "Run 'ironclaw onboard' to configure, or set the required environment variables."
+                "Run 'clawyer onboard' to configure, or set the required environment variables."
             );
             std::process::exit(1);
         }
         Err(e) => return Err(e.into()),
     };
+
+    apply_cli_legal_overrides(&cli, &mut config);
 
     // Initialize session manager and authenticate before channel setup
     let session_config = SessionConfig {
@@ -186,9 +188,9 @@ async fn main() -> anyhow::Result<()> {
     // Initialize tracing with a reloadable EnvFilter so the gateway can switch
     // log levels at runtime without restarting.
     let log_level_handle =
-        ironclaw::channels::web::log_layer::init_tracing(Arc::clone(&log_broadcaster));
+        clawyer::channels::web::log_layer::init_tracing(Arc::clone(&log_broadcaster));
 
-    tracing::info!("Starting IronClaw...");
+    tracing::info!("Starting cLawyer...");
     tracing::info!("Loaded configuration for agent: {}", config.agent.name);
     tracing::info!("LLM backend: {}", config.llm.backend);
 
@@ -205,10 +207,11 @@ async fn main() -> anyhow::Result<()> {
     .build_all()
     .await?;
 
-    let config = components.config;
+    let mut config = components.config;
+    apply_cli_legal_overrides(&cli, &mut config);
 
     // Session-based auth is only needed for NEAR AI backend without an API key.
-    if config.llm.backend == ironclaw::config::LlmBackend::NearAi
+    if config.llm.backend == clawyer::config::LlmBackend::NearAi
         && config.llm.nearai.api_key.is_none()
     {
         session.ensure_authenticated().await?;
@@ -222,32 +225,32 @@ async fn main() -> anyhow::Result<()> {
 
     // Proactive Docker detection
     let docker_status = if config.sandbox.enabled {
-        let detection = ironclaw::sandbox::check_docker().await;
+        let detection = clawyer::sandbox::check_docker().await;
         match detection.status {
-            ironclaw::sandbox::DockerStatus::Available => {
+            clawyer::sandbox::DockerStatus::Available => {
                 tracing::info!("Docker is available");
             }
-            ironclaw::sandbox::DockerStatus::NotInstalled => {
+            clawyer::sandbox::DockerStatus::NotInstalled => {
                 tracing::warn!(
                     "Docker is not installed -- sandbox disabled for this session. {}",
                     detection.platform.install_hint()
                 );
             }
-            ironclaw::sandbox::DockerStatus::NotRunning => {
+            clawyer::sandbox::DockerStatus::NotRunning => {
                 tracing::warn!(
                     "Docker is installed but not running -- sandbox disabled for this session. {}",
                     detection.platform.start_hint()
                 );
             }
-            ironclaw::sandbox::DockerStatus::Disabled => {}
+            clawyer::sandbox::DockerStatus::Disabled => {}
         }
         detection.status
     } else {
-        ironclaw::sandbox::DockerStatus::Disabled
+        clawyer::sandbox::DockerStatus::Disabled
     };
 
     let job_event_tx: Option<
-        tokio::sync::broadcast::Sender<(uuid::Uuid, ironclaw::channels::web::types::SseEvent)>,
+        tokio::sync::broadcast::Sender<(uuid::Uuid, clawyer::channels::web::types::SseEvent)>,
     > = if config.sandbox.enabled && docker_status.is_ok() {
         let (tx, _) = tokio::sync::broadcast::channel(256);
         Some(tx)
@@ -256,7 +259,7 @@ async fn main() -> anyhow::Result<()> {
     };
     let prompt_queue = Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::<
         uuid::Uuid,
-        std::collections::VecDeque<ironclaw::orchestrator::api::PendingPrompt>,
+        std::collections::VecDeque<clawyer::orchestrator::api::PendingPrompt>,
     >::new()));
 
     let container_job_manager: Option<Arc<ContainerJobManager>> =
@@ -268,7 +271,7 @@ async fn main() -> anyhow::Result<()> {
                 cpu_shares: config.sandbox.cpu_shares,
                 orchestrator_port: 50051,
                 claude_code_api_key: std::env::var("ANTHROPIC_API_KEY").ok(),
-                claude_code_oauth_token: ironclaw::config::ClaudeCodeConfig::extract_oauth_token(),
+                claude_code_oauth_token: clawyer::config::ClaudeCodeConfig::extract_oauth_token(),
                 claude_code_model: config.claude_code.model.clone(),
                 claude_code_max_turns: config.claude_code.max_turns,
                 claude_code_memory_limit_mb: config.claude_code.memory_limit_mb,
@@ -454,7 +457,7 @@ async fn main() -> anyhow::Result<()> {
 
     // Create session manager (shared between agent and web gateway)
     let session_manager =
-        Arc::new(ironclaw::agent::SessionManager::new().with_hooks(components.hooks.clone()));
+        Arc::new(clawyer::agent::SessionManager::new().with_hooks(components.hooks.clone()));
 
     // Register job tools (sandbox deps auto-injected when container_job_manager is available)
     components.tools.register_job_tools(
@@ -540,7 +543,7 @@ async fn main() -> anyhow::Result<()> {
         .map(|c| c.model_name().to_string());
 
     if config.channels.cli.enabled && cli.message.is_none() {
-        let boot_info = ironclaw::boot_screen::BootInfo {
+        let boot_info = clawyer::boot_screen::BootInfo {
             version: env!("CARGO_PKG_VERSION").to_string(),
             agent_name: config.agent.name.clone(),
             llm_backend: config.llm.backend.to_string(),
@@ -574,7 +577,7 @@ async fn main() -> anyhow::Result<()> {
                 .or_else(|| config.tunnel.public_url.clone()),
             tunnel_provider: active_tunnel.as_ref().map(|t| t.name().to_string()),
         };
-        ironclaw::boot_screen::print_boot_screen(&boot_info);
+        clawyer::boot_screen::print_boot_screen(&boot_info);
     }
 
     // ── Run the agent ──────────────────────────────────────────────────
@@ -608,6 +611,7 @@ async fn main() -> anyhow::Result<()> {
         skill_registry: components.skill_registry,
         skill_catalog: components.skill_catalog,
         skills_config: config.skills.clone(),
+        legal_config: config.legal.clone(),
         hooks: components.hooks,
         cost_guard: components.cost_guard,
     };
@@ -644,17 +648,50 @@ async fn main() -> anyhow::Result<()> {
 
 // ── Helper functions ────────────────────────────────────────────────────
 
+fn apply_cli_legal_overrides(cli: &Cli, config: &mut Config) {
+    if let Some(ref matter) = cli.matter {
+        let sanitized = clawyer::legal::policy::sanitize_matter_id(matter);
+        if !sanitized.is_empty() {
+            config.legal.active_matter = Some(sanitized);
+        }
+    }
+
+    if let Some(ref jurisdiction) = cli.jurisdiction
+        && !jurisdiction.trim().is_empty()
+    {
+        config.legal.jurisdiction = jurisdiction.trim().to_string();
+    }
+
+    if let Some(profile) = cli.legal_profile {
+        config.legal.hardening = match profile {
+            LegalProfileArg::Standard => clawyer::config::LegalHardeningProfile::Standard,
+            LegalProfileArg::MaxLockdown => clawyer::config::LegalHardeningProfile::MaxLockdown,
+        };
+    }
+
+    if !cli.allow_domain.is_empty() {
+        let mut merged = config.legal.network.allowed_domains.clone();
+        for domain in &cli.allow_domain {
+            let normalized = clawyer::legal::policy::normalize_domain(domain);
+            if !normalized.is_empty() && !merged.contains(&normalized) {
+                merged.push(normalized);
+            }
+        }
+        config.legal.network.allowed_domains = merged;
+    }
+}
+
 /// Initialize tracing for worker/bridge processes (info level).
 fn init_worker_tracing() {
     tracing_subscriber::fmt()
         .with_env_filter(
-            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("ironclaw=info")),
+            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("clawyer=info")),
         )
         .init();
 }
 
 /// Run the Memory CLI subcommand.
-async fn run_memory_command(mem_cmd: &ironclaw::cli::MemoryCommand) -> anyhow::Result<()> {
+async fn run_memory_command(mem_cmd: &clawyer::cli::MemoryCommand) -> anyhow::Result<()> {
     let config = Config::from_env()
         .await
         .map_err(|e| anyhow::anyhow!("{}", e))?;
@@ -670,7 +707,7 @@ async fn run_memory_command(mem_cmd: &ironclaw::cli::MemoryCommand) -> anyhow::R
         .create_provider(&config.llm.nearai.base_url, session);
 
     // Warn if libSQL backend is used with non-1536 embedding dimension.
-    if config.database.backend == ironclaw::config::DatabaseBackend::LibSql
+    if config.database.backend == clawyer::config::DatabaseBackend::LibSql
         && config.embeddings.enabled
         && config.embeddings.dimension != 1536
     {
@@ -684,11 +721,11 @@ async fn run_memory_command(mem_cmd: &ironclaw::cli::MemoryCommand) -> anyhow::R
         );
     }
 
-    let db: Arc<dyn ironclaw::db::Database> = ironclaw::db::connect_from_config(&config.database)
+    let db: Arc<dyn clawyer::db::Database> = clawyer::db::connect_from_config(&config.database)
         .await
         .map_err(|e| anyhow::anyhow!("{}", e))?;
 
-    ironclaw::cli::run_memory_command_with_db(mem_cmd.clone(), db, embeddings).await
+    clawyer::cli::run_memory_command_with_db(mem_cmd.clone(), db, embeddings).await
 }
 
 /// Run the Worker subcommand (inside Docker containers).
@@ -703,14 +740,14 @@ async fn run_worker(
         orchestrator_url
     );
 
-    let config = ironclaw::worker::runtime::WorkerConfig {
+    let config = clawyer::worker::runtime::WorkerConfig {
         job_id,
         orchestrator_url: orchestrator_url.to_string(),
         max_iterations,
         timeout: std::time::Duration::from_secs(600),
     };
 
-    let runtime = ironclaw::worker::WorkerRuntime::new(config)
+    let runtime = clawyer::worker::WorkerRuntime::new(config)
         .map_err(|e| anyhow::anyhow!("Worker init failed: {}", e))?;
 
     runtime
@@ -733,16 +770,16 @@ async fn run_claude_bridge(
         model
     );
 
-    let config = ironclaw::worker::claude_bridge::ClaudeBridgeConfig {
+    let config = clawyer::worker::claude_bridge::ClaudeBridgeConfig {
         job_id,
         orchestrator_url: orchestrator_url.to_string(),
         max_turns,
         model: model.to_string(),
         timeout: std::time::Duration::from_secs(1800),
-        allowed_tools: ironclaw::config::ClaudeCodeConfig::from_env().allowed_tools,
+        allowed_tools: clawyer::config::ClaudeCodeConfig::from_env().allowed_tools,
     };
 
-    let runtime = ironclaw::worker::ClaudeBridgeRuntime::new(config)
+    let runtime = clawyer::worker::ClaudeBridgeRuntime::new(config)
         .map_err(|e| anyhow::anyhow!("Claude bridge init failed: {}", e))?;
 
     runtime
@@ -753,10 +790,10 @@ async fn run_claude_bridge(
 
 /// Start managed tunnel if configured and no static URL is already set.
 async fn start_tunnel(
-    mut config: ironclaw::config::Config,
+    mut config: clawyer::config::Config,
 ) -> (
-    ironclaw::config::Config,
-    Option<Box<dyn ironclaw::tunnel::Tunnel>>,
+    clawyer::config::Config,
+    Option<Box<dyn clawyer::tunnel::Tunnel>>,
 ) {
     if config.tunnel.public_url.is_some() {
         tracing::info!(
@@ -783,7 +820,7 @@ async fn start_tunnel(
         .map(|g| g.host.as_str())
         .unwrap_or("127.0.0.1");
 
-    match ironclaw::tunnel::create_tunnel(provider_config) {
+    match clawyer::tunnel::create_tunnel(provider_config) {
         Ok(Some(tunnel)) => {
             tracing::info!(
                 "Starting {} tunnel on {}:{}...",
@@ -813,7 +850,7 @@ async fn start_tunnel(
 
 /// Result of WASM channel setup.
 struct WasmChannelSetup {
-    channels: Vec<(String, Box<dyn ironclaw::channels::Channel>)>,
+    channels: Vec<(String, Box<dyn clawyer::channels::Channel>)>,
     channel_names: Vec<String>,
     webhook_routes: Option<axum::Router>,
     /// Runtime objects needed for hot-activation via ExtensionManager.
@@ -824,9 +861,9 @@ struct WasmChannelSetup {
 
 /// Load WASM channels and register their webhook routes.
 async fn setup_wasm_channels(
-    config: &ironclaw::config::Config,
+    config: &clawyer::config::Config,
     secrets_store: &Option<Arc<dyn SecretsStore + Send + Sync>>,
-    extension_manager: Option<&Arc<ironclaw::extensions::ExtensionManager>>,
+    extension_manager: Option<&Arc<clawyer::extensions::ExtensionManager>>,
 ) -> Option<WasmChannelSetup> {
     let runtime = match WasmChannelRuntime::new(WasmChannelRuntimeConfig::default()) {
         Ok(r) => Arc::new(r),
@@ -852,7 +889,7 @@ async fn setup_wasm_channels(
 
     let wasm_router = Arc::new(WasmChannelRouter::new());
     let mut has_webhook_channels = false;
-    let mut channels: Vec<(String, Box<dyn ironclaw::channels::Channel>)> = Vec::new();
+    let mut channels: Vec<(String, Box<dyn clawyer::channels::Channel>)> = Vec::new();
     let mut channel_names: Vec<String> = Vec::new();
 
     for loaded in results.loaded {
@@ -988,7 +1025,7 @@ async fn setup_wasm_channels(
 fn check_onboard_needed() -> Option<&'static str> {
     let has_db = std::env::var("DATABASE_URL").is_ok()
         || std::env::var("LIBSQL_PATH").is_ok()
-        || ironclaw::config::default_libsql_path().exists();
+        || clawyer::config::default_libsql_path().exists();
 
     if !has_db {
         return Some("Database not configured");
@@ -1002,7 +1039,7 @@ fn check_onboard_needed() -> Option<&'static str> {
     }
 
     if std::env::var("NEARAI_API_KEY").is_err() {
-        let session_path = ironclaw::llm::session::default_session_path();
+        let session_path = clawyer::llm::session::default_session_path();
         if !session_path.exists() {
             return Some("First run");
         }
@@ -1016,7 +1053,7 @@ fn check_onboard_needed() -> Option<&'static str> {
 /// Looks for secrets matching the pattern `{channel_name}_*` and injects them
 /// as credential placeholders (e.g., `telegram_bot_token` -> `{TELEGRAM_BOT_TOKEN}`).
 async fn inject_channel_credentials(
-    channel: &Arc<ironclaw::channels::wasm::WasmChannel>,
+    channel: &Arc<clawyer::channels::wasm::WasmChannel>,
     secrets: &dyn SecretsStore,
     channel_name: &str,
 ) -> anyhow::Result<usize> {

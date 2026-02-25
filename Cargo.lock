@@ -917,6 +917,83 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3a822ea5bc7590f9d40f1ba12c0dc3c2760f3482c6984db1573ad11031420831"
 
 [[package]]
+name = "clawyer"
+version = "1.0.0-clawyer"
+dependencies = [
+ "aes-gcm",
+ "aho-corasick",
+ "anyhow",
+ "async-trait",
+ "axum 0.8.8",
+ "base64 0.22.1",
+ "blake3",
+ "bollard",
+ "bytes",
+ "chrono",
+ "clap",
+ "clap_complete",
+ "cron",
+ "crossterm 0.28.1",
+ "deadpool-postgres",
+ "dirs 6.0.0",
+ "dotenvy",
+ "flate2",
+ "fs4",
+ "futures",
+ "hkdf",
+ "html-to-markdown-rs",
+ "http-body-util",
+ "hyper 1.8.1",
+ "hyper-util",
+ "libsql",
+ "lru",
+ "mime_guess",
+ "open",
+ "pgvector",
+ "postgres-types",
+ "pretty_assertions",
+ "rand 0.8.5",
+ "readabilityrs",
+ "refinery",
+ "regex",
+ "reqwest",
+ "rig-core",
+ "rust_decimal",
+ "rust_decimal_macros",
+ "rustyline",
+ "secrecy",
+ "secret-service",
+ "security-framework",
+ "serde",
+ "serde_json",
+ "serde_yml",
+ "sha2",
+ "subtle",
+ "tar",
+ "tempfile",
+ "termimad",
+ "testcontainers-modules",
+ "thiserror 2.0.18",
+ "tokio",
+ "tokio-postgres",
+ "tokio-stream",
+ "tokio-test",
+ "tokio-tungstenite 0.26.2",
+ "toml",
+ "tower 0.5.3",
+ "tower-http 0.6.8",
+ "tracing",
+ "tracing-subscriber",
+ "url",
+ "urlencoding",
+ "uuid",
+ "wasmparser 0.220.1",
+ "wasmtime",
+ "wasmtime-wasi",
+ "zbus",
+]
+
+[[package]]
 name = "clipboard-win"
 version = "5.4.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2696,83 +2773,6 @@ checksum = "c91338f0783edbd6195decb37bae672fd3b165faffb89bf7b9e6942f8b1a731a"
 dependencies = [
  "memchr",
  "serde",
-]
-
-[[package]]
-name = "ironclaw"
-version = "0.11.1"
-dependencies = [
- "aes-gcm",
- "aho-corasick",
- "anyhow",
- "async-trait",
- "axum 0.8.8",
- "base64 0.22.1",
- "blake3",
- "bollard",
- "bytes",
- "chrono",
- "clap",
- "clap_complete",
- "cron",
- "crossterm 0.28.1",
- "deadpool-postgres",
- "dirs 6.0.0",
- "dotenvy",
- "flate2",
- "fs4",
- "futures",
- "hkdf",
- "html-to-markdown-rs",
- "http-body-util",
- "hyper 1.8.1",
- "hyper-util",
- "libsql",
- "lru",
- "mime_guess",
- "open",
- "pgvector",
- "postgres-types",
- "pretty_assertions",
- "rand 0.8.5",
- "readabilityrs",
- "refinery",
- "regex",
- "reqwest",
- "rig-core",
- "rust_decimal",
- "rust_decimal_macros",
- "rustyline",
- "secrecy",
- "secret-service",
- "security-framework",
- "serde",
- "serde_json",
- "serde_yml",
- "sha2",
- "subtle",
- "tar",
- "tempfile",
- "termimad",
- "testcontainers-modules",
- "thiserror 2.0.18",
- "tokio",
- "tokio-postgres",
- "tokio-stream",
- "tokio-test",
- "tokio-tungstenite 0.26.2",
- "toml",
- "tower 0.5.3",
- "tower-http 0.6.8",
- "tracing",
- "tracing-subscriber",
- "url",
- "urlencoding",
- "uuid",
- "wasmparser 0.220.1",
- "wasmtime",
- "wasmtime-wasi",
- "zbus",
 ]
 
 [[package]]
@@ -5033,6 +5033,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "sha1_smol"
+version = "1.0.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bbfa15b3dddfee50a0fff136974b3e1bde555604ba463834a7eb7deb6417705d"
+
+[[package]]
 name = "sha2"
 version = "0.10.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6207,6 +6213,7 @@ dependencies = [
  "getrandom 0.4.1",
  "js-sys",
  "serde_core",
+ "sha1_smol",
  "wasm-bindgen",
 ]
 

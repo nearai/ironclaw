@@ -327,7 +327,7 @@ pub async fn register_client(
         .map_err(|e| AuthError::Http(e.to_string()))?;
 
     let request = ClientRegistrationRequest {
-        client_name: "IronClaw".to_string(),
+        client_name: "cLawyer".to_string(),
         redirect_uris: vec![redirect_uri.to_string()],
         grant_types: vec![
             "authorization_code".to_string(),

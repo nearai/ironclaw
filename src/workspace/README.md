@@ -1,6 +1,6 @@
 # Workspace & Memory System
 
-Inspired by [OpenClaw](https://github.com/openclaw/openclaw), the workspace provides persistent memory for agents with a flexible filesystem-like structure.
+Inspired by [cLawyer](https://github.com/openclaw/openclaw), the workspace provides persistent memory for agents with a flexible filesystem-like structure.
 
 ## Key Principles
 

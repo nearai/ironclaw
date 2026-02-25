@@ -2,7 +2,7 @@ use clap::{CommandFactory, Parser};
 use clap_complete::{Shell, generate};
 use std::io;
 
-/// Generate shell completion scripts for ironclaw
+/// Generate shell completion scripts for clawyer
 #[derive(Parser, Debug)]
 pub struct Completion {
     /// The shell to generate completions for

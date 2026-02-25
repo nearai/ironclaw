@@ -1,4 +1,4 @@
-//! OpenClaw SKILL.md-based skills system for IronClaw.
+//! cLawyer SKILL.md-based skills system for cLawyer.
 //!
 //! Skills are SKILL.md files (YAML frontmatter + markdown prompt) that extend the
 //! agent's behavior through prompt-level instructions. Unlike code-level tools
@@ -85,7 +85,7 @@ impl std::fmt::Display for SkillTrust {
 pub enum SkillSource {
     /// Workspace skills directory (<workspace>/skills/).
     Workspace(PathBuf),
-    /// User skills directory (~/.ironclaw/skills/).
+    /// User skills directory (~/.clawyer/skills/).
     User(PathBuf),
     /// Bundled with the application.
     Bundled(PathBuf),
@@ -142,7 +142,7 @@ pub struct SkillManifest {
     /// Activation criteria.
     #[serde(default)]
     pub activation: ActivationCriteria,
-    /// Optional OpenClaw metadata.
+    /// Optional skill metadata.
     #[serde(default)]
     pub metadata: Option<SkillMetadata>,
 }
@@ -154,14 +154,23 @@ fn default_version() -> String {
 /// Optional metadata section in SKILL.md frontmatter.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct SkillMetadata {
-    /// OpenClaw-specific metadata.
+    /// Skill domain tag (e.g. "legal").
     #[serde(default)]
-    pub openclaw: Option<OpenClawMeta>,
+    pub domain: Option<String>,
+    /// Whether this skill requires an active matter context.
+    #[serde(default)]
+    pub requires_matter: Option<bool>,
+    /// Citation mode requirement (e.g. "required").
+    #[serde(default)]
+    pub citation_mode: Option<String>,
+    /// cLawyer/OpenClaw-compatible metadata for gating requirements.
+    #[serde(default, alias = "openclaw")]
+    pub clawyer: Option<ClawyerMeta>,
 }
 
-/// OpenClaw-specific metadata.
+/// cLawyer-compatible metadata.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct OpenClawMeta {
+pub struct ClawyerMeta {
     /// Gating requirements that must be met for the skill to load.
     #[serde(default)]
     pub requires: GatingRequirements,
@@ -411,11 +420,11 @@ activation:
     }
 
     #[test]
-    fn test_parse_openclaw_metadata() {
+    fn test_parse_clawyer_metadata() {
         let yaml = r#"
 name: test-skill
 metadata:
-  openclaw:
+  clawyer:
     requires:
       bins: ["vale"]
       env: ["VALE_CONFIG"]
@@ -423,10 +432,10 @@ metadata:
 "#;
         let manifest: SkillManifest = serde_yml::from_str(yaml).expect("parse failed");
         let meta = manifest.metadata.unwrap();
-        let openclaw = meta.openclaw.unwrap();
-        assert_eq!(openclaw.requires.bins, vec!["vale"]);
-        assert_eq!(openclaw.requires.env, vec!["VALE_CONFIG"]);
-        assert_eq!(openclaw.requires.config, vec!["/etc/vale.ini"]);
+        let clawyer = meta.clawyer.unwrap();
+        assert_eq!(clawyer.requires.bins, vec!["vale"]);
+        assert_eq!(clawyer.requires.env, vec!["VALE_CONFIG"]);
+        assert_eq!(clawyer.requires.config, vec!["/etc/vale.ini"]);
     }
 
     #[test]

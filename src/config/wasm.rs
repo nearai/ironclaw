@@ -9,7 +9,7 @@ use crate::error::ConfigError;
 pub struct WasmConfig {
     /// Whether WASM tool execution is enabled.
     pub enabled: bool,
-    /// Directory containing installed WASM tools (default: ~/.ironclaw/tools/).
+    /// Directory containing installed WASM tools (default: ~/.clawyer/tools/).
     pub tools_dir: PathBuf,
     /// Default memory limit in bytes (default: 10 MB).
     pub default_memory_limit: u64,
@@ -37,11 +37,11 @@ impl Default for WasmConfig {
     }
 }
 
-/// Get the default tools directory (~/.ironclaw/tools/).
+/// Get the default tools directory (~/.clawyer/tools/).
 fn default_tools_dir() -> PathBuf {
     dirs::home_dir()
         .unwrap_or_else(|| PathBuf::from("."))
-        .join(".ironclaw")
+        .join(".clawyer")
         .join("tools")
 }
 

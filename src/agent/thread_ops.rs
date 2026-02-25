@@ -150,6 +150,15 @@ impl Agent {
             }
         }
 
+        crate::legal::audit::record(
+            "prompt_received",
+            serde_json::json!({
+                "user_id": message.user_id.clone(),
+                "thread_id": thread_id.to_string(),
+                "channel": message.channel.clone(),
+            }),
+        );
+
         // Safety validation for user input
         let validation = self.safety().validate_input(content);
         if !validation.is_valid {
@@ -183,6 +192,65 @@ impl Agent {
         if let Some(intent) = self.router.route_command(&temp_message) {
             // Explicit command like /status, /job, /list - handle directly
             return self.handle_job_or_command(intent, message).await;
+        }
+
+        if self.deps.legal_config.enabled
+            && self.deps.legal_config.require_matter_context
+            && self.deps.legal_config.active_matter.is_none()
+            && crate::legal::policy::is_non_trivial_request(content)
+        {
+            crate::legal::audit::inc_blocked_action();
+            crate::legal::audit::record(
+                "blocked_missing_matter",
+                serde_json::json!({
+                    "thread_id": thread_id.to_string(),
+                    "reason": "active_matter_required",
+                }),
+            );
+            return Ok(SubmissionResult::error(
+                "An active matter is required for legal work. Start cLawyer with --matter <matter_id>.",
+            ));
+        }
+
+        if self.deps.legal_config.enabled
+            && self.deps.legal_config.require_matter_context
+            && crate::legal::policy::is_non_trivial_request(content)
+            && let Some(ws) = self.workspace()
+            && let Err(reason) = crate::legal::matter::validate_active_matter_metadata(
+                ws.as_ref(),
+                &self.deps.legal_config,
+            )
+            .await
+        {
+            crate::legal::audit::inc_blocked_action();
+            crate::legal::audit::record(
+                "blocked_invalid_matter_metadata",
+                serde_json::json!({
+                    "thread_id": thread_id.to_string(),
+                    "reason": reason,
+                }),
+            );
+            return Ok(SubmissionResult::error(
+                "Active matter metadata is incomplete or invalid. Update matters/<matter_id>/matter.yaml before continuing.",
+            ));
+        }
+
+        if let Some(ws) = self.workspace()
+            && let Some(conflict) =
+                crate::legal::matter::detect_conflict(ws.as_ref(), &self.deps.legal_config, content)
+                    .await
+        {
+            crate::legal::audit::inc_blocked_action();
+            crate::legal::audit::record(
+                "conflict_check_hit",
+                serde_json::json!({
+                    "thread_id": thread_id.to_string(),
+                    "conflict": conflict,
+                }),
+            );
+            return Ok(SubmissionResult::error(
+                "Potential conflict detected. Review conflicts.json and acknowledge before continuing.",
+            ));
         }
 
         // Natural language goes through the agentic loop
@@ -294,7 +362,7 @@ impl Agent {
         match result {
             Ok(AgenticLoopResult::Response(response)) => {
                 // Hook: TransformResponse — allow hooks to modify or reject the final response
-                let response = {
+                let mut response = {
                     let event = crate::hooks::HookEvent::ResponseTransform {
                         user_id: message.user_id.clone(),
                         thread_id: thread_id.to_string(),
@@ -313,6 +381,21 @@ impl Agent {
                         _ => response, // fail-open: use original
                     }
                 };
+
+                if self.deps.legal_config.enabled
+                    && self.deps.legal_config.citation_required
+                    && !crate::legal::policy::response_has_citation_markers(&response)
+                {
+                    crate::legal::audit::record(
+                        "citation_missing",
+                        serde_json::json!({
+                            "thread_id": thread_id.to_string(),
+                        }),
+                    );
+                    response.push_str(
+                        "\n\n[Draft status: citations not detected. Verify sources before relying on this output.]",
+                    );
+                }
 
                 thread.complete_turn(&response);
                 let _ = self
@@ -619,14 +702,29 @@ impl Agent {
         if approved {
             // If always, add to auto-approved set
             if always {
-                let mut sess = session.lock().await;
-                sess.auto_approve_tool(&pending.tool_name);
-                tracing::info!(
-                    "Auto-approved tool '{}' for session {}",
-                    pending.tool_name,
-                    sess.id
+                let legal_forced = crate::legal::policy::requires_explicit_approval(
+                    &self.deps.legal_config,
+                    &pending.tool_name,
                 );
+                if !legal_forced {
+                    let mut sess = session.lock().await;
+                    sess.auto_approve_tool(&pending.tool_name);
+                    tracing::info!(
+                        "Auto-approved tool '{}' for session {}",
+                        pending.tool_name,
+                        sess.id
+                    );
+                }
             }
+
+            crate::legal::audit::record(
+                "approval_response",
+                serde_json::json!({
+                    "approved": true,
+                    "always": always,
+                    "tool_name": pending.tool_name.clone(),
+                }),
+            );
 
             // Reset thread state to processing
             {
@@ -772,16 +870,32 @@ impl Agent {
             for (idx, tc) in deferred_tool_calls.iter().enumerate() {
                 if let Some(tool) = self.tools().get(&tc.name).await {
                     use crate::tools::ApprovalRequirement;
-                    let needs_approval = match tool.requires_approval(&tc.arguments) {
-                        ApprovalRequirement::Never => false,
-                        ApprovalRequirement::UnlessAutoApproved => {
-                            let sess = session.lock().await;
-                            !sess.is_tool_auto_approved(&tc.name)
+                    let legal_forced = crate::legal::policy::requires_explicit_approval(
+                        &self.deps.legal_config,
+                        &tc.name,
+                    );
+                    let needs_approval = if legal_forced {
+                        true
+                    } else {
+                        match tool.requires_approval(&tc.arguments) {
+                            ApprovalRequirement::Never => false,
+                            ApprovalRequirement::UnlessAutoApproved => {
+                                let sess = session.lock().await;
+                                !sess.is_tool_auto_approved(&tc.name)
+                            }
+                            ApprovalRequirement::Always => true,
                         }
-                        ApprovalRequirement::Always => true,
                     };
 
                     if needs_approval {
+                        crate::legal::audit::inc_approval_required();
+                        crate::legal::audit::record(
+                            "approval_required",
+                            serde_json::json!({
+                                "tool_name": tc.name,
+                                "legal_forced": legal_forced,
+                            }),
+                        );
                         approval_needed = Some((idx, tc.clone(), tool));
                         break; // remaining tools stay deferred
                     }
@@ -1038,7 +1152,21 @@ impl Agent {
                 .ok_or_else(|| Error::from(crate::error::JobError::NotFound { id: thread_id }))?;
 
             match result {
-                Ok(AgenticLoopResult::Response(response)) => {
+                Ok(AgenticLoopResult::Response(mut response)) => {
+                    if self.deps.legal_config.enabled
+                        && self.deps.legal_config.citation_required
+                        && !crate::legal::policy::response_has_citation_markers(&response)
+                    {
+                        crate::legal::audit::record(
+                            "citation_missing",
+                            serde_json::json!({
+                                "thread_id": thread_id.to_string(),
+                            }),
+                        );
+                        response.push_str(
+                            "\n\n[Draft status: citations not detected. Verify sources before relying on this output.]",
+                        );
+                    }
                     thread.complete_turn(&response);
                     // User message already persisted at turn start; save assistant response
                     self.persist_assistant_response(thread_id, &message.user_id, &response)
@@ -1083,6 +1211,14 @@ impl Agent {
                 }
             }
         } else {
+            crate::legal::audit::record(
+                "approval_response",
+                serde_json::json!({
+                    "approved": false,
+                    "always": always,
+                    "tool_name": pending.tool_name.clone(),
+                }),
+            );
             // Rejected - complete the turn with a rejection message and persist
             let rejection = format!(
                 "Tool '{}' was rejected. The agent will not execute this tool.\n\n\

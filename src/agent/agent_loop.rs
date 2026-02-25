@@ -70,6 +70,7 @@ pub struct AgentDeps {
     pub skill_registry: Option<Arc<std::sync::RwLock<SkillRegistry>>>,
     pub skill_catalog: Option<Arc<crate::skills::catalog::SkillCatalog>>,
     pub skills_config: SkillsConfig,
+    pub legal_config: crate::config::LegalConfig,
     pub hooks: Arc<HookRegistry>,
     /// Cost enforcement guardrails (daily budget, hourly rate limits).
     pub cost_guard: Arc<crate::agent::cost_guard::CostGuard>,

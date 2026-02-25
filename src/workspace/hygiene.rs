@@ -31,7 +31,7 @@ pub struct HygieneConfig {
     pub retention_days: u32,
     /// Minimum hours between hygiene passes.
     pub cadence_hours: u32,
-    /// Directory to store state file (default: `~/.ironclaw`).
+    /// Directory to store state file (default: `~/.clawyer`).
     pub state_dir: PathBuf,
 }
 
@@ -39,7 +39,7 @@ impl Default for HygieneConfig {
     fn default() -> Self {
         let state_dir = dirs::home_dir()
             .unwrap_or_else(|| PathBuf::from("."))
-            .join(".ironclaw");
+            .join(".clawyer");
 
         Self {
             enabled: true,

@@ -1,7 +1,7 @@
-//! Configuration for IronClaw.
+//! Configuration for cLawyer.
 //!
 //! Settings are loaded with priority: env var > database > default.
-//! `DATABASE_URL` lives in `~/.ironclaw/.env` (loaded via dotenvy early
+//! `DATABASE_URL` lives in `~/.clawyer/.env` (loaded via dotenvy early
 //! in startup). Everything else comes from env vars, the DB settings
 //! table, or auto-detection.
 
@@ -13,6 +13,7 @@ mod embeddings;
 mod heartbeat;
 pub(crate) mod helpers;
 mod hygiene;
+mod legal;
 mod llm;
 mod routines;
 mod safety;
@@ -36,6 +37,9 @@ pub use self::database::{DatabaseBackend, DatabaseConfig, default_libsql_path};
 pub use self::embeddings::EmbeddingsConfig;
 pub use self::heartbeat::HeartbeatConfig;
 pub use self::hygiene::HygieneConfig;
+pub use self::legal::{
+    LegalAuditConfig, LegalConfig, LegalHardeningProfile, LegalNetworkConfig, LegalRedactionConfig,
+};
 pub use self::llm::{
     AnthropicDirectConfig, LlmBackend, LlmConfig, NearAiConfig, OllamaConfig,
     OpenAiCompatibleConfig, OpenAiDirectConfig, TinfoilConfig,
@@ -74,6 +78,7 @@ pub struct Config {
     pub sandbox: SandboxModeConfig,
     pub claude_code: ClaudeCodeConfig,
     pub skills: SkillsConfig,
+    pub legal: LegalConfig,
     pub observability: crate::observability::ObservabilityConfig,
 }
 
@@ -119,7 +124,7 @@ impl Config {
     /// and by CLI commands that don't have DB access.
     /// Falls back to legacy `settings.json` on disk if present.
     ///
-    /// Loads both `./.env` (standard, higher priority) and `~/.ironclaw/.env`
+    /// Loads both `./.env` (standard, higher priority) and `~/.clawyer/.env`
     /// (lower priority) via dotenvy, which never overwrites existing vars.
     pub async fn from_env() -> Result<Self, ConfigError> {
         Self::from_env_with_toml(None).await
@@ -142,7 +147,7 @@ impl Config {
     /// Load and merge a TOML config file into settings.
     ///
     /// If `explicit_path` is `Some`, loads from that path (errors are fatal).
-    /// If `None`, tries the default path `~/.ironclaw/config.toml` (missing
+    /// If `None`, tries the default path `~/.clawyer/config.toml` (missing
     /// file is silently ignored).
     fn apply_toml_overlay(
         settings: &mut Settings,
@@ -198,6 +203,7 @@ impl Config {
             sandbox: SandboxModeConfig::resolve()?,
             claude_code: ClaudeCodeConfig::resolve()?,
             skills: SkillsConfig::resolve()?,
+            legal: LegalConfig::resolve(settings)?,
             observability: crate::observability::ObservabilityConfig {
                 backend: std::env::var("OBSERVABILITY_BACKEND").unwrap_or_else(|_| "none".into()),
             },

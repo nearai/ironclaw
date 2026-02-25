@@ -18,15 +18,21 @@ exclude = [
 ]
 
 [package]
-name = "ironclaw"
-version = "0.11.1"
+name = "clawyer"
+version = "1.0.0-clawyer"
 edition = "2024"
 rust-version = "1.92"
+autobins = false
+default-run = "clawyer"
 description = "Secure personal AI assistant that protects your data and expands its capabilities on the fly"
 authors = ["NEAR AI <support@near.ai>"]
 license = "MIT OR Apache-2.0"
-homepage = "https://github.com/nearai/ironclaw"
-repository = "https://github.com/nearai/ironclaw"
+homepage = "https://github.com/lawyered0/cLawyer"
+repository = "https://github.com/lawyered0/cLawyer"
+
+[[bin]]
+name = "clawyer"
+path = "src/main.rs"
 
 [package.metadata.wix]
 upgrade-guid = "D0156E61-BA37-451E-8AB9-1A2ECCCFA48F"

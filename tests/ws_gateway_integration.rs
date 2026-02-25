@@ -19,11 +19,11 @@ use tokio::time::timeout;
 use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 
-use ironclaw::channels::IncomingMessage;
-use ironclaw::channels::web::server::{GatewayState, start_server};
-use ironclaw::channels::web::sse::SseManager;
-use ironclaw::channels::web::types::SseEvent;
-use ironclaw::channels::web::ws::WsConnectionTracker;
+use clawyer::channels::IncomingMessage;
+use clawyer::channels::web::server::{GatewayState, start_server};
+use clawyer::channels::web::sse::SseManager;
+use clawyer::channels::web::types::SseEvent;
+use clawyer::channels::web::ws::WsConnectionTracker;
 
 const AUTH_TOKEN: &str = "test-token-12345";
 const TIMEOUT: Duration = Duration::from_secs(5);
@@ -55,7 +55,7 @@ async fn start_test_server() -> (
         llm_provider: None,
         skill_registry: None,
         skill_catalog: None,
-        chat_rate_limiter: ironclaw::channels::web::server::RateLimiter::new(30, 60),
+        chat_rate_limiter: clawyer::channels::web::server::RateLimiter::new(30, 60),
         registry_entries: Vec::new(),
         cost_guard: None,
         startup_time: std::time::Instant::now(),

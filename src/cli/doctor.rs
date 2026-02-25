@@ -1,4 +1,4 @@
-//! `ironclaw doctor` - active health diagnostics.
+//! `clawyer doctor` - active health diagnostics.
 //!
 //! Probes external dependencies and validates configuration to surface
 //! problems before they bite during normal operation. Each check reports
@@ -8,7 +8,7 @@ use std::path::PathBuf;
 
 /// Run all diagnostic checks and print results.
 pub async fn run_doctor_command() -> anyhow::Result<()> {
-    println!("IronClaw Doctor");
+    println!("cLawyer Doctor");
     println!("===============\n");
 
     let mut passed = 0u32;
@@ -112,7 +112,7 @@ async fn check_nearai_session() -> CheckResult {
             return CheckResult::Pass("API key configured".into());
         }
         return CheckResult::Fail(format!(
-            "session file not found at {}. Run `ironclaw onboard`",
+            "session file not found at {}. Run `clawyer onboard`",
             session_path.display()
         ));
     }
@@ -197,7 +197,7 @@ async fn try_pg_connect() -> Result<(), String> {
 fn check_workspace_dir() -> CheckResult {
     let dir = dirs::home_dir()
         .unwrap_or_else(|| PathBuf::from("."))
-        .join(".ironclaw");
+        .join(".clawyer");
 
     if dir.exists() {
         if dir.is_dir() {

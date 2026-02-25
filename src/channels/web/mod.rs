@@ -1,4 +1,4 @@
-//! Web gateway channel for browser-based access to IronClaw.
+//! Web gateway channel for browser-based access to cLawyer.
 //!
 //! Provides a single-page web UI with:
 //! - Chat with the agent (via REST + SSE)

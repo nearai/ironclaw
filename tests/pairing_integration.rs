@@ -3,8 +3,8 @@
 //! Verifies the full pairing lifecycle: upsert → list → approve → allowFrom → is_sender_allowed.
 //! Uses temp directory for isolation.
 
-use ironclaw::cli::{PairingCommand, run_pairing_command_with_store};
-use ironclaw::pairing::PairingStore;
+use clawyer::cli::{PairingCommand, run_pairing_command_with_store};
+use clawyer::pairing::PairingStore;
 use tempfile::TempDir;
 
 fn test_store() -> (PairingStore, TempDir) {

@@ -1,4 +1,4 @@
-//! CLI subcommand definitions for `ironclaw service`.
+//! CLI subcommand definitions for `clawyer service`.
 
 use clap::Subcommand;
 

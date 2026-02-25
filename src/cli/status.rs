@@ -11,7 +11,7 @@ use crate::settings::Settings;
 pub async fn run_status_command() -> anyhow::Result<()> {
     let settings = Settings::default();
 
-    println!("IronClaw Status");
+    println!("cLawyer Status");
     println!("===============\n");
 
     // Version
@@ -60,7 +60,7 @@ pub async fn run_status_command() -> anyhow::Result<()> {
     if session_path.exists() {
         println!("found ({})", session_path.display());
     } else {
-        println!("not found (run `ironclaw onboard`)");
+        println!("not found (run `clawyer onboard`)");
     }
 
     // Secrets (auto-detect from env only; skip keychain probe to avoid
@@ -208,13 +208,13 @@ fn count_wasm_files(dir: &std::path::Path) -> usize {
 fn default_tools_dir() -> PathBuf {
     dirs::home_dir()
         .unwrap_or_else(|| PathBuf::from("."))
-        .join(".ironclaw")
+        .join(".clawyer")
         .join("tools")
 }
 
 fn default_channels_dir() -> PathBuf {
     dirs::home_dir()
         .unwrap_or_else(|| PathBuf::from("."))
-        .join(".ironclaw")
+        .join(".clawyer")
         .join("channels")
 }

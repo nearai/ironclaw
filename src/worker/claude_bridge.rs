@@ -15,7 +15,7 @@
 //! ┌──────────────────────────────────────────────┐
 //! │ Docker Container                              │
 //! │                                               │
-//! │  ironclaw claude-bridge --job-id <uuid>       │
+//! │  clawyer claude-bridge --job-id <uuid>       │
 //! │    └─ writes /workspace/.claude/settings.json │
 //! │    └─ claude -p "task" --output-format        │
 //! │       stream-json                             │

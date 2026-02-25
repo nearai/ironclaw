@@ -1,4 +1,4 @@
-// IronClaw Web Gateway - Client
+// cLawyer Web Gateway - Client
 
 let token = '';
 let eventSource = null;
@@ -27,7 +27,7 @@ function authenticate() {
   // Test the token against the health-ish endpoint (chat/threads requires auth)
   apiFetch('/api/chat/threads')
     .then(() => {
-      sessionStorage.setItem('ironclaw_token', token);
+      sessionStorage.setItem('clawyer_token', token);
       document.getElementById('auth-screen').style.display = 'none';
       document.getElementById('app').style.display = 'flex';
       // Strip token and log_level from URL so they're not visible in the address bar
@@ -51,7 +51,7 @@ function authenticate() {
       }
     })
     .catch(() => {
-      sessionStorage.removeItem('ironclaw_token');
+      sessionStorage.removeItem('clawyer_token');
       document.getElementById('auth-screen').style.display = '';
       document.getElementById('app').style.display = 'none';
       document.getElementById('auth-error').textContent = 'Invalid token';
@@ -71,7 +71,7 @@ document.getElementById('token-input').addEventListener('keydown', (e) => {
     authenticate();
     return;
   }
-  const saved = sessionStorage.getItem('ironclaw_token');
+  const saved = sessionStorage.getItem('clawyer_token');
   if (saved) {
     document.getElementById('token-input').value = saved;
     // Hide auth screen immediately to prevent flash, authenticate() will
