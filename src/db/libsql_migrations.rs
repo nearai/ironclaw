@@ -116,6 +116,7 @@ CREATE TABLE IF NOT EXISTS job_actions (
     duration_ms INTEGER,
     success INTEGER NOT NULL,
     error_message TEXT,
+    retry_attempts INTEGER NOT NULL DEFAULT 0,
     created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
     UNIQUE(job_id, sequence_num)
 );
@@ -644,6 +645,10 @@ CREATE TRIGGER IF NOT EXISTS memory_chunks_fts_update AFTER UPDATE ON memory_chu
     INSERT INTO memory_chunks_fts(rowid, content) VALUES (new._rowid, new.content);
 END;
 "#,
+), (
+    10,
+    "add_retry_attempts",
+    "ALTER TABLE job_actions ADD COLUMN retry_attempts INTEGER NOT NULL DEFAULT 0;",
 )];
 
 /// Run incremental migrations that haven't been applied yet.
