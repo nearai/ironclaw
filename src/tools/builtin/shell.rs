@@ -261,8 +261,6 @@ static LOW_RISK_PATTERNS: LazyLock<Vec<&'static str>> = LazyLock::new(|| {
         "file",
         "stat",
         "man",
-        "--help",
-        "-h",
     ]
 });
 
@@ -315,17 +313,36 @@ static MEDIUM_RISK_PATTERNS: LazyLock<Vec<&'static str>> = LazyLock::new(|| {
     ]
 });
 
+/// Match a pipeline segment against a risk pattern using word-boundary rules.
+///
+/// - **Multi-word patterns** (e.g. `"git status"`): the segment must equal the
+///   pattern or start with `"<pattern> "`, so `"git statusbar"` does not match
+///   `"git status"`.
+/// - **Single-word patterns** (e.g. `"ls"`): the first whitespace-delimited
+///   token of the segment must equal the pattern exactly, so `"lsblk"` does
+///   not match `"ls"`.
+fn matches_command_pattern(segment: &str, pattern: &str) -> bool {
+    if pattern.contains(' ') {
+        segment == pattern || segment.starts_with(&format!("{} ", pattern))
+    } else {
+        segment.split_whitespace().next().unwrap_or("") == pattern
+    }
+}
+
 /// Classify a shell command into a [`RiskLevel`].
 ///
 /// Classification rules (in order):
-/// 1. **High** — matches [`NEVER_AUTO_APPROVE_PATTERNS`] (destructive / irreversible).
-/// 2. **Low** — matches [`LOW_RISK_PATTERNS`] (read-only, no side effects).
-/// 3. **Medium** — matches [`MEDIUM_RISK_PATTERNS`] (reversible mutations).
-/// 4. **Medium** — unknown commands default to Medium (safe default: require approval
-///    in supervised mode, rather than silently auto-approving an unrecognised binary).
+/// 1. **High** — any part of the command matches [`NEVER_AUTO_APPROVE_PATTERNS`]
+///    (destructive / irreversible). Checked across the entire string so that a
+///    dangerous sub-command in a pipeline is never missed.
+/// 2. **Pipeline max** — the command is split on `|`, `&`, `;` and each segment
+///    is classified independently; the overall risk is the **maximum** across all
+///    segments, so `echo hello | cargo build` → Medium, not Low.
+/// 3. Per-segment: Low if it matches [`LOW_RISK_PATTERNS`], Medium if it matches
+///    [`MEDIUM_RISK_PATTERNS`], Medium for unknown commands (safer default).
 ///
-/// Pipeline commands (e.g. `ls | grep foo`) are split on `|`, `&`, `;` — if any
-/// segment is High-risk the whole pipeline is classified as High.
+/// Matching uses word-boundary rules (see [`matches_command_pattern`]) to prevent
+/// false positives like `"lsblk"` matching the `"ls"` Low-risk prefix.
 pub fn classify_command_risk(command: &str) -> RiskLevel {
     let lower = command.to_lowercase();
 
@@ -337,30 +354,30 @@ pub fn classify_command_risk(command: &str) -> RiskLevel {
         return RiskLevel::High;
     }
 
-    // Classify based on the first pipeline segment.
-    let first = command
+    // For pipelines/chains, take the maximum risk across all segments.
+    command
         .split(['|', '&', ';'])
         .map(str::trim)
-        .find(|s| !s.is_empty())
-        .unwrap_or(command)
-        .to_lowercase();
-
-    if LOW_RISK_PATTERNS
-        .iter()
-        .any(|p| first.starts_with(p.to_lowercase().as_str()))
-    {
-        return RiskLevel::Low;
-    }
-
-    if MEDIUM_RISK_PATTERNS
-        .iter()
-        .any(|p| first.starts_with(p.to_lowercase().as_str()))
-    {
-        return RiskLevel::Medium;
-    }
-
-    // Unknown commands: default to Medium (safer than auto-approving).
-    RiskLevel::Medium
+        .filter(|s| !s.is_empty())
+        .map(|segment| {
+            let seg_lower = segment.to_lowercase();
+            if LOW_RISK_PATTERNS
+                .iter()
+                .any(|p| matches_command_pattern(&seg_lower, p))
+            {
+                RiskLevel::Low
+            } else if MEDIUM_RISK_PATTERNS
+                .iter()
+                .any(|p| matches_command_pattern(&seg_lower, p))
+            {
+                RiskLevel::Medium
+            } else {
+                // Unknown commands default to Medium (safer than auto-approving).
+                RiskLevel::Medium
+            }
+        })
+        .max()
+        .unwrap_or(RiskLevel::Medium)
 }
 
 /// Extract the `command` field from a tool-call parameter value.
@@ -1033,6 +1050,33 @@ mod tests {
         );
         // All-low pipeline stays Low
         assert_eq!(classify_command_risk("ls -la | grep foo"), RiskLevel::Low);
+        // Low + Medium → max is Medium
+        assert_eq!(
+            classify_command_risk("echo hello | cargo build"),
+            RiskLevel::Medium
+        );
+        // Unknown command in pipeline → Medium (safe default)
+        assert_eq!(
+            classify_command_risk("cat file.txt | my-custom-tool"),
+            RiskLevel::Medium
+        );
+    }
+
+    #[test]
+    fn test_classify_command_risk_word_boundary() {
+        // "lsblk" must NOT match the "ls" Low-risk prefix
+        assert_eq!(classify_command_risk("lsblk"), RiskLevel::Medium);
+        // "makeself" must NOT match "make"
+        assert_eq!(
+            classify_command_risk("makeself output.run"),
+            RiskLevel::Medium
+        );
+        // "git statusbar" must NOT match "git status"
+        assert_eq!(classify_command_risk("git statusbar"), RiskLevel::Medium);
+        // Legitimate commands still classified correctly
+        assert_eq!(classify_command_risk("ls -la"), RiskLevel::Low);
+        assert_eq!(classify_command_risk("make install"), RiskLevel::Medium);
+        assert_eq!(classify_command_risk("git status"), RiskLevel::Low);
     }
 
     /// Replicate the extraction logic to prove it works when `arguments` is a
