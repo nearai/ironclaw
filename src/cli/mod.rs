@@ -48,7 +48,7 @@ use clap::{ColorChoice, Parser, Subcommand};
     long_about = "IronClaw is a secure AI assistant. Use 'ironclaw <subcommand> --help' for details.\nExamples:\n  ironclaw run  # Start the agent\n  ironclaw config list  # List configs"
 )]
 #[command(version)]
-#[command(color = ColorChoice::Auto)] // Включи авто-цвет для help (если терминал поддерживает)
+#[command(color = ColorChoice::Auto)] // Enable auto-color for help (if your terminal supports it)
 pub struct Cli {
     #[command(subcommand)]
     pub command: Option<Command>,
