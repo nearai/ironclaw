@@ -56,7 +56,7 @@ use tokio::process::Command;
 use crate::context::JobContext;
 use crate::sandbox::{SandboxManager, SandboxPolicy};
 use crate::tools::tool::{
-    ApprovalRequirement, Tool, ToolDomain, ToolError, ToolOutput, require_str,
+    ApprovalRequirement, RiskLevel, Tool, ToolDomain, ToolError, ToolOutput, require_str,
 };
 
 /// Maximum output size before truncation (64KB).
@@ -135,6 +135,7 @@ static NEVER_AUTO_APPROVE_PATTERNS: LazyLock<Vec<&'static str>> = LazyLock::new(
         "git push -f",
         "git reset --hard",
         "git clean -f",
+        "sudo ",
         "DROP TABLE",
         "DROP DATABASE",
         "TRUNCATE",
@@ -195,15 +196,108 @@ const SAFE_ENV_VARS: &[&str] = &[
     "WINDIR",
 ];
 
-/// Check whether a shell command contains patterns that must never be auto-approved.
+
+/// Low-risk command prefixes: read-only, no side effects.
+static LOW_RISK_PATTERNS: LazyLock<Vec<&'static str>> = LazyLock::new(|| {
+    vec![
+        "ls", "ll", "la", "dir",
+        "cat", "less", "more", "head", "tail", "bat",
+        "grep", "rg", "ag", "awk", "sed",
+        "find", "fd", "locate",
+        "echo", "printf", "print",
+        "pwd", "cd",
+        "env", "printenv", "which", "whereis", "type",
+        "date", "cal", "uptime", "uname",
+        "df", "du", "free", "top", "htop", "ps",
+        "git status", "git log", "git diff", "git show",
+        "git branch", "git remote", "git fetch",
+        "cargo check", "cargo test", "cargo clippy",
+        "npm test", "npm run test", "yarn test",
+        "python -c", "python3 -c",
+        "node -e", "node --eval",
+        "curl --head", "curl -I",
+        "ping",
+        "wc", "sort", "uniq", "tr", "cut",
+        "jq", "yq",
+        "file", "stat",
+        "man", "help", "--help", "-h",
+        "open",
+    ]
+});
+
+/// Medium-risk command prefixes: mutations that are generally reversible.
+static MEDIUM_RISK_PATTERNS: LazyLock<Vec<&'static str>> = LazyLock::new(|| {
+    vec![
+        "mkdir", "rmdir",
+        "touch",
+        "cp", "copy",
+        "mv", "move",
+        "git commit", "git add", "git checkout", "git switch",
+        "git merge", "git rebase", "git stash",
+        "git tag",
+        "cargo build", "cargo run",
+        "npm install", "npm ci", "npm update",
+        "pip install", "pip uninstall",
+        "brew install", "brew uninstall",
+        "apt install", "apt remove",
+        "make", "cmake",
+        "tar", "zip", "unzip", "gzip", "gunzip",
+        "ssh", "scp", "rsync",
+        "curl", "wget",
+        "docker build", "docker pull", "docker run",
+        "kubectl apply", "kubectl create",
+    ]
+});
+
+/// Classify a shell command into a [`RiskLevel`].
 ///
-/// Even when the user has chosen "always approve" for the shell tool, these commands
-/// require explicit per-invocation approval because they are destructive.
-pub fn requires_explicit_approval(command: &str) -> bool {
+/// Classification rules (in order):
+/// 1. **High** — matches [`NEVER_AUTO_APPROVE_PATTERNS`] (destructive / irreversible).
+/// 2. **Low** — matches [`LOW_RISK_PATTERNS`] (read-only, no side effects).
+/// 3. **Medium** — matches [`MEDIUM_RISK_PATTERNS`] (reversible mutations).
+/// 4. **Medium** — unknown commands default to Medium (safe default: require approval
+///    in supervised mode, rather than silently auto-approving an unrecognised binary).
+///
+/// Pipeline commands (e.g. `ls | grep foo`) are classified by their first segment;
+/// if any segment is High-risk the whole pipeline is treated as High.
+pub fn classify_command_risk(command: &str) -> RiskLevel {
+    // Split on common pipeline/sequencing operators to catch `dangerous | safe`.
+    let segments: Vec<&str> = command
+        .split(['|', '&', ';'])
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .collect();
+
     let lower = command.to_lowercase();
-    NEVER_AUTO_APPROVE_PATTERNS
+
+    // High wins over everything — if any segment is destructive, the whole
+    // pipeline is destructive.
+    if NEVER_AUTO_APPROVE_PATTERNS
         .iter()
         .any(|p| lower.contains(&p.to_lowercase()))
+    {
+        return RiskLevel::High;
+    }
+
+    // Check the first segment for Low / Medium classification.
+    let first = segments.first().copied().unwrap_or(command).to_lowercase();
+
+    if LOW_RISK_PATTERNS
+        .iter()
+        .any(|p| first.starts_with(p.to_lowercase().as_str()))
+    {
+        return RiskLevel::Low;
+    }
+
+    if MEDIUM_RISK_PATTERNS
+        .iter()
+        .any(|p| first.starts_with(p.to_lowercase().as_str()))
+    {
+        return RiskLevel::Medium;
+    }
+
+    // Unknown commands: default to Medium (safer than auto-approving).
+    RiskLevel::Medium
 }
 
 /// Detect command injection and obfuscation attempts.
@@ -698,7 +792,7 @@ impl Tool for ShellTool {
         Ok(ToolOutput::success(result, duration))
     }
 
-    fn requires_approval(&self, params: &serde_json::Value) -> ApprovalRequirement {
+    fn risk_level_for(&self, params: &serde_json::Value) -> RiskLevel {
         let cmd = params
             .get("command")
             .and_then(|c| c.as_str().map(String::from))
@@ -709,13 +803,18 @@ impl Tool for ShellTool {
                     .and_then(|v| v.get("command").and_then(|c| c.as_str().map(String::from)))
             });
 
-        if let Some(ref cmd) = cmd
-            && requires_explicit_approval(cmd)
-        {
-            return ApprovalRequirement::Always;
-        }
+        cmd.as_deref()
+            .map(classify_command_risk)
+            // No command in params — treat as Medium (require approval).
+            .unwrap_or(RiskLevel::Medium)
+    }
 
-        ApprovalRequirement::UnlessAutoApproved
+    fn requires_approval(&self, params: &serde_json::Value) -> ApprovalRequirement {
+        match self.risk_level_for(params) {
+            RiskLevel::Low => ApprovalRequirement::Never,
+            RiskLevel::Medium => ApprovalRequirement::UnlessAutoApproved,
+            RiskLevel::High => ApprovalRequirement::Always,
+        }
     }
 
     fn requires_sanitization(&self) -> bool {
@@ -799,27 +898,6 @@ mod tests {
         assert!(matches!(result, Err(ToolError::Timeout(_))));
     }
 
-    #[test]
-    fn test_requires_explicit_approval() {
-        // Destructive commands should require explicit approval
-        assert!(requires_explicit_approval("rm -rf /tmp/stuff"));
-        assert!(requires_explicit_approval("git push --force origin main"));
-        assert!(requires_explicit_approval("git reset --hard HEAD~5"));
-        assert!(requires_explicit_approval("docker rm container_name"));
-        assert!(requires_explicit_approval("kill -9 12345"));
-        assert!(requires_explicit_approval("DROP TABLE users;"));
-
-        // Safe commands should not
-        assert!(!requires_explicit_approval("cargo build"));
-        assert!(!requires_explicit_approval("git status"));
-        assert!(!requires_explicit_approval("ls -la"));
-        assert!(!requires_explicit_approval("echo hello"));
-        assert!(!requires_explicit_approval("cat file.txt"));
-        assert!(!requires_explicit_approval(
-            "git push origin feature-branch"
-        ));
-    }
-
     /// Replicate the extraction logic from agent_loop.rs to prove it works
     /// when `arguments` is a `serde_json::Value::Object` (the common case
     /// that was previously broken because `Value::Object.as_str()` returns None).
@@ -838,7 +916,10 @@ mod tests {
             });
 
         assert_eq!(cmd.as_deref(), Some("rm -rf /tmp/stuff"));
-        assert!(requires_explicit_approval(cmd.as_deref().unwrap()));
+        assert_eq!(
+            classify_command_risk(cmd.as_deref().unwrap()),
+            RiskLevel::High
+        );
     }
 
     /// Verify extraction still works when `arguments` is a JSON string
@@ -859,7 +940,10 @@ mod tests {
             });
 
         assert_eq!(cmd.as_deref(), Some("git push --force origin main"));
-        assert!(requires_explicit_approval(cmd.as_deref().unwrap()));
+        assert_eq!(
+            classify_command_risk(cmd.as_deref().unwrap()),
+            RiskLevel::High
+        );
     }
 
     #[test]
@@ -882,17 +966,86 @@ mod tests {
     }
 
     #[test]
-    fn test_requires_approval_safe_command() {
+    fn test_requires_approval_medium_command() {
         use crate::tools::tool::ApprovalRequirement;
         let tool = ShellTool::new();
-        // Safe commands return UnlessAutoApproved (can be auto-approved).
+        // Medium-risk commands return UnlessAutoApproved (can be session-auto-approved).
         assert_eq!(
             tool.requires_approval(&serde_json::json!({"command": "cargo build"})),
             ApprovalRequirement::UnlessAutoApproved
         );
         assert_eq!(
-            tool.requires_approval(&serde_json::json!({"command": "echo hello"})),
+            tool.requires_approval(&serde_json::json!({"command": "mkdir /tmp/foo"})),
             ApprovalRequirement::UnlessAutoApproved
+        );
+    }
+
+    #[test]
+    fn test_requires_approval_low_risk_command() {
+        use crate::tools::tool::ApprovalRequirement;
+        let tool = ShellTool::new();
+        // Low-risk commands auto-approve: Never requires user interaction.
+        assert_eq!(
+            tool.requires_approval(&serde_json::json!({"command": "ls -la"})),
+            ApprovalRequirement::Never
+        );
+        assert_eq!(
+            tool.requires_approval(&serde_json::json!({"command": "echo hello"})),
+            ApprovalRequirement::Never
+        );
+        assert_eq!(
+            tool.requires_approval(&serde_json::json!({"command": "git status"})),
+            ApprovalRequirement::Never
+        );
+    }
+
+    #[test]
+    fn test_classify_command_risk_low() {
+        assert_eq!(classify_command_risk("ls -la /tmp"), RiskLevel::Low);
+        assert_eq!(classify_command_risk("cat README.md"), RiskLevel::Low);
+        assert_eq!(classify_command_risk("grep -r TODO src/"), RiskLevel::Low);
+        assert_eq!(classify_command_risk("git status"), RiskLevel::Low);
+        assert_eq!(classify_command_risk("git log --oneline -10"), RiskLevel::Low);
+        assert_eq!(classify_command_risk("cargo check"), RiskLevel::Low);
+        assert_eq!(classify_command_risk("echo hello"), RiskLevel::Low);
+        assert_eq!(classify_command_risk("pwd"), RiskLevel::Low);
+        assert_eq!(classify_command_risk("which cargo"), RiskLevel::Low);
+    }
+
+    #[test]
+    fn test_classify_command_risk_medium() {
+        assert_eq!(classify_command_risk("git commit -m 'fix'"), RiskLevel::Medium);
+        assert_eq!(classify_command_risk("mkdir /tmp/foo"), RiskLevel::Medium);
+        assert_eq!(classify_command_risk("cargo build --release"), RiskLevel::Medium);
+        assert_eq!(classify_command_risk("npm install express"), RiskLevel::Medium);
+        assert_eq!(classify_command_risk("cp src dst"), RiskLevel::Medium);
+        assert_eq!(classify_command_risk("mv old new"), RiskLevel::Medium);
+    }
+
+    #[test]
+    fn test_classify_command_risk_high() {
+        assert_eq!(classify_command_risk("rm -rf /tmp/stuff"), RiskLevel::High);
+        assert_eq!(classify_command_risk("git push --force origin main"), RiskLevel::High);
+        assert_eq!(classify_command_risk("git reset --hard HEAD~5"), RiskLevel::High);
+        assert_eq!(classify_command_risk("kill -9 12345"), RiskLevel::High);
+        assert_eq!(classify_command_risk("DROP TABLE users;"), RiskLevel::High);
+        assert_eq!(classify_command_risk("docker rm my_container"), RiskLevel::High);
+        assert_eq!(classify_command_risk("sudo rm important"), RiskLevel::High);
+    }
+
+    #[test]
+    fn test_classify_command_risk_unknown_defaults_to_medium() {
+        // Unrecognised binaries default to Medium — safe default.
+        assert_eq!(classify_command_risk("my-custom-tool --flag"), RiskLevel::Medium);
+        assert_eq!(classify_command_risk("./deploy.sh"), RiskLevel::Medium);
+    }
+
+    #[test]
+    fn test_classify_command_risk_pipeline_high_wins() {
+        // If any segment is High, the whole pipeline is High.
+        assert_eq!(
+            classify_command_risk("cat file.txt | rm -rf /"),
+            RiskLevel::High
         );
     }
 

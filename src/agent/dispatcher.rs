@@ -15,6 +15,7 @@ use crate::channels::{IncomingMessage, StatusUpdate};
 use crate::context::JobContext;
 use crate::error::Error;
 use crate::llm::{ChatMessage, Reasoning, ReasoningContext, RespondResult};
+use crate::tools::{ToolErrorKind, tool_retry_delay};
 
 /// Result of the agentic loop execution.
 pub(super) enum AgenticLoopResult {
@@ -682,14 +683,45 @@ pub(super) async fn execute_chat_tool_standalone(
         "Tool call started"
     );
 
-    // Execute with per-tool timeout
+    // Execute with per-tool timeout and exponential backoff retry for transient errors.
     let timeout = tool.execution_timeout();
-    let start = std::time::Instant::now();
-    let result = tokio::time::timeout(timeout, async {
-        tool.execute(params.clone(), job_ctx).await
-    })
-    .await;
-    let elapsed = start.elapsed();
+    let retry_cfg = tool.retry_config();
+    let global_start = std::time::Instant::now();
+    let mut retry_count: u32 = 0;
+    let result = loop {
+        let attempt = tokio::time::timeout(timeout, async {
+            tool.execute(params.clone(), job_ctx).await
+        })
+        .await;
+
+        let should_retry = match &attempt {
+            Ok(Ok(_)) => false,
+            Ok(Err(e)) => {
+                e.kind() == ToolErrorKind::Transient && retry_count < retry_cfg.max_retries_for(e)
+            }
+            // tokio timeout — treat like a Timeout error, cap at 2
+            Err(_) => retry_count < retry_cfg.max_retries.min(2),
+        };
+
+        if !should_retry {
+            break attempt;
+        }
+
+        let delay = match &attempt {
+            Ok(Err(e)) => tool_retry_delay(retry_count, &retry_cfg, Some(e)),
+            _ => tool_retry_delay(retry_count, &retry_cfg, None),
+        };
+        tracing::warn!(
+            tool = %tool_name,
+            attempt = retry_count + 1,
+            max_retries = retry_cfg.max_retries,
+            delay_ms = delay.as_millis() as u64,
+            "Transient tool error, retrying"
+        );
+        retry_count += 1;
+        tokio::time::sleep(delay).await;
+    };
+    let elapsed = global_start.elapsed();
 
     match &result {
         Ok(Ok(output)) => {
@@ -698,6 +730,7 @@ pub(super) async fn execute_chat_tool_standalone(
             tracing::debug!(
                 tool = %tool_name,
                 elapsed_ms = elapsed.as_millis() as u64,
+                retry_count,
                 result = %result_str,
                 "Tool call succeeded"
             );
@@ -706,6 +739,7 @@ pub(super) async fn execute_chat_tool_standalone(
             tracing::debug!(
                 tool = %tool_name,
                 elapsed_ms = elapsed.as_millis() as u64,
+                retry_count,
                 error = %e,
                 "Tool call failed"
             );
@@ -714,6 +748,7 @@ pub(super) async fn execute_chat_tool_standalone(
             tracing::debug!(
                 tool = %tool_name,
                 elapsed_ms = elapsed.as_millis() as u64,
+                retry_count,
                 timeout_secs = timeout.as_secs(),
                 "Tool call timed out"
             );
@@ -918,10 +953,11 @@ mod tests {
     }
 
     #[test]
-    fn test_shell_destructive_command_requires_explicit_approval() {
-        // requires_explicit_approval() detects destructive commands that
-        // should return ApprovalRequirement::Always from ShellTool.
-        use crate::tools::builtin::shell::requires_explicit_approval;
+    fn test_shell_destructive_command_risk_level() {
+        // classify_command_risk() maps destructive commands to High, which
+        // causes ShellTool::requires_approval() to return Always.
+        use crate::tools::builtin::shell::classify_command_risk;
+        use crate::tools::RiskLevel;
 
         let destructive_cmds = [
             "rm -rf /tmp/test",
@@ -929,18 +965,20 @@ mod tests {
             "git reset --hard HEAD~5",
         ];
         for cmd in &destructive_cmds {
-            assert!(
-                requires_explicit_approval(cmd),
-                "'{}' should require explicit approval",
+            assert_eq!(
+                classify_command_risk(cmd),
+                RiskLevel::High,
+                "'{}' should be High risk",
                 cmd
             );
         }
 
-        let safe_cmds = ["git status", "cargo build", "ls -la"];
-        for cmd in &safe_cmds {
-            assert!(
-                !requires_explicit_approval(cmd),
-                "'{}' should not require explicit approval",
+        let read_only_cmds = ["git status", "ls -la"];
+        for cmd in &read_only_cmds {
+            assert_eq!(
+                classify_command_risk(cmd),
+                RiskLevel::Low,
+                "'{}' should be Low risk",
                 cmd
             );
         }

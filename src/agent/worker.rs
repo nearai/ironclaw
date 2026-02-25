@@ -19,6 +19,7 @@ use crate::llm::{
 use crate::safety::SafetyLayer;
 use crate::tools::ToolRegistry;
 use crate::tools::rate_limiter::RateLimitResult;
+use crate::tools::{ToolErrorKind, tool_retry_delay};
 
 /// Shared dependencies for worker execution.
 ///
@@ -519,21 +520,54 @@ Report when the job is complete or if you encounter issues you cannot resolve."#
             .into());
         }
 
-        tracing::debug!(
+        let risk = tool.risk_level_for(&params);
+        tracing::info!(
             tool = %tool_name,
-            params = %params,
+            risk = ?risk,
             job = %job_id,
             "Tool call started"
         );
 
-        // Execute with per-tool timeout and timing
+        // Execute with per-tool timeout and exponential backoff retry for transient errors.
         let tool_timeout = tool.execution_timeout();
-        let start = std::time::Instant::now();
-        let result = tokio::time::timeout(tool_timeout, async {
-            tool.execute(params.clone(), &job_ctx).await
-        })
-        .await;
-        let elapsed = start.elapsed();
+        let retry_cfg = tool.retry_config();
+        let global_start = std::time::Instant::now();
+        let mut retry_count: u32 = 0;
+        let result = loop {
+            let attempt = tokio::time::timeout(tool_timeout, async {
+                tool.execute(params.clone(), &job_ctx).await
+            })
+            .await;
+
+            let should_retry = match &attempt {
+                Ok(Ok(_)) => false,
+                Ok(Err(e)) => {
+                    e.kind() == ToolErrorKind::Transient
+                        && retry_count < retry_cfg.max_retries_for(e)
+                }
+                // tokio timeout — treat like a Timeout error, cap at 2
+                Err(_) => retry_count < retry_cfg.max_retries.min(2),
+            };
+
+            if !should_retry {
+                break attempt;
+            }
+
+            let delay = match &attempt {
+                Ok(Err(e)) => tool_retry_delay(retry_count, &retry_cfg, Some(e)),
+                _ => tool_retry_delay(retry_count, &retry_cfg, None),
+            };
+            tracing::warn!(
+                tool = %tool_name,
+                attempt = retry_count + 1,
+                max_retries = retry_cfg.max_retries,
+                delay_ms = delay.as_millis() as u64,
+                "Transient tool error, retrying"
+            );
+            retry_count += 1;
+            tokio::time::sleep(delay).await;
+        };
+        let elapsed = global_start.elapsed();
 
         match &result {
             Ok(Ok(output)) => {
@@ -573,11 +607,10 @@ Report when the job is complete or if you encounter issues you cannot resolve."#
                 match deps
                     .context_manager
                     .update_memory(job_id, |mem| {
-                        let rec = mem.create_action(tool_name, params.clone()).succeed(
-                            output_str.clone(),
-                            output.result.clone(),
-                            elapsed,
-                        );
+                        let rec = mem
+                            .create_action(tool_name, params.clone())
+                            .succeed(output_str.clone(), output.result.clone(), elapsed)
+                            .with_retry_count(retry_count);
                         mem.record_action(rec.clone());
                         rec
                     })
@@ -596,7 +629,8 @@ Report when the job is complete or if you encounter issues you cannot resolve."#
                     .update_memory(job_id, |mem| {
                         let rec = mem
                             .create_action(tool_name, params.clone())
-                            .fail(e.to_string(), elapsed);
+                            .fail(e.to_string(), elapsed)
+                            .with_retry_count(retry_count);
                         mem.record_action(rec.clone());
                         rec
                     })
@@ -615,7 +649,8 @@ Report when the job is complete or if you encounter issues you cannot resolve."#
                     .update_memory(job_id, |mem| {
                         let rec = mem
                             .create_action(tool_name, params.clone())
-                            .fail("Execution timeout", elapsed);
+                            .fail("Execution timeout", elapsed)
+                            .with_retry_count(retry_count);
                         mem.record_action(rec.clone());
                         rec
                     })

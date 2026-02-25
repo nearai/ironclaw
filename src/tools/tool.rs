@@ -3,11 +3,29 @@
 use std::time::Duration;
 
 use async_trait::async_trait;
+use rand::Rng;
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::context::JobContext;
+
+/// Risk level of a tool invocation.
+///
+/// Used by the shell tool to classify commands and by the worker to drive
+/// approval decisions and observability logging. Implements `Ord` so callers
+/// can compare levels (e.g. `risk >= RiskLevel::High`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub enum RiskLevel {
+    /// Read-only, safe, reversible (e.g. `ls`, `cat`, `grep`).
+    Low,
+    /// Creates or modifies state, but generally reversible
+    /// (e.g. `mkdir`, `git commit`, `cargo build`).
+    Medium,
+    /// Destructive, irreversible, or security-sensitive
+    /// (e.g. `rm -rf`, `git push --force`, `kill -9`).
+    High,
+}
 
 /// How much approval a specific tool invocation requires.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -96,6 +114,91 @@ pub enum ToolError {
 
     #[error("Sandbox error: {0}")]
     Sandbox(String),
+}
+
+/// Whether a tool error is transient (worth retrying) or permanent (fail immediately).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ToolErrorKind {
+    /// Could succeed on retry (rate limit, external service hiccup, sandbox crash).
+    Transient,
+    /// Retrying won't help (bad params, not authorized, logic failure).
+    Permanent,
+}
+
+impl ToolError {
+    /// Classify this error as transient or permanent for retry decisions.
+    pub fn kind(&self) -> ToolErrorKind {
+        match self {
+            // Transient: could succeed on retry
+            ToolError::RateLimited(..) | ToolError::ExternalService(..) => ToolErrorKind::Transient,
+            // Transient but capped at 2 retries (via max_retries_for)
+            ToolError::Sandbox(..) | ToolError::Timeout(..) => ToolErrorKind::Transient,
+            // Permanent: retrying won't help
+            ToolError::InvalidParameters(..)
+            | ToolError::ExecutionFailed(..)
+            | ToolError::NotAuthorized(..) => ToolErrorKind::Permanent,
+        }
+    }
+}
+
+/// Retry configuration for tool execution.
+#[derive(Debug, Clone)]
+pub struct ToolRetryConfig {
+    /// Maximum number of retry attempts (not counting the initial attempt).
+    pub max_retries: u32,
+    /// Base delay before first retry.
+    pub base_delay: Duration,
+    /// Maximum delay cap (delays are capped at this value).
+    pub max_delay: Duration,
+}
+
+impl Default for ToolRetryConfig {
+    fn default() -> Self {
+        Self {
+            max_retries: 3,
+            base_delay: Duration::from_secs(2),
+            max_delay: Duration::from_secs(30),
+        }
+    }
+}
+
+impl ToolRetryConfig {
+    /// Effective max retries for a given error.
+    ///
+    /// Sandbox/Timeout errors are capped at 2 — repeated failures suggest a
+    /// configuration issue rather than a transient blip.
+    pub fn max_retries_for(&self, error: &ToolError) -> u32 {
+        match error {
+            ToolError::Sandbox(..) | ToolError::Timeout(..) => self.max_retries.min(2),
+            _ => self.max_retries,
+        }
+    }
+}
+
+/// Exponential backoff delay with jitter for tool retries.
+///
+/// Respects `RateLimited(Some(hint))` from the tool, capped at `config.max_delay`.
+/// Mirrors `llm::retry::retry_backoff_delay` but uses the tool's own base/max delays.
+pub fn tool_retry_delay(
+    attempt: u32,
+    config: &ToolRetryConfig,
+    error: Option<&ToolError>,
+) -> Duration {
+    // Honor the provider-supplied retry-after hint for rate limiting
+    if let Some(ToolError::RateLimited(Some(hint))) = error {
+        return (*hint).min(config.max_delay);
+    }
+    let base_ms = config.base_delay.as_millis() as u64;
+    let exp_ms = base_ms.saturating_mul(2u64.saturating_pow(attempt));
+    let capped_ms = exp_ms.min(config.max_delay.as_millis() as u64);
+    let jitter_range = capped_ms / 4; // 25% jitter
+    let jitter = if jitter_range > 0 {
+        let offset = rand::thread_rng().gen_range(0..=jitter_range * 2);
+        offset as i64 - jitter_range as i64
+    } else {
+        0
+    };
+    Duration::from_millis((capped_ms as i64 + jitter).max(100) as u64)
 }
 
 /// Output from a tool execution.
@@ -212,6 +315,18 @@ pub trait Tool: Send + Sync {
         true
     }
 
+    /// Risk level for a specific invocation of this tool.
+    ///
+    /// Defaults to `Low` (read-only, safe). Override for tools whose risk
+    /// depends on the parameters — the shell tool classifies commands into
+    /// Low / Medium / High based on the command string.
+    ///
+    /// The worker logs this value with every tool call so operators can audit
+    /// what risk level each execution was classified at.
+    fn risk_level_for(&self, _params: &serde_json::Value) -> RiskLevel {
+        RiskLevel::Low
+    }
+
     /// Whether this tool invocation requires user approval.
     ///
     /// Returns `Never` by default (most tools run in a sandboxed environment).
@@ -253,6 +368,17 @@ pub trait Tool: Send + Sync {
     /// Default: `None` (no rate limiting).
     fn rate_limit_config(&self) -> Option<ToolRateLimitConfig> {
         None
+    }
+
+    /// Retry configuration for transient failures.
+    ///
+    /// Controls how many times a transient error is retried and the backoff
+    /// schedule. Override for tools that should never retry (e.g. destructive
+    /// tools) or that need a longer backoff (e.g. heavily rate-limited APIs).
+    ///
+    /// Default: 3 retries, 2s base delay, 30s max delay.
+    fn retry_config(&self) -> ToolRetryConfig {
+        ToolRetryConfig::default()
     }
 
     /// Get the tool schema for LLM function calling.
@@ -408,5 +534,98 @@ mod tests {
         assert!(!ApprovalRequirement::Never.is_required());
         assert!(ApprovalRequirement::UnlessAutoApproved.is_required());
         assert!(ApprovalRequirement::Always.is_required());
+    }
+
+    // -- ToolErrorKind classification tests --
+
+    #[test]
+    fn tool_error_kind_transient_variants() {
+        assert_eq!(
+            ToolError::RateLimited(None).kind(),
+            ToolErrorKind::Transient
+        );
+        assert_eq!(
+            ToolError::RateLimited(Some(Duration::from_secs(5))).kind(),
+            ToolErrorKind::Transient
+        );
+        assert_eq!(
+            ToolError::ExternalService("upstream down".into()).kind(),
+            ToolErrorKind::Transient
+        );
+        assert_eq!(
+            ToolError::Sandbox("container crash".into()).kind(),
+            ToolErrorKind::Transient
+        );
+        assert_eq!(
+            ToolError::Timeout(Duration::from_secs(60)).kind(),
+            ToolErrorKind::Transient
+        );
+    }
+
+    #[test]
+    fn tool_error_kind_permanent_variants() {
+        assert_eq!(
+            ToolError::InvalidParameters("bad input".into()).kind(),
+            ToolErrorKind::Permanent
+        );
+        assert_eq!(
+            ToolError::ExecutionFailed("logic error".into()).kind(),
+            ToolErrorKind::Permanent
+        );
+        assert_eq!(
+            ToolError::NotAuthorized("missing scope".into()).kind(),
+            ToolErrorKind::Permanent
+        );
+    }
+
+    #[test]
+    fn tool_retry_config_sandbox_capped_at_2() {
+        let cfg = ToolRetryConfig {
+            max_retries: 5,
+            ..Default::default()
+        };
+        assert!(cfg.max_retries_for(&ToolError::Sandbox("crash".into())) <= 2);
+        assert!(cfg.max_retries_for(&ToolError::Timeout(Duration::from_secs(1))) <= 2);
+        assert_eq!(cfg.max_retries_for(&ToolError::RateLimited(None)), 5);
+    }
+
+    #[test]
+    fn tool_retry_delay_uses_rate_limit_hint() {
+        let cfg = ToolRetryConfig::default();
+        let hint = Duration::from_secs(10);
+        let delay = tool_retry_delay(0, &cfg, Some(&ToolError::RateLimited(Some(hint))));
+        assert_eq!(delay, hint);
+
+        // Hint exceeding max_delay should be capped
+        let big_hint = Duration::from_secs(1000);
+        let delay = tool_retry_delay(0, &cfg, Some(&ToolError::RateLimited(Some(big_hint))));
+        assert_eq!(delay, cfg.max_delay);
+    }
+
+    #[test]
+    fn tool_retry_delay_exponential_growth() {
+        let cfg = ToolRetryConfig {
+            base_delay: Duration::from_secs(2),
+            max_delay: Duration::from_secs(30),
+            max_retries: 3,
+        };
+        // Run multiple samples to account for jitter
+        for _ in 0..20 {
+            // attempt 0: base 2000ms, jitter +/-500ms -> [1500, 2500]
+            let d0 = tool_retry_delay(0, &cfg, None);
+            assert!(d0.as_millis() >= 1500, "attempt 0 too low: {:?}", d0);
+            assert!(d0.as_millis() <= 2500, "attempt 0 too high: {:?}", d0);
+
+            // attempt 1: base 4000ms, jitter +/-1000ms -> [3000, 5000]
+            let d1 = tool_retry_delay(1, &cfg, None);
+            assert!(d1.as_millis() >= 3000, "attempt 1 too low: {:?}", d1);
+            assert!(d1.as_millis() <= 5000, "attempt 1 too high: {:?}", d1);
+
+            // attempt 5: exp would be 64000ms, capped at 30000ms, jitter +/-7500ms -> [22500, 37500]
+            // (jitter can push the result above max_delay — we only cap the pre-jitter base)
+            let d5 = tool_retry_delay(5, &cfg, None);
+            assert!(d5.as_millis() >= 22500, "attempt 5 too low: {:?}", d5);
+            assert!(d5.as_millis() <= 37500, "attempt 5 too high: {:?}", d5);
+        }
     }
 }
