@@ -61,6 +61,7 @@ impl McpClient {
     pub fn new(server_url: impl Into<String>) -> Self {
         let url = server_url.into();
         let name = extract_server_name(&url);
+        let session_manager = Arc::new(McpSessionManager::new());
 
         Self {
             server_url: url,
@@ -71,7 +72,7 @@ impl McpClient {
                 .expect("Failed to create HTTP client"),
             next_id: AtomicU64::new(1),
             tools_cache: RwLock::new(None),
-            session_manager: None,
+            session_manager: Some(session_manager),
             secrets: None,
             user_id: "default".to_string(),
             server_config: None,
@@ -82,6 +83,7 @@ impl McpClient {
     ///
     /// Use this when you have a configured server name but no authentication.
     pub fn new_with_name(server_name: impl Into<String>, server_url: impl Into<String>) -> Self {
+        let session_manager = Arc::new(McpSessionManager::new());
         Self {
             server_url: server_url.into(),
             server_name: server_name.into(),
@@ -91,7 +93,7 @@ impl McpClient {
                 .expect("Failed to create HTTP client"),
             next_id: AtomicU64::new(1),
             tools_cache: RwLock::new(None),
-            session_manager: None,
+            session_manager: Some(session_manager),
             secrets: None,
             user_id: "default".to_string(),
             server_config: None,

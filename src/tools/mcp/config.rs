@@ -17,7 +17,7 @@ pub struct McpServerConfig {
     /// Unique name for this server (e.g., "notion", "github").
     pub name: String,
 
-    /// Server URL (must be HTTPS for remote servers).
+    /// Server URL (must use HTTP or HTTPS).
     pub url: String,
 
     /// OAuth configuration (if server requires authentication).
@@ -75,12 +75,13 @@ impl McpServerConfig {
             });
         }
 
-        // Remote servers must use HTTPS (localhost is allowed for development)
-        let url_lower = self.url.to_lowercase();
-        let is_localhost = url_lower.contains("localhost") || url_lower.contains("127.0.0.1");
-        if !is_localhost && !url_lower.starts_with("https://") {
+        let parsed = url::Url::parse(&self.url).map_err(|e| ConfigError::InvalidConfig {
+            reason: format!("Invalid server URL: {}", e),
+        })?;
+
+        if !matches!(parsed.scheme(), "http" | "https") {
             return Err(ConfigError::InvalidConfig {
-                reason: "Remote MCP servers must use HTTPS".to_string(),
+                reason: "MCP server URL must use http:// or https://".to_string(),
             });
         }
 
@@ -463,8 +464,12 @@ mod tests {
         let config = McpServerConfig::new("", "https://example.com");
         assert!(config.validate().is_err());
 
-        // Invalid: HTTP for remote server
+        // Valid remote HTTP server
         let config = McpServerConfig::new("remote", "http://mcp.example.com");
+        assert!(config.validate().is_ok());
+
+        // Invalid: unsupported scheme
+        let config = McpServerConfig::new("remote", "ftp://mcp.example.com");
         assert!(config.validate().is_err());
     }
 
@@ -590,8 +595,7 @@ mod tests {
 
     #[test]
     fn test_requires_auth_http_remote_no_auth() {
-        // HTTP remote servers won't pass validation, but if they existed
-        // they wouldn't trigger HTTPS auth detection
+        // Remote HTTP servers are allowed but do not trigger implicit HTTPS auth detection.
         let config = McpServerConfig::new("bad", "http://mcp.example.com");
         assert!(!config.requires_auth());
     }

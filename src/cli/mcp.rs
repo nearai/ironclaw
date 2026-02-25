@@ -25,7 +25,7 @@ pub enum McpCommand {
         /// Server name (e.g., "notion", "github")
         name: String,
 
-        /// Server URL (e.g., "https://mcp.notion.com")
+        /// Server URL (e.g., "https://mcp.notion.com" or "http://mcp.example.com")
         url: String,
 
         /// OAuth client ID (if authentication is required)
