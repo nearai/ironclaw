@@ -10,6 +10,8 @@ publish = false
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 wit-bindgen = "0.36"
+ed25519-dalek = { version = "2", default-features = false, features = ["alloc", "fast", "zeroize"] }
+hex = "0.4"
 
 [lib]
 crate-type = ["cdylib"]
