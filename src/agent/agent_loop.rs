@@ -72,6 +72,8 @@ pub struct AgentDeps {
     pub hooks: Arc<HookRegistry>,
     /// Cost enforcement guardrails (daily budget, hourly rate limits).
     pub cost_guard: Arc<crate::agent::cost_guard::CostGuard>,
+    /// Observability backend for recording events and metrics.
+    pub observer: Arc<dyn crate::observability::Observer>,
 }
 
 /// The main agent that coordinates all components.
@@ -168,6 +170,10 @@ impl Agent {
 
     pub(super) fn cost_guard(&self) -> &Arc<crate::agent::cost_guard::CostGuard> {
         &self.deps.cost_guard
+    }
+
+    pub(super) fn observer(&self) -> &Arc<dyn crate::observability::Observer> {
+        &self.deps.observer
     }
 
     pub(super) fn skill_registry(&self) -> Option<&Arc<std::sync::RwLock<SkillRegistry>>> {
@@ -370,6 +376,7 @@ impl Agent {
                         workspace.clone(),
                         self.cheap_llm().clone(),
                         self.safety().clone(),
+                        self.observer().clone(),
                         Some(notify_tx),
                     ))
                 } else {
@@ -436,11 +443,9 @@ impl Agent {
                         std::time::Duration::from_secs(rt_config.cron_check_interval_secs);
                     let cron_handle = spawn_cron_ticker(Arc::clone(&engine), cron_interval);
 
-                    // Store engine reference for event trigger checking
-                    // Safety: we're in run() which takes self, no other reference exists
+                    // Store engine reference for event trigger checking in the
+                    // message loop below. This is just an Arc::clone; safe and cheap.
                     let engine_ref = Arc::clone(&engine);
-                    // SAFETY: self is consumed by run(), we can smuggle the engine in
-                    // via a local to use in the message loop below.
 
                     tracing::info!(
                         "Routines enabled: cron ticker every {}s, max {} concurrent",
@@ -484,6 +489,12 @@ impl Agent {
                 }
             };
 
+            // H8: Emit inbound channel message event.
+            self.observer().record_event(&crate::observability::ObserverEvent::ChannelMessage {
+                channel: message.channel.clone(),
+                direction: "inbound".to_string(),
+            });
+
             match self.handle_message(&message).await {
                 Ok(Some(response)) if !response.is_empty() => {
                     // Hook: BeforeOutbound — allow hooks to modify or suppress outbound
@@ -493,38 +504,42 @@ impl Agent {
                         content: response.clone(),
                         thread_id: message.thread_id.clone(),
                     };
-                    match self.hooks().run(&event).await {
+                    let send_result = match self.hooks().run(&event).await {
                         Err(err) => {
                             tracing::warn!("BeforeOutbound hook blocked response: {}", err);
+                            None // Hook blocked — nothing sent
                         }
                         Ok(crate::hooks::HookOutcome::Continue {
                             modified: Some(new_content),
                         }) => {
-                            if let Err(e) = self
+                            Some(self
                                 .channels
                                 .respond(&message, OutgoingResponse::text(new_content))
-                                .await
-                            {
-                                tracing::error!(
-                                    channel = %message.channel,
-                                    error = %e,
-                                    "Failed to send response to channel"
-                                );
-                            }
+                                .await)
                         }
                         _ => {
-                            if let Err(e) = self
+                            Some(self
                                 .channels
                                 .respond(&message, OutgoingResponse::text(response))
-                                .await
-                            {
-                                tracing::error!(
-                                    channel = %message.channel,
-                                    error = %e,
-                                    "Failed to send response to channel"
-                                );
-                            }
+                                .await)
                         }
+                    };
+                    // H8: Emit outbound event only after response was actually sent.
+                    match send_result {
+                        Some(Ok(())) => {
+                            self.observer().record_event(&crate::observability::ObserverEvent::ChannelMessage {
+                                channel: message.channel.clone(),
+                                direction: "outbound".to_string(),
+                            });
+                        }
+                        Some(Err(e)) => {
+                            tracing::error!(
+                                channel = %message.channel,
+                                error = %e,
+                                "Failed to send response to channel"
+                            );
+                        }
+                        None => {} // Hook blocked, no event
                     }
                 }
                 Ok(Some(empty)) => {
@@ -578,6 +593,8 @@ impl Agent {
         }
         self.scheduler.stop_all().await;
         self.channels.shutdown_all().await?;
+        // C5: Flush and release observer resources (OTEL batch exporter, etc.)
+        self.observer().shutdown();
 
         Ok(())
     }
@@ -755,6 +772,97 @@ impl Agent {
 mod tests {
     use super::truncate_for_preview;
 
+    /// Regression test for C5: observer must be shut down at agent shutdown.
+    ///
+    /// Before the fix, Agent::run() never called observer.flush() or shutdown(),
+    /// causing OTEL spans buffered in the batch exporter to be silently dropped.
+    /// Now calls observer.shutdown() which flushes and releases resources (C4).
+    #[cfg(feature = "libsql")]
+    #[tokio::test]
+    async fn observer_flush_called_at_shutdown() {
+        use std::sync::Arc;
+
+        use crate::agent::Agent;
+        use crate::channels::{ChannelManager, IncomingMessage};
+        use crate::config::AgentConfig;
+        use crate::observability::recording::RecordingObserver;
+        use crate::testing::TestHarnessBuilder;
+
+        // Build test deps with a recording observer that tracks flush calls.
+        let (observer, _events, _metrics, flush_count) =
+            RecordingObserver::with_flush_counter();
+
+        let harness = TestHarnessBuilder::new()
+            .with_observer(Arc::new(observer))
+            .build()
+            .await;
+
+        // Create a channel that sends a /quit message then stays open.
+        let channels = Arc::new(ChannelManager::new());
+        struct QuitChannel;
+        #[async_trait::async_trait]
+        impl crate::channels::Channel for QuitChannel {
+            fn name(&self) -> &str {
+                "test-quit"
+            }
+            async fn start(
+                &self,
+            ) -> Result<crate::channels::MessageStream, crate::error::ChannelError> {
+                let quit_msg = IncomingMessage {
+                    id: uuid::Uuid::new_v4(),
+                    content: "/quit".to_string(),
+                    user_id: "test".to_string(),
+                    user_name: None,
+                    channel: "test-quit".to_string(),
+                    thread_id: None,
+                    received_at: chrono::Utc::now(),
+                    metadata: serde_json::Value::Null,
+                };
+                Ok(Box::pin(futures::stream::once(async { quit_msg })))
+            }
+            async fn respond(
+                &self,
+                _msg: &crate::channels::IncomingMessage,
+                _response: crate::channels::OutgoingResponse,
+            ) -> Result<(), crate::error::ChannelError> {
+                Ok(())
+            }
+            async fn health_check(&self) -> Result<(), crate::error::ChannelError> {
+                Ok(())
+            }
+        }
+        channels.add(Box::new(QuitChannel)).await;
+
+        let config = AgentConfig {
+            name: "test-agent".to_string(),
+            max_parallel_jobs: 1,
+            job_timeout: std::time::Duration::from_secs(10),
+            stuck_threshold: std::time::Duration::from_secs(30),
+            repair_check_interval: std::time::Duration::from_secs(60),
+            max_repair_attempts: 1,
+            use_planning: false,
+            session_idle_timeout: std::time::Duration::from_secs(300),
+            allow_local_tools: false,
+            max_cost_per_day_cents: None,
+            max_actions_per_hour: None,
+            max_tool_iterations: 10,
+            auto_approve_tools: false,
+        };
+
+        let agent = Agent::new(config, harness.deps, channels, None, None, None, None, None);
+
+        // Run the agent — /quit triggers Ok(None) which breaks the loop.
+        agent.run().await.expect("agent should shut down cleanly");
+
+        // REGRESSION: Before fix, flush/shutdown was never called (count == 0).
+        // shutdown() calls flush() via the trait default, so flush_count == 1.
+        assert_eq!(
+            flush_count.load(std::sync::atomic::Ordering::Relaxed),
+            1,
+            "observer.shutdown() must be called exactly once during agent shutdown"
+        );
+    }
+
     #[test]
     fn test_truncate_short_input() {
         assert_eq!(truncate_for_preview("hello", 10), "hello");
@@ -816,4 +924,390 @@ mod tests {
         // 'h','e','l','l','o',' ','世','界' = 8 chars
         assert_eq!(result, "hello 世界...");
     }
+
+    /// Tests for outbound event emission (H8 fix: emit only after successful send).
+    ///
+    /// These tests exercise the `send_result` / `match send_result` block in the agent
+    /// loop, verifying that `ObserverEvent::ChannelMessage { direction: "outbound" }`
+    /// is emitted only when the channel send actually succeeds.
+    mod outbound_event_tests {
+        use std::sync::{Arc, Mutex};
+        use std::time::Duration;
+
+        use async_trait::async_trait;
+        use futures::stream;
+
+        use crate::agent::agent_loop::{Agent, AgentDeps};
+        use crate::agent::cost_guard::{CostGuard, CostGuardConfig};
+        use crate::channels::{
+            Channel, ChannelManager, IncomingMessage, MessageStream, OutgoingResponse,
+        };
+        use crate::config::{AgentConfig, SafetyConfig, SkillsConfig};
+        use crate::error::ChannelError;
+        use crate::hooks::{
+            Hook, HookContext, HookError, HookEvent, HookOutcome, HookPoint, HookRegistry,
+        };
+        use crate::hooks::hook::HookFailureMode;
+        use crate::observability::recording::RecordingObserver;
+        use crate::observability::traits::ObserverEvent;
+        use crate::safety::SafetyLayer;
+        use crate::testing::StubLlm;
+        use crate::tools::ToolRegistry;
+
+        // ── Stub channel ────────────────────────────────────────────
+
+        /// A channel that records `respond` calls and can be configured to fail.
+        struct StubChannel {
+            name: String,
+            /// What `respond` should return.
+            respond_result: Mutex<Result<(), ChannelError>>,
+            /// Content of each `respond` call, for assertion.
+            sent: Mutex<Vec<String>>,
+        }
+
+        impl StubChannel {
+            fn ok(name: &str) -> Self {
+                Self {
+                    name: name.to_string(),
+                    respond_result: Mutex::new(Ok(())),
+                    sent: Mutex::new(Vec::new()),
+                }
+            }
+
+            fn failing(name: &str) -> Self {
+                Self {
+                    name: name.to_string(),
+                    respond_result: Mutex::new(Err(ChannelError::SendFailed {
+                        name: name.to_string(),
+                        reason: "simulated failure".to_string(),
+                    })),
+                    sent: Mutex::new(Vec::new()),
+                }
+            }
+
+            fn sent_contents(&self) -> Vec<String> {
+                self.sent.lock().unwrap().clone()
+            }
+        }
+
+        #[async_trait]
+        impl Channel for StubChannel {
+            fn name(&self) -> &str {
+                &self.name
+            }
+
+            async fn start(&self) -> Result<MessageStream, ChannelError> {
+                // Return an empty stream; we use the inject sender instead.
+                Ok(Box::pin(stream::empty()))
+            }
+
+            async fn respond(
+                &self,
+                _msg: &IncomingMessage,
+                response: OutgoingResponse,
+            ) -> Result<(), ChannelError> {
+                self.sent
+                    .lock()
+                    .unwrap()
+                    .push(response.content.clone());
+                // Clone the stored result
+                match &*self.respond_result.lock().unwrap() {
+                    Ok(()) => Ok(()),
+                    Err(e) => Err(ChannelError::SendFailed {
+                        name: self.name.clone(),
+                        reason: format!("{}", e),
+                    }),
+                }
+            }
+
+            async fn health_check(&self) -> Result<(), ChannelError> {
+                Ok(())
+            }
+        }
+
+        // ── Stub hooks ─────────────────────────────────────────────
+
+        /// Hook that rejects all BeforeOutbound events.
+        struct RejectOutbound;
+
+        #[async_trait]
+        impl Hook for RejectOutbound {
+            fn name(&self) -> &str { "reject-outbound" }
+            fn hook_points(&self) -> &[HookPoint] { &[HookPoint::BeforeOutbound] }
+            fn failure_mode(&self) -> HookFailureMode { HookFailureMode::FailClosed }
+            async fn execute(&self, _event: &HookEvent, _ctx: &HookContext) -> Result<HookOutcome, HookError> {
+                Ok(HookOutcome::reject("blocked by test hook"))
+            }
+        }
+
+        /// Hook that modifies outbound content.
+        struct ModifyOutbound {
+            replacement: String,
+        }
+
+        impl ModifyOutbound {
+            fn new(replacement: &str) -> Self {
+                Self { replacement: replacement.to_string() }
+            }
+        }
+
+        #[async_trait]
+        impl Hook for ModifyOutbound {
+            fn name(&self) -> &str { "modify-outbound" }
+            fn hook_points(&self) -> &[HookPoint] { &[HookPoint::BeforeOutbound] }
+            async fn execute(&self, _event: &HookEvent, _ctx: &HookContext) -> Result<HookOutcome, HookError> {
+                Ok(HookOutcome::modify(self.replacement.clone()))
+            }
+        }
+
+        /// Hook that errors with fail-closed mode.
+        struct FailClosedHook;
+
+        #[async_trait]
+        impl Hook for FailClosedHook {
+            fn name(&self) -> &str { "fail-closed" }
+            fn hook_points(&self) -> &[HookPoint] { &[HookPoint::BeforeOutbound] }
+            fn failure_mode(&self) -> HookFailureMode { HookFailureMode::FailClosed }
+            async fn execute(&self, _event: &HookEvent, _ctx: &HookContext) -> Result<HookOutcome, HookError> {
+                Err(HookError::ExecutionFailed { reason: "simulated hook failure".to_string() })
+            }
+        }
+
+        /// Hook that errors with fail-open mode (default).
+        struct FailOpenHook;
+
+        #[async_trait]
+        impl Hook for FailOpenHook {
+            fn name(&self) -> &str { "fail-open" }
+            fn hook_points(&self) -> &[HookPoint] { &[HookPoint::BeforeOutbound] }
+            fn failure_mode(&self) -> HookFailureMode { HookFailureMode::FailOpen }
+            async fn execute(&self, _event: &HookEvent, _ctx: &HookContext) -> Result<HookOutcome, HookError> {
+                Err(HookError::ExecutionFailed { reason: "simulated hook failure".to_string() })
+            }
+        }
+
+        // ── Helpers ─────────────────────────────────────────────────
+
+        fn make_agent_config() -> AgentConfig {
+            AgentConfig {
+                name: "test-outbound".to_string(),
+                max_parallel_jobs: 1,
+                job_timeout: Duration::from_secs(60),
+                stuck_threshold: Duration::from_secs(60),
+                repair_check_interval: Duration::from_secs(30),
+                max_repair_attempts: 1,
+                use_planning: false,
+                session_idle_timeout: Duration::from_secs(300),
+                allow_local_tools: false,
+                max_cost_per_day_cents: None,
+                max_actions_per_hour: None,
+                max_tool_iterations: 50,
+                auto_approve_tools: true,
+            }
+        }
+
+        /// Build an agent that uses the given channel and hooks, with a recording observer.
+        /// Returns (Agent, observer events handle, channel reference).
+        async fn build_agent(
+            channel: Arc<StubChannel>,
+            hooks: Arc<HookRegistry>,
+            response: &str,
+        ) -> (Agent, Arc<Mutex<Vec<ObserverEvent>>>) {
+            let (observer, events, _, _) = RecordingObserver::with_flush_counter();
+
+            let cm = Arc::new(ChannelManager::new());
+            // Wrap in a newtype so we can pass Arc<StubChannel> as Box<dyn Channel>
+            cm.add(Box::new(ArcChannel(Arc::clone(&channel)))).await;
+
+            let deps = AgentDeps {
+                store: None,
+                llm: Arc::new(StubLlm::new(response)),
+                cheap_llm: None,
+                safety: Arc::new(SafetyLayer::new(&SafetyConfig {
+                    max_output_length: 100_000,
+                    injection_check_enabled: false,
+                })),
+                tools: Arc::new(ToolRegistry::new()),
+                workspace: None,
+                extension_manager: None,
+                skill_registry: None,
+                skills_config: SkillsConfig::default(),
+                hooks,
+                cost_guard: Arc::new(CostGuard::new(CostGuardConfig::default())),
+                observer: Arc::new(observer),
+            };
+
+            let agent = Agent::new(
+                make_agent_config(),
+                deps,
+                cm.clone(),
+                None, None, None, None, None,
+            );
+
+            (agent, events)
+        }
+
+        /// Wrapper to use `Arc<StubChannel>` as `Box<dyn Channel>`.
+        struct ArcChannel(Arc<StubChannel>);
+
+        #[async_trait]
+        impl Channel for ArcChannel {
+            fn name(&self) -> &str { self.0.name() }
+            async fn start(&self) -> Result<MessageStream, ChannelError> { self.0.start().await }
+            async fn respond(&self, msg: &IncomingMessage, response: OutgoingResponse) -> Result<(), ChannelError> {
+                self.0.respond(msg, response).await
+            }
+            async fn health_check(&self) -> Result<(), ChannelError> { self.0.health_check().await }
+        }
+
+        /// Helper to count outbound events.
+        fn count_outbound_events(events: &[ObserverEvent]) -> usize {
+            events.iter().filter(|e| matches!(e,
+                ObserverEvent::ChannelMessage { direction, .. } if direction == "outbound"
+            )).count()
+        }
+
+        /// Helper to count inbound events.
+        fn count_inbound_events(events: &[ObserverEvent]) -> usize {
+            events.iter().filter(|e| matches!(e,
+                ObserverEvent::ChannelMessage { direction, .. } if direction == "inbound"
+            )).count()
+        }
+
+        /// Send a single message followed by /quit and run the agent loop.
+        async fn send_and_run(
+            agent: Agent,
+            events: Arc<Mutex<Vec<ObserverEvent>>>,
+            channel_name: &str,
+            content: &str,
+        ) -> Vec<ObserverEvent> {
+            let inject_tx = agent.channels.inject_sender();
+
+            // Send the test message, then /quit to terminate the loop.
+            let msg = IncomingMessage::new(channel_name, "test-user", content);
+            inject_tx.send(msg).await.expect("inject message");
+            let quit = IncomingMessage::new(channel_name, "test-user", "/quit");
+            inject_tx.send(quit).await.expect("inject quit");
+
+            // Run the agent loop. It will process messages and exit on /quit.
+            agent.run().await.ok();
+
+            // Collect events
+            events.lock().unwrap().clone()
+        }
+
+        // ── Tests ───────────────────────────────────────────────────
+
+        #[tokio::test]
+        async fn outbound_event_emitted_on_successful_send() {
+            let channel = Arc::new(StubChannel::ok("test-ch"));
+            let hooks = Arc::new(HookRegistry::new());
+            let (agent, events) = build_agent(channel.clone(), hooks, "Hello!").await;
+
+            let recorded = send_and_run(agent, events, "test-ch", "/ping").await;
+
+            assert_eq!(count_inbound_events(&recorded), 2, "should have 2 inbound events (ping + quit)");
+            assert_eq!(count_outbound_events(&recorded), 1, "should have 1 outbound event");
+        }
+
+        #[tokio::test]
+        async fn no_outbound_event_when_hook_rejects() {
+            let channel = Arc::new(StubChannel::ok("test-ch"));
+            let hooks = Arc::new(HookRegistry::new());
+            hooks.register(Arc::new(RejectOutbound)).await;
+            let (agent, events) = build_agent(channel.clone(), hooks, "Hello!").await;
+
+            let recorded = send_and_run(agent, events, "test-ch", "/ping").await;
+
+            assert_eq!(count_inbound_events(&recorded), 2, "should have 2 inbound events (ping + quit)");
+            assert_eq!(count_outbound_events(&recorded), 0, "hook rejected: should have 0 outbound events");
+            assert!(channel.sent_contents().is_empty(), "nothing should be sent to channel");
+        }
+
+        #[tokio::test]
+        async fn outbound_event_emitted_when_hook_modifies() {
+            let channel = Arc::new(StubChannel::ok("test-ch"));
+            let hooks = Arc::new(HookRegistry::new());
+            hooks.register(Arc::new(ModifyOutbound::new("Modified response"))).await;
+            let (agent, events) = build_agent(channel.clone(), hooks, "Original").await;
+
+            let recorded = send_and_run(agent, events, "test-ch", "/ping").await;
+
+            assert_eq!(count_outbound_events(&recorded), 1, "should have 1 outbound event for modified content");
+            let sent = channel.sent_contents();
+            assert_eq!(sent.len(), 1);
+            assert_eq!(sent[0], "Modified response", "channel should receive the modified content");
+        }
+
+        #[tokio::test]
+        async fn no_outbound_event_when_send_fails() {
+            let channel = Arc::new(StubChannel::failing("test-ch"));
+            let hooks = Arc::new(HookRegistry::new());
+            let (agent, events) = build_agent(channel, hooks, "Hello!").await;
+
+            let recorded = send_and_run(agent, events, "test-ch", "/ping").await;
+
+            assert_eq!(count_inbound_events(&recorded), 2, "should have 2 inbound events (ping + quit)");
+            assert_eq!(count_outbound_events(&recorded), 0, "send failed: should have 0 outbound events");
+        }
+
+        #[tokio::test]
+        async fn no_outbound_event_when_hook_fail_closed() {
+            let channel = Arc::new(StubChannel::ok("test-ch"));
+            let hooks = Arc::new(HookRegistry::new());
+            hooks.register(Arc::new(FailClosedHook)).await;
+            let (agent, events) = build_agent(channel.clone(), hooks, "Hello!").await;
+
+            let recorded = send_and_run(agent, events, "test-ch", "/ping").await;
+
+            assert_eq!(count_inbound_events(&recorded), 2, "should have 2 inbound events (ping + quit)");
+            assert_eq!(count_outbound_events(&recorded), 0, "fail-closed hook: should have 0 outbound events");
+            assert!(channel.sent_contents().is_empty(), "nothing should be sent to channel");
+        }
+
+        #[tokio::test]
+        async fn outbound_event_emitted_when_hook_fail_open() {
+            let channel = Arc::new(StubChannel::ok("test-ch"));
+            let hooks = Arc::new(HookRegistry::new());
+            hooks.register(Arc::new(FailOpenHook)).await;
+            let (agent, events) = build_agent(channel.clone(), hooks, "Hello!").await;
+
+            let recorded = send_and_run(agent, events, "test-ch", "/ping").await;
+
+            assert_eq!(count_inbound_events(&recorded), 2, "should have 2 inbound events (ping + quit)");
+            assert_eq!(count_outbound_events(&recorded), 1, "fail-open hook: should still emit outbound event");
+            assert!(!channel.sent_contents().is_empty(), "message should be sent to channel");
+        }
+
+        #[tokio::test]
+        async fn outbound_events_match_successful_sends() {
+            // Send 3 messages; only the ones that succeed should emit outbound events.
+            // We use a channel that always succeeds, no hooks, and count.
+            let channel = Arc::new(StubChannel::ok("test-ch"));
+            let hooks = Arc::new(HookRegistry::new());
+            let (agent, events) = build_agent(channel.clone(), hooks, "Reply").await;
+
+            let inject_tx = agent.channels.inject_sender();
+
+            // Send 3 messages then /quit
+            for i in 0..3 {
+                let msg = IncomingMessage::new("test-ch", "user", format!("msg-{i}"));
+                inject_tx.send(msg).await.expect("inject");
+            }
+            let quit = IncomingMessage::new("test-ch", "user", "/quit");
+            inject_tx.send(quit).await.expect("inject quit");
+
+            agent.run().await.ok();
+
+            let recorded = events.lock().unwrap().clone();
+            let inbound = count_inbound_events(&recorded);
+            let outbound = count_outbound_events(&recorded);
+
+            // 4 inbound events: 3 messages + 1 /quit
+            assert_eq!(inbound, 4, "should have 4 inbound events (3 msgs + quit)");
+            assert_eq!(outbound, 3, "should have 3 outbound events (all sends succeeded)");
+            assert_eq!(channel.sent_contents().len(), 3, "3 messages sent to channel");
+        }
+    }
+
 }

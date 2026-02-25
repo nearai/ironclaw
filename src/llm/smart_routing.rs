@@ -7,15 +7,16 @@
 //! This is a decorator that wraps two `LlmProvider`s and implements `LlmProvider` itself,
 //! following the same pattern as `RetryProvider`, `CachedProvider`, and `CircuitBreakerProvider`.
 
+use std::collections::HashMap;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Mutex;
+use std::sync::atomic::{AtomicU64, AtomicU8, Ordering};
 
 use async_trait::async_trait;
-use rust_decimal::Decimal;
 
 use crate::error::LlmError;
 use crate::llm::provider::{
-    CompletionRequest, CompletionResponse, LlmProvider, ModelMetadata, Role, ToolCompletionRequest,
+    CompletionRequest, CompletionResponse, LlmProvider, Role, ToolCompletionRequest,
     ToolCompletionResponse,
 };
 
@@ -79,6 +80,19 @@ pub struct SmartRoutingSnapshot {
     pub cascade_escalations: u64,
 }
 
+/// Which inner provider handled a request.
+#[derive(Debug, Clone, Copy)]
+enum RoutedTo {
+    Primary = 0,
+    Cheap = 1,
+}
+
+impl RoutedTo {
+    fn from_u8(v: u8) -> Self {
+        if v == 1 { Self::Cheap } else { Self::Primary }
+    }
+}
+
 /// Smart routing provider that classifies task complexity and routes to the appropriate model.
 ///
 /// - `complete()` — classifies and routes to cheap or primary model
@@ -88,9 +102,27 @@ pub struct SmartRoutingProvider {
     cheap: Arc<dyn LlmProvider>,
     config: SmartRoutingConfig,
     stats: SmartRoutingStats,
+    /// Global fallback: which provider last served a request.
+    /// Used when task-scoped binding is unavailable (no Tokio task ID).
+    last_routed: AtomicU8,
+    /// Request-scoped routing decision keyed by Tokio task ID.
+    /// Takes precedence over `last_routed` for concurrent use.
+    ///
+    /// Entries are inserted on `complete()`/`complete_with_tools()` and removed
+    /// on `effective_model_name()`. If a task panics or is cancelled between
+    /// insert and remove, entries leak. A capacity guard evicts all entries when
+    /// the map exceeds [`Self::TASK_MAP_CAPACITY`] to prevent unbounded growth.
+    routed_for_task: Mutex<HashMap<tokio::task::Id, RoutedTo>>,
 }
 
 impl SmartRoutingProvider {
+    /// Maximum number of entries in `routed_for_task` before eviction.
+    /// Each entry corresponds to a Tokio task that called `complete()` but
+    /// hasn't yet called `effective_model_name()`. Under normal operation
+    /// this map stays small (bounded by concurrency). A large map indicates
+    /// leaked entries from cancelled or panicked tasks.
+    const TASK_MAP_CAPACITY: usize = 1000;
+
     /// Create a new smart routing provider wrapping a primary and cheap provider.
     pub fn new(
         primary: Arc<dyn LlmProvider>,
@@ -102,6 +134,8 @@ impl SmartRoutingProvider {
             cheap,
             config,
             stats: SmartRoutingStats::new(),
+            last_routed: AtomicU8::new(RoutedTo::Primary as u8),
+            routed_for_task: Mutex::new(HashMap::new()),
         }
     }
 
@@ -126,6 +160,43 @@ impl SmartRoutingProvider {
             .unwrap_or("");
 
         classify_message(last_user_msg, &self.config)
+    }
+
+    /// Bind the routing decision to the current Tokio task and update the
+    /// global fallback.
+    ///
+    /// If the map exceeds [`Self::TASK_MAP_CAPACITY`], all entries are evicted
+    /// (with a warning log) before inserting the new entry. This prevents
+    /// unbounded growth from leaked entries when tasks panic or are cancelled
+    /// between `complete()` and `effective_model_name()`.
+    fn bind_route_to_current_task(&self, routed_to: RoutedTo) {
+        self.last_routed.store(routed_to as u8, Ordering::Relaxed);
+        let Some(task_id) = tokio::task::try_id() else {
+            return;
+        };
+        if let Ok(mut guard) = self.routed_for_task.lock() {
+            if guard.len() >= Self::TASK_MAP_CAPACITY {
+                tracing::warn!(
+                    entries = guard.len(),
+                    capacity = Self::TASK_MAP_CAPACITY,
+                    "routed_for_task map exceeded capacity, evicting stale entries"
+                );
+                guard.clear();
+            }
+            guard.insert(task_id, routed_to);
+        }
+    }
+
+    /// Take and remove the routing decision bound to the current task.
+    /// Falls back to `last_routed` if no task ID is available.
+    fn take_route_for_current_task(&self) -> RoutedTo {
+        let task_routed = tokio::task::try_id().and_then(|task_id| {
+            self.routed_for_task
+                .lock()
+                .ok()
+                .and_then(|mut guard| guard.remove(&task_id))
+        });
+        task_routed.unwrap_or_else(|| RoutedTo::from_u8(self.last_routed.load(Ordering::Relaxed)))
     }
 
     /// Check if a response from the cheap model shows uncertainty, warranting escalation.
@@ -259,12 +330,13 @@ fn classify_message(msg: &str, config: &SmartRoutingConfig) -> TaskComplexity {
 
 #[async_trait]
 impl LlmProvider for SmartRoutingProvider {
-    fn model_name(&self) -> &str {
-        self.primary.model_name()
-    }
+    crate::delegate_llm_provider!(self.primary, skip_effective_model_name);
 
-    fn cost_per_token(&self) -> (Decimal, Decimal) {
-        self.primary.cost_per_token()
+    fn effective_model_name(&self, requested_model: Option<&str>) -> String {
+        match self.take_route_for_current_task() {
+            RoutedTo::Primary => self.primary.effective_model_name(requested_model),
+            RoutedTo::Cheap => self.cheap.effective_model_name(requested_model),
+        }
     }
 
     async fn complete(&self, request: CompletionRequest) -> Result<CompletionResponse, LlmError> {
@@ -279,7 +351,11 @@ impl LlmProvider for SmartRoutingProvider {
                     "Smart routing: Simple task -> cheap model"
                 );
                 self.stats.cheap_requests.fetch_add(1, Ordering::Relaxed);
-                self.cheap.complete(request).await
+                let result = self.cheap.complete(request).await;
+                if result.is_ok() {
+                    self.bind_route_to_current_task(RoutedTo::Cheap);
+                }
+                result
             }
             TaskComplexity::Complex => {
                 tracing::debug!(
@@ -287,7 +363,11 @@ impl LlmProvider for SmartRoutingProvider {
                     "Smart routing: Complex task -> primary model"
                 );
                 self.stats.primary_requests.fetch_add(1, Ordering::Relaxed);
-                self.primary.complete(request).await
+                let result = self.primary.complete(request).await;
+                if result.is_ok() {
+                    self.bind_route_to_current_task(RoutedTo::Primary);
+                }
+                result
             }
             TaskComplexity::Moderate => {
                 if self.config.cascade_enabled {
@@ -309,8 +389,13 @@ impl LlmProvider for SmartRoutingProvider {
                             .cascade_escalations
                             .fetch_add(1, Ordering::Relaxed);
                         self.stats.primary_requests.fetch_add(1, Ordering::Relaxed);
-                        self.primary.complete(request).await
+                        let result = self.primary.complete(request).await;
+                        if result.is_ok() {
+                            self.bind_route_to_current_task(RoutedTo::Primary);
+                        }
+                        result
                     } else {
+                        self.bind_route_to_current_task(RoutedTo::Cheap);
                         Ok(response)
                     }
                 } else {
@@ -320,7 +405,11 @@ impl LlmProvider for SmartRoutingProvider {
                         "Smart routing: Moderate task -> cheap model (cascade disabled)"
                     );
                     self.stats.cheap_requests.fetch_add(1, Ordering::Relaxed);
-                    self.cheap.complete(request).await
+                    let result = self.cheap.complete(request).await;
+                    if result.is_ok() {
+                        self.bind_route_to_current_task(RoutedTo::Cheap);
+                    }
+                    result
                 }
             }
         }
@@ -337,27 +426,11 @@ impl LlmProvider for SmartRoutingProvider {
             model = %self.primary.model_name(),
             "Smart routing: Tool use -> primary model (always)"
         );
-        self.primary.complete_with_tools(request).await
-    }
-
-    async fn list_models(&self) -> Result<Vec<String>, LlmError> {
-        self.primary.list_models().await
-    }
-
-    async fn model_metadata(&self) -> Result<ModelMetadata, LlmError> {
-        self.primary.model_metadata().await
-    }
-
-    fn active_model_name(&self) -> String {
-        self.primary.active_model_name()
-    }
-
-    fn set_model(&self, model: &str) -> Result<(), LlmError> {
-        self.primary.set_model(model)
-    }
-
-    fn calculate_cost(&self, input_tokens: u32, output_tokens: u32) -> Decimal {
-        self.primary.calculate_cost(input_tokens, output_tokens)
+        let result = self.primary.complete_with_tools(request).await;
+        if result.is_ok() {
+            self.bind_route_to_current_task(RoutedTo::Primary);
+        }
+        result
     }
 }
 
@@ -487,6 +560,7 @@ mod tests {
             input_tokens: 10,
             output_tokens: 5,
             finish_reason: crate::llm::FinishReason::Stop,
+            cached: false,
         };
         assert!(SmartRoutingProvider::response_is_uncertain(&response));
     }
@@ -498,6 +572,7 @@ mod tests {
             input_tokens: 10,
             output_tokens: 0,
             finish_reason: crate::llm::FinishReason::Stop,
+            cached: false,
         };
         assert!(SmartRoutingProvider::response_is_uncertain(&response));
     }
@@ -509,6 +584,7 @@ mod tests {
             input_tokens: 10,
             output_tokens: 1,
             finish_reason: crate::llm::FinishReason::Stop,
+            cached: false,
         };
         assert!(!SmartRoutingProvider::response_is_uncertain(&response));
     }
@@ -521,6 +597,7 @@ mod tests {
             input_tokens: 10,
             output_tokens: 20,
             finish_reason: crate::llm::FinishReason::Stop,
+            cached: false,
         };
         assert!(!SmartRoutingProvider::response_is_uncertain(&response));
     }
@@ -696,5 +773,137 @@ mod tests {
         let router = SmartRoutingProvider::new(primary, cheap, default_config());
         assert_eq!(router.model_name(), "sonnet");
         assert_eq!(router.active_model_name(), "sonnet");
+    }
+
+    /// Regression test for C3: effective_model_name must report the model
+    /// that *actually* handled the request, not always the primary.
+    /// Before the fix, SmartRoutingProvider delegated effective_model_name()
+    /// to self.primary unconditionally, so a haiku-routed request was
+    /// reported as sonnet.
+    #[tokio::test]
+    async fn effective_model_name_reports_cheap_model_for_simple_request() {
+        let primary = Arc::new(StubLlm::new("primary-response").with_model_name("sonnet"));
+        let cheap = Arc::new(StubLlm::new("cheap-response").with_model_name("haiku"));
+
+        let router = SmartRoutingProvider::new(
+            primary,
+            cheap,
+            SmartRoutingConfig {
+                cascade_enabled: false,
+                ..default_config()
+            },
+        );
+
+        // "hello" is classified as Simple → routes to cheap model
+        let resp = router.complete(make_request("hello")).await.unwrap();
+        assert_eq!(resp.content, "cheap-response");
+
+        // REGRESSION: Before fix, this returned "sonnet" (primary model)
+        let effective = router.effective_model_name(None);
+        assert_eq!(
+            effective, "haiku",
+            "Expected cheap model 'haiku' but got '{effective}'"
+        );
+    }
+
+    /// C3: effective_model_name reports primary for complex requests.
+    #[tokio::test]
+    async fn effective_model_name_reports_primary_for_complex_request() {
+        let primary = Arc::new(StubLlm::new("primary-response").with_model_name("sonnet"));
+        let cheap = Arc::new(StubLlm::new("cheap-response").with_model_name("haiku"));
+
+        let router = SmartRoutingProvider::new(primary, cheap, default_config());
+
+        let resp = router
+            .complete(make_request("implement a binary search"))
+            .await
+            .unwrap();
+        assert_eq!(resp.content, "primary-response");
+
+        let effective = router.effective_model_name(None);
+        assert_eq!(effective, "sonnet");
+    }
+
+    /// C3: cascade escalation reports the primary model.
+    #[tokio::test]
+    async fn effective_model_name_reports_primary_after_cascade_escalation() {
+        let primary = Arc::new(StubLlm::new("primary-response").with_model_name("sonnet"));
+        let cheap = Arc::new(StubLlm::new("I'm not sure about that.").with_model_name("haiku"));
+
+        let router = SmartRoutingProvider::new(
+            primary,
+            cheap,
+            SmartRoutingConfig {
+                cascade_enabled: true,
+                ..default_config()
+            },
+        );
+
+        // Moderate task → cheap → uncertain → escalates to primary
+        let resp = router
+            .complete(make_request(
+                "Tell me about the weather patterns in the Pacific Ocean during summer months",
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.content, "primary-response");
+
+        let effective = router.effective_model_name(None);
+        assert_eq!(effective, "sonnet");
+    }
+
+    // L2: routed_for_task capacity guard evicts stale entries when map exceeds threshold.
+    #[test]
+    fn routed_for_task_evicts_when_capacity_exceeded() {
+        let primary = Arc::new(StubLlm::new("primary-response").with_model_name("primary"));
+        let cheap = Arc::new(StubLlm::new("cheap-response").with_model_name("cheap"));
+
+        let router = SmartRoutingProvider::new(primary, cheap, default_config());
+
+        // Verify map starts empty.
+        assert_eq!(router.routed_for_task.lock().unwrap().len(), 0);
+
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+
+        rt.block_on(async {
+            let router = Arc::new(router);
+
+            // Spawn tasks that insert but never call effective_model_name (simulating leak).
+            let mut handles = Vec::new();
+            for _ in 0..SmartRoutingProvider::TASK_MAP_CAPACITY {
+                let r = Arc::clone(&router);
+                handles.push(tokio::spawn(async move {
+                    r.bind_route_to_current_task(RoutedTo::Primary);
+                }));
+            }
+            for h in handles {
+                h.await.unwrap();
+            }
+
+            // Map should be at or near capacity.
+            let len_before = router.routed_for_task.lock().unwrap().len();
+            assert!(
+                len_before > 0,
+                "Expected entries in map, got 0"
+            );
+
+            // One more insert should trigger eviction.
+            let r = Arc::clone(&router);
+            tokio::spawn(async move {
+                r.bind_route_to_current_task(RoutedTo::Cheap);
+            })
+            .await
+            .unwrap();
+
+            // After eviction, map should have just the one new entry.
+            let len_after = router.routed_for_task.lock().unwrap().len();
+            assert!(
+                len_after <= 1,
+                "Expected map to be evicted to at most 1 entry, got {len_after}"
+            );
+        });
     }
 }

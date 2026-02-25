@@ -10,11 +10,10 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use rand::Rng;
-use rust_decimal::Decimal;
 
 use crate::error::LlmError;
 use crate::llm::provider::{
-    CompletionRequest, CompletionResponse, LlmProvider, ModelMetadata, ToolCompletionRequest,
+    CompletionRequest, CompletionResponse, LlmProvider, ToolCompletionRequest,
     ToolCompletionResponse,
 };
 
@@ -101,13 +100,7 @@ impl RetryProvider {
 
 #[async_trait]
 impl LlmProvider for RetryProvider {
-    fn model_name(&self) -> &str {
-        self.inner.model_name()
-    }
-
-    fn cost_per_token(&self) -> (Decimal, Decimal) {
-        self.inner.cost_per_token()
-    }
+    crate::delegate_llm_provider!(self.inner);
 
     async fn complete(&self, request: CompletionRequest) -> Result<CompletionResponse, LlmError> {
         let mut last_error: Option<LlmError> = None;
@@ -193,31 +186,13 @@ impl LlmProvider for RetryProvider {
             reason: "retry loop exited unexpectedly".to_string(),
         }))
     }
-
-    async fn list_models(&self) -> Result<Vec<String>, LlmError> {
-        self.inner.list_models().await
-    }
-
-    async fn model_metadata(&self) -> Result<ModelMetadata, LlmError> {
-        self.inner.model_metadata().await
-    }
-
-    fn active_model_name(&self) -> String {
-        self.inner.active_model_name()
-    }
-
-    fn set_model(&self, model: &str) -> Result<(), LlmError> {
-        self.inner.set_model(model)
-    }
-
-    fn calculate_cost(&self, input_tokens: u32, output_tokens: u32) -> Decimal {
-        self.inner.calculate_cost(input_tokens, output_tokens)
-    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    use rust_decimal::Decimal;
 
     use crate::testing::StubLlm;
 
@@ -394,5 +369,44 @@ mod tests {
         assert_eq!(retry.active_model_name(), "my-model");
         assert_eq!(retry.cost_per_token(), (Decimal::ZERO, Decimal::ZERO));
         assert_eq!(retry.calculate_cost(100, 50), Decimal::ZERO);
+    }
+
+    /// Regression test for D1: effective_model_name must delegate to inner,
+    /// not use the trait default (which skips custom inner implementations).
+    #[tokio::test]
+    async fn effective_model_name_delegates_to_inner() {
+        use crate::llm::provider::{
+            CompletionRequest, CompletionResponse, ToolCompletionRequest, ToolCompletionResponse,
+        };
+
+        struct CustomEffective;
+
+        #[async_trait]
+        impl LlmProvider for CustomEffective {
+            fn model_name(&self) -> &str {
+                "base"
+            }
+            fn cost_per_token(&self) -> (Decimal, Decimal) {
+                (Decimal::ZERO, Decimal::ZERO)
+            }
+            async fn complete(
+                &self,
+                _: CompletionRequest,
+            ) -> Result<CompletionResponse, LlmError> {
+                unimplemented!()
+            }
+            async fn complete_with_tools(
+                &self,
+                _: ToolCompletionRequest,
+            ) -> Result<ToolCompletionResponse, LlmError> {
+                unimplemented!()
+            }
+            fn effective_model_name(&self, _requested: Option<&str>) -> String {
+                "custom-effective".to_string()
+            }
+        }
+
+        let retry = RetryProvider::new(Arc::new(CustomEffective), fast_config(1));
+        assert_eq!(retry.effective_model_name(None), "custom-effective");
     }
 }

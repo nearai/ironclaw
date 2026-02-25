@@ -198,6 +198,8 @@ pub enum RespondResult {
 pub struct RespondOutput {
     pub result: RespondResult,
     pub usage: TokenUsage,
+    /// Whether this response was served from the LLM response cache.
+    pub cached: bool,
 }
 
 /// Reasoning engine for the agent.
@@ -476,6 +478,7 @@ Respond in JSON format:
                         content: response.content.map(|c| clean_response(&c)),
                     },
                     usage,
+                    cached: false,
                 });
             }
 
@@ -499,6 +502,7 @@ Respond in JSON format:
                         },
                     },
                     usage,
+                    cached: false,
                 });
             }
 
@@ -520,6 +524,7 @@ Respond in JSON format:
             Ok(RespondOutput {
                 result: RespondResult::Text(final_text),
                 usage,
+                cached: false,
             })
         } else {
             // No tools, use simple completion
@@ -545,6 +550,7 @@ Respond in JSON format:
                     input_tokens: response.input_tokens,
                     output_tokens: response.output_tokens,
                 },
+                cached: response.cached,
             })
         }
     }

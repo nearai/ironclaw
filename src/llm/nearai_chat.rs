@@ -179,10 +179,31 @@ impl NearAiChatProvider {
 
         tracing::debug!("Sending request to NEAR AI Chat: {}", url);
 
-        if tracing::enabled!(tracing::Level::DEBUG)
+        if tracing::enabled!(tracing::Level::TRACE)
             && let Ok(json) = serde_json::to_string(body)
         {
-            tracing::debug!("NEAR AI Chat request body: {}", json);
+            tracing::trace!("NEAR AI Chat request body: {}", json);
+        } else if tracing::enabled!(tracing::Level::DEBUG)
+            && let Ok(json_val) = serde_json::to_value(body)
+        {
+            let msg_count = json_val
+                .get("messages")
+                .and_then(|m| m.as_array())
+                .map(|a| a.len())
+                .unwrap_or(0);
+            let model = json_val
+                .get("model")
+                .and_then(|m| m.as_str())
+                .unwrap_or("unknown");
+            let body_len = serde_json::to_string(&json_val)
+                .map(|s| s.len())
+                .unwrap_or(0);
+            tracing::debug!(
+                model = %model,
+                message_count = msg_count,
+                body_bytes = body_len,
+                "NEAR AI Chat request metadata"
+            );
         }
 
         let response = self
@@ -204,8 +225,12 @@ impl NearAiChatProvider {
             reason: format!("Failed to read response body: {}", e),
         })?;
 
-        tracing::debug!("NEAR AI Chat response status: {}", status);
-        tracing::debug!("NEAR AI Chat response body: {}", response_text);
+        tracing::debug!(
+            status = %status,
+            body_bytes = response_text.len(),
+            "NEAR AI Chat response metadata"
+        );
+        tracing::trace!("NEAR AI Chat response body: {}", response_text);
 
         if !status.is_success() {
             let status_code = status.as_u16();
@@ -382,11 +407,12 @@ impl NearAiChatProvider {
         }
 
         // Couldn't find model names in response
+        let boundary = crate::util::floor_char_boundary(&response_text, 300);
         Err(LlmError::InvalidResponse {
             provider: "nearai_chat".to_string(),
             reason: format!(
                 "No model names found in response: {}",
-                &response_text[..response_text.len().min(300)]
+                &response_text[..boundary]
             ),
         })
     }
@@ -444,6 +470,7 @@ impl LlmProvider for NearAiChatProvider {
             finish_reason,
             input_tokens,
             output_tokens,
+            cached: false,
         })
     }
 
@@ -509,7 +536,17 @@ impl LlmProvider for NearAiChatProvider {
             .into_iter()
             .map(|tc| {
                 let arguments = serde_json::from_str(&tc.function.arguments)
-                    .unwrap_or(serde_json::Value::Object(Default::default()));
+                    .unwrap_or_else(|err| {
+                        let boundary =
+                            crate::util::floor_char_boundary(&tc.function.arguments, 200);
+                        tracing::warn!(
+                            tool = %tc.function.name,
+                            error = %err,
+                            raw_arguments = %&tc.function.arguments[..boundary],
+                            "Failed to parse tool call arguments; defaulting to {{}}"
+                        );
+                        serde_json::Value::Object(Default::default())
+                    });
                 ToolCall {
                     id: tc.id,
                     name: tc.function.name,
@@ -541,6 +578,10 @@ impl LlmProvider for NearAiChatProvider {
             input_tokens,
             output_tokens,
         })
+    }
+
+    fn provider_name(&self) -> &str {
+        "nearai"
     }
 
     fn model_name(&self) -> &str {
@@ -1261,5 +1302,63 @@ mod tests {
         let (default_in, default_out) = costs::default_cost();
         assert_eq!(input, default_in);
         assert_eq!(output, default_out);
+    }
+
+    /// H1 regression: byte-slicing a multi-byte UTF-8 string at an arbitrary
+    /// byte offset panics when the offset lands mid-character. This test
+    /// constructs a 301-byte string where byte 300 is inside a 4-byte emoji,
+    /// proving the old pattern `&s[..s.len().min(300)]` would panic.
+    #[test]
+    fn test_truncate_multibyte_response_no_panic() {
+        // 298 ASCII bytes + one 4-byte emoji (U+1F600 = 😀) = 302 bytes total.
+        // Byte 300 falls inside the emoji (bytes 298..302), so slicing at 300
+        // would hit a non-char-boundary.
+        let mut text = "x".repeat(298);
+        text.push('😀'); // 4-byte character
+        assert_eq!(text.len(), 302);
+        assert!(!text.is_char_boundary(300)); // confirms the trap
+
+        // Old code would panic here:
+        let result = std::panic::catch_unwind(|| {
+            let _ = &text[..text.len().min(300)];
+        });
+        assert!(result.is_err(), "byte-slice at 300 should panic");
+
+        // Safe truncation via truncate_for_preview must not panic.
+        let safe = crate::agent::truncate_for_preview(&text, 300);
+        assert!(safe.len() <= 302); // at most the full string
+        assert!(!safe.is_empty());
+    }
+
+    #[test]
+    fn test_malformed_tool_call_arguments_defaults_to_empty_object() {
+        // Simulate the parsing logic from complete_with_tools: when the LLM
+        // returns unparseable JSON in tool call arguments, the code should
+        // default to {} (empty object) rather than panicking.
+        let malformed = "this is not json {{{";
+        let result: serde_json::Value = serde_json::from_str(malformed)
+            .unwrap_or_else(|_err| serde_json::Value::Object(Default::default()));
+        assert_eq!(result, serde_json::json!({}));
+
+        // Valid JSON should parse normally.
+        let valid = r#"{"query": "test"}"#;
+        let result: serde_json::Value = serde_json::from_str(valid)
+            .unwrap_or_else(|_err| serde_json::Value::Object(Default::default()));
+        assert_eq!(result, serde_json::json!({"query": "test"}));
+    }
+
+    #[test]
+    fn test_malformed_tool_call_arguments_multibyte_truncation() {
+        // The warn! log truncates raw arguments to 200 bytes using
+        // floor_char_boundary. Verify it doesn't panic on multi-byte input.
+        let mut args = "invalid json: ".to_string();
+        args.push_str(&"🔧".repeat(60)); // 60 × 4 = 240 bytes of emoji
+        assert!(args.len() > 200);
+
+        let boundary = crate::util::floor_char_boundary(&args, 200);
+        let truncated = &args[..boundary];
+        assert!(truncated.len() <= 200);
+        // Must not panic — boundary is on a char boundary.
+        assert!(args.is_char_boundary(boundary));
     }
 }

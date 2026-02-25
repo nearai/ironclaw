@@ -32,19 +32,21 @@ use crate::llm::provider::{
 pub struct RigAdapter<M: CompletionModel> {
     model: M,
     model_name: String,
+    provider: String,
     input_cost: Decimal,
     output_cost: Decimal,
 }
 
 impl<M: CompletionModel> RigAdapter<M> {
     /// Create a new adapter wrapping the given rig-core model.
-    pub fn new(model: M, model_name: impl Into<String>) -> Self {
+    pub fn new(model: M, model_name: impl Into<String>, provider: impl Into<String>) -> Self {
         let name = model_name.into();
         let (input_cost, output_cost) =
             costs::model_cost(&name).unwrap_or_else(costs::default_cost);
         Self {
             model,
             model_name: name,
+            provider: provider.into(),
             input_cost,
             output_cost,
         }
@@ -397,6 +399,10 @@ where
     M: CompletionModel + Send + Sync + 'static,
     M::Response: Send + Sync + Serialize + DeserializeOwned,
 {
+    fn provider_name(&self) -> &str {
+        &self.provider
+    }
+
     fn model_name(&self) -> &str {
         &self.model_name
     }
@@ -452,6 +458,7 @@ where
             input_tokens: saturate_u32(response.usage.input_tokens),
             output_tokens: saturate_u32(response.usage.output_tokens),
             finish_reason: finish,
+            cached: false,
         })
     }
 

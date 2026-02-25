@@ -97,6 +97,10 @@ pub struct Settings {
     /// Builder configuration.
     #[serde(default)]
     pub builder: BuilderSettings,
+
+    /// Observability configuration.
+    #[serde(default)]
+    pub observability: ObservabilitySettings,
 }
 
 /// Source for the secrets master key.
@@ -559,6 +563,41 @@ impl Default for BuilderSettings {
             max_iterations: default_builder_max_iterations(),
             timeout_secs: default_builder_timeout(),
             auto_register: true,
+        }
+    }
+}
+
+/// Observability backend configuration.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ObservabilitySettings {
+    /// Backend name: "none", "noop", "log", "otel", or "log+otel".
+    #[serde(default = "default_observability_backend")]
+    pub backend: String,
+
+    /// OTLP exporter endpoint (e.g. "http://localhost:4317").
+    #[serde(default)]
+    pub otel_endpoint: Option<String>,
+
+    /// OTLP protocol: "grpc" or "http".
+    #[serde(default)]
+    pub otel_protocol: Option<String>,
+
+    /// OTEL service name (default: "ironclaw").
+    #[serde(default)]
+    pub otel_service_name: Option<String>,
+}
+
+fn default_observability_backend() -> String {
+    "none".to_string()
+}
+
+impl Default for ObservabilitySettings {
+    fn default() -> Self {
+        Self {
+            backend: default_observability_backend(),
+            otel_endpoint: None,
+            otel_protocol: None,
+            otel_service_name: None,
         }
     }
 }

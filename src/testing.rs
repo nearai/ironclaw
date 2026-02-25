@@ -30,6 +30,7 @@ use crate::llm::{
     CompletionRequest, CompletionResponse, FinishReason, LlmProvider, ToolCompletionRequest,
     ToolCompletionResponse,
 };
+use crate::observability::Observer;
 use crate::tools::ToolRegistry;
 
 /// Create a libSQL-backed test database in a temporary directory.
@@ -76,6 +77,9 @@ pub struct StubLlm {
     call_count: AtomicU32,
     should_fail: AtomicBool,
     error_kind: StubErrorKind,
+    /// When > 0, the first N calls fail (with `error_kind`), then succeed.
+    /// This takes precedence over `should_fail` for the first N calls.
+    fail_first_n: u32,
 }
 
 impl StubLlm {
@@ -87,6 +91,7 @@ impl StubLlm {
             call_count: AtomicU32::new(0),
             should_fail: AtomicBool::new(false),
             error_kind: StubErrorKind::Transient,
+            fail_first_n: 0,
         }
     }
 
@@ -98,6 +103,7 @@ impl StubLlm {
             call_count: AtomicU32::new(0),
             should_fail: AtomicBool::new(true),
             error_kind: StubErrorKind::Transient,
+            fail_first_n: 0,
         }
     }
 
@@ -109,6 +115,20 @@ impl StubLlm {
             call_count: AtomicU32::new(0),
             should_fail: AtomicBool::new(true),
             error_kind: StubErrorKind::NonTransient,
+            fail_first_n: 0,
+        }
+    }
+
+    /// Create a stub that fails with a non-transient error on the first `n`
+    /// calls, then returns `response` on subsequent calls.
+    pub fn failing_first_n(n: u32, response: impl Into<String>) -> Self {
+        Self {
+            model_name: "stub-model".to_string(),
+            response: response.into(),
+            call_count: AtomicU32::new(0),
+            should_fail: AtomicBool::new(false),
+            error_kind: StubErrorKind::NonTransient,
+            fail_first_n: n,
         }
     }
 
@@ -159,8 +179,8 @@ impl LlmProvider for StubLlm {
     }
 
     async fn complete(&self, _request: CompletionRequest) -> Result<CompletionResponse, LlmError> {
-        self.call_count.fetch_add(1, Ordering::Relaxed);
-        if self.should_fail.load(Ordering::Relaxed) {
+        let call_num = self.call_count.fetch_add(1, Ordering::Relaxed);
+        if self.should_fail.load(Ordering::Relaxed) || call_num < self.fail_first_n {
             return Err(self.make_error());
         }
         Ok(CompletionResponse {
@@ -168,6 +188,7 @@ impl LlmProvider for StubLlm {
             input_tokens: 10,
             output_tokens: 5,
             finish_reason: FinishReason::Stop,
+            cached: false,
         })
     }
 
@@ -175,8 +196,8 @@ impl LlmProvider for StubLlm {
         &self,
         _request: ToolCompletionRequest,
     ) -> Result<ToolCompletionResponse, LlmError> {
-        self.call_count.fetch_add(1, Ordering::Relaxed);
-        if self.should_fail.load(Ordering::Relaxed) {
+        let call_num = self.call_count.fetch_add(1, Ordering::Relaxed);
+        if self.should_fail.load(Ordering::Relaxed) || call_num < self.fail_first_n {
             return Err(self.make_error());
         }
         Ok(ToolCompletionResponse {
@@ -214,6 +235,7 @@ pub struct TestHarnessBuilder {
     db: Option<Arc<dyn Database>>,
     llm: Option<Arc<dyn LlmProvider>>,
     tools: Option<Arc<ToolRegistry>>,
+    observer: Option<Arc<dyn Observer>>,
 }
 
 impl TestHarnessBuilder {
@@ -223,6 +245,7 @@ impl TestHarnessBuilder {
             db: None,
             llm: None,
             tools: None,
+            observer: None,
         }
     }
 
@@ -241,6 +264,15 @@ impl TestHarnessBuilder {
     /// Override the tool registry.
     pub fn with_tools(mut self, tools: Arc<ToolRegistry>) -> Self {
         self.tools = Some(tools);
+        self
+    }
+
+    /// Override the observer (default: `NoopObserver`).
+    ///
+    /// Use with [`RecordingObserver`](crate::observability::recording::RecordingObserver)
+    /// to capture and assert on agent lifecycle events in tests.
+    pub fn with_observer(mut self, observer: Arc<dyn Observer>) -> Self {
+        self.observer = Some(observer);
         self
     }
 
@@ -292,6 +324,9 @@ impl TestHarnessBuilder {
             skills_config: SkillsConfig::default(),
             hooks,
             cost_guard,
+            observer: self
+                .observer
+                .unwrap_or_else(|| Arc::new(crate::observability::NoopObserver)),
         };
 
         TestHarness {
@@ -339,6 +374,31 @@ mod tests {
             .await
             .expect("create conversation");
         assert!(!id.is_nil());
+    }
+
+    #[cfg(feature = "libsql")]
+    #[tokio::test]
+    async fn test_harness_custom_observer() {
+        use crate::observability::recording::RecordingObserver;
+
+        let (observer, events, _) = RecordingObserver::new();
+        let harness = TestHarnessBuilder::new()
+            .with_observer(Arc::new(observer))
+            .build()
+            .await;
+
+        // The observer should be wired into deps, not NoopObserver.
+        assert_eq!(harness.deps.observer.name(), "recording");
+
+        // Events recorded through deps.observer should appear in the handle.
+        use crate::observability::traits::ObserverEvent;
+        harness.deps.observer.record_event(&ObserverEvent::AgentStart {
+            provider: "test".into(),
+            model: "test-model".into(),
+        });
+        let captured = events.lock().unwrap();
+        assert_eq!(captured.len(), 1);
+        assert!(matches!(captured[0], ObserverEvent::AgentStart { .. }));
     }
 
     #[tokio::test]

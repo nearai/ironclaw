@@ -102,6 +102,7 @@ pub struct HeartbeatRunner {
     workspace: Arc<Workspace>,
     llm: Arc<dyn LlmProvider>,
     safety: Arc<SafetyLayer>,
+    observer: Arc<dyn crate::observability::Observer>,
     response_tx: Option<mpsc::Sender<OutgoingResponse>>,
     consecutive_failures: u32,
 }
@@ -114,6 +115,7 @@ impl HeartbeatRunner {
         workspace: Arc<Workspace>,
         llm: Arc<dyn LlmProvider>,
         safety: Arc<SafetyLayer>,
+        observer: Arc<dyn crate::observability::Observer>,
     ) -> Self {
         Self {
             config,
@@ -121,6 +123,7 @@ impl HeartbeatRunner {
             workspace,
             llm,
             safety,
+            observer,
             response_tx: None,
             consecutive_failures: 0,
         }
@@ -152,6 +155,10 @@ impl HeartbeatRunner {
 
         loop {
             interval.tick().await;
+
+            // H8: Emit heartbeat tick event.
+            self.observer
+                .record_event(&crate::observability::ObserverEvent::HeartbeatTick);
 
             // Run memory hygiene in the background so it never delays the
             // heartbeat checklist. Failures are logged inside run_if_due.
@@ -353,9 +360,10 @@ pub fn spawn_heartbeat(
     workspace: Arc<Workspace>,
     llm: Arc<dyn LlmProvider>,
     safety: Arc<SafetyLayer>,
+    observer: Arc<dyn crate::observability::Observer>,
     response_tx: Option<mpsc::Sender<OutgoingResponse>>,
 ) -> tokio::task::JoinHandle<()> {
-    let mut runner = HeartbeatRunner::new(config, hygiene_config, workspace, llm, safety);
+    let mut runner = HeartbeatRunner::new(config, hygiene_config, workspace, llm, safety, observer);
     if let Some(tx) = response_tx {
         runner = runner.with_response_channel(tx);
     }

@@ -42,7 +42,7 @@ fi
 
 # 2. Clippy (includes cognitive_complexity + too_many_lines via clippy.toml)
 step "cargo clippy"
-if cargo clippy --all --all-features -- -D warnings 2>&1; then
+if cargo clippy --all --benches --tests --examples --all-features -- -D warnings 2>&1; then
     pass "clippy (zero warnings)"
 else
     fail "clippy — fix all warnings"
@@ -56,7 +56,70 @@ else
     fail "tests"
 fi
 
-# 4. Lizard (cyclomatic complexity + copy-paste detection)
+# 4. Mutex unwrap check (no .lock().unwrap() in production code)
+step "mutex unwrap check"
+# Scan each .rs file, only checking lines BEFORE '#[cfg(test)]' boundary.
+# This excludes test modules at the bottom of files. recording.rs is test-only.
+MUTEX_UNWRAPS=""
+while IFS= read -r rs_file; do
+    # Find the line number where #[cfg(test)] starts (0 if absent)
+    TEST_LINE=$(grep -n '^#\[cfg(test)\]' "$rs_file" | head -1 | cut -d: -f1)
+    TEST_LINE=${TEST_LINE:-99999}
+    # Check production portion for .lock().unwrap() (single-line and multi-line)
+    HITS=$(head -n "$((TEST_LINE - 1))" "$rs_file" 2>/dev/null \
+        | grep -n '\.lock()\.unwrap()' || true)
+    if [[ -n "$HITS" ]]; then
+        while IFS= read -r hit; do
+            MUTEX_UNWRAPS+="${rs_file}:${hit}"$'\n'
+        done <<< "$HITS"
+    fi
+done < <(find src/ -name '*.rs' ! -name 'recording.rs')
+MUTEX_UNWRAPS=$(echo "$MUTEX_UNWRAPS" | sed '/^$/d')
+if [[ -z "$MUTEX_UNWRAPS" ]]; then
+    pass "no .lock().unwrap() in production code"
+else
+    echo "$MUTEX_UNWRAPS"
+    fail "found .lock().unwrap() in production code — use if let Ok()"
+fi
+
+# 5. Feature isolation
+step "feature isolation"
+if cargo check --no-default-features --features libsql 2>&1; then
+    pass "feature isolation: libsql-only"
+else
+    fail "feature isolation: libsql-only"
+fi
+if cargo check --no-default-features --features "libsql,otel" 2>&1; then
+    pass "feature isolation: libsql+otel"
+else
+    fail "feature isolation: libsql+otel"
+fi
+
+# 6. OTEL E2E test (requires Docker)
+step "OTEL E2E (Jaeger)"
+COMPOSE_FILE="docker-compose.otel-test.yml"
+if command -v docker &>/dev/null && docker info &>/dev/null 2>&1; then
+    # Ensure cleanup on exit (container leak prevention)
+    cleanup_jaeger() { docker compose -f "$COMPOSE_FILE" down 2>/dev/null || true; }
+    trap cleanup_jaeger EXIT
+    docker compose -f "$COMPOSE_FILE" up -d 2>&1
+    # Poll for Jaeger readiness instead of blind sleep
+    for i in $(seq 1 30); do
+        if curl -sf http://localhost:16686/ >/dev/null 2>&1; then break; fi
+        sleep 1
+    done
+    if cargo test --features otel --test otel_e2e -- --ignored 2>&1; then
+        pass "OTEL E2E — spans arrive in Jaeger"
+    else
+        fail "OTEL E2E — test failed (check Jaeger logs)"
+    fi
+    cleanup_jaeger
+    trap - EXIT
+else
+    printf "${YELLOW}SKIP${NC}: Docker not available — skipping OTEL E2E test\n"
+fi
+
+# 7. Lizard (cyclomatic complexity + copy-paste detection)
 step "lizard"
 if command -v python3 &>/dev/null && python3 -m lizard --version &>/dev/null 2>&1; then
     LIZARD_WARNINGS=$(python3 -m lizard src/ -l rust -w -T cyclomatic_complexity=15 -T length=100 2>&1 | grep -c "^.*warning:" || true)
@@ -80,7 +143,7 @@ fi
 if [[ "$QUICK" == true ]]; then
     printf "\n${YELLOW}Skipping coverage and mutation testing (--quick mode)${NC}\n"
 else
-    # 5. Test coverage
+    # 8. Test coverage
     step "cargo llvm-cov"
     if command -v cargo-llvm-cov &>/dev/null; then
         COV_OUTPUT=$(cargo llvm-cov --text --skip-functions 2>&1)
@@ -103,7 +166,7 @@ else
         printf "${YELLOW}SKIP${NC}: cargo-llvm-cov not installed\n"
     fi
 
-    # 6. Mutation testing (targeted — full run is too slow for a gate)
+    # 9. Mutation testing (targeted — full run is too slow for a gate)
     step "cargo mutants (sampled)"
     if command -v cargo-mutants &>/dev/null; then
         # Run on a small sample to keep the gate fast

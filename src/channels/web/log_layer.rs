@@ -171,7 +171,7 @@ impl LogLevelHandle {
 ///
 /// Returns the `LogLevelHandle` so callers can swap the filter at runtime.
 /// The fmt layer and `WebLogLayer` are attached alongside the reloadable filter.
-pub fn init_tracing(log_broadcaster: Arc<LogBroadcaster>) -> Arc<LogLevelHandle> {
+pub fn init_tracing(log_broadcaster: Arc<LogBroadcaster>, enable_otel: bool) -> Arc<LogLevelHandle> {
     let raw_filter =
         std::env::var("RUST_LOG").unwrap_or_else(|_| "ironclaw=info,tower_http=warn".to_string());
 
@@ -200,6 +200,24 @@ pub fn init_tracing(log_broadcaster: Arc<LogBroadcaster>) -> Arc<LogLevelHandle>
         base_filter,
     ));
 
+    // When the `otel` feature is active AND the backend config includes "otel",
+    // the tracing-opentelemetry layer bridges all `tracing` events/spans into
+    // the OTEL pipeline. We use an Option layer so the subscriber type stays
+    // the same regardless of feature flags. Without the runtime check, compiling
+    // with `otel` but OBSERVABILITY_BACKEND=none would attach the bridge to a
+    // no-op provider, wasting cycles on every tracing span.
+    #[cfg(feature = "otel")]
+    let otel_layer = if enable_otel {
+        Some(tracing_opentelemetry::layer())
+    } else {
+        None
+    };
+    #[cfg(not(feature = "otel"))]
+    let otel_layer: Option<tracing_subscriber::layer::Identity> = {
+        let _ = enable_otel; // suppress unused-variable warning
+        None
+    };
+
     tracing_subscriber::registry()
         .with(reload_layer)
         .with(
@@ -208,6 +226,7 @@ pub fn init_tracing(log_broadcaster: Arc<LogBroadcaster>) -> Arc<LogLevelHandle>
                 .with_writer(crate::tracing_fmt::TruncatingStderr::default()),
         )
         .with(WebLogLayer::new(log_broadcaster))
+        .with(otel_layer)
         .init();
 
     handle

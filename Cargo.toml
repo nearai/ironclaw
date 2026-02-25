@@ -64,6 +64,12 @@ anyhow = "1"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 
+# OpenTelemetry (optional, feature-gated behind "otel")
+opentelemetry = { version = "0.28", optional = true }
+opentelemetry_sdk = { version = "0.28", features = ["rt-tokio"], optional = true }
+opentelemetry-otlp = { version = "0.28", features = ["grpc-tonic", "http-proto"], optional = true }
+tracing-opentelemetry = { version = "0.29", optional = true }
+
 # Configuration
 dotenvy = "0.15"
 toml = "0.8"
@@ -169,6 +175,7 @@ tokio-tungstenite = "0.26"
 testcontainers-modules = { version = "0.11", features = ["postgres"] }
 pretty_assertions = "1"
 tempfile = "3"
+opentelemetry_sdk = { version = "0.28", features = ["testing"] }
 
 [features]
 default = ["postgres", "libsql", "html-to-markdown"]
@@ -181,12 +188,17 @@ postgres = [
     "rust_decimal/db-tokio-postgres",
 ]
 libsql = ["dep:libsql"]
+otel = ["dep:opentelemetry", "dep:opentelemetry_sdk", "dep:opentelemetry-otlp", "dep:tracing-opentelemetry"]
 integration = []
 html-to-markdown = ["dep:html-to-markdown-rs", "dep:readabilityrs"]
 
 [[test]]
 name = "html_to_markdown"
 required-features = ["html-to-markdown"]
+
+[[test]]
+name = "otel_e2e"
+required-features = ["otel"]
 
 # The profile that 'cargo dist' will build with
 [profile.dist]

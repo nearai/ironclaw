@@ -15,6 +15,7 @@ use crate::channels::{IncomingMessage, StatusUpdate};
 use crate::context::JobContext;
 use crate::error::Error;
 use crate::llm::{ChatMessage, Reasoning, ReasoningContext, RespondResult};
+use crate::observability::{Observer, ObserverEvent};
 
 /// Result of the agentic loop execution.
 pub(super) enum AgenticLoopResult {
@@ -25,6 +26,58 @@ pub(super) enum AgenticLoopResult {
         /// The pending approval request to store.
         pending: PendingApproval,
     },
+}
+
+// ── Observer emission helpers ────────────────────────────────────────────
+//
+// Thin wrappers that keep observer calls out of the main loop body.
+// Each is a single function call from the loop — zero added complexity.
+
+fn emit_llm_request(
+    observer: &dyn Observer,
+    provider: &str,
+    model: &str,
+    message_count: usize,
+    thread_id: Option<&str>,
+) {
+    observer.record_event(&ObserverEvent::LlmRequest {
+        provider: provider.to_string(),
+        model: model.to_string(),
+        message_count,
+        temperature: None,
+        max_tokens: None,
+        thread_id: thread_id.map(|s| s.to_string()),
+    });
+}
+
+fn emit_tool_start(
+    observer: &dyn Observer,
+    tool: &str,
+    call_id: Option<&str>,
+    thread_id: Option<&str>,
+) {
+    observer.record_event(&ObserverEvent::ToolCallStart {
+        tool: tool.to_string(),
+        call_id: call_id.map(|s| s.to_string()),
+        thread_id: thread_id.map(|s| s.to_string()),
+    });
+}
+
+fn emit_tool_end(
+    observer: &dyn Observer,
+    tool: &str,
+    call_id: Option<&str>,
+    duration: std::time::Duration,
+    success: bool,
+    error_message: Option<&str>,
+) {
+    observer.record_event(&ObserverEvent::ToolCallEnd {
+        tool: tool.to_string(),
+        call_id: call_id.map(|s| s.to_string()),
+        duration,
+        success,
+        error_message: error_message.map(|s| s.to_string()),
+    });
 }
 
 impl Agent {
@@ -125,12 +178,25 @@ impl Agent {
         // message so the LLM knows it should wrap up.
         let force_text_at = max_tool_iterations;
         let nudge_at = max_tool_iterations.saturating_sub(1);
+
+        // C2: Emit AgentStart before the loop begins.
+        let agent_start = std::time::Instant::now();
+        self.observer().record_event(&ObserverEvent::AgentStart {
+            provider: self.llm().provider_name().to_string(),
+            model: self.llm().active_model_name(),
+        });
+
         let mut iteration = 0;
         loop {
             iteration += 1;
             // Hard ceiling one past the forced-text iteration (should never be reached
             // since force_text_at guarantees a text response, but kept as a safety net).
             if iteration > max_tool_iterations + 1 {
+                self.observer().record_event(&ObserverEvent::AgentEnd {
+                    duration: agent_start.elapsed(),
+                    tokens_used: None,
+                    total_cost_usd: None,
+                });
                 return Err(crate::error::LlmError::InvalidResponse {
                     provider: "agent".to_string(),
                     reason: format!("Exceeded maximum tool iterations ({max_tool_iterations})"),
@@ -144,6 +210,11 @@ impl Agent {
                 if let Some(thread) = sess.threads.get(&thread_id)
                     && thread.state == ThreadState::Interrupted
                 {
+                    self.observer().record_event(&ObserverEvent::AgentEnd {
+                        duration: agent_start.elapsed(),
+                        tokens_used: None,
+                        total_cost_usd: None,
+                    });
                     return Err(crate::error::JobError::ContextError {
                         id: thread_id,
                         reason: "Interrupted".to_string(),
@@ -154,6 +225,11 @@ impl Agent {
 
             // Enforce cost guardrails before the LLM call
             if let Err(limit) = self.cost_guard().check_allowed().await {
+                self.observer().record_event(&ObserverEvent::AgentEnd {
+                    duration: agent_start.elapsed(),
+                    tokens_used: None,
+                    total_cost_usd: None,
+                });
                 return Err(crate::error::LlmError::InvalidResponse {
                     provider: "agent".to_string(),
                     reason: limit.to_string(),
@@ -212,6 +288,16 @@ impl Agent {
                 );
             }
 
+            let mut llm_start = std::time::Instant::now();
+            let thread_id_str = thread_id.to_string();
+            emit_llm_request(
+                self.observer().as_ref(),
+                self.llm().provider_name(),
+                &self.llm().active_model_name(),
+                context_messages.len(),
+                Some(&thread_id_str),
+            );
+
             let output = match reasoning.respond_with_tools(&context).await {
                 Ok(output) => output,
                 Err(crate::error::LlmError::ContextLengthExceeded { used, limit }) => {
@@ -221,6 +307,22 @@ impl Agent {
                         iteration,
                         "Context length exceeded, compacting messages and retrying"
                     );
+
+                    // C2 fix: emit LlmResponse for the failed first call.
+                    self.observer().record_event(&ObserverEvent::LlmResponse {
+                        provider: self.llm().provider_name().to_string(),
+                        model: self.llm().active_model_name(),
+                        duration: llm_start.elapsed(),
+                        success: false,
+                        error_message: Some(format!(
+                            "Context length exceeded: used {used}, limit {limit}"
+                        )),
+                        input_tokens: None,
+                        output_tokens: None,
+                        finish_reasons: None,
+                        cost_usd: None,
+                        cached: false,
+                    });
 
                     // Compact: keep system messages + last user message + current turn
                     context_messages = compact_messages_for_retry(&context_messages);
@@ -236,6 +338,17 @@ impl Agent {
                         .with_metadata(context.metadata.clone());
                     retry_context.force_text = force_text;
 
+                    // C2 fix: reset timing and emit a new LlmRequest for the
+                    // retry so latency histograms and message counts are accurate.
+                    llm_start = std::time::Instant::now();
+                    emit_llm_request(
+                        self.observer().as_ref(),
+                        self.llm().provider_name(),
+                        &self.llm().active_model_name(),
+                        context_messages.len(),
+                        Some(&thread_id_str),
+                    );
+
                     reasoning
                         .respond_with_tools(&retry_context)
                         .await
@@ -246,33 +359,113 @@ impl Agent {
                                 retry_error = %retry_err,
                                 "Retry after auto-compaction also failed"
                             );
+                            // C2: emit LlmResponse for the failed retry call.
+                            self.observer().record_event(&ObserverEvent::LlmResponse {
+                                provider: self.llm().provider_name().to_string(),
+                                model: self.llm().active_model_name(),
+                                duration: llm_start.elapsed(),
+                                success: false,
+                                error_message: Some(retry_err.to_string()),
+                                input_tokens: None,
+                                output_tokens: None,
+                                finish_reasons: None,
+                                cost_usd: None,
+                                cached: false,
+                            });
+                            // C1 fix: emit AgentEnd so observers don't leak the span.
+                            self.observer().record_event(&ObserverEvent::AgentEnd {
+                                duration: agent_start.elapsed(),
+                                tokens_used: None,
+                                total_cost_usd: None,
+                            });
                             // Propagate the actual retry error so callers see the real failure
                             crate::error::Error::from(retry_err)
                         })?
                 }
-                Err(e) => return Err(e.into()),
+                Err(e) => {
+                    // C4: Emit LlmResponse on error path.
+                    self.observer().record_event(&ObserverEvent::LlmResponse {
+                        provider: self.llm().provider_name().to_string(),
+                        model: self.llm().active_model_name(),
+                        duration: llm_start.elapsed(),
+                        success: false,
+                        error_message: Some(e.to_string()),
+                        input_tokens: None,
+                        output_tokens: None,
+                        finish_reasons: None,
+                        cost_usd: None,
+                        cached: false,
+                    });
+                    self.observer().record_event(&ObserverEvent::AgentEnd {
+                        duration: agent_start.elapsed(),
+                        tokens_used: None,
+                        total_cost_usd: None,
+                    });
+                    return Err(e.into());
+                }
             };
 
-            // Record cost and track token usage
-            let model_name = self.llm().active_model_name();
-            let call_cost = self
-                .cost_guard()
-                .record_llm_call(
-                    &model_name,
+            // Record cost and track token usage.
+            // C3 fix: use effective_model_name() which is request-scoped,
+            // so SmartRouting/Failover report the model that actually served
+            // the request, not the outermost wrapper's default.
+            let model_name = self.llm().effective_model_name(None);
+
+            // I4 fix: skip cost recording for cache hits — no real LLM call,
+            // no cost incurred. Token counts reflect the original call's usage.
+            let call_cost = if output.cached {
+                tracing::debug!("LLM response served from cache (0 cost)");
+                rust_decimal::Decimal::ZERO
+            } else {
+                let cost = self
+                    .cost_guard()
+                    .record_llm_call(
+                        &model_name,
+                        output.usage.input_tokens,
+                        output.usage.output_tokens,
+                        Some(self.llm().cost_per_token()),
+                    )
+                    .await;
+                tracing::debug!(
+                    "LLM call used {} input + {} output tokens (${:.6})",
                     output.usage.input_tokens,
                     output.usage.output_tokens,
-                    Some(self.llm().cost_per_token()),
-                )
-                .await;
-            tracing::debug!(
-                "LLM call used {} input + {} output tokens (${:.6})",
-                output.usage.input_tokens,
-                output.usage.output_tokens,
-                call_cost,
-            );
+                    cost,
+                );
+                cost
+            };
+
+            self.observer().record_event(&ObserverEvent::LlmResponse {
+                provider: self.llm().provider_name().to_string(),
+                model: model_name.clone(),
+                duration: llm_start.elapsed(),
+                success: true,
+                error_message: None,
+                input_tokens: Some(output.usage.input_tokens),
+                output_tokens: Some(output.usage.output_tokens),
+                finish_reasons: None,
+                cost_usd: if output.cached {
+                    None
+                } else {
+                    rust_decimal::prelude::ToPrimitive::to_f64(&call_cost)
+                },
+                cached: output.cached,
+            });
 
             match output.result {
                 RespondResult::Text(text) => {
+                    // H7: Emit TurnComplete for text-only responses.
+                    self.observer().record_event(&ObserverEvent::TurnComplete {
+                        thread_id: Some(thread_id_str.clone()),
+                        iteration: iteration as u32,
+                        tool_calls_in_turn: 0,
+                    });
+                    // C2: Emit AgentEnd on completion.
+                    self.observer().record_event(&ObserverEvent::AgentEnd {
+                        duration: agent_start.elapsed(),
+                        tokens_used: None,
+                        total_cost_usd: None,
+                    });
                     return Ok(AgenticLoopResult::Response(text));
                 }
                 RespondResult::ToolCalls {
@@ -425,9 +618,26 @@ impl Agent {
                                 )
                                 .await;
 
+                            emit_tool_start(
+                                self.observer().as_ref(),
+                                &tc.name,
+                                Some(&tc.id),
+                                Some(&thread_id_str),
+                            );
+                            let tool_start = std::time::Instant::now();
+
                             let result = self
                                 .execute_chat_tool(&tc.name, &tc.arguments, &job_ctx)
                                 .await;
+
+                            emit_tool_end(
+                                self.observer().as_ref(),
+                                &tc.name,
+                                Some(&tc.id),
+                                tool_start.elapsed(),
+                                result.is_ok(),
+                                result.as_ref().err().map(|e| e.to_string()).as_deref(),
+                            );
 
                             let _ = self
                                 .channels
@@ -452,10 +662,12 @@ impl Agent {
                             let tools = self.tools().clone();
                             let safety = self.safety().clone();
                             let channels = self.channels.clone();
+                            let observer = self.observer().clone();
                             let job_ctx = job_ctx.clone();
                             let tc = tc.clone();
                             let channel = message.channel.clone();
                             let metadata = message.metadata.clone();
+                            let tid = thread_id_str.clone();
 
                             join_set.spawn(async move {
                                 let _ = channels
@@ -468,6 +680,15 @@ impl Agent {
                                     )
                                     .await;
 
+                                // C3: Emit ToolCallStart inside spawned task.
+                                emit_tool_start(
+                                    observer.as_ref(),
+                                    &tc.name,
+                                    Some(&tc.id),
+                                    Some(&tid),
+                                );
+                                let tool_start = std::time::Instant::now();
+
                                 let result = execute_chat_tool_standalone(
                                     &tools,
                                     &safety,
@@ -476,6 +697,16 @@ impl Agent {
                                     &job_ctx,
                                 )
                                 .await;
+
+                                // C3: Emit ToolCallEnd inside spawned task.
+                                emit_tool_end(
+                                    observer.as_ref(),
+                                    &tc.name,
+                                    Some(&tc.id),
+                                    tool_start.elapsed(),
+                                    result.is_ok(),
+                                    result.as_ref().err().map(|e| e.to_string()).as_deref(),
+                                );
 
                                 let _ = channels
                                     .send_status(
@@ -533,8 +764,6 @@ impl Agent {
                     // results — in the original tool_calls order. Auth intercept
                     // is deferred until after every result is recorded.
                     let mut deferred_auth: Option<String> = None;
-                    // Collect tool call summaries for DB persistence (audit trail)
-                    let mut tool_summaries: Vec<String> = Vec::new();
 
                     for (pf_idx, (tc, outcome)) in preflight.into_iter().enumerate() {
                         match outcome {
@@ -548,11 +777,6 @@ impl Agent {
                                         turn.record_tool_error(error_msg.clone());
                                     }
                                 }
-                                tool_summaries.push(format!(
-                                    "tool:{} status:rejected reason:{}",
-                                    sanitize_audit_field(&tc.name),
-                                    sanitize_audit_field(&error_msg)
-                                ));
                                 context_messages
                                     .push(ChatMessage::tool_result(&tc.id, &tc.name, error_msg));
                             }
@@ -598,27 +822,6 @@ impl Agent {
                                                 turn.record_tool_error(e.to_string());
                                             }
                                         }
-                                    }
-                                }
-
-                                // Collect tool summary for audit trail
-                                match &tool_result {
-                                    Ok(output) => {
-                                        let params_preview = extract_params_preview(&tc.arguments);
-                                        let output_len = output.len();
-                                        tool_summaries.push(format!(
-                                            "tool:{} params:{} status:ok output_bytes:{}",
-                                            sanitize_audit_field(&tc.name),
-                                            params_preview,
-                                            output_len
-                                        ));
-                                    }
-                                    Err(e) => {
-                                        tool_summaries.push(format!(
-                                            "tool:{} status:error reason:{}",
-                                            sanitize_audit_field(&tc.name),
-                                            sanitize_audit_field(&e.to_string())
-                                        ));
                                     }
                                 }
 
@@ -674,23 +877,25 @@ impl Agent {
                         }
                     }
 
-                    // Persist tool call audit trail to DB
-                    if !tool_summaries.is_empty()
-                        && let Some(store) = self.store()
-                    {
-                        let summary = tool_summaries.join("\n");
-                        // Use "system" role so sanitize_tool_messages doesn't
-                        // re-cast this as User input (orphan "tool" messages
-                        // without a tool_call_id get promoted to User role).
-                        let _ = store
-                            .add_conversation_message(thread_id, "system", &summary)
-                            .await;
-                    }
-
                     // Return auth response after all results are recorded
                     if let Some(instructions) = deferred_auth {
+                        self.observer().record_event(&ObserverEvent::AgentEnd {
+                            duration: agent_start.elapsed(),
+                            tokens_used: None,
+                            total_cost_usd: None,
+                        });
                         return Ok(AgenticLoopResult::Response(instructions));
                     }
+
+                    // Emit turn-complete event
+                    // D2 fix: use runnable.len() (actually-executed tools),
+                    // not tool_calls.len() (all LLM-requested tools) — when
+                    // approval interrupts, deferred tools haven't run yet.
+                    self.observer().record_event(&ObserverEvent::TurnComplete {
+                        thread_id: Some(thread_id_str.clone()),
+                        iteration: iteration as u32,
+                        tool_calls_in_turn: runnable.len() as u32,
+                    });
 
                     // Handle approval if a tool needed it
                     if let Some((approval_idx, tc, tool)) = approval_needed {
@@ -704,6 +909,11 @@ impl Agent {
                             deferred_tool_calls: tool_calls[approval_idx + 1..].to_vec(),
                         };
 
+                        self.observer().record_event(&ObserverEvent::AgentEnd {
+                            duration: agent_start.elapsed(),
+                            tokens_used: None,
+                            total_cost_usd: None,
+                        });
                         return Ok(AgenticLoopResult::NeedApproval { pending });
                     }
                 }
@@ -826,39 +1036,6 @@ pub(super) struct ParsedAuthData {
     pub(super) setup_url: Option<String>,
 }
 
-// ── Audit trail helpers ─────────────────────────────────────────────────
-
-/// Maximum length for any single field in an audit summary line.
-/// Prevents oversized DB entries and context window exhaustion.
-const AUDIT_FIELD_MAX_LEN: usize = 200;
-
-/// Sanitize a string for inclusion in an audit summary line.
-/// Strips control characters (newlines, tabs, etc.) that could be used for
-/// log injection / spoofing, and truncates to `AUDIT_FIELD_MAX_LEN`.
-fn sanitize_audit_field(s: &str) -> String {
-    let cleaned: String = s.chars().filter(|c| !c.is_control()).collect();
-    if cleaned.len() > AUDIT_FIELD_MAX_LEN {
-        format!("{}…", &cleaned[..AUDIT_FIELD_MAX_LEN])
-    } else {
-        cleaned
-    }
-}
-
-/// Extract a short params preview (url, query, or path) from tool call arguments.
-/// Returns a sanitized, truncated string suitable for audit logging.
-fn extract_params_preview(arguments: &serde_json::Value) -> String {
-    let raw = arguments
-        .as_object()
-        .and_then(|o| {
-            o.get("url")
-                .or_else(|| o.get("query"))
-                .or_else(|| o.get("path"))
-        })
-        .and_then(|v| v.as_str())
-        .unwrap_or("");
-    sanitize_audit_field(raw)
-}
-
 /// Extract auth_url and setup_url from a tool_auth result JSON string.
 pub(super) fn parse_auth_result(result: &Result<String, Error>) -> ParsedAuthData {
     let parsed = result
@@ -928,8 +1105,8 @@ fn compact_messages_for_retry(messages: &[ChatMessage]) -> Vec<ChatMessage> {
             }
         }
 
-        // Only add a compaction note if there was earlier history that is being dropped
-        if idx > 0 {
+        // Only add a compaction note if non-system messages were actually dropped
+        if messages[..idx].iter().any(|m| m.role != Role::System) {
             compacted.push(ChatMessage::system(
                 "[Note: Earlier conversation history was automatically compacted \
                  to fit within the context window. The most recent exchange is preserved below.]",
@@ -976,12 +1153,11 @@ mod tests {
         CompletionRequest, CompletionResponse, FinishReason, LlmProvider, ToolCall,
         ToolCompletionRequest, ToolCompletionResponse,
     };
+    use crate::observability::NoopObserver;
     use crate::safety::SafetyLayer;
     use crate::tools::ToolRegistry;
 
-    use super::{
-        AUDIT_FIELD_MAX_LEN, check_auth_required, extract_params_preview, sanitize_audit_field,
-    };
+    use super::check_auth_required;
 
     /// Minimal LLM provider for unit tests that always returns a static response.
     struct StaticLlmProvider;
@@ -1005,6 +1181,7 @@ mod tests {
                 input_tokens: 0,
                 output_tokens: 0,
                 finish_reason: FinishReason::Stop,
+                cached: false,
             })
         }
 
@@ -1039,6 +1216,7 @@ mod tests {
             skills_config: SkillsConfig::default(),
             hooks: Arc::new(HookRegistry::new()),
             cost_guard: Arc::new(CostGuard::new(CostGuardConfig::default())),
+            observer: Arc::new(NoopObserver),
         };
 
         Agent::new(
@@ -1388,11 +1566,10 @@ mod tests {
 
         let compacted = compact_messages_for_retry(&messages);
 
-        // system + compaction note + user
-        assert_eq!(compacted.len(), 3);
+        // system + user (no compaction note — nothing was dropped)
+        assert_eq!(compacted.len(), 2);
         assert_eq!(compacted[0].content, "System prompt");
-        assert!(compacted[1].content.contains("compacted"));
-        assert_eq!(compacted[2].content, "Only question");
+        assert_eq!(compacted[1].content, "Only question");
     }
 
     #[test]
@@ -1458,6 +1635,7 @@ mod tests {
     fn test_compact_no_duplicate_system_after_last_user() {
         // A system nudge message injected AFTER the last user message must
         // not be duplicated — it should only appear once (via extend_from_slice).
+        // Also: no compaction note because only system messages precede the User.
         let messages = vec![
             ChatMessage::system("System prompt"),
             ChatMessage::user("Question"),
@@ -1475,14 +1653,14 @@ mod tests {
 
         let compacted = compact_messages_for_retry(&messages);
 
-        // system prompt + note + user + nudge + assistant + tool_result = 6
-        assert_eq!(compacted.len(), 6);
+        // system prompt + user + nudge + assistant + tool_result = 5
+        // No compaction note: only system messages precede the last User.
+        assert_eq!(compacted.len(), 5);
         assert_eq!(compacted[0].content, "System prompt");
-        assert!(compacted[1].content.contains("compacted"));
-        assert_eq!(compacted[2].content, "Question");
-        assert_eq!(compacted[3].content, "Nudge: wrap up"); // not duplicated
-        assert_eq!(compacted[4].role, Role::Assistant);
-        assert_eq!(compacted[5].role, Role::Tool);
+        assert_eq!(compacted[1].content, "Question");
+        assert_eq!(compacted[2].content, "Nudge: wrap up"); // not duplicated
+        assert_eq!(compacted[3].role, Role::Assistant);
+        assert_eq!(compacted[4].role, Role::Tool);
 
         // Verify "Nudge: wrap up" appears exactly once
         let nudge_count = compacted
@@ -1492,66 +1670,752 @@ mod tests {
         assert_eq!(nudge_count, 1);
     }
 
-    // ---- tool audit trail tests ----
+    // ---- I3 regression: false compaction note ----
 
+    /// Regression test for I3: compact_messages_for_retry must NOT insert a
+    /// compaction note when only system messages precede the last User message,
+    /// because nothing was actually dropped.
     #[test]
-    fn test_tool_summary_format_ok() {
-        let name = sanitize_audit_field("http");
-        let params = extract_params_preview(&serde_json::json!({"url": "https://example.com"}));
-        let output_len = 4096;
-        let summary = format!(
-            "tool:{} params:{} status:ok output_bytes:{}",
-            name, params, output_len
-        );
-        assert!(summary.starts_with("tool:http"));
-        assert!(summary.contains("params:https://example.com"));
-        assert!(summary.contains("status:ok"));
-        assert!(summary.contains("output_bytes:4096"));
-    }
+    fn no_false_compaction_note_when_only_system_precedes_user() {
+        // [System, User] — the system message is kept, nothing is dropped.
+        let messages = vec![
+            ChatMessage::system("System prompt"),
+            ChatMessage::user("Only question"),
+        ];
 
-    #[test]
-    fn test_tool_summary_format_error() {
-        let name = sanitize_audit_field("shell");
-        let reason = sanitize_audit_field("Command not found: foobar");
-        let summary = format!("tool:{} status:error reason:{}", name, reason);
-        assert!(summary.starts_with("tool:shell"));
-        assert!(summary.contains("status:error"));
-        assert!(summary.contains("reason:Command not found"));
-    }
+        let compacted = compact_messages_for_retry(&messages);
 
-    #[test]
-    fn test_tool_summary_params_preview_extraction() {
-        // Extracts url
-        let params = serde_json::json!({"url": "https://api.example.com/data", "method": "GET"});
+        // Should be just: system + user (no compaction note)
         assert_eq!(
-            extract_params_preview(&params),
-            "https://api.example.com/data"
+            compacted.len(),
+            2,
+            "No compaction note when nothing was dropped: got {:?}",
+            compacted.iter().map(|m| &m.content).collect::<Vec<_>>()
+        );
+        assert_eq!(compacted[0].role, Role::System);
+        assert_eq!(compacted[0].content, "System prompt");
+        assert_eq!(compacted[1].role, Role::User);
+        assert_eq!(compacted[1].content, "Only question");
+
+        // No message should contain the word "compacted"
+        assert!(
+            !compacted.iter().any(|m| m.content.contains("compacted")),
+            "Should not have compaction note when nothing was dropped"
+        );
+    }
+
+    /// Regression test for I3: multiple system messages before the only User
+    /// message should not trigger a compaction note either.
+    #[test]
+    fn no_false_compaction_note_with_multiple_systems() {
+        let messages = vec![
+            ChatMessage::system("System prompt"),
+            ChatMessage::system("Skill context"),
+            ChatMessage::user("Question"),
+            ChatMessage::assistant_with_tool_calls(
+                None,
+                vec![ToolCall {
+                    id: "c1".to_string(),
+                    name: "echo".to_string(),
+                    arguments: serde_json::json!({}),
+                }],
+            ),
+            ChatMessage::tool_result("c1", "echo", "done"),
+        ];
+
+        let compacted = compact_messages_for_retry(&messages);
+
+        // system + system + user + assistant + tool — no compaction note
+        assert_eq!(compacted.len(), 5);
+        assert!(
+            !compacted.iter().any(|m| m.content.contains("compacted")),
+            "Should not have compaction note when only system messages precede user"
+        );
+    }
+
+    // ---- C1 regression: AgentEnd emitted when compact-and-retry fails ----
+
+    /// Regression test for C1: when the first LLM call fails with
+    /// ContextLengthExceeded and the retry after compaction also fails,
+    /// AgentEnd must still be emitted so observers don't leak the span.
+    #[cfg(feature = "libsql")]
+    #[tokio::test]
+    async fn agent_end_emitted_on_compact_retry_failure() {
+        use std::sync::Arc;
+
+        use crate::agent::Agent;
+        use crate::channels::{ChannelManager, IncomingMessage};
+        use crate::config::AgentConfig;
+        use crate::observability::recording::RecordingObserver;
+        use crate::observability::traits::ObserverEvent;
+        use crate::testing::{StubLlm, TestHarnessBuilder};
+
+        // StubLlm that always fails with ContextLengthExceeded.
+        // Both the initial call and the retry will hit this error.
+        let llm = Arc::new(StubLlm::failing_non_transient("ctx-overflow"));
+
+        let (observer, events, _, _) = RecordingObserver::with_flush_counter();
+
+        let harness = TestHarnessBuilder::new()
+            .with_llm(llm)
+            .with_observer(Arc::new(observer))
+            .build()
+            .await;
+
+        // Channel sends one real message (triggers agentic loop) then /quit.
+        let channels = Arc::new(ChannelManager::new());
+        struct FailThenQuitChannel;
+        #[async_trait::async_trait]
+        impl crate::channels::Channel for FailThenQuitChannel {
+            fn name(&self) -> &str {
+                "test-c1"
+            }
+            async fn start(
+                &self,
+            ) -> Result<crate::channels::MessageStream, crate::error::ChannelError> {
+                let msgs = vec![
+                    IncomingMessage {
+                        id: uuid::Uuid::new_v4(),
+                        content: "hello".to_string(),
+                        user_id: "test".to_string(),
+                        user_name: None,
+                        channel: "test-c1".to_string(),
+                        thread_id: None,
+                        received_at: chrono::Utc::now(),
+                        metadata: serde_json::Value::Null,
+                    },
+                    IncomingMessage {
+                        id: uuid::Uuid::new_v4(),
+                        content: "/quit".to_string(),
+                        user_id: "test".to_string(),
+                        user_name: None,
+                        channel: "test-c1".to_string(),
+                        thread_id: None,
+                        received_at: chrono::Utc::now(),
+                        metadata: serde_json::Value::Null,
+                    },
+                ];
+                Ok(Box::pin(futures::stream::iter(msgs)))
+            }
+            async fn respond(
+                &self,
+                _msg: &crate::channels::IncomingMessage,
+                _response: crate::channels::OutgoingResponse,
+            ) -> Result<(), crate::error::ChannelError> {
+                Ok(())
+            }
+            async fn health_check(&self) -> Result<(), crate::error::ChannelError> {
+                Ok(())
+            }
+        }
+        channels.add(Box::new(FailThenQuitChannel)).await;
+
+        let config = AgentConfig {
+            name: "test-agent".to_string(),
+            max_parallel_jobs: 1,
+            job_timeout: std::time::Duration::from_secs(10),
+            stuck_threshold: std::time::Duration::from_secs(30),
+            repair_check_interval: std::time::Duration::from_secs(60),
+            max_repair_attempts: 1,
+            use_planning: false,
+            session_idle_timeout: std::time::Duration::from_secs(300),
+            allow_local_tools: false,
+            max_cost_per_day_cents: None,
+            max_actions_per_hour: None,
+            max_tool_iterations: 10,
+            auto_approve_tools: false,
+        };
+
+        let agent = Agent::new(config, harness.deps, channels, None, None, None, None, None);
+        agent.run().await.expect("agent should shut down cleanly");
+
+        // Check recorded events: AgentStart must be paired with AgentEnd.
+        let captured = events.lock().unwrap();
+        let start_count = captured
+            .iter()
+            .filter(|e| matches!(e, ObserverEvent::AgentStart { .. }))
+            .count();
+        let end_count = captured
+            .iter()
+            .filter(|e| matches!(e, ObserverEvent::AgentEnd { .. }))
+            .count();
+
+        assert!(
+            start_count > 0,
+            "AgentStart should have been emitted for the LLM call"
+        );
+        // REGRESSION: Before fix, end_count was 0 because the compact-retry
+        // failure path used `?` without emitting AgentEnd first.
+        assert_eq!(
+            start_count, end_count,
+            "Every AgentStart must have a matching AgentEnd; got {start_count} starts and {end_count} ends"
+        );
+    }
+
+    /// Regression test for C2: when the first LLM call fails with
+    /// ContextLengthExceeded and the retry succeeds, there must be:
+    /// - 2 LlmRequest events (original + retry with compacted message count)
+    /// - 2 LlmResponse events (first: success=false, second: success=true)
+    /// Before the fix, only 1 LlmRequest and 1 LlmResponse were emitted,
+    /// and the duration included both the failed call and the retry.
+    #[cfg(feature = "libsql")]
+    #[tokio::test]
+    async fn retry_llm_call_emits_separate_observer_events() {
+        use std::sync::Arc;
+
+        use crate::agent::Agent;
+        use crate::channels::{ChannelManager, IncomingMessage};
+        use crate::config::AgentConfig;
+        use crate::observability::recording::RecordingObserver;
+        use crate::observability::traits::ObserverEvent;
+        use crate::testing::{StubLlm, TestHarnessBuilder};
+
+        // First call fails with ContextLengthExceeded, second call succeeds.
+        let llm = Arc::new(StubLlm::failing_first_n(1, "OK"));
+
+        let (observer, events, _, _) = RecordingObserver::with_flush_counter();
+
+        let harness = TestHarnessBuilder::new()
+            .with_llm(llm)
+            .with_observer(Arc::new(observer))
+            .build()
+            .await;
+
+        let channels = Arc::new(ChannelManager::new());
+        struct C2TestChannel;
+        #[async_trait::async_trait]
+        impl crate::channels::Channel for C2TestChannel {
+            fn name(&self) -> &str {
+                "test-c2"
+            }
+            async fn start(
+                &self,
+            ) -> Result<crate::channels::MessageStream, crate::error::ChannelError> {
+                let msgs = vec![
+                    IncomingMessage {
+                        id: uuid::Uuid::new_v4(),
+                        content: "hello".to_string(),
+                        user_id: "test".to_string(),
+                        user_name: None,
+                        channel: "test-c2".to_string(),
+                        thread_id: None,
+                        received_at: chrono::Utc::now(),
+                        metadata: serde_json::Value::Null,
+                    },
+                    IncomingMessage {
+                        id: uuid::Uuid::new_v4(),
+                        content: "/quit".to_string(),
+                        user_id: "test".to_string(),
+                        user_name: None,
+                        channel: "test-c2".to_string(),
+                        thread_id: None,
+                        received_at: chrono::Utc::now(),
+                        metadata: serde_json::Value::Null,
+                    },
+                ];
+                Ok(Box::pin(futures::stream::iter(msgs)))
+            }
+            async fn respond(
+                &self,
+                _msg: &crate::channels::IncomingMessage,
+                _response: crate::channels::OutgoingResponse,
+            ) -> Result<(), crate::error::ChannelError> {
+                Ok(())
+            }
+            async fn health_check(&self) -> Result<(), crate::error::ChannelError> {
+                Ok(())
+            }
+        }
+        channels.add(Box::new(C2TestChannel)).await;
+
+        let config = AgentConfig {
+            name: "test-agent".to_string(),
+            max_parallel_jobs: 1,
+            job_timeout: std::time::Duration::from_secs(10),
+            stuck_threshold: std::time::Duration::from_secs(30),
+            repair_check_interval: std::time::Duration::from_secs(60),
+            max_repair_attempts: 1,
+            use_planning: false,
+            session_idle_timeout: std::time::Duration::from_secs(300),
+            allow_local_tools: false,
+            max_cost_per_day_cents: None,
+            max_actions_per_hour: None,
+            max_tool_iterations: 10,
+            auto_approve_tools: false,
+        };
+
+        let agent = Agent::new(config, harness.deps, channels, None, None, None, None, None);
+        agent.run().await.expect("agent should shut down cleanly");
+
+        let captured = events.lock().unwrap();
+
+        // Collect LlmRequest events
+        let llm_requests: Vec<_> = captured
+            .iter()
+            .filter(|e| matches!(e, ObserverEvent::LlmRequest { .. }))
+            .collect();
+
+        // Collect LlmResponse events
+        let llm_responses: Vec<_> = captured
+            .iter()
+            .filter_map(|e| {
+                if let ObserverEvent::LlmResponse {
+                    success,
+                    error_message,
+                    ..
+                } = e
+                {
+                    Some((*success, error_message.clone()))
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        // REGRESSION: Before fix, only 1 LlmRequest was emitted.
+        assert_eq!(
+            llm_requests.len(),
+            2,
+            "Expected 2 LlmRequest events (original + retry), got {}",
+            llm_requests.len()
         );
 
-        // Falls back to query
-        let params2 = serde_json::json!({"query": "rust async"});
-        assert_eq!(extract_params_preview(&params2), "rust async");
+        // REGRESSION: Before fix, only 1 LlmResponse (success=true) was emitted.
+        assert_eq!(
+            llm_responses.len(),
+            2,
+            "Expected 2 LlmResponse events (failed + success), got {}",
+            llm_responses.len()
+        );
 
-        // Empty when no matching key
-        let params3 = serde_json::json!({"message": "hello"});
-        assert_eq!(extract_params_preview(&params3), "");
+        // First response should be the failure
+        assert!(
+            !llm_responses[0].0,
+            "First LlmResponse should have success=false"
+        );
+        assert!(
+            llm_responses[0].1.is_some(),
+            "First LlmResponse should have an error message"
+        );
+
+        // Second response should be success
+        assert!(
+            llm_responses[1].0,
+            "Second LlmResponse should have success=true"
+        );
+
+        // Second LlmRequest should have a smaller message count (compacted)
+        if let (
+            ObserverEvent::LlmRequest {
+                message_count: count1,
+                ..
+            },
+            ObserverEvent::LlmRequest {
+                message_count: count2,
+                ..
+            },
+        ) = (llm_requests[0], llm_requests[1])
+        {
+            assert!(
+                count2 <= count1,
+                "Retry LlmRequest message_count ({count2}) should be <= original ({count1})"
+            );
+        }
     }
 
-    #[test]
-    fn test_sanitize_audit_field_strips_newlines() {
-        // Newlines could be used for log injection / audit trail spoofing
-        let malicious = "http\ntool:shell status:ok output_bytes:0";
-        let cleaned = sanitize_audit_field(malicious);
-        assert!(!cleaned.contains('\n'));
-        assert_eq!(cleaned, "httptool:shell status:ok output_bytes:0");
-    }
+    /// D2 test helpers: shared infrastructure for TurnComplete tool-count tests.
+    #[cfg(feature = "libsql")]
+    mod d2_turn_complete_tests {
+        use std::sync::Arc;
 
-    #[test]
-    fn test_sanitize_audit_field_truncates_long_strings() {
-        let long = "x".repeat(500);
-        let cleaned = sanitize_audit_field(&long);
-        // 200 chars + ellipsis
-        assert!(cleaned.len() <= AUDIT_FIELD_MAX_LEN + "…".len());
-        assert!(cleaned.ends_with('…'));
+        use async_trait::async_trait;
+        use rust_decimal::Decimal;
+
+        use crate::agent::agent_loop::Agent;
+        use crate::channels::{ChannelManager, IncomingMessage};
+        use crate::config::AgentConfig;
+        use crate::llm::{
+            CompletionRequest, CompletionResponse, FinishReason, LlmProvider, ToolCall,
+            ToolCompletionRequest, ToolCompletionResponse,
+        };
+        use crate::observability::recording::RecordingObserver;
+        use crate::observability::traits::ObserverEvent;
+        use crate::testing::TestHarnessBuilder;
+        use crate::tools::{ApprovalRequirement, ToolRegistry};
+
+        // --- Shared test components ---
+
+        /// LLM that returns a configurable list of tool calls.
+        struct ToolCallsLlm {
+            tool_calls: Vec<ToolCall>,
+        }
+
+        impl ToolCallsLlm {
+            fn new(tool_calls: Vec<ToolCall>) -> Self {
+                Self { tool_calls }
+            }
+        }
+
+        #[async_trait]
+        impl LlmProvider for ToolCallsLlm {
+            fn model_name(&self) -> &str {
+                "tool-calls-mock"
+            }
+
+            fn cost_per_token(&self) -> (Decimal, Decimal) {
+                (Decimal::ZERO, Decimal::ZERO)
+            }
+
+            async fn complete(
+                &self,
+                _request: CompletionRequest,
+            ) -> Result<CompletionResponse, crate::error::LlmError> {
+                Ok(CompletionResponse {
+                    content: "done".to_string(),
+                    input_tokens: 0,
+                    output_tokens: 0,
+                    finish_reason: FinishReason::Stop,
+                    cached: false,
+                })
+            }
+
+            async fn complete_with_tools(
+                &self,
+                _request: ToolCompletionRequest,
+            ) -> Result<ToolCompletionResponse, crate::error::LlmError> {
+                Ok(ToolCompletionResponse {
+                    content: None,
+                    tool_calls: self.tool_calls.clone(),
+                    input_tokens: 10,
+                    output_tokens: 5,
+                    finish_reason: FinishReason::ToolUse,
+                })
+            }
+        }
+
+        /// Tool that always requires approval.
+        struct ApprovalTool;
+
+        #[async_trait]
+        impl crate::tools::Tool for ApprovalTool {
+            fn name(&self) -> &str {
+                "approve_me"
+            }
+            fn description(&self) -> &str {
+                "Test tool requiring approval"
+            }
+            fn parameters_schema(&self) -> serde_json::Value {
+                serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "message": {"type": "string"}
+                    }
+                })
+            }
+            async fn execute(
+                &self,
+                _params: serde_json::Value,
+                _ctx: &crate::context::JobContext,
+            ) -> Result<crate::tools::ToolOutput, crate::tools::ToolError> {
+                Ok(crate::tools::ToolOutput::text(
+                    "approved",
+                    std::time::Duration::ZERO,
+                ))
+            }
+            fn requires_approval(
+                &self,
+                _params: &serde_json::Value,
+            ) -> ApprovalRequirement {
+                ApprovalRequirement::Always
+            }
+        }
+
+        /// Run an agent with the given LLM and tool registry, return TurnComplete counts.
+        async fn run_and_extract_turn_counts(
+            llm: Arc<dyn LlmProvider>,
+            tools: Arc<ToolRegistry>,
+            auto_approve: bool,
+        ) -> Vec<u32> {
+            run_and_extract_turn_counts_with_hooks(llm, tools, auto_approve, None).await
+        }
+
+        async fn run_and_extract_turn_counts_with_hooks(
+            llm: Arc<dyn LlmProvider>,
+            tools: Arc<ToolRegistry>,
+            auto_approve: bool,
+            hooks: Option<Arc<crate::hooks::HookRegistry>>,
+        ) -> Vec<u32> {
+            let (observer, events, _, _) = RecordingObserver::with_flush_counter();
+
+            let mut harness = TestHarnessBuilder::new()
+                .with_llm(llm)
+                .with_tools(tools)
+                .with_observer(Arc::new(observer))
+                .build()
+                .await;
+            if let Some(h) = hooks {
+                harness.deps.hooks = h;
+            }
+
+            let channels = Arc::new(ChannelManager::new());
+            struct MsgThenQuitChannel;
+            #[async_trait::async_trait]
+            impl crate::channels::Channel for MsgThenQuitChannel {
+                fn name(&self) -> &str {
+                    "test-d2"
+                }
+                async fn start(
+                    &self,
+                ) -> Result<crate::channels::MessageStream, crate::error::ChannelError> {
+                    let msgs = vec![
+                        IncomingMessage {
+                            id: uuid::Uuid::new_v4(),
+                            content: "trigger tools".to_string(),
+                            user_id: "test".to_string(),
+                            user_name: None,
+                            channel: "test-d2".to_string(),
+                            thread_id: None,
+                            received_at: chrono::Utc::now(),
+                            metadata: serde_json::Value::Null,
+                        },
+                        IncomingMessage {
+                            id: uuid::Uuid::new_v4(),
+                            content: "/quit".to_string(),
+                            user_id: "test".to_string(),
+                            user_name: None,
+                            channel: "test-d2".to_string(),
+                            thread_id: None,
+                            received_at: chrono::Utc::now(),
+                            metadata: serde_json::Value::Null,
+                        },
+                    ];
+                    Ok(Box::pin(futures::stream::iter(msgs)))
+                }
+                async fn respond(
+                    &self,
+                    _msg: &crate::channels::IncomingMessage,
+                    _response: crate::channels::OutgoingResponse,
+                ) -> Result<(), crate::error::ChannelError> {
+                    Ok(())
+                }
+                async fn health_check(&self) -> Result<(), crate::error::ChannelError> {
+                    Ok(())
+                }
+            }
+            channels.add(Box::new(MsgThenQuitChannel)).await;
+
+            let config = AgentConfig {
+                name: "test-agent".to_string(),
+                max_parallel_jobs: 1,
+                job_timeout: std::time::Duration::from_secs(10),
+                stuck_threshold: std::time::Duration::from_secs(30),
+                repair_check_interval: std::time::Duration::from_secs(60),
+                max_repair_attempts: 1,
+                use_planning: false,
+                session_idle_timeout: std::time::Duration::from_secs(300),
+                allow_local_tools: false,
+                max_cost_per_day_cents: None,
+                max_actions_per_hour: None,
+                max_tool_iterations: 10,
+                auto_approve_tools: auto_approve,
+            };
+
+            let agent =
+                Agent::new(config, harness.deps, channels, None, None, None, None, None);
+            let _ = agent.run().await;
+
+            let captured = events.lock().unwrap();
+            captured
+                .iter()
+                .filter_map(|e| match e {
+                    ObserverEvent::TurnComplete {
+                        tool_calls_in_turn, ..
+                    } => Some(*tool_calls_in_turn),
+                    _ => None,
+                })
+                .collect()
+        }
+
+        fn echo_call(id: &str) -> ToolCall {
+            ToolCall {
+                id: id.into(),
+                name: "echo".into(),
+                arguments: serde_json::json!({"message": id}),
+            }
+        }
+
+        fn approval_call(id: &str) -> ToolCall {
+            ToolCall {
+                id: id.into(),
+                name: "approve_me".into(),
+                arguments: serde_json::json!({"message": "need approval"}),
+            }
+        }
+
+        async fn tools_with_approval() -> Arc<ToolRegistry> {
+            let tools = Arc::new(ToolRegistry::new());
+            tools.register_builtin_tools();
+            tools.register(Arc::new(ApprovalTool)).await;
+            tools
+        }
+
+        fn tools_builtin_only() -> Arc<ToolRegistry> {
+            let tools = Arc::new(ToolRegistry::new());
+            tools.register_builtin_tools();
+            tools
+        }
+
+        /// Hook that rejects a specific tool by name.
+        struct RejectToolHook {
+            tool_name: String,
+        }
+
+        #[async_trait]
+        impl crate::hooks::Hook for RejectToolHook {
+            fn name(&self) -> &str {
+                "reject-tool-hook"
+            }
+            fn hook_points(&self) -> &[crate::hooks::HookPoint] {
+                &[crate::hooks::HookPoint::BeforeToolCall]
+            }
+            async fn execute(
+                &self,
+                event: &crate::hooks::HookEvent,
+                _ctx: &crate::hooks::HookContext,
+            ) -> Result<crate::hooks::HookOutcome, crate::hooks::HookError> {
+                if let crate::hooks::HookEvent::ToolCall { tool_name, .. } = event
+                    && tool_name == &self.tool_name
+                {
+                    return Ok(crate::hooks::HookOutcome::reject(format!(
+                        "tool {tool_name} blocked by test hook",
+                    )));
+                }
+                Ok(crate::hooks::HookOutcome::ok())
+            }
+        }
+
+        // --- Test cases ---
+
+        /// D2 regression: approval at index 1 → only 1 tool runs out of 3.
+        #[tokio::test]
+        async fn approval_mid_list_counts_only_executed() {
+            let llm: Arc<dyn LlmProvider> = Arc::new(ToolCallsLlm::new(vec![
+                echo_call("call_1"),
+                approval_call("call_2"),
+                echo_call("call_3"),
+            ]));
+
+            let counts =
+                run_and_extract_turn_counts(llm, tools_with_approval().await, false).await;
+
+            assert!(!counts.is_empty(), "Expected at least one TurnComplete");
+            assert_eq!(
+                counts[0], 1,
+                "Only 1 tool ran before approval; got {}",
+                counts[0]
+            );
+        }
+
+        /// Edge case: first tool requires approval → 0 tools executed.
+        #[tokio::test]
+        async fn approval_at_first_tool_counts_zero() {
+            let llm: Arc<dyn LlmProvider> = Arc::new(ToolCallsLlm::new(vec![
+                approval_call("call_1"),
+                echo_call("call_2"),
+                echo_call("call_3"),
+            ]));
+
+            let counts =
+                run_and_extract_turn_counts(llm, tools_with_approval().await, false).await;
+
+            assert!(!counts.is_empty(), "Expected at least one TurnComplete");
+            assert_eq!(
+                counts[0], 0,
+                "No tools should have run when first needs approval; got {}",
+                counts[0]
+            );
+        }
+
+        /// Happy path: all 3 tools pass, no approval needed → count is 3.
+        /// Catches mutations that always return 0 or a subset.
+        #[tokio::test]
+        async fn all_tools_pass_counts_all() {
+            let llm: Arc<dyn LlmProvider> = Arc::new(ToolCallsLlm::new(vec![
+                echo_call("call_1"),
+                echo_call("call_2"),
+                echo_call("call_3"),
+            ]));
+
+            let counts =
+                run_and_extract_turn_counts(llm, tools_builtin_only(), false).await;
+
+            assert!(!counts.is_empty(), "Expected at least one TurnComplete");
+            assert_eq!(
+                counts[0], 3,
+                "All 3 tools should have run; got {}",
+                counts[0]
+            );
+        }
+
+        /// auto_approve_tools bypasses approval → all 3 run even with approve_me.
+        /// Catches mutations that hard-code approval filtering.
+        #[tokio::test]
+        async fn auto_approve_counts_all() {
+            let llm: Arc<dyn LlmProvider> = Arc::new(ToolCallsLlm::new(vec![
+                echo_call("call_1"),
+                approval_call("call_2"),
+                echo_call("call_3"),
+            ]));
+
+            let counts =
+                run_and_extract_turn_counts(llm, tools_with_approval().await, true).await;
+
+            assert!(!counts.is_empty(), "Expected at least one TurnComplete");
+            assert_eq!(
+                counts[0], 3,
+                "With auto_approve, all 3 tools should run; got {}",
+                counts[0]
+            );
+        }
+
+        /// Hook rejection: first tool rejected by hook, second and third run.
+        /// Distinguishes `runnable.len()` (2) from `preflight.len()` (3) and
+        /// `exec_results.len()` (3), killing the `exec_results.len()` mutation.
+        #[tokio::test]
+        async fn hook_rejection_excludes_from_count() {
+            // 3 tool calls: first has a unique name targeted by the hook,
+            // the other two are plain echo calls that will run normally.
+            let llm: Arc<dyn LlmProvider> = Arc::new(ToolCallsLlm::new(vec![
+                ToolCall {
+                    id: "call_1".into(),
+                    name: "blocked_tool".into(),
+                    arguments: serde_json::json!({"message": "blocked"}),
+                },
+                echo_call("call_2"),
+                echo_call("call_3"),
+            ]));
+
+            let hooks = Arc::new(crate::hooks::HookRegistry::new());
+            hooks.register(Arc::new(RejectToolHook {
+                tool_name: "blocked_tool".to_string(),
+            })).await;
+
+            let counts = run_and_extract_turn_counts_with_hooks(
+                llm,
+                tools_builtin_only(),
+                false,
+                Some(hooks),
+            )
+            .await;
+
+            assert!(!counts.is_empty(), "Expected at least one TurnComplete");
+            // preflight has 3 entries (1 Rejected + 2 Runnable),
+            // exec_results has 3 slots, but runnable has only 2.
+            assert_eq!(
+                counts[0], 2,
+                "Hook-rejected tool should not count; got {}",
+                counts[0]
+            );
+        }
     }
 }
