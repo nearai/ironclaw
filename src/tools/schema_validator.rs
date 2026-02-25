@@ -737,4 +737,222 @@ mod tests {
             failures.join("\n")
         );
     }
+
+    // ── WASM and MCP tool schema validation (QA 1.1 extension) ─────────
+
+    /// Representative WASM tool schemas -- these mirror the shapes produced by
+    /// `WasmToolWrapper::parameters_schema()` from real WASM modules.
+    #[test]
+    fn test_wasm_tool_schemas() {
+        let schemas: Vec<(&str, serde_json::Value)> = vec![
+            // Typical WASM tool with simple params
+            (
+                "wasm_weather",
+                serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "city": { "type": "string", "description": "City name" },
+                        "units": {
+                            "type": "string",
+                            "enum": ["celsius", "fahrenheit"],
+                            "description": "Temperature units"
+                        }
+                    },
+                    "required": ["city"]
+                }),
+            ),
+            // WASM tool with nested object (e.g., HTTP tool)
+            (
+                "wasm_http_client",
+                serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "url": { "type": "string", "description": "URL to fetch" },
+                        "method": {
+                            "type": "string",
+                            "enum": ["GET", "POST", "PUT", "DELETE"],
+                            "description": "HTTP method"
+                        },
+                        "headers": {
+                            "type": "object",
+                            "properties": {},
+                            "description": "Custom headers"
+                        },
+                        "body": { "type": "string", "description": "Request body" }
+                    },
+                    "required": ["url"]
+                }),
+            ),
+            // WASM tool with array params
+            (
+                "wasm_batch_processor",
+                serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "items": {
+                            "type": "array",
+                            "items": { "type": "string" },
+                            "description": "Items to process"
+                        },
+                        "parallel": { "type": "boolean", "description": "Run in parallel" }
+                    },
+                    "required": ["items"]
+                }),
+            ),
+            // Empty WASM tool (no required params)
+            (
+                "wasm_status",
+                serde_json::json!({
+                    "type": "object",
+                    "properties": {}
+                }),
+            ),
+        ];
+
+        let mut failures = Vec::new();
+        for (name, schema) in &schemas {
+            if let Err(errors) = validate_strict_schema(schema, name) {
+                failures.push(format!("WASM tool '{}': {}", name, errors.join("; ")));
+            }
+        }
+        assert!(
+            failures.is_empty(),
+            "Schema validation failures for WASM tool schemas:\n{}",
+            failures.join("\n")
+        );
+    }
+
+    /// Representative MCP tool schemas -- these mirror the shapes received from
+    /// MCP servers via `McpTool::input_schema` (camelCase `inputSchema` in protocol).
+    #[test]
+    fn test_mcp_tool_schemas() {
+        let schemas: Vec<(&str, serde_json::Value)> = vec![
+            // Default MCP schema (empty object -- from default_input_schema())
+            (
+                "mcp_default",
+                serde_json::json!({"type": "object", "properties": {}}),
+            ),
+            // Typical MCP server tool (e.g., filesystem server)
+            (
+                "mcp_read_file",
+                serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "path": { "type": "string", "description": "File path to read" }
+                    },
+                    "required": ["path"]
+                }),
+            ),
+            // MCP tool with complex nested params (e.g., database query)
+            (
+                "mcp_sql_query",
+                serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "query": { "type": "string", "description": "SQL query to execute" },
+                        "params": {
+                            "type": "array",
+                            "items": { "type": "string" },
+                            "description": "Query parameters"
+                        },
+                        "timeout_ms": {
+                            "type": "integer",
+                            "description": "Query timeout in milliseconds"
+                        }
+                    },
+                    "required": ["query"]
+                }),
+            ),
+            // MCP tool with additionalProperties: false (strict server)
+            (
+                "mcp_strict_tool",
+                serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "action": {
+                            "type": "string",
+                            "enum": ["start", "stop", "restart"],
+                            "description": "Action to perform"
+                        }
+                    },
+                    "required": ["action"],
+                    "additionalProperties": false
+                }),
+            ),
+        ];
+
+        let mut failures = Vec::new();
+        for (name, schema) in &schemas {
+            if let Err(errors) = validate_strict_schema(schema, name) {
+                failures.push(format!("MCP tool '{}': {}", name, errors.join("; ")));
+            }
+        }
+        assert!(
+            failures.is_empty(),
+            "Schema validation failures for MCP tool schemas:\n{}",
+            failures.join("\n")
+        );
+    }
+
+    /// Verify the validator catches common issues in externally-sourced schemas.
+    /// WASM modules and MCP servers may produce schemas with defects that
+    /// built-in tools wouldn't have.
+    #[test]
+    fn test_external_schema_defects_detected() {
+        // Missing top-level type (MCP server omitted it)
+        let bad_no_type = serde_json::json!({
+            "properties": {
+                "query": { "type": "string" }
+            }
+        });
+        assert!(validate_strict_schema(&bad_no_type, "ext_no_type").is_err());
+
+        // Required key not in properties (WASM module typo)
+        let bad_required = serde_json::json!({
+            "type": "object",
+            "properties": {
+                "input": { "type": "string" }
+            },
+            "required": ["inpt"]
+        });
+        assert!(validate_strict_schema(&bad_required, "ext_typo").is_err());
+
+        // Array without items definition (MCP server bug)
+        let bad_array = serde_json::json!({
+            "type": "object",
+            "properties": {
+                "tags": { "type": "array" }
+            }
+        });
+        assert!(validate_strict_schema(&bad_array, "ext_no_items").is_err());
+
+        // Enum type mismatch (WASM module declares string enum with integers)
+        let bad_enum = serde_json::json!({
+            "type": "object",
+            "properties": {
+                "mode": {
+                    "type": "string",
+                    "enum": [1, 2, 3]
+                }
+            }
+        });
+        assert!(validate_strict_schema(&bad_enum, "ext_enum_mismatch").is_err());
+
+        // Nested object without type (deeply nested MCP schema)
+        let bad_nested = serde_json::json!({
+            "type": "object",
+            "properties": {
+                "config": {
+                    "type": "object",
+                    "properties": {
+                        "setting": { "description": "missing type field" }
+                    }
+                }
+            }
+        });
+        // This may pass or fail depending on whether we enforce type on every
+        // nested property -- the validator allows freeform for compatibility.
+        // The important thing is it doesn't panic.
+        let _ = validate_strict_schema(&bad_nested, "ext_nested_no_type");
+    }
 }
