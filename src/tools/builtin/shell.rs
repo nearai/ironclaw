@@ -199,49 +199,119 @@ const SAFE_ENV_VARS: &[&str] = &[
 /// Low-risk command prefixes: read-only, no side effects.
 static LOW_RISK_PATTERNS: LazyLock<Vec<&'static str>> = LazyLock::new(|| {
     vec![
-        "ls", "ll", "la", "dir",
-        "cat", "less", "more", "head", "tail",
-        "grep", "rg", "ag", "awk", "sed",
-        "find", "fd", "locate",
-        "echo", "printf",
-        "pwd", "cd",
-        "env", "printenv", "which", "whereis", "type",
-        "date", "cal", "uptime", "uname",
-        "df", "du", "free", "top", "htop", "ps",
-        "git status", "git log", "git diff", "git show",
-        "git branch", "git remote", "git fetch",
-        "cargo check", "cargo test", "cargo clippy",
-        "npm test", "npm run test", "yarn test",
-        "curl --head", "curl -I",
+        "ls",
+        "ll",
+        "la",
+        "dir",
+        "cat",
+        "less",
+        "more",
+        "head",
+        "tail",
+        "grep",
+        "rg",
+        "ag",
+        "awk",
+        "sed",
+        "find",
+        "fd",
+        "locate",
+        "echo",
+        "printf",
+        "pwd",
+        "cd",
+        "env",
+        "printenv",
+        "which",
+        "whereis",
+        "type",
+        "date",
+        "cal",
+        "uptime",
+        "uname",
+        "df",
+        "du",
+        "free",
+        "top",
+        "htop",
+        "ps",
+        "git status",
+        "git log",
+        "git diff",
+        "git show",
+        "git branch",
+        "git remote",
+        "git fetch",
+        "cargo check",
+        "cargo test",
+        "cargo clippy",
+        "npm test",
+        "npm run test",
+        "yarn test",
+        "curl --head",
+        "curl -I",
         "ping",
-        "wc", "sort", "uniq", "tr", "cut",
-        "jq", "yq",
-        "file", "stat",
-        "man", "--help", "-h",
+        "wc",
+        "sort",
+        "uniq",
+        "tr",
+        "cut",
+        "jq",
+        "yq",
+        "file",
+        "stat",
+        "man",
+        "--help",
+        "-h",
     ]
 });
 
 /// Medium-risk command prefixes: mutations that are generally reversible.
 static MEDIUM_RISK_PATTERNS: LazyLock<Vec<&'static str>> = LazyLock::new(|| {
     vec![
-        "mkdir", "rmdir",
+        "mkdir",
+        "rmdir",
         "touch",
-        "cp", "copy",
-        "mv", "move",
-        "git commit", "git add", "git checkout", "git switch",
-        "git merge", "git rebase", "git stash",
+        "cp",
+        "copy",
+        "mv",
+        "move",
+        "git commit",
+        "git add",
+        "git checkout",
+        "git switch",
+        "git merge",
+        "git rebase",
+        "git stash",
         "git tag",
-        "cargo build", "cargo run",
-        "npm install", "npm ci", "npm update",
-        "pip install", "pip uninstall",
-        "brew install", "brew uninstall",
-        "apt install", "apt remove",
-        "make", "cmake",
-        "tar", "zip", "unzip", "gzip", "gunzip",
-        "ssh", "scp", "rsync",
-        "curl", "wget",
-        "docker build", "docker pull", "docker run",
-        "kubectl apply", "kubectl create",
+        "cargo build",
+        "cargo run",
+        "npm install",
+        "npm ci",
+        "npm update",
+        "pip install",
+        "pip uninstall",
+        "brew install",
+        "brew uninstall",
+        "apt install",
+        "apt remove",
+        "make",
+        "cmake",
+        "tar",
+        "zip",
+        "unzip",
+        "gzip",
+        "gunzip",
+        "ssh",
+        "scp",
+        "rsync",
+        "curl",
+        "wget",
+        "docker build",
+        "docker pull",
+        "docker run",
+        "kubectl apply",
+        "kubectl create",
     ]
 });
 
@@ -933,16 +1003,25 @@ mod tests {
     #[test]
     fn test_classify_command_risk_medium() {
         assert_eq!(classify_command_risk("cargo build"), RiskLevel::Medium);
-        assert_eq!(classify_command_risk("git commit -m 'foo'"), RiskLevel::Medium);
+        assert_eq!(
+            classify_command_risk("git commit -m 'foo'"),
+            RiskLevel::Medium
+        );
         assert_eq!(classify_command_risk("mkdir /tmp/dir"), RiskLevel::Medium);
-        assert_eq!(classify_command_risk("npm install lodash"), RiskLevel::Medium);
+        assert_eq!(
+            classify_command_risk("npm install lodash"),
+            RiskLevel::Medium
+        );
         // Non-force push is medium (reversible)
         assert_eq!(
             classify_command_risk("git push origin feature-branch"),
             RiskLevel::Medium
         );
         // Unknown commands default to Medium
-        assert_eq!(classify_command_risk("my-custom-tool --flag"), RiskLevel::Medium);
+        assert_eq!(
+            classify_command_risk("my-custom-tool --flag"),
+            RiskLevel::Medium
+        );
     }
 
     #[test]
