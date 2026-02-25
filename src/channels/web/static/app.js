@@ -15,6 +15,11 @@ let jobListRefreshTimer = null;
 const JOB_EVENTS_CAP = 500;
 const MEMORY_SEARCH_QUERY_MAX_LENGTH = 100;
 
+// --- Tool Activity State ---
+let _activeGroup = null;
+let _activeToolCards = {};
+let _activityThinking = null;
+
 // --- Auth ---
 
 function authenticate() {
@@ -113,6 +118,7 @@ function connectSSE() {
     document.getElementById('sse-dot').classList.remove('disconnected');
     document.getElementById('sse-status').textContent = 'Connected';
     if (sseHasConnectedBefore && currentThreadId) {
+      finalizeActivityGroup();
       loadHistory();
     }
     sseHasConnectedBefore = true;
@@ -126,6 +132,7 @@ function connectSSE() {
   eventSource.addEventListener('response', (e) => {
     const data = JSON.parse(e.data);
     if (!isCurrentThread(data.thread_id)) return;
+    finalizeActivityGroup();
     addMessage('assistant', data.content);
     setStatus('');
     enableChatInput();
@@ -136,25 +143,31 @@ function connectSSE() {
   eventSource.addEventListener('thinking', (e) => {
     const data = JSON.parse(e.data);
     if (!isCurrentThread(data.thread_id)) return;
-    setStatus(data.message, true);
+    showActivityThinking(data.message);
   });
 
   eventSource.addEventListener('tool_started', (e) => {
     const data = JSON.parse(e.data);
     if (!isCurrentThread(data.thread_id)) return;
-    setStatus('Running tool: ' + data.name, true);
+    addToolCard(data.name);
   });
 
   eventSource.addEventListener('tool_completed', (e) => {
     const data = JSON.parse(e.data);
     if (!isCurrentThread(data.thread_id)) return;
-    const icon = data.success ? '\u2713' : '\u2717';
-    setStatus('Tool ' + data.name + ' ' + icon);
+    completeToolCard(data.name, data.success);
+  });
+
+  eventSource.addEventListener('tool_result', (e) => {
+    const data = JSON.parse(e.data);
+    if (!isCurrentThread(data.thread_id)) return;
+    setToolCardOutput(data.name, data.preview);
   });
 
   eventSource.addEventListener('stream_chunk', (e) => {
     const data = JSON.parse(e.data);
     if (!isCurrentThread(data.thread_id)) return;
+    finalizeActivityGroup();
     appendToLastAssistant(data.content);
   });
 
@@ -166,6 +179,7 @@ function connectSSE() {
     // the agentic loop finished, so re-enable input as a safety net in case
     // the response SSE event is empty or lost.
     if (data.message === 'Done' || data.message === 'Awaiting approval') {
+      finalizeActivityGroup();
       enableChatInput();
     }
   });
@@ -197,6 +211,7 @@ function connectSSE() {
     if (e.data) {
       const data = JSON.parse(e.data);
       if (!isCurrentThread(data.thread_id)) return;
+      finalizeActivityGroup();
       addMessage('system', 'Error: ' + data.message);
       enableChatInput();
     }
@@ -256,8 +271,6 @@ function sendMessage() {
   addMessage('user', content);
   input.value = '';
   autoResizeTextarea(input);
-  setStatus('Sending...', true);
-
   sendBtn.disabled = true;
   input.disabled = true;
 
@@ -377,13 +390,232 @@ function appendToLastAssistant(chunk) {
   }
 }
 
-function setStatus(text, spinning) {
+function setStatus(text) {
   const el = document.getElementById('chat-status');
   if (!text) {
     el.innerHTML = '';
     return;
   }
-  el.innerHTML = (spinning ? '<div class="spinner"></div>' : '') + escapeHtml(text);
+  el.innerHTML = escapeHtml(text);
+}
+
+// --- Inline Tool Activity Cards ---
+
+function getOrCreateActivityGroup() {
+  if (_activeGroup) return _activeGroup;
+  const container = document.getElementById('chat-messages');
+  const group = document.createElement('div');
+  group.className = 'activity-group';
+  container.appendChild(group);
+  container.scrollTop = container.scrollHeight;
+  _activeGroup = group;
+  _activeToolCards = {};
+  return group;
+}
+
+function showActivityThinking(message) {
+  const group = getOrCreateActivityGroup();
+  if (_activityThinking) {
+    // Already exists — just update text and un-hide
+    _activityThinking.style.display = '';
+    _activityThinking.querySelector('.activity-thinking-text').textContent = message;
+  } else {
+    _activityThinking = document.createElement('div');
+    _activityThinking.className = 'activity-thinking';
+    _activityThinking.innerHTML =
+      '<span class="activity-thinking-dots">'
+      + '<span class="activity-thinking-dot"></span>'
+      + '<span class="activity-thinking-dot"></span>'
+      + '<span class="activity-thinking-dot"></span>'
+      + '</span>'
+      + '<span class="activity-thinking-text"></span>';
+    group.appendChild(_activityThinking);
+    _activityThinking.querySelector('.activity-thinking-text').textContent = message;
+  }
+  const container = document.getElementById('chat-messages');
+  container.scrollTop = container.scrollHeight;
+}
+
+function removeActivityThinking() {
+  if (_activityThinking) {
+    _activityThinking.remove();
+    _activityThinking = null;
+  }
+}
+
+function addToolCard(name) {
+  // Hide thinking instead of destroying — it may reappear between tool rounds
+  if (_activityThinking) _activityThinking.style.display = 'none';
+  const group = getOrCreateActivityGroup();
+
+  const card = document.createElement('div');
+  card.className = 'activity-tool-card';
+  card.setAttribute('data-tool-name', name);
+  card.setAttribute('data-status', 'running');
+
+  const header = document.createElement('div');
+  header.className = 'activity-tool-header';
+
+  const icon = document.createElement('span');
+  icon.className = 'activity-tool-icon';
+  icon.innerHTML = '<div class="spinner"></div>';
+
+  const toolName = document.createElement('span');
+  toolName.className = 'activity-tool-name';
+  toolName.textContent = name;
+
+  const duration = document.createElement('span');
+  duration.className = 'activity-tool-duration';
+  duration.textContent = '';
+
+  const chevron = document.createElement('span');
+  chevron.className = 'activity-tool-chevron';
+  chevron.innerHTML = '&#9656;';
+
+  header.appendChild(icon);
+  header.appendChild(toolName);
+  header.appendChild(duration);
+  header.appendChild(chevron);
+
+  const body = document.createElement('div');
+  body.className = 'activity-tool-body';
+  body.style.display = 'none';
+
+  const output = document.createElement('pre');
+  output.className = 'activity-tool-output';
+  body.appendChild(output);
+
+  header.addEventListener('click', () => {
+    const isOpen = body.style.display !== 'none';
+    body.style.display = isOpen ? 'none' : 'block';
+    chevron.classList.toggle('expanded', !isOpen);
+  });
+
+  card.appendChild(header);
+  card.appendChild(body);
+  group.appendChild(card);
+
+  const startTime = Date.now();
+  const timerInterval = setInterval(() => {
+    const elapsed = (Date.now() - startTime) / 1000;
+    if (elapsed > 300) { clearInterval(timerInterval); return; }
+    duration.textContent = elapsed < 10 ? elapsed.toFixed(1) + 's' : Math.floor(elapsed) + 's';
+  }, 100);
+
+  if (!_activeToolCards[name]) _activeToolCards[name] = [];
+  _activeToolCards[name].push({ card, startTime, timer: timerInterval, duration, icon });
+
+  const container = document.getElementById('chat-messages');
+  container.scrollTop = container.scrollHeight;
+}
+
+function completeToolCard(name, success) {
+  const entries = _activeToolCards[name];
+  if (!entries || entries.length === 0) return;
+  // Find first running card
+  let entry = null;
+  for (let i = 0; i < entries.length; i++) {
+    if (entries[i].card.getAttribute('data-status') === 'running') {
+      entry = entries[i];
+      break;
+    }
+  }
+  if (!entry) entry = entries[entries.length - 1];
+
+  clearInterval(entry.timer);
+  const elapsed = (Date.now() - entry.startTime) / 1000;
+  entry.duration.textContent = elapsed < 10 ? elapsed.toFixed(1) + 's' : Math.floor(elapsed) + 's';
+  entry.icon.innerHTML = success
+    ? '<span class="activity-icon-success">&#10003;</span>'
+    : '<span class="activity-icon-fail">&#10007;</span>';
+  entry.card.setAttribute('data-status', success ? 'success' : 'fail');
+}
+
+function setToolCardOutput(name, preview) {
+  const entries = _activeToolCards[name];
+  if (!entries || entries.length === 0) return;
+  // Find first card with empty output
+  let entry = null;
+  for (let i = 0; i < entries.length; i++) {
+    const out = entries[i].card.querySelector('.activity-tool-output');
+    if (out && !out.textContent) {
+      entry = entries[i];
+      break;
+    }
+  }
+  if (!entry) entry = entries[entries.length - 1];
+
+  const output = entry.card.querySelector('.activity-tool-output');
+  if (output) {
+    const truncated = preview.length > 2000 ? preview.substring(0, 2000) + '\n... (truncated)' : preview;
+    output.textContent = truncated;
+  }
+}
+
+function finalizeActivityGroup() {
+  removeActivityThinking();
+  if (!_activeGroup) return;
+
+  // Stop all timers
+  for (const name in _activeToolCards) {
+    const entries = _activeToolCards[name];
+    for (let i = 0; i < entries.length; i++) {
+      clearInterval(entries[i].timer);
+    }
+  }
+
+  // Count tools and total duration
+  let toolCount = 0;
+  let totalDuration = 0;
+  for (const tname in _activeToolCards) {
+    const tentries = _activeToolCards[tname];
+    for (let j = 0; j < tentries.length; j++) {
+      toolCount++;
+      totalDuration += (Date.now() - tentries[j].startTime) / 1000;
+    }
+  }
+
+  if (toolCount === 0) {
+    // No tools were used — remove the empty group
+    _activeGroup.remove();
+    _activeGroup = null;
+    _activeToolCards = {};
+    return;
+  }
+
+  // Wrap existing cards into a hidden container
+  const cardsContainer = document.createElement('div');
+  cardsContainer.className = 'activity-cards-container';
+  cardsContainer.style.display = 'none';
+
+  const cards = _activeGroup.querySelectorAll('.activity-tool-card');
+  for (let k = 0; k < cards.length; k++) {
+    cardsContainer.appendChild(cards[k]);
+  }
+
+  // Build summary line
+  const durationStr = totalDuration < 10 ? totalDuration.toFixed(1) + 's' : Math.floor(totalDuration) + 's';
+  const toolWord = toolCount === 1 ? 'tool' : 'tools';
+  const summary = document.createElement('div');
+  summary.className = 'activity-summary';
+  summary.innerHTML = '<span class="activity-summary-chevron">&#9656;</span>'
+    + '<span class="activity-summary-text">Used ' + toolCount + ' ' + toolWord + '</span>'
+    + '<span class="activity-summary-duration">(' + durationStr + ')</span>';
+
+  summary.addEventListener('click', () => {
+    const isOpen = cardsContainer.style.display !== 'none';
+    cardsContainer.style.display = isOpen ? 'none' : 'block';
+    summary.querySelector('.activity-summary-chevron').classList.toggle('expanded', !isOpen);
+  });
+
+  // Clear group and add summary + hidden cards
+  _activeGroup.innerHTML = '';
+  _activeGroup.classList.add('collapsed');
+  _activeGroup.appendChild(summary);
+  _activeGroup.appendChild(cardsContainer);
+
+  _activeGroup = null;
+  _activeToolCards = {};
 }
 
 function showApproval(data) {
@@ -761,6 +993,7 @@ function loadThreads() {
 
 function switchToAssistant() {
   if (!assistantThreadId) return;
+  finalizeActivityGroup();
   currentThreadId = assistantThreadId;
   hasMore = false;
   oldestTimestamp = null;
@@ -769,6 +1002,7 @@ function switchToAssistant() {
 }
 
 function switchThread(threadId) {
+  finalizeActivityGroup();
   currentThreadId = threadId;
   hasMore = false;
   oldestTimestamp = null;
