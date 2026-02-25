@@ -244,7 +244,7 @@ impl SignalChannel {
             .map_err(|e| ChannelError::Http(e.to_string()))?;
 
         let target = Self::parse_recipient_target(recipient);
-        let params = Self::build_rpc_params_static(http_url, account, &target, Some(message));
+        let params = Self::build_rpc_params_static(http_url, account, &target, Some(message), None);
 
         let url = format!("{}/api/v1/rpc", http_url);
         let id = Uuid::new_v4().to_string();
@@ -504,6 +504,7 @@ impl SignalChannel {
         &self,
         target: &RecipientTarget,
         message: Option<&str>,
+        attachments: Option<&[String]>,
     ) -> serde_json::Value {
         match target {
             RecipientTarget::Direct(id) => {
@@ -514,6 +515,16 @@ impl SignalChannel {
                 if let Some(msg) = message {
                     params["message"] = serde_json::Value::String(msg.to_string());
                 }
+                if let Some(attachments) = attachments
+                    && !attachments.is_empty()
+                {
+                    params["attachments"] = serde_json::Value::Array(
+                        attachments
+                            .iter()
+                            .map(|s| serde_json::Value::String(s.clone()))
+                            .collect(),
+                    );
+                }
                 params
             }
             RecipientTarget::Group(group_id) => {
@@ -523,6 +534,16 @@ impl SignalChannel {
                 });
                 if let Some(msg) = message {
                     params["message"] = serde_json::Value::String(msg.to_string());
+                }
+                if let Some(attachments) = attachments
+                    && !attachments.is_empty()
+                {
+                    params["attachments"] = serde_json::Value::Array(
+                        attachments
+                            .iter()
+                            .map(|s| serde_json::Value::String(s.clone()))
+                            .collect(),
+                    );
                 }
                 params
             }
@@ -535,6 +556,7 @@ impl SignalChannel {
         account: &str,
         target: &RecipientTarget,
         message: Option<&str>,
+        attachments: Option<&[String]>,
     ) -> serde_json::Value {
         match target {
             RecipientTarget::Direct(id) => {
@@ -545,6 +567,16 @@ impl SignalChannel {
                 if let Some(msg) = message {
                     params["message"] = serde_json::Value::String(msg.to_string());
                 }
+                if let Some(attachments) = attachments
+                    && !attachments.is_empty()
+                {
+                    params["attachments"] = serde_json::Value::Array(
+                        attachments
+                            .iter()
+                            .map(|s| serde_json::Value::String(s.clone()))
+                            .collect(),
+                    );
+                }
                 params
             }
             RecipientTarget::Group(group_id) => {
@@ -554,6 +586,16 @@ impl SignalChannel {
                 });
                 if let Some(msg) = message {
                     params["message"] = serde_json::Value::String(msg.to_string());
+                }
+                if let Some(attachments) = attachments
+                    && !attachments.is_empty()
+                {
+                    params["attachments"] = serde_json::Value::Array(
+                        attachments
+                            .iter()
+                            .map(|s| serde_json::Value::String(s.clone()))
+                            .collect(),
+                    );
                 }
                 params
             }
@@ -790,13 +832,45 @@ impl Channel for SignalChannel {
         .unwrap_or_else(|| msg.user_id.clone());
 
         let target = Self::parse_recipient_target(&target_str);
-        let params = self.build_rpc_params(&target, Some(&response.content));
-        self.rpc_request("send", params).await?;
+        let attachments = &response.attachments;
 
-        // Clean up stored target.
+        // Handle attachments: if we have attachments, we need special handling
+        let result: Result<(), ChannelError> = if !attachments.is_empty() {
+            // If no text but have attachments, send each with path as message
+            if response.content.is_empty() {
+                for attachment in attachments {
+                    let params = self.build_rpc_params(
+                        &target,
+                        Some(attachment),
+                        Some(std::slice::from_ref(attachment)),
+                    );
+                    self.rpc_request("send", params).await?;
+                }
+            } else {
+                // If we have both text and attachments, send text first, then each attachment
+                let text_params = self.build_rpc_params(&target, Some(&response.content), None);
+                self.rpc_request("send", text_params).await?;
+
+                for attachment in attachments {
+                    let params = self.build_rpc_params(
+                        &target,
+                        Some(attachment),
+                        Some(std::slice::from_ref(attachment)),
+                    );
+                    self.rpc_request("send", params).await?;
+                }
+            }
+            Ok(())
+        } else {
+            // No attachments - original behavior
+            let params = self.build_rpc_params(&target, Some(&response.content), None);
+            self.rpc_request("send", params).await.map(|_| ())
+        };
+
+        // Clean up stored target regardless of success or failure.
         self.reply_targets.write().await.pop(&msg.id);
 
-        Ok(())
+        result
     }
 
     async fn send_status(
@@ -809,7 +883,7 @@ impl Channel for SignalChannel {
             && let Some(target_str) = metadata.get("signal_target").and_then(|v| v.as_str())
         {
             let target = Self::parse_recipient_target(target_str);
-            let params = self.build_rpc_params(&target, None);
+            let params = self.build_rpc_params(&target, None, None);
             let _ = self.rpc_request("sendTyping", params).await;
         }
 
@@ -957,7 +1031,41 @@ impl Channel for SignalChannel {
         response: OutgoingResponse,
     ) -> Result<(), ChannelError> {
         let target = Self::parse_recipient_target(user_id);
-        let params = self.build_rpc_params(&target, Some(&response.content));
+        let attachments = &response.attachments;
+
+        // Handle attachments: if we have attachments, we need special handling
+        if !attachments.is_empty() {
+            // If no text but have attachments, send each with path as message
+            if response.content.is_empty() {
+                for attachment in attachments {
+                    let params = self.build_rpc_params(
+                        &target,
+                        Some(attachment),
+                        Some(std::slice::from_ref(attachment)),
+                    );
+                    self.rpc_request("send", params).await?;
+                }
+                return Ok(());
+            }
+
+            // If we have both text and attachments, send text first, then each attachment
+            let text_params = self.build_rpc_params(&target, Some(&response.content), None);
+            self.rpc_request("send", text_params).await?;
+
+            for attachment in attachments {
+                let params = self.build_rpc_params(
+                    &target,
+                    Some(attachment),
+                    Some(std::slice::from_ref(attachment)),
+                );
+                self.rpc_request("send", params).await?;
+            }
+
+            return Ok(());
+        }
+
+        // No attachments - original behavior
+        let params = self.build_rpc_params(&target, Some(&response.content), None);
         self.rpc_request("send", params).await?;
         Ok(())
     }
@@ -987,7 +1095,7 @@ impl Channel for SignalChannel {
 impl SignalChannel {
     async fn send_status_message(&self, target: &str, message: &str) {
         let target = Self::parse_recipient_target(target);
-        let params = self.build_rpc_params(&target, Some(message));
+        let params = self.build_rpc_params(&target, Some(message), None);
         if let Err(e) = self.rpc_request("send", params).await {
             tracing::warn!("Signal: failed to send status message: {}", e);
         }
@@ -1187,6 +1295,7 @@ async fn sse_listener(
                                         let reply_params = channel.build_rpc_params(
                                             &SignalChannel::parse_recipient_target(&target),
                                             Some(response),
+                                            None,
                                         );
                                         let _ = channel.rpc_request("send", reply_params).await;
                                         // Don't send the /debug command to the agent.
@@ -1925,7 +2034,7 @@ mod tests {
     fn build_rpc_params_direct_with_message() -> Result<(), ChannelError> {
         let ch = make_channel()?;
         let target = RecipientTarget::Direct("+5555555555".to_string());
-        let params = ch.build_rpc_params(&target, Some("Hello!"));
+        let params = ch.build_rpc_params(&target, Some("Hello!"), None);
         assert_eq!(params["recipient"], serde_json::json!(["+5555555555"]));
         assert_eq!(params["account"], "+1234567890");
         assert_eq!(params["message"], "Hello!");
@@ -1938,7 +2047,7 @@ mod tests {
     fn build_rpc_params_direct_without_message() -> Result<(), ChannelError> {
         let ch = make_channel()?;
         let target = RecipientTarget::Direct("+5555555555".to_string());
-        let params = ch.build_rpc_params(&target, None);
+        let params = ch.build_rpc_params(&target, None, None);
         assert_eq!(params["recipient"], serde_json::json!(["+5555555555"]));
         assert_eq!(params["account"], "+1234567890");
         // No message key should be present for typing indicators.
@@ -1950,7 +2059,7 @@ mod tests {
     fn build_rpc_params_group_with_message() -> Result<(), ChannelError> {
         let ch = make_channel()?;
         let target = RecipientTarget::Group("abc123".to_string());
-        let params = ch.build_rpc_params(&target, Some("Group msg"));
+        let params = ch.build_rpc_params(&target, Some("Group msg"), None);
         assert_eq!(params["groupId"], "abc123");
         assert_eq!(params["account"], "+1234567890");
         assert_eq!(params["message"], "Group msg");
@@ -1963,7 +2072,7 @@ mod tests {
     fn build_rpc_params_group_without_message() -> Result<(), ChannelError> {
         let ch = make_channel()?;
         let target = RecipientTarget::Group("abc123".to_string());
-        let params = ch.build_rpc_params(&target, None);
+        let params = ch.build_rpc_params(&target, None, None);
         assert_eq!(params["groupId"], "abc123");
         assert_eq!(params["account"], "+1234567890");
         assert!(params.get("message").is_none());
@@ -1975,9 +2084,92 @@ mod tests {
         let ch = make_channel()?;
         let uuid = "a1b2c3d4-e5f6-7890-abcd-ef1234567890";
         let target = RecipientTarget::Direct(uuid.to_string());
-        let params = ch.build_rpc_params(&target, Some("hi"));
+        let params = ch.build_rpc_params(&target, Some("hi"), None);
         assert_eq!(params["recipient"], serde_json::json!([uuid]));
         Ok(())
+    }
+
+    // ── build_rpc_params with attachments tests ─────────────────────────
+
+    #[test]
+    fn build_rpc_params_with_attachments() -> Result<(), ChannelError> {
+        let ch = make_channel()?;
+        let target = RecipientTarget::Direct("+5555555555".to_string());
+        let attachments = vec!["/path/to/image.png".to_string()];
+        let params = ch.build_rpc_params(&target, Some("Check this!"), Some(&attachments));
+        assert_eq!(params["recipient"], serde_json::json!(["+5555555555"]));
+        assert_eq!(params["message"], "Check this!");
+        assert_eq!(
+            params["attachments"],
+            serde_json::json!(["/path/to/image.png"])
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn build_rpc_params_with_multiple_attachments() -> Result<(), ChannelError> {
+        let ch = make_channel()?;
+        let target = RecipientTarget::Direct("+5555555555".to_string());
+        let attachments = vec![
+            "/path/to/image.png".to_string(),
+            "/path/to/document.pdf".to_string(),
+        ];
+        let params = ch.build_rpc_params(&target, Some("Files attached"), Some(&attachments));
+        assert_eq!(
+            params["attachments"],
+            serde_json::json!(["/path/to/image.png", "/path/to/document.pdf"])
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn build_rpc_params_with_attachments_no_message() -> Result<(), ChannelError> {
+        let ch = make_channel()?;
+        let target = RecipientTarget::Direct("+5555555555".to_string());
+        let attachments = vec!["/path/to/image.png".to_string()];
+        let params = ch.build_rpc_params(&target, None, Some(&attachments));
+        assert!(params.get("message").is_none());
+        assert_eq!(
+            params["attachments"],
+            serde_json::json!(["/path/to/image.png"])
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn build_rpc_params_group_with_attachments() -> Result<(), ChannelError> {
+        let ch = make_channel()?;
+        let target = RecipientTarget::Group("abc123".to_string());
+        let attachments = vec!["/path/to/photo.jpg".to_string()];
+        let params = ch.build_rpc_params(&target, Some("Group photo"), Some(&attachments));
+        assert_eq!(params["groupId"], "abc123");
+        assert_eq!(params["message"], "Group photo");
+        assert_eq!(
+            params["attachments"],
+            serde_json::json!(["/path/to/photo.jpg"])
+        );
+        Ok(())
+    }
+
+    // ── OutgoingResponse attachment tests ─────────────────────────────
+
+    #[test]
+    fn outgoing_response_with_attachments() {
+        let response = OutgoingResponse::text("Hello with file")
+            .with_attachments(vec!["/path/to/file.png".to_string()]);
+        assert_eq!(response.content, "Hello with file");
+        assert!(
+            response
+                .attachments
+                .contains(&"/path/to/file.png".to_string())
+        );
+    }
+
+    #[test]
+    fn outgoing_response_text_empty_attachments() {
+        let response = OutgoingResponse::text("Hello");
+        assert_eq!(response.content, "Hello");
+        assert!(response.attachments.is_empty());
     }
 
     // ── metadata assertion tests ────────────────────────────────────

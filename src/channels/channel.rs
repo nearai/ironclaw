@@ -78,6 +78,8 @@ pub struct OutgoingResponse {
     pub content: String,
     /// Optional thread ID to reply in.
     pub thread_id: Option<String>,
+    /// Optional file paths to attach.
+    pub attachments: Vec<String>,
     /// Channel-specific metadata for the response.
     pub metadata: serde_json::Value,
 }
@@ -88,6 +90,7 @@ impl OutgoingResponse {
         Self {
             content: content.into(),
             thread_id: None,
+            attachments: Vec::new(),
             metadata: serde_json::Value::Null,
         }
     }
@@ -95,6 +98,12 @@ impl OutgoingResponse {
     /// Set the thread ID for the response.
     pub fn in_thread(mut self, thread_id: impl Into<String>) -> Self {
         self.thread_id = Some(thread_id.into());
+        self
+    }
+
+    /// Add attachments to the response.
+    pub fn with_attachments(mut self, paths: Vec<String>) -> Self {
+        self.attachments = paths;
         self
     }
 }
