@@ -1270,6 +1270,8 @@ mod tests {
         assert!(is_new_message(Some("100"), "200"));
         assert!(!is_new_message(Some("200"), "100"));
         assert!(!is_new_message(Some("100"), "100"));
+        assert!(is_new_message(Some("abc"), "abd"));
+        assert!(!is_new_message(Some("abd"), "abc"));
     }
 
     #[test]
@@ -1300,6 +1302,84 @@ mod tests {
         };
         assert!(message_mentions_bot(&msg, "123"));
         assert!(!message_mentions_bot(&msg, "999"));
+    }
+
+    #[test]
+    fn test_message_mentions_bot_via_mentions_array() {
+        let msg = DiscordChannelMessage {
+            id: "2".to_string(),
+            content: "hello".to_string(),
+            channel_id: "10".to_string(),
+            author: DiscordChannelAuthor {
+                id: "u1".to_string(),
+                username: "alice".to_string(),
+                global_name: None,
+                bot: false,
+            },
+            mentions: vec![DiscordUser {
+                id: "777".to_string(),
+                username: "bot".to_string(),
+                global_name: None,
+            }],
+            webhook_id: None,
+        };
+        assert!(message_mentions_bot(&msg, "777"));
+    }
+
+    #[test]
+    fn test_compare_message_ids_numeric_and_lexical_fallback() {
+        assert_eq!(compare_message_ids("100", "20"), Ordering::Greater);
+        assert_eq!(compare_message_ids("20", "100"), Ordering::Less);
+        assert_eq!(compare_message_ids("abc", "abd"), Ordering::Less);
+        assert_eq!(compare_message_ids("abd", "abc"), Ordering::Greater);
+    }
+
+    #[test]
+    fn test_remember_processed_id_dedup_and_cap() {
+        let mut ids = Vec::new();
+        for i in 0..220 {
+            remember_processed_id(&mut ids, &format!("{}", i));
+        }
+        assert_eq!(ids.len(), 200);
+        assert_eq!(ids.first().map(String::as_str), Some("20"));
+        assert_eq!(ids.last().map(String::as_str), Some("219"));
+
+        remember_processed_id(&mut ids, "219");
+        assert_eq!(ids.len(), 200);
+        assert_eq!(ids.last().map(String::as_str), Some("219"));
+    }
+
+    #[test]
+    fn test_header_case_insensitive() {
+        let mut headers = HashMap::new();
+        headers.insert("X-Signature-Timestamp".to_string(), "123".to_string());
+        assert_eq!(
+            header_case_insensitive(&headers, "x-signature-timestamp"),
+            Some("123")
+        );
+        assert_eq!(header_case_insensitive(&headers, "missing"), None);
+    }
+
+    #[test]
+    fn test_discord_auth_headers_json_shape() {
+        let with_ct: serde_json::Value =
+            serde_json::from_str(&discord_auth_headers_json(true)).unwrap();
+        assert_eq!(
+            with_ct.get("Content-Type").and_then(|v| v.as_str()),
+            Some("application/json")
+        );
+        assert_eq!(
+            with_ct.get("Authorization").and_then(|v| v.as_str()),
+            Some("Bot {DISCORD_BOT_TOKEN}")
+        );
+
+        let no_ct: serde_json::Value =
+            serde_json::from_str(&discord_auth_headers_json(false)).unwrap();
+        assert!(no_ct.get("Content-Type").is_none());
+        assert_eq!(
+            no_ct.get("Authorization").and_then(|v| v.as_str()),
+            Some("Bot {DISCORD_BOT_TOKEN}")
+        );
     }
 
     #[test]
@@ -1402,6 +1482,67 @@ mod tests {
             headers,
             b"abc",
             Some("00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff")
+        ));
+    }
+
+    #[test]
+    fn test_verify_discord_request_signature_invalid_public_key_hex() {
+        let mut headers = HashMap::new();
+        headers.insert("x-signature-ed25519".to_string(), "00".repeat(64));
+        headers.insert(
+            "x-signature-timestamp".to_string(),
+            "1234567890".to_string(),
+        );
+        assert!(!verify_discord_request_signature(
+            headers,
+            b"abc",
+            Some("not-hex")
+        ));
+    }
+
+    #[test]
+    fn test_verify_discord_request_signature_invalid_lengths() {
+        let mut headers = HashMap::new();
+        headers.insert("x-signature-ed25519".to_string(), "00".repeat(10));
+        headers.insert(
+            "x-signature-timestamp".to_string(),
+            "1234567890".to_string(),
+        );
+        assert!(!verify_discord_request_signature(
+            headers.clone(),
+            b"abc",
+            Some("00".repeat(31).as_str())
+        ));
+        assert!(!verify_discord_request_signature(
+            headers,
+            b"abc",
+            Some("00".repeat(32).as_str())
+        ));
+    }
+
+    #[test]
+    fn test_verify_discord_request_signature_case_insensitive_headers() {
+        let signing_key = SigningKey::from_bytes(&[13u8; 32]);
+        let public_key_hex = hex::encode(signing_key.verifying_key().to_bytes());
+        let timestamp = "1234567890";
+        let body = b"case-header";
+
+        let mut signed = Vec::new();
+        signed.extend_from_slice(timestamp.as_bytes());
+        signed.extend_from_slice(body);
+        let signature = signing_key.sign(&signed);
+
+        let mut headers = HashMap::new();
+        headers.insert(
+            "X-Signature-Ed25519".to_string(),
+            hex::encode(signature.to_bytes()),
+        );
+        headers.insert("X-Signature-Timestamp".to_string(), timestamp.to_string());
+
+        assert!(verify_discord_request_signature(
+            headers,
+            body,
+            Some(&public_key_hex)
         ));
     }
 
