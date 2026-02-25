@@ -1218,4 +1218,109 @@ mod tests {
         assert!(result.is_ok());
         assert_eq!(result.unwrap().content, "solo ok");
     }
+
+    // === QA Plan 2.6: Failover edge case tests ===
+
+    /// When all providers fail with retryable errors, the failover must
+    /// return a graceful error (not panic via .unwrap()/.expect()). Verify
+    /// the error content includes the last provider's identity.
+    #[tokio::test]
+    async fn test_failover_all_providers_fail_no_panic() {
+        let p1 = Arc::new(MultiCallMockProvider::always_fail("alpha"));
+        let p2 = Arc::new(MultiCallMockProvider::always_fail("beta"));
+        let p3 = Arc::new(MultiCallMockProvider::always_fail("gamma"));
+
+        let failover = FailoverProvider::new(vec![
+            p1 as Arc<dyn LlmProvider>,
+            p2 as Arc<dyn LlmProvider>,
+            p3 as Arc<dyn LlmProvider>,
+        ])
+        .unwrap();
+
+        // All three providers fail. Must return Err, not panic.
+        let result = failover.complete(make_request()).await;
+        assert!(result.is_err(), "should return error, not panic");
+        let err = result.unwrap_err();
+        match &err {
+            LlmError::RequestFailed { provider, reason } => {
+                // The last error should come from the last provider tried.
+                assert_eq!(
+                    provider, "gamma",
+                    "error should identify the last provider tried"
+                );
+                assert!(
+                    reason.contains("failed"),
+                    "error reason should describe the failure: {}",
+                    reason
+                );
+            }
+            other => panic!("expected RequestFailed, got: {:?}", other),
+        }
+
+        // Also test complete_with_tools follows the same graceful path.
+        let p4 = Arc::new(MultiCallMockProvider::always_fail("delta"));
+        let p5 = Arc::new(MultiCallMockProvider::always_fail("epsilon"));
+        let failover2 = FailoverProvider::new(vec![
+            p4 as Arc<dyn LlmProvider>,
+            p5 as Arc<dyn LlmProvider>,
+        ])
+        .unwrap();
+
+        let result = failover2.complete_with_tools(make_tool_request()).await;
+        assert!(
+            result.is_err(),
+            "complete_with_tools should also return error, not panic"
+        );
+    }
+
+    /// A single provider that always fails with no fallback available.
+    /// Verifies the failover returns the error from that provider and
+    /// does not panic or produce an "unreachable" invariant violation.
+    #[tokio::test]
+    async fn test_failover_with_single_provider_failing() {
+        let solo = Arc::new(MultiCallMockProvider::always_fail("solo-broken"));
+        let failover =
+            FailoverProvider::new(vec![solo.clone() as Arc<dyn LlmProvider>]).unwrap();
+
+        // First call: should return error from the solo provider.
+        let result = failover.complete(make_request()).await;
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            LlmError::RequestFailed { provider, .. } => {
+                assert_eq!(provider, "solo-broken");
+            }
+            other => panic!("expected RequestFailed, got: {:?}", other),
+        }
+
+        // After repeated failures, the single provider enters cooldown.
+        // But since it's the only provider, the "never skip all" logic
+        // should still try it (as the oldest-cooled provider).
+        let config = CooldownConfig {
+            cooldown_duration: Duration::from_secs(300),
+            failure_threshold: 1,
+        };
+        let solo2 = Arc::new(MultiCallMockProvider::always_fail("solo-cd"));
+        let failover2 =
+            FailoverProvider::with_cooldown(vec![solo2.clone() as Arc<dyn LlmProvider>], config)
+                .unwrap();
+
+        // First call: fails, enters cooldown (threshold=1).
+        let _ = failover2.complete(make_request()).await;
+        assert_eq!(solo2.call_count(), 1);
+
+        // Second call: provider is in cooldown, but it's the only one,
+        // so "never skip all" should try it anyway.
+        let result = failover2.complete(make_request()).await;
+        assert!(result.is_err(), "should still fail but not panic");
+        assert_eq!(
+            solo2.call_count(),
+            2,
+            "sole provider should be retried despite cooldown"
+        );
+
+        // Third call: same behavior, no state corruption.
+        let result = failover2.complete(make_request()).await;
+        assert!(result.is_err());
+        assert_eq!(solo2.call_count(), 3);
+    }
 }
