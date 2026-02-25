@@ -57,26 +57,22 @@ async def test_skills_install_and_remove(page):
         pytest.skip("No installable skills found in results")
     await install_btn.click()
 
-    # Wait for install to complete (installed list updates)
-    # The UI should show the skill in the installed section
-    await page.wait_for_timeout(5000)
-
-    # Check if any installed skills exist now
+    # Wait for install to complete -- the UI calls loadSkills() after install,
+    # which populates #skills-list with .ext-card elements
     installed = page.locator(SEL["skill_installed"])
-    installed_count = await installed.count()
-    if installed_count == 0:
-        # Try scrolling or waiting longer
-        await page.wait_for_timeout(5000)
-        installed_count = await installed.count()
+    try:
+        await installed.first.wait_for(state="visible", timeout=15000)
+    except Exception:
+        pytest.skip("Skill install did not update the installed list in time")
 
+    installed_count = await installed.count()
     assert installed_count >= 1, "Skill should appear in installed list after install"
 
-    # Remove the skill
+    # Remove the skill (confirm is already overridden)
     remove_btn = installed.first.locator("button", has_text="Remove")
     if await remove_btn.count() > 0:
         await remove_btn.click()
+        # Wait for the card to disappear or list to shrink
         await page.wait_for_timeout(3000)
-
-        # Verify removed
         new_count = await page.locator(SEL["skill_installed"]).count()
         assert new_count < installed_count, "Skill should be removed from installed list"

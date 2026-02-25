@@ -9,6 +9,7 @@ import os
 import signal
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 import pytest
@@ -21,6 +22,9 @@ ROOT = Path(__file__).resolve().parent.parent.parent
 # Ports: use high fixed ports to avoid conflicts with development instances
 MOCK_LLM_PORT = 18_199
 GATEWAY_PORT = 18_200
+
+# Temp directory for the libSQL database file (cleaned up automatically)
+_DB_TMPDIR = tempfile.TemporaryDirectory(prefix="ironclaw-e2e-")
 
 
 @pytest.fixture(scope="session")
@@ -85,7 +89,7 @@ async def ironclaw_server(ironclaw_binary, mock_llm_server):
         "LLM_BASE_URL": mock_llm_server,
         "LLM_MODEL": "mock-model",
         "DATABASE_BACKEND": "libsql",
-        "LIBSQL_PATH": ":memory:",
+        "LIBSQL_PATH": os.path.join(_DB_TMPDIR.name, "e2e.db"),
         "SANDBOX_ENABLED": "false",
         "SKILLS_ENABLED": "true",
         "ROUTINES_ENABLED": "false",

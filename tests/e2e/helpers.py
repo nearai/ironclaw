@@ -28,7 +28,7 @@ SEL = {
     "skill_search_input": "#skill-search-input",
     "skill_search_results": "#skill-search-results",
     "skill_search_result": ".skill-search-result",
-    "skill_installed": "#installed-skills .ext-card",
+    "skill_installed": "#skills-list .ext-card",
 }
 
 TABS = ["chat", "memory", "jobs", "routines", "extensions", "skills"]
