@@ -29,6 +29,20 @@ SEL = {
     "skill_search_results": "#skill-search-results",
     "skill_search_result": ".skill-search-result",
     "skill_installed": "#skills-list .ext-card",
+    # SSE status
+    "sse_dot": "#sse-dot",
+    # Approval overlay
+    "approval_card": ".approval-card",
+    "approval_header": ".approval-header",
+    "approval_tool_name": ".approval-tool-name",
+    "approval_description": ".approval-description",
+    "approval_params_toggle": ".approval-params-toggle",
+    "approval_params": ".approval-params",
+    "approval_actions": ".approval-actions",
+    "approval_approve_btn": ".approval-actions button.approve",
+    "approval_always_btn": ".approval-actions button.always",
+    "approval_deny_btn": ".approval-actions button.deny",
+    "approval_resolved": ".approval-resolved",
 }
 
 TABS = ["chat", "memory", "jobs", "routines", "extensions", "skills"]

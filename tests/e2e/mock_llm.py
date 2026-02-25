@@ -12,6 +12,8 @@ CANNED_RESPONSES = [
     (re.compile(r"hello|hi|hey", re.IGNORECASE), "Hello! How can I help you today?"),
     (re.compile(r"2\s*\+\s*2|two plus two", re.IGNORECASE), "The answer is 4."),
     (re.compile(r"skill|install", re.IGNORECASE), "I can help you with skills management."),
+    (re.compile(r"html.?test|injection.?test", re.IGNORECASE),
+     'Here is some content: <script>alert("xss")</script> and <img src=x onerror="alert(1)"> and <iframe src="javascript:alert(2)"></iframe> end of content.'),
 ]
 DEFAULT_RESPONSE = "I understand your request."
 
