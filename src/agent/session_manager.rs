@@ -128,6 +128,42 @@ impl SessionManager {
             }
         }
 
+        // Check if external_thread_id is itself a known thread UUID that
+        // exists in the session but was never registered in the thread_map
+        // (e.g. created by chat_new_thread_handler or hydrated from DB).
+        // We only adopt it if no thread_map entry maps to this UUID —
+        // otherwise it belongs to a different channel scope.
+        if let Some(ext_tid) = external_thread_id
+            && let Ok(ext_uuid) = Uuid::parse_str(ext_tid)
+        {
+            let thread_map = self.thread_map.read().await;
+            let mapped_elsewhere = thread_map.values().any(|&v| v == ext_uuid);
+            drop(thread_map);
+
+            if !mapped_elsewhere {
+                let sess = session.lock().await;
+                if sess.threads.contains_key(&ext_uuid) {
+                    drop(sess);
+
+                    let mut thread_map = self.thread_map.write().await;
+                    // Re-check after acquiring write lock to prevent race condition
+                    // where another task mapped this UUID between our read and write.
+                    if !thread_map.values().any(|&v| v == ext_uuid) {
+                        thread_map.insert(key, ext_uuid);
+                        drop(thread_map);
+                        // Ensure undo manager exists
+                        let mut undo_managers = self.undo_managers.write().await;
+                        undo_managers
+                            .entry(ext_uuid)
+                            .or_insert_with(|| Arc::new(Mutex::new(UndoManager::new())));
+                        return (session, ext_uuid);
+                    }
+                    // If it was mapped elsewhere while we were unlocked, fall through
+                    // to create a new thread, preserving channel isolation.
+                }
+            }
+        }
+
         // Create new thread (always create a new one for a new key)
         let thread_id = {
             let mut sess = session.lock().await;
@@ -734,5 +770,44 @@ mod tests {
             .resolve_thread("user-cross", "telegram", Some(&tid.to_string()))
             .await;
         assert_ne!(resolved, tid);
+    }
+
+    #[tokio::test]
+    async fn test_resolve_thread_finds_existing_session_thread_by_uuid() {
+        use crate::agent::session::{Session, Thread};
+
+        let manager = SessionManager::new();
+        let tid = Uuid::new_v4();
+
+        // Simulate chat_new_thread_handler: create thread directly in session
+        // without registering it in thread_map
+        let session = Arc::new(Mutex::new(Session::new("user-direct")));
+        {
+            let mut sess = session.lock().await;
+            let thread = Thread::with_id(tid, sess.id);
+            sess.threads.insert(tid, thread);
+        }
+        {
+            let mut sessions = manager.sessions.write().await;
+            sessions.insert("user-direct".to_string(), Arc::clone(&session));
+        }
+
+        // resolve_thread should find the existing thread by UUID
+        // instead of creating a duplicate
+        let (_, resolved) = manager
+            .resolve_thread("user-direct", "gateway", Some(&tid.to_string()))
+            .await;
+        assert_eq!(
+            resolved, tid,
+            "should reuse existing thread, not create a new one"
+        );
+
+        // Verify no duplicate threads were created
+        let sess = session.lock().await;
+        assert_eq!(
+            sess.threads.len(),
+            1,
+            "should have exactly 1 thread, not a duplicate"
+        );
     }
 }
