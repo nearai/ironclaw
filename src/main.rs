@@ -30,6 +30,7 @@ use ironclaw::{
     },
     pairing::PairingStore,
     secrets::SecretsStore,
+    workspace::Workspace,
 };
 
 #[cfg(any(feature = "postgres", feature = "libsql"))]
@@ -77,6 +78,12 @@ async fn main() -> anyhow::Result<()> {
         Some(Command::Service(service_cmd)) => {
             init_cli_tracing();
             return run_service_command(service_cmd);
+        }
+        Some(Command::Import(import_cmd)) => {
+            init_cli_tracing();
+            let _ = dotenvy::dotenv();
+            ironclaw::bootstrap::load_ironclaw_env();
+            return run_import_command(import_cmd.clone()).await;
         }
         Some(Command::Doctor) => {
             init_cli_tracing();
@@ -724,6 +731,81 @@ async fn run_memory_command(mem_cmd: &ironclaw::cli::MemoryCommand) -> anyhow::R
         .map_err(|e| anyhow::anyhow!("{}", e))?;
 
     ironclaw::cli::run_memory_command_with_db(mem_cmd.clone(), db, embeddings).await
+}
+
+/// Run the Import CLI subcommand.
+async fn run_import_command(import_cmd: ironclaw::cli::ImportCommand) -> anyhow::Result<()> {
+    let config = Config::from_env()
+        .await
+        .map_err(|e| anyhow::anyhow!("{}", e))?;
+
+    let db: Arc<dyn ironclaw::db::Database> = ironclaw::db::connect_from_config(&config.database)
+        .await
+        .map_err(|e| anyhow::anyhow!("{}", e))?;
+
+    let session = create_session_manager(SessionConfig {
+        auth_base_url: config.llm.nearai.auth_base_url.clone(),
+        session_path: config.llm.nearai.session_path.clone(),
+    })
+    .await;
+
+    let embeddings = config
+        .embeddings
+        .create_provider(&config.llm.nearai.base_url, session);
+
+    let workspace = Workspace::new_with_db("default", Arc::clone(&db));
+    let workspace = if let Some(emb) = embeddings {
+        workspace.with_embeddings(emb)
+    } else {
+        workspace
+    };
+
+    // Build secrets store (best-effort — import can proceed without it)
+    let secrets_store = build_secrets_store(&config).await;
+
+    ironclaw::cli::run_import_command_with_db(import_cmd, db, Some(workspace), secrets_store).await
+}
+
+/// Build a secrets store from config (best-effort for CLI commands).
+async fn build_secrets_store(config: &Config) -> Option<Arc<dyn SecretsStore + Send + Sync>> {
+    use ironclaw::secrets::SecretsCrypto;
+    use secrecy::SecretString;
+
+    // Try to get master key from env or keychain
+    let master_key = std::env::var("SECRETS_MASTER_KEY").ok()?;
+    let crypto = Arc::new(SecretsCrypto::new(SecretString::from(master_key)).ok()?);
+
+    match config.database.backend {
+        #[cfg(feature = "postgres")]
+        ironclaw::config::DatabaseBackend::Postgres => {
+            use deadpool_postgres::{Config as PoolConfig, Runtime};
+            use secrecy::ExposeSecret;
+            use tokio_postgres::NoTls;
+
+            let mut pg_config = PoolConfig::new();
+            pg_config.url = Some(config.database.url.expose_secret().to_string());
+            let pool = pg_config.create_pool(Some(Runtime::Tokio1), NoTls).ok()?;
+            Some(Arc::new(ironclaw::secrets::PostgresSecretsStore::new(
+                pool, crypto,
+            )))
+        }
+        #[cfg(feature = "libsql")]
+        ironclaw::config::DatabaseBackend::LibSql => {
+            let default_path = ironclaw::config::default_libsql_path();
+            let db_path = config
+                .database
+                .libsql_path
+                .as_deref()
+                .unwrap_or(&default_path);
+            let db = libsql::Builder::new_local(db_path).build().await.ok()?;
+            Some(Arc::new(ironclaw::secrets::LibSqlSecretsStore::new(
+                Arc::new(db),
+                crypto,
+            )))
+        }
+        #[allow(unreachable_patterns)]
+        _ => None,
+    }
 }
 
 /// Run the Worker subcommand (inside Docker containers).

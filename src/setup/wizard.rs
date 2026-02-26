@@ -164,6 +164,9 @@ impl SetupWizard {
 
             self.persist_after_step().await;
 
+            // Optional: detect and offer OpenClaw import
+            self.try_openclaw_import().await;
+
             // Step 2: Security
             print_step(2, total_steps, "Security");
             self.step_security().await?;
@@ -1875,6 +1878,115 @@ impl SetupWizard {
         }
 
         Ok(())
+    }
+
+    /// Detect an OpenClaw installation and offer to import data.
+    ///
+    /// Called after Step 1 (database) so that the DB connection is available.
+    /// Non-fatal: any error is logged and the wizard continues.
+    async fn try_openclaw_import(&mut self) {
+        use crate::import::{
+            OpenClawConfig, OpenClawImporter, OpenClawInstallation, TerminalProgress,
+        };
+
+        // Quick check — skip entirely if no installation found
+        if !OpenClawInstallation::exists_at_default() {
+            return;
+        }
+
+        println!();
+        print_info("Detected an existing OpenClaw installation!");
+        println!();
+
+        let do_import = match confirm(
+            "Import your OpenClaw data (memory, conversations, settings)?",
+            true,
+        ) {
+            Ok(v) => v,
+            Err(_) => return,
+        };
+
+        if !do_import {
+            print_info("You can import later with: ironclaw import openclaw");
+            return;
+        }
+
+        let installation = match OpenClawInstallation::discover(None) {
+            Ok(i) => i,
+            Err(e) => {
+                print_error(&format!("Failed to discover OpenClaw installation: {}", e));
+                return;
+            }
+        };
+
+        let config = match OpenClawConfig::parse(
+            &installation.config_file,
+            installation.oauth_file.as_deref(),
+        ) {
+            Ok(c) => c,
+            Err(e) => {
+                print_error(&format!("Failed to parse OpenClaw config: {}", e));
+                return;
+            }
+        };
+
+        // Build a Database handle from the wizard's live connection
+        let db: Option<Arc<dyn crate::db::Database>> = self.get_db_handle().await;
+
+        let Some(db) = db else {
+            print_error("No database connection available for import.");
+            return;
+        };
+
+        let workspace = crate::workspace::Workspace::new_with_db("default", Arc::clone(&db));
+
+        let importer = OpenClawImporter::new(installation, config, false);
+        let mut progress = TerminalProgress::new();
+
+        match importer
+            .run(&db, Some(&workspace), None, &mut progress)
+            .await
+        {
+            Ok(report) => {
+                report.print_summary();
+                if !report.errors.is_empty() {
+                    print_info(
+                        "Some items had errors. You can retry with: ironclaw import openclaw",
+                    );
+                }
+            }
+            Err(e) => {
+                print_error(&format!("Import failed: {}", e));
+                print_info("You can retry later with: ironclaw import openclaw");
+            }
+        }
+    }
+
+    /// Get an `Arc<dyn Database>` from the wizard's current DB connection.
+    async fn get_db_handle(&self) -> Option<Arc<dyn crate::db::Database>> {
+        #[cfg(feature = "libsql")]
+        if self.db_backend.is_some() {
+            let path = self
+                .settings
+                .libsql_path
+                .as_deref()
+                .unwrap_or("~/.ironclaw/ironclaw.db");
+            match crate::db::libsql::LibSqlBackend::new_local(std::path::Path::new(path)).await {
+                Ok(b) => return Some(Arc::new(b)),
+                Err(e) => {
+                    tracing::warn!("Failed to create libSQL handle for import: {}", e);
+                }
+            }
+        }
+
+        #[cfg(feature = "postgres")]
+        if let Some(ref pool) = self.db_pool {
+            return Some(Arc::new(crate::db::postgres::PgBackend::from_pool(
+                pool.clone(),
+            )));
+        }
+
+        None
     }
 
     /// Step 9: Heartbeat configuration.
