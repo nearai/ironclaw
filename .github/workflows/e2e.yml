@@ -39,7 +39,7 @@ jobs:
           playwright install --with-deps chromium
 
       - name: Run E2E tests
-        run: pytest tests/e2e/ -v --timeout=120
+        run: pytest tests/e2e/ -v -x --timeout=120
 
       - name: Upload screenshots on failure
         if: failure()
