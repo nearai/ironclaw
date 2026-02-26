@@ -474,6 +474,27 @@ mod tests {
     use super::*;
     use crate::config::helpers::ENV_MUTEX;
     use crate::settings::Settings;
+    use secrecy::ExposeSecret;
+
+    /// Clear all provider-related env vars.
+    fn clear_provider_env() {
+        // SAFETY: Only called under ENV_MUTEX in tests.
+        unsafe {
+            std::env::remove_var("LLM_BACKEND");
+            std::env::remove_var("LLM_BASE_URL");
+            std::env::remove_var("LLM_MODEL");
+            std::env::remove_var("OPENAI_API_KEY");
+            std::env::remove_var("OPENAI_MODEL");
+            std::env::remove_var("OPENAI_BASE_URL");
+            std::env::remove_var("CODEX_OAUTH_TOKEN");
+            std::env::remove_var("ANTHROPIC_API_KEY");
+            std::env::remove_var("ANTHROPIC_OAUTH_TOKEN");
+            std::env::remove_var("ANTHROPIC_MODEL");
+            std::env::remove_var("ANTHROPIC_BASE_URL");
+            std::env::remove_var("TINFOIL_API_KEY");
+            std::env::remove_var("TINFOIL_MODEL");
+        }
+    }
 
     /// Clear all openai-compatible-related env vars.
     fn clear_openai_compatible_env() {
@@ -597,5 +618,209 @@ mod tests {
                 ("X-Title".to_string(), "MyApp".to_string()),
             ]
         );
+    }
+
+    // ── Provider resolution tests ────────────────────────────────────
+
+    #[test]
+    fn anthropic_api_key_resolves() {
+        let _guard = ENV_MUTEX.lock().expect("env mutex poisoned");
+        clear_provider_env();
+        unsafe { std::env::set_var("ANTHROPIC_API_KEY", "sk-ant-test-key") };
+
+        let settings = Settings {
+            llm_backend: Some("anthropic".to_string()),
+            selected_model: Some("claude-opus-4-20250514".to_string()),
+            ..Default::default()
+        };
+        let cfg = LlmConfig::resolve(&settings).expect("resolve");
+        let anth = cfg.anthropic.expect("anthropic config should be present");
+
+        assert_eq!(anth.api_key.expose_secret(), "sk-ant-test-key");
+        assert_eq!(anth.model, "claude-opus-4-20250514");
+        assert!(anth.oauth_token.is_none());
+
+        clear_provider_env();
+    }
+
+    #[test]
+    fn anthropic_oauth_token_resolves_with_placeholder() {
+        let _guard = ENV_MUTEX.lock().expect("env mutex poisoned");
+        clear_provider_env();
+        unsafe { std::env::set_var("ANTHROPIC_OAUTH_TOKEN", "sk-ant-oat01-test") };
+
+        let settings = Settings {
+            llm_backend: Some("anthropic".to_string()),
+            ..Default::default()
+        };
+        let cfg = LlmConfig::resolve(&settings).expect("resolve");
+        let anth = cfg.anthropic.expect("anthropic config should be present");
+
+        assert_eq!(anth.api_key.expose_secret(), OAUTH_PLACEHOLDER);
+        assert!(anth.oauth_token.is_some());
+        assert_eq!(
+            anth.oauth_token.unwrap().expose_secret(),
+            "sk-ant-oat01-test"
+        );
+
+        clear_provider_env();
+    }
+
+    #[test]
+    fn anthropic_defers_when_no_credentials() {
+        let _guard = ENV_MUTEX.lock().expect("env mutex poisoned");
+        clear_provider_env();
+
+        let settings = Settings {
+            llm_backend: Some("anthropic".to_string()),
+            ..Default::default()
+        };
+        let cfg = LlmConfig::resolve(&settings).expect("resolve should NOT error");
+        assert!(
+            cfg.anthropic.is_none(),
+            "anthropic should be None when no credentials"
+        );
+
+        clear_provider_env();
+    }
+
+    #[test]
+    fn anthropic_env_model_overrides_selected_model() {
+        let _guard = ENV_MUTEX.lock().expect("env mutex poisoned");
+        clear_provider_env();
+        unsafe {
+            std::env::set_var("ANTHROPIC_API_KEY", "sk-ant-test");
+            std::env::set_var("ANTHROPIC_MODEL", "claude-haiku-4-5-20251001");
+        };
+
+        let settings = Settings {
+            llm_backend: Some("anthropic".to_string()),
+            selected_model: Some("claude-opus-4-20250514".to_string()),
+            ..Default::default()
+        };
+        let cfg = LlmConfig::resolve(&settings).expect("resolve");
+        let anth = cfg.anthropic.expect("anthropic config");
+
+        assert_eq!(anth.model, "claude-haiku-4-5-20251001");
+
+        clear_provider_env();
+    }
+
+    #[test]
+    fn openai_api_key_resolves() {
+        let _guard = ENV_MUTEX.lock().expect("env mutex poisoned");
+        clear_provider_env();
+        unsafe { std::env::set_var("OPENAI_API_KEY", "sk-openai-test") };
+
+        let settings = Settings {
+            llm_backend: Some("openai".to_string()),
+            selected_model: Some("gpt-5".to_string()),
+            ..Default::default()
+        };
+        let cfg = LlmConfig::resolve(&settings).expect("resolve");
+        let oai = cfg.openai.expect("openai config should be present");
+
+        assert_eq!(oai.api_key.expose_secret(), "sk-openai-test");
+        assert_eq!(oai.model, "gpt-5");
+
+        clear_provider_env();
+    }
+
+    #[test]
+    fn openai_codex_fallback_resolves() {
+        let _guard = ENV_MUTEX.lock().expect("env mutex poisoned");
+        clear_provider_env();
+        unsafe { std::env::set_var("CODEX_OAUTH_TOKEN", "codex-tok-123") };
+
+        let settings = Settings {
+            llm_backend: Some("openai".to_string()),
+            ..Default::default()
+        };
+        let cfg = LlmConfig::resolve(&settings).expect("resolve");
+        let oai = cfg.openai.expect("openai config should be present");
+
+        assert_eq!(oai.api_key.expose_secret(), "codex-tok-123");
+
+        clear_provider_env();
+    }
+
+    #[test]
+    fn openai_defers_when_no_credentials() {
+        let _guard = ENV_MUTEX.lock().expect("env mutex poisoned");
+        clear_provider_env();
+
+        let settings = Settings {
+            llm_backend: Some("openai".to_string()),
+            ..Default::default()
+        };
+        let cfg = LlmConfig::resolve(&settings).expect("resolve should NOT error");
+        assert!(cfg.openai.is_none());
+
+        clear_provider_env();
+    }
+
+    #[test]
+    fn tinfoil_defers_when_no_credentials() {
+        let _guard = ENV_MUTEX.lock().expect("env mutex poisoned");
+        clear_provider_env();
+
+        let settings = Settings {
+            llm_backend: Some("tinfoil".to_string()),
+            ..Default::default()
+        };
+        let cfg = LlmConfig::resolve(&settings).expect("resolve should NOT error");
+        assert!(cfg.tinfoil.is_none());
+
+        clear_provider_env();
+    }
+
+    #[test]
+    fn tinfoil_resolves_with_key() {
+        let _guard = ENV_MUTEX.lock().expect("env mutex poisoned");
+        clear_provider_env();
+        unsafe { std::env::set_var("TINFOIL_API_KEY", "tf-key-123") };
+
+        let settings = Settings {
+            llm_backend: Some("tinfoil".to_string()),
+            ..Default::default()
+        };
+        let cfg = LlmConfig::resolve(&settings).expect("resolve");
+        let tf = cfg.tinfoil.expect("tinfoil config should be present");
+        assert_eq!(tf.api_key.expose_secret(), "tf-key-123");
+
+        clear_provider_env();
+    }
+
+    #[test]
+    fn ollama_always_resolves() {
+        let _guard = ENV_MUTEX.lock().expect("env mutex poisoned");
+        clear_provider_env();
+
+        let settings = Settings {
+            llm_backend: Some("ollama".to_string()),
+            ..Default::default()
+        };
+        let cfg = LlmConfig::resolve(&settings).expect("resolve");
+        assert!(
+            cfg.ollama.is_some(),
+            "ollama should always resolve (has defaults)"
+        );
+
+        clear_provider_env();
+    }
+
+    #[test]
+    fn nearai_always_resolves() {
+        let _guard = ENV_MUTEX.lock().expect("env mutex poisoned");
+        clear_provider_env();
+
+        let settings = Settings {
+            llm_backend: Some("nearai".to_string()),
+            ..Default::default()
+        };
+        let cfg = LlmConfig::resolve(&settings).expect("resolve");
+        assert_eq!(cfg.backend, LlmBackend::NearAi);
+
+        clear_provider_env();
     }
 }
