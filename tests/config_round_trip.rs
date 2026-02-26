@@ -3,75 +3,14 @@
 //! Tests the full config lifecycle: write via bootstrap helpers, read back via
 //! dotenvy, and assert values match. Each test uses a tempdir for isolation.
 //!
-//! The bootstrap `.env` format uses double-quoted values with backslash-escaping
-//! for quotes and backslashes. dotenvy strips the quotes on read, giving back
-//! the original value.
-//!
-//! Note: `save_bootstrap_env` and `upsert_bootstrap_var` write to the global
-//! `~/.ironclaw/.env` path. These tests exercise the same escaping/formatting
-//! logic against tempdir paths so they remain hermetic. The format contract is:
-//! `KEY="escaped_value"\n` per line, parseable by dotenvy.
+//! These tests call the real `save_bootstrap_env_to` and `upsert_bootstrap_var_to`
+//! functions from `ironclaw::bootstrap`, ensuring test coverage of the actual
+//! escaping/formatting logic rather than a reimplementation.
 
 use std::collections::HashMap;
 use tempfile::tempdir;
 
-/// Write a set of key-value pairs to a .env file using the same format as
-/// `save_bootstrap_env`: double-quoted values with escaped backslashes and
-/// double quotes.
-fn write_bootstrap_env(
-    path: &std::path::Path,
-    vars: &[(&str, &str)],
-) -> std::io::Result<()> {
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    let mut content = String::new();
-    for (key, value) in vars {
-        let escaped = value.replace('\\', "\\\\").replace('"', "\\\"");
-        content.push_str(&format!("{}=\"{}\"\n", key, escaped));
-    }
-    std::fs::write(path, &content)
-}
-
-/// Simulate `upsert_bootstrap_var` against a specific path: read existing
-/// content, replace or append the key, write back.
-fn upsert_env_var(
-    path: &std::path::Path,
-    key: &str,
-    value: &str,
-) -> std::io::Result<()> {
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-
-    let escaped = value.replace('\\', "\\\\").replace('"', "\\\"");
-    let new_line = format!("{}=\"{}\"", key, escaped);
-    let prefix = format!("{}=", key);
-
-    let existing = std::fs::read_to_string(path).unwrap_or_default();
-
-    let mut found = false;
-    let mut result = String::new();
-    for line in existing.lines() {
-        if line.starts_with(&prefix) {
-            if !found {
-                result.push_str(&new_line);
-                result.push('\n');
-                found = true;
-            }
-            continue;
-        }
-        result.push_str(line);
-        result.push('\n');
-    }
-
-    if !found {
-        result.push_str(&new_line);
-        result.push('\n');
-    }
-
-    std::fs::write(path, result)
-}
+use ironclaw::bootstrap::{save_bootstrap_env_to, upsert_bootstrap_var_to};
 
 /// Parse a .env file into a HashMap using dotenvy.
 fn read_env_map(path: &std::path::Path) -> HashMap<String, String> {
@@ -89,7 +28,7 @@ fn bootstrap_env_round_trips_llm_backend() {
     let env_path = dir.path().join(".env");
 
     // Write: same vars the wizard writes when user picks an LLM backend
-    write_bootstrap_env(
+    save_bootstrap_env_to(
         &env_path,
         &[
             ("DATABASE_BACKEND", "libsql"),
@@ -110,7 +49,7 @@ fn bootstrap_env_round_trips_llm_backend() {
 
     // All other backends the wizard supports
     for backend in &["nearai", "anthropic", "ollama", "openai_compatible", "tinfoil"] {
-        write_bootstrap_env(&env_path, &[("LLM_BACKEND", backend)]).unwrap();
+        save_bootstrap_env_to(&env_path, &[("LLM_BACKEND", backend)]).unwrap();
         let map = read_env_map(&env_path);
         assert_eq!(
             map.get("LLM_BACKEND").map(String::as_str),
@@ -127,9 +66,7 @@ fn bootstrap_env_round_trips_embedding_disabled() {
     let dir = tempdir().unwrap();
     let env_path = dir.path().join(".env");
 
-    // Write both EMBEDDING_ENABLED=false and OPENAI_API_KEY (a user who has
-    // an OpenAI key but explicitly disabled embeddings)
-    write_bootstrap_env(
+    save_bootstrap_env_to(
         &env_path,
         &[
             ("DATABASE_BACKEND", "libsql"),
@@ -161,7 +98,7 @@ fn bootstrap_env_round_trips_onboard_completed() {
     let dir = tempdir().unwrap();
     let env_path = dir.path().join(".env");
 
-    write_bootstrap_env(
+    save_bootstrap_env_to(
         &env_path,
         &[
             ("DATABASE_BACKEND", "libsql"),
@@ -172,15 +109,12 @@ fn bootstrap_env_round_trips_onboard_completed() {
 
     let map = read_env_map(&env_path);
 
-    // Verify the value round-trips
     assert_eq!(
         map.get("ONBOARD_COMPLETED").map(String::as_str),
         Some("true"),
         "ONBOARD_COMPLETED=true must survive .env round-trip"
     );
 
-    // Verify the same logic check_onboard_needed() uses: the string must be
-    // exactly "true" (not "1", not "TRUE") for the check to pass.
     let onboard_val = map.get("ONBOARD_COMPLETED").unwrap();
     let onboard_completed = onboard_val == "true";
     assert!(
@@ -189,7 +123,7 @@ fn bootstrap_env_round_trips_onboard_completed() {
     );
 
     // Also verify that without ONBOARD_COMPLETED, the flag is absent
-    write_bootstrap_env(&env_path, &[("DATABASE_BACKEND", "libsql")]).unwrap();
+    save_bootstrap_env_to(&env_path, &[("DATABASE_BACKEND", "libsql")]).unwrap();
     let map2 = read_env_map(&env_path);
     assert!(
         !map2.contains_key("ONBOARD_COMPLETED"),
@@ -204,11 +138,8 @@ fn bootstrap_env_round_trips_session_token_key() {
     let dir = tempdir().unwrap();
     let env_path = dir.path().join(".env");
 
-    // The session manager writes NEARAI_API_KEY via upsert_bootstrap_var
-    // (see src/llm/session.rs:424). Verify the key name is correct and
-    // the value (which looks like a session token or API key) round-trips.
     let token = "sess_abc123def456ghi789jkl012mno345pqr678stu901vwx234";
-    write_bootstrap_env(
+    save_bootstrap_env_to(
         &env_path,
         &[
             ("DATABASE_BACKEND", "libsql"),
@@ -226,9 +157,8 @@ fn bootstrap_env_round_trips_session_token_key() {
         "NEARAI_API_KEY (session token) must survive .env round-trip"
     );
 
-    // Also test the NEARAI_SESSION_TOKEN key (used by hosting providers)
     let session_token = "sess_hosting_provider_injected_token_value";
-    write_bootstrap_env(
+    save_bootstrap_env_to(
         &env_path,
         &[
             ("NEARAI_SESSION_TOKEN", session_token),
@@ -252,7 +182,6 @@ fn bootstrap_env_preserves_existing_values() {
     let dir = tempdir().unwrap();
     let env_path = dir.path().join(".env");
 
-    // Write the full set of vars the wizard might produce
     let initial_vars: &[(&str, &str)] = &[
         ("DATABASE_BACKEND", "postgres"),
         ("DATABASE_URL", "postgres://user:pass@localhost:5432/ironclaw"),
@@ -261,11 +190,10 @@ fn bootstrap_env_preserves_existing_values() {
         ("EMBEDDING_ENABLED", "true"),
         ("ONBOARD_COMPLETED", "true"),
     ];
-    write_bootstrap_env(&env_path, initial_vars).unwrap();
+    save_bootstrap_env_to(&env_path, initial_vars).unwrap();
 
     let map = read_env_map(&env_path);
 
-    // All keys must be present with correct values
     assert_eq!(map.len(), initial_vars.len(), "all vars must survive round-trip");
     for (key, value) in initial_vars {
         assert_eq!(
@@ -276,11 +204,10 @@ fn bootstrap_env_preserves_existing_values() {
     }
 
     // Now upsert a new key and verify nothing is lost
-    upsert_env_var(&env_path, "LLM_MODEL", "gpt-4o").unwrap();
+    upsert_bootstrap_var_to(&env_path, "LLM_MODEL", "gpt-4o").unwrap();
 
     let map2 = read_env_map(&env_path);
 
-    // Original keys must still be there
     for (key, value) in initial_vars {
         assert_eq!(
             map2.get(*key).map(String::as_str),
@@ -288,7 +215,6 @@ fn bootstrap_env_preserves_existing_values() {
             "{key} must be preserved after upsert"
         );
     }
-    // New key must also be present
     assert_eq!(
         map2.get("LLM_MODEL").map(String::as_str),
         Some("gpt-4o"),
@@ -296,7 +222,7 @@ fn bootstrap_env_preserves_existing_values() {
     );
 
     // Upsert an existing key and verify the value is updated, others preserved
-    upsert_env_var(&env_path, "LLM_BACKEND", "anthropic").unwrap();
+    upsert_bootstrap_var_to(&env_path, "LLM_BACKEND", "anthropic").unwrap();
 
     let map3 = read_env_map(&env_path);
 
@@ -343,7 +269,7 @@ fn bootstrap_env_handles_special_characters() {
         ("SPACER", " "),
     ];
 
-    write_bootstrap_env(&env_path, test_cases).unwrap();
+    save_bootstrap_env_to(&env_path, test_cases).unwrap();
 
     let map = read_env_map(&env_path);
 

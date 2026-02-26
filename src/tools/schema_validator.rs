@@ -6,7 +6,15 @@
 //! exercises every built-in tool's `parameters_schema()` to ensure compatibility
 //! with the OpenAI function calling API strict mode.
 
-/// Validate a JSON schema against OpenAI strict-mode rules.
+/// Strict CI-time validation of a JSON schema against OpenAI strict-mode rules.
+///
+/// Use this function in tests and CI to catch subtle schema defects that the
+/// lenient runtime validator allows (freeform properties, missing
+/// `additionalProperties`, enum-type mismatches).
+///
+/// For the lenient runtime variant used at tool-registration time, see
+/// [`validate_tool_schema`](crate::tools::tool::validate_tool_schema) in
+/// `tool.rs`.
 ///
 /// Returns `Ok(())` if the schema is valid, or `Err(errors)` with a list of
 /// all violations found. The validation is recursive for nested objects and

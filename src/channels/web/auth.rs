@@ -24,11 +24,13 @@ pub async fn auth_middleware(
     request: Request,
     next: Next,
 ) -> Response {
-    // Try Authorization header first (constant-time comparison)
+    // Try Authorization header first (constant-time comparison).
+    // RFC 6750 Section 2.1: auth-scheme comparison is case-insensitive.
     if let Some(auth_header) = headers.get("authorization")
         && let Ok(value) = auth_header.to_str()
-        && let Some(token) = value.strip_prefix("Bearer ")
-        && bool::from(token.as_bytes().ct_eq(auth.token.as_bytes()))
+        && value.len() > 7
+        && value[..7].eq_ignore_ascii_case("Bearer ")
+        && bool::from(value.as_bytes()[7..].ct_eq(auth.token.as_bytes()))
     {
         return next.run(request).await;
     }
@@ -136,9 +138,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_bearer_prefix_case_sensitivity() {
-        // The middleware uses `strip_prefix("Bearer ")` which is case-sensitive.
-        // Lowercase "bearer" should NOT match, resulting in a 401.
+    async fn test_bearer_prefix_case_insensitive() {
+        // RFC 6750 Section 2.1: auth-scheme comparison must be case-insensitive.
         let app = test_app("secret-token");
         let req = Request::builder()
             .uri("/test")
@@ -146,7 +147,19 @@ mod tests {
             .body(Body::empty())
             .unwrap();
         let resp = app.oneshot(req).await.unwrap();
-        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn test_bearer_prefix_mixed_case() {
+        let app = test_app("secret-token");
+        let req = Request::builder()
+            .uri("/test")
+            .header("Authorization", "BEARER secret-token")
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
     }
 
     #[tokio::test]

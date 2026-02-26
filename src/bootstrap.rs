@@ -92,7 +92,14 @@ fn migrate_bootstrap_json_to_env(env_path: &std::path::Path) {
 /// Values are double-quoted so that `#` (common in URL-encoded passwords)
 /// and other shell-special characters are preserved by dotenvy.
 pub fn save_bootstrap_env(vars: &[(&str, &str)]) -> std::io::Result<()> {
-    let path = ironclaw_env_path();
+    save_bootstrap_env_to(&ironclaw_env_path(), vars)
+}
+
+/// Write bootstrap vars to an arbitrary path (testable variant).
+///
+/// Values are double-quoted and escaped so that `#`, `"`, `\` and other
+/// shell-special characters are preserved by dotenvy.
+pub fn save_bootstrap_env_to(path: &std::path::Path, vars: &[(&str, &str)]) -> std::io::Result<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
@@ -103,8 +110,8 @@ pub fn save_bootstrap_env(vars: &[(&str, &str)]) -> std::io::Result<()> {
         let escaped = value.replace('\\', "\\\\").replace('"', "\\\"");
         content.push_str(&format!("{}=\"{}\"\n", key, escaped));
     }
-    std::fs::write(&path, &content)?;
-    restrict_file_permissions(&path)?;
+    std::fs::write(path, &content)?;
+    restrict_file_permissions(path)?;
     Ok(())
 }
 
@@ -115,7 +122,15 @@ pub fn save_bootstrap_env(vars: &[(&str, &str)]) -> std::io::Result<()> {
 /// or appends it otherwise. Use this when writing a single bootstrap var
 /// outside the wizard (which manages the full set via `save_bootstrap_env`).
 pub fn upsert_bootstrap_var(key: &str, value: &str) -> std::io::Result<()> {
-    let path = ironclaw_env_path();
+    upsert_bootstrap_var_to(&ironclaw_env_path(), key, value)
+}
+
+/// Update or add a single variable at an arbitrary path (testable variant).
+pub fn upsert_bootstrap_var_to(
+    path: &std::path::Path,
+    key: &str,
+    value: &str,
+) -> std::io::Result<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
@@ -124,7 +139,7 @@ pub fn upsert_bootstrap_var(key: &str, value: &str) -> std::io::Result<()> {
     let new_line = format!("{}=\"{}\"", key, escaped);
     let prefix = format!("{}=", key);
 
-    let existing = std::fs::read_to_string(&path).unwrap_or_default();
+    let existing = std::fs::read_to_string(path).unwrap_or_default();
 
     let mut found = false;
     let mut result = String::new();
@@ -147,8 +162,8 @@ pub fn upsert_bootstrap_var(key: &str, value: &str) -> std::io::Result<()> {
         result.push('\n');
     }
 
-    std::fs::write(&path, result)?;
-    restrict_file_permissions(&path)?;
+    std::fs::write(path, result)?;
+    restrict_file_permissions(path)?;
     Ok(())
 }
 

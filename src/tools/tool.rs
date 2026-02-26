@@ -287,17 +287,28 @@ pub fn require_param<'a>(
         .ok_or_else(|| ToolError::InvalidParameters(format!("missing '{}' parameter", name)))
 }
 
-/// Validate a tool's `parameters_schema()` against OpenAI strict-mode rules.
+/// Lenient runtime validation of a tool's `parameters_schema()`.
+///
+/// Use this function at tool-registration time to catch structural mistakes
+/// (missing `"type": "object"`, orphan `"required"` keys, arrays without
+/// `"items"`) without rejecting intentional freeform properties.
+///
+/// For the stricter variant that also enforces `additionalProperties: false`,
+/// enum-type consistency, and per-property `"type"` fields, see
+/// [`validate_strict_schema`](crate::tools::schema_validator::validate_strict_schema)
+/// in `schema_validator.rs` (used in CI tests).
 ///
 /// Returns a list of validation errors. An empty list means the schema is valid.
-/// Rules enforced:
+///
+/// # Rules enforced
+///
 /// 1. Top-level must have `"type": "object"`
 /// 2. Top-level must have `"properties"` as an object
 /// 3. Every key in `"required"` must exist in `"properties"`
 /// 4. Nested objects follow the same rules recursively
 /// 5. Array properties should have `"items"` defined
 ///
-/// Note: properties without a `"type"` field are allowed (freeform/any-type).
+/// Properties without a `"type"` field are allowed (freeform/any-type).
 /// This is an intentional pattern used by tools like `json` and `http` for
 /// OpenAI compatibility, since union types with arrays require `items`.
 pub fn validate_tool_schema(schema: &serde_json::Value, path: &str) -> Vec<String> {
@@ -347,14 +358,14 @@ pub fn validate_tool_schema(schema: &serde_json::Value, path: &str) -> Vec<Strin
                     errors.extend(validate_tool_schema(prop, &prop_path));
                 }
                 "array" => {
-                    if prop.get("items").is_none() {
-                        errors.push(format!("{prop_path}: array property missing \"items\""));
-                    } else if let Some(items) = prop.get("items") {
+                    if let Some(items) = prop.get("items") {
                         // If items is an object type, recurse
                         if items.get("type").and_then(|t| t.as_str()) == Some("object") {
                             errors
                                 .extend(validate_tool_schema(items, &format!("{prop_path}.items")));
                         }
+                    } else {
+                        errors.push(format!("{prop_path}: array property missing \"items\""));
                     }
                 }
                 _ => {}
