@@ -63,6 +63,7 @@ pub trait EmbeddingProvider: Send + Sync {
 /// OpenAI embedding provider using text-embedding-ada-002 or text-embedding-3-small.
 pub struct OpenAiEmbeddings {
     client: reqwest::Client,
+    base_url: String,
     api_key: String,
     model: String,
     dimension: usize,
@@ -75,6 +76,7 @@ impl OpenAiEmbeddings {
     pub fn new(api_key: impl Into<String>) -> Self {
         Self {
             client: reqwest::Client::new(),
+            base_url: "https://api.openai.com".to_string(),
             api_key: api_key.into(),
             model: "text-embedding-3-small".to_string(),
             dimension: 1536,
@@ -85,6 +87,7 @@ impl OpenAiEmbeddings {
     pub fn ada_002(api_key: impl Into<String>) -> Self {
         Self {
             client: reqwest::Client::new(),
+            base_url: "https://api.openai.com".to_string(),
             api_key: api_key.into(),
             model: "text-embedding-ada-002".to_string(),
             dimension: 1536,
@@ -95,6 +98,7 @@ impl OpenAiEmbeddings {
     pub fn large(api_key: impl Into<String>) -> Self {
         Self {
             client: reqwest::Client::new(),
+            base_url: "https://api.openai.com".to_string(),
             api_key: api_key.into(),
             model: "text-embedding-3-large".to_string(),
             dimension: 3072,
@@ -109,10 +113,17 @@ impl OpenAiEmbeddings {
     ) -> Self {
         Self {
             client: reqwest::Client::new(),
+            base_url: "https://api.openai.com".to_string(),
             api_key: api_key.into(),
             model: model.into(),
             dimension,
         }
+    }
+
+    /// Set a custom base URL (e.g., for OpenRouter).
+    pub fn with_base_url(mut self, base_url: impl Into<String>) -> Self {
+        self.base_url = base_url.into().trim_end_matches('/').to_string();
+        self
     }
 }
 
@@ -175,7 +186,7 @@ impl EmbeddingProvider for OpenAiEmbeddings {
 
         let response = self
             .client
-            .post("https://api.openai.com/v1/embeddings")
+            .post(&format!("{}/v1/embeddings", self.base_url))
             .header("Authorization", format!("Bearer {}", self.api_key))
             .json(&request)
             .send()
