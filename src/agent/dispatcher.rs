@@ -298,6 +298,15 @@ impl Agent {
                 Some(&thread_id_str),
             );
 
+            let _ = self
+                .channels
+                .send_status(
+                    &message.channel,
+                    StatusUpdate::Thinking("Calling LLM...".into()),
+                    &message.metadata,
+                )
+                .await;
+
             let output = match reasoning.respond_with_tools(&context).await {
                 Ok(output) => output,
                 Err(crate::error::LlmError::ContextLengthExceeded { used, limit }) => {
