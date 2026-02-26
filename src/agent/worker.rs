@@ -1199,4 +1199,55 @@ mod tests {
             "Missing tool should produce an error, not a panic"
         );
     }
+
+    #[test]
+    fn test_store_fallback_in_metadata_roundtrip() {
+        use crate::context::FallbackDeliverable;
+
+        let mut ctx = JobContext::new("Test", "fallback roundtrip");
+        let memory = crate::context::Memory::new(ctx.job_id);
+        let fb = FallbackDeliverable::build(&ctx, &memory, "test failure");
+
+        // Store into metadata
+        store_fallback_in_metadata(&mut ctx, Some(&fb));
+
+        // Verify it's stored and can be deserialized back
+        let stored = ctx.metadata.get("fallback_deliverable");
+        assert!(
+            stored.is_some(),
+            "fallback_deliverable missing from metadata"
+        );
+
+        let recovered: FallbackDeliverable =
+            serde_json::from_value(stored.unwrap().clone()).expect("deserialize fallback");
+        assert_eq!(recovered.failure_reason, "test failure");
+        assert!(!recovered.partial);
+    }
+
+    #[test]
+    fn test_store_fallback_handles_non_object_metadata() {
+        use crate::context::FallbackDeliverable;
+
+        let mut ctx = JobContext::new("Test", "non-object metadata");
+        ctx.metadata = serde_json::json!("not an object");
+
+        let memory = crate::context::Memory::new(ctx.job_id);
+        let fb = FallbackDeliverable::build(&ctx, &memory, "failed");
+
+        store_fallback_in_metadata(&mut ctx, Some(&fb));
+
+        // Must normalize to object and store
+        assert!(ctx.metadata.is_object());
+        assert!(ctx.metadata.get("fallback_deliverable").is_some());
+    }
+
+    #[test]
+    fn test_store_fallback_none_is_noop() {
+        let mut ctx = JobContext::new("Test", "noop");
+        let original = ctx.metadata.clone();
+
+        store_fallback_in_metadata(&mut ctx, None);
+
+        assert_eq!(ctx.metadata, original);
+    }
 }

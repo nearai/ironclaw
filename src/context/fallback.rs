@@ -59,8 +59,13 @@ impl FallbackDeliverable {
         let total = memory.actions.len() as u32;
 
         let last_action = memory.last_action().map(|a| {
-            let preview = a.output_raw.as_deref().unwrap_or("");
-            let preview = truncate_str(preview, 200);
+            // Use sanitized output to avoid leaking secrets through the fallback API surface.
+            let preview_source = a
+                .output_sanitized
+                .as_ref()
+                .map(|v| serde_json::to_string(v).unwrap_or_default())
+                .unwrap_or_default();
+            let preview = truncate_str(&preview_source, 200);
             LastAction {
                 tool_name: a.tool_name.clone(),
                 output_preview: preview.to_string(),
@@ -185,15 +190,37 @@ mod tests {
         let action = memory
             .create_action("tool_c", serde_json::json!({}))
             .succeed(
-                Some(long_output),
-                serde_json::json!({}),
+                Some(long_output.clone()),
+                serde_json::Value::String(long_output),
                 StdDuration::from_secs(1),
             );
         memory.record_action(action);
 
         let fb = FallbackDeliverable::build(&ctx, &memory, "failed");
         let la = fb.last_action.unwrap();
-        assert_eq!(la.output_preview.len(), 200);
+        assert!(la.output_preview.len() <= 200);
+        assert!(!la.output_preview.is_empty());
+    }
+
+    #[test]
+    fn test_fallback_uses_sanitized_output() {
+        let ctx = JobContext::new("Test", "Sanitized");
+        let mut memory = Memory::new(ctx.job_id);
+
+        let action = memory
+            .create_action("tool_d", serde_json::json!({}))
+            .succeed(
+                Some("sk-secret-key-12345".to_string()),
+                serde_json::json!({"result": "[REDACTED]"}),
+                StdDuration::from_secs(1),
+            );
+        memory.record_action(action);
+
+        let fb = FallbackDeliverable::build(&ctx, &memory, "failed");
+        let la = fb.last_action.unwrap();
+        // Must use sanitized output, not raw
+        assert!(!la.output_preview.contains("sk-secret"));
+        assert!(la.output_preview.contains("REDACTED"));
     }
 
     #[test]
