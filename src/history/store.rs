@@ -963,6 +963,15 @@ impl Store {
         rows.iter().map(row_to_routine).collect()
     }
 
+    /// List all routines across all users.
+    pub async fn list_all_routines(&self) -> Result<Vec<Routine>, DatabaseError> {
+        let conn = self.conn().await?;
+        let rows = conn
+            .query("SELECT * FROM routines ORDER BY name", &[])
+            .await?;
+        rows.iter().map(row_to_routine).collect()
+    }
+
     /// List all enabled routines with event triggers (for event matching).
     pub async fn list_event_routines(&self) -> Result<Vec<Routine>, DatabaseError> {
         let conn = self.conn().await?;
