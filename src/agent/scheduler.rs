@@ -427,6 +427,7 @@ impl Scheduler {
         // Execute with per-tool timeout and retry on transient errors
         let tool_timeout = tool.execution_timeout();
         let retry_config = crate::tools::retry::effective_retry_config(tool.as_ref());
+        let retry_counter = std::sync::atomic::AtomicU32::new(0);
         let result = tokio::time::timeout(tool_timeout, async {
             crate::tools::retry::retry_tool_execute(
                 tool.as_ref(),
@@ -434,11 +435,20 @@ impl Scheduler {
                 &job_ctx,
                 &retry_config,
                 tool_timeout,
+                &retry_counter,
             )
             .await
         })
         .await
         .map_err(|_| {
+            let attempts = retry_counter.load(std::sync::atomic::Ordering::Relaxed);
+            if attempts > 0 {
+                tracing::warn!(
+                    tool = %tool_name,
+                    retry_attempts = attempts,
+                    "Subtask tool call timed out after retries"
+                );
+            }
             Error::Tool(crate::error::ToolError::Timeout {
                 name: tool_name.to_string(),
                 timeout: tool_timeout,

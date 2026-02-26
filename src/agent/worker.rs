@@ -578,6 +578,7 @@ Report when the job is complete or if you encounter issues you cannot resolve."#
         // Execute with per-tool timeout, retry, and timing
         let tool_timeout = tool.execution_timeout();
         let retry_config = effective_retry_config(tool.as_ref());
+        let retry_counter = std::sync::atomic::AtomicU32::new(0);
         let start = std::time::Instant::now();
         let timeout_result = tokio::time::timeout(tool_timeout, async {
             retry_tool_execute(
@@ -586,13 +587,16 @@ Report when the job is complete or if you encounter issues you cannot resolve."#
                 &job_ctx,
                 &retry_config,
                 tool_timeout,
+                &retry_counter,
             )
             .await
         })
         .await;
         let elapsed = start.elapsed();
 
-        // Unpack the timeout + retry layers
+        // Unpack the timeout + retry layers.
+        // On timeout, read retry_counter to capture retries that occurred
+        // before the cancellation — without this, the count would be lost.
         let (result, retry_attempts) = match timeout_result {
             Ok(outcome) => {
                 let attempts = outcome.retry_attempts;
@@ -605,7 +609,17 @@ Report when the job is complete or if you encounter issues you cannot resolve."#
                 }
                 (Ok(outcome.result), attempts)
             }
-            Err(_) => (Err(()), 0),
+            Err(_) => {
+                let attempts = retry_counter.load(std::sync::atomic::Ordering::Relaxed);
+                if attempts > 0 {
+                    tracing::warn!(
+                        tool = %tool_name,
+                        retry_attempts = attempts,
+                        "Tool call timed out after retries"
+                    );
+                }
+                (Err(()), attempts)
+            }
         };
 
         match &result {

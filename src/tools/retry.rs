@@ -5,6 +5,7 @@
 //! `NotAuthorized`) fail immediately; transient errors (`RateLimited`,
 //! `ExternalService`, `Timeout`, `Sandbox`) are retried with backoff.
 
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::{Duration, Instant};
 
 use rand::Rng;
@@ -19,8 +20,6 @@ pub struct ToolRetryOutcome {
     pub result: Result<ToolOutput, ToolError>,
     /// Number of retry attempts (0 = succeeded on first try).
     pub retry_attempts: u32,
-    /// Total wall-clock time across all attempts including sleeps.
-    pub total_duration: Duration,
 }
 
 /// Calculate exponential backoff delay with 25% jitter, capped at `max_delay`.
@@ -34,7 +33,7 @@ fn backoff_delay(config: &ToolRetryConfig, attempt: u32) -> Duration {
 
     let jitter_range = capped_ms / 4; // 25%
     let jitter = if jitter_range > 0 {
-        let offset = rand::thread_rng().gen_range(0..=jitter_range * 2);
+        let offset = rand::thread_rng().gen_range(0..=jitter_range.saturating_mul(2));
         offset as i64 - jitter_range as i64
     } else {
         0
@@ -50,23 +49,38 @@ fn backoff_delay(config: &ToolRetryConfig, attempt: u32) -> Duration {
 /// - On transient error, sleeps with exponential backoff + jitter
 /// - Honors `RateLimited(Some(duration))` by using the server-suggested delay
 /// - Tracks `remaining_budget` to stop before exceeding `budget`
+///
+/// ## Budget vs outer timeout
+///
+/// `budget` is a cooperative, graceful exit: before each sleep the function checks
+/// whether the next delay would exceed the remaining budget and, if so, returns
+/// the last error *without* sleeping. The caller typically also wraps this call
+/// in `tokio::time::timeout(budget)` as a hard cancellation backstop.
+/// Using the same `Duration` for both is intentional: the budget lets the function
+/// exit cleanly in most cases, while the outer timeout catches edge cases where
+/// a slow `tool.execute()` call blocks past the deadline.
+///
+/// ## `retry_counter`
+///
+/// An externally-owned `AtomicU32` that this function increments on every retry.
+/// If the outer timeout fires and cancels the future mid-sleep, the caller can
+/// still read the counter to log how many retries occurred before cancellation.
 pub async fn retry_tool_execute(
     tool: &dyn Tool,
     params: &serde_json::Value,
     ctx: &JobContext,
     config: &ToolRetryConfig,
     budget: Duration,
+    retry_counter: &AtomicU32,
 ) -> ToolRetryOutcome {
     let start = Instant::now();
-    let mut retry_attempts: u32 = 0;
 
     for attempt in 0..=config.max_retries {
         match tool.execute(params.clone(), ctx).await {
             Ok(output) => {
                 return ToolRetryOutcome {
                     result: Ok(output),
-                    retry_attempts,
-                    total_duration: start.elapsed(),
+                    retry_attempts: retry_counter.load(Ordering::Relaxed),
                 };
             }
             Err(err) => {
@@ -74,8 +88,7 @@ pub async fn retry_tool_execute(
                 if err.kind() == ToolErrorKind::Permanent {
                     return ToolRetryOutcome {
                         result: Err(err),
-                        retry_attempts,
-                        total_duration: start.elapsed(),
+                        retry_attempts: retry_counter.load(Ordering::Relaxed),
                     };
                 }
 
@@ -83,20 +96,34 @@ pub async fn retry_tool_execute(
                 if attempt == config.max_retries {
                     return ToolRetryOutcome {
                         result: Err(err),
-                        retry_attempts,
-                        total_duration: start.elapsed(),
+                        retry_attempts: retry_counter.load(Ordering::Relaxed),
                     };
                 }
 
-                // Calculate delay: prefer server-suggested for RateLimited
+                // Budget check: compute remaining time before calculating delay
+                let elapsed = start.elapsed();
+                let remaining = budget.saturating_sub(elapsed);
+
+                // Calculate delay: prefer server-suggested for RateLimited,
+                // capped against remaining budget (not max_delay) so we never
+                // sleep longer than the caller's deadline allows.
                 let delay = match err.retry_after() {
-                    Some(suggested) => suggested.min(config.max_delay),
+                    Some(suggested) => {
+                        let capped = suggested.min(remaining);
+                        if capped < suggested {
+                            tracing::warn!(
+                                tool = %tool.name(),
+                                suggested_ms = suggested.as_millis() as u64,
+                                remaining_ms = remaining.as_millis() as u64,
+                                "Rate-limit retry_after capped to remaining budget"
+                            );
+                        }
+                        capped
+                    }
                     None => backoff_delay(config, attempt),
                 };
 
                 // Budget check: stop if sleeping would exceed remaining time
-                let elapsed = start.elapsed();
-                let remaining = budget.saturating_sub(elapsed);
                 if delay >= remaining {
                     tracing::warn!(
                         tool = %tool.name(),
@@ -108,12 +135,11 @@ pub async fn retry_tool_execute(
                     );
                     return ToolRetryOutcome {
                         result: Err(err),
-                        retry_attempts,
-                        total_duration: start.elapsed(),
+                        retry_attempts: retry_counter.load(Ordering::Relaxed),
                     };
                 }
 
-                retry_attempts += 1;
+                retry_counter.fetch_add(1, Ordering::Relaxed);
                 tracing::warn!(
                     tool = %tool.name(),
                     attempt = attempt + 1,
@@ -154,7 +180,6 @@ mod tests {
     use super::*;
 
     use std::sync::Arc;
-    use std::sync::atomic::{AtomicU32, Ordering};
 
     use async_trait::async_trait;
 
@@ -261,6 +286,7 @@ mod tests {
         let tool = FailNThenSucceedTool::new(0, ToolError::ExternalService("err".into()));
         let ctx = JobContext::default();
         let config = fast_config(3);
+        let counter = AtomicU32::new(0);
 
         let outcome = retry_tool_execute(
             &tool,
@@ -268,6 +294,7 @@ mod tests {
             &ctx,
             &config,
             Duration::from_secs(60),
+            &counter,
         )
         .await;
 
@@ -281,6 +308,7 @@ mod tests {
         let tool = FailNThenSucceedTool::new(2, ToolError::ExternalService("503".into()));
         let ctx = JobContext::default();
         let config = fast_config(5);
+        let counter = AtomicU32::new(0);
 
         let outcome = retry_tool_execute(
             &tool,
@@ -288,6 +316,7 @@ mod tests {
             &ctx,
             &config,
             Duration::from_secs(60),
+            &counter,
         )
         .await;
 
@@ -301,6 +330,7 @@ mod tests {
         let tool = FailNThenSucceedTool::new(10, ToolError::InvalidParameters("bad".into()));
         let ctx = JobContext::default();
         let config = fast_config(5);
+        let counter = AtomicU32::new(0);
 
         let outcome = retry_tool_execute(
             &tool,
@@ -308,6 +338,7 @@ mod tests {
             &ctx,
             &config,
             Duration::from_secs(60),
+            &counter,
         )
         .await;
 
@@ -321,6 +352,7 @@ mod tests {
         let tool = FailNThenSucceedTool::new(100, ToolError::ExternalService("always fail".into()));
         let ctx = JobContext::default();
         let config = fast_config(2);
+        let counter = AtomicU32::new(0);
 
         let outcome = retry_tool_execute(
             &tool,
@@ -328,10 +360,12 @@ mod tests {
             &ctx,
             &config,
             Duration::from_secs(60),
+            &counter,
         )
         .await;
 
         assert!(outcome.result.is_err());
+        assert_eq!(outcome.retry_attempts, 2);
         assert_eq!(tool.call_count(), 3); // 1 initial + 2 retries
     }
 
@@ -345,6 +379,7 @@ mod tests {
             base_delay: Duration::from_secs(10), // much larger than suggested
             max_delay: Duration::from_secs(30),
         };
+        let counter = AtomicU32::new(0);
 
         let start = Instant::now();
         let outcome = retry_tool_execute(
@@ -353,6 +388,7 @@ mod tests {
             &ctx,
             &config,
             Duration::from_secs(60),
+            &counter,
         )
         .await;
         let elapsed = start.elapsed();
@@ -377,6 +413,7 @@ mod tests {
             base_delay: Duration::from_secs(5),
             max_delay: Duration::from_secs(30),
         };
+        let counter = AtomicU32::new(0);
 
         // Budget is tiny — should stop after 1st attempt since delay > remaining
         let outcome = retry_tool_execute(
@@ -385,6 +422,7 @@ mod tests {
             &ctx,
             &config,
             Duration::from_millis(100),
+            &counter,
         )
         .await;
 
@@ -433,6 +471,7 @@ mod tests {
         ));
         let ctx = JobContext::default();
         let config = fast_config(3);
+        let counter = AtomicU32::new(0);
 
         let outcome = retry_tool_execute(
             tool.as_ref(),
@@ -440,10 +479,100 @@ mod tests {
             &ctx,
             &config,
             Duration::from_secs(60),
+            &counter,
         )
         .await;
 
         assert!(outcome.result.is_ok());
         assert_eq!(outcome.retry_attempts, 1);
+    }
+
+    // --- F-8: Timeout cancellation preserves retry counter ---
+
+    /// Mock tool that always sleeps before returning a transient error.
+    struct SlowTool {
+        call_count: AtomicU32,
+        sleep_ms: u64,
+    }
+
+    impl SlowTool {
+        fn new(sleep_ms: u64) -> Self {
+            Self {
+                call_count: AtomicU32::new(0),
+                sleep_ms,
+            }
+        }
+
+        fn call_count(&self) -> u32 {
+            self.call_count.load(Ordering::SeqCst)
+        }
+    }
+
+    impl std::fmt::Debug for SlowTool {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.debug_struct("SlowTool").finish()
+        }
+    }
+
+    #[async_trait]
+    impl Tool for SlowTool {
+        fn name(&self) -> &str {
+            "slow_tool"
+        }
+        fn description(&self) -> &str {
+            "Slow test tool"
+        }
+        fn parameters_schema(&self) -> serde_json::Value {
+            serde_json::json!({"type": "object"})
+        }
+
+        async fn execute(
+            &self,
+            _params: serde_json::Value,
+            _ctx: &JobContext,
+        ) -> Result<ToolOutput, ToolError> {
+            self.call_count.fetch_add(1, Ordering::SeqCst);
+            tokio::time::sleep(Duration::from_millis(self.sleep_ms)).await;
+            Err(ToolError::ExternalService("slow failure".into()))
+        }
+    }
+
+    #[tokio::test]
+    async fn test_timeout_cancellation_preserves_retry_counter() {
+        let tool = SlowTool::new(50); // 50ms sleep per attempt
+        let ctx = JobContext::default();
+        let config = ToolRetryConfig {
+            max_retries: 100, // lots of retries so timeout fires first
+            base_delay: Duration::from_millis(10),
+            max_delay: Duration::from_millis(50),
+        };
+        let counter = AtomicU32::new(0);
+
+        // Outer timeout: 200ms. Each attempt takes ~50ms sleep + ~10ms backoff = ~60ms.
+        // So we should get at least 2 attempts before timeout.
+        let result = tokio::time::timeout(
+            Duration::from_millis(200),
+            retry_tool_execute(
+                &tool,
+                &serde_json::json!({}),
+                &ctx,
+                &config,
+                Duration::from_secs(60), // large budget so timeout fires first
+                &counter,
+            ),
+        )
+        .await;
+
+        // The outer timeout should have fired
+        assert!(result.is_err(), "Expected timeout to fire");
+        // The counter should reflect retries that happened before cancellation
+        let retries = counter.load(Ordering::Relaxed);
+        assert!(retries > 0, "Expected at least 1 retry, got {retries}");
+        // The tool should have been called multiple times
+        assert!(
+            tool.call_count() >= 2,
+            "Expected at least 2 calls, got {}",
+            tool.call_count()
+        );
     }
 }

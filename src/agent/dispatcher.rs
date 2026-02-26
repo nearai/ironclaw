@@ -725,6 +725,7 @@ pub(super) async fn execute_chat_tool_standalone(
     // Execute with per-tool timeout and retry on transient errors
     let timeout = tool.execution_timeout();
     let retry_config = crate::tools::retry::effective_retry_config(tool.as_ref());
+    let retry_counter = std::sync::atomic::AtomicU32::new(0);
     let start = std::time::Instant::now();
     let timeout_result = tokio::time::timeout(timeout, async {
         crate::tools::retry::retry_tool_execute(
@@ -733,13 +734,16 @@ pub(super) async fn execute_chat_tool_standalone(
             job_ctx,
             &retry_config,
             timeout,
+            &retry_counter,
         )
         .await
     })
     .await;
     let elapsed = start.elapsed();
 
-    // Unpack the timeout + retry layers
+    // Unpack the timeout + retry layers.
+    // retry_attempts is intentionally only logged here — this standalone chat
+    // path has no ActionRecord to persist the count into (unlike the worker path).
     let result = match timeout_result {
         Ok(outcome) => {
             if outcome.retry_attempts > 0 {
@@ -751,7 +755,17 @@ pub(super) async fn execute_chat_tool_standalone(
             }
             Ok(outcome.result)
         }
-        Err(_) => Err(()),
+        Err(_) => {
+            let attempts = retry_counter.load(std::sync::atomic::Ordering::Relaxed);
+            if attempts > 0 {
+                tracing::warn!(
+                    tool = %tool_name,
+                    retry_attempts = attempts,
+                    "Tool call timed out after retries"
+                );
+            }
+            Err(())
+        }
     };
 
     match &result {
