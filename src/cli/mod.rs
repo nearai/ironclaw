@@ -175,3 +175,18 @@ impl Cli {
         matches!(self.command, None | Some(Command::Run))
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clap::CommandFactory;
+
+    #[test]
+    fn test_version() {
+        let cmd = Cli::command();
+        assert_eq!(
+            cmd.get_version().unwrap_or("unknown"),
+            env!("CARGO_PKG_VERSION")
+        );
+    }
+}

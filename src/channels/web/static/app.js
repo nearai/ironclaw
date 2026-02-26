@@ -12,6 +12,7 @@ let loadingOlder = false;
 let sseHasConnectedBefore = false;
 let jobEvents = new Map(); // job_id -> Array of events
 let jobListRefreshTimer = null;
+let pairingPollInterval = null;
 const JOB_EVENTS_CAP = 500;
 const MEMORY_SEARCH_QUERY_MAX_LENGTH = 100;
 const THREAD_PAGE_SIZE = 50;
@@ -23,6 +24,11 @@ let threadListLoading = false;
 let threadListGeneration = 0;
 let threadSeenIds = new Set();
 let threadListRetryAfterMs = 0;
+
+// --- Tool Activity State ---
+let _activeGroup = null;
+let _activeToolCards = {};
+let _activityThinking = null;
 
 // --- Auth ---
 
@@ -122,6 +128,7 @@ function connectSSE() {
     document.getElementById('sse-dot').classList.remove('disconnected');
     document.getElementById('sse-status').textContent = 'Connected';
     if (sseHasConnectedBefore && currentThreadId) {
+      finalizeActivityGroup();
       loadHistory();
     }
     sseHasConnectedBefore = true;
@@ -135,6 +142,7 @@ function connectSSE() {
   eventSource.addEventListener('response', (e) => {
     const data = JSON.parse(e.data);
     if (!isCurrentThread(data.thread_id)) return;
+    finalizeActivityGroup();
     addMessage('assistant', data.content);
     setStatus('');
     enableChatInput();
@@ -148,25 +156,31 @@ function connectSSE() {
   eventSource.addEventListener('thinking', (e) => {
     const data = JSON.parse(e.data);
     if (!isCurrentThread(data.thread_id)) return;
-    setStatus(data.message, true);
+    showActivityThinking(data.message);
   });
 
   eventSource.addEventListener('tool_started', (e) => {
     const data = JSON.parse(e.data);
     if (!isCurrentThread(data.thread_id)) return;
-    setStatus('Running tool: ' + data.name, true);
+    addToolCard(data.name);
   });
 
   eventSource.addEventListener('tool_completed', (e) => {
     const data = JSON.parse(e.data);
     if (!isCurrentThread(data.thread_id)) return;
-    const icon = data.success ? '\u2713' : '\u2717';
-    setStatus('Tool ' + data.name + ' ' + icon);
+    completeToolCard(data.name, data.success);
+  });
+
+  eventSource.addEventListener('tool_result', (e) => {
+    const data = JSON.parse(e.data);
+    if (!isCurrentThread(data.thread_id)) return;
+    setToolCardOutput(data.name, data.preview);
   });
 
   eventSource.addEventListener('stream_chunk', (e) => {
     const data = JSON.parse(e.data);
     if (!isCurrentThread(data.thread_id)) return;
+    finalizeActivityGroup();
     appendToLastAssistant(data.content);
   });
 
@@ -178,6 +192,7 @@ function connectSSE() {
     // the agentic loop finished, so re-enable input as a safety net in case
     // the response SSE event is empty or lost.
     if (data.message === 'Done' || data.message === 'Awaiting approval') {
+      finalizeActivityGroup();
       enableChatInput();
     }
   });
@@ -205,10 +220,15 @@ function connectSSE() {
     enableChatInput();
   });
 
+  eventSource.addEventListener('extension_status', (e) => {
+    if (currentTab === 'extensions') loadExtensions();
+  });
+
   eventSource.addEventListener('error', (e) => {
     if (e.data) {
       const data = JSON.parse(e.data);
       if (!isCurrentThread(data.thread_id)) return;
+      finalizeActivityGroup();
       addMessage('system', 'Error: ' + data.message);
       enableChatInput();
     }
@@ -268,8 +288,6 @@ function sendMessage() {
   addMessage('user', content);
   input.value = '';
   autoResizeTextarea(input);
-  setStatus('Sending...', true);
-
   sendBtn.disabled = true;
   input.disabled = true;
 
@@ -389,13 +407,239 @@ function appendToLastAssistant(chunk) {
   }
 }
 
-function setStatus(text, spinning) {
+function setStatus(text) {
   const el = document.getElementById('chat-status');
   if (!text) {
     el.innerHTML = '';
     return;
   }
-  el.innerHTML = (spinning ? '<div class="spinner"></div>' : '') + escapeHtml(text);
+  el.innerHTML = escapeHtml(text);
+}
+
+// --- Inline Tool Activity Cards ---
+
+function getOrCreateActivityGroup() {
+  if (_activeGroup) return _activeGroup;
+  const container = document.getElementById('chat-messages');
+  const group = document.createElement('div');
+  group.className = 'activity-group';
+  container.appendChild(group);
+  container.scrollTop = container.scrollHeight;
+  _activeGroup = group;
+  _activeToolCards = {};
+  return group;
+}
+
+function showActivityThinking(message) {
+  const group = getOrCreateActivityGroup();
+  if (_activityThinking) {
+    // Already exists — just update text and un-hide
+    _activityThinking.style.display = '';
+    _activityThinking.querySelector('.activity-thinking-text').textContent = message;
+  } else {
+    _activityThinking = document.createElement('div');
+    _activityThinking.className = 'activity-thinking';
+    _activityThinking.innerHTML =
+      '<span class="activity-thinking-dots">'
+      + '<span class="activity-thinking-dot"></span>'
+      + '<span class="activity-thinking-dot"></span>'
+      + '<span class="activity-thinking-dot"></span>'
+      + '</span>'
+      + '<span class="activity-thinking-text"></span>';
+    group.appendChild(_activityThinking);
+    _activityThinking.querySelector('.activity-thinking-text').textContent = message;
+  }
+  const container = document.getElementById('chat-messages');
+  container.scrollTop = container.scrollHeight;
+}
+
+function removeActivityThinking() {
+  if (_activityThinking) {
+    _activityThinking.remove();
+    _activityThinking = null;
+  }
+}
+
+function addToolCard(name) {
+  // Hide thinking instead of destroying — it may reappear between tool rounds
+  if (_activityThinking) _activityThinking.style.display = 'none';
+  const group = getOrCreateActivityGroup();
+
+  const card = document.createElement('div');
+  card.className = 'activity-tool-card';
+  card.setAttribute('data-tool-name', name);
+  card.setAttribute('data-status', 'running');
+
+  const header = document.createElement('div');
+  header.className = 'activity-tool-header';
+
+  const icon = document.createElement('span');
+  icon.className = 'activity-tool-icon';
+  icon.innerHTML = '<div class="spinner"></div>';
+
+  const toolName = document.createElement('span');
+  toolName.className = 'activity-tool-name';
+  toolName.textContent = name;
+
+  const duration = document.createElement('span');
+  duration.className = 'activity-tool-duration';
+  duration.textContent = '';
+
+  const chevron = document.createElement('span');
+  chevron.className = 'activity-tool-chevron';
+  chevron.innerHTML = '&#9656;';
+
+  header.appendChild(icon);
+  header.appendChild(toolName);
+  header.appendChild(duration);
+  header.appendChild(chevron);
+
+  const body = document.createElement('div');
+  body.className = 'activity-tool-body';
+  body.style.display = 'none';
+
+  const output = document.createElement('pre');
+  output.className = 'activity-tool-output';
+  body.appendChild(output);
+
+  header.addEventListener('click', () => {
+    const isOpen = body.style.display !== 'none';
+    body.style.display = isOpen ? 'none' : 'block';
+    chevron.classList.toggle('expanded', !isOpen);
+  });
+
+  card.appendChild(header);
+  card.appendChild(body);
+  group.appendChild(card);
+
+  const startTime = Date.now();
+  const timerInterval = setInterval(() => {
+    const elapsed = (Date.now() - startTime) / 1000;
+    if (elapsed > 300) { clearInterval(timerInterval); return; }
+    duration.textContent = elapsed < 10 ? elapsed.toFixed(1) + 's' : Math.floor(elapsed) + 's';
+  }, 100);
+
+  if (!_activeToolCards[name]) _activeToolCards[name] = [];
+  _activeToolCards[name].push({ card, startTime, timer: timerInterval, duration, icon, finalDuration: null });
+
+  const container = document.getElementById('chat-messages');
+  container.scrollTop = container.scrollHeight;
+}
+
+function completeToolCard(name, success) {
+  const entries = _activeToolCards[name];
+  if (!entries || entries.length === 0) return;
+  // Find first running card
+  let entry = null;
+  for (let i = 0; i < entries.length; i++) {
+    if (entries[i].card.getAttribute('data-status') === 'running') {
+      entry = entries[i];
+      break;
+    }
+  }
+  if (!entry) entry = entries[entries.length - 1];
+
+  clearInterval(entry.timer);
+  const elapsed = (Date.now() - entry.startTime) / 1000;
+  entry.finalDuration = elapsed;
+  entry.duration.textContent = elapsed < 10 ? elapsed.toFixed(1) + 's' : Math.floor(elapsed) + 's';
+  entry.icon.innerHTML = success
+    ? '<span class="activity-icon-success">&#10003;</span>'
+    : '<span class="activity-icon-fail">&#10007;</span>';
+  entry.card.setAttribute('data-status', success ? 'success' : 'fail');
+}
+
+function setToolCardOutput(name, preview) {
+  const entries = _activeToolCards[name];
+  if (!entries || entries.length === 0) return;
+  // Find first card with empty output
+  let entry = null;
+  for (let i = 0; i < entries.length; i++) {
+    const out = entries[i].card.querySelector('.activity-tool-output');
+    if (out && !out.textContent) {
+      entry = entries[i];
+      break;
+    }
+  }
+  if (!entry) entry = entries[entries.length - 1];
+
+  const output = entry.card.querySelector('.activity-tool-output');
+  if (output) {
+    const truncated = preview.length > 2000 ? preview.substring(0, 2000) + '\n... (truncated)' : preview;
+    output.textContent = truncated;
+  }
+}
+
+function finalizeActivityGroup() {
+  removeActivityThinking();
+  if (!_activeGroup) return;
+
+  // Stop all timers
+  for (const name in _activeToolCards) {
+    const entries = _activeToolCards[name];
+    for (let i = 0; i < entries.length; i++) {
+      clearInterval(entries[i].timer);
+    }
+  }
+
+  // Count tools and total duration
+  let toolCount = 0;
+  let totalDuration = 0;
+  for (const tname in _activeToolCards) {
+    const tentries = _activeToolCards[tname];
+    for (let j = 0; j < tentries.length; j++) {
+      const entry = tentries[j];
+      toolCount++;
+      if (entry.finalDuration !== null) {
+        totalDuration += entry.finalDuration;
+      } else {
+        // Tool was still running when finalized
+        totalDuration += (Date.now() - entry.startTime) / 1000;
+      }
+    }
+  }
+
+  if (toolCount === 0) {
+    // No tools were used — remove the empty group
+    _activeGroup.remove();
+    _activeGroup = null;
+    _activeToolCards = {};
+    return;
+  }
+
+  // Wrap existing cards into a hidden container
+  const cardsContainer = document.createElement('div');
+  cardsContainer.className = 'activity-cards-container';
+  cardsContainer.style.display = 'none';
+
+  const cards = _activeGroup.querySelectorAll('.activity-tool-card');
+  for (let k = 0; k < cards.length; k++) {
+    cardsContainer.appendChild(cards[k]);
+  }
+
+  // Build summary line
+  const durationStr = totalDuration < 10 ? totalDuration.toFixed(1) + 's' : Math.floor(totalDuration) + 's';
+  const toolWord = toolCount === 1 ? 'tool' : 'tools';
+  const summary = document.createElement('div');
+  summary.className = 'activity-summary';
+  summary.innerHTML = '<span class="activity-summary-chevron">&#9656;</span>'
+    + '<span class="activity-summary-text">Used ' + toolCount + ' ' + toolWord + '</span>'
+    + '<span class="activity-summary-duration">(' + durationStr + ')</span>';
+
+  summary.addEventListener('click', () => {
+    const isOpen = cardsContainer.style.display !== 'none';
+    cardsContainer.style.display = isOpen ? 'none' : 'block';
+    summary.querySelector('.activity-summary-chevron').classList.toggle('expanded', !isOpen);
+  });
+
+  // Clear group and add summary + hidden cards
+  _activeGroup.innerHTML = '';
+  _activeGroup.classList.add('collapsed');
+  _activeGroup.appendChild(summary);
+  _activeGroup.appendChild(cardsContainer);
+
+  _activeGroup = null;
+  _activeToolCards = {};
 }
 
 function showApproval(data) {
@@ -905,6 +1149,7 @@ document.getElementById('thread-list').addEventListener('scroll', maybeLoadMoreT
 
 function switchToAssistant() {
   if (!assistantThreadId) return;
+  finalizeActivityGroup();
   currentThreadId = assistantThreadId;
   hasMore = false;
   oldestTimestamp = null;
@@ -913,6 +1158,7 @@ function switchToAssistant() {
 }
 
 function switchThread(threadId) {
+  finalizeActivityGroup();
   currentThreadId = threadId;
   hasMore = false;
   oldestTimestamp = null;
@@ -993,7 +1239,12 @@ function switchTab(tab) {
   if (tab === 'jobs') loadJobs();
   if (tab === 'routines') loadRoutines();
   if (tab === 'logs') applyLogFilters();
-  if (tab === 'extensions') loadExtensions();
+  if (tab === 'extensions') {
+    loadExtensions();
+    startPairingPoll();
+  } else {
+    stopPairingPoll();
+  }
   if (tab === 'skills') loadSkills();
 }
 
@@ -1249,7 +1500,7 @@ function connectLogSSE() {
       logBuffer.push(entry);
       return;
     }
-    appendLogEntry(entry);
+    prependLogEntry(entry);
   });
 
   logEventSource.onerror = () => {
@@ -1257,7 +1508,7 @@ function connectLogSSE() {
   };
 }
 
-function appendLogEntry(entry) {
+function prependLogEntry(entry) {
   const output = document.getElementById('logs-output');
 
   // Level filter
@@ -1298,16 +1549,16 @@ function appendLogEntry(entry) {
     div.style.display = 'none';
   }
 
-  output.appendChild(div);
+  output.prepend(div);
 
-  // Cap entries
+  // Cap entries (remove oldest at the bottom)
   while (output.children.length > LOG_MAX_ENTRIES) {
-    output.removeChild(output.firstChild);
+    output.removeChild(output.lastChild);
   }
 
-  // Auto-scroll
+  // Auto-scroll to top (newest entries are at the top)
   if (document.getElementById('logs-autoscroll').checked) {
-    output.scrollTop = output.scrollHeight;
+    output.scrollTop = 0;
   }
 }
 
@@ -1317,9 +1568,9 @@ function toggleLogsPause() {
   btn.textContent = logsPaused ? 'Resume' : 'Pause';
 
   if (!logsPaused) {
-    // Flush buffer
+    // Flush buffer: oldest-first + prepend naturally puts newest at top
     for (const entry of logBuffer) {
-      appendLogEntry(entry);
+      prependLogEntry(entry);
     }
     logBuffer = [];
   }
@@ -1479,10 +1730,15 @@ function renderAvailableExtensionCard(entry) {
     }).then(function(res) {
       if (res.success) {
         showToast('Installed ' + entry.display_name, 'success');
+        loadExtensions();
+        // Auto-open configure for WASM channels
+        if (entry.kind === 'wasm_channel') {
+          showConfigureModal(entry.name);
+        }
       } else {
         showToast('Install: ' + (res.message || 'unknown error'), 'error');
+        loadExtensions();
       }
-      loadExtensions();
     }).catch(function(err) {
       showToast('Install failed: ' + err.message, 'error');
       loadExtensions();
@@ -1575,6 +1831,14 @@ function renderMcpServerCard(entry, installedExt) {
   return card;
 }
 
+function createReconfigureButton(extName) {
+  var btn = document.createElement('button');
+  btn.className = 'btn-ext configure';
+  btn.textContent = 'Reconfigure';
+  btn.addEventListener('click', function() { showConfigureModal(extName); });
+  return btn;
+}
+
 function renderExtensionCard(ext) {
   const card = document.createElement('div');
   card.className = 'ext-card';
@@ -1592,12 +1856,20 @@ function renderExtensionCard(ext) {
   kind.textContent = ext.kind;
   header.appendChild(kind);
 
-  const authDot = document.createElement('span');
-  authDot.className = 'ext-auth-dot ' + (ext.authenticated ? 'authed' : 'unauthed');
-  authDot.title = ext.authenticated ? 'Authenticated' : 'Not authenticated';
-  header.appendChild(authDot);
+  // Auth dot only for non-WASM-channel extensions (channels use the stepper instead)
+  if (ext.kind !== 'wasm_channel') {
+    const authDot = document.createElement('span');
+    authDot.className = 'ext-auth-dot ' + (ext.authenticated ? 'authed' : 'unauthed');
+    authDot.title = ext.authenticated ? 'Authenticated' : 'Not authenticated';
+    header.appendChild(authDot);
+  }
 
   card.appendChild(header);
+
+  // WASM channels get a progress stepper
+  if (ext.kind === 'wasm_channel') {
+    card.appendChild(renderWasmChannelStepper(ext));
+  }
 
   if (ext.description) {
     const desc = document.createElement('div');
@@ -1621,28 +1893,78 @@ function renderExtensionCard(ext) {
     card.appendChild(tools);
   }
 
+  // Show activation error for WASM channels
+  if (ext.kind === 'wasm_channel' && ext.activation_error) {
+    const errorDiv = document.createElement('div');
+    errorDiv.className = 'ext-error';
+    errorDiv.textContent = ext.activation_error;
+    card.appendChild(errorDiv);
+  }
+
+  // Show "coming soon" note for non-Telegram channels that are configured but not fully supported yet
+  if (ext.kind === 'wasm_channel' && ext.name !== 'telegram'
+      && (ext.activation_status === 'configured' || ext.active)) {
+    const noteDiv = document.createElement('div');
+    noteDiv.className = 'ext-note';
+    noteDiv.textContent = 'Full integration coming soon. Use the CLI to complete setup.';
+    card.appendChild(noteDiv);
+  }
+
   const actions = document.createElement('div');
   actions.className = 'ext-actions';
 
-  if (!ext.active) {
-    const activateBtn = document.createElement('button');
-    activateBtn.className = 'btn-ext activate';
-    activateBtn.textContent = 'Activate';
-    activateBtn.addEventListener('click', () => activateExtension(ext.name));
-    actions.appendChild(activateBtn);
+  if (ext.kind === 'wasm_channel') {
+    // WASM channels: state-based buttons (no generic Activate)
+    var status = ext.activation_status || 'installed';
+    if (status === 'active') {
+      var activeLabel = document.createElement('span');
+      activeLabel.className = 'ext-active-label';
+      activeLabel.textContent = 'Active';
+      actions.appendChild(activeLabel);
+      actions.appendChild(createReconfigureButton(ext.name));
+    } else if (status === 'pairing') {
+      var pairingLabel = document.createElement('span');
+      pairingLabel.className = 'ext-pairing-label';
+      pairingLabel.textContent = 'Awaiting Pairing';
+      actions.appendChild(pairingLabel);
+      actions.appendChild(createReconfigureButton(ext.name));
+    } else if (status === 'failed') {
+      var restartBtn = document.createElement('button');
+      restartBtn.className = 'btn-ext activate';
+      restartBtn.textContent = 'Restart';
+      restartBtn.addEventListener('click', restartGateway);
+      actions.appendChild(restartBtn);
+      actions.appendChild(createReconfigureButton(ext.name));
+    } else {
+      // installed or configured: show Setup button
+      var setupBtn = document.createElement('button');
+      setupBtn.className = 'btn-ext configure';
+      setupBtn.textContent = 'Setup';
+      setupBtn.addEventListener('click', function() { showConfigureModal(ext.name); });
+      actions.appendChild(setupBtn);
+    }
   } else {
-    const activeLabel = document.createElement('span');
-    activeLabel.className = 'ext-active-label';
-    activeLabel.textContent = 'Active';
-    actions.appendChild(activeLabel);
-  }
+    // Non-WASM-channel extensions: original behavior
+    if (!ext.active) {
+      const activateBtn = document.createElement('button');
+      activateBtn.className = 'btn-ext activate';
+      activateBtn.textContent = 'Activate';
+      activateBtn.addEventListener('click', () => activateExtension(ext.name));
+      actions.appendChild(activateBtn);
+    } else {
+      const activeLabel = document.createElement('span');
+      activeLabel.className = 'ext-active-label';
+      activeLabel.textContent = 'Active';
+      actions.appendChild(activeLabel);
+    }
 
-  if (ext.needs_setup) {
-    const configBtn = document.createElement('button');
-    configBtn.className = 'btn-ext configure';
-    configBtn.textContent = ext.authenticated ? 'Reconfigure' : 'Configure';
-    configBtn.addEventListener('click', () => showConfigureModal(ext.name));
-    actions.appendChild(configBtn);
+    if (ext.needs_setup) {
+      const configBtn = document.createElement('button');
+      configBtn.className = 'btn-ext configure';
+      configBtn.textContent = ext.authenticated ? 'Reconfigure' : 'Configure';
+      configBtn.addEventListener('click', () => showConfigureModal(ext.name));
+      actions.appendChild(configBtn);
+    }
   }
 
   const removeBtn = document.createElement('button');
@@ -1654,11 +1976,10 @@ function renderExtensionCard(ext) {
   card.appendChild(actions);
 
   // For WASM channels, check for pending pairing requests.
-  // Show even when inactive — pairing requests can arrive via webhooks
-  // before the channel is fully activated.
   if (ext.kind === 'wasm_channel') {
     const pairingSection = document.createElement('div');
     pairingSection.className = 'ext-pairing';
+    pairingSection.setAttribute('data-channel', ext.name);
     card.appendChild(pairingSection);
     loadPairingRequests(ext.name, pairingSection);
   }
@@ -1808,6 +2129,10 @@ function submitConfigureModal(name, fields) {
     }
   }
 
+  // Disable buttons to prevent double-submit
+  var btns = document.querySelectorAll('.configure-actions button');
+  btns.forEach(function(b) { b.disabled = true; });
+
   apiFetch('/api/extensions/' + encodeURIComponent(name) + '/setup', {
     method: 'POST',
     body: { secrets },
@@ -1815,13 +2140,22 @@ function submitConfigureModal(name, fields) {
     .then((res) => {
       closeConfigureModal();
       if (res.success) {
-        showToast(res.message, 'success');
+        if (res.activated && name === 'telegram') {
+          showToast('Configured and activated ' + name, 'success');
+        } else if (res.activated) {
+          showToast('Configured ' + name + ' successfully', 'success');
+        } else if (res.needs_restart) {
+          showToast('Configured ' + name + '. Restart required to activate.', 'info');
+        } else {
+          showToast(res.message, 'success');
+        }
       } else {
         showToast(res.message || 'Configuration failed', 'error');
       }
       loadExtensions();
     })
     .catch((err) => {
+      btns.forEach(function(b) { b.disabled = false; });
       showToast('Configuration failed: ' + err.message, 'error');
     });
 }
@@ -1882,6 +2216,139 @@ function approvePairing(channel, code, container) {
       showToast(res.message || 'Approve failed', 'error');
     }
   }).catch(err => showToast('Error: ' + err.message, 'error'));
+}
+
+function startPairingPoll() {
+  stopPairingPoll();
+  pairingPollInterval = setInterval(function() {
+    document.querySelectorAll('.ext-pairing[data-channel]').forEach(function(el) {
+      loadPairingRequests(el.getAttribute('data-channel'), el);
+    });
+  }, 10000);
+}
+
+function stopPairingPoll() {
+  if (pairingPollInterval) {
+    clearInterval(pairingPollInterval);
+    pairingPollInterval = null;
+  }
+}
+
+// --- Gateway restart ---
+
+function restartGateway() {
+  if (!confirm('Restart IronClaw gateway? Active connections will be dropped.')) return;
+
+  apiFetch('/api/gateway/restart', { method: 'POST' })
+    .then(function() {
+      showRestartOverlay();
+    })
+    .catch(function() {
+      showRestartOverlay();
+    });
+}
+
+function showRestartOverlay() {
+  var overlay = document.createElement('div');
+  overlay.className = 'restart-overlay';
+  overlay.innerHTML = '<div class="restart-message">'
+    + '<div class="restart-spinner"></div>'
+    + '<h2>Restarting IronClaw...</h2>'
+    + '<p>Waiting for server to come back online</p>'
+    + '</div>';
+  document.body.appendChild(overlay);
+
+  var pollCount = 0;
+  var pollTimer = setInterval(function() {
+    pollCount++;
+    if (pollCount > 30) { // 60 seconds
+      clearInterval(pollTimer);
+      overlay.querySelector('h2').textContent = 'Restart timed out';
+      overlay.querySelector('p').textContent = 'Server did not come back within 60 seconds. Check logs.';
+      overlay.querySelector('.restart-spinner').style.display = 'none';
+      return;
+    }
+    fetch('/api/gateway/status', {
+      headers: { 'Authorization': 'Bearer ' + token },
+    })
+    .then(function(r) {
+      if (r.ok) {
+        clearInterval(pollTimer);
+        window.location.reload();
+      }
+    })
+    .catch(function() { /* still restarting */ });
+  }, 2000);
+}
+
+// --- WASM channel stepper ---
+
+function renderWasmChannelStepper(ext) {
+  var stepper = document.createElement('div');
+  stepper.className = 'ext-stepper';
+
+  var status = ext.activation_status || 'installed';
+  var isTelegram = ext.name === 'telegram';
+
+  // Telegram gets a 3-step stepper (Installed → Configured → Active/Pairing).
+  // Other channels only get 2 steps (Installed → Configured) since full
+  // integration isn't available in the web UI yet.
+  var steps = [
+    { label: 'Installed', key: 'installed' },
+    { label: 'Configured', key: 'configured' },
+  ];
+  if (isTelegram) {
+    steps.push({ label: status === 'pairing' ? 'Awaiting Pairing' : 'Active', key: 'active' });
+  }
+
+  var reachedIdx;
+  if (status === 'active') reachedIdx = isTelegram ? 2 : 1;
+  else if (status === 'pairing') reachedIdx = 2;
+  else if (status === 'failed') reachedIdx = isTelegram ? 2 : 1;
+  else if (status === 'configured') reachedIdx = 1;
+  else reachedIdx = 0;
+
+  for (var i = 0; i < steps.length; i++) {
+    if (i > 0) {
+      var connector = document.createElement('div');
+      connector.className = 'stepper-connector' + (i <= reachedIdx ? ' completed' : '');
+      stepper.appendChild(connector);
+    }
+
+    var step = document.createElement('div');
+    var stepState;
+    if (i < reachedIdx) {
+      stepState = 'completed';
+    } else if (i === reachedIdx) {
+      if (status === 'failed') {
+        stepState = 'failed';
+      } else if (status === 'pairing') {
+        stepState = 'in-progress';
+      } else if (status === 'active' || status === 'configured' || status === 'installed') {
+        stepState = 'completed';
+      } else {
+        stepState = 'pending';
+      }
+    } else {
+      stepState = 'pending';
+    }
+    step.className = 'stepper-step ' + stepState;
+
+    var circle = document.createElement('span');
+    circle.className = 'stepper-circle';
+    if (stepState === 'completed') circle.textContent = '\u2713';
+    else if (stepState === 'failed') circle.textContent = '\u2717';
+    step.appendChild(circle);
+
+    var label = document.createElement('span');
+    label.className = 'stepper-label';
+    label.textContent = steps[i].label;
+    step.appendChild(label);
+
+    stepper.appendChild(step);
+  }
+
+  return stepper;
 }
 
 // --- Jobs ---

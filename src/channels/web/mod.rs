@@ -93,6 +93,7 @@ impl GatewayChannel {
             registry_entries: Vec::new(),
             cost_guard: None,
             startup_time: std::time::Instant::now(),
+            restart_requested: std::sync::atomic::AtomicBool::new(false),
         });
 
         Self {
@@ -126,6 +127,7 @@ impl GatewayChannel {
             registry_entries: self.state.registry_entries.clone(),
             cost_guard: self.state.cost_guard.clone(),
             startup_time: self.state.startup_time,
+            restart_requested: std::sync::atomic::AtomicBool::new(false),
         };
         mutate(&mut new_state);
         self.state = Arc::new(new_state);

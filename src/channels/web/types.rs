@@ -199,6 +199,15 @@ pub enum SseEvent {
         #[serde(skip_serializing_if = "Option::is_none")]
         session_id: Option<String>,
     },
+
+    /// Extension activation status change (WASM channels).
+    #[serde(rename = "extension_status")]
+    ExtensionStatus {
+        extension_name: String,
+        status: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        message: Option<String>,
+    },
 }
 
 // --- Memory ---
@@ -355,6 +364,12 @@ pub struct ExtensionInfo {
     /// Whether this extension has configurable secrets (setup schema).
     #[serde(default)]
     pub needs_setup: bool,
+    /// WASM channel activation status: "installed", "configured", "active", "failed".
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub activation_status: Option<String>,
+    /// Human-readable error when activation_status is "failed".
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub activation_error: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -418,6 +433,12 @@ pub struct ActionResponse {
     /// Instructions for manual token entry.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub instructions: Option<String>,
+    /// Whether the channel was successfully activated after setup.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub activated: Option<bool>,
+    /// Whether a gateway restart is needed (activation failed).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub needs_restart: Option<bool>,
 }
 
 impl ActionResponse {
@@ -428,6 +449,8 @@ impl ActionResponse {
             auth_url: None,
             awaiting_token: None,
             instructions: None,
+            activated: None,
+            needs_restart: None,
         }
     }
 
@@ -438,6 +461,8 @@ impl ActionResponse {
             auth_url: None,
             awaiting_token: None,
             instructions: None,
+            activated: None,
+            needs_restart: None,
         }
     }
 }
@@ -618,6 +643,7 @@ impl WsServerMessage {
             SseEvent::JobToolResult { .. } => "job_tool_result",
             SseEvent::JobStatus { .. } => "job_status",
             SseEvent::JobResult { .. } => "job_result",
+            SseEvent::ExtensionStatus { .. } => "extension_status",
         };
         let data = serde_json::to_value(event).unwrap_or(serde_json::Value::Null);
         WsServerMessage::Event {

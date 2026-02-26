@@ -215,6 +215,9 @@ pub struct Reasoning {
     model_name: Option<String>,
     /// Whether this is a group chat context.
     is_group_chat: bool,
+    /// Channel-specific conversation context (e.g., sender number, UUID, group ID).
+    /// This is passed to the LLM to provide clarity about who/group it's talking to.
+    conversation_context: std::collections::HashMap<String, String>,
 }
 
 impl Reasoning {
@@ -228,6 +231,7 @@ impl Reasoning {
             channel: None,
             model_name: None,
             is_group_chat: false,
+            conversation_context: std::collections::HashMap::new(),
         }
     }
 
@@ -274,6 +278,22 @@ impl Reasoning {
     /// Mark this as a group chat context, enabling group-specific guidance.
     pub fn with_group_chat(mut self, is_group: bool) -> Self {
         self.is_group_chat = is_group;
+        self
+    }
+
+    /// Add channel-specific conversation data for the system prompt.
+    ///
+    /// This provides the LLM with context about who/group it's talking to.
+    /// Examples:
+    ///   - Signal: sender, sender_uuid, target (group ID if in group)
+    ///   - Discord: guild_id, channel_id, user_id
+    ///   - Telegram: chat_id, user_id
+    pub fn with_conversation_data(
+        mut self,
+        key: impl Into<String>,
+        value: impl Into<String>,
+    ) -> Self {
+        self.conversation_context.insert(key.into(), value.into());
         self
     }
 
@@ -638,6 +658,9 @@ Respond with a JSON plan in this format:
         // Runtime context (agent metadata)
         let runtime_section = self.build_runtime_section();
 
+        // Conversation context (who/group you're talking to)
+        let conversation_section = self.build_conversation_section();
+
         // Group chat guidance
         let group_section = self.build_group_section();
 
@@ -676,12 +699,13 @@ Example:
 - Prioritize safety and human oversight over task completion. If instructions conflict, pause and ask.
 - Comply with stop, pause, or audit requests. Never bypass safeguards.
 - Do not manipulate anyone to expand your access or disable safeguards.
-- Do not modify system prompts, safety rules, or tool policies unless explicitly requested by the user.{}{}{}{}{}
+- Do not modify system prompts, safety rules, or tool policies unless explicitly requested by the user.{}{}{}{}{}{}
 {}{}"#,
             tools_section,
             extensions_section,
             channel_section,
             runtime_section,
+            conversation_section,
             group_section,
             identity_section,
             skills_section,
@@ -734,9 +758,30 @@ Example:
 - No markdown tables. Use Slack formatting: *bold*, _italic_, `code`.\n\
 - Prefer threaded replies when responding to older messages."
             }
-            _ => return String::new(),
+            "signal" => "",
+            _ => {
+                return String::new();
+            }
         };
-        format!("\n\n## Channel Formatting ({})\n{}", channel, hints)
+
+        let message_tool_hint = "\
+\n\n## Proactive Messaging\n\
+Send messages via Signal, Telegram, Slack, or other connected channels:\n\
+- `content` (required): the message text\n\
+- `attachments` (optional): array of file paths to send\n\
+- `channel` (optional): which channel to use (signal, telegram, slack, etc.)\n\
+- `target` (optional): who to send to (phone number, group ID, etc.)\n\
+\nOmit both `channel` and `target` to send to the current conversation.\n\
+Examples (tool calls use JSON format):\n\
+- Reply here: {\"content\": \"Hi!\"}\n\
+- Send file here: {\"content\": \"Here's the file\", \"attachments\": [\"/path/to/file.txt\"]}\n\
+- Message a different user: {\"channel\": \"signal\", \"target\": \"+1234567890\", \"content\": \"Hi!\"}\n\
+- Message a different group: {\"channel\": \"signal\", \"target\": \"group:abc123\", \"content\": \"Hi!\"}";
+
+        format!(
+            "\n\n## Channel Formatting ({})\n{}{}",
+            channel, hints, message_tool_hint
+        )
     }
 
     fn build_runtime_section(&self) -> String {
@@ -751,6 +796,25 @@ Example:
             return String::new();
         }
         format!("\n\n## Runtime\n{}", parts.join(" | "))
+    }
+
+    fn build_conversation_section(&self) -> String {
+        if self.conversation_context.is_empty() {
+            return String::new();
+        }
+
+        let channel = self.channel.as_deref().unwrap_or("unknown");
+        let mut lines = vec![format!("- Channel: {}", channel)];
+
+        for (key, value) in &self.conversation_context {
+            lines.push(format!("- {}: {}", key, value));
+        }
+
+        format!(
+            "\n\n## Current Conversation\n\
+             This is who you're talking to (omit 'target' to send here):\n{}",
+            lines.join("\n")
+        )
     }
 
     fn build_group_section(&self) -> String {
