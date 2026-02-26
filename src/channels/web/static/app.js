@@ -15,6 +15,7 @@ let jobListRefreshTimer = null;
 let pendingReasoningByTurn = new Map(); // key: threadId:turnNumber -> reasoning payload
 let pendingThreadAliasByRequest = new Map(); // key: request-thread-id -> resolved-thread-id
 const JOB_EVENTS_CAP = 500;
+const PENDING_REASONING_CAP = 200;
 const MEMORY_SEARCH_QUERY_MAX_LENGTH = 100;
 
 // --- Auth ---
@@ -123,6 +124,7 @@ function connectSSE() {
   eventSource.onerror = () => {
     document.getElementById('sse-dot').classList.add('disconnected');
     document.getElementById('sse-status').textContent = 'Reconnecting...';
+    pendingReasoningByTurn.clear();
   };
 
   eventSource.addEventListener('response', (e) => {
@@ -188,6 +190,10 @@ function connectSSE() {
     if (data.message === 'Done' || data.message === 'Awaiting approval') {
       enableChatInput();
     }
+  });
+
+  eventSource.addEventListener('result', () => {
+    pendingReasoningByTurn.clear();
   });
 
   eventSource.addEventListener('job_started', (e) => {
@@ -352,6 +358,12 @@ function sanitizeRenderedHtml(html) {
     });
   }
 
+  if (!window.__domPurifyMissingWarned) {
+    window.__domPurifyMissingWarned = true;
+    showToast('DOMPurify unavailable; using degraded HTML sanitizer.', 'error');
+    console.warn('DOMPurify unavailable; using fallback sanitizer');
+  }
+
   return sanitizeRenderedHtmlFallback(html);
 }
 
@@ -502,11 +514,14 @@ function reasoningHtml(data) {
       }
 
       const name = escapeHtml(d.tool_name || 'tool');
+      const toolCallId = d.tool_call_id == null
+        ? ''
+        : ' <span class="reasoning-id" title="tool_call_id">#' + escapeHtml(String(d.tool_call_id)) + '</span>';
       const rationale = ' — ' + escapeHtml(String(d.rationale));
       const outcome = d.outcome ? ' <span class="reasoning-outcome">[' + escapeHtml(String(d.outcome)) + ']</span>' : '';
       const itemClass = isParallel ? 'reasoning-item reasoning-item-parallel' : 'reasoning-item';
       const prefix = isParallel ? '<span class="reasoning-parallel-arrow">↳</span>' : '';
-      rows.push('<li class="' + itemClass + '">' + prefix + '<span class="reasoning-tool">' + name + '</span>' + rationale + outcome + '</li>');
+      rows.push('<li class="' + itemClass + '">' + prefix + '<span class="reasoning-tool">' + name + '</span>' + toolCallId + rationale + outcome + '</li>');
     }
 
     if (openParallel) {
@@ -566,6 +581,13 @@ function appendReasoningByTurn(data) {
   } else {
     const key = resolvedThreadId + ':' + String(turnNumber);
     pendingReasoningByTurn.set(key, normalized);
+  }
+
+  // Cap pending reasoning entries to avoid unbounded growth on intermittent failures.
+  while (pendingReasoningByTurn.size > PENDING_REASONING_CAP) {
+    const firstKey = pendingReasoningByTurn.keys().next().value;
+    if (firstKey == null) break;
+    pendingReasoningByTurn.delete(firstKey);
   }
 
   const container = document.getElementById('chat-messages');
@@ -2468,13 +2490,16 @@ function appendActivityEvent(terminal, eventType, data) {
         ? '<ul class="activity-reasoning-list">'
           + decisions.map((d) => {
             const name = escapeHtml(d.tool_name || 'tool');
+            const toolCallId = d.tool_call_id == null
+              ? ''
+              : ' <span class="activity-reasoning-id" title="tool_call_id">#' + escapeHtml(String(d.tool_call_id)) + '</span>';
             const rationale = ' — ' + escapeHtml(String(d.rationale));
             const outcome = d.outcome ? ' [' + escapeHtml(String(d.outcome)) + ']' : '';
             const parallel = Number.isInteger(d.parallel_group)
               ? ' <span class="activity-reasoning-parallel">(parallel ' + d.parallel_group + ')</span>'
               : '';
             return '<li><span class="activity-reasoning-tool">' + name + '</span>'
-              + rationale + outcome + parallel + '</li>';
+              + toolCallId + rationale + outcome + parallel + '</li>';
           }).join('')
           + '</ul>'
         : '';

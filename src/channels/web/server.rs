@@ -277,6 +277,7 @@ fn build_gateway_router(addr: SocketAddr, state: Arc<GatewayState>, auth_token: 
         .route("/", get(index_handler))
         .route("/style.css", get(css_handler))
         .route("/app.js", get(js_handler))
+        .route("/dompurify.bundle.min.js", get(dompurify_bundle_handler))
         .route("/favicon.ico", get(favicon_handler));
 
     // Project file serving (behind auth to prevent unauthorized file access).
@@ -398,6 +399,16 @@ async fn js_handler() -> impl IntoResponse {
             (header::CACHE_CONTROL, "no-cache"),
         ],
         include_str!("static/app.js"),
+    )
+}
+
+async fn dompurify_bundle_handler() -> impl IntoResponse {
+    (
+        [
+            (header::CONTENT_TYPE, "application/javascript"),
+            (header::CACHE_CONTROL, "no-cache"),
+        ],
+        include_str!("static/dompurify.bundle.min.js"),
     )
 }
 
@@ -685,6 +696,7 @@ fn turn_reasoning_from_in_memory(
         .tool_calls
         .iter()
         .map(|tc| ToolDecisionInfo {
+            tool_call_id: tc.tool_call_id.clone(),
             tool_name: tc.name.clone(),
             rationale: tc.rationale.clone(),
             parameters: redact_sensitive_json(&tc.parameters),
@@ -2674,6 +2686,7 @@ mod tests {
             Some("Inspecting prior context")
         );
         assert_eq!(reasoning.tool_decisions.len(), 1);
+        assert_eq!(reasoning.tool_decisions[0].tool_call_id, None);
         assert_eq!(reasoning.tool_decisions[0].tool_name, "memory_search");
         assert_eq!(reasoning.tool_decisions[0].parallel_group, Some(0));
     }

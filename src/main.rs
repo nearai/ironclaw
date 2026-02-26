@@ -285,6 +285,7 @@ async fn main() -> anyhow::Result<()> {
                 prompt_queue: Arc::clone(&prompt_queue),
                 store: components.db.clone(),
                 secrets_store: components.secrets_store.clone(),
+                safety: components.safety.clone(),
                 user_id: "default".to_string(),
             };
 

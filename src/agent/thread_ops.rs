@@ -29,10 +29,7 @@ pub(crate) fn sanitize_pending_tool_rationale(
     let normalized = normalize_tool_reasoning(raw);
     let sanitized = safety.sanitize_tool_output("reasoning", &normalized);
     let cleaned = sanitized.content.trim();
-    if cleaned.is_empty()
-        || cleaned == "[Output blocked due to potential secret leakage]"
-        || cleaned == "[Output blocked by safety policy]"
-    {
+    if cleaned.is_empty() || safety.is_blocked_output(cleaned) {
         DEFAULT_TOOL_RATIONALE.to_string()
     } else {
         cleaned.to_string()
@@ -44,7 +41,6 @@ type DeferredApprovalCandidate = (
     crate::llm::ToolCall,
     Arc<dyn crate::tools::Tool>,
     String,
-    Option<usize>,
 );
 
 impl Agent {
@@ -743,7 +739,8 @@ impl Agent {
                 if let Some(thread) = sess.threads.get_mut(&thread_id)
                     && let Some(turn) = thread.last_turn_mut()
                 {
-                    turn.record_tool_call(
+                    turn.record_tool_call_with_id(
+                        Some(pending.tool_call_id.clone()),
                         pending.tool_name.clone(),
                         redact_sensitive_json(&pending.parameters),
                         pending.rationale.clone(),
@@ -751,10 +748,13 @@ impl Agent {
                     );
                     match &tool_result {
                         Ok(output) => {
-                            turn.record_tool_result(serde_json::json!(output));
+                            turn.record_tool_result_for(
+                                &pending.tool_call_id,
+                                serde_json::json!(output),
+                            );
                         }
                         Err(e) => {
-                            turn.record_tool_error(e.to_string());
+                            turn.record_tool_error_for(&pending.tool_call_id, e.to_string());
                         }
                     }
                 }
@@ -836,13 +836,7 @@ impl Agent {
                     if needs_approval {
                         let rationale =
                             sanitize_pending_tool_rationale(self.safety(), &tc.reasoning);
-                        let pending_parallel_group = if deferred_tool_calls.len() - idx > 1 {
-                            Some(0)
-                        } else {
-                            None
-                        };
-                        approval_needed =
-                            Some((idx, tc.clone(), tool, rationale, pending_parallel_group));
+                        approval_needed = Some((idx, tc.clone(), tool, rationale));
                         break; // remaining tools stay deferred
                     }
                 }
@@ -975,6 +969,30 @@ impl Agent {
             // === Phase 3: Post-flight (sequential, in original order) ===
             // Process all results before any conditional return so every
             // tool result is recorded in the session audit trail.
+            let deferred_batch_parallel_group = {
+                let sess = session.lock().await;
+                let existing_tool_calls: &[crate::agent::session::TurnToolCall] =
+                    if let Some(thread) = sess.threads.get(&thread_id)
+                        && let Some(turn) = thread.last_turn()
+                    {
+                        &turn.tool_calls
+                    } else {
+                        &[]
+                    };
+
+                if runnable.len() > 1 {
+                    Some(
+                        existing_tool_calls
+                            .iter()
+                            .filter_map(|call| call.parallel_group)
+                            .max()
+                            .map_or(0, |max_group| max_group + 1),
+                    )
+                } else {
+                    None
+                }
+            };
+
             let mut deferred_auth: Option<String> = None;
 
             for (tc, deferred_result) in exec_results {
@@ -1000,15 +1018,18 @@ impl Agent {
                     if let Some(thread) = sess.threads.get_mut(&thread_id)
                         && let Some(turn) = thread.last_turn_mut()
                     {
-                        turn.record_tool_call(
+                        turn.record_tool_call_with_id(
+                            Some(tc.id.clone()),
                             tc.name.clone(),
                             redact_sensitive_json(&tc.arguments),
                             sanitize_pending_tool_rationale(self.safety(), &tc.reasoning),
-                            if runnable.len() > 1 { Some(0) } else { None },
+                            deferred_batch_parallel_group,
                         );
                         match &deferred_result {
-                            Ok(output) => turn.record_tool_result(serde_json::json!(output)),
-                            Err(e) => turn.record_tool_error(e.to_string()),
+                            Ok(output) => {
+                                turn.record_tool_result_for(&tc.id, serde_json::json!(output))
+                            }
+                            Err(e) => turn.record_tool_error_for(&tc.id, e.to_string()),
                         }
                     }
                 }
@@ -1051,7 +1072,32 @@ impl Agent {
             }
 
             // Handle approval if a tool needed it
-            if let Some((approval_idx, tc, tool, rationale, parallel_group)) = approval_needed {
+            if let Some((approval_idx, tc, tool, rationale)) = approval_needed {
+                let approval_parallel_group = {
+                    let remaining = deferred_tool_calls.len() - approval_idx;
+                    let sess = session.lock().await;
+                    let existing_tool_calls: &[crate::agent::session::TurnToolCall] =
+                        if let Some(thread) = sess.threads.get(&thread_id)
+                            && let Some(turn) = thread.last_turn()
+                        {
+                            &turn.tool_calls
+                        } else {
+                            &[]
+                        };
+
+                    if remaining > 1 {
+                        Some(
+                            existing_tool_calls
+                                .iter()
+                                .filter_map(|call| call.parallel_group)
+                                .max()
+                                .map_or(0, |max_group| max_group + 1),
+                        )
+                    } else {
+                        None
+                    }
+                };
+
                 let new_pending = PendingApproval {
                     request_id: Uuid::new_v4(),
                     tool_name: tc.name.clone(),
@@ -1059,7 +1105,7 @@ impl Agent {
                     description: tool.description().to_string(),
                     tool_call_id: tc.id.clone(),
                     rationale,
-                    parallel_group,
+                    parallel_group: approval_parallel_group,
                     context_messages: context_messages.clone(),
                     deferred_tool_calls: deferred_tool_calls[approval_idx + 1..].to_vec(),
                 };

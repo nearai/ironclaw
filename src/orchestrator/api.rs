@@ -50,6 +50,8 @@ pub struct OrchestratorState {
     pub store: Option<Arc<dyn Database>>,
     /// Encrypted secrets store for credential injection into containers.
     pub secrets_store: Option<Arc<dyn SecretsStore + Send + Sync>>,
+    /// Shared safety layer used for job-event sanitization.
+    pub safety: Arc<crate::safety::SafetyLayer>,
     /// User ID for secret lookups (single-tenant, typically "default").
     pub user_id: String,
 }
@@ -248,7 +250,11 @@ async fn report_complete(
 // -- Sandbox job event handlers --
 
 /// Receive a job event from a worker or Claude Code bridge and broadcast + persist it.
-fn sanitize_job_event_data(event_type: &str, data: &serde_json::Value) -> serde_json::Value {
+fn sanitize_job_event_data(
+    safety: &crate::safety::SafetyLayer,
+    event_type: &str,
+    data: &serde_json::Value,
+) -> serde_json::Value {
     match event_type {
         "tool_use" => {
             let mut sanitized = data.clone();
@@ -270,10 +276,6 @@ fn sanitize_job_event_data(event_type: &str, data: &serde_json::Value) -> serde_
                     .and_then(|v| v.as_str())
                     .unwrap_or("")
                     .to_string();
-                let safety = crate::safety::SafetyLayer::new(&crate::config::SafetyConfig {
-                    max_output_length: 100_000,
-                    injection_check_enabled: true,
-                });
                 let output_sanitized = safety.sanitize_tool_output("job_tool_result", &output);
                 obj.insert(
                     "output".to_string(),
@@ -298,7 +300,8 @@ async fn job_event_handler(
     );
 
     // Redact/sanitize sensitive job event fields before persistence/broadcast.
-    payload.data = sanitize_job_event_data(&payload.event_type, &payload.data);
+    payload.data =
+        sanitize_job_event_data(state.safety.as_ref(), &payload.event_type, &payload.data);
 
     // Persist to DB (fire-and-forget)
     if let Some(ref store) = state.store {
@@ -368,6 +371,10 @@ async fn job_event_handler(
                 .map(|arr| {
                     arr.iter()
                         .map(|item| crate::channels::web::types::ToolDecisionSsePayload {
+                            tool_call_id: item
+                                .get("tool_call_id")
+                                .and_then(|v| v.as_str())
+                                .map(|s| s.to_string()),
                             tool_name: item
                                 .get("tool_name")
                                 .and_then(|v| v.as_str())
@@ -430,8 +437,12 @@ async fn job_event_handler(
             SseEvent::JobResult {
                 job_id: job_id_str,
                 status,
-                success,
-                message,
+                success: Some(success),
+                message: if message.is_empty() {
+                    None
+                } else {
+                    Some(message)
+                },
                 session_id: payload
                     .data
                     .get("session_id")
@@ -578,6 +589,12 @@ mod tests {
             prompt_queue: Arc::new(Mutex::new(HashMap::new())),
             store: None,
             secrets_store: None,
+            safety: Arc::new(crate::safety::SafetyLayer::new(
+                &crate::config::SafetyConfig {
+                    max_output_length: 100_000,
+                    injection_check_enabled: true,
+                },
+            )),
             user_id: "default".to_string(),
         }
     }
@@ -810,6 +827,12 @@ mod tests {
             prompt_queue: Arc::new(Mutex::new(HashMap::new())),
             store: None,
             secrets_store: Some(secrets_store),
+            safety: Arc::new(crate::safety::SafetyLayer::new(
+                &crate::config::SafetyConfig {
+                    max_output_length: 100_000,
+                    injection_check_enabled: true,
+                },
+            )),
             user_id: "default".to_string(),
         };
 
@@ -845,6 +868,12 @@ mod tests {
             prompt_queue: Arc::new(Mutex::new(HashMap::new())),
             store: None,
             secrets_store: None,
+            safety: Arc::new(crate::safety::SafetyLayer::new(
+                &crate::config::SafetyConfig {
+                    max_output_length: 100_000,
+                    injection_check_enabled: true,
+                },
+            )),
             user_id: "default".to_string(),
         };
 
@@ -900,6 +929,12 @@ mod tests {
             prompt_queue: Arc::new(Mutex::new(HashMap::new())),
             store: None,
             secrets_store: None,
+            safety: Arc::new(crate::safety::SafetyLayer::new(
+                &crate::config::SafetyConfig {
+                    max_output_length: 100_000,
+                    injection_check_enabled: true,
+                },
+            )),
             user_id: "default".to_string(),
         };
 
@@ -949,6 +984,12 @@ mod tests {
             prompt_queue: Arc::new(Mutex::new(HashMap::new())),
             store: None,
             secrets_store: None,
+            safety: Arc::new(crate::safety::SafetyLayer::new(
+                &crate::config::SafetyConfig {
+                    max_output_length: 100_000,
+                    injection_check_enabled: true,
+                },
+            )),
             user_id: "default".to_string(),
         };
 
@@ -997,6 +1038,12 @@ mod tests {
             prompt_queue: Arc::new(Mutex::new(HashMap::new())),
             store: None,
             secrets_store: None,
+            safety: Arc::new(crate::safety::SafetyLayer::new(
+                &crate::config::SafetyConfig {
+                    max_output_length: 100_000,
+                    injection_check_enabled: true,
+                },
+            )),
             user_id: "default".to_string(),
         };
 
@@ -1045,6 +1092,12 @@ mod tests {
             prompt_queue: Arc::new(Mutex::new(HashMap::new())),
             store: None,
             secrets_store: None,
+            safety: Arc::new(crate::safety::SafetyLayer::new(
+                &crate::config::SafetyConfig {
+                    max_output_length: 100_000,
+                    injection_check_enabled: true,
+                },
+            )),
             user_id: "default".to_string(),
         };
 
@@ -1058,6 +1111,7 @@ mod tests {
                 "narrative": "Inspecting context before tool execution",
                 "tool_decisions": [
                     {
+                        "tool_call_id": "call_mem_1",
                         "tool_name": "memory_search",
                         "rationale": "fetch prior context",
                         "outcome": "pending",
@@ -1090,6 +1144,10 @@ mod tests {
                     Some("Inspecting context before tool execution")
                 );
                 assert_eq!(tool_decisions.len(), 1);
+                assert_eq!(
+                    tool_decisions[0].tool_call_id.as_deref(),
+                    Some("call_mem_1")
+                );
                 assert_eq!(tool_decisions[0].tool_name, "memory_search");
                 assert_eq!(tool_decisions[0].parallel_group, Some(0));
             }
@@ -1110,6 +1168,12 @@ mod tests {
             prompt_queue: Arc::new(Mutex::new(HashMap::new())),
             store: None,
             secrets_store: None,
+            safety: Arc::new(crate::safety::SafetyLayer::new(
+                &crate::config::SafetyConfig {
+                    max_output_length: 100_000,
+                    injection_check_enabled: true,
+                },
+            )),
             user_id: "default".to_string(),
         };
 
@@ -1147,8 +1211,8 @@ mod tests {
                 ..
             } => {
                 assert_eq!(status, "completed");
-                assert!(success);
-                assert_eq!(message, "done");
+                assert_eq!(success, Some(true));
+                assert_eq!(message.as_deref(), Some("done"));
                 assert_eq!(session_id.as_deref(), Some("sess-1"));
             }
             other => panic!("Expected JobResult, got {:?}", other),
@@ -1168,6 +1232,12 @@ mod tests {
             prompt_queue: Arc::new(Mutex::new(HashMap::new())),
             store: None,
             secrets_store: None,
+            safety: Arc::new(crate::safety::SafetyLayer::new(
+                &crate::config::SafetyConfig {
+                    max_output_length: 100_000,
+                    injection_check_enabled: true,
+                },
+            )),
             user_id: "default".to_string(),
         };
 

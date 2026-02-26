@@ -458,6 +458,7 @@ body {
   color: var(--accent);
 }
 
+.reasoning-id,
 .reasoning-outcome,
 .reasoning-parallel {
   color: var(--text-tertiary);
@@ -2353,6 +2354,7 @@ body {
   color: var(--accent);
 }
 
+.activity-reasoning-id,
 .activity-reasoning-parallel {
   color: var(--text-tertiary);
 }

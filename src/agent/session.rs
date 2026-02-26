@@ -459,7 +459,10 @@ impl Turn {
         self.narrative = Some(narrative.into());
     }
 
-    /// Record a tool call.
+    /// Record a tool call with its rationale and optional parallel batch group.
+    ///
+    /// `rationale` stores the sanitized reason for selecting this tool, and
+    /// `parallel_group` groups concurrently dispatched calls for UI rendering.
     pub fn record_tool_call(
         &mut self,
         name: impl Into<String>,
@@ -467,7 +470,20 @@ impl Turn {
         rationale: String,
         parallel_group: Option<usize>,
     ) {
+        self.record_tool_call_with_id(None, name, params, rationale, parallel_group);
+    }
+
+    /// Record a tool call with its LLM `tool_call_id` for identity-safe result matching.
+    pub fn record_tool_call_with_id(
+        &mut self,
+        tool_call_id: Option<String>,
+        name: impl Into<String>,
+        params: serde_json::Value,
+        rationale: String,
+        parallel_group: Option<usize>,
+    ) {
         self.tool_calls.push(TurnToolCall {
+            tool_call_id,
             name: name.into(),
             parameters: params,
             result: None,
@@ -477,7 +493,23 @@ impl Turn {
         });
     }
 
-    /// Record tool call result.
+    /// Record tool call result for a specific tool call ID.
+    pub fn record_tool_result_for(&mut self, tool_call_id: &str, result: serde_json::Value) {
+        if let Some(call) = self.tool_calls.iter_mut().find(|c| {
+            c.tool_call_id.as_deref() == Some(tool_call_id)
+                && c.result.is_none()
+                && c.error.is_none()
+        }) {
+            call.result = Some(result);
+        } else {
+            tracing::warn!(
+                tool_call_id,
+                "record_tool_result_for called with unknown/completed tool call; result dropped"
+            );
+        }
+    }
+
+    /// Record tool call result for the next unfinished tool call in-order.
     pub fn record_tool_result(&mut self, result: serde_json::Value) {
         if let Some(call) = self
             .tool_calls
@@ -485,10 +517,30 @@ impl Turn {
             .find(|c| c.result.is_none() && c.error.is_none())
         {
             call.result = Some(result);
+        } else {
+            #[cfg(not(test))]
+            debug_assert!(false, "record_tool_result called with no pending tool call");
+            tracing::warn!("record_tool_result called with no pending tool call; result dropped");
         }
     }
 
-    /// Record tool call error.
+    /// Record tool call error for a specific tool call ID.
+    pub fn record_tool_error_for(&mut self, tool_call_id: &str, error: impl Into<String>) {
+        if let Some(call) = self.tool_calls.iter_mut().find(|c| {
+            c.tool_call_id.as_deref() == Some(tool_call_id)
+                && c.result.is_none()
+                && c.error.is_none()
+        }) {
+            call.error = Some(error.into());
+        } else {
+            tracing::warn!(
+                tool_call_id,
+                "record_tool_error_for called with unknown/completed tool call; error dropped"
+            );
+        }
+    }
+
+    /// Record tool call error for the next unfinished tool call in-order.
     pub fn record_tool_error(&mut self, error: impl Into<String>) {
         if let Some(call) = self
             .tool_calls
@@ -496,6 +548,10 @@ impl Turn {
             .find(|c| c.result.is_none() && c.error.is_none())
         {
             call.error = Some(error.into());
+        } else {
+            #[cfg(not(test))]
+            debug_assert!(false, "record_tool_error called with no pending tool call");
+            tracing::warn!("record_tool_error called with no pending tool call; error dropped");
         }
     }
 }
@@ -503,6 +559,9 @@ impl Turn {
 /// Record of a tool call made during a turn.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TurnToolCall {
+    /// Provider tool call ID (for identity-safe result matching).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_call_id: Option<String>,
     /// Tool name.
     pub name: String,
     /// Parameters passed to the tool.
@@ -978,9 +1037,108 @@ mod tests {
 
         assert_eq!(turn.tool_calls.len(), 1);
         let call = &turn.tool_calls[0];
+        assert_eq!(call.tool_call_id, None);
         assert_eq!(call.name, "memory_search");
         assert_eq!(call.rationale, "check prior context");
         assert_eq!(call.parallel_group, Some(0));
+    }
+
+    #[test]
+    fn test_record_tool_result_fills_first_pending_in_order() {
+        let mut turn = Turn::new(0, "test");
+        turn.record_tool_call(
+            "tool_one",
+            serde_json::json!({"i": 1}),
+            "first".to_string(),
+            None,
+        );
+        turn.record_tool_call(
+            "tool_two",
+            serde_json::json!({"i": 2}),
+            "second".to_string(),
+            None,
+        );
+        turn.record_tool_call(
+            "tool_three",
+            serde_json::json!({"i": 3}),
+            "third".to_string(),
+            None,
+        );
+
+        turn.record_tool_result(serde_json::json!("r1"));
+        turn.record_tool_result(serde_json::json!("r2"));
+        turn.record_tool_result(serde_json::json!("r3"));
+
+        assert_eq!(turn.tool_calls[0].result, Some(serde_json::json!("r1")));
+        assert_eq!(turn.tool_calls[1].result, Some(serde_json::json!("r2")));
+        assert_eq!(turn.tool_calls[2].result, Some(serde_json::json!("r3")));
+    }
+
+    #[test]
+    fn test_record_tool_result_no_pending_is_noop() {
+        let mut turn = Turn::new(0, "test");
+        turn.record_tool_call(
+            "tool_one",
+            serde_json::json!({"i": 1}),
+            "first".to_string(),
+            None,
+        );
+        turn.record_tool_result(serde_json::json!("r1"));
+
+        // No panic / no change when no pending call remains.
+        turn.record_tool_result(serde_json::json!("extra"));
+        assert_eq!(turn.tool_calls[0].result, Some(serde_json::json!("r1")));
+    }
+
+    #[test]
+    fn test_record_tool_result_for_matches_by_id() {
+        let mut turn = Turn::new(0, "test");
+        turn.record_tool_call_with_id(
+            Some("call_1".to_string()),
+            "tool_one",
+            serde_json::json!({"i": 1}),
+            "first".to_string(),
+            None,
+        );
+        turn.record_tool_call_with_id(
+            Some("call_2".to_string()),
+            "tool_two",
+            serde_json::json!({"i": 2}),
+            "second".to_string(),
+            None,
+        );
+
+        // Out-of-order completion should still attach to the right tool call.
+        turn.record_tool_result_for("call_2", serde_json::json!("r2"));
+        turn.record_tool_result_for("call_1", serde_json::json!("r1"));
+
+        assert_eq!(turn.tool_calls[0].result, Some(serde_json::json!("r1")));
+        assert_eq!(turn.tool_calls[1].result, Some(serde_json::json!("r2")));
+    }
+
+    #[test]
+    fn test_record_tool_error_for_matches_by_id() {
+        let mut turn = Turn::new(0, "test");
+        turn.record_tool_call_with_id(
+            Some("call_1".to_string()),
+            "tool_one",
+            serde_json::json!({"i": 1}),
+            "first".to_string(),
+            None,
+        );
+        turn.record_tool_call_with_id(
+            Some("call_2".to_string()),
+            "tool_two",
+            serde_json::json!({"i": 2}),
+            "second".to_string(),
+            None,
+        );
+
+        turn.record_tool_error_for("call_2", "boom");
+        turn.record_tool_error_for("call_1", "oops");
+
+        assert_eq!(turn.tool_calls[0].error.as_deref(), Some("oops"));
+        assert_eq!(turn.tool_calls[1].error.as_deref(), Some("boom"));
     }
 
     #[test]

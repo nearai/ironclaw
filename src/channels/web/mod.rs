@@ -326,6 +326,7 @@ impl Channel for GatewayChannel {
                     .into_iter()
                     .map(|decision: ReasoningDecisionUpdate| {
                         crate::channels::web::types::ToolDecisionSsePayload {
+                            tool_call_id: decision.tool_call_id,
                             tool_name: decision.tool_name,
                             rationale: decision.rationale,
                             outcome: decision.outcome,

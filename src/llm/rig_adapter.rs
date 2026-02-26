@@ -441,6 +441,9 @@ fn install_rig_panic_suppression_hook_once() {
     static INSTALL_HOOK: Once = Once::new();
 
     INSTALL_HOOK.call_once(|| {
+        tracing::warn!(
+            "Installing rig panic-suppression hook; if another component replaces the global panic hook later, suppression may stop applying"
+        );
         let previous_hook = std::panic::take_hook();
         std::panic::set_hook(Box::new(move |info| {
             if RIG_PANIC_SUPPRESSION_DEPTH.load(Ordering::Relaxed) > 0
@@ -491,6 +494,10 @@ async fn run_completion_guarded<M: CompletionModel>(
         }
     })?;
 
+    // SAFETY: We intentionally mark this future unwind-safe to convert provider
+    // panics into typed `LlmError`s and keep the process alive. The adapter does
+    // not retain mutable aliases into the model across this boundary; if a panic
+    // occurs, this specific call is discarded and surfaced as an error.
     let response = AssertUnwindSafe(fut)
         .catch_unwind()
         .await

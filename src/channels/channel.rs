@@ -101,6 +101,7 @@ impl OutgoingResponse {
 
 #[derive(Debug, Clone)]
 pub struct ReasoningDecisionUpdate {
+    pub tool_call_id: Option<String>,
     pub tool_name: String,
     pub rationale: String,
     pub outcome: String,

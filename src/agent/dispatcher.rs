@@ -456,7 +456,8 @@ impl Agent {
                             for (tc, outcome) in &preflight {
                                 match outcome {
                                     PreflightOutcome::Runnable { rationale } => {
-                                        turn.record_tool_call(
+                                        turn.record_tool_call_with_id(
+                                            Some(tc.id.clone()),
                                             tc.name.clone(),
                                             crate::tools::redaction::redact_sensitive_json(
                                                 &tc.arguments,
@@ -466,7 +467,8 @@ impl Agent {
                                         );
                                     }
                                     PreflightOutcome::Rejected(_) => {
-                                        turn.record_tool_call(
+                                        turn.record_tool_call_with_id(
+                                            Some(tc.id.clone()),
                                             tc.name.clone(),
                                             crate::tools::redaction::redact_sensitive_json(
                                                 &tc.arguments,
@@ -649,7 +651,7 @@ impl Agent {
                                     if let Some(thread) = sess.threads.get_mut(&thread_id)
                                         && let Some(turn) = thread.last_turn_mut()
                                     {
-                                        turn.record_tool_error(error_msg.clone());
+                                        turn.record_tool_error_for(&tc.id, error_msg.clone());
                                     }
                                 }
 
@@ -692,10 +694,13 @@ impl Agent {
                                     {
                                         match &tool_result {
                                             Ok(output) => {
-                                                turn.record_tool_result(serde_json::json!(output));
+                                                turn.record_tool_result_for(
+                                                    &tc.id,
+                                                    serde_json::json!(output),
+                                                );
                                             }
                                             Err(e) => {
-                                                turn.record_tool_error(e.to_string());
+                                                turn.record_tool_error_for(&tc.id, e.to_string());
                                             }
                                         }
                                     }
@@ -802,10 +807,16 @@ impl Agent {
 
                     // Handle approval if a tool needed it
                     if let Some((approval_idx, tc, tool, rationale)) = approval_needed {
-                        let pending_parallel_group = if tool_calls.len() - approval_idx > 1 {
-                            Some(0)
-                        } else {
-                            None
+                        let pending_parallel_group = {
+                            let remaining = tool_calls.len() - approval_idx;
+                            let sess = session.lock().await;
+                            if let Some(thread) = sess.threads.get(&thread_id)
+                                && let Some(turn) = thread.last_turn()
+                            {
+                                parallel_group_for_iteration(remaining, &turn.tool_calls)
+                            } else {
+                                parallel_group_for_iteration(remaining, &[])
+                            }
                         };
                         let pending = PendingApproval {
                             request_id: Uuid::new_v4(),
@@ -1028,17 +1039,15 @@ fn sanitize_reasoning_narrative(
         };
     }
 
-    if cleaned == "[Output blocked due to potential secret leakage]" {
-        return NarrativeSanitizeResult {
-            summary: None,
-            outcome: NarrativeSanitizeOutcome::BlockedByLeakDetector,
+    if safety.is_blocked_output(cleaned) {
+        let outcome = if cleaned == crate::safety::SafetyLayer::BLOCKED_BY_LEAK_DETECTOR {
+            NarrativeSanitizeOutcome::BlockedByLeakDetector
+        } else {
+            NarrativeSanitizeOutcome::BlockedByPolicy
         };
-    }
-
-    if cleaned == "[Output blocked by safety policy]" {
         return NarrativeSanitizeResult {
             summary: None,
-            outcome: NarrativeSanitizeOutcome::BlockedByPolicy,
+            outcome,
         };
     }
 
@@ -1054,6 +1063,7 @@ fn turn_reasoning_decision_events(
     turn.tool_calls
         .iter()
         .map(|call| ReasoningDecisionUpdate {
+            tool_call_id: call.tool_call_id.clone(),
             tool_name: call.name.clone(),
             rationale: call.rationale.clone(),
             outcome: if call.error.is_some() {
@@ -1073,10 +1083,7 @@ fn sanitize_tool_rationale(safety: &crate::safety::SafetyLayer, raw_rationale: &
     let sanitized = safety.sanitize_tool_output("reasoning", &rationale);
     let cleaned = sanitized.content.trim();
 
-    if cleaned.is_empty()
-        || cleaned == "[Output blocked due to potential secret leakage]"
-        || cleaned == "[Output blocked by safety policy]"
-    {
+    if cleaned.is_empty() || safety.is_blocked_output(cleaned) {
         tracing::warn!("Tool rationale blocked by safety policy; applying deterministic fallback");
         return DEFAULT_TOOL_RATIONALE.to_string();
     }
