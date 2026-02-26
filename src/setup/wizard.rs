@@ -1230,6 +1230,8 @@ impl SetupWizard {
             ollama: None,
             openai_compatible: None,
             tinfoil: None,
+            cheap_model: None,
+            smart_routing_cascade: true,
         };
 
         match create_llm_provider(&config, session) {

@@ -267,12 +267,18 @@ fn create_openai_compatible_provider(config: &LlmConfig) -> Result<Arc<dyn LlmPr
 
 /// Create a cheap/fast LLM provider for lightweight tasks (heartbeat, routing, evaluation).
 ///
-/// Uses `NEARAI_CHEAP_MODEL` if set, otherwise falls back to the main provider.
-/// Currently only supports NEAR AI backend.
+/// Checks `LLM_CHEAP_MODEL` first (works with any backend), then falls back to
+/// `NEARAI_CHEAP_MODEL` for the NearAI backend.
 pub fn create_cheap_llm_provider(
     config: &LlmConfig,
     session: Arc<SessionManager>,
 ) -> Result<Option<Arc<dyn LlmProvider>>, LlmError> {
+    // First try generic LLM_CHEAP_MODEL (works with any backend)
+    if let Some(ref cheap_model) = config.cheap_model {
+        return create_cheap_provider_for_backend(config, cheap_model, session);
+    }
+
+    // Fall back to NEARAI_CHEAP_MODEL (NearAI only)
     let Some(ref cheap_model) = config.nearai.cheap_model else {
         return Ok(None);
     };
@@ -280,7 +286,7 @@ pub fn create_cheap_llm_provider(
     if config.backend != LlmBackend::NearAi {
         tracing::warn!(
             "NEARAI_CHEAP_MODEL is set but LLM_BACKEND is {:?}, not NearAi. \
-             Cheap model setting will be ignored.",
+             Cheap model setting will be ignored. Use LLM_CHEAP_MODEL instead.",
             config.backend
         );
         return Ok(None);
@@ -293,6 +299,58 @@ pub fn create_cheap_llm_provider(
         cheap_config,
         session,
     )?)))
+}
+
+/// Create a cheap provider for the current backend by cloning config and swapping the model.
+fn create_cheap_provider_for_backend(
+    config: &LlmConfig,
+    cheap_model: &str,
+    session: Arc<SessionManager>,
+) -> Result<Option<Arc<dyn LlmProvider>>, LlmError> {
+    let mut cheap_config = config.clone();
+
+    match config.backend {
+        LlmBackend::NearAi => {
+            cheap_config.nearai.model = cheap_model.to_string();
+            let provider = create_llm_provider_with_config(&cheap_config.nearai, session)?;
+            Ok(Some(provider))
+        }
+        LlmBackend::OpenAiCompatible => {
+            if let Some(ref mut compat) = cheap_config.openai_compatible {
+                compat.model = cheap_model.to_string();
+            }
+            let provider = create_openai_compatible_provider(&cheap_config)?;
+            Ok(Some(provider))
+        }
+        LlmBackend::OpenAi => {
+            if let Some(ref mut oai) = cheap_config.openai {
+                oai.model = cheap_model.to_string();
+            }
+            let provider = create_openai_provider(&cheap_config)?;
+            Ok(Some(provider))
+        }
+        LlmBackend::Anthropic => {
+            if let Some(ref mut anth) = cheap_config.anthropic {
+                anth.model = cheap_model.to_string();
+            }
+            let provider = create_anthropic_provider(&cheap_config)?;
+            Ok(Some(provider))
+        }
+        LlmBackend::Ollama => {
+            if let Some(ref mut oll) = cheap_config.ollama {
+                oll.model = cheap_model.to_string();
+            }
+            let provider = create_ollama_provider(&cheap_config)?;
+            Ok(Some(provider))
+        }
+        LlmBackend::Tinfoil => {
+            if let Some(ref mut tf) = cheap_config.tinfoil {
+                tf.model = cheap_model.to_string();
+            }
+            let provider = create_tinfoil_provider(&cheap_config)?;
+            Ok(Some(provider))
+        }
+    }
 }
 
 /// Build the full LLM provider chain with all configured wrappers.
@@ -333,10 +391,24 @@ pub fn build_provider_chain(
     };
 
     // 2. Smart routing (cheap/primary split)
-    let llm: Arc<dyn LlmProvider> = if let Some(ref cheap_model) = config.nearai.cheap_model {
-        let mut cheap_config = config.nearai.clone();
-        cheap_config.model = cheap_model.clone();
-        let cheap = create_llm_provider_with_config(&cheap_config, session.clone())?;
+    //    Supports any backend via LLM_CHEAP_MODEL, falls back to NEARAI_CHEAP_MODEL.
+    let cheap_model_name = config
+        .cheap_model
+        .as_deref()
+        .or(config.nearai.cheap_model.as_deref());
+    let cascade_enabled = config.smart_routing_cascade;
+
+    let llm: Arc<dyn LlmProvider> = if let Some(cheap_model) = cheap_model_name {
+        let cheap = if config.cheap_model.is_some() {
+            // Generic path: create cheap provider for current backend
+            create_cheap_provider_for_backend(config, cheap_model, session.clone())?
+                .expect("cheap provider creation should succeed when cheap_model is set")
+        } else {
+            // NearAI-only path (legacy NEARAI_CHEAP_MODEL)
+            let mut cheap_config = config.nearai.clone();
+            cheap_config.model = cheap_model.to_string();
+            create_llm_provider_with_config(&cheap_config, session.clone())?
+        };
         let cheap: Arc<dyn LlmProvider> = if retry_config.max_retries > 0 {
             Arc::new(RetryProvider::new(cheap, retry_config.clone()))
         } else {
@@ -345,13 +417,14 @@ pub fn build_provider_chain(
         tracing::info!(
             primary = %llm.model_name(),
             cheap = %cheap.model_name(),
+            cascade = cascade_enabled,
             "Smart routing enabled"
         );
         Arc::new(SmartRoutingProvider::new(
             llm,
             cheap,
             SmartRoutingConfig {
-                cascade_enabled: config.nearai.smart_routing_cascade,
+                cascade_enabled,
                 ..SmartRoutingConfig::default()
             },
         ))
@@ -472,6 +545,8 @@ mod tests {
             ollama: None,
             openai_compatible: None,
             tinfoil: None,
+            cheap_model: None,
+            smart_routing_cascade: true,
         }
     }
 
