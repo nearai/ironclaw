@@ -1125,8 +1125,9 @@ impl SetupWizard {
             ));
         }
 
-        // Set env var so write_bootstrap_env() can persist it, and so
-        // subsequent wizard steps (model selection) can use it immediately.
+        // Set env var so subsequent wizard steps (model selection) can use it
+        // immediately. This is ephemeral — credentials are NOT written to the
+        // bootstrap .env; they live only in the encrypted secrets DB.
         // SAFETY: Single-threaded wizard context.
         unsafe { std::env::set_var(env_var, key_str) };
 
@@ -2191,14 +2192,11 @@ impl SetupWizard {
     /// These are the chicken-and-egg settings needed before the database is
     /// connected (DATABASE_BACKEND, DATABASE_URL, LLM_BACKEND, etc.).
     ///
-    /// # Security note
-    ///
-    /// Credential env vars (API keys, OAuth tokens) are written in **plaintext**
-    /// with 0o600 permissions. This is a deliberate tradeoff: `Config::from_env()`
-    /// runs before the encrypted secrets DB is available, so we need these values
-    /// on disk for the initial config resolution. Users handling sensitive keys
-    /// should ensure full-disk encryption (FileVault, LUKS, BitLocker) or use a
-    /// secrets manager that injects env vars at runtime.
+    /// **Credentials are NOT written here.** API keys and OAuth tokens live
+    /// only in the encrypted secrets DB. `LlmConfig::resolve()` defers
+    /// gracefully when credentials are missing during early startup, and the
+    /// re-resolution in `AppBuilder::build_all()` fills them in after
+    /// `inject_llm_keys_from_secrets()` loads from encrypted storage.
     fn write_bootstrap_env(&self) -> Result<(), SetupError> {
         let mut env_vars: Vec<(&str, String)> = Vec::new();
 
@@ -2225,28 +2223,6 @@ impl SetupWizard {
         }
         if let Some(ref url) = self.settings.ollama_base_url {
             env_vars.push(("OLLAMA_BASE_URL", url.clone()));
-        }
-
-        // Preserve LLM credentials: Config::from_env() runs before the DB is
-        // connected, so secrets stored only in the encrypted DB aren't available
-        // yet. Write any present API keys / OAuth tokens to the bootstrap .env
-        // so the initial config resolution succeeds.
-        let credential_vars = [
-            "NEARAI_API_KEY",
-            "ANTHROPIC_API_KEY",
-            "ANTHROPIC_OAUTH_TOKEN",
-            "OPENAI_API_KEY",
-            "CODEX_OAUTH_TOKEN",
-            "LLM_API_KEY",
-            "TINFOIL_API_KEY",
-        ];
-        for var in credential_vars {
-            if let Ok(val) = std::env::var(var)
-                && !val.is_empty()
-                && val != OAUTH_PLACEHOLDER
-            {
-                env_vars.push((var, val));
-            }
         }
 
         // Always write ONBOARD_COMPLETED so that check_onboard_needed()

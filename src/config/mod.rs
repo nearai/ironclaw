@@ -242,6 +242,15 @@ pub async fn inject_llm_keys_from_secrets(
         }
     }
 
+    // Try the OS credential store for a fresh Anthropic OAuth token.
+    // Tokens from `claude login` expire in 8-12h, so the DB copy may be stale.
+    // A fresh extraction from macOS Keychain / Linux credentials.json wins
+    // over the (possibly expired) copy stored in the encrypted secrets DB.
+    if let Some(fresh) = crate::config::ClaudeCodeConfig::extract_oauth_token() {
+        injected.insert("ANTHROPIC_OAUTH_TOKEN".to_string(), fresh);
+        tracing::debug!("Refreshed ANTHROPIC_OAUTH_TOKEN from OS credential store");
+    }
+
     // Fallback: if OPENAI_API_KEY is still empty and we have a Codex token,
     // inject it as OPENAI_API_KEY too (Codex tokens use the same Bearer auth).
     if !injected.contains_key("OPENAI_API_KEY")

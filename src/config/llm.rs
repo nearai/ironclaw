@@ -251,23 +251,34 @@ impl LlmConfig {
             smart_routing_cascade: parse_optional_env("SMART_ROUTING_CASCADE", true)?,
         };
 
-        // Resolve provider-specific configs based on backend
+        // Resolve provider-specific configs based on backend.
+        //
+        // Credentials may not be available yet during early startup (before the
+        // encrypted secrets store is loaded). In that case return `None` for the
+        // provider config; the re-resolution in `AppBuilder::build_all()` will
+        // fill it in after `inject_llm_keys_from_secrets()` runs.
         let openai = if backend == LlmBackend::OpenAi {
-            let api_key = optional_env("OPENAI_API_KEY")?
+            match optional_env("OPENAI_API_KEY")?
                 .or(optional_env("CODEX_OAUTH_TOKEN")?)
                 .map(SecretString::from)
-                .ok_or_else(|| ConfigError::MissingRequired {
-                    key: "OPENAI_API_KEY".to_string(),
-                    hint: "Set OPENAI_API_KEY or CODEX_OAUTH_TOKEN when LLM_BACKEND=openai"
-                        .to_string(),
-                })?;
-            let model = optional_env("OPENAI_MODEL")?.unwrap_or_else(|| "gpt-4o".to_string());
-            let base_url = optional_env("OPENAI_BASE_URL")?;
-            Some(OpenAiDirectConfig {
-                api_key,
-                model,
-                base_url,
-            })
+            {
+                Some(api_key) => {
+                    let model =
+                        optional_env("OPENAI_MODEL")?.unwrap_or_else(|| "gpt-4o".to_string());
+                    let base_url = optional_env("OPENAI_BASE_URL")?;
+                    Some(OpenAiDirectConfig {
+                        api_key,
+                        model,
+                        base_url,
+                    })
+                }
+                None => {
+                    tracing::debug!(
+                        "OpenAI credentials not yet available; deferring config resolution"
+                    );
+                    None
+                }
+            }
         } else {
             None
         };
@@ -276,29 +287,39 @@ impl LlmConfig {
             let api_key_env = optional_env("ANTHROPIC_API_KEY")?.map(SecretString::from);
             let oauth_token = optional_env("ANTHROPIC_OAUTH_TOKEN")?.map(SecretString::from);
 
-            let api_key = match (&api_key_env, &oauth_token) {
-                (Some(key), _) => key.clone(),
-                // OAuth token present but no API key: use a placeholder so the
-                // config block is populated. The provider factory will route to
-                // the OAuth provider instead of rig-core's x-api-key client.
-                (None, Some(_)) => SecretString::from(OAUTH_PLACEHOLDER.to_string()),
-                (None, None) => {
-                    return Err(ConfigError::MissingRequired {
-                        key: "ANTHROPIC_API_KEY".to_string(),
-                        hint: "Set ANTHROPIC_API_KEY or ANTHROPIC_OAUTH_TOKEN when LLM_BACKEND=anthropic".to_string(),
-                    });
+            match (&api_key_env, &oauth_token) {
+                (Some(key), _) => {
+                    let model = optional_env("ANTHROPIC_MODEL")?
+                        .unwrap_or_else(|| "claude-sonnet-4-20250514".to_string());
+                    let base_url = optional_env("ANTHROPIC_BASE_URL")?;
+                    Some(AnthropicDirectConfig {
+                        api_key: key.clone(),
+                        model,
+                        base_url,
+                        oauth_token,
+                    })
                 }
-            };
-
-            let model = optional_env("ANTHROPIC_MODEL")?
-                .unwrap_or_else(|| "claude-sonnet-4-20250514".to_string());
-            let base_url = optional_env("ANTHROPIC_BASE_URL")?;
-            Some(AnthropicDirectConfig {
-                api_key,
-                model,
-                base_url,
-                oauth_token,
-            })
+                (None, Some(_)) => {
+                    // OAuth token present but no API key: use a placeholder so the
+                    // config block is populated. The provider factory will route to
+                    // the OAuth provider instead of rig-core's x-api-key client.
+                    let model = optional_env("ANTHROPIC_MODEL")?
+                        .unwrap_or_else(|| "claude-sonnet-4-20250514".to_string());
+                    let base_url = optional_env("ANTHROPIC_BASE_URL")?;
+                    Some(AnthropicDirectConfig {
+                        api_key: SecretString::from(OAUTH_PLACEHOLDER.to_string()),
+                        model,
+                        base_url,
+                        oauth_token,
+                    })
+                }
+                (None, None) => {
+                    tracing::debug!(
+                        "Anthropic credentials not yet available; deferring config resolution"
+                    );
+                    None
+                }
+            }
         } else {
             None
         };
@@ -314,39 +335,50 @@ impl LlmConfig {
         };
 
         let openai_compatible = if backend == LlmBackend::OpenAiCompatible {
-            let base_url = optional_env("LLM_BASE_URL")?
+            match optional_env("LLM_BASE_URL")?
                 .or_else(|| settings.openai_compatible_base_url.clone())
-                .ok_or_else(|| ConfigError::MissingRequired {
-                    key: "LLM_BASE_URL".to_string(),
-                    hint: "Set LLM_BASE_URL when LLM_BACKEND=openai_compatible".to_string(),
-                })?;
-            let api_key = optional_env("LLM_API_KEY")?.map(SecretString::from);
-            let model = optional_env("LLM_MODEL")?
-                .or_else(|| settings.selected_model.clone())
-                .unwrap_or_else(|| "default".to_string());
-            let extra_headers = optional_env("LLM_EXTRA_HEADERS")?
-                .map(|val| parse_extra_headers(&val))
-                .transpose()?
-                .unwrap_or_default();
-            Some(OpenAiCompatibleConfig {
-                base_url,
-                api_key,
-                model,
-                extra_headers,
-            })
+            {
+                Some(base_url) => {
+                    let api_key = optional_env("LLM_API_KEY")?.map(SecretString::from);
+                    let model = optional_env("LLM_MODEL")?
+                        .or_else(|| settings.selected_model.clone())
+                        .unwrap_or_else(|| "default".to_string());
+                    let extra_headers = optional_env("LLM_EXTRA_HEADERS")?
+                        .map(|val| parse_extra_headers(&val))
+                        .transpose()?
+                        .unwrap_or_default();
+                    Some(OpenAiCompatibleConfig {
+                        base_url,
+                        api_key,
+                        model,
+                        extra_headers,
+                    })
+                }
+                None => {
+                    tracing::debug!(
+                        "OpenAI-compatible base URL not yet available; deferring config resolution"
+                    );
+                    None
+                }
+            }
         } else {
             None
         };
 
         let tinfoil = if backend == LlmBackend::Tinfoil {
-            let api_key = optional_env("TINFOIL_API_KEY")?
-                .map(SecretString::from)
-                .ok_or_else(|| ConfigError::MissingRequired {
-                    key: "TINFOIL_API_KEY".to_string(),
-                    hint: "Set TINFOIL_API_KEY when LLM_BACKEND=tinfoil".to_string(),
-                })?;
-            let model = optional_env("TINFOIL_MODEL")?.unwrap_or_else(|| "kimi-k2-5".to_string());
-            Some(TinfoilConfig { api_key, model })
+            match optional_env("TINFOIL_API_KEY")?.map(SecretString::from) {
+                Some(api_key) => {
+                    let model =
+                        optional_env("TINFOIL_MODEL")?.unwrap_or_else(|| "kimi-k2-5".to_string());
+                    Some(TinfoilConfig { api_key, model })
+                }
+                None => {
+                    tracing::debug!(
+                        "Tinfoil credentials not yet available; deferring config resolution"
+                    );
+                    None
+                }
+            }
         } else {
             None
         };
