@@ -42,6 +42,11 @@ impl SseManager {
         let _ = self.tx.send(event);
     }
 
+    /// Get a clone of the broadcast sender for use by other components.
+    pub fn sender(&self) -> broadcast::Sender<SseEvent> {
+        self.tx.clone()
+    }
+
     /// Get current number of active connections.
     pub fn connection_count(&self) -> u64 {
         self.connection_count.load(Ordering::Relaxed)
@@ -120,6 +125,7 @@ impl SseManager {
                     SseEvent::JobStatus { .. } => "job_status",
                     SseEvent::JobResult { .. } => "job_result",
                     SseEvent::Heartbeat => "heartbeat",
+                    SseEvent::ExtensionStatus { .. } => "extension_status",
                 };
                 Ok(Event::default().event(event_type).data(data))
             });

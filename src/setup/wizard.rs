@@ -735,13 +735,24 @@ impl SetupWizard {
     async fn step_inference_provider(&mut self) -> Result<(), SetupError> {
         // Show current provider if already configured
         if let Some(ref current) = self.settings.llm_backend {
-            let display = match current.as_str() {
-                "nearai" => "NEAR AI",
-                "anthropic" => "Anthropic (Claude)",
-                "openai" => "OpenAI",
-                "ollama" => "Ollama (local)",
-                "openai_compatible" => "OpenAI-compatible endpoint",
-                other => other,
+            let is_openrouter = current == "openai_compatible"
+                && self
+                    .settings
+                    .openai_compatible_base_url
+                    .as_deref()
+                    .is_some_and(|u| u.contains("openrouter.ai"));
+
+            let display = if is_openrouter {
+                "OpenRouter"
+            } else {
+                match current.as_str() {
+                    "nearai" => "NEAR AI",
+                    "anthropic" => "Anthropic (Claude)",
+                    "openai" => "OpenAI",
+                    "ollama" => "Ollama (local)",
+                    "openai_compatible" => "OpenAI-compatible endpoint",
+                    other => other,
+                }
             };
             print_info(&format!("Current provider: {}", display));
             println!();
@@ -753,6 +764,9 @@ impl SetupWizard {
 
             if is_known && confirm("Keep current provider?", true).map_err(SetupError::Io)? {
                 // Still run the auth sub-flow in case they need to update keys
+                if is_openrouter {
+                    return self.setup_openrouter().await;
+                }
                 match current.as_str() {
                     "nearai" => return self.setup_nearai().await,
                     "anthropic" => return self.setup_anthropic().await,
@@ -784,7 +798,8 @@ impl SetupWizard {
             "Anthropic        - Claude models (direct API key)",
             "OpenAI           - GPT models (direct API key)",
             "Ollama           - local models, no API key needed",
-            "OpenAI-compatible - custom endpoint (vLLM, LiteLLM, Together, etc.)",
+            "OpenRouter       - 200+ models via single API key",
+            "OpenAI-compatible - custom endpoint (vLLM, LiteLLM, etc.)",
         ];
 
         let choice = select_one("Provider:", options).map_err(SetupError::Io)?;
@@ -794,7 +809,8 @@ impl SetupWizard {
             1 => self.setup_anthropic().await?,
             2 => self.setup_openai().await?,
             3 => self.setup_ollama()?,
-            4 => self.setup_openai_compatible().await?,
+            4 => self.setup_openrouter().await?,
+            5 => self.setup_openai_compatible().await?,
             _ => return Err(SetupError::Config("Invalid provider selection".to_string())),
         }
 
@@ -868,6 +884,7 @@ impl SetupWizard {
             "llm_anthropic_api_key",
             "Anthropic API key",
             "https://console.anthropic.com/settings/keys",
+            None,
         )
         .await
     }
@@ -880,11 +897,12 @@ impl SetupWizard {
             "llm_openai_api_key",
             "OpenAI API key",
             "https://platform.openai.com/api-keys",
+            None,
         )
         .await
     }
 
-    /// Shared setup flow for API-key-based providers (Anthropic, OpenAI).
+    /// Shared setup flow for API-key-based providers (Anthropic, OpenAI, OpenRouter).
     async fn setup_api_key_provider(
         &mut self,
         backend: &str,
@@ -892,12 +910,13 @@ impl SetupWizard {
         secret_name: &str,
         prompt_label: &str,
         hint_url: &str,
+        override_display_name: Option<&str>,
     ) -> Result<(), SetupError> {
-        let display_name = match backend {
+        let display_name = override_display_name.unwrap_or(match backend {
             "anthropic" => "Anthropic",
             "openai" => "OpenAI",
             other => other,
-        };
+        });
 
         self.settings.llm_backend = Some(backend.to_string());
         if self.settings.selected_model.is_some() {
@@ -975,6 +994,24 @@ impl SetupWizard {
 
         print_success(&format!("Ollama configured ({})", url));
         Ok(())
+    }
+
+    /// OpenRouter provider setup: pre-configured OpenAI-compatible endpoint.
+    ///
+    /// Sets the base URL to `https://openrouter.ai/api/v1` and delegates
+    /// API key collection to `setup_api_key_provider` with a display name
+    /// override so messages say "OpenRouter" instead of "openai_compatible".
+    async fn setup_openrouter(&mut self) -> Result<(), SetupError> {
+        self.settings.openai_compatible_base_url = Some("https://openrouter.ai/api/v1".to_string());
+        self.setup_api_key_provider(
+            "openai_compatible",
+            "LLM_API_KEY",
+            "llm_compatible_api_key",
+            "OpenRouter API key",
+            "https://openrouter.ai/settings/keys",
+            Some("OpenRouter"),
+        )
+        .await
     }
 
     /// OpenAI-compatible provider setup: base URL + optional API key.

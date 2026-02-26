@@ -6,6 +6,7 @@
 
 use std::num::NonZeroUsize;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -91,6 +92,8 @@ pub struct SignalChannel {
     /// Bounded to `MAX_REPLY_TARGETS` entries; least-recently-used entries
     /// are evicted automatically when the cache is full.
     reply_targets: Arc<RwLock<LruCache<Uuid, String>>>,
+    /// Debug mode for verbose tool output (toggled via /debug command).
+    debug_mode: Arc<AtomicBool>,
 }
 
 impl SignalChannel {
@@ -106,8 +109,9 @@ impl SignalChannel {
 
         let cap = REPLY_TARGETS_CAP;
         let reply_targets = Arc::new(RwLock::new(LruCache::new(cap)));
+        let debug_mode = Arc::new(AtomicBool::new(false));
 
-        Ok(Self::from_parts(config, client, reply_targets))
+        Ok(Self::from_parts(config, client, reply_targets, debug_mode))
     }
 
     /// Construct a SignalChannel from pre-validated parts.
@@ -118,12 +122,24 @@ impl SignalChannel {
         config: SignalConfig,
         client: Client,
         reply_targets: Arc<RwLock<LruCache<Uuid, String>>>,
+        debug_mode: Arc<AtomicBool>,
     ) -> Self {
         Self {
             config,
             client,
             reply_targets,
+            debug_mode,
         }
+    }
+
+    fn is_debug(&self) -> bool {
+        self.debug_mode.load(Ordering::Relaxed)
+    }
+
+    fn toggle_debug(&self) -> bool {
+        let current = self.debug_mode.load(Ordering::Relaxed);
+        self.debug_mode.store(!current, Ordering::Relaxed);
+        !current
     }
 
     /// Effective sender: prefer `sourceNumber` (E.164), fall back to `source`
@@ -548,6 +564,7 @@ impl SignalChannel {
     fn process_envelope(&self, envelope: &Envelope) -> Option<(IncomingMessage, String)> {
         // Skip story messages when configured.
         if self.config.ignore_stories && envelope.story_message.is_some() {
+            tracing::debug!("Signal: dropping story message");
             return None;
         }
 
@@ -557,6 +574,7 @@ impl SignalChannel {
         let has_attachments = data_msg.attachments.as_ref().is_some_and(|a| !a.is_empty());
         let has_message_text = data_msg.message.as_ref().is_some_and(|m| !m.is_empty());
         if self.config.ignore_attachments && has_attachments && !has_message_text {
+            tracing::debug!("Signal: dropping attachment-only message");
             return None;
         }
 
@@ -734,9 +752,10 @@ impl Channel for SignalChannel {
         let config = self.config.clone();
         let client = self.client.clone();
         let reply_targets = Arc::clone(&self.reply_targets);
+        let debug_mode = Arc::clone(&self.debug_mode);
 
         tokio::spawn(async move {
-            if let Err(e) = sse_listener(config, client, tx, reply_targets).await {
+            if let Err(e) = sse_listener(config, client, tx, reply_targets, debug_mode).await {
                 tracing::error!("Signal SSE listener exited with error: {e}");
             }
         });
@@ -793,6 +812,142 @@ impl Channel for SignalChannel {
             let params = self.build_rpc_params(&target, None);
             let _ = self.rpc_request("sendTyping", params).await;
         }
+
+        // Send approval prompt to user
+        if let StatusUpdate::ApprovalNeeded {
+            request_id,
+            tool_name,
+            description: _,
+            parameters,
+        } = &status
+            && let Some(target_str) = metadata.get("signal_target").and_then(|v| v.as_str())
+        {
+            let params_json = serde_json::to_string_pretty(parameters).unwrap_or_default();
+            let message = format!(
+                "⚠️ *Approval Required*\n\n\
+                 *Request ID:* `{}`\n\
+                 *Tool:* {}\n\
+                 *Parameters:*\n```\n{}\n```\n\n\
+                 Reply with:\n\
+                 • `yes` or `y` - Approve this request\n\
+                 • `always` or `a` - Approve and auto-approve future {} requests\n\
+                 • `no` or `n` - Deny",
+                request_id, tool_name, params_json, tool_name
+            );
+            self.send_status_message(target_str, &message).await;
+        }
+
+        // Filter out well-known UX/terminal status messages to avoid redundant updates.
+        let should_forward_status = |msg: &str| {
+            let normalized = msg.trim();
+            !normalized.eq_ignore_ascii_case("done")
+                && !normalized.eq_ignore_ascii_case("awaiting approval")
+                && !normalized.eq_ignore_ascii_case("rejected")
+        };
+        // Filter/send status messages
+        if let StatusUpdate::Status(msg) = &status
+            && let Some(target_str) = metadata.get("signal_target").and_then(|v| v.as_str())
+            && should_forward_status(msg)
+        {
+            self.send_status_message(target_str, msg).await;
+        }
+
+        // Send tool result previews to user (debug mode only)
+        if self.is_debug()
+            && let StatusUpdate::ToolResult { name, preview } = &status
+            && let Some(target_str) = metadata.get("signal_target").and_then(|v| v.as_str())
+        {
+            let truncated = if preview.chars().count() > 500 {
+                let s: String = preview.chars().take(500).collect();
+                format!("{s}...")
+            } else {
+                preview.clone()
+            };
+            let message = format!("Tool '{}' result:\n{}", name, truncated);
+            self.send_status_message(target_str, &message).await;
+        }
+
+        // Send tool started notification (debug mode only)
+        if self.is_debug()
+            && let StatusUpdate::ToolStarted { name } = &status
+            && let Some(target_str) = metadata.get("signal_target").and_then(|v| v.as_str())
+        {
+            let message = format!("\u{25CB} Running tool: {}", name);
+            self.send_status_message(target_str, &message).await;
+        }
+
+        // Send tool completed notification (debug mode only)
+        if self.is_debug()
+            && let StatusUpdate::ToolCompleted { name, success } = &status
+            && let Some(target_str) = metadata.get("signal_target").and_then(|v| v.as_str())
+        {
+            let (icon, color) = if *success {
+                ("\u{25CF}", "success")
+            } else {
+                ("\u{2717}", "failed")
+            };
+            let message = format!("{} Tool '{}' completed ({})", icon, name, color);
+            self.send_status_message(target_str, &message).await;
+        }
+
+        // Send job started notification (sandbox jobs)
+        if let StatusUpdate::JobStarted {
+            job_id,
+            title,
+            browse_url,
+        } = &status
+            && let Some(target_str) = metadata.get("signal_target").and_then(|v| v.as_str())
+        {
+            let message = format!(
+                "\u{1F680} Job started: {}\nID: {}\nURL: {}",
+                title, job_id, browse_url
+            );
+            self.send_status_message(target_str, &message).await;
+        }
+
+        // Send auth required notification
+        if let StatusUpdate::AuthRequired {
+            extension_name,
+            instructions,
+            auth_url,
+            setup_url,
+        } = &status
+            && let Some(target_str) = metadata.get("signal_target").and_then(|v| v.as_str())
+        {
+            let mut message = format!("\u{1F512} Authentication required for: {}", extension_name);
+            if let Some(instr) = instructions {
+                message.push_str(&format!("\n\n{}", instr));
+            }
+            if let Some(url) = auth_url {
+                message.push_str(&format!("\n\nAuth URL: {}", url));
+            }
+            if let Some(url) = setup_url {
+                message.push_str(&format!("\nSetup URL: {}", url));
+            }
+            self.send_status_message(target_str, &message).await;
+        }
+
+        // Send auth completed notification
+        if let StatusUpdate::AuthCompleted {
+            extension_name,
+            success,
+            message: msg,
+        } = &status
+            && let Some(target_str) = metadata.get("signal_target").and_then(|v| v.as_str())
+        {
+            let icon = if *success { "\u{2705}" } else { "\u{274C}" };
+            let mut message = format!(
+                "{} Authentication {} for {}",
+                icon,
+                if *success { "completed" } else { "failed" },
+                extension_name
+            );
+            if !msg.is_empty() {
+                message.push_str(&format!("\n{}", msg));
+            }
+            self.send_status_message(target_str, &message).await;
+        }
+
         Ok(())
     }
 
@@ -829,14 +984,30 @@ impl Channel for SignalChannel {
     }
 }
 
+impl SignalChannel {
+    async fn send_status_message(&self, target: &str, message: &str) {
+        let target = Self::parse_recipient_target(target);
+        let params = self.build_rpc_params(&target, Some(message));
+        if let Err(e) = self.rpc_request("send", params).await {
+            tracing::warn!("Signal: failed to send status message: {}", e);
+        }
+    }
+}
+
 /// Long-running SSE listener that reconnects with exponential backoff.
 async fn sse_listener(
     config: SignalConfig,
     client: Client,
     tx: tokio::sync::mpsc::Sender<IncomingMessage>,
     reply_targets: Arc<RwLock<LruCache<Uuid, String>>>,
+    debug_mode: Arc<AtomicBool>,
 ) -> Result<(), ChannelError> {
-    let channel = SignalChannel::from_parts(config, client, Arc::clone(&reply_targets));
+    let channel = SignalChannel::from_parts(
+        config,
+        client,
+        Arc::clone(&reply_targets),
+        Arc::clone(&debug_mode),
+    );
 
     let mut url = reqwest::Url::parse(&format!("{}/api/v1/events", channel.config.http_url))
         .map_err(|e| ChannelError::StartupFailed {
@@ -1004,6 +1175,24 @@ async fn sse_listener(
                                 if let Some(ref envelope) = sse.envelope
                                     && let Some((msg, target)) = channel.process_envelope(envelope)
                                 {
+                                    // Handle /debug command locally (same as REPL).
+                                    let content_lower = msg.content.trim().to_lowercase();
+                                    if content_lower == "/debug" {
+                                        let new_state = channel.toggle_debug();
+                                        let response = if new_state {
+                                            "Debug mode enabled. Tool execution will be shown in chat."
+                                        } else {
+                                            "Debug mode disabled. Tool execution will be hidden from chat."
+                                        };
+                                        let reply_params = channel.build_rpc_params(
+                                            &SignalChannel::parse_recipient_target(&target),
+                                            Some(response),
+                                        );
+                                        let _ = channel.rpc_request("send", reply_params).await;
+                                        // Don't send the /debug command to the agent.
+                                        continue;
+                                    }
+
                                     // Store reply target for respond().
                                     // LruCache automatically evicts the
                                     // least-recently-used entry when full.
@@ -1130,6 +1319,50 @@ mod tests {
         config.http_url = "http://127.0.0.1:8686/".to_string();
         let ch = SignalChannel::new(config)?;
         assert_eq!(ch.config.http_url, "http://127.0.0.1:8686");
+        Ok(())
+    }
+
+    #[test]
+    fn debug_mode_disabled_by_default() -> Result<(), ChannelError> {
+        let ch = make_channel()?;
+        assert!(!ch.is_debug());
+        Ok(())
+    }
+
+    #[test]
+    fn debug_mode_toggle() -> Result<(), ChannelError> {
+        let ch = make_channel()?;
+
+        // Initially disabled
+        assert!(!ch.is_debug());
+
+        // Toggle on
+        let new_state = ch.toggle_debug();
+        assert!(new_state);
+        assert!(ch.is_debug());
+
+        // Toggle off
+        let new_state = ch.toggle_debug();
+        assert!(!new_state);
+        assert!(!ch.is_debug());
+
+        Ok(())
+    }
+
+    #[test]
+    fn debug_mode_persists_across_toggles() -> Result<(), ChannelError> {
+        let ch = make_channel()?;
+
+        // Multiple toggles
+        ch.toggle_debug();
+        assert!(ch.is_debug());
+        ch.toggle_debug();
+        assert!(!ch.is_debug());
+        ch.toggle_debug();
+        assert!(ch.is_debug());
+        ch.toggle_debug();
+        assert!(!ch.is_debug());
+
         Ok(())
     }
 
