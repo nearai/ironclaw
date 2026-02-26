@@ -8,7 +8,6 @@
 //! Fallback deliverables are stored in `JobContext.metadata["fallback_deliverable"]`
 //! and surfaced through the `job_status` tool.
 
-use chrono::Utc;
 use serde::{Deserialize, Serialize};
 
 use crate::context::memory::Memory;
@@ -67,7 +66,10 @@ impl FallbackDeliverable {
             let preview_source = a
                 .output_sanitized
                 .as_ref()
-                .map(|v| serde_json::to_string(v).unwrap_or_default())
+                .map(|v| match v {
+                    serde_json::Value::String(s) => s.clone(),
+                    other => serde_json::to_string(other).unwrap_or_default(),
+                })
                 .unwrap_or_default();
             let preview = truncate_str(&preview_source, 200);
             LastAction {
@@ -77,13 +79,7 @@ impl FallbackDeliverable {
             }
         });
 
-        let elapsed_secs = ctx
-            .started_at
-            .map(|s| {
-                let end = ctx.completed_at.unwrap_or_else(Utc::now);
-                (end - s).num_milliseconds() as f64 / 1000.0
-            })
-            .unwrap_or(0.0);
+        let elapsed_secs = ctx.elapsed().map_or(0.0, |d| d.as_secs_f64());
 
         Self {
             partial: successful > 0,
@@ -214,8 +210,8 @@ mod tests {
         let action = memory
             .create_action("tool_d", serde_json::json!({}))
             .succeed(
-                Some("sk-secret-key-12345".to_string()),
-                serde_json::json!({"result": "[REDACTED]"}),
+                Some("[REDACTED]".to_string()),
+                serde_json::json!({"api_key": "sk-secret-key-12345"}),
                 StdDuration::from_secs(1),
             );
         memory.record_action(action);

@@ -867,12 +867,26 @@ Report when the job is complete or if you encounter issues you cannot resolve."#
 
     /// Build a [`FallbackDeliverable`] from the current job context and memory.
     async fn build_fallback(&self, reason: &str) -> Option<crate::context::FallbackDeliverable> {
-        let memory = self
-            .context_manager()
-            .get_memory(self.job_id)
-            .await
-            .unwrap_or_else(|_| crate::context::Memory::new(self.job_id));
-        let ctx = self.context_manager().get_context(self.job_id).await.ok()?;
+        let memory = match self.context_manager().get_memory(self.job_id).await {
+            Ok(memory) => memory,
+            Err(e) => {
+                tracing::warn!(
+                    job_id = %self.job_id,
+                    "Failed to load memory while building fallback deliverable: {e}"
+                );
+                return None;
+            }
+        };
+        let ctx = match self.context_manager().get_context(self.job_id).await {
+            Ok(ctx) => ctx,
+            Err(e) => {
+                tracing::warn!(
+                    job_id = %self.job_id,
+                    "Failed to load context while building fallback deliverable: {e}"
+                );
+                return None;
+            }
+        };
         Some(crate::context::FallbackDeliverable::build(
             &ctx, &memory, reason,
         ))
