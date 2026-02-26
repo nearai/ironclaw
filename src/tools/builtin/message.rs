@@ -125,10 +125,12 @@ impl Tool for MessageTool {
             })?
         };
 
-        let attachments: Vec<String> = params
-            .get("attachments")
-            .and_then(|v| serde_json::from_value(v.clone()).ok())
-            .unwrap_or_default();
+        let attachments: Vec<String> = match params.get("attachments") {
+            Some(v) => serde_json::from_value(v.clone()).map_err(|e| {
+                ToolError::ExecutionFailed(format!("Invalid attachments format: {}", e))
+            })?,
+            None => Vec::new(),
+        };
 
         let attachment_count = attachments.len();
 
