@@ -258,9 +258,7 @@ impl LlmConfig {
         // provider config; the re-resolution in `AppBuilder::build_all()` will
         // fill it in after `inject_llm_keys_from_secrets()` runs.
         let openai = if backend == LlmBackend::OpenAi {
-            match optional_env("OPENAI_API_KEY")?
-                .map(SecretString::from)
-            {
+            match optional_env("OPENAI_API_KEY")?.map(SecretString::from) {
                 Some(api_key) => {
                     let model = optional_env("OPENAI_MODEL")?
                         .or_else(|| settings.selected_model.clone())

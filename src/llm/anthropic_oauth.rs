@@ -576,5 +576,4 @@ mod tests {
         assert_eq!(tool_calls.len(), 1);
         assert_eq!(tool_calls[0].name, "search");
     }
-
 }
