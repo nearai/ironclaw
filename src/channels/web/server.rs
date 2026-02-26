@@ -780,12 +780,15 @@ async fn chat_history_handler(
             })
             .collect();
 
-        let pending_approval = thread.pending_approval.as_ref().map(|pa| PendingApprovalInfo {
-            request_id: pa.request_id.to_string(),
-            tool_name: pa.tool_name.clone(),
-            description: pa.description.clone(),
-            parameters: serde_json::to_string_pretty(&pa.parameters).unwrap_or_default(),
-        });
+        let pending_approval = thread
+            .pending_approval
+            .as_ref()
+            .map(|pa| PendingApprovalInfo {
+                request_id: pa.request_id.to_string(),
+                tool_name: pa.tool_name.clone(),
+                description: pa.description.clone(),
+                parameters: serde_json::to_string_pretty(&pa.parameters).unwrap_or_default(),
+            });
 
         return Ok(Json(HistoryResponse {
             thread_id,
@@ -854,21 +857,14 @@ fn build_turns_from_db_messages(messages: &[crate::history::ConversationMessage]
                 && next.role == "tool_calls"
             {
                 let tc_msg = iter.next().expect("peeked");
-                if let Ok(calls) =
-                    serde_json::from_str::<Vec<serde_json::Value>>(&tc_msg.content)
-                {
+                if let Ok(calls) = serde_json::from_str::<Vec<serde_json::Value>>(&tc_msg.content) {
                     turn.tool_calls = calls
                         .iter()
                         .map(|c| ToolCallInfo {
-                            name: c["name"]
-                                .as_str()
-                                .unwrap_or("unknown")
-                                .to_string(),
+                            name: c["name"].as_str().unwrap_or("unknown").to_string(),
                             has_result: c.get("result_preview").is_some(),
                             has_error: c.get("error").is_some(),
-                            result_preview: c["result_preview"]
-                                .as_str()
-                                .map(String::from),
+                            result_preview: c["result_preview"].as_str().map(String::from),
                             error: c["error"].as_str().map(String::from),
                         })
                         .collect();
