@@ -1125,7 +1125,7 @@ async fn inject_channel_credentials(
             "Injecting credential from environment variable"
         );
 
-        channel.set_credential(&key, value).await;
+        channel.set_credential(&key.to_uppercase(), value).await;
         count += 1;
     }
 

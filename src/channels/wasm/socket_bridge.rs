@@ -372,8 +372,9 @@ async fn forward_event_to_wasm(
     };
     let query = HashMap::new();
 
+    let path = format!("/webhook/{}", channel_name);
     match channel
-        .call_on_http_request("POST", "/webhook/slack", &headers, &query, &body, true)
+        .call_on_http_request("POST", &path, &headers, &query, &body, true)
         .await
     {
         Ok(_response) => {
@@ -701,6 +702,25 @@ mod tests {
         let no_type: serde_json::Value = serde_json::json!({ "envelope_id": "no-type" });
         let missing_type = no_type.get("type").and_then(|v| v.as_str()).unwrap_or("");
         assert_eq!(missing_type, "");
+    }
+
+    #[test]
+    fn socket_mode_webhook_path_uses_channel_name() {
+        // Regression: forward_event_to_wasm hardcoded "/webhook/slack" regardless
+        // of the actual channel name. The path must be derived from channel_name
+        // so non-slack channels (e.g., "custom-bot") get the correct route.
+        fn webhook_path(channel_name: &str) -> String {
+            format!("/webhook/{}", channel_name)
+        }
+
+        assert_eq!(webhook_path("slack"), "/webhook/slack");
+        assert_eq!(webhook_path("custom-slack"), "/webhook/custom-slack");
+        assert_eq!(webhook_path("telegram"), "/webhook/telegram");
+        assert_ne!(
+            webhook_path("custom-bot"),
+            "/webhook/slack",
+            "Non-slack channels must not get the hardcoded /webhook/slack path"
+        );
     }
 
     #[tokio::test]

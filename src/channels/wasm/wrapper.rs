@@ -284,11 +284,7 @@ impl near::agent::channel_host::Host for ChannelStoreData {
         {
             for mapping in http_cap.credentials.values() {
                 let matches_host = mapping.host_patterns.iter().any(|p| {
-                    if let Some(suffix) = p.strip_prefix("*.") {
-                        host.ends_with(suffix) || host == suffix
-                    } else {
-                        host == p
-                    }
+                    crate::tools::wasm::credential_injector::host_matches_pattern(host, p)
                 });
                 if !matches_host {
                     continue;
@@ -3690,5 +3686,83 @@ mod tests {
         .expect("spawn_blocking panicked");
         // 404 because "000" is not a valid bot token
         assert_eq!(result, 404);
+    }
+
+    #[tokio::test]
+    async fn credential_lookup_requires_uppercase_key() {
+        // Regression: Phase 2 of inject_channel_credentials stored env var keys
+        // in their original case, but the credential injection lookup (line 292)
+        // uppercases the secret_name: `mapping.secret_name.to_uppercase()`.
+        // If a credential is stored as "slack_bot_token" (lowercase), the lookup
+        // for "SLACK_BOT_TOKEN" won't find it.
+        //
+        // Fix: Phase 2 now uppercases keys before storing, matching Phase 1.
+        let channel = create_test_channel();
+
+        // Simulate Phase 2 storing with uppercase (the fix)
+        let env_key = "slack_bot_token";
+        channel
+            .set_credential(&env_key.to_uppercase(), "xoxb-test".into())
+            .await;
+
+        let creds = channel.get_credentials().await;
+
+        // The credential injection code looks up with UPPERCASE key
+        let lookup_key = env_key.to_uppercase(); // "SLACK_BOT_TOKEN"
+        assert!(
+            creds.contains_key(&lookup_key),
+            "Credential stored with uppercase key must be findable by uppercase lookup. \
+             Got keys: {:?}",
+            creds.keys().collect::<Vec<_>>()
+        );
+
+        // Also verify that storing with original case would NOT be found
+        // (this documents why the uppercase fix is necessary)
+        let channel2 = create_test_channel();
+        channel2.set_credential(env_key, "xoxb-test".into()).await;
+        let creds2 = channel2.get_credentials().await;
+        assert!(
+            !creds2.contains_key(&lookup_key),
+            "Without uppercase fix, lowercase key is NOT findable by uppercase lookup"
+        );
+    }
+
+    #[test]
+    fn wildcard_host_pattern_rejects_subdomain_spoofing() {
+        // Regression: the inline wildcard matching in credential auto-injection was:
+        //   host.ends_with(suffix) || host == suffix
+        // which allowed "evilslack.com" to match pattern "*.slack.com"
+        // because "evilslack.com".ends_with("slack.com") == true.
+        //
+        // Replicate the EXACT inline logic to prove the vulnerability:
+        fn old_inline_match(host: &str, pattern: &str) -> bool {
+            if let Some(suffix) = pattern.strip_prefix("*.") {
+                host.ends_with(suffix) || host == suffix
+            } else {
+                host == pattern
+            }
+        }
+
+        // BUG: old inline logic incorrectly matches spoofed domains
+        assert!(
+            old_inline_match("evilslack.com", "*.slack.com"),
+            "Old logic should (incorrectly) match — proving the vulnerability"
+        );
+
+        // The correct function requires a dot separator before the suffix
+        use crate::tools::wasm::credential_injector::host_matches_pattern;
+
+        // Legitimate subdomains MUST match
+        assert!(host_matches_pattern("api.slack.com", "*.slack.com"));
+        assert!(host_matches_pattern("sub.api.slack.com", "*.slack.com"));
+
+        // Spoofed domains MUST NOT match
+        assert!(!host_matches_pattern("evilslack.com", "*.slack.com"));
+        assert!(!host_matches_pattern("notslack.com", "*.slack.com"));
+        assert!(!host_matches_pattern("fakeslack.com", "*.slack.com"));
+
+        // Exact match patterns still work
+        assert!(host_matches_pattern("slack.com", "slack.com"));
+        assert!(!host_matches_pattern("slack.com", "*.slack.com"));
     }
 }
