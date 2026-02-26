@@ -38,7 +38,7 @@ pub use self::heartbeat::HeartbeatConfig;
 pub use self::hygiene::HygieneConfig;
 pub use self::llm::{
     AnthropicDirectConfig, LlmBackend, LlmConfig, NearAiConfig, OllamaConfig,
-    OpenAiCompatibleConfig, OpenAiDirectConfig, TinfoilConfig,
+    OpenAiCompatibleConfig, OpenAiDirectConfig, TinfoilConfig, extract_codex_oauth_token,
 };
 pub use self::routines::RoutineConfig;
 pub use self::safety::SafetyConfig;
@@ -218,6 +218,8 @@ pub async fn inject_llm_keys_from_secrets(
     let mappings = [
         ("llm_openai_api_key", "OPENAI_API_KEY"),
         ("llm_anthropic_api_key", "ANTHROPIC_API_KEY"),
+        ("llm_anthropic_oauth_token", "ANTHROPIC_OAUTH_TOKEN"),
+        ("llm_codex_oauth_token", "CODEX_OAUTH_TOKEN"),
         ("llm_compatible_api_key", "LLM_API_KEY"),
         ("llm_nearai_api_key", "NEARAI_API_KEY"),
     ];
@@ -238,6 +240,16 @@ pub async fn inject_llm_keys_from_secrets(
                 // Secret doesn't exist, that's fine
             }
         }
+    }
+
+    // Fallback: if OPENAI_API_KEY is still empty and we have a Codex token,
+    // inject it as OPENAI_API_KEY too (Codex tokens use the same Bearer auth).
+    if !injected.contains_key("OPENAI_API_KEY")
+        && std::env::var("OPENAI_API_KEY").map_or(true, |v| v.is_empty())
+        && let Some(codex_token) = injected.get("CODEX_OAUTH_TOKEN").cloned()
+    {
+        injected.insert("OPENAI_API_KEY".to_string(), codex_token);
+        tracing::debug!("Injected CODEX_OAUTH_TOKEN as fallback OPENAI_API_KEY");
     }
 
     let _ = INJECTED_VARS.set(injected);

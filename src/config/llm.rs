@@ -75,6 +75,8 @@ pub struct AnthropicDirectConfig {
     pub model: String,
     /// Optional base URL override (e.g. for proxies like VibeProxy).
     pub base_url: Option<String>,
+    /// OAuth token from `claude login` (uses `Authorization: Bearer` instead of `x-api-key`).
+    pub oauth_token: Option<SecretString>,
 }
 
 /// Configuration for local Ollama.
@@ -242,10 +244,12 @@ impl LlmConfig {
         // Resolve provider-specific configs based on backend
         let openai = if backend == LlmBackend::OpenAi {
             let api_key = optional_env("OPENAI_API_KEY")?
+                .or_else(|| optional_env("CODEX_OAUTH_TOKEN").ok().flatten())
                 .map(SecretString::from)
                 .ok_or_else(|| ConfigError::MissingRequired {
                     key: "OPENAI_API_KEY".to_string(),
-                    hint: "Set OPENAI_API_KEY when LLM_BACKEND=openai".to_string(),
+                    hint: "Set OPENAI_API_KEY or CODEX_OAUTH_TOKEN when LLM_BACKEND=openai"
+                        .to_string(),
                 })?;
             let model = optional_env("OPENAI_MODEL")?.unwrap_or_else(|| "gpt-4o".to_string());
             let base_url = optional_env("OPENAI_BASE_URL")?;
@@ -259,12 +263,23 @@ impl LlmConfig {
         };
 
         let anthropic = if backend == LlmBackend::Anthropic {
-            let api_key = optional_env("ANTHROPIC_API_KEY")?
-                .map(SecretString::from)
-                .ok_or_else(|| ConfigError::MissingRequired {
-                    key: "ANTHROPIC_API_KEY".to_string(),
-                    hint: "Set ANTHROPIC_API_KEY when LLM_BACKEND=anthropic".to_string(),
-                })?;
+            let api_key_env = optional_env("ANTHROPIC_API_KEY")?.map(SecretString::from);
+            let oauth_token = optional_env("ANTHROPIC_OAUTH_TOKEN")?.map(SecretString::from);
+
+            let api_key = match (&api_key_env, &oauth_token) {
+                (Some(key), _) => key.clone(),
+                // OAuth token present but no API key: use a placeholder so the
+                // config block is populated. The provider factory will route to
+                // the OAuth provider instead of rig-core's x-api-key client.
+                (None, Some(_)) => SecretString::from("oauth-placeholder".to_string()),
+                (None, None) => {
+                    return Err(ConfigError::MissingRequired {
+                        key: "ANTHROPIC_API_KEY".to_string(),
+                        hint: "Set ANTHROPIC_API_KEY or ANTHROPIC_OAUTH_TOKEN when LLM_BACKEND=anthropic".to_string(),
+                    });
+                }
+            };
+
             let model = optional_env("ANTHROPIC_MODEL")?
                 .unwrap_or_else(|| "claude-sonnet-4-20250514".to_string());
             let base_url = optional_env("ANTHROPIC_BASE_URL")?;
@@ -272,6 +287,7 @@ impl LlmConfig {
                 api_key,
                 model,
                 base_url,
+                oauth_token,
             })
         } else {
             None
@@ -369,6 +385,40 @@ fn parse_extra_headers(val: &str) -> Result<Vec<(String, String)>, ConfigError> 
         headers.push((key.to_string(), value.trim().to_string()));
     }
     Ok(headers)
+}
+
+/// Extract a Codex OAuth token from the local Codex CLI auth file.
+///
+/// Checks `$CODEX_HOME/auth.json` first, then falls back to `~/.codex/auth.json`.
+/// Tries JSON fields: `token`, `api_key`, `access_token` (various Codex versions).
+pub fn extract_codex_oauth_token() -> Option<String> {
+    let candidates: Vec<PathBuf> = {
+        let mut paths = Vec::new();
+        if let Ok(codex_home) = std::env::var("CODEX_HOME") {
+            paths.push(PathBuf::from(codex_home).join("auth.json"));
+        }
+        if let Some(home) = dirs::home_dir() {
+            paths.push(home.join(".codex").join("auth.json"));
+        }
+        paths
+    };
+
+    for path in &candidates {
+        if let Ok(json_str) = std::fs::read_to_string(path)
+            && let Ok(val) = serde_json::from_str::<serde_json::Value>(&json_str)
+        {
+            // Try common field names across Codex versions
+            for field in &["token", "api_key", "access_token"] {
+                if let Some(tok) = val.get(field).and_then(|v| v.as_str())
+                    && !tok.is_empty()
+                {
+                    return Some(tok.to_string());
+                }
+            }
+        }
+    }
+
+    None
 }
 
 /// Get the default session file path (~/.ironclaw/session.json).

@@ -876,30 +876,171 @@ impl SetupWizard {
         Ok(())
     }
 
-    /// Anthropic provider setup: collect API key and store in secrets.
+    /// Anthropic provider setup: API key or OAuth token from `claude login`.
     async fn setup_anthropic(&mut self) -> Result<(), SetupError> {
-        self.setup_api_key_provider(
-            "anthropic",
-            "ANTHROPIC_API_KEY",
-            "llm_anthropic_api_key",
-            "Anthropic API key",
-            "https://console.anthropic.com/settings/keys",
-            None,
-        )
-        .await
+        let options = &["Direct API Key", "OAuth Token (from `claude login`)"];
+        let choice = select_one("How do you want to authenticate with Anthropic?", options)
+            .map_err(SetupError::Io)?;
+
+        if choice == 0 {
+            // Standard API key flow
+            self.setup_api_key_provider(
+                "anthropic",
+                "ANTHROPIC_API_KEY",
+                "llm_anthropic_api_key",
+                "Anthropic API key",
+                "https://console.anthropic.com/settings/keys",
+                None,
+            )
+            .await
+        } else {
+            // OAuth token flow
+            self.setup_anthropic_oauth().await
+        }
     }
 
-    /// OpenAI provider setup: collect API key and store in secrets.
+    /// Anthropic OAuth setup: extract token from `claude login` credentials.
+    async fn setup_anthropic_oauth(&mut self) -> Result<(), SetupError> {
+        self.settings.llm_backend = Some("anthropic".to_string());
+        if self.settings.selected_model.is_some() {
+            self.settings.selected_model = None;
+        }
+
+        // Try to extract existing OAuth token from Claude Code credentials
+        if let Some(token) = crate::config::ClaudeCodeConfig::extract_oauth_token() {
+            print_info(&format!("Found OAuth token: {}", mask_api_key(&token)));
+            if confirm("Use this token?", true).map_err(SetupError::Io)? {
+                return self.save_anthropic_oauth_token(&token).await;
+            }
+        } else {
+            print_info("No OAuth token found from `claude login`.");
+            print_info("Run `claude login` in a terminal to authenticate, then retry.");
+            println!();
+
+            if confirm("Retry after running `claude login`?", true).map_err(SetupError::Io)? {
+                // Give user time to run claude login
+                if let Some(token) = crate::config::ClaudeCodeConfig::extract_oauth_token() {
+                    print_info(&format!("Found OAuth token: {}", mask_api_key(&token)));
+                    return self.save_anthropic_oauth_token(&token).await;
+                }
+                print_error("Still no OAuth token found.");
+            }
+        }
+
+        // Fallback: let user paste the token manually
+        print_info("You can paste your OAuth token directly (starts with sk-ant-oat01-).");
+        let token = secret_input("Anthropic OAuth token").map_err(SetupError::Io)?;
+        let token_str = token.expose_secret();
+        if token_str.is_empty() {
+            return Err(SetupError::Config(
+                "OAuth token cannot be empty".to_string(),
+            ));
+        }
+        self.save_anthropic_oauth_token(token_str).await
+    }
+
+    /// Save an Anthropic OAuth token to secrets and set env for immediate use.
+    async fn save_anthropic_oauth_token(&mut self, token: &str) -> Result<(), SetupError> {
+        // Store in secrets if available
+        if let Ok(ctx) = self.init_secrets_context().await {
+            let key = SecretString::from(token.to_string());
+            ctx.save_secret("llm_anthropic_oauth_token", &key)
+                .await
+                .map_err(|e| SetupError::Config(format!("Failed to save OAuth token: {e}")))?;
+            print_success("OAuth token encrypted and saved");
+        } else {
+            print_info("Secrets not available. Set ANTHROPIC_OAUTH_TOKEN in your environment.");
+        }
+
+        // Set env var for immediate use (model selection step)
+        // SAFETY: Single-threaded wizard context.
+        unsafe {
+            std::env::set_var("ANTHROPIC_OAUTH_TOKEN", token);
+        }
+
+        // Cache for model fetching
+        self.llm_api_key = Some(SecretString::from(token.to_string()));
+
+        print_success("Anthropic OAuth configured");
+        Ok(())
+    }
+
+    /// OpenAI provider setup: API key or Codex OAuth token.
     async fn setup_openai(&mut self) -> Result<(), SetupError> {
-        self.setup_api_key_provider(
-            "openai",
-            "OPENAI_API_KEY",
-            "llm_openai_api_key",
-            "OpenAI API key",
-            "https://platform.openai.com/api-keys",
-            None,
-        )
-        .await
+        let options = &["Direct API Key", "OAuth Token (from Codex CLI)"];
+        let choice = select_one("How do you want to authenticate with OpenAI?", options)
+            .map_err(SetupError::Io)?;
+
+        if choice == 0 {
+            // Standard API key flow
+            self.setup_api_key_provider(
+                "openai",
+                "OPENAI_API_KEY",
+                "llm_openai_api_key",
+                "OpenAI API key",
+                "https://platform.openai.com/api-keys",
+                None,
+            )
+            .await
+        } else {
+            // Codex OAuth token flow
+            self.setup_codex_oauth().await
+        }
+    }
+
+    /// Codex OAuth setup: extract token from `~/.codex/auth.json`.
+    async fn setup_codex_oauth(&mut self) -> Result<(), SetupError> {
+        self.settings.llm_backend = Some("openai".to_string());
+        if self.settings.selected_model.is_some() {
+            self.settings.selected_model = None;
+        }
+
+        // Try to extract existing Codex token
+        if let Some(token) = crate::config::extract_codex_oauth_token() {
+            print_info(&format!("Found Codex token: {}", mask_api_key(&token)));
+            if confirm("Use this token?", true).map_err(SetupError::Io)? {
+                return self.save_codex_oauth_token(&token).await;
+            }
+        } else {
+            print_info("No Codex token found in ~/.codex/auth.json.");
+        }
+
+        // Fallback: let user paste the token
+        print_info("You can paste your Codex/OpenAI OAuth token directly.");
+        let token = secret_input("Codex OAuth token").map_err(SetupError::Io)?;
+        let token_str = token.expose_secret();
+        if token_str.is_empty() {
+            return Err(SetupError::Config(
+                "OAuth token cannot be empty".to_string(),
+            ));
+        }
+        self.save_codex_oauth_token(token_str).await
+    }
+
+    /// Save a Codex OAuth token — stored as the OpenAI API key since it's functionally equivalent.
+    async fn save_codex_oauth_token(&mut self, token: &str) -> Result<(), SetupError> {
+        // Store as the OpenAI API key (Codex tokens use the same Bearer auth)
+        if let Ok(ctx) = self.init_secrets_context().await {
+            let key = SecretString::from(token.to_string());
+            ctx.save_secret("llm_openai_api_key", &key)
+                .await
+                .map_err(|e| SetupError::Config(format!("Failed to save Codex token: {e}")))?;
+            print_success("Codex token encrypted and saved");
+        } else {
+            print_info("Secrets not available. Set OPENAI_API_KEY in your environment.");
+        }
+
+        // Set env var for immediate use (model selection step)
+        // SAFETY: Single-threaded wizard context.
+        unsafe {
+            std::env::set_var("OPENAI_API_KEY", token);
+        }
+
+        // Cache for model fetching
+        self.llm_api_key = Some(SecretString::from(token.to_string()));
+
+        print_success("Codex OAuth configured (as OpenAI API key)");
+        Ok(())
     }
 
     /// Shared setup flow for API-key-based providers (Anthropic, OpenAI, OpenRouter).
@@ -1874,6 +2015,62 @@ impl SetupWizard {
             }
         }
 
+        // Claude Code sandbox sub-step (only if Docker sandbox is enabled)
+        if self.settings.sandbox.enabled {
+            self.step_claude_code_sandbox().await?;
+        }
+
+        Ok(())
+    }
+
+    /// Claude Code sandbox sub-step: enable Claude CLI inside Docker containers.
+    async fn step_claude_code_sandbox(&mut self) -> Result<(), SetupError> {
+        println!();
+        print_info("Claude Code mode lets the agent delegate complex tasks to Claude CLI");
+        print_info("running inside sandboxed Docker containers.");
+        println!();
+
+        if !confirm("Enable Claude Code sandbox mode?", false).map_err(SetupError::Io)? {
+            self.settings.sandbox.claude_code_enabled = false;
+            return Ok(());
+        }
+
+        // Check for Anthropic credentials (API key or OAuth token)
+        let has_api_key = std::env::var("ANTHROPIC_API_KEY")
+            .is_ok_and(|v| !v.is_empty() && v != "oauth-placeholder");
+        let has_oauth = crate::config::ClaudeCodeConfig::extract_oauth_token().is_some()
+            || std::env::var("ANTHROPIC_OAUTH_TOKEN").is_ok_and(|v| !v.is_empty());
+
+        if has_api_key || has_oauth {
+            self.settings.sandbox.claude_code_enabled = true;
+            print_success("Claude Code sandbox enabled");
+        } else {
+            print_error("No Anthropic credentials found.");
+            print_info(
+                "Claude Code needs ANTHROPIC_API_KEY or an OAuth token from `claude login`.",
+            );
+            println!();
+
+            if confirm("Retry after setting up credentials?", false).map_err(SetupError::Io)? {
+                let has_oauth_retry =
+                    crate::config::ClaudeCodeConfig::extract_oauth_token().is_some();
+                let has_key_retry = std::env::var("ANTHROPIC_API_KEY")
+                    .is_ok_and(|v| !v.is_empty() && v != "oauth-placeholder");
+
+                if has_key_retry || has_oauth_retry {
+                    self.settings.sandbox.claude_code_enabled = true;
+                    print_success("Claude Code sandbox enabled");
+                } else {
+                    self.settings.sandbox.claude_code_enabled = false;
+                    print_info("No credentials found. Claude Code disabled for now.");
+                    print_info("Set ANTHROPIC_API_KEY or run `claude login` and enable later.");
+                }
+            } else {
+                self.settings.sandbox.claude_code_enabled = false;
+                print_info("Claude Code disabled. Enable with CLAUDE_CODE_ENABLED=true later.");
+            }
+        }
+
         Ok(())
     }
 
@@ -2006,6 +2203,11 @@ impl SetupWizard {
         // (which runs before the DB is connected) knows to skip re-onboarding.
         if self.settings.onboard_completed {
             env_vars.push(("ONBOARD_COMPLETED", "true".to_string()));
+        }
+
+        // Claude Code sandbox mode
+        if self.settings.sandbox.claude_code_enabled {
+            env_vars.push(("CLAUDE_CODE_ENABLED", "true".to_string()));
         }
 
         // Signal channel env vars (chicken-and-egg: config resolves before DB).
