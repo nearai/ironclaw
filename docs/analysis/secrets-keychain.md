@@ -1,6 +1,6 @@
 # IronClaw Codebase Analysis — Secrets Management & Keychain
 
-> Updated: 2026-02-24 | Version: v0.11.1
+> Updated: 2026-02-26 | Version: v0.12.0
 
 ## 1. Overview
 

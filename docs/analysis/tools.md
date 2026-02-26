@@ -1,6 +1,6 @@
 # IronClaw Tool System — Developer Reference
 
-Version: v0.11.1
+Version: v0.12.0
 Source: `src/tools/`
 
 ---
@@ -201,6 +201,8 @@ The registry assembles built-in tools in these groups during startup:
 | `register_builder_tool()` | build_software |
 | `register_wasm()` | WASM tools from `~/.ironclaw/tools/` directory |
 | `register_wasm_from_storage()` | WASM tools persisted in database |
+
+> **v0.12.0 note (#346):** As of v0.12.0, the Telegram MTPRoto API tool is registered as `telegram-mtproto` and the Slack API tool as `slack-tool` (renamed to avoid name collisions with the WASM channel entries).
 
 ---
 
@@ -818,7 +820,7 @@ Config file: `~/.ironclaw/mcp-servers.json`
   "servers": [
     {
       "name": "notion",
-      "url": "https://mcp.notion.so/sse",
+      "url": "https://mcp.notion.com/mcp",
       "enabled": true,
       "description": "Notion workspace tools",
       "oauth": {

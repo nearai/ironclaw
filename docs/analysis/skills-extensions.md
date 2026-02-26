@@ -1,6 +1,6 @@
 # IronClaw Codebase Analysis — Skills, Extensions & Hooks
 
-> Updated: 2026-02-24 | Version: v0.11.1
+> Updated: 2026-02-26 | Version: v0.12.0
 
 ## 1. Overview
 
@@ -109,20 +109,17 @@ Error variants:
 
 Source: `src/skills/registry.rs`
 
-`SkillRegistry` manages loaded skills and two local trust domains on disk:
+`SkillRegistry` manages the in-memory set of loaded skills and the on-disk `~/.ironclaw/skills/` directory.
 
-- User skills: `~/.ironclaw/skills/` (manually managed; trusted)
-- Registry-installed skills: `~/.ironclaw/installed_skills/` (installed by registry tooling; installed trust)
-
-**Discovery** (`discover_all`): Scans directories in priority order:
+**Discovery** (`discover_all`): Scans three directories in priority order:
 
 1. `<workspace>/skills/` — loaded as `SkillTrust::Trusted`, `SkillSource::Workspace`
-2. `~/.ironclaw/skills/` — loaded as `SkillTrust::Trusted`, `SkillSource::User`
-3. `~/.ironclaw/installed_skills/` (if configured) — loaded as `SkillTrust::Installed`
+2. `~/.ironclaw/skills/` — loaded as `SkillTrust::Trusted`, `SkillSource::User` (user-placed skills)
+3. `~/.ironclaw/installed_skills/` — loaded as `SkillTrust::Installed`, `SkillSource::Installed` (registry-installed; restricted tool ceiling)
 
-On name collision, higher-priority definitions win (workspace > user > installed). Discovery is capped at 100 skills per directory (`MAX_DISCOVERED_SKILLS`).
+On name collision, the workspace skill wins; the user skill is silently skipped. Discovery is capped at 100 skills per directory (`MAX_DISCOVERED_SKILLS`).
 
-**Supported layouts** (for each skills directory):
+**Supported layouts**:
 
 - Flat: `skills/SKILL.md` directly in the skills directory
 - Subdirectory: `skills/<name>/SKILL.md`
@@ -142,22 +139,19 @@ On name collision, higher-priority definitions win (workspace > user > installed
 ```
 parse_skill_md(content)
   -> normalize_line_endings(content)
-  -> create <install_target_dir>/<name>/
+  -> create ~/.ironclaw/skills/<name>/
   -> write SKILL.md to disk
   -> load_and_validate_skill (validates round-trip)
   -> commit_install (in-memory append)
 ```
 
-`install_target_dir()` prefers `installed_dir` when configured, otherwise falls back to `user_dir`. The two-phase `prepare_install_to_disk` + `commit_install` split allows callers holding a registry lock to release the lock before the async disk write.
+The two-phase `prepare_install_to_disk` + `commit_install` split allows callers holding a registry lock to release the lock before the async disk write.
 
 **Remove flow** (`remove_skill`):
 
 Only `SkillSource::User` skills can be removed. `SkillSource::Workspace` and `SkillSource::Bundled` skills return `CannotRemove`. Files are deleted, then the empty directory is removed, then the in-memory entry is dropped.
 
-**Default storage locations**:
-
-- User-managed skills: `~/.ironclaw/skills/<name>/SKILL.md`
-- Registry-installed skills: `~/.ironclaw/installed_skills/<name>/SKILL.md`
+**Storage location**: `~/.ironclaw/skills/<name>/SKILL.md` (subdirectory layout is always used for installed skills).
 
 ### 2.5 Skill Catalog (`catalog.rs`)
 
@@ -348,25 +342,27 @@ All operations flow through `ExtensionManager` (`src/extensions/manager.rs`):
 
 `ExtensionRegistry` (`src/extensions/registry.rs`) ships with a hardcoded list of well-known MCP servers:
 
-| Name | Display Name | Auth |
-|------|-------------|------|
-| `notion` | Notion | DCR (Dynamic Client Registration) |
-| `linear` | Linear | DCR |
-| `google-calendar` | Google Calendar | DCR |
-| `google-drive` | Google Drive | DCR |
-| `github` | GitHub | DCR |
-| `slack` | Slack | DCR |
-| `sentry` | Sentry | DCR |
-| `stripe` | Stripe | DCR |
-| `cloudflare` | Cloudflare | DCR |
-| `asana` | Asana | DCR |
-| `intercom` | Intercom | DCR |
+| Name | Display Name | URL | Auth |
+|------|-------------|-----|------|
+| `notion` | Notion | `https://mcp.notion.com/mcp` | DCR (Dynamic Client Registration) |
+| `linear` | Linear | `https://mcp.linear.app/sse` | DCR |
+| `github` | GitHub Copilot | `https://api.githubcopilot.com/mcp/` | DCR |
+| `slack` | Slack | `https://mcp.slack.com` | DCR |
+| `sentry` | Sentry | `https://mcp.sentry.dev/mcp` | DCR |
+| `stripe` | Stripe | — | DCR |
+| `cloudflare` | Cloudflare | `https://mcp.cloudflare.com/mcp` | DCR |
+| `asana` | Asana | `https://mcp.asana.com/v2/mcp` | DCR |
+| `intercom` | Intercom | `https://mcp.intercom.com/mcp` | DCR |
+
+> **v0.12.0 note (#370):** Google Drive and Google Calendar were removed from the built-in registry — `mcp.google.com` does not exist and Google has no official remote MCP servers. The URLs for all remaining entries were corrected to match the providers' actual endpoints.
 
 Search scoring: exact name match = 100 points, name contains token = 50, display name contains = 30, exact keyword match = 40, keyword contains = 20, description contains = 10.
 
 ### 3.5 Embedded Registry Catalog (v0.10.0)
 
 The extension registry now ships with an embedded catalog of known extensions. This allows offline discovery of available extensions without requiring network access. The embedded catalog is updated with each release.
+
+> **v0.12.0 note:** The extension registry catalog is embedded in the binary for offline-capable extension discovery.
 
 ### 3.6 WASM Bundle Install Pipeline (v0.10.0)
 
@@ -700,14 +696,17 @@ The host provides functions the channel WASM can call:
 
 Skills are **enabled by default** as of v0.10.0 (`SKILLS_ENABLED=true`). The compiled-in registry backend is a Convex URL (`https://wry-manatee-359.convex.site`), overridable via `CLAWHUB_REGISTRY`. The skill install flow was fixed to correctly handle the registry API and WASM binary download.
 
+> **v0.12.0 note (#300):** As of v0.12.0, skills are **enabled by default**. The skills system no longer needs to be explicitly activated — it is active on every fresh installation. The registry loading and installation pipeline were fixed in this release.
+
 ### 7.2 Skill Directory Layout
 
 | Path | Trust | Managed by |
 |------|-------|-----------|
-| `~/.ironclaw/skills/` | `Trusted` | User; registry `install_skill` writes here |
-| `<workspace>/skills/` | `Trusted` | Workspace; read-only from registry |
+| `<workspace>/skills/` | `Trusted` | Workspace; highest priority |
+| `~/.ironclaw/skills/` | `Trusted` | User; user-placed skills only |
+| `~/.ironclaw/installed_skills/` | `Installed` | Registry; `install_skill` writes here (restricted tool ceiling) |
 
-Workspace overrides user: if both contain a skill with the same name, the workspace version is used.
+Workspace overrides user: if both contain a skill with the same name, the workspace version is used. Registry-installed skills use `SkillTrust::Installed` (read-only tool ceiling survives restarts), while user and workspace skills use `SkillTrust::Trusted` (full tool access).
 
 ### 7.3 Extension Configuration
 

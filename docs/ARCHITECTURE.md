@@ -1,6 +1,6 @@
 # IronClaw — Master Architecture Document
 
-> Updated: 2026-02-24 (v0.11.1) | Comprehensive reference for contributors
+> Updated: 2026-02-26 (v0.12.0) | Comprehensive reference for contributors
 
 ---
 
@@ -161,7 +161,7 @@ The following table lists every source module directory and the key top-level fi
 | Module | Path | Purpose |
 |--------|------|---------|
 | `agent` | `src/agent/` | Core agent orchestration: main event loop, session management, job scheduling, self-repair, heartbeat, routine engine, context compaction (**Context Compactor** (`agent/compaction.rs`): three strategies — Summarize (LLM summary → workspace daily log), Truncate (drop oldest turns), MoveToWorkspace (archive full turns); triggered automatically on ContextLengthExceeded), undo/redo, skill selection, cost guardrails |
-| `channels` | `src/channels/` | Multi-channel input abstraction: `Channel` trait, `ChannelManager` (stream merge), HTTP webhook, web gateway (axum + SSE + WebSocket), WASM channel runtime (hot-activate without restart since v0.10.0; all WASM channels support device pairing and channel-context-injected prompts for group chat privacy), REPL |
+| `channels` | `src/channels/` | Multi-channel input abstraction: `Channel` trait, `ChannelManager` (stream merge), HTTP webhook, web gateway (axum + SSE + WebSocket), WASM channel runtime (hot-activate without restart since v0.10.0; all WASM channels support device pairing and channel-context-injected prompts for group chat privacy), REPL, **Signal channel** (`signal.rs`): Native Rust channel connecting to signal-cli HTTP daemon for Signal messaging. Added in v0.12.0. |
 | `cli` | `src/cli/` | CLI command surface: onboarding, config, tool, mcp, memory, pairing, service, doctor, status |
 | `config` | `src/config/` | Configuration loading from environment, DB settings table, and optional TOML overlay. Sub-modules per domain: agent, builder, channels, database, embeddings, heartbeat, llm, routines, safety, sandbox, secrets, skills, tunnel, wasm |
 | `context` | `src/context/` | Per-job state isolation: `JobState` state machine (Pending → InProgress → Completed/Failed/Stuck), `JobContext`, `ContextManager` for concurrent job tracking |
@@ -178,7 +178,7 @@ The following table lists every source module directory and the key top-level fi
 | `registry` | `src/registry/` | Extension/tool registry client for discovering installable tools and channels |
 | `safety` | `src/safety/` | Prompt injection defense: `Sanitizer` (pattern detection, XML escaping), `Validator` (length, encoding checks), `Policy` (rule-based actions: Block/Warn/Review/Sanitize), `LeakDetector` (15+ secret patterns with Block/Redact/Warn actions), `CredentialDetector` (HTTP param credential detection: requires approval when auth data is present in headers/URL) |
 | `sandbox` | `src/sandbox/` | Docker-based job isolation: `SandboxManager`, `ContainerRunner`, `NetworkProxy` (hyper HTTP/CONNECT proxy with domain allowlist and credential injection), `SandboxPolicy` (ReadOnly/WorkspaceWrite/FullAccess) |
-| `secrets` | `src/secrets/` | Encrypted credential storage: AES-256-GCM encryption, HKDF-SHA256 per-secret key derivation, PostgreSQL backend (libSQL not supported for encrypted store), OS keychain integration (macOS: security-framework, Linux: secret-service/KWallet) |
+| `secrets` | `src/secrets/` | Encrypted credential storage: AES-256-GCM encryption, HKDF-SHA256 per-secret key derivation, PostgreSQL or libSQL backend (both support encrypted store), OS keychain integration (macOS: security-framework, Linux: secret-service/KWallet) |
 | `setup` | `src/setup/` | 7-step interactive onboarding wizard: database backend selection, NEAR AI authentication, secrets master key setup, channel configuration |
 | `skills` | `src/skills/` | SKILL.md prompt extension system: `SkillRegistry` (discover, install, remove), deterministic scorer (keywords/tags/regex), `SkillTrust` model (Trusted vs Installed), tool attenuation (trust-based ceiling), gating requirements (bins/env/config), `SkillCatalog` (ClawHub HTTP client) |
 | `tools` | `src/tools/` | Extensible tool system: `Tool` trait, `ToolRegistry` (shadowing protection for built-in names; shared `Arc<RateLimiter>` for per-tool per-user sliding window rate limiting via **RateLimiter** (`tools/rate_limiter.rs`) — per-minute and per-hour windows), built-in tools (echo, time, json, http, shell, file ops, memory, job mgmt, routines, extensions, skills, `HtmlConverter` (**HTML-to-Markdown** built-in conversion — two-stage: readability extraction + markdown conversion; feature-gated `html-to-markdown`)), WASM sandbox (wasmtime component model, fuel metering, memory limits), MCP client (JSON-RPC over HTTP), dynamic software builder |
@@ -264,6 +264,7 @@ src/main.rs
     │        │       └──▶ channels::web::auth  (Bearer token, constant-time compare)
     │        ├──▶ channels::http     (HttpChannel, axum webhook)
     │        ├──▶ channels::repl     (ReplChannel, rustyline)
+    │        ├──▶ channels::signal   (SignalChannel, signal-cli HTTP/JSON-RPC daemon; added v0.12.0)
     │        ├──▶ channels::wasm     (WASM channel runtime; loads channels-src/: Telegram, Slack, Discord, WhatsApp; hot-activate v0.10.0; device pairing + channel-aware prompts)
     │        └──▶ cli                 (clap command routing)
     │
@@ -745,7 +746,7 @@ Every major extension point is expressed as a trait. This allows swapping implem
 - `Arc<dyn LlmProvider>` — primary and failover LLM providers, all wrapping strategies
 - `Arc<dyn Tool>` — built-in, WASM, and MCP tools in the same registry
 - `Arc<dyn Database>` — PostgreSQL and libSQL backends
-- `Arc<dyn SecretsStore + Send + Sync>` — PostgreSQL secrets store (libSQL not supported for encrypted secrets)
+- `Arc<dyn SecretsStore + Send + Sync>` — PostgreSQL or libSQL secrets store (both support AES-256-GCM encrypted secrets)
 - `Arc<dyn EmbeddingProvider>` — OpenAI, NEAR AI, and Ollama embeddings
 - `Box<dyn Channel>` — REPL, HTTP, web gateway, WASM channels
 - `Arc<dyn NetworkPolicyDecider>` — custom network access policies for sandbox containers
@@ -813,7 +814,7 @@ File counts for each module directory (`.rs` files only, excluding tests in sepa
 | Module | Directory | `.rs` Files |
 |--------|-----------|------------|
 | `agent` | `src/agent/` | 21 |
-| `channels` | `src/channels/` | 33 |
+| `channels` | `src/channels/` | 34 |
 | `cli` | `src/cli/` | 12 |
 | `config` | `src/config/` | 17 |
 | `context` | `src/context/` | 4 |
@@ -839,9 +840,9 @@ File counts for each module directory (`.rs` files only, excluding tests in sepa
 | `workspace` | `src/workspace/` | 7 |
 | **Top-level files** | `src/*.rs` | 11 (`main.rs`, `lib.rs`, `app.rs`, `bootstrap.rs`, `service.rs`, `error.rs`, `settings.rs`, `util.rs`, `boot_screen.rs`, `testing.rs`, `tracing_fmt.rs`) |
 
-> **Note**: File counts are pinned to the `v0.11.1` release tag snapshot. The tools module includes 13 files in `builtin/`, 13 files in `wasm/`, plus builder/mcp support modules.
+> **Note**: File counts are pinned to the `v0.12.0` release tag snapshot. The tools module includes 13 files in `builtin/`, 13 files in `wasm/`, plus builder/mcp support modules.
 
-The `tools` module is one of the largest modules, reflecting the breadth of the tool system: built-ins, a full WASM runtime, an MCP client, a software builder, and the registry/trait definitions. The `channels` module includes REPL, web gateway, HTTP, and WASM channel runtime implementations.
+The `tools` module is one of the largest modules, reflecting the breadth of the tool system: built-ins, a full WASM runtime, an MCP client, a software builder, and the registry/trait definitions. The `channels` module includes REPL, web gateway, HTTP, Signal (added v0.12.0), and WASM channel runtime implementations.
 
 **Key third-party crate dependencies:**
 
@@ -873,4 +874,4 @@ The `tools` module is one of the largest modules, reflecting the breadth of the 
 
 ---
 
-*Document generated from source code inspection of IronClaw v0.11.1 (`src/` directory). For module-level specifications, see `src/setup/README.md`, `src/workspace/README.md`, and `src/tools/README.md`.*
+*Document generated from source code inspection of IronClaw v0.12.0 (`src/` directory). For module-level specifications, see `src/setup/README.md`, `src/workspace/README.md`, and `src/tools/README.md`.*

@@ -3,7 +3,7 @@
 > **AI Agent Use**: Optimized for code review, bug triage, and targeted fixes.
 > Jump directly to the section relevant to the error or task — no narrative reading required.
 
-**Source**: IronClaw v0.11.1 (`ebb4ce95`) · `~/src/ironclaw/` · ~113K Rust lines in `src/` (~129K repo-wide)
+**Source**: IronClaw v0.12.0 (`v0.12.0`) · `~/src/ironclaw/` · ~113K Rust lines in `src/` (~129K repo-wide)
 
 ---
 
@@ -48,6 +48,7 @@
 | SSE broadcast | `src/channels/web/sse.rs` |
 | WebSocket | `src/channels/web/ws.rs` |
 | HTTP webhook channel | `src/channels/http.rs` |
+| Signal channel (signal-cli HTTP/JSON-RPC) | `src/channels/signal.rs` |
 | WASM channel runtime | `src/channels/wasm/` |
 | All error types | `src/error.rs` |
 | All config structs / env var loading | `src/config/mod.rs` |
@@ -112,6 +113,7 @@
 | Orchestrator internal API | `src/orchestrator/api.rs` |
 | Per-job bearer token store | `src/orchestrator/auth.rs` |
 | Entry point, CLI arg parsing | `src/main.rs` |
+| `ironclaw --version` (print version and exit, e.g., "ironclaw 0.12.0") | `src/main.rs` |
 | Library root, module declarations | `src/lib.rs` |
 
 ---
@@ -121,7 +123,7 @@
 | Module | Path | Responsibility |
 |--------|------|----------------|
 | `agent` | `src/agent/` | Core loop, job scheduling, sessions, routines, heartbeat |
-| `channels` | `src/channels/` | REPL, web gateway, HTTP webhooks, WASM plugin channels |
+| `channels` | `src/channels/` | REPL, web gateway, HTTP webhooks, Signal (v0.12.0), WASM plugin channels |
 | `llm` | `src/llm/` | Multi-provider LLM: retry, circuit breaker, cache, failover |
 | `tools` | `src/tools/` | Built-in tools, WASM sandbox, MCP client, dynamic builder |
 | `safety` | `src/safety/` | Prompt injection defense: sanitize, validate, policy, leak-detect |
@@ -326,13 +328,28 @@ Config struct: `src/config/mod.rs` · `INJECTED_VARS: OnceLock<HashMap<String,St
 | `GATEWAY_AUTH_TOKEN` | string | random if unset | No | Bearer token for protected API calls |
 | `GATEWAY_USER_ID` | string | `default` | No | Default user context |
 
-### 4.6 CLI / REPL
+### 4.6 Signal Channel (v0.12.0)
+
+`SignalConfig` — Signal channel configuration. Source: `src/config/channels.rs`.
+
+| Env Var | Type | Default | Required | Notes |
+|---------|------|---------|----------|-------|
+| `SIGNAL_ENABLED` | bool | `false` | No | Enable Signal channel |
+| `SIGNAL_HTTP_URL` | URL | — | Yes (if enabled) | signal-cli HTTP daemon endpoint |
+| `SIGNAL_ACCOUNT` | string | — | Yes (if enabled) | Registered Signal phone number |
+| `SIGNAL_ALLOW_FROM` | string list | — | No | Comma-separated allowed sender numbers |
+| `SIGNAL_DM_POLICY` | enum | `allow` | No | `allow\|block` — direct message handling |
+| `SIGNAL_GROUP_POLICY` | enum | `allow` | No | `allow\|block` — group message handling |
+
+Config struct fields: `http_url`, `account`, `allow_from`, `dm_policy`, `group_policy`.
+
+### 4.7 CLI / REPL
 
 | Env Var | Type | Default | Notes |
 |---------|------|---------|-------|
 | `CLI_ENABLED` | bool | `true` | **Set `false` for service mode** (prevents REPL EOF crash with `/dev/null` stdin) |
 
-### 4.7 Docker Sandbox
+### 4.8 Docker Sandbox
 
 | Env Var | Type | Default | Notes |
 |---------|------|---------|-------|
@@ -345,7 +362,7 @@ Config struct: `src/config/mod.rs` · `INJECTED_VARS: OnceLock<HashMap<String,St
 | `SANDBOX_AUTO_PULL` | bool | `true` | Auto-pull missing image |
 | `DOCKER_HOST` | string | system default | Set to Podman socket for Podman users |
 
-### 4.8 Claude Code Mode (in containers)
+### 4.9 Claude Code Mode (in containers)
 
 | Env Var | Type | Default | Notes |
 |---------|------|---------|-------|
@@ -354,7 +371,7 @@ Config struct: `src/config/mod.rs` · `INJECTED_VARS: OnceLock<HashMap<String,St
 | `CLAUDE_CODE_MAX_TURNS` | u32 | `50` | Max turns per job |
 | `CLAUDE_CONFIG_DIR` | path | `~/.claude` | Host config dir for credential extraction |
 
-### 4.9 Routines
+### 4.10 Routines
 
 | Env Var | Type | Default | Notes |
 |---------|------|---------|-------|
@@ -364,7 +381,7 @@ Config struct: `src/config/mod.rs` · `INJECTED_VARS: OnceLock<HashMap<String,St
 | `ROUTINES_DEFAULT_COOLDOWN` | u64 | `300` | Default cooldown between runs |
 | `ROUTINES_MAX_TOKENS` | u32 | `4096` | Lightweight routine token budget |
 
-### 4.10 Skills
+### 4.11 Skills
 
 | Env Var | Type | Default | Notes |
 |---------|------|---------|-------|
@@ -373,7 +390,7 @@ Config struct: `src/config/mod.rs` · `INJECTED_VARS: OnceLock<HashMap<String,St
 | `SKILLS_MAX_ACTIVE` | usize | `3` | Max active skills per request |
 | `SKILLS_MAX_CONTEXT_TOKENS` | usize | `4000` | Max prompt budget per turn |
 
-### 4.11 Workspace / Memory
+### 4.12 Workspace / Memory
 
 | Env Var | Type | Default | Notes |
 |---------|------|---------|-------|
@@ -386,7 +403,7 @@ Config struct: `src/config/mod.rs` · `INJECTED_VARS: OnceLock<HashMap<String,St
 | `HEARTBEAT_NOTIFY_CHANNEL` | string | unset | Channel to send findings |
 | `HEARTBEAT_NOTIFY_USER` | string | unset | User to notify |
 
-### 4.12 Tunnel
+### 4.13 Tunnel
 
 | Env Var | Type | Default | Notes |
 |---------|------|---------|-------|
@@ -398,7 +415,7 @@ Config struct: `src/config/mod.rs` · `INJECTED_VARS: OnceLock<HashMap<String,St
 | `TUNNEL_TS_FUNNEL` | bool | `false` | Use tailscale funnel |
 | `TUNNEL_TS_HOSTNAME` | string | — | Tailscale hostname |
 
-### 4.13 WASM Runtime
+### 4.14 WASM Runtime
 
 | Env Var | Type | Default | Notes |
 |---------|------|---------|-------|
@@ -409,13 +426,13 @@ Config struct: `src/config/mod.rs` · `INJECTED_VARS: OnceLock<HashMap<String,St
 | `WASM_DEFAULT_TIMEOUT_SECS` | u64 | `60` | Execution timeout |
 | `WASM_CACHE_DIR` | path | unset | Compiled module cache override |
 
-### 4.14 Rate Limiting
+### 4.15 Rate Limiting
 
 | Env Var | Type | Default | Notes |
 |---------|------|---------|-------|
 | Built-in/WASM tool rate limiting is configured in tool/runtime capabilities and code defaults (`src/tools/rate_limiter.rs`, `src/tools/wasm/capabilities.rs`). |
 
-### 4.15 Logging
+### 4.16 Logging
 
 | Env Var | Type | Default | Notes |
 |---------|------|---------|-------|
@@ -513,7 +530,7 @@ After compaction completes, the failed LLM request is automatically retried with
 
 | Limitation | Impact |
 |-----------|--------|
-| Secrets store not available | AES-GCM encrypted secrets require PostgreSQL |
+| Secrets store available | AES-GCM encrypted secrets supported on both PostgreSQL and libSQL |
 | Hybrid search: FTS5 only (no vector) | Semantic search unavailable |
 | Settings reload from DB skipped | Config changes require restart |
 | No incremental migrations | Schema uses `CREATE IF NOT EXISTS`; no `ALTER TABLE` |
@@ -1069,4 +1086,4 @@ sqlite3 ~/.ironclaw/ironclaw.db "SELECT id, status, created_at FROM agent_jobs O
 
 ---
 
-*Source: IronClaw v0.11.1 (`ebb4ce95`) · Docs: github.com/mudrii/ironclaw-docs · Generated: 2026-02-24*
+*Source: IronClaw v0.12.0 (`v0.12.0`) · Docs: github.com/mudrii/ironclaw-docs · Generated: 2026-02-26*

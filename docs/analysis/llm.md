@@ -1,4 +1,4 @@
-# IronClaw v0.11.1 — LLM Backend System Deep Dive
+# IronClaw v0.12.0 — LLM Backend System Deep Dive
 
 > **Scope:** `src/llm/`, `src/config/llm.rs`, `src/agent/cost_guard.rs`,
 > `src/agent/context_monitor.rs`, `src/agent/compaction.rs`,
@@ -150,8 +150,8 @@ Notable factory quirks:
 
 - **OpenAI uses `CompletionsClient`** (not the Responses API client) to avoid
   a known `rig-core` panic when threading `call_id` values.
-- **Tinfoil** always targets `https://inference.tinfoil.sh/v1` and supports
-  only Chat Completions (no Responses API).
+- **Tinfoil** always targets `https://inference.tinfoil.sh/v1`, supports only
+  Chat Completions (no Responses API), and adapts tool calls to Chat-format.
 - **Ollama** defaults to `http://localhost:11434` and the `llama3` model.
 
 ### 3.3 Provider Matrix
@@ -797,7 +797,7 @@ async fn evaluate(
 
 ---
 
-*Generated from IronClaw v0.11.1 source — `src/llm/`, `src/config/llm.rs`,
+*Generated from IronClaw v0.12.0 source — `src/llm/`, `src/config/llm.rs`,
 `src/agent/cost_guard.rs`, `src/agent/context_monitor.rs`,
 `src/agent/compaction.rs`, `src/estimation/`, `src/evaluation/`,
 `src/observability/`.*
