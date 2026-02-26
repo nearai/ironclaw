@@ -2675,6 +2675,9 @@ mod tests {
             .unwrap_or_else(|| std::path::PathBuf::from("."))
             .join(".ironclaw");
 
+        // Create sandbox directory if it doesn't exist (needed for CI)
+        let _ = fs::create_dir_all(&base_dir);
+
         let temp_dir = tempfile::tempdir_in(&base_dir).unwrap();
         let file1 = temp_dir.path().join("file.txt");
         let file2 = temp_dir.path().join("report.pdf");
