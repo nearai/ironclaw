@@ -48,7 +48,7 @@ use clap::{ColorChoice, Parser, Subcommand};
     long_about = "IronClaw is a secure AI assistant. Use 'ironclaw <subcommand> --help' for details.\nExamples:\n  ironclaw run  # Start the agent\n  ironclaw config list  # List configs"
 )]
 #[command(version)]
-#[command(color = ColorChoice::Auto)] // Enable auto-color for help (if your terminal supports it)
+#[command(color = ColorChoice::Auto)] // Enable auto-color for help (if the terminal supports it)
 pub struct Cli {
     #[command(subcommand)]
     pub command: Option<Command>,
@@ -126,7 +126,7 @@ pub enum Command {
     #[command(
         subcommand,
         about = "Manage MCP servers",
-        long_about = "Add, auth, list, or test MCP servers.\nExample: ironclaw mcp add my-server-url"
+        long_about = "Add, auth, list, or test MCP servers.\nExample: ironclaw mcp add notion https://mcp.notion.com"
     )]
     Mcp(McpCommand),
 
@@ -142,7 +142,7 @@ pub enum Command {
     #[command(
         subcommand,
         about = "Manage DM pairing",
-        long_about = "Approve or manage pairing requests.\nExample: ironclaw pairing approve"
+        long_about = "Approve or manage pairing requests.\nExamples:\n  ironclaw pairing list telegram\n  ironclaw pairing approve telegram ABC12345"
     )]
     Pairing(PairingCommand),
 
@@ -177,6 +177,7 @@ pub enum Command {
 
     /// Run as a sandboxed worker inside a Docker container (internal use).
     /// This is invoked automatically by the orchestrator, not by users directly.
+    #[command(hide = true)]
     Worker {
         /// Job ID to execute.
         #[arg(long)]
@@ -193,6 +194,7 @@ pub enum Command {
 
     /// Run as a Claude Code bridge inside a Docker container (internal use).
     /// Spawns the `claude` CLI and streams output back to the orchestrator.
+    #[command(hide = true)]
     ClaudeBridge {
         /// Job ID to execute.
         #[arg(long)]
@@ -238,6 +240,13 @@ mod tests {
     fn test_help_output() {
         let mut cmd = Cli::command();
         let help = cmd.render_help().to_string();
+        assert_snapshot!(help);
+    }
+
+    #[test]
+    fn test_long_help_output() {
+        let mut cmd = Cli::command();
+        let help = cmd.render_long_help().to_string();
         assert_snapshot!(help);
     }
 }

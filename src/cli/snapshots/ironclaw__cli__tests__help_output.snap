@@ -7,21 +7,19 @@ Secure personal AI assistant that protects your data and expands its capabilitie
 Usage: ironclaw [OPTIONS] [COMMAND]
 
 Commands:
-  run            Run the AI agent
-  onboard        Run interactive setup wizard
-  config         Manage app configs
-  tool           Manage WASM tools
-  registry       Browse/install extensions
-  mcp            Manage MCP servers
-  memory         Manage workspace memory
-  pairing        Manage DM pairing
-  service        Manage OS service
-  doctor         Run diagnostics
-  status         Show system status
-  completion     Generate completions
-  worker         Run as a sandboxed worker inside a Docker container (internal use). This is invoked automatically by the orchestrator, not by users directly
-  claude-bridge  Run as a Claude Code bridge inside a Docker container (internal use). Spawns the `claude` CLI and streams output back to the orchestrator
-  help           Print this message or the help of the given subcommand(s)
+  run         Run the AI agent
+  onboard     Run interactive setup wizard
+  config      Manage app configs
+  tool        Manage WASM tools
+  registry    Browse/install extensions
+  mcp         Manage MCP servers
+  memory      Manage workspace memory
+  pairing     Manage DM pairing
+  service     Manage OS service
+  doctor      Run diagnostics
+  status      Show system status
+  completion  Generate completions
+  help        Print this message or the help of the given subcommand(s)
 
 Options:
       --cli-only           Run in interactive CLI mode only (disable other channels)
