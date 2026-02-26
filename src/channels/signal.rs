@@ -550,15 +550,27 @@ impl SignalChannel {
         }
     }
 
-    /// Validate that attachment paths don't contain path traversal sequences.
+    /// Validate that attachment paths are safe and within the sandbox.
+    /// Uses the shared path validation logic from path_utils to ensure:
+    /// - No path traversal attacks (../, URL-encoded, null bytes)
+    /// - Paths are canonicalized and symlinks resolved
+    /// - All paths are within ~/.ironclaw/ sandbox
     fn validate_attachment_paths(paths: &[String]) -> Result<(), ChannelError> {
+        // Get the sandbox base directory (same as MessageTool uses)
+        let base_dir = dirs::home_dir()
+            .unwrap_or_else(|| std::path::PathBuf::from("."))
+            .join(".ironclaw");
+
         for path in paths {
-            if path.contains("..") {
-                return Err(ChannelError::InvalidMessage(format!(
-                    "Attachment path contains forbidden sequence: {}",
-                    path
-                )));
-            }
+            crate::tools::builtin::path_utils::validate_path(path, Some(&base_dir)).map_err(
+                |e| {
+                    ChannelError::InvalidMessage(format!(
+                        "Attachment path must be within {}: {}",
+                        base_dir.display(),
+                        e
+                    ))
+                },
+            )?;
         }
         Ok(())
     }
@@ -2629,15 +2641,27 @@ mod tests {
         let result = SignalChannel::validate_attachment_paths(&paths);
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
-        assert!(err.contains("forbidden") || err.contains(".."));
+        assert!(err.contains("forbidden") || err.contains("sandbox"));
     }
 
     #[test]
     fn validate_attachment_paths_accepts_normal_paths() {
+        use std::fs;
+
+        // Create test files in sandbox
+        let base_dir = dirs::home_dir()
+            .unwrap_or_else(|| std::path::PathBuf::from("."))
+            .join(".ironclaw");
+
+        let temp_dir = tempfile::tempdir_in(&base_dir).unwrap();
+        let file1 = temp_dir.path().join("file.txt");
+        let file2 = temp_dir.path().join("report.pdf");
+        fs::write(&file1, "test").unwrap();
+        fs::write(&file2, "test").unwrap();
+
         let paths = vec![
-            "/tmp/file.txt".to_string(),
-            "documents/report.pdf".to_string(),
-            "images/photo.png".to_string(),
+            file1.to_string_lossy().to_string(),
+            file2.to_string_lossy().to_string(),
         ];
         let result = SignalChannel::validate_attachment_paths(&paths);
         assert!(result.is_ok());
@@ -2655,5 +2679,28 @@ mod tests {
         let paths: Vec<String> = vec![];
         let result = SignalChannel::validate_attachment_paths(&paths);
         assert!(result.is_ok());
+    }
+
+    #[test]
+    fn validate_attachment_paths_rejects_path_outside_sandbox() {
+        let paths = vec!["/tmp/evil.txt".to_string()];
+        let result = SignalChannel::validate_attachment_paths(&paths);
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("sandbox"));
+    }
+
+    #[test]
+    fn validate_attachment_paths_rejects_url_encoded_traversal() {
+        let paths = vec!["%2e%2e%2fetc/passwd".to_string()];
+        let result = SignalChannel::validate_attachment_paths(&paths);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn validate_attachment_paths_rejects_null_byte() {
+        let paths = vec!["file\0.txt".to_string()];
+        let result = SignalChannel::validate_attachment_paths(&paths);
+        assert!(result.is_err());
     }
 }

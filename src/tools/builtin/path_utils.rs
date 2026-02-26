@@ -46,6 +46,16 @@ pub fn normalize_lexical(path: &Path) -> PathBuf {
 /// * `Ok(resolved_path)` - The canonicalized, validated path
 /// * `Err(ToolError)` - If path escapes sandbox or is invalid
 pub fn validate_path(path_str: &str, base_dir: Option<&Path>) -> Result<PathBuf, ToolError> {
+    // First pass: reject null bytes and URL-encoded traversal
+    // Note: We don't block `..` here because validate_path handles it by
+    // normalizing lexically and checking sandbox containment
+    if !is_path_safe_minimal(path_str) {
+        return Err(ToolError::NotAuthorized(format!(
+            "Path contains forbidden characters or sequences: {}",
+            path_str
+        )));
+    }
+
     let path = PathBuf::from(path_str);
 
     // Resolve to absolute path
@@ -133,6 +143,22 @@ pub fn is_path_safe_basic(path: &str) -> bool {
     }
 
     // Block URL-encoded traversal attempts
+    let lower = path.to_lowercase();
+    if lower.contains("%2e") || lower.contains("%2f") || lower.contains("%5c") {
+        return false;
+    }
+
+    true
+}
+
+/// Check for null bytes and URL-encoded traversal only.
+/// Unlike is_path_safe_basic, this allows `..` in paths since validate_path
+/// handles that by normalizing lexically and checking sandbox containment.
+fn is_path_safe_minimal(path: &str) -> bool {
+    if path.contains('\0') {
+        return false;
+    }
+
     let lower = path.to_lowercase();
     if lower.contains("%2e") || lower.contains("%2f") || lower.contains("%5c") {
         return false;
