@@ -21,7 +21,11 @@ use crate::llm::provider::{
 };
 
 const ANTHROPIC_API_URL: &str = "https://api.anthropic.com/v1/messages";
-const ANTHROPIC_API_VERSION: &str = "2024-10-22";
+/// OAuth beta requires 2023-06-01; the 2024-10-22 version is not valid with the beta flag.
+const ANTHROPIC_API_VERSION: &str = "2023-06-01";
+/// Required beta flag to enable OAuth Bearer auth on api.anthropic.com.
+/// Without this header, the API returns 401 "OAuth authentication is currently not supported."
+const ANTHROPIC_OAUTH_BETA: &str = "oauth-2025-04-20";
 const DEFAULT_MAX_TOKENS: u32 = 8192;
 
 /// Anthropic provider using OAuth Bearer authentication.
@@ -83,6 +87,7 @@ impl AnthropicOAuthProvider {
             .post(&url)
             .bearer_auth(self.token.expose_secret())
             .header("anthropic-version", ANTHROPIC_API_VERSION)
+            .header("anthropic-beta", ANTHROPIC_OAUTH_BETA)
             .header("Content-Type", "application/json")
             .json(body)
             .send()
