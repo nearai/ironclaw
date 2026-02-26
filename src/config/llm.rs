@@ -263,8 +263,9 @@ impl LlmConfig {
                 .map(SecretString::from)
             {
                 Some(api_key) => {
-                    let model =
-                        optional_env("OPENAI_MODEL")?.unwrap_or_else(|| "gpt-4o".to_string());
+                    let model = optional_env("OPENAI_MODEL")?
+                        .or_else(|| settings.selected_model.clone())
+                        .unwrap_or_else(|| "gpt-4o".to_string());
                     let base_url = optional_env("OPENAI_BASE_URL")?;
                     Some(OpenAiDirectConfig {
                         api_key,
@@ -287,39 +288,34 @@ impl LlmConfig {
             let api_key_env = optional_env("ANTHROPIC_API_KEY")?.map(SecretString::from);
             let oauth_token = optional_env("ANTHROPIC_OAUTH_TOKEN")?.map(SecretString::from);
 
-            match (&api_key_env, &oauth_token) {
-                (Some(key), _) => {
-                    let model = optional_env("ANTHROPIC_MODEL")?
-                        .unwrap_or_else(|| "claude-sonnet-4-20250514".to_string());
-                    let base_url = optional_env("ANTHROPIC_BASE_URL")?;
-                    Some(AnthropicDirectConfig {
-                        api_key: key.clone(),
-                        model,
-                        base_url,
-                        oauth_token,
-                    })
-                }
-                (None, Some(_)) => {
-                    // OAuth token present but no API key: use a placeholder so the
-                    // config block is populated. The provider factory will route to
-                    // the OAuth provider instead of rig-core's x-api-key client.
-                    let model = optional_env("ANTHROPIC_MODEL")?
-                        .unwrap_or_else(|| "claude-sonnet-4-20250514".to_string());
-                    let base_url = optional_env("ANTHROPIC_BASE_URL")?;
-                    Some(AnthropicDirectConfig {
-                        api_key: SecretString::from(OAUTH_PLACEHOLDER.to_string()),
-                        model,
-                        base_url,
-                        oauth_token,
-                    })
-                }
+            let api_key = match (&api_key_env, &oauth_token) {
+                (Some(key), _) => Some(key.clone()),
+                // OAuth token present but no API key: use a placeholder so the
+                // config block is populated. The provider factory will route to
+                // the OAuth provider instead of rig-core's x-api-key client.
+                (None, Some(_)) => Some(SecretString::from(OAUTH_PLACEHOLDER.to_string())),
                 (None, None) => {
                     tracing::debug!(
                         "Anthropic credentials not yet available; deferring config resolution"
                     );
                     None
                 }
-            }
+            };
+
+            api_key.map(|api_key| {
+                let model = optional_env("ANTHROPIC_MODEL")
+                    .ok()
+                    .flatten()
+                    .or_else(|| settings.selected_model.clone())
+                    .unwrap_or_else(|| "claude-sonnet-4-20250514".to_string());
+                let base_url = optional_env("ANTHROPIC_BASE_URL").ok().flatten();
+                AnthropicDirectConfig {
+                    api_key,
+                    model,
+                    base_url,
+                    oauth_token,
+                }
+            })
         } else {
             None
         };
