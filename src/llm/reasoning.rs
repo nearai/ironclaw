@@ -758,6 +758,9 @@ Example:
 - No markdown tables. Use Slack formatting: *bold*, _italic_, `code`.\n\
 - Prefer threaded replies when responding to older messages."
             }
+            "signal" => {
+                ""
+            }
             _ => {
                 return String::new();
             }
