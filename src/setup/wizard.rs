@@ -977,91 +977,17 @@ impl SetupWizard {
         Ok(())
     }
 
-    /// OpenAI provider setup: API key or Codex OAuth token.
+    /// OpenAI provider setup: direct API key.
     async fn setup_openai(&mut self) -> Result<(), SetupError> {
-        let options = &["Direct API Key", "OAuth Token (from Codex CLI)"];
-        let choice = select_one("How do you want to authenticate with OpenAI?", options)
-            .map_err(SetupError::Io)?;
-
-        if choice == 0 {
-            // Standard API key flow
-            self.setup_api_key_provider(
-                "openai",
-                "OPENAI_API_KEY",
-                "llm_openai_api_key",
-                "OpenAI API key",
-                "https://platform.openai.com/api-keys",
-                None,
-            )
-            .await
-        } else {
-            // Codex OAuth token flow
-            self.setup_codex_oauth().await
-        }
-    }
-
-    /// Codex OAuth setup: extract token from `~/.codex/auth.json`.
-    async fn setup_codex_oauth(&mut self) -> Result<(), SetupError> {
-        self.settings.llm_backend = Some("openai".to_string());
-        if self.settings.selected_model.is_some() {
-            self.settings.selected_model = None;
-        }
-
-        // Try to extract existing Codex token
-        if let Some(token) = crate::config::extract_codex_oauth_token() {
-            print_info(&format!("Found Codex token: {}", mask_api_key(&token)));
-            if confirm("Use this token?", true).map_err(SetupError::Io)? {
-                return self.save_codex_oauth_token(&token).await;
-            }
-        } else {
-            print_info("No Codex token found in ~/.codex/auth.json.");
-        }
-
-        // Fallback: let user paste the token, or switch to API key
-        print_info("You can paste your Codex/OpenAI OAuth token directly.");
-        print_info("Or press Enter with no input to switch to the API key flow.");
-        let token = secret_input("Codex OAuth token").map_err(SetupError::Io)?;
-        let token_str = token.expose_secret();
-        if token_str.is_empty() {
-            print_info("Switching to API key flow...");
-            return self
-                .setup_api_key_provider(
-                    "openai",
-                    "OPENAI_API_KEY",
-                    "llm_openai_api_key",
-                    "OpenAI API key",
-                    "https://platform.openai.com/api-keys",
-                    None,
-                )
-                .await;
-        }
-        self.save_codex_oauth_token(token_str).await
-    }
-
-    /// Save a Codex OAuth token — stored as the OpenAI API key since it's functionally equivalent.
-    async fn save_codex_oauth_token(&mut self, token: &str) -> Result<(), SetupError> {
-        // Store as the OpenAI API key (Codex tokens use the same Bearer auth)
-        if let Ok(ctx) = self.init_secrets_context().await {
-            let key = SecretString::from(token.to_string());
-            ctx.save_secret("llm_openai_api_key", &key)
-                .await
-                .map_err(|e| SetupError::Config(format!("Failed to save Codex token: {e}")))?;
-            print_success("Codex token encrypted and saved");
-        } else {
-            print_info("Secrets not available. Set OPENAI_API_KEY in your environment.");
-        }
-
-        // Set env var for immediate use (model selection step)
-        // SAFETY: Single-threaded wizard context.
-        unsafe {
-            std::env::set_var("OPENAI_API_KEY", token);
-        }
-
-        // Cache for model fetching
-        self.llm_api_key = Some(SecretString::from(token.to_string()));
-
-        print_success("Codex OAuth configured (as OpenAI API key)");
-        Ok(())
+        self.setup_api_key_provider(
+            "openai",
+            "OPENAI_API_KEY",
+            "llm_openai_api_key",
+            "OpenAI API key",
+            "https://platform.openai.com/api-keys",
+            None,
+        )
+        .await
     }
 
     /// Shared setup flow for API-key-based providers (Anthropic, OpenAI, OpenRouter).

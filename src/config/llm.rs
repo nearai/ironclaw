@@ -259,7 +259,6 @@ impl LlmConfig {
         // fill it in after `inject_llm_keys_from_secrets()` runs.
         let openai = if backend == LlmBackend::OpenAi {
             match optional_env("OPENAI_API_KEY")?
-                .or(optional_env("CODEX_OAUTH_TOKEN")?)
                 .map(SecretString::from)
             {
                 Some(api_key) => {
@@ -425,51 +424,6 @@ fn parse_extra_headers(val: &str) -> Result<Vec<(String, String)>, ConfigError> 
     Ok(headers)
 }
 
-/// Extract a Codex OAuth token from the local Codex CLI auth file.
-///
-/// Checks `$CODEX_HOME/auth.json` first, then falls back to `~/.codex/auth.json`.
-/// Tries JSON fields: `token`, `api_key`, `access_token` (various Codex versions).
-pub fn extract_codex_oauth_token() -> Option<String> {
-    let candidates: Vec<PathBuf> = {
-        let mut paths = Vec::new();
-        if let Ok(codex_home) = std::env::var("CODEX_HOME") {
-            paths.push(PathBuf::from(codex_home).join("auth.json"));
-        }
-        if let Some(home) = dirs::home_dir() {
-            paths.push(home.join(".codex").join("auth.json"));
-        } else {
-            tracing::debug!("Could not determine home directory for Codex token lookup");
-        }
-        paths
-    };
-
-    for path in &candidates {
-        if let Ok(json_str) = std::fs::read_to_string(path)
-            && let Ok(val) = serde_json::from_str::<serde_json::Value>(&json_str)
-        {
-            // Try top-level fields first (simple Codex formats)
-            for field in &["token", "api_key", "access_token", "OPENAI_API_KEY"] {
-                if let Some(tok) = val.get(field).and_then(|v| v.as_str())
-                    && !tok.is_empty()
-                {
-                    return Some(tok.to_string());
-                }
-            }
-            // Try nested tokens.access_token (ChatGPT OAuth format used by Codex CLI)
-            if let Some(tok) = val
-                .get("tokens")
-                .and_then(|t| t.get("access_token"))
-                .and_then(|v| v.as_str())
-                && !tok.is_empty()
-            {
-                return Some(tok.to_string());
-            }
-        }
-    }
-
-    None
-}
-
 /// Get the default session file path (~/.ironclaw/session.json).
 fn default_session_path() -> PathBuf {
     dirs::home_dir()
@@ -495,7 +449,6 @@ mod tests {
             std::env::remove_var("OPENAI_API_KEY");
             std::env::remove_var("OPENAI_MODEL");
             std::env::remove_var("OPENAI_BASE_URL");
-            std::env::remove_var("CODEX_OAUTH_TOKEN");
             std::env::remove_var("ANTHROPIC_API_KEY");
             std::env::remove_var("ANTHROPIC_OAUTH_TOKEN");
             std::env::remove_var("ANTHROPIC_MODEL");
@@ -731,24 +684,6 @@ mod tests {
 
         assert_eq!(oai.api_key.expose_secret(), "sk-openai-test");
         assert_eq!(oai.model, "gpt-5");
-
-        clear_provider_env();
-    }
-
-    #[test]
-    fn openai_codex_fallback_resolves() {
-        let _guard = ENV_MUTEX.lock().expect("env mutex poisoned");
-        clear_provider_env();
-        unsafe { std::env::set_var("CODEX_OAUTH_TOKEN", "codex-tok-123") };
-
-        let settings = Settings {
-            llm_backend: Some("openai".to_string()),
-            ..Default::default()
-        };
-        let cfg = LlmConfig::resolve(&settings).expect("resolve");
-        let oai = cfg.openai.expect("openai config should be present");
-
-        assert_eq!(oai.api_key.expose_secret(), "codex-tok-123");
 
         clear_provider_env();
     }

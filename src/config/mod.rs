@@ -38,7 +38,7 @@ pub use self::heartbeat::HeartbeatConfig;
 pub use self::hygiene::HygieneConfig;
 pub use self::llm::{
     AnthropicDirectConfig, LlmBackend, LlmConfig, NearAiConfig, OllamaConfig,
-    OpenAiCompatibleConfig, OpenAiDirectConfig, TinfoilConfig, extract_codex_oauth_token,
+    OpenAiCompatibleConfig, OpenAiDirectConfig, TinfoilConfig,
 };
 pub use self::routines::RoutineConfig;
 pub use self::safety::SafetyConfig;
@@ -222,7 +222,6 @@ pub async fn inject_llm_keys_from_secrets(
         ("llm_openai_api_key", "OPENAI_API_KEY"),
         ("llm_anthropic_api_key", "ANTHROPIC_API_KEY"),
         ("llm_anthropic_oauth_token", "ANTHROPIC_OAUTH_TOKEN"),
-        ("llm_codex_oauth_token", "CODEX_OAUTH_TOKEN"),
         ("llm_compatible_api_key", "LLM_API_KEY"),
         ("llm_nearai_api_key", "NEARAI_API_KEY"),
     ];
@@ -254,7 +253,7 @@ pub async fn inject_llm_keys_from_secrets(
 ///
 /// Called unconditionally during startup — even when the encrypted secrets DB
 /// is unavailable (no master key, no DB connection). This ensures OAuth tokens
-/// from `claude login` (macOS Keychain) and Codex CLI (`~/.codex/auth.json`)
+/// from `claude login` (macOS Keychain / Linux credentials.json)
 /// are available for config resolution.
 pub fn inject_os_credentials() {
     let mut injected = HashMap::new();
@@ -271,20 +270,5 @@ fn inject_os_credential_store_tokens(injected: &mut HashMap<String, String>) {
     if let Some(fresh) = crate::config::ClaudeCodeConfig::extract_oauth_token() {
         injected.insert("ANTHROPIC_OAUTH_TOKEN".to_string(), fresh);
         tracing::debug!("Refreshed ANTHROPIC_OAUTH_TOKEN from OS credential store");
-    }
-
-    // Try Codex CLI credential store for OpenAI-compatible token.
-    if !injected.contains_key("OPENAI_API_KEY")
-        && std::env::var("OPENAI_API_KEY").map_or(true, |v| v.is_empty())
-    {
-        if let Some(codex_token) = crate::config::extract_codex_oauth_token() {
-            injected.insert("OPENAI_API_KEY".to_string(), codex_token.clone());
-            injected.insert("CODEX_OAUTH_TOKEN".to_string(), codex_token);
-            tracing::debug!("Loaded Codex OAuth token from ~/.codex/auth.json");
-        } else if let Some(codex_token) = injected.get("CODEX_OAUTH_TOKEN").cloned() {
-            // Fallback: if CODEX_OAUTH_TOKEN was loaded from DB secrets, use it as OPENAI_API_KEY
-            injected.insert("OPENAI_API_KEY".to_string(), codex_token);
-            tracing::debug!("Injected CODEX_OAUTH_TOKEN as fallback OPENAI_API_KEY");
-        }
     }
 }
