@@ -12,6 +12,7 @@ let loadingOlder = false;
 let sseHasConnectedBefore = false;
 let jobEvents = new Map(); // job_id -> Array of events
 let jobListRefreshTimer = null;
+let pairingPollInterval = null;
 const JOB_EVENTS_CAP = 500;
 const MEMORY_SEARCH_QUERY_MAX_LENGTH = 100;
 
@@ -205,6 +206,10 @@ function connectSSE() {
     removeAuthCard(data.extension_name);
     showToast(data.message, 'success');
     enableChatInput();
+  });
+
+  eventSource.addEventListener('extension_status', (e) => {
+    if (currentTab === 'extensions') loadExtensions();
   });
 
   eventSource.addEventListener('error', (e) => {
@@ -1090,7 +1095,12 @@ function switchTab(tab) {
   if (tab === 'jobs') loadJobs();
   if (tab === 'routines') loadRoutines();
   if (tab === 'logs') applyLogFilters();
-  if (tab === 'extensions') loadExtensions();
+  if (tab === 'extensions') {
+    loadExtensions();
+    startPairingPoll();
+  } else {
+    stopPairingPoll();
+  }
   if (tab === 'skills') loadSkills();
 }
 
@@ -1576,10 +1586,15 @@ function renderAvailableExtensionCard(entry) {
     }).then(function(res) {
       if (res.success) {
         showToast('Installed ' + entry.display_name, 'success');
+        loadExtensions();
+        // Auto-open configure for WASM channels
+        if (entry.kind === 'wasm_channel') {
+          showConfigureModal(entry.name);
+        }
       } else {
         showToast('Install: ' + (res.message || 'unknown error'), 'error');
+        loadExtensions();
       }
-      loadExtensions();
     }).catch(function(err) {
       showToast('Install failed: ' + err.message, 'error');
       loadExtensions();
@@ -1689,12 +1704,20 @@ function renderExtensionCard(ext) {
   kind.textContent = ext.kind;
   header.appendChild(kind);
 
-  const authDot = document.createElement('span');
-  authDot.className = 'ext-auth-dot ' + (ext.authenticated ? 'authed' : 'unauthed');
-  authDot.title = ext.authenticated ? 'Authenticated' : 'Not authenticated';
-  header.appendChild(authDot);
+  // Auth dot only for non-WASM-channel extensions (channels use the stepper instead)
+  if (ext.kind !== 'wasm_channel') {
+    const authDot = document.createElement('span');
+    authDot.className = 'ext-auth-dot ' + (ext.authenticated ? 'authed' : 'unauthed');
+    authDot.title = ext.authenticated ? 'Authenticated' : 'Not authenticated';
+    header.appendChild(authDot);
+  }
 
   card.appendChild(header);
+
+  // WASM channels get a progress stepper
+  if (ext.kind === 'wasm_channel') {
+    card.appendChild(renderWasmChannelStepper(ext));
+  }
 
   if (ext.description) {
     const desc = document.createElement('div');
@@ -1718,28 +1741,93 @@ function renderExtensionCard(ext) {
     card.appendChild(tools);
   }
 
+  // Show activation error for WASM channels
+  if (ext.kind === 'wasm_channel' && ext.activation_error) {
+    const errorDiv = document.createElement('div');
+    errorDiv.className = 'ext-error';
+    errorDiv.textContent = ext.activation_error;
+    card.appendChild(errorDiv);
+  }
+
+  // Show "coming soon" note for non-Telegram channels that are configured but not fully supported yet
+  if (ext.kind === 'wasm_channel' && ext.name !== 'telegram'
+      && (ext.activation_status === 'configured' || ext.active)) {
+    const noteDiv = document.createElement('div');
+    noteDiv.className = 'ext-note';
+    noteDiv.textContent = 'Full integration coming soon. Use the CLI to complete setup.';
+    card.appendChild(noteDiv);
+  }
+
   const actions = document.createElement('div');
   actions.className = 'ext-actions';
 
-  if (!ext.active) {
-    const activateBtn = document.createElement('button');
-    activateBtn.className = 'btn-ext activate';
-    activateBtn.textContent = 'Activate';
-    activateBtn.addEventListener('click', () => activateExtension(ext.name));
-    actions.appendChild(activateBtn);
-  } else {
-    const activeLabel = document.createElement('span');
-    activeLabel.className = 'ext-active-label';
-    activeLabel.textContent = 'Active';
-    actions.appendChild(activeLabel);
-  }
+  if (ext.kind === 'wasm_channel') {
+    // WASM channels: state-based buttons (no generic Activate)
+    var status = ext.activation_status || 'installed';
+    if (status === 'active') {
+      var activeLabel = document.createElement('span');
+      activeLabel.className = 'ext-active-label';
+      activeLabel.textContent = 'Active';
+      actions.appendChild(activeLabel);
 
-  if (ext.needs_setup) {
-    const configBtn = document.createElement('button');
-    configBtn.className = 'btn-ext configure';
-    configBtn.textContent = ext.authenticated ? 'Reconfigure' : 'Configure';
-    configBtn.addEventListener('click', () => showConfigureModal(ext.name));
-    actions.appendChild(configBtn);
+      var reconfigBtn = document.createElement('button');
+      reconfigBtn.className = 'btn-ext configure';
+      reconfigBtn.textContent = 'Reconfigure';
+      reconfigBtn.addEventListener('click', function() { showConfigureModal(ext.name); });
+      actions.appendChild(reconfigBtn);
+    } else if (status === 'pairing') {
+      var pairingLabel = document.createElement('span');
+      pairingLabel.className = 'ext-pairing-label';
+      pairingLabel.textContent = 'Awaiting Pairing';
+      actions.appendChild(pairingLabel);
+
+      var reconfigBtn3 = document.createElement('button');
+      reconfigBtn3.className = 'btn-ext configure';
+      reconfigBtn3.textContent = 'Reconfigure';
+      reconfigBtn3.addEventListener('click', function() { showConfigureModal(ext.name); });
+      actions.appendChild(reconfigBtn3);
+    } else if (status === 'failed') {
+      var restartBtn = document.createElement('button');
+      restartBtn.className = 'btn-ext activate';
+      restartBtn.textContent = 'Restart';
+      restartBtn.addEventListener('click', restartGateway);
+      actions.appendChild(restartBtn);
+
+      var reconfigBtn2 = document.createElement('button');
+      reconfigBtn2.className = 'btn-ext configure';
+      reconfigBtn2.textContent = 'Reconfigure';
+      reconfigBtn2.addEventListener('click', function() { showConfigureModal(ext.name); });
+      actions.appendChild(reconfigBtn2);
+    } else {
+      // installed or configured: show Setup button
+      var setupBtn = document.createElement('button');
+      setupBtn.className = 'btn-ext configure';
+      setupBtn.textContent = 'Setup';
+      setupBtn.addEventListener('click', function() { showConfigureModal(ext.name); });
+      actions.appendChild(setupBtn);
+    }
+  } else {
+    // Non-WASM-channel extensions: original behavior
+    if (!ext.active) {
+      const activateBtn = document.createElement('button');
+      activateBtn.className = 'btn-ext activate';
+      activateBtn.textContent = 'Activate';
+      activateBtn.addEventListener('click', () => activateExtension(ext.name));
+      actions.appendChild(activateBtn);
+    } else {
+      const activeLabel = document.createElement('span');
+      activeLabel.className = 'ext-active-label';
+      activeLabel.textContent = 'Active';
+      actions.appendChild(activeLabel);
+    }
+
+    if (ext.needs_setup) {
+      const configBtn = document.createElement('button');
+      configBtn.className = 'btn-ext configure';
+      configBtn.textContent = ext.authenticated ? 'Reconfigure' : 'Configure';
+      configBtn.addEventListener('click', () => showConfigureModal(ext.name));
+      actions.appendChild(configBtn);
+    }
   }
 
   const removeBtn = document.createElement('button');
@@ -1751,11 +1839,10 @@ function renderExtensionCard(ext) {
   card.appendChild(actions);
 
   // For WASM channels, check for pending pairing requests.
-  // Show even when inactive — pairing requests can arrive via webhooks
-  // before the channel is fully activated.
   if (ext.kind === 'wasm_channel') {
     const pairingSection = document.createElement('div');
     pairingSection.className = 'ext-pairing';
+    pairingSection.setAttribute('data-channel', ext.name);
     card.appendChild(pairingSection);
     loadPairingRequests(ext.name, pairingSection);
   }
@@ -1905,6 +1992,10 @@ function submitConfigureModal(name, fields) {
     }
   }
 
+  // Disable buttons to prevent double-submit
+  var btns = document.querySelectorAll('.configure-actions button');
+  btns.forEach(function(b) { b.disabled = true; });
+
   apiFetch('/api/extensions/' + encodeURIComponent(name) + '/setup', {
     method: 'POST',
     body: { secrets },
@@ -1912,13 +2003,22 @@ function submitConfigureModal(name, fields) {
     .then((res) => {
       closeConfigureModal();
       if (res.success) {
-        showToast(res.message, 'success');
+        if (res.activated && name === 'telegram') {
+          showToast('Configured and activated ' + name, 'success');
+        } else if (res.activated) {
+          showToast('Configured ' + name + ' successfully', 'success');
+        } else if (res.needs_restart) {
+          showToast('Configured ' + name + '. Restart required to activate.', 'info');
+        } else {
+          showToast(res.message, 'success');
+        }
       } else {
         showToast(res.message || 'Configuration failed', 'error');
       }
       loadExtensions();
     })
     .catch((err) => {
+      btns.forEach(function(b) { b.disabled = false; });
       showToast('Configuration failed: ' + err.message, 'error');
     });
 }
@@ -1979,6 +2079,139 @@ function approvePairing(channel, code, container) {
       showToast(res.message || 'Approve failed', 'error');
     }
   }).catch(err => showToast('Error: ' + err.message, 'error'));
+}
+
+function startPairingPoll() {
+  stopPairingPoll();
+  pairingPollInterval = setInterval(function() {
+    document.querySelectorAll('.ext-pairing[data-channel]').forEach(function(el) {
+      loadPairingRequests(el.getAttribute('data-channel'), el);
+    });
+  }, 10000);
+}
+
+function stopPairingPoll() {
+  if (pairingPollInterval) {
+    clearInterval(pairingPollInterval);
+    pairingPollInterval = null;
+  }
+}
+
+// --- Gateway restart ---
+
+function restartGateway() {
+  if (!confirm('Restart IronClaw gateway? Active connections will be dropped.')) return;
+
+  apiFetch('/api/gateway/restart', { method: 'POST' })
+    .then(function() {
+      showRestartOverlay();
+    })
+    .catch(function() {
+      showRestartOverlay();
+    });
+}
+
+function showRestartOverlay() {
+  var overlay = document.createElement('div');
+  overlay.className = 'restart-overlay';
+  overlay.innerHTML = '<div class="restart-message">'
+    + '<div class="restart-spinner"></div>'
+    + '<h2>Restarting IronClaw...</h2>'
+    + '<p>Waiting for server to come back online</p>'
+    + '</div>';
+  document.body.appendChild(overlay);
+
+  var pollCount = 0;
+  var pollTimer = setInterval(function() {
+    pollCount++;
+    if (pollCount > 30) { // 60 seconds
+      clearInterval(pollTimer);
+      overlay.querySelector('h2').textContent = 'Restart timed out';
+      overlay.querySelector('p').textContent = 'Server did not come back within 60 seconds. Check logs.';
+      overlay.querySelector('.restart-spinner').style.display = 'none';
+      return;
+    }
+    fetch('/api/gateway/status', {
+      headers: { 'Authorization': 'Bearer ' + token },
+    })
+    .then(function(r) {
+      if (r.ok) {
+        clearInterval(pollTimer);
+        window.location.reload();
+      }
+    })
+    .catch(function() { /* still restarting */ });
+  }, 2000);
+}
+
+// --- WASM channel stepper ---
+
+function renderWasmChannelStepper(ext) {
+  var stepper = document.createElement('div');
+  stepper.className = 'ext-stepper';
+
+  var status = ext.activation_status || 'installed';
+  var isTelegram = ext.name === 'telegram';
+
+  // Telegram gets a 3-step stepper (Installed → Configured → Active/Pairing).
+  // Other channels only get 2 steps (Installed → Configured) since full
+  // integration isn't available in the web UI yet.
+  var steps = [
+    { label: 'Installed', key: 'installed' },
+    { label: 'Configured', key: 'configured' },
+  ];
+  if (isTelegram) {
+    steps.push({ label: status === 'pairing' ? 'Awaiting Pairing' : 'Active', key: 'active' });
+  }
+
+  var reachedIdx;
+  if (status === 'active') reachedIdx = isTelegram ? 2 : 1;
+  else if (status === 'pairing') reachedIdx = 2;
+  else if (status === 'failed') reachedIdx = isTelegram ? 2 : 1;
+  else if (status === 'configured') reachedIdx = 1;
+  else reachedIdx = 0;
+
+  for (var i = 0; i < steps.length; i++) {
+    if (i > 0) {
+      var connector = document.createElement('div');
+      connector.className = 'stepper-connector' + (i <= reachedIdx ? ' completed' : '');
+      stepper.appendChild(connector);
+    }
+
+    var step = document.createElement('div');
+    var stepState;
+    if (i < reachedIdx) {
+      stepState = 'completed';
+    } else if (i === reachedIdx) {
+      if (status === 'failed') {
+        stepState = 'failed';
+      } else if (status === 'pairing') {
+        stepState = 'in-progress';
+      } else if (status === 'active' || status === 'configured' || status === 'installed') {
+        stepState = 'completed';
+      } else {
+        stepState = 'pending';
+      }
+    } else {
+      stepState = 'pending';
+    }
+    step.className = 'stepper-step ' + stepState;
+
+    var circle = document.createElement('span');
+    circle.className = 'stepper-circle';
+    if (stepState === 'completed') circle.textContent = '\u2713';
+    else if (stepState === 'failed') circle.textContent = '\u2717';
+    step.appendChild(circle);
+
+    var label = document.createElement('span');
+    label.className = 'stepper-label';
+    label.textContent = steps[i].label;
+    step.appendChild(label);
+
+    stepper.appendChild(step);
+  }
+
+  return stepper;
 }
 
 // --- Jobs ---
