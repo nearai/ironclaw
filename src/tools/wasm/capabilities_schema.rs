@@ -89,6 +89,7 @@ impl CapabilitiesFile {
     /// This promotes the inner fields so callers can access them uniformly.
     fn resolve_nested(mut self) -> Self {
         if let Some(inner) = self.capabilities.take() {
+            let inner = inner.resolve_nested();
             self.http = self.http.or(inner.http);
             self.secrets = self.secrets.or(inner.secrets);
             self.tool_invoke = self.tool_invoke.or(inner.tool_invoke);
@@ -900,6 +901,96 @@ mod tests {
         assert!(
             CapabilitiesFile::from_json(json).is_err(),
             "Header without name or header_name should fail deserialization"
+        );
+    }
+
+    // ── resolve_nested tests ──────────────────────────────────────────
+
+    #[test]
+    fn test_resolve_nested_outer_takes_precedence() {
+        // Outer http should win over inner http
+        let json = r#"{
+            "http": {
+                "allowlist": [{ "host": "outer.example.com" }]
+            },
+            "capabilities": {
+                "http": {
+                    "allowlist": [{ "host": "inner.example.com" }]
+                }
+            }
+        }"#;
+
+        let caps = CapabilitiesFile::from_json(json).unwrap();
+        let http = caps.http.unwrap();
+        assert_eq!(
+            http.allowlist[0].host, "outer.example.com",
+            "Outer http should take precedence over inner"
+        );
+    }
+
+    #[test]
+    fn test_resolve_nested_doubly_nested() {
+        // capabilities.capabilities.http should resolve to top-level
+        let json = r#"{
+            "capabilities": {
+                "capabilities": {
+                    "http": {
+                        "allowlist": [{ "host": "deep.example.com" }]
+                    }
+                }
+            }
+        }"#;
+
+        let caps = CapabilitiesFile::from_json(json).unwrap();
+        let http = caps.http.unwrap();
+        assert_eq!(
+            http.allowlist[0].host, "deep.example.com",
+            "Doubly-nested capabilities should be resolved"
+        );
+    }
+
+    #[test]
+    fn test_resolve_nested_all_fields_promoted() {
+        // Inner has secrets, workspace, and auth — all should be promoted
+        let json = r#"{
+            "capabilities": {
+                "secrets": {
+                    "allowed_names": ["my_secret"]
+                },
+                "workspace": {
+                    "allowed_prefixes": ["data/"]
+                },
+                "auth": {
+                    "secret_name": "my_auth_token"
+                }
+            }
+        }"#;
+
+        let caps = CapabilitiesFile::from_json(json).unwrap();
+        assert!(caps.secrets.is_some(), "secrets should be promoted");
+        assert!(caps.workspace.is_some(), "workspace should be promoted");
+        assert!(caps.auth.is_some(), "auth should be promoted");
+
+        assert_eq!(caps.secrets.unwrap().allowed_names, vec!["my_secret"]);
+        assert_eq!(caps.workspace.unwrap().allowed_prefixes, vec!["data/"]);
+        assert_eq!(caps.auth.unwrap().secret_name, "my_auth_token");
+    }
+
+    #[test]
+    fn test_resolve_nested_empty_capabilities_noop() {
+        // Empty inner capabilities should not clobber outer http
+        let json = r#"{
+            "http": {
+                "allowlist": [{ "host": "preserved.example.com" }]
+            },
+            "capabilities": {}
+        }"#;
+
+        let caps = CapabilitiesFile::from_json(json).unwrap();
+        let http = caps.http.unwrap();
+        assert_eq!(
+            http.allowlist[0].host, "preserved.example.com",
+            "Empty inner capabilities should not clobber outer http"
         );
     }
 }
