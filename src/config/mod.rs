@@ -13,7 +13,7 @@ mod embeddings;
 mod heartbeat;
 pub(crate) mod helpers;
 mod hygiene;
-mod llm;
+pub(crate) mod llm;
 mod routines;
 mod safety;
 mod sandbox;

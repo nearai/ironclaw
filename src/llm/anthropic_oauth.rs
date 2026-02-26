@@ -21,7 +21,7 @@ use crate::llm::provider::{
 };
 
 const ANTHROPIC_API_URL: &str = "https://api.anthropic.com/v1/messages";
-const ANTHROPIC_API_VERSION: &str = "2023-06-01";
+const ANTHROPIC_API_VERSION: &str = "2024-10-22";
 const DEFAULT_MAX_TOKENS: u32 = 8192;
 
 /// Anthropic provider using OAuth Bearer authentication.
@@ -81,10 +81,7 @@ impl AnthropicOAuthProvider {
         let response = self
             .client
             .post(&url)
-            .header(
-                "Authorization",
-                format!("Bearer {}", self.token.expose_secret()),
-            )
+            .bearer_auth(self.token.expose_secret())
             .header("anthropic-version", ANTHROPIC_API_VERSION)
             .header("Content-Type", "application/json")
             .json(body)
@@ -96,15 +93,18 @@ impl AnthropicOAuthProvider {
             })?;
 
         let status = response.status();
-        let response_text = response.text().await.map_err(|e| LlmError::RequestFailed {
-            provider: "anthropic_oauth".to_string(),
-            reason: format!("Failed to read response body: {}", e),
-        })?;
-
-        tracing::debug!("Anthropic OAuth response status: {}", status);
-        tracing::debug!("Anthropic OAuth response body: {}", response_text);
 
         if !status.is_success() {
+            // Parse Retry-After header before consuming the body.
+            let retry_after = response
+                .headers()
+                .get("retry-after")
+                .and_then(|v| v.to_str().ok())
+                .and_then(|v| v.parse::<u64>().ok())
+                .map(std::time::Duration::from_secs);
+
+            let response_text = response.text().await.unwrap_or_default();
+
             if status.as_u16() == 401 {
                 return Err(LlmError::AuthFailed {
                     provider: "anthropic_oauth".to_string(),
@@ -113,7 +113,7 @@ impl AnthropicOAuthProvider {
             if status.as_u16() == 429 {
                 return Err(LlmError::RateLimited {
                     provider: "anthropic_oauth".to_string(),
-                    retry_after: None,
+                    retry_after,
                 });
             }
             let truncated = crate::agent::truncate_for_preview(&response_text, 512);
@@ -122,6 +122,17 @@ impl AnthropicOAuthProvider {
                 reason: format!("HTTP {}: {}", status, truncated),
             });
         }
+
+        let response_text = response.text().await.map_err(|e| LlmError::RequestFailed {
+            provider: "anthropic_oauth".to_string(),
+            reason: format!("Failed to read response body: {}", e),
+        })?;
+
+        tracing::debug!(
+            "Anthropic OAuth response: status={}, bytes={}",
+            status,
+            response_text.len()
+        );
 
         serde_json::from_str(&response_text).map_err(|e| {
             let truncated = crate::agent::truncate_for_preview(&response_text, 512);
@@ -564,9 +575,25 @@ mod tests {
     #[test]
     fn test_codex_token_extraction_nonexistent_path() {
         use crate::config::extract_codex_oauth_token;
-        // With no CODEX_HOME set and no ~/.codex/auth.json, should return None
-        // (This is a safe test that doesn't modify the filesystem)
-        let _result = extract_codex_oauth_token();
-        // Just verify it doesn't panic
+        // Point CODEX_HOME at a non-existent directory to avoid reading real credentials.
+        let dir = tempfile::tempdir().expect("create temp dir");
+        let nonexistent = dir.path().join("does-not-exist");
+        // SAFETY: Test-only, serialized by test runner.
+        unsafe { std::env::set_var("CODEX_HOME", nonexistent.to_str().unwrap()) };
+        let result = extract_codex_oauth_token();
+        assert!(result.is_none(), "expected None for non-existent path");
+        unsafe { std::env::remove_var("CODEX_HOME") };
+    }
+
+    #[test]
+    fn test_codex_token_extraction_valid_json() {
+        let dir = tempfile::tempdir().expect("create temp dir");
+        let auth_path = dir.path().join("auth.json");
+        std::fs::write(&auth_path, r#"{"token":"test-tok-123"}"#).expect("write auth.json");
+        // SAFETY: Test-only.
+        unsafe { std::env::set_var("CODEX_HOME", dir.path().to_str().unwrap()) };
+        let result = crate::config::extract_codex_oauth_token();
+        assert_eq!(result, Some("test-tok-123".to_string()));
+        unsafe { std::env::remove_var("CODEX_HOME") };
     }
 }

@@ -6,6 +6,16 @@ use crate::config::helpers::{optional_env, parse_optional_env};
 use crate::error::ConfigError;
 use crate::settings::Settings;
 
+/// Sentinel value used as `api_key` when only an OAuth token is present.
+///
+/// The Anthropic config block requires `api_key` to be populated so
+/// `anthropic.is_some()` is true. When we only have an OAuth token the
+/// provider factory in `llm/mod.rs` checks `oauth_token.is_some()` and
+/// routes to `AnthropicOAuthProvider`, so this placeholder is never sent
+/// over the wire. Guard against accidental leakage by checking for this
+/// value in `write_bootstrap_env()` and `step_claude_code_sandbox()`.
+pub const OAUTH_PLACEHOLDER: &str = "oauth-placeholder";
+
 /// Which LLM backend to use.
 ///
 /// Defaults to `NearAi` to keep IronClaw close to the NEAR ecosystem.
@@ -244,7 +254,7 @@ impl LlmConfig {
         // Resolve provider-specific configs based on backend
         let openai = if backend == LlmBackend::OpenAi {
             let api_key = optional_env("OPENAI_API_KEY")?
-                .or_else(|| optional_env("CODEX_OAUTH_TOKEN").ok().flatten())
+                .or(optional_env("CODEX_OAUTH_TOKEN")?)
                 .map(SecretString::from)
                 .ok_or_else(|| ConfigError::MissingRequired {
                     key: "OPENAI_API_KEY".to_string(),
@@ -271,7 +281,7 @@ impl LlmConfig {
                 // OAuth token present but no API key: use a placeholder so the
                 // config block is populated. The provider factory will route to
                 // the OAuth provider instead of rig-core's x-api-key client.
-                (None, Some(_)) => SecretString::from("oauth-placeholder".to_string()),
+                (None, Some(_)) => SecretString::from(OAUTH_PLACEHOLDER.to_string()),
                 (None, None) => {
                     return Err(ConfigError::MissingRequired {
                         key: "ANTHROPIC_API_KEY".to_string(),
@@ -399,6 +409,8 @@ pub fn extract_codex_oauth_token() -> Option<String> {
         }
         if let Some(home) = dirs::home_dir() {
             paths.push(home.join(".codex").join("auth.json"));
+        } else {
+            tracing::debug!("Could not determine home directory for Codex token lookup");
         }
         paths
     };

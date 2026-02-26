@@ -23,6 +23,7 @@ use tokio_postgres::NoTls;
 use crate::channels::wasm::{
     ChannelCapabilitiesFile, available_channel_names, install_bundled_channel,
 };
+use crate::config::llm::OAUTH_PLACEHOLDER;
 use crate::llm::{SessionConfig, SessionManager};
 use crate::secrets::{SecretsCrypto, SecretsStore};
 use crate::settings::{KeySource, Settings};
@@ -918,7 +919,9 @@ impl SetupWizard {
             println!();
 
             if confirm("Retry after running `claude login`?", true).map_err(SetupError::Io)? {
-                // Give user time to run claude login
+                // Block until the user has run `claude login` in another terminal
+                input("Press Enter after running `claude login` in another terminal...")
+                    .map_err(SetupError::Io)?;
                 if let Some(token) = crate::config::ClaudeCodeConfig::extract_oauth_token() {
                     print_info(&format!("Found OAuth token: {}", mask_api_key(&token)));
                     return self.save_anthropic_oauth_token(&token).await;
@@ -927,14 +930,23 @@ impl SetupWizard {
             }
         }
 
-        // Fallback: let user paste the token manually
+        // Fallback: let user paste the token manually, or switch to API key
         print_info("You can paste your OAuth token directly (starts with sk-ant-oat01-).");
+        print_info("Or press Enter with no input to switch to the API key flow.");
         let token = secret_input("Anthropic OAuth token").map_err(SetupError::Io)?;
         let token_str = token.expose_secret();
         if token_str.is_empty() {
-            return Err(SetupError::Config(
-                "OAuth token cannot be empty".to_string(),
-            ));
+            print_info("Switching to API key flow...");
+            return self
+                .setup_api_key_provider(
+                    "anthropic",
+                    "ANTHROPIC_API_KEY",
+                    "llm_anthropic_api_key",
+                    "Anthropic API key",
+                    "https://console.anthropic.com/settings/keys",
+                    None,
+                )
+                .await;
         }
         self.save_anthropic_oauth_token(token_str).await
     }
@@ -1005,14 +1017,23 @@ impl SetupWizard {
             print_info("No Codex token found in ~/.codex/auth.json.");
         }
 
-        // Fallback: let user paste the token
+        // Fallback: let user paste the token, or switch to API key
         print_info("You can paste your Codex/OpenAI OAuth token directly.");
+        print_info("Or press Enter with no input to switch to the API key flow.");
         let token = secret_input("Codex OAuth token").map_err(SetupError::Io)?;
         let token_str = token.expose_secret();
         if token_str.is_empty() {
-            return Err(SetupError::Config(
-                "OAuth token cannot be empty".to_string(),
-            ));
+            print_info("Switching to API key flow...");
+            return self
+                .setup_api_key_provider(
+                    "openai",
+                    "OPENAI_API_KEY",
+                    "llm_openai_api_key",
+                    "OpenAI API key",
+                    "https://platform.openai.com/api-keys",
+                    None,
+                )
+                .await;
         }
         self.save_codex_oauth_token(token_str).await
     }
@@ -2042,7 +2063,7 @@ impl SetupWizard {
 
         // Check for Anthropic credentials (API key or OAuth token)
         let has_api_key = std::env::var("ANTHROPIC_API_KEY")
-            .is_ok_and(|v| !v.is_empty() && v != "oauth-placeholder");
+            .is_ok_and(|v| !v.is_empty() && v != OAUTH_PLACEHOLDER);
         let has_oauth = crate::config::ClaudeCodeConfig::extract_oauth_token().is_some()
             || std::env::var("ANTHROPIC_OAUTH_TOKEN").is_ok_and(|v| !v.is_empty());
 
@@ -2060,7 +2081,7 @@ impl SetupWizard {
                 let has_oauth_retry =
                     crate::config::ClaudeCodeConfig::extract_oauth_token().is_some();
                 let has_key_retry = std::env::var("ANTHROPIC_API_KEY")
-                    .is_ok_and(|v| !v.is_empty() && v != "oauth-placeholder");
+                    .is_ok_and(|v| !v.is_empty() && v != OAUTH_PLACEHOLDER);
 
                 if has_key_retry || has_oauth_retry {
                     self.settings.sandbox.claude_code_enabled = true;
@@ -2169,6 +2190,15 @@ impl SetupWizard {
     ///
     /// These are the chicken-and-egg settings needed before the database is
     /// connected (DATABASE_BACKEND, DATABASE_URL, LLM_BACKEND, etc.).
+    ///
+    /// # Security note
+    ///
+    /// Credential env vars (API keys, OAuth tokens) are written in **plaintext**
+    /// with 0o600 permissions. This is a deliberate tradeoff: `Config::from_env()`
+    /// runs before the encrypted secrets DB is available, so we need these values
+    /// on disk for the initial config resolution. Users handling sensitive keys
+    /// should ensure full-disk encryption (FileVault, LUKS, BitLocker) or use a
+    /// secrets manager that injects env vars at runtime.
     fn write_bootstrap_env(&self) -> Result<(), SetupError> {
         let mut env_vars: Vec<(&str, String)> = Vec::new();
 
@@ -2213,7 +2243,7 @@ impl SetupWizard {
         for var in credential_vars {
             if let Ok(val) = std::env::var(var)
                 && !val.is_empty()
-                && val != "oauth-placeholder"
+                && val != OAUTH_PLACEHOLDER
             {
                 env_vars.push((var, val));
             }
