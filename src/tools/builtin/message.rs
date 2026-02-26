@@ -10,7 +10,7 @@ use tokio::sync::RwLock;
 
 use crate::channels::{ChannelManager, OutgoingResponse};
 use crate::context::JobContext;
-use crate::tools::tool::{Tool, ToolError, ToolOutput, require_str};
+use crate::tools::tool::{ApprovalRequirement, Tool, ToolError, ToolOutput, ToolRateLimitConfig, require_str};
 
 /// Tool for sending messages to channels.
 pub struct MessageTool {
@@ -130,6 +130,8 @@ impl Tool for MessageTool {
             .and_then(|v| serde_json::from_value(v.clone()).ok())
             .unwrap_or_default();
 
+        let attachment_count = attachments.len();
+
         // Validate all attachment paths against the sandbox
         for path in &attachments {
             crate::tools::builtin::path_utils::validate_path(path, Some(&self.base_dir)).map_err(
@@ -154,6 +156,13 @@ impl Tool for MessageTool {
             .await
         {
             Ok(()) => {
+                tracing::info!(
+                    message_sent = true,
+                    channel = %channel,
+                    target = %target,
+                    attachments = attachment_count,
+                    "Message sent via message tool"
+                );
                 let msg = format!("Sent message to {}:{}", channel, target);
                 Ok(ToolOutput::text(msg, start.elapsed()))
             }
@@ -173,6 +182,29 @@ impl Tool for MessageTool {
                 Err(ToolError::ExecutionFailed(err_msg))
             }
         }
+    }
+
+    fn requires_approval(&self, params: &serde_json::Value) -> ApprovalRequirement {
+        // Require approval when sending to a different channel than the default
+        // (cross-channel messages are more sensitive)
+        let param_channel = params.get("channel").and_then(|v| v.as_str());
+        if let Some(channel) = param_channel {
+            // Check if it differs from the default channel
+            let default_channel = self.default_channel.blocking_read();
+            if let Some(default) = default_channel.as_ref() {
+                if channel != default {
+                    return ApprovalRequirement::Always;
+                }
+            }
+            // No default set - require approval for explicit channel selection
+            return ApprovalRequirement::Always;
+        }
+        // No channel specified in params - uses default, less risky
+        ApprovalRequirement::UnlessAutoApproved
+    }
+
+    fn rate_limit_config(&self) -> Option<ToolRateLimitConfig> {
+        Some(ToolRateLimitConfig::new(10, 100))
     }
 
     fn requires_sanitization(&self) -> bool {
