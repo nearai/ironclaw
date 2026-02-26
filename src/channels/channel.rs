@@ -214,10 +214,7 @@ pub trait Channel: Send + Sync {
     /// help the LLM understand who it's talking to.
     ///
     /// Default implementation returns empty map.
-    fn conversation_context(
-        &self,
-        _metadata: &serde_json::Value,
-    ) -> HashMap<String, String> {
+    fn conversation_context(&self, _metadata: &serde_json::Value) -> HashMap<String, String> {
         HashMap::new()
     }
 

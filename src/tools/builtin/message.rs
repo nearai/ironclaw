@@ -10,7 +10,9 @@ use tokio::sync::RwLock;
 
 use crate::channels::{ChannelManager, OutgoingResponse};
 use crate::context::JobContext;
-use crate::tools::tool::{ApprovalRequirement, Tool, ToolError, ToolOutput, ToolRateLimitConfig, require_str};
+use crate::tools::tool::{
+    ApprovalRequirement, Tool, ToolError, ToolOutput, ToolRateLimitConfig, require_str,
+};
 
 /// Tool for sending messages to channels.
 pub struct MessageTool {
@@ -134,17 +136,23 @@ impl Tool for MessageTool {
 
         let attachment_count = attachments.len();
 
-        // Validate all attachment paths against the sandbox
+        // Validate all attachment paths against the sandbox and verify existence
         for path in &attachments {
-            crate::tools::builtin::path_utils::validate_path(path, Some(&self.base_dir)).map_err(
-                |e| {
-                    ToolError::ExecutionFailed(format!(
-                        "Attachment path must be within {}: {}",
-                        self.base_dir.display(),
-                        e
-                    ))
-                },
-            )?;
+            let resolved =
+                crate::tools::builtin::path_utils::validate_path(path, Some(&self.base_dir))
+                    .map_err(|e| {
+                        ToolError::ExecutionFailed(format!(
+                            "Attachment path must be within {}: {}",
+                            self.base_dir.display(),
+                            e
+                        ))
+                    })?;
+            if !resolved.exists() {
+                return Err(ToolError::ExecutionFailed(format!(
+                    "Attachment file not found: {}",
+                    path
+                )));
+            }
         }
 
         let mut response = OutgoingResponse::text(content);
@@ -193,10 +201,10 @@ impl Tool for MessageTool {
         if let Some(channel) = param_channel {
             // Check if it differs from the default channel
             let default_channel = self.default_channel.blocking_read();
-            if let Some(default) = default_channel.as_ref() {
-                if channel != default {
-                    return ApprovalRequirement::Always;
-                }
+            if let Some(default) = default_channel.as_ref()
+                && channel != default
+            {
+                return ApprovalRequirement::Always;
             }
             // No default set - require approval for explicit channel selection
             return ApprovalRequirement::Always;

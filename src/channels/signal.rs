@@ -1088,21 +1088,13 @@ impl Channel for SignalChannel {
         use std::collections::HashMap;
         let mut ctx = HashMap::new();
 
-        if let Some(sender) = metadata
-            .get("signal_sender")
-            .and_then(|v| v.as_str())
-        {
+        if let Some(sender) = metadata.get("signal_sender").and_then(|v| v.as_str()) {
             ctx.insert("sender".to_string(), sender.to_string());
         }
-        if let Some(sender_uuid) = metadata
-            .get("signal_sender_uuid")
-            .and_then(|v| v.as_str())
-        {
+        if let Some(sender_uuid) = metadata.get("signal_sender_uuid").and_then(|v| v.as_str()) {
             ctx.insert("sender_uuid".to_string(), sender_uuid.to_string());
         }
-        if let Some(target) = metadata
-            .get("signal_target")
-            .and_then(|v| v.as_str())
+        if let Some(target) = metadata.get("signal_target").and_then(|v| v.as_str())
             && target.starts_with("group:")
         {
             ctx.insert("group".to_string(), target.to_string());

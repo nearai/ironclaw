@@ -42,7 +42,10 @@ impl ChannelManager {
     /// Add a channel to the manager.
     pub async fn add(&self, channel: Box<dyn Channel>) {
         let name = channel.name().to_string();
-        self.channels.write().await.insert(name.clone(), Arc::from(channel));
+        self.channels
+            .write()
+            .await
+            .insert(name.clone(), Arc::from(channel));
         tracing::debug!("Added channel: {}", name);
     }
 
@@ -56,7 +59,10 @@ impl ChannelManager {
         let stream = channel.start().await?;
 
         // Register for respond/broadcast/send_status
-        self.channels.write().await.insert(name.clone(), Arc::from(channel));
+        self.channels
+            .write()
+            .await
+            .insert(name.clone(), Arc::from(channel));
 
         // Forward stream messages through inject_tx
         let tx = self.inject_tx.clone();

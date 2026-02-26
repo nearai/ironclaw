@@ -411,8 +411,14 @@ impl ToolRegistry {
         use crate::tools::builtin::MessageTool;
         let tool = Arc::new(MessageTool::new(channel_manager));
         *self.message_tool.write().await = Some(Arc::clone(&tool));
-        self.tools.write().await.insert(tool.name().to_string(), tool as Arc<dyn Tool>);
-        self.builtin_names.write().await.insert("message".to_string());
+        self.tools
+            .write()
+            .await
+            .insert(tool.name().to_string(), tool as Arc<dyn Tool>);
+        self.builtin_names
+            .write()
+            .await
+            .insert("message".to_string());
         tracing::info!("Registered message tool");
     }
 
