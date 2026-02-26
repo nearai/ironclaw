@@ -6,6 +6,8 @@
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
+const OPENAI_API_BASE_URL: &str = "https://api.openai.com";
+
 /// Error type for embedding operations.
 #[derive(Debug, thiserror::Error)]
 pub enum EmbeddingError {
@@ -76,7 +78,7 @@ impl OpenAiEmbeddings {
     pub fn new(api_key: impl Into<String>) -> Self {
         Self {
             client: reqwest::Client::new(),
-            base_url: "https://api.openai.com".to_string(),
+            base_url: OPENAI_API_BASE_URL.to_string(),
             api_key: api_key.into(),
             model: "text-embedding-3-small".to_string(),
             dimension: 1536,
@@ -87,7 +89,7 @@ impl OpenAiEmbeddings {
     pub fn ada_002(api_key: impl Into<String>) -> Self {
         Self {
             client: reqwest::Client::new(),
-            base_url: "https://api.openai.com".to_string(),
+            base_url: OPENAI_API_BASE_URL.to_string(),
             api_key: api_key.into(),
             model: "text-embedding-ada-002".to_string(),
             dimension: 1536,
@@ -98,7 +100,7 @@ impl OpenAiEmbeddings {
     pub fn large(api_key: impl Into<String>) -> Self {
         Self {
             client: reqwest::Client::new(),
-            base_url: "https://api.openai.com".to_string(),
+            base_url: OPENAI_API_BASE_URL.to_string(),
             api_key: api_key.into(),
             model: "text-embedding-3-large".to_string(),
             dimension: 3072,
@@ -113,7 +115,7 @@ impl OpenAiEmbeddings {
     ) -> Self {
         Self {
             client: reqwest::Client::new(),
-            base_url: "https://api.openai.com".to_string(),
+            base_url: OPENAI_API_BASE_URL.to_string(),
             api_key: api_key.into(),
             model: model.into(),
             dimension,
@@ -122,7 +124,15 @@ impl OpenAiEmbeddings {
 
     /// Set a custom base URL (e.g., for OpenRouter).
     pub fn with_base_url(mut self, base_url: impl Into<String>) -> Self {
-        self.base_url = base_url.into().trim_end_matches('/').to_string();
+        let mut url: String = base_url.into();
+        while url.ends_with('/') {
+            url.pop();
+        }
+        if !url.starts_with("https://") && !url.starts_with("http://") {
+            tracing::warn!(url = %url, "EMBEDDING_BASE_URL must start with https:// or http://, ignoring");
+            return self;
+        }
+        self.base_url = url;
         self
     }
 }
