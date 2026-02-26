@@ -14,18 +14,7 @@ use uuid::Uuid;
 use crate::channels::IncomingMessage;
 use crate::channels::web::server::GatewayState;
 use crate::channels::web::types::*;
-
-/// Truncate a string to at most `max_bytes` bytes at a char boundary, appending "...".
-fn truncate_preview(s: &str, max_bytes: usize) -> String {
-    if s.len() <= max_bytes {
-        return s.to_string();
-    }
-    let mut end = max_bytes;
-    while !s.is_char_boundary(end) {
-        end -= 1;
-    }
-    format!("{}...", &s[..end])
-}
+use crate::channels::web::util::{build_turns_from_db_messages, truncate_preview};
 
 pub async fn chat_send_handler(
     State(state): State<Arc<GatewayState>>,
@@ -414,72 +403,6 @@ pub async fn chat_history_handler(
         oldest_timestamp: None,
         pending_approval: None,
     }))
-}
-
-/// Build TurnInfo pairs from flat DB messages (user/tool_calls/assistant triples).
-///
-/// Handles three message patterns:
-/// - `user → assistant` (legacy, no tool calls)
-/// - `user → tool_calls → assistant` (with persisted tool call summaries)
-/// - `user` alone (incomplete turn)
-pub fn build_turns_from_db_messages(
-    messages: &[crate::history::ConversationMessage],
-) -> Vec<TurnInfo> {
-    let mut turns = Vec::new();
-    let mut turn_number = 0;
-    let mut iter = messages.iter().peekable();
-
-    while let Some(msg) = iter.next() {
-        if msg.role == "user" {
-            let mut turn = TurnInfo {
-                turn_number,
-                user_input: msg.content.clone(),
-                response: None,
-                state: "Completed".to_string(),
-                started_at: msg.created_at.to_rfc3339(),
-                completed_at: None,
-                tool_calls: Vec::new(),
-            };
-
-            // Check if next message is a tool_calls record
-            if let Some(next) = iter.peek()
-                && next.role == "tool_calls"
-            {
-                let tc_msg = iter.next().expect("peeked");
-                if let Ok(calls) = serde_json::from_str::<Vec<serde_json::Value>>(&tc_msg.content) {
-                    turn.tool_calls = calls
-                        .iter()
-                        .map(|c| ToolCallInfo {
-                            name: c["name"].as_str().unwrap_or("unknown").to_string(),
-                            has_result: c.get("result_preview").is_some(),
-                            has_error: c.get("error").is_some(),
-                            result_preview: c["result_preview"].as_str().map(String::from),
-                            error: c["error"].as_str().map(String::from),
-                        })
-                        .collect();
-                }
-            }
-
-            // Check if next message is an assistant response
-            if let Some(next) = iter.peek()
-                && next.role == "assistant"
-            {
-                let assistant_msg = iter.next().expect("peeked");
-                turn.response = Some(assistant_msg.content.clone());
-                turn.completed_at = Some(assistant_msg.created_at.to_rfc3339());
-            }
-
-            // Incomplete turn (user message without response)
-            if turn.response.is_none() {
-                turn.state = "Failed".to_string();
-            }
-
-            turns.push(turn);
-            turn_number += 1;
-        }
-    }
-
-    turns
 }
 
 pub async fn chat_threads_handler(

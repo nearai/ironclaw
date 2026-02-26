@@ -16,23 +16,11 @@ use crate::agent::dispatcher::{
 };
 use crate::agent::session::{PendingApproval, Session, ThreadState};
 use crate::agent::submission::SubmissionResult;
+use crate::channels::web::util::truncate_preview;
 use crate::channels::{IncomingMessage, StatusUpdate};
 use crate::context::JobContext;
 use crate::error::Error;
 use crate::llm::ChatMessage;
-
-/// Truncate a string to at most `max_bytes` bytes at a char boundary, appending "...".
-fn truncate_preview(s: &str, max_bytes: usize) -> String {
-    if s.len() <= max_bytes {
-        return s.to_string();
-    }
-    // Walk backwards from max_bytes to find a valid char boundary
-    let mut end = max_bytes;
-    while !s.is_char_boundary(end) {
-        end -= 1;
-    }
-    format!("{}...", &s[..end])
-}
 
 impl Agent {
     /// Hydrate a historical thread from DB into memory if not already present.
@@ -477,7 +465,7 @@ impl Agent {
                     obj["result_preview"] = serde_json::Value::String(preview);
                 }
                 if let Some(ref error) = tc.error {
-                    obj["error"] = serde_json::Value::String(error.clone());
+                    obj["error"] = serde_json::Value::String(truncate_preview(error, 200));
                 }
                 obj
             })
@@ -676,6 +664,11 @@ impl Agent {
 
             if thread.state != ThreadState::AwaitingApproval {
                 // Stale or duplicate approval (tool already executed) — silently ignore.
+                tracing::debug!(
+                    %thread_id,
+                    state = ?thread.state,
+                    "Ignoring stale approval: thread not in AwaitingApproval state"
+                );
                 return Ok(SubmissionResult::ok_with_message(""));
             }
 
@@ -684,7 +677,13 @@ impl Agent {
 
         let pending = match pending {
             Some(p) => p,
-            None => return Ok(SubmissionResult::ok_with_message("")),
+            None => {
+                tracing::debug!(
+                    %thread_id,
+                    "Ignoring stale approval: no pending approval found"
+                );
+                return Ok(SubmissionResult::ok_with_message(""));
+            }
         };
 
         // Verify request ID if provided

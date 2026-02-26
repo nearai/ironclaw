@@ -21,6 +21,7 @@ pub mod openai_compat;
 pub mod server;
 pub mod sse;
 pub mod types;
+pub(crate) mod util;
 pub mod ws;
 
 use std::net::SocketAddr;
