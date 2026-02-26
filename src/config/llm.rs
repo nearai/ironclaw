@@ -447,13 +447,22 @@ pub fn extract_codex_oauth_token() -> Option<String> {
         if let Ok(json_str) = std::fs::read_to_string(path)
             && let Ok(val) = serde_json::from_str::<serde_json::Value>(&json_str)
         {
-            // Try common field names across Codex versions
-            for field in &["token", "api_key", "access_token"] {
+            // Try top-level fields first (simple Codex formats)
+            for field in &["token", "api_key", "access_token", "OPENAI_API_KEY"] {
                 if let Some(tok) = val.get(field).and_then(|v| v.as_str())
                     && !tok.is_empty()
                 {
                     return Some(tok.to_string());
                 }
+            }
+            // Try nested tokens.access_token (ChatGPT OAuth format used by Codex CLI)
+            if let Some(tok) = val
+                .get("tokens")
+                .and_then(|t| t.get("access_token"))
+                .and_then(|v| v.as_str())
+                && !tok.is_empty()
+            {
+                return Some(tok.to_string());
             }
         }
     }
