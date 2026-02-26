@@ -88,6 +88,12 @@ pub enum ToolError {
     #[error("Invalid parameters: {0}")]
     InvalidParameters(String),
 
+    /// A permanent execution failure — retrying the same call will not help.
+    ///
+    /// Use this for logic errors, assertion failures, or any condition that
+    /// the tool knows will persist. For transient failures (network hiccups,
+    /// temporary unavailability) use [`ExternalService`](Self::ExternalService)
+    /// or [`Sandbox`](Self::Sandbox) instead so the retry layer can help.
     #[error("Execution failed: {0}")]
     ExecutionFailed(String),
 
