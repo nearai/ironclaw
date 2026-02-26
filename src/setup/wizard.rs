@@ -1989,12 +1989,15 @@ impl SetupWizard {
         }
 
         // Check for Anthropic credentials (API key or OAuth token)
-        let has_api_key = std::env::var("ANTHROPIC_API_KEY")
-            .is_ok_and(|v| !v.is_empty() && v != OAUTH_PLACEHOLDER);
-        let has_oauth = crate::config::ClaudeCodeConfig::extract_oauth_token().is_some()
-            || std::env::var("ANTHROPIC_OAUTH_TOKEN").is_ok_and(|v| !v.is_empty());
+        let has_credentials = || {
+            let has_api_key = std::env::var("ANTHROPIC_API_KEY")
+                .is_ok_and(|v| !v.is_empty() && v != OAUTH_PLACEHOLDER);
+            let has_oauth = crate::config::ClaudeCodeConfig::extract_oauth_token().is_some()
+                || std::env::var("ANTHROPIC_OAUTH_TOKEN").is_ok_and(|v| !v.is_empty());
+            has_api_key || has_oauth
+        };
 
-        if has_api_key || has_oauth {
+        if has_credentials() {
             self.settings.sandbox.claude_code_enabled = true;
             print_success("Claude Code sandbox enabled");
         } else {
@@ -2005,12 +2008,7 @@ impl SetupWizard {
             println!();
 
             if confirm("Retry after setting up credentials?", false).map_err(SetupError::Io)? {
-                let has_oauth_retry =
-                    crate::config::ClaudeCodeConfig::extract_oauth_token().is_some();
-                let has_key_retry = std::env::var("ANTHROPIC_API_KEY")
-                    .is_ok_and(|v| !v.is_empty() && v != OAUTH_PLACEHOLDER);
-
-                if has_key_retry || has_oauth_retry {
+                if has_credentials() {
                     self.settings.sandbox.claude_code_enabled = true;
                     print_success("Claude Code sandbox enabled");
                 } else {

@@ -299,20 +299,21 @@ impl LlmConfig {
                 }
             };
 
-            api_key.map(|api_key| {
-                let model = optional_env("ANTHROPIC_MODEL")
-                    .ok()
-                    .flatten()
-                    .or_else(|| settings.selected_model.clone())
-                    .unwrap_or_else(|| "claude-sonnet-4-20250514".to_string());
-                let base_url = optional_env("ANTHROPIC_BASE_URL").ok().flatten();
-                AnthropicDirectConfig {
-                    api_key,
-                    model,
-                    base_url,
-                    oauth_token,
+            match api_key {
+                Some(api_key) => {
+                    let model = optional_env("ANTHROPIC_MODEL")?
+                        .or_else(|| settings.selected_model.clone())
+                        .unwrap_or_else(|| "claude-sonnet-4-20250514".to_string());
+                    let base_url = optional_env("ANTHROPIC_BASE_URL")?;
+                    Some(AnthropicDirectConfig {
+                        api_key,
+                        model,
+                        base_url,
+                        oauth_token,
+                    })
                 }
-            })
+                None => None,
+            }
         } else {
             None
         };

@@ -425,9 +425,13 @@ fn convert_messages(messages: Vec<ChatMessage>) -> (Option<String>, Vec<Anthropi
                 }
             }
             Role::Tool => {
+                let Some(tool_call_id) = msg.tool_call_id else {
+                    tracing::warn!("Skipping Tool message without tool_call_id");
+                    continue;
+                };
                 // Tool results go into a user message with tool_result blocks
                 let block = AnthropicContentBlock::ToolResult {
-                    tool_use_id: msg.tool_call_id.unwrap_or_default(),
+                    tool_use_id: tool_call_id,
                     content: msg.content,
                 };
                 // If the last message is already a user message with blocks,
