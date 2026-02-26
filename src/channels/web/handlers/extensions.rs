@@ -24,6 +24,7 @@ pub async fn extensions_list_handler(
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
+    let pairing_store = crate::pairing::PairingStore::new();
     let extensions = installed
         .into_iter()
         .map(|ext| {
@@ -33,7 +34,7 @@ pub async fn extensions_list_handler(
                 } else if !ext.authenticated {
                     "installed".to_string()
                 } else if ext.active && ext.name == "telegram" {
-                    let has_paired = crate::pairing::PairingStore::new()
+                    let has_paired = pairing_store
                         .read_allow_from(&ext.name)
                         .map(|list| !list.is_empty())
                         .unwrap_or(false);

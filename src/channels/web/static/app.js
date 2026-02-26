@@ -1687,6 +1687,14 @@ function renderMcpServerCard(entry, installedExt) {
   return card;
 }
 
+function createReconfigureButton(extName) {
+  var btn = document.createElement('button');
+  btn.className = 'btn-ext configure';
+  btn.textContent = 'Reconfigure';
+  btn.addEventListener('click', function() { showConfigureModal(extName); });
+  return btn;
+}
+
 function renderExtensionCard(ext) {
   const card = document.createElement('div');
   card.className = 'ext-card';
@@ -1769,35 +1777,20 @@ function renderExtensionCard(ext) {
       activeLabel.className = 'ext-active-label';
       activeLabel.textContent = 'Active';
       actions.appendChild(activeLabel);
-
-      var reconfigBtn = document.createElement('button');
-      reconfigBtn.className = 'btn-ext configure';
-      reconfigBtn.textContent = 'Reconfigure';
-      reconfigBtn.addEventListener('click', function() { showConfigureModal(ext.name); });
-      actions.appendChild(reconfigBtn);
+      actions.appendChild(createReconfigureButton(ext.name));
     } else if (status === 'pairing') {
       var pairingLabel = document.createElement('span');
       pairingLabel.className = 'ext-pairing-label';
       pairingLabel.textContent = 'Awaiting Pairing';
       actions.appendChild(pairingLabel);
-
-      var reconfigBtn3 = document.createElement('button');
-      reconfigBtn3.className = 'btn-ext configure';
-      reconfigBtn3.textContent = 'Reconfigure';
-      reconfigBtn3.addEventListener('click', function() { showConfigureModal(ext.name); });
-      actions.appendChild(reconfigBtn3);
+      actions.appendChild(createReconfigureButton(ext.name));
     } else if (status === 'failed') {
       var restartBtn = document.createElement('button');
       restartBtn.className = 'btn-ext activate';
       restartBtn.textContent = 'Restart';
       restartBtn.addEventListener('click', restartGateway);
       actions.appendChild(restartBtn);
-
-      var reconfigBtn2 = document.createElement('button');
-      reconfigBtn2.className = 'btn-ext configure';
-      reconfigBtn2.textContent = 'Reconfigure';
-      reconfigBtn2.addEventListener('click', function() { showConfigureModal(ext.name); });
-      actions.appendChild(reconfigBtn2);
+      actions.appendChild(createReconfigureButton(ext.name));
     } else {
       // installed or configured: show Setup button
       var setupBtn = document.createElement('button');
