@@ -347,7 +347,10 @@ mod tests {
         let cost = dec!(100.0);
 
         // Both should produce identical results.
-        assert_eq!(from_new.estimate("x", cost), from_default.estimate("x", cost));
+        assert_eq!(
+            from_new.estimate("x", cost),
+            from_default.estimate("x", cost)
+        );
         assert_eq!(from_new.minimum_bid(cost), from_default.minimum_bid(cost));
         assert_eq!(from_new.ideal_bid(cost), from_default.ideal_bid(cost));
         assert_eq!(

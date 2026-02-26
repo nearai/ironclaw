@@ -48,7 +48,13 @@ fn bootstrap_env_round_trips_llm_backend() {
     );
 
     // All other backends the wizard supports
-    for backend in &["nearai", "anthropic", "ollama", "openai_compatible", "tinfoil"] {
+    for backend in &[
+        "nearai",
+        "anthropic",
+        "ollama",
+        "openai_compatible",
+        "tinfoil",
+    ] {
         save_bootstrap_env_to(&env_path, &[("LLM_BACKEND", backend)]).unwrap();
         let map = read_env_map(&env_path);
         assert_eq!(
@@ -184,7 +190,10 @@ fn bootstrap_env_preserves_existing_values() {
 
     let initial_vars: &[(&str, &str)] = &[
         ("DATABASE_BACKEND", "postgres"),
-        ("DATABASE_URL", "postgres://user:pass@localhost:5432/ironclaw"),
+        (
+            "DATABASE_URL",
+            "postgres://user:pass@localhost:5432/ironclaw",
+        ),
         ("LLM_BACKEND", "nearai"),
         ("NEARAI_API_KEY", "key_abc123"),
         ("EMBEDDING_ENABLED", "true"),
@@ -194,7 +203,11 @@ fn bootstrap_env_preserves_existing_values() {
 
     let map = read_env_map(&env_path);
 
-    assert_eq!(map.len(), initial_vars.len(), "all vars must survive round-trip");
+    assert_eq!(
+        map.len(),
+        initial_vars.len(),
+        "all vars must survive round-trip"
+    );
     for (key, value) in initial_vars {
         assert_eq!(
             map.get(*key).map(String::as_str),
@@ -275,10 +288,7 @@ fn bootstrap_env_handles_special_characters() {
 
     for (key, expected) in test_cases {
         let actual = map.get(*key);
-        assert!(
-            actual.is_some(),
-            "{key} must be present in parsed .env"
-        );
+        assert!(actual.is_some(), "{key} must be present in parsed .env");
         assert_eq!(
             actual.unwrap(),
             expected,

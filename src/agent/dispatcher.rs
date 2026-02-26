@@ -1702,10 +1702,7 @@ mod tests {
 
     /// Helper to build a test Agent with a custom LLM provider and
     /// `max_tool_iterations` override.
-    fn make_test_agent_with_llm(
-        llm: Arc<dyn LlmProvider>,
-        max_tool_iterations: usize,
-    ) -> Agent {
+    fn make_test_agent_with_llm(llm: Arc<dyn LlmProvider>, max_tool_iterations: usize) -> Agent {
         let deps = AgentDeps {
             store: None,
             llm,
@@ -1895,10 +1892,7 @@ mod tests {
         // Verify we got a text response.
         match inner.unwrap() {
             super::AgenticLoopResult::Response(text) => {
-                assert!(
-                    !text.is_empty(),
-                    "Expected non-empty forced text response"
-                );
+                assert!(!text.is_empty(), "Expected non-empty forced text response");
             }
             super::AgenticLoopResult::NeedApproval { .. } => {
                 panic!("Expected text response, got NeedApproval");

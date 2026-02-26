@@ -8,8 +8,8 @@
 //! - `HangingProvider` -- Hangs forever (tests caller-side timeout)
 //! - `GarbageProvider` -- Returns valid response structure with garbage content
 
-use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -296,7 +296,11 @@ async fn test_flakey_provider_eventually_succeeds() {
     let response = result.expect("should succeed after retries");
     assert_eq!(response.content, "success after retries");
     // Should have been called 4 times: 3 failures + 1 success
-    assert_eq!(flakey.calls(), 4, "expected 3 failures + 1 success = 4 calls");
+    assert_eq!(
+        flakey.calls(),
+        4,
+        "expected 3 failures + 1 success = 4 calls"
+    );
 }
 
 /// Verify that a FlakeyProvider with more failures than retries exhausts
@@ -417,7 +421,11 @@ async fn test_garbage_provider_not_retried() {
 
     let response = retry.complete(make_request()).await;
     assert!(response.is_ok(), "garbage Ok response should pass through");
-    assert_eq!(garbage.calls(), 1, "should only call once -- no retry on Ok");
+    assert_eq!(
+        garbage.calls(),
+        1,
+        "should only call once -- no retry on Ok"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -522,9 +530,8 @@ async fn test_failover_chain_under_chaos() {
         cooldown_duration: Duration::from_secs(300),
         failure_threshold: 100, // high threshold: no cooldown during this test
     };
-    let failover =
-        FailoverProvider::with_cooldown(vec![flakey.clone(), reliable.clone()], config)
-            .expect("should create failover with 2 providers");
+    let failover = FailoverProvider::with_cooldown(vec![flakey.clone(), reliable.clone()], config)
+        .expect("should create failover with 2 providers");
 
     // Request 1: flakey fails, reliable succeeds.
     let r = failover.complete(make_request()).await.unwrap();
@@ -549,16 +556,14 @@ async fn test_failover_chain_under_chaos() {
 async fn test_failover_cooldown_with_flakey_provider() {
     let flakey: Arc<dyn LlmProvider> =
         Arc::new(FlakeyProvider::new(3, "flakey back").with_name("flakey-cd"));
-    let reliable: Arc<dyn LlmProvider> =
-        Arc::new(ReliableProvider::new("reliable-cd", "reliable"));
+    let reliable: Arc<dyn LlmProvider> = Arc::new(ReliableProvider::new("reliable-cd", "reliable"));
 
     let config = CooldownConfig {
         cooldown_duration: Duration::from_millis(50),
         failure_threshold: 2,
     };
-    let failover =
-        FailoverProvider::with_cooldown(vec![flakey.clone(), reliable.clone()], config)
-            .expect("should create failover with cooldown");
+    let failover = FailoverProvider::with_cooldown(vec![flakey.clone(), reliable.clone()], config)
+        .expect("should create failover with cooldown");
 
     // Requests 1-2: flakey fails twice, reaching cooldown threshold.
     let r = failover.complete(make_request()).await.unwrap();
@@ -598,9 +603,8 @@ async fn test_failover_three_provider_cascade() {
     let reliable: Arc<dyn LlmProvider> =
         Arc::new(ReliableProvider::new("reliable-last", "last resort"));
 
-    let failover =
-        FailoverProvider::new(vec![always_fail, flakey.clone(), reliable.clone()])
-            .expect("three providers");
+    let failover = FailoverProvider::new(vec![always_fail, flakey.clone(), reliable.clone()])
+        .expect("three providers");
 
     // Request 1: always-fail fails, flakey fails (1st), reliable serves.
     let r = failover.complete(make_request()).await.unwrap();
@@ -653,9 +657,8 @@ async fn test_failover_non_transient_stops_chain() {
     let primary: Arc<dyn LlmProvider> = Arc::new(NonTransientProvider);
     let backup = Arc::new(ReliableProvider::new("backup", "should not reach"));
 
-    let failover =
-        FailoverProvider::new(vec![primary, backup.clone() as Arc<dyn LlmProvider>])
-            .expect("failover");
+    let failover = FailoverProvider::new(vec![primary, backup.clone() as Arc<dyn LlmProvider>])
+        .expect("failover");
 
     let err = failover.complete(make_request()).await.unwrap_err();
     assert!(
@@ -664,7 +667,11 @@ async fn test_failover_non_transient_stops_chain() {
         err
     );
     // Backup should never have been called.
-    assert_eq!(backup.calls(), 0, "backup should not be called for non-transient errors");
+    assert_eq!(
+        backup.calls(),
+        0,
+        "backup should not be called for non-transient errors"
+    );
 }
 
 /// Full stack: RetryProvider wrapping FlakeyProvider, behind a
@@ -716,10 +723,8 @@ async fn test_full_chain_retry_failover_circuit_breaker() {
         Arc::new(ReliableProvider::new("reliable-full", "backup ok"));
 
     // Failover wraps both.
-    let failover: Arc<dyn LlmProvider> = Arc::new(
-        FailoverProvider::new(vec![retry_primary, reliable.clone()])
-            .expect("failover"),
-    );
+    let failover: Arc<dyn LlmProvider> =
+        Arc::new(FailoverProvider::new(vec![retry_primary, reliable.clone()]).expect("failover"));
 
     // Circuit breaker on top.
     let cb = CircuitBreakerProvider::new(

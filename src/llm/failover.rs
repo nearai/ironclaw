@@ -1260,11 +1260,9 @@ mod tests {
         // Also test complete_with_tools follows the same graceful path.
         let p4 = Arc::new(MultiCallMockProvider::always_fail("delta"));
         let p5 = Arc::new(MultiCallMockProvider::always_fail("epsilon"));
-        let failover2 = FailoverProvider::new(vec![
-            p4 as Arc<dyn LlmProvider>,
-            p5 as Arc<dyn LlmProvider>,
-        ])
-        .unwrap();
+        let failover2 =
+            FailoverProvider::new(vec![p4 as Arc<dyn LlmProvider>, p5 as Arc<dyn LlmProvider>])
+                .unwrap();
 
         let result = failover2.complete_with_tools(make_tool_request()).await;
         assert!(
@@ -1279,8 +1277,7 @@ mod tests {
     #[tokio::test]
     async fn test_failover_with_single_provider_failing() {
         let solo = Arc::new(MultiCallMockProvider::always_fail("solo-broken"));
-        let failover =
-            FailoverProvider::new(vec![solo.clone() as Arc<dyn LlmProvider>]).unwrap();
+        let failover = FailoverProvider::new(vec![solo.clone() as Arc<dyn LlmProvider>]).unwrap();
 
         // First call: should return error from the solo provider.
         let result = failover.complete(make_request()).await;
