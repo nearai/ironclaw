@@ -276,14 +276,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn message_tool_with_attachments() {
+    async fn message_tool_with_attachments_outside_sandbox() {
         let tool = MessageTool::new(Arc::new(ChannelManager::new()));
 
         // Set context
         tool.set_context(Some("signal".to_string()), Some("+1234567890".to_string()))
             .await;
 
-        // Execute with attachments
+        // Execute with attachments outside sandbox
         let ctx = crate::context::JobContext::new("test", "test description");
         let result = tool
             .execute(
@@ -295,8 +295,43 @@ mod tests {
             )
             .await;
 
-        // Will fail because channel doesn't exist, but that's expected
+        // Should fail due to sandbox rejection (paths outside ~/.ironclaw/)
         assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("sandbox") || err.contains("escapes"));
+    }
+
+    #[tokio::test]
+    async fn message_tool_with_attachments_inside_sandbox_no_channel() {
+        use std::fs;
+
+        let tool = MessageTool::new(Arc::new(ChannelManager::new()));
+        tool.set_context(Some("signal".to_string()), Some("+1234567890".to_string()))
+            .await;
+
+        // Create temp files inside the sandbox
+        let sandbox_dir = &tool.base_dir;
+        let temp_dir = tempfile::tempdir_in(sandbox_dir).unwrap();
+        let file1 = temp_dir.path().join("file1.txt");
+        let file2 = temp_dir.path().join("file2.png");
+        fs::write(&file1, "test").unwrap();
+        fs::write(&file2, "test").unwrap();
+
+        let ctx = crate::context::JobContext::new("test", "test description");
+        let result = tool
+            .execute(
+                serde_json::json!({
+                    "content": "hello",
+                    "attachments": [file1.to_string_lossy(), file2.to_string_lossy()]
+                }),
+                &ctx,
+            )
+            .await;
+
+        // Path validation passes, but channel broadcast fails (no real channel)
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("channel") || err.contains("Channel"));
     }
 
     #[tokio::test]
