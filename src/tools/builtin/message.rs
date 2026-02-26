@@ -2,6 +2,7 @@
 //!
 //! Allows the agent to proactively message users on any connected channel.
 
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -11,10 +12,6 @@ use crate::channels::{ChannelManager, OutgoingResponse};
 use crate::context::JobContext;
 use crate::tools::tool::{Tool, ToolError, ToolOutput, require_str};
 
-fn is_path_safe(path: &str) -> bool {
-    !path.contains("..")
-}
-
 /// Tool for sending messages to channels.
 pub struct MessageTool {
     channel_manager: Arc<ChannelManager>,
@@ -22,15 +19,29 @@ pub struct MessageTool {
     default_channel: Arc<RwLock<Option<String>>>,
     /// Default target (user_id or group_id) for current conversation (set per-turn).
     default_target: Arc<RwLock<Option<String>>>,
+    /// Base directory for attachment path validation (sandbox).
+    pub(crate) base_dir: PathBuf,
 }
 
 impl MessageTool {
     pub fn new(channel_manager: Arc<ChannelManager>) -> Self {
+        let base_dir = dirs::home_dir()
+            .unwrap_or_else(|| std::path::PathBuf::from("."))
+            .join(".ironclaw");
+
         Self {
             channel_manager,
             default_channel: Arc::new(RwLock::new(None)),
             default_target: Arc::new(RwLock::new(None)),
+            base_dir,
         }
+    }
+
+    /// Set the base directory for attachment validation.
+    /// This is primarily used for testing or future configuration.
+    pub fn with_base_dir(mut self, dir: PathBuf) -> Self {
+        self.base_dir = dir;
+        self
     }
 
     /// Set the default channel and target for the current conversation turn.
@@ -119,13 +130,17 @@ impl Tool for MessageTool {
             .and_then(|v| serde_json::from_value(v.clone()).ok())
             .unwrap_or_default();
 
+        // Validate all attachment paths against the sandbox
         for path in &attachments {
-            if !is_path_safe(path) {
-                return Err(ToolError::ExecutionFailed(format!(
-                    "Attachment path contains forbidden sequence: {}",
-                    path
-                )));
-            }
+            crate::tools::builtin::path_utils::validate_path(path, Some(&self.base_dir)).map_err(
+                |e| {
+                    ToolError::ExecutionFailed(format!(
+                        "Attachment path must be within {}: {}",
+                        self.base_dir.display(),
+                        e
+                    ))
+                },
+            )?;
         }
 
         let mut response = OutgoingResponse::text(content);
@@ -312,16 +327,18 @@ mod tests {
 
     #[test]
     fn path_traversal_rejects_double_dot() {
-        assert!(!is_path_safe("../etc/passwd"));
-        assert!(!is_path_safe("foo/../bar"));
-        assert!(!is_path_safe("foo/bar/../../secret"));
+        use crate::tools::builtin::path_utils::is_path_safe_basic;
+        assert!(!is_path_safe_basic("../etc/passwd"));
+        assert!(!is_path_safe_basic("foo/../bar"));
+        assert!(!is_path_safe_basic("foo/bar/../../secret"));
     }
 
     #[test]
     fn path_traversal_accepts_normal_paths() {
-        assert!(is_path_safe("/tmp/file.txt"));
-        assert!(is_path_safe("documents/report.pdf"));
-        assert!(is_path_safe("my-file.png"));
+        use crate::tools::builtin::path_utils::is_path_safe_basic;
+        assert!(is_path_safe_basic("/tmp/file.txt"));
+        assert!(is_path_safe_basic("documents/report.pdf"));
+        assert!(is_path_safe_basic("my-file.png"));
     }
 
     #[tokio::test]
@@ -349,32 +366,36 @@ mod tests {
     #[tokio::test]
     async fn message_tool_passes_attachment_to_broadcast() {
         use std::fs;
-        use tempfile::NamedTempFile;
 
         let tool = MessageTool::new(Arc::new(ChannelManager::new()));
         tool.set_context(Some("signal".to_string()), Some("+1234567890".to_string()))
             .await;
 
-        let temp_file = NamedTempFile::new().unwrap();
-        let temp_path = temp_file.path().to_string_lossy().to_string();
+        // Create a temp file within the sandbox directory
+        let sandbox_dir = &tool.base_dir;
+        let temp_dir = tempfile::tempdir_in(sandbox_dir).unwrap();
+        let temp_path = temp_dir.path().join("test.txt");
         fs::write(&temp_path, "test content").unwrap();
+        let temp_path_str = temp_path.to_string_lossy().to_string();
 
         let ctx = crate::context::JobContext::new("test", "test description");
         let result = tool
             .execute(
                 serde_json::json!({
                     "content": "here's the file",
-                    "attachments": [temp_path]
+                    "attachments": [temp_path_str]
                 }),
                 &ctx,
             )
             .await;
 
+        // Should succeed in path validation (file is in sandbox)
+        // but fail on channel broadcast (no actual channel)
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
         assert!(
-            err.contains("not found") || err.contains("Failed"),
-            "Expected channel not found error, got: {}",
+            err.contains("not found") || err.contains("Failed") || err.contains("broadcast"),
+            "Expected channel error, got: {}",
             err
         );
     }
@@ -382,18 +403,20 @@ mod tests {
     #[tokio::test]
     async fn message_tool_passes_multiple_attachments_to_broadcast() {
         use std::fs;
-        use tempfile::NamedTempFile;
 
         let tool = MessageTool::new(Arc::new(ChannelManager::new()));
         tool.set_context(Some("signal".to_string()), Some("+1234567890".to_string()))
             .await;
 
-        let temp_file1 = NamedTempFile::new().unwrap();
-        let temp_file2 = NamedTempFile::new().unwrap();
-        let path1 = temp_file1.path().to_string_lossy().to_string();
-        let path2 = temp_file2.path().to_string_lossy().to_string();
-        fs::write(&path1, "test content 1").unwrap();
-        fs::write(&path2, "test content 2").unwrap();
+        // Create temp files within the sandbox directory
+        let sandbox_dir = &tool.base_dir;
+        let temp_dir = tempfile::tempdir_in(sandbox_dir).unwrap();
+        let temp_path1 = temp_dir.path().join("test1.txt");
+        let temp_path2 = temp_dir.path().join("test2.txt");
+        fs::write(&temp_path1, "test content 1").unwrap();
+        fs::write(&temp_path2, "test content 2").unwrap();
+        let path1 = temp_path1.to_string_lossy().to_string();
+        let path2 = temp_path2.to_string_lossy().to_string();
 
         let ctx = crate::context::JobContext::new("test", "test description");
         let result = tool
@@ -406,11 +429,13 @@ mod tests {
             )
             .await;
 
+        // Should succeed in path validation (files are in sandbox)
+        // but fail on channel broadcast (no actual channel)
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
         assert!(
-            err.contains("not found") || err.contains("Failed"),
-            "Expected channel not found error, got: {}",
+            err.contains("not found") || err.contains("Failed") || err.contains("broadcast"),
+            "Expected channel error, got: {}",
             err
         );
     }

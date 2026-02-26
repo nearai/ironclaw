@@ -8,6 +8,7 @@ mod job;
 mod json;
 mod memory;
 mod message;
+pub mod path_utils;
 pub mod routine;
 pub(crate) mod shell;
 pub mod skill_tools;
