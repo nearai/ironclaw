@@ -12,6 +12,8 @@ use std::process::Command;
 
 use anyhow::{Context, Result, bail};
 
+use crate::bootstrap::ironclaw_base_dir;
+
 const SERVICE_LABEL: &str = "com.ironclaw.daemon";
 const SYSTEMD_UNIT: &str = "ironclaw.service";
 
@@ -251,8 +253,7 @@ fn linux_unit_path() -> Result<PathBuf> {
 }
 
 fn ironclaw_logs_dir() -> Result<PathBuf> {
-    let home = dirs::home_dir().context("could not find home directory")?;
-    Ok(home.join(".ironclaw").join("logs"))
+    Ok(ironclaw_base_dir().join("logs"))
 }
 
 // ── Shell helpers ───────────────────────────────────────────────

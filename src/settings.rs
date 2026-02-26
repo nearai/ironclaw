@@ -7,6 +7,8 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
+use crate::bootstrap::ironclaw_base_dir;
+
 /// User settings persisted to disk.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct Settings {
@@ -656,10 +658,7 @@ impl Settings {
 
     /// Get the default settings file path (~/.ironclaw/settings.json).
     pub fn default_path() -> std::path::PathBuf {
-        dirs::home_dir()
-            .unwrap_or_else(|| std::path::PathBuf::from("."))
-            .join(".ironclaw")
-            .join("settings.json")
+        ironclaw_base_dir().join("settings.json")
     }
 
     /// Load settings from disk, returning default if not found.
@@ -677,10 +676,7 @@ impl Settings {
 
     /// Default TOML config file path (~/.ironclaw/config.toml).
     pub fn default_toml_path() -> PathBuf {
-        dirs::home_dir()
-            .unwrap_or_else(|| PathBuf::from("."))
-            .join(".ironclaw")
-            .join("config.toml")
+        ironclaw_base_dir().join("config.toml")
     }
 
     /// Load settings from a TOML file.

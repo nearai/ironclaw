@@ -2,6 +2,7 @@ use std::path::PathBuf;
 
 use secrecy::SecretString;
 
+use crate::bootstrap::ironclaw_base_dir;
 use crate::config::helpers::{optional_env, parse_bool_env, parse_optional_env};
 use crate::error::ConfigError;
 use crate::settings::Settings;
@@ -193,8 +194,5 @@ impl ChannelsConfig {
 
 /// Get the default channels directory (~/.ironclaw/channels/).
 fn default_channels_dir() -> PathBuf {
-    dirs::home_dir()
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join(".ironclaw")
-        .join("channels")
+    ironclaw_base_dir().join("channels")
 }

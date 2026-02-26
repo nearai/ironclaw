@@ -11,6 +11,7 @@ use chrono::{DateTime, Utc};
 use tokio::sync::RwLock;
 use uuid::Uuid;
 
+use crate::bootstrap::ironclaw_base_dir;
 use crate::error::OrchestratorError;
 use crate::orchestrator::auth::{CredentialGrant, TokenStore};
 use crate::sandbox::connect_docker;
@@ -158,11 +159,7 @@ fn validate_bind_mount_path(
             ),
         })?;
 
-    let home = dirs::home_dir().ok_or_else(|| OrchestratorError::ContainerCreationFailed {
-        job_id,
-        reason: "could not determine home directory for path validation".to_string(),
-    })?;
-    let projects_base = home.join(".ironclaw").join("projects");
+    let projects_base = ironclaw_base_dir().join("projects");
 
     // Ensure the base exists so canonicalize always succeeds.
     std::fs::create_dir_all(&projects_base).map_err(|e| {
@@ -617,7 +614,7 @@ mod tests {
 
     #[test]
     fn test_validate_bind_mount_valid_path() {
-        let base = dirs::home_dir().unwrap().join(".ironclaw").join("projects");
+        let base = ironclaw_base_dir().join("projects");
         std::fs::create_dir_all(&base).unwrap();
 
         let test_dir = base.join("test_validate_bind");

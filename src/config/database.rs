@@ -2,6 +2,7 @@ use std::path::PathBuf;
 
 use secrecy::{ExposeSecret, SecretString};
 
+use crate::bootstrap::ironclaw_base_dir;
 use crate::config::helpers::{optional_env, parse_optional_env};
 use crate::error::ConfigError;
 
@@ -123,8 +124,5 @@ impl DatabaseConfig {
 
 /// Default libSQL database path (~/.ironclaw/ironclaw.db).
 pub fn default_libsql_path() -> PathBuf {
-    dirs::home_dir()
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join(".ironclaw")
-        .join("ironclaw.db")
+    ironclaw_base_dir().join("ironclaw.db")
 }

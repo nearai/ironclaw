@@ -5,6 +5,7 @@ use std::path::{Component, Path, PathBuf};
 
 use tokio::fs;
 
+use crate::bootstrap::ironclaw_base_dir;
 use crate::registry::catalog::RegistryError;
 use crate::registry::manifest::{BundleDefinition, ExtensionManifest, ManifestKind};
 
@@ -179,11 +180,11 @@ impl RegistryInstaller {
 
     /// Default installer using standard paths.
     pub fn with_defaults(repo_root: PathBuf) -> Self {
-        let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
+        let base_dir = ironclaw_base_dir();
         Self {
             repo_root,
-            tools_dir: home.join(".ironclaw").join("tools"),
-            channels_dir: home.join(".ironclaw").join("channels"),
+            tools_dir: base_dir.join("tools"),
+            channels_dir: base_dir.join("channels"),
         }
     }
 
