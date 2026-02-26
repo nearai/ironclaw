@@ -58,15 +58,18 @@ impl ActionRecord {
     }
 
     /// Mark the action as successful.
+    ///
+    /// `output_sanitized` is the tool output after safety processing (string).
+    /// `output_raw` is the original tool result (JSON value).
     pub fn succeed(
         mut self,
-        output_raw: Option<String>,
-        output_sanitized: serde_json::Value,
+        output_sanitized: Option<String>,
+        output_raw: serde_json::Value,
         duration: Duration,
     ) -> Self {
         self.success = true;
-        self.output_raw = output_raw;
-        self.output_sanitized = Some(output_sanitized);
+        self.output_raw = Some(serde_json::to_string_pretty(&output_raw).unwrap_or_default());
+        self.output_sanitized = output_sanitized.map(serde_json::Value::String);
         self.duration = duration;
         self
     }
