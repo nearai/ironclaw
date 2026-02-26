@@ -78,6 +78,7 @@ async def ironclaw_server(ironclaw_binary, mock_llm_server):
         "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
         "HOME": os.environ.get("HOME", "/tmp"),
         "RUST_LOG": "ironclaw=info",
+        "RUST_BACKTRACE": "1",
         "GATEWAY_ENABLED": "true",
         "GATEWAY_HOST": "127.0.0.1",
         "GATEWAY_PORT": str(gateway_port),
@@ -98,7 +99,8 @@ async def ironclaw_server(ironclaw_binary, mock_llm_server):
         "ONBOARD_COMPLETED": "true",
     }
     proc = await asyncio.create_subprocess_exec(
-        ironclaw_binary,
+        ironclaw_binary, "--no-onboard",
+        stdin=asyncio.subprocess.DEVNULL,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
         env=env,
@@ -107,12 +109,28 @@ async def ironclaw_server(ironclaw_binary, mock_llm_server):
     try:
         await wait_for_ready(f"{base_url}/api/health", timeout=60)
         yield base_url
+    except TimeoutError:
+        # Dump stderr so CI logs show why the server failed to start
+        returncode = proc.returncode
+        stderr_bytes = b""
+        if proc.stderr:
+            try:
+                stderr_bytes = await asyncio.wait_for(proc.stderr.read(8192), timeout=2)
+            except (asyncio.TimeoutError, Exception):
+                pass
+        stderr_text = stderr_bytes.decode("utf-8", errors="replace")
+        proc.kill()
+        pytest.fail(
+            f"ironclaw server failed to start on port {gateway_port} "
+            f"(returncode={returncode}).\nstderr:\n{stderr_text}"
+        )
     finally:
-        proc.send_signal(signal.SIGTERM)
-        try:
-            await asyncio.wait_for(proc.wait(), timeout=5)
-        except asyncio.TimeoutError:
-            proc.kill()
+        if proc.returncode is None:
+            proc.send_signal(signal.SIGTERM)
+            try:
+                await asyncio.wait_for(proc.wait(), timeout=5)
+            except asyncio.TimeoutError:
+                proc.kill()
 
 
 @pytest.fixture(scope="session")
