@@ -786,8 +786,10 @@ impl SignalChannel {
             });
 
         // Build metadata with signal-specific routing info.
+        let sender_uuid = envelope.source_uuid.as_deref();
         let metadata = serde_json::json!({
             "signal_sender": &sender,
+            "signal_sender_uuid": sender_uuid,
             "signal_target": &target,
             "signal_timestamp": timestamp,
         });

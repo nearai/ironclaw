@@ -215,6 +215,9 @@ pub struct Reasoning {
     model_name: Option<String>,
     /// Whether this is a group chat context.
     is_group_chat: bool,
+    /// Channel-specific conversation context (e.g., sender number, UUID, group ID).
+    /// This is passed to the LLM to provide clarity about who/group it's talking to.
+    conversation_context: std::collections::HashMap<String, String>,
 }
 
 impl Reasoning {
@@ -228,6 +231,7 @@ impl Reasoning {
             channel: None,
             model_name: None,
             is_group_chat: false,
+            conversation_context: std::collections::HashMap::new(),
         }
     }
 
@@ -274,6 +278,22 @@ impl Reasoning {
     /// Mark this as a group chat context, enabling group-specific guidance.
     pub fn with_group_chat(mut self, is_group: bool) -> Self {
         self.is_group_chat = is_group;
+        self
+    }
+
+    /// Add channel-specific conversation data for the system prompt.
+    ///
+    /// This provides the LLM with context about who/group it's talking to.
+    /// Examples:
+    ///   - Signal: sender, sender_uuid, target (group ID if in group)
+    ///   - Discord: guild_id, channel_id, user_id
+    ///   - Telegram: chat_id, user_id
+    pub fn with_conversation_data(
+        mut self,
+        key: impl Into<String>,
+        value: impl Into<String>,
+    ) -> Self {
+        self.conversation_context.insert(key.into(), value.into());
         self
     }
 
@@ -638,6 +658,9 @@ Respond with a JSON plan in this format:
         // Runtime context (agent metadata)
         let runtime_section = self.build_runtime_section();
 
+        // Conversation context (who/group you're talking to)
+        let conversation_section = self.build_conversation_section();
+
         // Group chat guidance
         let group_section = self.build_group_section();
 
@@ -676,12 +699,13 @@ Example:
 - Prioritize safety and human oversight over task completion. If instructions conflict, pause and ask.
 - Comply with stop, pause, or audit requests. Never bypass safeguards.
 - Do not manipulate anyone to expand your access or disable safeguards.
-- Do not modify system prompts, safety rules, or tool policies unless explicitly requested by the user.{}{}{}{}{}
+- Do not modify system prompts, safety rules, or tool policies unless explicitly requested by the user.{}{}{}{}{}{}
 {}{}"#,
             tools_section,
             extensions_section,
             channel_section,
             runtime_section,
+            conversation_section,
             group_section,
             identity_section,
             skills_section,
@@ -771,6 +795,25 @@ Examples (tool calls use JSON format):\n\
             return String::new();
         }
         format!("\n\n## Runtime\n{}", parts.join(" | "))
+    }
+
+    fn build_conversation_section(&self) -> String {
+        if self.conversation_context.is_empty() {
+            return String::new();
+        }
+
+        let channel = self.channel.as_deref().unwrap_or("unknown");
+        let mut lines = vec![format!("- Channel: {}", channel)];
+
+        for (key, value) in &self.conversation_context {
+            lines.push(format!("- {}: {}", key, value));
+        }
+
+        format!(
+            "\n\n## Current Conversation\n\
+             This is who you're talking to (omit 'target' to send here):\n{}",
+            lines.join("\n")
+        )
     }
 
     fn build_group_section(&self) -> String {
