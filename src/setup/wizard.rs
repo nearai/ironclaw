@@ -2199,6 +2199,19 @@ impl SetupWizard {
             env_vars.push(("NEARAI_API_KEY", api_key));
         }
 
+        // Preserve OAuth tokens (same chicken-and-egg: Config::from_env() runs
+        // before DB is connected, so secrets aren't available yet).
+        if let Ok(token) = std::env::var("ANTHROPIC_OAUTH_TOKEN")
+            && !token.is_empty()
+        {
+            env_vars.push(("ANTHROPIC_OAUTH_TOKEN", token));
+        }
+        if let Ok(token) = std::env::var("CODEX_OAUTH_TOKEN")
+            && !token.is_empty()
+        {
+            env_vars.push(("CODEX_OAUTH_TOKEN", token));
+        }
+
         // Always write ONBOARD_COMPLETED so that check_onboard_needed()
         // (which runs before the DB is connected) knows to skip re-onboarding.
         if self.settings.onboard_completed {

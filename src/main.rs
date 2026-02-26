@@ -157,6 +157,18 @@ async fn main() -> anyhow::Result<()> {
         wizard.run().await?;
     }
 
+    // Re-extract fresh OAuth tokens before config resolution.
+    // Bootstrap .env may have a stale token (they expire in 8-12h), so
+    // try the OS credential store for a fresher one. Only set the env var
+    // if it's not already present (explicit env always wins).
+    if std::env::var("ANTHROPIC_OAUTH_TOKEN").map_or(true, |v| v.is_empty())
+        && std::env::var("ANTHROPIC_API_KEY").map_or(true, |v| v.is_empty())
+        && let Some(fresh) = ironclaw::config::ClaudeCodeConfig::extract_oauth_token()
+    {
+        // SAFETY: runs single-threaded before tokio runtime spawns tasks.
+        unsafe { std::env::set_var("ANTHROPIC_OAUTH_TOKEN", &fresh) };
+    }
+
     // Load initial config from env + disk + optional TOML (before DB is available)
     let toml_path = cli.config.as_deref();
     let config = match Config::from_env_with_toml(toml_path).await {
