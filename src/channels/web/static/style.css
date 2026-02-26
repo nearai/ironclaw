@@ -833,6 +833,75 @@ body {
   font-style: italic;
 }
 
+/* Tool calls summary (persisted between user/assistant messages) */
+.tool-calls-summary {
+  background: var(--bg-secondary);
+  border-left: 3px solid var(--warning);
+  padding: 6px 12px;
+  margin: 4px 0;
+  font-size: 0.85em;
+  border-radius: 4px;
+}
+
+.tool-calls-header {
+  color: var(--text-secondary);
+  font-weight: 500;
+  user-select: none;
+}
+
+.tool-calls-header::before {
+  content: '\25B6';
+  display: inline-block;
+  margin-right: 6px;
+  font-size: 0.7em;
+  transition: transform 0.15s;
+}
+
+.tool-calls-header.expanded::before {
+  transform: rotate(90deg);
+}
+
+.tool-calls-list {
+  margin-top: 6px;
+  display: none;
+}
+
+.tool-calls-list.expanded {
+  display: block;
+}
+
+.tool-call-item {
+  padding: 3px 0;
+  border-bottom: 1px solid var(--border);
+}
+
+.tool-call-item:last-child {
+  border-bottom: none;
+}
+
+.tool-call-name {
+  font-weight: 500;
+  color: var(--text-primary);
+}
+
+.tool-call-preview {
+  color: var(--text-secondary);
+  font-size: 0.9em;
+  max-height: 60px;
+  overflow: hidden;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.tool-call-error-text {
+  color: var(--danger);
+  font-size: 0.9em;
+}
+
+.tool-error .tool-call-name {
+  color: var(--danger);
+}
+
 /* Auth card (inline in chat) */
 .auth-card {
   align-self: flex-start;

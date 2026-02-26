@@ -21,6 +21,19 @@ use crate::context::JobContext;
 use crate::error::Error;
 use crate::llm::ChatMessage;
 
+/// Truncate a string to at most `max_bytes` bytes at a char boundary, appending "...".
+fn truncate_preview(s: &str, max_bytes: usize) -> String {
+    if s.len() <= max_bytes {
+        return s.to_string();
+    }
+    // Walk backwards from max_bytes to find a valid char boundary
+    let mut end = max_bytes;
+    while !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("{}...", &s[..end])
+}
+
 impl Agent {
     /// Hydrate a historical thread from DB into memory if not already present.
     ///
@@ -69,6 +82,8 @@ impl Agent {
                 .filter_map(|m| match m.role.as_str() {
                     "user" => Some(ChatMessage::user(&m.content)),
                     "assistant" => Some(ChatMessage::assistant(&m.content)),
+                    // tool_calls rows are UI metadata (tool name + preview),
+                    // not part of the LLM conversation context.
                     _ => None,
                 })
                 .collect();
@@ -315,6 +330,11 @@ impl Agent {
                 };
 
                 thread.complete_turn(&response);
+                let tool_calls = thread
+                    .turns
+                    .last()
+                    .map(|t| t.tool_calls.clone())
+                    .unwrap_or_default();
                 let _ = self
                     .channels
                     .send_status(
@@ -324,7 +344,9 @@ impl Agent {
                     )
                     .await;
 
-                // Persist assistant response (user message already persisted at turn start)
+                // Persist tool calls then assistant response (user message already persisted at turn start)
+                self.persist_tool_calls(thread_id, &message.user_id, &tool_calls)
+                    .await;
                 self.persist_assistant_response(thread_id, &message.user_id, &response)
                     .await;
 
@@ -420,6 +442,68 @@ impl Agent {
             .await
         {
             tracing::warn!("Failed to persist assistant message: {}", e);
+        }
+    }
+
+    /// Persist tool call summaries to the DB as a `role="tool_calls"` message.
+    ///
+    /// Stored between the user and assistant messages so that
+    /// `build_turns_from_db_messages` can reconstruct the tool call history.
+    /// Content is a JSON array of tool call summaries.
+    pub(super) async fn persist_tool_calls(
+        &self,
+        thread_id: Uuid,
+        user_id: &str,
+        tool_calls: &[crate::agent::session::TurnToolCall],
+    ) {
+        if tool_calls.is_empty() {
+            return;
+        }
+
+        let store = match self.store() {
+            Some(s) => Arc::clone(s),
+            None => return,
+        };
+
+        let summaries: Vec<serde_json::Value> = tool_calls
+            .iter()
+            .map(|tc| {
+                let mut obj = serde_json::json!({ "name": tc.name });
+                if let Some(ref result) = tc.result {
+                    let preview = match result {
+                        serde_json::Value::String(s) => truncate_preview(s, 500),
+                        other => truncate_preview(&other.to_string(), 500),
+                    };
+                    obj["result_preview"] = serde_json::Value::String(preview);
+                }
+                if let Some(ref error) = tc.error {
+                    obj["error"] = serde_json::Value::String(error.clone());
+                }
+                obj
+            })
+            .collect();
+
+        let content = match serde_json::to_string(&summaries) {
+            Ok(c) => c,
+            Err(e) => {
+                tracing::warn!("Failed to serialize tool calls: {}", e);
+                return;
+            }
+        };
+
+        if let Err(e) = store
+            .ensure_conversation(thread_id, "gateway", user_id, None)
+            .await
+        {
+            tracing::warn!("Failed to ensure conversation {}: {}", thread_id, e);
+            return;
+        }
+
+        if let Err(e) = store
+            .add_conversation_message(thread_id, "tool_calls", &content)
+            .await
+        {
+            tracing::warn!("Failed to persist tool calls: {}", e);
         }
     }
 
@@ -591,7 +675,8 @@ impl Agent {
                 .ok_or_else(|| Error::from(crate::error::JobError::NotFound { id: thread_id }))?;
 
             if thread.state != ThreadState::AwaitingApproval {
-                return Ok(SubmissionResult::error("No pending approval request."));
+                // Stale or duplicate approval (tool already executed) — silently ignore.
+                return Ok(SubmissionResult::ok_with_message(""));
             }
 
             thread.take_pending_approval()
@@ -599,7 +684,7 @@ impl Agent {
 
         let pending = match pending {
             Some(p) => p,
-            None => return Ok(SubmissionResult::error("No pending approval request.")),
+            None => return Ok(SubmissionResult::ok_with_message("")),
         };
 
         // Verify request ID if provided
@@ -1040,7 +1125,14 @@ impl Agent {
             match result {
                 Ok(AgenticLoopResult::Response(response)) => {
                     thread.complete_turn(&response);
-                    // User message already persisted at turn start; save assistant response
+                    let tool_calls = thread
+                        .turns
+                        .last()
+                        .map(|t| t.tool_calls.clone())
+                        .unwrap_or_default();
+                    // User message already persisted at turn start; save tool calls then assistant response
+                    self.persist_tool_calls(thread_id, &message.user_id, &tool_calls)
+                        .await;
                     self.persist_assistant_response(thread_id, &message.user_id, &response)
                         .await;
                     let _ = self

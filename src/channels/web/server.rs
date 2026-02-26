@@ -364,6 +364,18 @@ pub async fn start_server(
     Ok(bound_addr)
 }
 
+/// Truncate a string to at most `max_bytes` bytes at a char boundary, appending "...".
+fn truncate_preview(s: &str, max_bytes: usize) -> String {
+    if s.len() <= max_bytes {
+        return s.to_string();
+    }
+    let mut end = max_bytes;
+    while !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("{}...", &s[..end])
+}
+
 // --- Static file handlers ---
 
 async fn index_handler() -> impl IntoResponse {
@@ -730,12 +742,13 @@ async fn chat_history_handler(
             turns,
             has_more,
             oldest_timestamp,
+            pending_approval: None,
         }));
     }
 
     // Try in-memory first (freshest data for active threads)
     if let Some(thread) = sess.threads.get(&thread_id)
-        && !thread.turns.is_empty()
+        && (!thread.turns.is_empty() || thread.pending_approval.is_some())
     {
         let turns: Vec<TurnInfo> = thread
             .turns
@@ -754,16 +767,32 @@ async fn chat_history_handler(
                         name: tc.name.clone(),
                         has_result: tc.result.is_some(),
                         has_error: tc.error.is_some(),
+                        result_preview: tc.result.as_ref().map(|r| {
+                            let s = match r {
+                                serde_json::Value::String(s) => s.clone(),
+                                other => other.to_string(),
+                            };
+                            truncate_preview(&s, 500)
+                        }),
+                        error: tc.error.clone(),
                     })
                     .collect(),
             })
             .collect();
+
+        let pending_approval = thread.pending_approval.as_ref().map(|pa| PendingApprovalInfo {
+            request_id: pa.request_id.to_string(),
+            tool_name: pa.tool_name.clone(),
+            description: pa.description.clone(),
+            parameters: serde_json::to_string_pretty(&pa.parameters).unwrap_or_default(),
+        });
 
         return Ok(Json(HistoryResponse {
             thread_id,
             turns,
             has_more: false,
             oldest_timestamp: None,
+            pending_approval,
         }));
     }
 
@@ -782,6 +811,7 @@ async fn chat_history_handler(
                 turns,
                 has_more,
                 oldest_timestamp,
+                pending_approval: None,
             }));
         }
     }
@@ -792,10 +822,16 @@ async fn chat_history_handler(
         turns: Vec::new(),
         has_more: false,
         oldest_timestamp: None,
+        pending_approval: None,
     }))
 }
 
-/// Build TurnInfo pairs from flat DB messages (alternating user/assistant).
+/// Build TurnInfo pairs from flat DB messages (user/tool_calls/assistant triples).
+///
+/// Handles three message patterns:
+/// - `user → assistant` (legacy, no tool calls)
+/// - `user → tool_calls → assistant` (with persisted tool call summaries)
+/// - `user` alone (incomplete turn)
 fn build_turns_from_db_messages(messages: &[crate::history::ConversationMessage]) -> Vec<TurnInfo> {
     let mut turns = Vec::new();
     let mut turn_number = 0;
@@ -812,6 +848,32 @@ fn build_turns_from_db_messages(messages: &[crate::history::ConversationMessage]
                 completed_at: None,
                 tool_calls: Vec::new(),
             };
+
+            // Check if next message is a tool_calls record
+            if let Some(next) = iter.peek()
+                && next.role == "tool_calls"
+            {
+                let tc_msg = iter.next().expect("peeked");
+                if let Ok(calls) =
+                    serde_json::from_str::<Vec<serde_json::Value>>(&tc_msg.content)
+                {
+                    turn.tool_calls = calls
+                        .iter()
+                        .map(|c| ToolCallInfo {
+                            name: c["name"]
+                                .as_str()
+                                .unwrap_or("unknown")
+                                .to_string(),
+                            has_result: c.get("result_preview").is_some(),
+                            has_error: c.get("error").is_some(),
+                            result_preview: c["result_preview"]
+                                .as_str()
+                                .map(String::from),
+                            error: c["error"].as_str().map(String::from),
+                        })
+                        .collect();
+                }
+            }
 
             // Check if next message is an assistant response
             if let Some(next) = iter.peek()
@@ -865,7 +927,7 @@ async fn chat_threads_handler(
                 let info = ThreadInfo {
                     id: s.id,
                     state: "Idle".to_string(),
-                    turn_count: (s.message_count / 2).max(0) as usize,
+                    turn_count: s.message_count.max(0) as usize,
                     created_at: s.started_at.to_rfc3339(),
                     updated_at: s.last_activity.to_rfc3339(),
                     title: s.title.clone(),
