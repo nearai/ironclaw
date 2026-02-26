@@ -592,6 +592,12 @@ async fn main() -> anyhow::Result<()> {
 
     let channels = Arc::new(channels);
 
+    // Register message tool for sending messages to connected channels
+    components
+        .tools
+        .register_message_tools(Arc::clone(&channels))
+        .await;
+
     // Wire up channel runtime for hot-activation of WASM channels.
     if let Some(ref ext_mgr) = components.extension_manager
         && let Some((rt, ps, router)) = wasm_channel_runtime_state.take()
