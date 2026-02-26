@@ -1,8 +1,12 @@
-//! Structured fallback deliverables for failed/stuck jobs.
+//! Structured fallback deliverables for failed or stuck jobs.
 //!
-//! When a job fails, a [`FallbackDeliverable`] captures what was accomplished
-//! before the failure: partial results, action statistics, cost, and timing.
-//! This gives users visibility into failed jobs instead of just an error string.
+//! When a job fails or is detected as stuck, a [`FallbackDeliverable`] captures
+//! what was accomplished before the failure: partial results, action statistics,
+//! cost, and timing. This gives users visibility into terminal jobs instead of
+//! just an error string.
+//!
+//! Fallback deliverables are stored in `JobContext.metadata["fallback_deliverable"]`
+//! and surfaced through the `job_status` tool.
 
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
@@ -12,8 +16,8 @@ use crate::context::state::JobContext;
 
 /// Structured summary of a failed or stuck job.
 ///
-/// Stored in `JobContext.metadata["fallback_deliverable"]` when a job fails.
-/// Surfaced via SSE `job_result` events and the `job_status` tool.
+/// Stored in `JobContext.metadata["fallback_deliverable"]` when a job fails
+/// or is marked stuck. Surfaced through the `job_status` tool.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FallbackDeliverable {
     /// True if at least one action succeeded before failure.
@@ -83,7 +87,7 @@ impl FallbackDeliverable {
 
         Self {
             partial: successful > 0,
-            failure_reason: reason.to_string(),
+            failure_reason: truncate_str(reason, 1000).to_string(),
             last_action,
             action_stats: ActionStats {
                 total,
@@ -244,6 +248,31 @@ mod tests {
 
         let fb = FallbackDeliverable::build(&ctx, &memory, "failed");
         assert!((fb.elapsed_secs - 0.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn test_fallback_elapsed_time_no_completed_at() {
+        let mut ctx = JobContext::new("Test", "Still running");
+        ctx.started_at = Some(Utc::now() - Duration::seconds(5));
+        // completed_at is None — should use Utc::now() as fallback
+
+        let memory = Memory::new(ctx.job_id);
+        let fb = FallbackDeliverable::build(&ctx, &memory, "stuck");
+
+        // Should be approximately 5 seconds (using now as end time)
+        assert!(fb.elapsed_secs >= 4.0 && fb.elapsed_secs <= 7.0);
+    }
+
+    #[test]
+    fn test_fallback_failure_reason_truncation() {
+        let ctx = JobContext::new("Test", "Long reason");
+        let memory = Memory::new(ctx.job_id);
+
+        let long_reason = "x".repeat(5000);
+        let fb = FallbackDeliverable::build(&ctx, &memory, &long_reason);
+
+        assert!(fb.failure_reason.len() <= 1000);
+        assert!(!fb.failure_reason.is_empty());
     }
 
     #[test]
