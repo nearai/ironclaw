@@ -1104,6 +1104,11 @@ impl SetupWizard {
             ));
         }
 
+        // Set env var so write_bootstrap_env() can persist it, and so
+        // subsequent wizard steps (model selection) can use it immediately.
+        // SAFETY: Single-threaded wizard context.
+        unsafe { std::env::set_var(env_var, key_str) };
+
         // Cache key in memory for model fetching later in the wizard
         self.llm_api_key = Some(SecretString::from(key_str.to_string()));
 
@@ -2192,24 +2197,26 @@ impl SetupWizard {
             env_vars.push(("OLLAMA_BASE_URL", url.clone()));
         }
 
-        // Preserve NEARAI_API_KEY if present (set by API key auth flow)
-        if let Ok(api_key) = std::env::var("NEARAI_API_KEY")
-            && !api_key.is_empty()
-        {
-            env_vars.push(("NEARAI_API_KEY", api_key));
-        }
-
-        // Preserve OAuth tokens (same chicken-and-egg: Config::from_env() runs
-        // before DB is connected, so secrets aren't available yet).
-        if let Ok(token) = std::env::var("ANTHROPIC_OAUTH_TOKEN")
-            && !token.is_empty()
-        {
-            env_vars.push(("ANTHROPIC_OAUTH_TOKEN", token));
-        }
-        if let Ok(token) = std::env::var("CODEX_OAUTH_TOKEN")
-            && !token.is_empty()
-        {
-            env_vars.push(("CODEX_OAUTH_TOKEN", token));
+        // Preserve LLM credentials: Config::from_env() runs before the DB is
+        // connected, so secrets stored only in the encrypted DB aren't available
+        // yet. Write any present API keys / OAuth tokens to the bootstrap .env
+        // so the initial config resolution succeeds.
+        let credential_vars = [
+            "NEARAI_API_KEY",
+            "ANTHROPIC_API_KEY",
+            "ANTHROPIC_OAUTH_TOKEN",
+            "OPENAI_API_KEY",
+            "CODEX_OAUTH_TOKEN",
+            "LLM_API_KEY",
+            "TINFOIL_API_KEY",
+        ];
+        for var in credential_vars {
+            if let Ok(val) = std::env::var(var)
+                && !val.is_empty()
+                && val != "oauth-placeholder"
+            {
+                env_vars.push((var, val));
+            }
         }
 
         // Always write ONBOARD_COMPLETED so that check_onboard_needed()
