@@ -1105,7 +1105,7 @@ function connectLogSSE() {
       logBuffer.push(entry);
       return;
     }
-    appendLogEntry(entry);
+    prependLogEntry(entry);
   });
 
   logEventSource.onerror = () => {
@@ -1113,7 +1113,7 @@ function connectLogSSE() {
   };
 }
 
-function appendLogEntry(entry) {
+function prependLogEntry(entry) {
   const output = document.getElementById('logs-output');
 
   // Level filter
@@ -1154,16 +1154,16 @@ function appendLogEntry(entry) {
     div.style.display = 'none';
   }
 
-  output.appendChild(div);
+  output.prepend(div);
 
-  // Cap entries
+  // Cap entries (remove oldest at the bottom)
   while (output.children.length > LOG_MAX_ENTRIES) {
-    output.removeChild(output.firstChild);
+    output.removeChild(output.lastChild);
   }
 
-  // Auto-scroll
+  // Auto-scroll to top (newest entries are at the top)
   if (document.getElementById('logs-autoscroll').checked) {
-    output.scrollTop = output.scrollHeight;
+    output.scrollTop = 0;
   }
 }
 
@@ -1173,9 +1173,9 @@ function toggleLogsPause() {
   btn.textContent = logsPaused ? 'Resume' : 'Pause';
 
   if (!logsPaused) {
-    // Flush buffer
+    // Flush buffer: oldest-first + prepend naturally puts newest at top
     for (const entry of logBuffer) {
-      appendLogEntry(entry);
+      prependLogEntry(entry);
     }
     logBuffer = [];
   }
