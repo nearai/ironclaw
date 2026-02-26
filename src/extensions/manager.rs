@@ -52,6 +52,14 @@ struct ChannelRuntimeState {
     telegram_owner_id: Option<i64>,
 }
 
+/// Result of saving setup secrets and attempting activation.
+pub struct SetupResult {
+    /// Human-readable status message.
+    pub message: String,
+    /// Whether the channel was successfully activated after saving secrets.
+    pub activated: bool,
+}
+
 /// Central manager for extension lifecycle operations.
 pub struct ExtensionManager {
     registry: ExtensionRegistry,
@@ -82,6 +90,11 @@ pub struct ExtensionManager {
     store: Option<Arc<dyn crate::db::Database>>,
     /// Names of WASM channels that were successfully loaded at startup.
     active_channel_names: RwLock<HashSet<String>>,
+    /// Last activation error for each WASM channel (ephemeral, cleared on success).
+    activation_errors: RwLock<HashMap<String, String>>,
+    /// SSE broadcast sender (set post-construction via `set_sse_sender()`).
+    sse_sender:
+        RwLock<Option<tokio::sync::broadcast::Sender<crate::channels::web::types::SseEvent>>>,
 }
 
 impl ExtensionManager {
@@ -121,6 +134,8 @@ impl ExtensionManager {
             user_id,
             store,
             active_channel_names: RwLock::new(HashSet::new()),
+            activation_errors: RwLock::new(HashMap::new()),
+            sse_sender: RwLock::new(None),
         }
     }
 
@@ -151,6 +166,25 @@ impl ExtensionManager {
     pub async fn set_active_channels(&self, names: Vec<String>) {
         let mut active = self.active_channel_names.write().await;
         active.extend(names);
+    }
+
+    /// Set the SSE broadcast sender for pushing extension status events to the web UI.
+    pub async fn set_sse_sender(
+        &self,
+        sender: tokio::sync::broadcast::Sender<crate::channels::web::types::SseEvent>,
+    ) {
+        *self.sse_sender.write().await = Some(sender);
+    }
+
+    /// Broadcast an extension status change to the web UI via SSE.
+    async fn broadcast_extension_status(&self, name: &str, status: &str, message: Option<&str>) {
+        if let Some(ref sender) = *self.sse_sender.read().await {
+            let _ = sender.send(crate::channels::web::types::SseEvent::ExtensionStatus {
+                extension_name: name.to_string(),
+                status: status.to_string(),
+                message: message.map(|m| m.to_string()),
+            });
+        }
     }
 
     /// Search for extensions. If `discover` is true, also searches online.
@@ -299,6 +333,7 @@ impl ExtensionManager {
                             tools,
                             needs_setup: false,
                             installed: true,
+                            activation_error: None,
                         });
                     }
                 }
@@ -327,6 +362,7 @@ impl ExtensionManager {
                             tools: if active { vec![name] } else { Vec::new() },
                             needs_setup: false,
                             installed: true,
+                            activation_error: None,
                         });
                     }
                 }
@@ -343,10 +379,12 @@ impl ExtensionManager {
             match crate::channels::wasm::discover_channels(&self.wasm_channels_dir).await {
                 Ok(channels) => {
                     let active_names = self.active_channel_names.read().await;
+                    let errors = self.activation_errors.read().await;
                     for (name, _discovered) in channels {
                         let active = active_names.contains(&name);
                         let (authenticated, needs_setup) =
                             self.check_channel_auth_status(&name).await;
+                        let activation_error = errors.get(&name).cloned();
                         extensions.push(InstalledExtension {
                             name,
                             kind: ExtensionKind::WasmChannel,
@@ -357,6 +395,7 @@ impl ExtensionManager {
                             tools: Vec::new(),
                             needs_setup,
                             installed: true,
+                            activation_error,
                         });
                     }
                 }
@@ -392,6 +431,7 @@ impl ExtensionManager {
                     tools: Vec::new(),
                     needs_setup: false,
                     installed: false,
+                    activation_error: None,
                 });
             }
         }
@@ -2087,11 +2127,14 @@ impl ExtensionManager {
     }
 
     /// Save setup secrets for an extension, validating names against the capabilities schema.
+    ///
+    /// After saving, attempts to hot-activate the channel. Returns a [`SetupResult`]
+    /// indicating whether activation succeeded (so the frontend can show appropriate UI).
     pub async fn save_setup_secrets(
         &self,
         name: &str,
         secrets: &std::collections::HashMap<String, String>,
-    ) -> Result<String, ExtensionError> {
+    ) -> Result<SetupResult, ExtensionError> {
         let kind = self.determine_installed_kind(name).await?;
         if kind != ExtensionKind::WasmChannel {
             return Err(ExtensionError::Other(
@@ -2174,21 +2217,38 @@ impl ExtensionManager {
 
         // Try to hot-activate the channel now that secrets are saved
         match self.activate_wasm_channel(name).await {
-            Ok(result) => Ok(format!(
-                "Configuration saved and channel '{}' activated. {}",
-                name, result.message
-            )),
+            Ok(result) => {
+                self.activation_errors.write().await.remove(name);
+                self.broadcast_extension_status(name, "active", None).await;
+                Ok(SetupResult {
+                    message: format!(
+                        "Configuration saved and channel '{}' activated. {}",
+                        name, result.message
+                    ),
+                    activated: true,
+                })
+            }
             Err(e) => {
+                let error_msg = e.to_string();
                 tracing::warn!(
                     channel = name,
                     error = %e,
                     "Saved configuration but hot-activation failed, restart may be needed"
                 );
-                Ok(format!(
-                    "Configuration saved for '{}'. \
-                     Automatic activation failed ({}), restart IronClaw to activate.",
-                    name, e
-                ))
+                self.activation_errors
+                    .write()
+                    .await
+                    .insert(name.to_string(), error_msg.clone());
+                self.broadcast_extension_status(name, "failed", Some(&error_msg))
+                    .await;
+                Ok(SetupResult {
+                    message: format!(
+                        "Configuration saved for '{}'. \
+                         Automatic activation failed ({}), restart IronClaw to activate.",
+                        name, e
+                    ),
+                    activated: false,
+                })
             }
         }
     }
