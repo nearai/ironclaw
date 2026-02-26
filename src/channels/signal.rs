@@ -1080,6 +1080,36 @@ impl Channel for SignalChannel {
             })
         }
     }
+
+    fn conversation_context(
+        &self,
+        metadata: &serde_json::Value,
+    ) -> std::collections::HashMap<String, String> {
+        use std::collections::HashMap;
+        let mut ctx = HashMap::new();
+
+        if let Some(sender) = metadata
+            .get("signal_sender")
+            .and_then(|v| v.as_str())
+        {
+            ctx.insert("sender".to_string(), sender.to_string());
+        }
+        if let Some(sender_uuid) = metadata
+            .get("signal_sender_uuid")
+            .and_then(|v| v.as_str())
+        {
+            ctx.insert("sender_uuid".to_string(), sender_uuid.to_string());
+        }
+        if let Some(target) = metadata
+            .get("signal_target")
+            .and_then(|v| v.as_str())
+            && target.starts_with("group:")
+        {
+            ctx.insert("group".to_string(), target.to_string());
+        }
+
+        ctx
+    }
 }
 
 impl SignalChannel {
@@ -2702,5 +2732,43 @@ mod tests {
         let paths = vec!["file\0.txt".to_string()];
         let result = SignalChannel::validate_attachment_paths(&paths);
         assert!(result.is_err());
+    }
+
+    // ── conversation context ───────────────────────────────────────────
+
+    #[test]
+    fn conversation_context_extracts_sender() {
+        let ch = SignalChannel::new(make_config()).unwrap();
+        let metadata = serde_json::json!({
+            "signal_sender": "+1234567890",
+            "signal_sender_uuid": "uuid-123",
+            "signal_target": "+0987654321"
+        });
+        let ctx = ch.conversation_context(&metadata);
+        assert_eq!(ctx.get("sender"), Some(&"+1234567890".to_string()));
+        assert_eq!(ctx.get("sender_uuid"), Some(&"uuid-123".to_string()));
+        assert!(ctx.get("group").is_none());
+    }
+
+    #[test]
+    fn conversation_context_extracts_group() {
+        let ch = SignalChannel::new(make_config()).unwrap();
+        let metadata = serde_json::json!({
+            "signal_sender": "+1234567890",
+            "signal_target": "group:mygroup"
+        });
+        let ctx = ch.conversation_context(&metadata);
+        assert_eq!(ctx.get("sender"), Some(&"+1234567890".to_string()));
+        assert_eq!(ctx.get("group"), Some(&"group:mygroup".to_string()));
+    }
+
+    #[test]
+    fn conversation_context_empty_for_unknown_channel() {
+        let ch = SignalChannel::new(make_config()).unwrap();
+        let metadata = serde_json::json!({
+            "unknown_key": "value"
+        });
+        let ctx = ch.conversation_context(&metadata);
+        assert!(ctx.is_empty());
     }
 }

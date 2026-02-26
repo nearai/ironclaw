@@ -109,28 +109,9 @@ impl Agent {
 
         // Pass channel-specific conversation context to the LLM.
         // This helps the agent know who/group it's talking to.
-        if message.channel == "signal" {
-            if let Some(sender) = message
-                .metadata
-                .get("signal_sender")
-                .and_then(|v| v.as_str())
-            {
-                reasoning = reasoning.with_conversation_data("sender", sender);
-            }
-            if let Some(sender_uuid) = message
-                .metadata
-                .get("signal_sender_uuid")
-                .and_then(|v| v.as_str())
-            {
-                reasoning = reasoning.with_conversation_data("sender_uuid", sender_uuid);
-            }
-            if let Some(target) = message
-                .metadata
-                .get("signal_target")
-                .and_then(|v| v.as_str())
-                && target.starts_with("group:")
-            {
-                reasoning = reasoning.with_conversation_data("group", target);
+        if let Some(channel) = self.channels.get_channel(&message.channel).await {
+            for (key, value) in channel.conversation_context(&message.metadata) {
+                reasoning = reasoning.with_conversation_data(&key, &value);
             }
         }
 

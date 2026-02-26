@@ -14,7 +14,7 @@ use crate::error::ChannelError;
 /// Includes an injection channel so background tasks (e.g., job monitors) can
 /// push messages into the agent loop without being a full `Channel` impl.
 pub struct ChannelManager {
-    channels: Arc<RwLock<HashMap<String, Box<dyn Channel>>>>,
+    channels: Arc<RwLock<HashMap<String, Arc<dyn Channel>>>>,
     inject_tx: mpsc::Sender<IncomingMessage>,
     /// Taken once in `start_all()` and merged into the stream.
     inject_rx: tokio::sync::Mutex<Option<mpsc::Receiver<IncomingMessage>>>,
@@ -42,7 +42,7 @@ impl ChannelManager {
     /// Add a channel to the manager.
     pub async fn add(&self, channel: Box<dyn Channel>) {
         let name = channel.name().to_string();
-        self.channels.write().await.insert(name.clone(), channel);
+        self.channels.write().await.insert(name.clone(), Arc::from(channel));
         tracing::debug!("Added channel: {}", name);
     }
 
@@ -56,7 +56,7 @@ impl ChannelManager {
         let stream = channel.start().await?;
 
         // Register for respond/broadcast/send_status
-        self.channels.write().await.insert(name.clone(), channel);
+        self.channels.write().await.insert(name.clone(), Arc::from(channel));
 
         // Forward stream messages through inject_tx
         let tx = self.inject_tx.clone();
@@ -216,6 +216,11 @@ impl ChannelManager {
     /// Get list of channel names.
     pub async fn channel_names(&self) -> Vec<String> {
         self.channels.read().await.keys().cloned().collect()
+    }
+
+    /// Get a channel by name.
+    pub async fn get_channel(&self, name: &str) -> Option<Arc<dyn Channel>> {
+        self.channels.read().await.get(name).cloned()
     }
 }
 

@@ -1,5 +1,6 @@
 //! Channel trait and message types.
 
+use std::collections::HashMap;
 use std::pin::Pin;
 
 use async_trait::async_trait;
@@ -206,6 +207,19 @@ pub trait Channel: Send + Sync {
 
     /// Check if the channel is healthy.
     async fn health_check(&self) -> Result<(), ChannelError>;
+
+    /// Get conversation context from message metadata for system prompt.
+    ///
+    /// Returns key-value pairs like "sender", "sender_uuid", "group" that
+    /// help the LLM understand who it's talking to.
+    ///
+    /// Default implementation returns empty map.
+    fn conversation_context(
+        &self,
+        _metadata: &serde_json::Value,
+    ) -> HashMap<String, String> {
+        HashMap::new()
+    }
 
     /// Gracefully shut down the channel.
     async fn shutdown(&self) -> Result<(), ChannelError> {
