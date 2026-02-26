@@ -292,6 +292,37 @@ impl Database for LibSqlBackend {
         conn.execute_batch(libsql_migrations::SCHEMA)
             .await
             .map_err(|e| DatabaseError::Migration(format!("libSQL migration failed: {}", e)))?;
+
+        // Incremental migrations for existing databases.
+        // Check schema metadata before ALTER TABLE to avoid brittle error-message matching.
+        let has_retry_col = {
+            let mut rows = conn
+                .query(
+                    "SELECT 1 FROM pragma_table_info('job_actions') WHERE name = 'retry_attempts' LIMIT 1",
+                    (),
+                )
+                .await
+                .map_err(|e| {
+                    DatabaseError::Migration(format!(
+                        "Failed to inspect job_actions schema: {e}"
+                    ))
+                })?;
+            rows.next()
+                .await
+                .map_err(|e| {
+                    DatabaseError::Migration(format!("Failed to read job_actions schema info: {e}"))
+                })?
+                .is_some()
+        };
+        if !has_retry_col {
+            conn.execute(
+                "ALTER TABLE job_actions ADD COLUMN retry_attempts INTEGER NOT NULL DEFAULT 0",
+                (),
+            )
+            .await
+            .map_err(|e| DatabaseError::Migration(format!("Incremental migration failed: {e}")))?;
+        }
+
         Ok(())
     }
 }

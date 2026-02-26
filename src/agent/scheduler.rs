@@ -424,23 +424,51 @@ impl Scheduler {
             .into());
         }
 
-        // Execute with per-tool timeout
+        // Execute with per-tool timeout and retry on transient errors
         let tool_timeout = tool.execution_timeout();
-        let result =
-            tokio::time::timeout(tool_timeout, async { tool.execute(params, &job_ctx).await })
-                .await
-                .map_err(|_| {
-                    Error::Tool(crate::error::ToolError::Timeout {
-                        name: tool_name.to_string(),
-                        timeout: tool_timeout,
-                    })
-                })?
-                .map_err(|e| {
-                    Error::Tool(crate::error::ToolError::ExecutionFailed {
-                        name: tool_name.to_string(),
-                        reason: e.to_string(),
-                    })
-                })?;
+        let retry_config = crate::tools::retry::effective_retry_config(tool.as_ref());
+        let retry_counter = std::sync::atomic::AtomicU32::new(0);
+        let result = tokio::time::timeout(tool_timeout, async {
+            crate::tools::retry::retry_tool_execute(
+                tool.as_ref(),
+                &params,
+                &job_ctx,
+                &retry_config,
+                tool_timeout,
+                &retry_counter,
+            )
+            .await
+        })
+        .await
+        .map_err(|_| {
+            let attempts = retry_counter.load(std::sync::atomic::Ordering::Relaxed);
+            if attempts > 0 {
+                tracing::warn!(
+                    tool = %tool_name,
+                    retry_attempts = attempts,
+                    "Subtask tool call timed out after retries"
+                );
+            }
+            Error::Tool(crate::error::ToolError::Timeout {
+                name: tool_name.to_string(),
+                timeout: tool_timeout,
+            })
+        })?;
+
+        if result.retry_attempts > 0 {
+            tracing::debug!(
+                tool = %tool_name,
+                retry_attempts = result.retry_attempts,
+                "Subtask tool call completed after retries"
+            );
+        }
+
+        let result = result.result.map_err(|e| {
+            Error::Tool(crate::error::ToolError::ExecutionFailed {
+                name: tool_name.to_string(),
+                reason: e.to_string(),
+            })
+        })?;
 
         Ok(TaskOutput::new(result.result, start.elapsed()))
     }

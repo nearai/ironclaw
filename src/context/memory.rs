@@ -36,6 +36,9 @@ pub struct ActionRecord {
     pub error: Option<String>,
     /// When the action was executed.
     pub executed_at: DateTime<Utc>,
+    /// Number of retry attempts before the final result (0 = no retries).
+    #[serde(default)]
+    pub retry_attempts: u32,
 }
 
 impl ActionRecord {
@@ -54,6 +57,7 @@ impl ActionRecord {
             success: false,
             error: None,
             executed_at: Utc::now(),
+            retry_attempts: 0,
         }
     }
 
@@ -88,6 +92,12 @@ impl ActionRecord {
     /// Set the cost.
     pub fn with_cost(mut self, cost: Decimal) -> Self {
         self.cost = Some(cost);
+        self
+    }
+
+    /// Set the number of retry attempts.
+    pub fn with_retry_attempts(mut self, retry_attempts: u32) -> Self {
+        self.retry_attempts = retry_attempts;
         self
     }
 }

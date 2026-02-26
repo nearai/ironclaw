@@ -11,6 +11,7 @@ pub mod builder;
 pub mod builtin;
 pub mod mcp;
 pub mod rate_limiter;
+pub mod retry;
 pub mod wasm;
 
 mod registry;
@@ -23,4 +24,8 @@ pub use builder::{
 };
 pub use rate_limiter::RateLimiter;
 pub use registry::ToolRegistry;
-pub use tool::{ApprovalRequirement, Tool, ToolDomain, ToolError, ToolOutput, ToolRateLimitConfig};
+pub use retry::{ToolRetryOutcome, effective_retry_config, retry_tool_execute};
+pub use tool::{
+    ApprovalRequirement, Tool, ToolDomain, ToolError, ToolErrorKind, ToolOutput,
+    ToolRateLimitConfig, ToolRetryConfig,
+};
