@@ -211,6 +211,9 @@ impl Config {
 /// env-var-first resolution in `LlmConfig::resolve()`. Keys in the overlay
 /// are read by `optional_env()` before falling back to `std::env::var()`,
 /// so explicit env vars always win.
+///
+/// Also loads tokens from OS credential stores (macOS Keychain, Linux
+/// credentials files) which don't require the secrets DB.
 pub async fn inject_llm_keys_from_secrets(
     secrets: &dyn crate::secrets::SecretsStore,
     user_id: &str,
@@ -242,6 +245,25 @@ pub async fn inject_llm_keys_from_secrets(
         }
     }
 
+    inject_os_credential_store_tokens(&mut injected);
+
+    let _ = INJECTED_VARS.set(injected);
+}
+
+/// Load tokens from OS credential stores (no DB required).
+///
+/// Called unconditionally during startup — even when the encrypted secrets DB
+/// is unavailable (no master key, no DB connection). This ensures OAuth tokens
+/// from `claude login` (macOS Keychain) and Codex CLI (`~/.codex/auth.json`)
+/// are available for config resolution.
+pub fn inject_os_credentials() {
+    let mut injected = HashMap::new();
+    inject_os_credential_store_tokens(&mut injected);
+    let _ = INJECTED_VARS.set(injected);
+}
+
+/// Shared helper: extract tokens from OS credential stores into the overlay map.
+fn inject_os_credential_store_tokens(injected: &mut HashMap<String, String>) {
     // Try the OS credential store for a fresh Anthropic OAuth token.
     // Tokens from `claude login` expire in 8-12h, so the DB copy may be stale.
     // A fresh extraction from macOS Keychain / Linux credentials.json wins
@@ -251,15 +273,18 @@ pub async fn inject_llm_keys_from_secrets(
         tracing::debug!("Refreshed ANTHROPIC_OAUTH_TOKEN from OS credential store");
     }
 
-    // Fallback: if OPENAI_API_KEY is still empty and we have a Codex token,
-    // inject it as OPENAI_API_KEY too (Codex tokens use the same Bearer auth).
+    // Try Codex CLI credential store for OpenAI-compatible token.
     if !injected.contains_key("OPENAI_API_KEY")
         && std::env::var("OPENAI_API_KEY").map_or(true, |v| v.is_empty())
-        && let Some(codex_token) = injected.get("CODEX_OAUTH_TOKEN").cloned()
     {
-        injected.insert("OPENAI_API_KEY".to_string(), codex_token);
-        tracing::debug!("Injected CODEX_OAUTH_TOKEN as fallback OPENAI_API_KEY");
+        if let Some(codex_token) = crate::config::extract_codex_oauth_token() {
+            injected.insert("OPENAI_API_KEY".to_string(), codex_token.clone());
+            injected.insert("CODEX_OAUTH_TOKEN".to_string(), codex_token);
+            tracing::debug!("Loaded Codex OAuth token from ~/.codex/auth.json");
+        } else if let Some(codex_token) = injected.get("CODEX_OAUTH_TOKEN").cloned() {
+            // Fallback: if CODEX_OAUTH_TOKEN was loaded from DB secrets, use it as OPENAI_API_KEY
+            injected.insert("OPENAI_API_KEY".to_string(), codex_token);
+            tracing::debug!("Injected CODEX_OAUTH_TOKEN as fallback OPENAI_API_KEY");
+        }
     }
-
-    let _ = INJECTED_VARS.set(injected);
 }
