@@ -588,6 +588,19 @@ impl Agent {
     }
 
     async fn handle_message(&self, message: &IncomingMessage) -> Result<Option<String>, Error> {
+        // Set message tool context for this turn (current channel and target)
+        // For Signal, use signal_target from metadata (group:ID or phone number),
+        // otherwise fall back to user_id
+        let target = message
+            .metadata
+            .get("signal_target")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| message.user_id.clone());
+        self.tools()
+            .set_message_tool_context(Some(message.channel.clone()), Some(target))
+            .await;
+
         // Parse submission type first
         let mut submission = SubmissionParser::parse(&message.content);
 

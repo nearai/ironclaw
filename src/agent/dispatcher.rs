@@ -106,6 +106,15 @@ impl Agent {
             .with_channel(message.channel.clone())
             .with_model_name(self.llm().active_model_name())
             .with_group_chat(is_group_chat);
+
+        // Pass channel-specific conversation context to the LLM.
+        // This helps the agent know who/group it's talking to.
+        if let Some(channel) = self.channels.get_channel(&message.channel).await {
+            for (key, value) in channel.conversation_context(&message.metadata) {
+                reasoning = reasoning.with_conversation_data(&key, &value);
+            }
+        }
+
         if let Some(prompt) = system_prompt {
             reasoning = reasoning.with_system_prompt(prompt);
         }
@@ -211,6 +220,15 @@ impl Agent {
                     "Forcing text-only response (iteration limit reached)"
                 );
             }
+
+            let _ = self
+                .channels
+                .send_status(
+                    &message.channel,
+                    StatusUpdate::Thinking("Calling LLM...".into()),
+                    &message.metadata,
+                )
+                .await;
 
             let output = match reasoning.respond_with_tools(&context).await {
                 Ok(output) => output,
