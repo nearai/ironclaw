@@ -884,13 +884,22 @@ fn store_fallback_in_metadata(
     ctx: &mut crate::context::JobContext,
     fallback: Option<&crate::context::FallbackDeliverable>,
 ) {
-    if let Some(fb) = fallback
-        && let Ok(val) = serde_json::to_value(fb)
-    {
-        if !ctx.metadata.is_object() {
-            ctx.metadata = serde_json::json!({});
+    let Some(fb) = fallback else {
+        return;
+    };
+    match serde_json::to_value(fb) {
+        Ok(val) => {
+            if !ctx.metadata.is_object() {
+                ctx.metadata = serde_json::json!({});
+            }
+            ctx.metadata["fallback_deliverable"] = val;
         }
-        ctx.metadata["fallback_deliverable"] = val;
+        Err(e) => {
+            tracing::warn!(
+                "Failed to serialize fallback deliverable for job {}: {e}",
+                ctx.job_id
+            );
+        }
     }
 }
 

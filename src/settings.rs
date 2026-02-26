@@ -1273,9 +1273,11 @@ mod tests {
         let from_db = Settings::from_db_map(&db_map);
 
         // Step 1 of the new wizard run: user enters a NEW database_url
-        let mut step1_settings = Settings::default();
-        step1_settings.database_backend = Some("postgres".to_string());
-        step1_settings.database_url = Some("postgres://new-host/ironclaw".to_string());
+        let step1_settings = Settings {
+            database_backend: Some("postgres".to_string()),
+            database_url: Some("postgres://new-host/ironclaw".to_string()),
+            ..Settings::default()
+        };
 
         // Wizard flow: load DB → merge_from(step1_overrides)
         let mut current = step1_settings.clone();

@@ -1374,11 +1374,16 @@ mod tests {
             .await
             .unwrap();
 
-        // Inject a fallback_deliverable into the job metadata.
+        // Inject a real FallbackDeliverable into the job metadata.
         let fallback = serde_json::json!({
-            "completed": false,
-            "actions_total": 3,
-            "actions_succeeded": 2,
+            "partial": true,
+            "failure_reason": "max iterations",
+            "last_action": null,
+            "action_stats": { "total": 5, "successful": 3, "failed": 2 },
+            "tokens_used": 1000,
+            "cost": "0.05",
+            "elapsed_secs": 12.5,
+            "repair_attempts": 1,
         });
         manager
             .update_context(job_id, |ctx| {
@@ -1393,9 +1398,12 @@ mod tests {
         let result = tool.execute(params, &ctx).await.unwrap();
 
         let fb = result.result.get("fallback_deliverable").unwrap();
-        assert_eq!(fb.get("actions_total").unwrap(), 3);
-        assert_eq!(fb.get("actions_succeeded").unwrap(), 2);
-        assert_eq!(fb.get("completed").unwrap(), false);
+        assert_eq!(fb.get("partial").unwrap(), true);
+        assert_eq!(fb.get("failure_reason").unwrap(), "max iterations");
+        let stats = fb.get("action_stats").unwrap();
+        assert_eq!(stats.get("total").unwrap(), 5);
+        assert_eq!(stats.get("successful").unwrap(), 3);
+        assert_eq!(stats.get("failed").unwrap(), 2);
     }
 
     #[test]
