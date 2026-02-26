@@ -1,9 +1,9 @@
 # IronClaw Documentation
 
-> Comprehensive developer reference for [IronClaw](https://github.com/nearai/ironclaw) v0.11.1
+> Comprehensive developer reference for [IronClaw](https://github.com/nearai/ironclaw) v0.12.0
 > — a secure, self-hosted personal AI assistant written in Rust.
 
-**Documentation set for IronClaw v0.11.1, validated against Git tag `v0.11.1` (commit `ebb4ce95`).**
+**Documentation set for IronClaw v0.12.0, validated against tag `v0.12.0` (`1156884`) in `~/src/ironclaw`.**
 
 ---
 
@@ -14,6 +14,7 @@
 | [INSTALLATION.md](INSTALLATION.md) | ~715 | Installation, configuration, service setup, troubleshooting |
 | [LLM_PROVIDERS.md](LLM_PROVIDERS.md) | ~174 | LLM backend configuration quick guide (NEAR AI, OpenAI, Anthropic, Ollama, OpenAI-compatible) |
 | [TELEGRAM_SETUP.md](TELEGRAM_SETUP.md) | ~137 | Telegram channel setup with DM pairing flow and webhook/polling modes |
+| [SIGNAL_SETUP.md](SIGNAL_SETUP.md) | ~120 | Signal channel setup via signal-cli HTTP daemon |
 | [BUILDING_CHANNELS.md](BUILDING_CHANNELS.md) | ~442 | WASM channel authoring and build/deploy workflow |
 | [ARCHITECTURE.md](ARCHITECTURE.md) | ~876 | Master architecture: modules, data flows, diagrams |
 | [DEVELOPER-REFERENCE.md](DEVELOPER-REFERENCE.md) | ~1072 | Developer reference: errors, config, code review patterns |
@@ -36,19 +37,19 @@
 
 IronClaw is a Rust-based personal AI assistant built by [NEAR AI](https://near.ai) with:
 
-- **Multi-channel**: REPL, web gateway (axum), HTTP webhooks, WASM plugin channels
+- **Multi-channel**: REPL, web gateway (axum), HTTP webhooks, WASM plugin channels, native Signal channel
 - **Security-first**: WASM sandbox (wasmtime), Docker isolation (bollard), credential injection, SSRF proxy
 - **Self-expanding**: Dynamic WASM tool builder, MCP protocol client, plugin architecture
 - **Persistent memory**: Hybrid FTS+vector search (RRF), workspace filesystem, identity files
 - **Multiple LLM backends**: NEAR AI, Anthropic, OpenAI, Ollama, OpenAI-compatible, Tinfoil
 - **Dual database**: libSQL (embedded, no server required) or PostgreSQL (with pgvector)
 
-### Source Module Statistics (v0.11.1)
+### Source Module Statistics (v0.12.0)
 
 | Module | Files | Description |
 |--------|------:|-------------|
 | `tools/` | 41 | Tool system: built-in, MCP, WASM, dynamic builder, rate limiter, HTML-to-Markdown |
-| `channels/` | 33 | Channels: REPL, web gateway, HTTP, WASM plugins (with pairing + hot-activate) |
+| `channels/` | 34 | Channels: REPL, web gateway, HTTP, native Signal, WASM plugins (with pairing + hot-activate) |
 | `agent/` | 21 | Agent runtime: loop, sessions, jobs, routines, heartbeat, context compaction |
 | `config/` | 17 | Configuration: all env vars and structs |
 | `workspace/` | 7 | Memory, embeddings, hybrid FTS+vector search |
@@ -56,8 +57,8 @@ IronClaw is a Rust-based personal AI assistant built by [NEAR AI](https://near.a
 | `tunnel/` | 6 | Tunnels: cloudflare, ngrok, tailscale, custom |
 | `secrets/` | 5 | Keychain, AES-256-GCM crypto, credential injection |
 | `worker/` | 5 | Docker worker: runtime, LLM bridge, proxy |
-| **Total (`src/`)** | **248** | ~113,083 Rust source lines in `src/` (v0.11.1 tag snapshot) |
-| **Total (repo-wide)** | **291** | ~129,040 Rust source lines including tests, channel/tool source trees, and helper binaries |
+| **Total (`src/`)** | **250** | ~113,000+ Rust source lines in `src/` (v0.12.0 tag snapshot) |
+| **Total (repo-wide)** | **293** | ~129,000+ Rust source lines including tests, channel/tool source trees, and helper binaries |
 
 ---
 
@@ -106,11 +107,23 @@ ironclaw --no-onboard
 curl http://127.0.0.1:3000/api/health
 ```
 
-See [INSTALLATION.md](INSTALLATION.md) for complete setup and deployment, [LLM_PROVIDERS.md](LLM_PROVIDERS.md) for backend-specific examples, [TELEGRAM_SETUP.md](TELEGRAM_SETUP.md) for Telegram pairing setup, and [BUILDING_CHANNELS.md](BUILDING_CHANNELS.md) for custom WASM channels.
+See [INSTALLATION.md](INSTALLATION.md) for complete setup and deployment, [LLM_PROVIDERS.md](LLM_PROVIDERS.md) for backend-specific examples, [TELEGRAM_SETUP.md](TELEGRAM_SETUP.md) or [SIGNAL_SETUP.md](SIGNAL_SETUP.md) for messaging channel setup, and [BUILDING_CHANNELS.md](BUILDING_CHANNELS.md) for custom WASM channels.
 
 ---
 
 ## What's New
+
+### v0.12.0 (2026-02-26)
+- **Signal Channel**: Native Signal messaging via signal-cli HTTP daemon — first-class channel alongside Telegram with tool approval workflow, DM pairing, group support, and allowlist controls
+- **OpenRouter Preset**: Setup wizard now includes OpenRouter as a dedicated provider option (200+ models via single API key)
+- **Web UI — Tool Activity Cards**: Inline tool execution cards with animated spinner, elapsed timer, and auto-collapsing summary after response
+- **Web UI — WASM Channel Setup Flow**: Improved setup stepper (Installed → Configured → Active) with state-aware action buttons
+- **Web UI — Newest-First Logs**: Log viewer now displays most recent entries at the top
+- **`--version` Flag**: `ironclaw --version` now officially supported, outputs `ironclaw 0.12.0`
+- **Skills Enabled by Default**: Skills system now active by default with fixed registry and install pipeline
+- **MCP Registry URL Fixes**: Corrected 6 MCP endpoint URLs, removed non-existent Google Drive and Google Calendar entries
+- **Docker Build Fix**: Dockerfile now correctly copies `migrations/`, `registry/`, `channels-src/`, `wit/` directories
+- **Extension Name Collision Fix**: Telegram and Slack tool registry names renamed to avoid conflicts with channel entries
 
 ### v0.11.1 (2026-02-23)
 - **CI/CD Fix**: Resolved release pipeline issue allowing custom `release.yml` jobs
@@ -144,8 +157,8 @@ See [INSTALLATION.md](INSTALLATION.md) for complete setup and deployment, [LLM_P
 
 ## Version
 
-Documented: IronClaw v0.11.1
-Release tag: [`v0.11.1`](https://github.com/nearai/ironclaw/releases/tag/v0.11.1) (`ebb4ce95`, 2026-02-23)
+Documented: IronClaw v0.12.0
+Release tag: [`v0.12.0`](https://github.com/nearai/ironclaw/releases/tag/v0.12.0) (`1156884`, 2026-02-26)
 Source: [github.com/nearai/ironclaw](https://github.com/nearai/ironclaw)
 Docs repo: [github.com/mudrii/ironclaw-docs](https://github.com/mudrii/ironclaw-docs)
-Generated: 2026-02-24
+Generated: 2026-02-26

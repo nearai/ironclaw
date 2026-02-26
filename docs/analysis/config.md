@@ -1,6 +1,6 @@
 # IronClaw Codebase Analysis — Configuration System
 
-> Updated: 2026-02-24 | Version: v0.11.1
+> Updated: 2026-02-24 | Version: v0.12.0
 
 ## 1. Overview
 
@@ -130,6 +130,16 @@ default is possible.
 | `WASM_CHANNELS_DIR` | path | `~/.ironclaw/channels/` | No | Directory containing WASM channel modules (Telegram, Slack, etc.) |
 | `WASM_CHANNELS_ENABLED` | bool | `true` | No | Enable WASM channel modules |
 | `TELEGRAM_OWNER_ID` | i64 | — | No | Telegram user ID. When set, bot only responds to this user |
+| **Channels: Signal** | | | | |
+| `SIGNAL_HTTP_URL` | string | — | If Signal enabled | Base URL of signal-cli HTTP daemon (e.g. `http://127.0.0.1:8080`). Setting this and `SIGNAL_ACCOUNT` enables the Signal channel |
+| `SIGNAL_ACCOUNT` | string | — | If Signal enabled | Bot's E.164 phone number (e.g. `+1234567890`) |
+| `SIGNAL_ALLOW_FROM` | string | `SIGNAL_ACCOUNT` | No | Comma-separated DM allowlist: phone numbers, UUIDs, `uuid:` prefix, or `*` |
+| `SIGNAL_ALLOW_FROM_GROUPS` | string | *(empty)* | No | Comma-separated group ID allowlist or `*` for all groups |
+| `SIGNAL_DM_POLICY` | string | `pairing` | No | DM policy: `open`, `allowlist`, or `pairing` |
+| `SIGNAL_GROUP_POLICY` | string | `allowlist` | No | Group policy: `disabled`, `allowlist`, or `open` |
+| `SIGNAL_GROUP_ALLOW_FROM` | string | *(inherits `SIGNAL_ALLOW_FROM`)* | No | Group sender allowlist |
+| `SIGNAL_IGNORE_ATTACHMENTS` | bool | `false` | No | Skip messages with attachments only |
+| `SIGNAL_IGNORE_STORIES` | bool | `true` | No | Skip Signal story messages |
 | **Tunnel** | | | | |
 | `TUNNEL_URL` | string | — | No | Static public HTTPS URL (externally managed tunnel). Must start with `https://` |
 | `TUNNEL_PROVIDER` | string | — | No | Managed tunnel provider: `ngrok`, `cloudflare`, `tailscale`, or `custom` |
@@ -351,6 +361,7 @@ pub struct ChannelsConfig {
     pub cli: CliConfig,
     pub http: Option<HttpConfig>,        // Some when HTTP_HOST or HTTP_PORT is set
     pub gateway: Option<GatewayConfig>,  // Some when GATEWAY_ENABLED != false
+    pub signal: Option<SignalConfig>,    // Some when SIGNAL_HTTP_URL and SIGNAL_ACCOUNT are set
     pub wasm_channels_dir: PathBuf,      // WASM_CHANNELS_DIR
     pub wasm_channels_enabled: bool,     // WASM_CHANNELS_ENABLED
     pub telegram_owner_id: Option<i64>,  // TELEGRAM_OWNER_ID
@@ -377,6 +388,67 @@ pub struct GatewayConfig {
 
 Note: `GATEWAY_ENABLED` defaults to `true`, meaning the gateway is on by default.
 Set `GATEWAY_ENABLED=false` to disable it entirely.
+
+### Signal Channel Configuration (`SignalConfig`) — v0.12.0
+
+The Signal channel is a native Rust channel (not WASM). It activates when `SIGNAL_HTTP_URL` and `SIGNAL_ACCOUNT` are set.
+
+#### Environment Variables
+
+| Variable | Required | Default | Description |
+|----------|----------|---------|-------------|
+| `SIGNAL_HTTP_URL` | **Yes** | — | Base URL of signal-cli HTTP daemon (e.g., `http://127.0.0.1:8080`) |
+| `SIGNAL_ACCOUNT` | **Yes** | — | Bot's E.164 phone number (e.g., `+1234567890`) |
+| `SIGNAL_ALLOW_FROM` | No | `SIGNAL_ACCOUNT` | Comma-separated DM allowlist: phone numbers, UUIDs, `uuid:` prefix, or `*` |
+| `SIGNAL_ALLOW_FROM_GROUPS` | No | *(empty — deny all)* | Group IDs or `*` for all groups |
+| `SIGNAL_DM_POLICY` | No | `pairing` | DM policy: `open`, `allowlist`, or `pairing` |
+| `SIGNAL_GROUP_POLICY` | No | `allowlist` | Group policy: `disabled`, `allowlist`, or `open` |
+| `SIGNAL_GROUP_ALLOW_FROM` | No | *(inherits `SIGNAL_ALLOW_FROM`)* | Group sender allowlist |
+| `SIGNAL_IGNORE_ATTACHMENTS` | No | `false` | Skip messages with attachments only |
+| `SIGNAL_IGNORE_STORIES` | No | `true` | Skip Signal story messages |
+
+#### Rust Struct (`SignalConfig`)
+
+```rust
+pub struct SignalConfig {
+    pub http_url: String,           // SIGNAL_HTTP_URL
+    pub account: String,            // SIGNAL_ACCOUNT
+    pub allow_from: Vec<String>,    // SIGNAL_ALLOW_FROM (comma-split)
+    pub allow_from_groups: Vec<String>, // SIGNAL_ALLOW_FROM_GROUPS
+    pub dm_policy: String,          // SIGNAL_DM_POLICY ("pairing")
+    pub group_policy: String,       // SIGNAL_GROUP_POLICY ("allowlist")
+    pub group_allow_from: Vec<String>,  // SIGNAL_GROUP_ALLOW_FROM
+    pub ignore_attachments: bool,   // SIGNAL_IGNORE_ATTACHMENTS (false)
+    pub ignore_stories: bool,       // SIGNAL_IGNORE_STORIES (true)
+}
+```
+
+#### Policy Modes
+
+**DM Policy (`SIGNAL_DM_POLICY`):**
+- `pairing` (default): allowlist + send pairing code to unknown users
+- `allowlist`: only senders in `SIGNAL_ALLOW_FROM` accepted; others silently ignored
+- `open`: all DMs accepted, ignoring `SIGNAL_ALLOW_FROM`
+
+**Group Policy (`SIGNAL_GROUP_POLICY`):**
+- `allowlist` (default): only groups in `SIGNAL_ALLOW_FROM_GROUPS` accepted
+- `disabled`: all group messages ignored
+- `open`: all groups accepted (respects `SIGNAL_ALLOW_FROM_GROUPS` if set)
+
+#### Example Configuration
+
+```env
+# Minimal (DM from bot's own account only)
+SIGNAL_HTTP_URL=http://127.0.0.1:8080
+SIGNAL_ACCOUNT=+1234567890
+
+# Allow specific users + all groups
+SIGNAL_HTTP_URL=http://127.0.0.1:8080
+SIGNAL_ACCOUNT=+1234567890
+SIGNAL_ALLOW_FROM=+1111111111,+2222222222
+SIGNAL_ALLOW_FROM_GROUPS=*
+SIGNAL_GROUP_POLICY=open
+```
 
 ### EmbeddingsConfig (`config/embeddings.rs`)
 
@@ -800,6 +872,20 @@ GATEWAY_AUTH_TOKEN="replace-with-random-hex-token"
 # WASM_CHANNELS_ENABLED="true"
 # WASM_CHANNELS_DIR="~/.ironclaw/channels/"
 # TELEGRAM_OWNER_ID="123456789"
+
+##############################################
+# Signal Channel (v0.12.0)
+##############################################
+# Requires signal-cli running with HTTP daemon enabled.
+# Both vars must be set to activate the channel.
+# SIGNAL_HTTP_URL="http://127.0.0.1:8080"
+# SIGNAL_ACCOUNT="+1234567890"
+# SIGNAL_ALLOW_FROM="+1111111111,+2222222222"   # or * for open
+# SIGNAL_ALLOW_FROM_GROUPS="*"                  # or specific group IDs
+# SIGNAL_DM_POLICY="pairing"                    # open | allowlist | pairing
+# SIGNAL_GROUP_POLICY="allowlist"               # disabled | allowlist | open
+# SIGNAL_IGNORE_ATTACHMENTS="false"
+# SIGNAL_IGNORE_STORIES="true"
 
 ##############################################
 # Tunnel (for public webhook endpoints)

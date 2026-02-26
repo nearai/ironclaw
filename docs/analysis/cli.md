@@ -1,6 +1,6 @@
 # IronClaw Codebase Analysis — CLI Interface
 
-> Updated: 2026-02-24 | Version: v0.11.1
+> Updated: 2026-02-26 | Version: v0.12.0
 
 ## 1. Overview
 
@@ -14,6 +14,7 @@ ironclaw [OPTIONS] [SUBCOMMAND]
 
 | Flag | Description |
 |------|-------------|
+| `--version` | Print the version and exit. As of v0.12.0, `ironclaw --version` is officially supported and outputs `ironclaw 0.12.0` (version from Cargo.toml). |
 | `--cli-only` | Run in interactive CLI mode only, disabling other channels (HTTP, WASM) |
 | `--no-db` | Skip database connection (useful for testing or offline use) |
 | `-m, --message <MSG>` | Single-message mode: send one message and exit |
@@ -116,7 +117,7 @@ The `ironclaw service` subcommand manages IronClaw as an OS-level background ser
 
 **Linux note:** On Linux, the service integrates with systemd and installs a user unit file to `~/.config/systemd/user/`.
 
-The `run`, `stop`, and `status` operations do not use a PID file managed by IronClaw itself — they delegate entirely to the OS service manager so the lifecycle is owned by a process supervisor that handles crash recovery and clean shutdown.
+The `start`, `stop`, and `status` operations do not use a PID file managed by IronClaw itself — they delegate entirely to the OS service manager so the lifecycle is owned by a process supervisor that handles crash recovery and clean shutdown.
 
 ---
 
@@ -208,7 +209,7 @@ Environment variable > TOML config file > Database (settings table) > Compiled d
 Generates a `config.toml` file at `~/.ironclaw/config.toml` (or `--output` path). Reads current settings from the database if connected, so the generated file reflects live configuration. Refuses to overwrite an existing file unless `--force` is passed. The generated file contains all available settings with their current values, ready for editing.
 
 **`config list [--filter PREFIX]`**
-Prints all settings as a two-column table (key, value). Long values are truncated at 60 characters. The `--filter` flag limits output to keys matching a dot-notation prefix, e.g., `--filter agent` shows only `agent.*` settings. The source (database or defaults) is printed as a header.
+Prints all settings as a two-column table (key, value). Long values are truncated for display. The `--filter` flag limits output to keys matching a dot-notation prefix, e.g., `--filter agent` shows only `agent.*` settings. The source (database or defaults) is printed as a header.
 
 **`config get <PATH>`**
 Prints the value of a single setting to stdout. Exits with an error if the path is not recognized. Useful for scripting: `ironclaw config get agent.max_parallel_jobs`.
@@ -247,7 +248,7 @@ IronClaw supports the Model Context Protocol (MCP) for connecting to hosted tool
 ```json
 {
   "name": "notion",
-  "url": "https://mcp.notion.com",
+  "url": "https://mcp.notion.com/mcp",
   "description": "Notion workspace integration",
   "enabled": true,
   "oauth": {
@@ -429,7 +430,7 @@ const GOOGLE_CLIENT_ID: &str = match option_env!("IRONCLAW_GOOGLE_CLIENT_ID") {
 
 Override at **compile time** by setting `IRONCLAW_GOOGLE_CLIENT_ID` and `IRONCLAW_GOOGLE_CLIENT_SECRET` before running `cargo build`. Override at **runtime** by setting `GOOGLE_OAUTH_CLIENT_ID` / `GOOGLE_OAUTH_CLIENT_SECRET` env vars; these take priority over built-in defaults.
 
-> **Security Note:** While Google's OAuth flow for installed/desktop apps treats `client_secret` as non-confidential (since it's distributed with the binary), developers should understand the security implications. For production deployments, consider using your own OAuth credentials registered with Google. See [Google's OAuth 2.0 for Installed Applications](https://developers.google.com/identity/protocols/oauth2/installed-app) for details on why this pattern is acceptable.
+> **Security Note:** While Google's OAuth flow for installed/desktop apps treats `client_secret` as non-confidential (since it's distributed with the binary), developers should understand the security implications. For production deployments, consider using your own OAuth credentials registered with Google. See [Google's OAuth 2.0 for Installed Applications](https://developers.google.com/identity/protocols/oauth2/native-app) for details on why this pattern is acceptable.
 
 The `builtin_credentials(secret_name)` function is the lookup point — it returns credentials keyed by the tool's `auth.secret_name` from `capabilities.json`. Currently only `"google_oauth_token"` has built-in credentials; all other providers return `None` and must supply a `client_id` in their capabilities file or via env var.
 

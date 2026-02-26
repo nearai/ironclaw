@@ -1,6 +1,6 @@
 # IronClaw Codebase Analysis — Channel System
 
-> Updated: 2026-02-24 | Version: v0.11.1
+> Updated: 2026-02-24 | Version: v0.12.0
 
 ---
 
@@ -33,6 +33,7 @@ src/channels/
 │   ├── log_layer.rs — Tracing layer → SSE log streaming
 │   ├── openai_compat.rs — /v1/chat/completions proxy
 │   └── handlers/    — Per-resource handler modules (chat, jobs, memory, …)
+├── signal.rs        — Native Signal channel via signal-cli HTTP/JSON-RPC daemon
 └── wasm/            — WASM channel plugin runtime
     ├── mod.rs       — Public API re-exports
     ├── runtime.rs   — Wasmtime engine, compiled module cache
@@ -45,7 +46,7 @@ The overall data flow:
 ┌─────────────────────────────────────────────────────────────┐
 │                        ChannelManager                        │
 │                                                              │
-│  ReplChannel  HttpChannel  GatewayChannel  WasmChannel ...  │
+│  ReplChannel  HttpChannel  GatewayChannel  SignalChannel  WasmChannel ...  │
 │       │            │             │              │            │
 │       └────────────┴─────────────┴──────────────┘           │
 │                          │                                   │
@@ -877,7 +878,106 @@ HTTP_WEBHOOK_SECRET=change-me-to-a-webhook-secret
 
 ---
 
-## 9. Extending the Channel System
+## 9. Signal Channel (`signal.rs`)
+
+> Added in v0.12.0 (#271, #350)
+
+The Signal channel is a **native Rust implementation** that connects IronClaw to Signal messaging via the [signal-cli](https://github.com/AsamK/signal-cli) HTTP/JSON-RPC daemon. Unlike WASM-based channels (Telegram, Slack), it is built directly into the binary and activates when `SIGNAL_HTTP_URL` and `SIGNAL_ACCOUNT` are configured.
+
+### 9.1 Architecture
+
+```
+User (Signal app)
+      │
+signal-cli daemon (HTTP/JSON-RPC)
+      │
+      ├── GET  /api/v1/events   ← SSE stream (incoming messages)
+      ├── POST /api/v1/rpc      ← JSON-RPC (send messages, typing indicators)
+      └── GET  /api/v1/check    ← Health check
+      │
+IronClaw SignalChannel (src/channels/signal.rs)
+      │
+      └── MessageStream → Agent Loop
+```
+
+**Key components:**
+- **SSE listener** at `/api/v1/events`: Receives incoming messages with automatic reconnection and exponential backoff
+- **JSON-RPC client** at `/api/v1/rpc`: Sends messages and typing indicators
+- **LRU reply-target cache**: `Arc<RwLock<LruCache<Uuid, String>>>` — tracks 10,000 most-recent sender addresses (DM phone/UUID or group ID) for routing responses back
+- **Debug mode**: `Arc<AtomicBool>` toggle (via `/debug` command) — enables verbose tool status updates per-conversation
+
+### 9.2 Message Flow
+
+```
+signal-cli SSE event arrives
+      │
+      ├── Parse envelope: data_message or group_info
+      ├── Extract sender (phone/uuid) and group_id (if group)
+      ├── Check allow_from / allow_from_groups policy
+      │   ├── DM policy: open | allowlist | pairing
+      │   └── Group policy: disabled | allowlist | open
+      ├── If allowed: emit IncomingMessage to agent loop
+      └── If denied (pairing mode): send pairing code prompt to sender
+
+Agent loop responds
+      │
+      ├── Lookup reply target from LRU cache by session UUID
+      ├── If DM: send to phone/UUID via JSON-RPC
+      └── If group: send to group_id via JSON-RPC
+```
+
+### 9.3 Tool Approval Workflow (v0.12.0 #350)
+
+When the agent requests a tool that requires approval, the Signal channel sends a formatted approval prompt:
+
+```
+StatusUpdate::ApprovalNeeded → formatted markdown message with:
+  - Tool name and description
+  - Parameters (pretty-printed JSON)
+  - User instructions with supported keywords
+
+User replies → parsed by `src/agent/submission.rs`
+  - Approve once: `yes`, `y`, `approve`, `ok`, `/approve`, `/yes`, `/y`
+  - Approve always: `always`, `a`, `yes always`, `approve always`, `/always`, `/a`
+  - Deny: `no`, `n`, `deny`, `reject`, `cancel`, `/deny`, `/no`, `/n`
+```
+
+Status updates (debug-gated):
+| StatusUpdate Variant | Behavior |
+|---|---|
+| `ApprovalNeeded` | Always sent — formatted prompt |
+| `ToolStarted` | Debug mode only — "○ Running tool: {name}" |
+| `ToolCompleted` | Debug mode only — "✓/✗ Tool '{name}' completed" |
+| `JobStarted` | Always sent — job ID + browse URL |
+| `AuthRequired` | Always sent — extension name + auth URL |
+| `AuthCompleted` | Always sent — auth success/failure |
+| `ToolResult` | Debug mode only — output preview (≤500 chars) |
+
+### 9.4 Safety Limits
+
+| Limit | Value | Purpose |
+|---|---|---|
+| `MAX_SSE_BUFFER_SIZE` | 1 MB | Prevent buffer overflow from malformed events |
+| `MAX_SSE_EVENT_SIZE` | 256 KB | Per-event size cap |
+| `MAX_HTTP_RESPONSE_SIZE` | 10 MB | Response body size cap |
+| `MAX_REPLY_TARGETS` | 10,000 | LRU cache eviction threshold |
+
+### 9.5 Activation
+
+Signal activates automatically when both required env vars are present:
+
+```env
+SIGNAL_HTTP_URL=http://127.0.0.1:8080   # Required
+SIGNAL_ACCOUNT=+1234567890              # Required
+```
+
+No extension registry install required — unlike WASM channels, it is built into the binary.
+
+See [SIGNAL_SETUP.md](../SIGNAL_SETUP.md) for full setup and configuration reference.
+
+---
+
+## 10. Extending the Channel System
 
 To add a new channel:
 
