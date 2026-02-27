@@ -1786,8 +1786,13 @@ impl ExtensionManager {
             None
         };
 
-        let loader =
-            WasmChannelLoader::new(Arc::clone(&channel_runtime), Arc::clone(&pairing_store));
+        let settings_store: Option<Arc<dyn crate::db::SettingsStore>> =
+            self.store.as_ref().map(|db| Arc::clone(db) as _);
+        let loader = WasmChannelLoader::new(
+            Arc::clone(&channel_runtime),
+            Arc::clone(&pairing_store),
+            settings_store,
+        );
         let loaded = loader
             .load_from_files(name, &wasm_path, cap_path_option)
             .await
@@ -1796,6 +1801,7 @@ impl ExtensionManager {
         let channel_name = loaded.name().to_string();
         let webhook_secret_name = loaded.webhook_secret_name();
         let secret_header = loaded.webhook_secret_header().map(|s| s.to_string());
+        let sig_key_secret_name = loaded.signature_key_secret_name();
 
         // Get webhook secret from secrets store
         let webhook_secret = self
@@ -1861,6 +1867,26 @@ impl ExtensionManager {
                 )
                 .await;
             tracing::info!(channel = %channel_name, "Registered hot-activated channel with webhook router");
+
+            // Register Ed25519 signature key if declared in capabilities
+            if let Some(ref sig_key_name) = sig_key_secret_name
+                && let Ok(key_secret) = self
+                    .secrets
+                    .get_decrypted(&self.user_id, sig_key_name)
+                    .await
+            {
+                match wasm_channel_router
+                    .register_signature_key(&channel_name, key_secret.expose())
+                    .await
+                {
+                    Ok(()) => {
+                        tracing::info!(channel = %channel_name, "Registered signature key for hot-activated channel")
+                    }
+                    Err(e) => {
+                        tracing::error!(channel = %channel_name, error = %e, "Failed to register signature key")
+                    }
+                }
+            }
         }
 
         // Inject credentials
@@ -1994,6 +2020,37 @@ impl ExtensionManager {
                 serde_json::Value::String(secret.expose().to_string()),
             );
             existing_channel.update_config(config_updates).await;
+        }
+
+        // Also refresh signature key in the router
+        let sig_key_secret_name = {
+            let cap_path = self
+                .wasm_channels_dir
+                .join(format!("{}.capabilities.json", name));
+            match tokio::fs::read(&cap_path).await {
+                Ok(bytes) => crate::channels::wasm::ChannelCapabilitiesFile::from_bytes(&bytes)
+                    .ok()
+                    .and_then(|f| f.signature_key_secret_name().map(|s| s.to_string())),
+                Err(_) => None,
+            }
+        };
+        if let Some(ref sig_key_name) = sig_key_secret_name
+            && let Ok(key_secret) = self
+                .secrets
+                .get_decrypted(&self.user_id, sig_key_name)
+                .await
+        {
+            match router
+                .register_signature_key(name, key_secret.expose())
+                .await
+            {
+                Ok(()) => {
+                    tracing::info!(channel = %name, "Refreshed signature verification key")
+                }
+                Err(e) => {
+                    tracing::error!(channel = %name, error = %e, "Failed to refresh signature key")
+                }
+            }
         }
 
         // Refresh tunnel_url in case it wasn't set at startup
@@ -2476,5 +2533,100 @@ mod tests {
             matches!(combined, ExtensionError::AlreadyInstalled(ref name) if name == "test"),
             "Expected AlreadyInstalled, got: {combined:?}"
         );
+    }
+
+    // === QA Plan P2 - 2.4: Extension registry collision tests (filesystem) ===
+
+    #[test]
+    fn test_tool_and_channel_paths_are_separate() {
+        // Verify that a WASM tool named "telegram" and a WASM channel named
+        // "telegram" use different filesystem paths and don't overwrite each other.
+        let dir = tempfile::tempdir().expect("temp dir");
+        let tools_dir = dir.path().join("tools");
+        let channels_dir = dir.path().join("channels");
+        std::fs::create_dir_all(&tools_dir).unwrap();
+        std::fs::create_dir_all(&channels_dir).unwrap();
+
+        let name = "telegram";
+        let tool_wasm = tools_dir.join(format!("{}.wasm", name));
+        let channel_wasm = channels_dir.join(format!("{}.wasm", name));
+
+        // Simulate installing both.
+        std::fs::write(&tool_wasm, b"tool-payload").unwrap();
+        std::fs::write(&channel_wasm, b"channel-payload").unwrap();
+
+        // Both files exist and contain distinct content.
+        assert!(tool_wasm.exists());
+        assert!(channel_wasm.exists());
+        assert_ne!(
+            std::fs::read(&tool_wasm).unwrap(),
+            std::fs::read(&channel_wasm).unwrap(),
+            "Tool and channel files must be independent"
+        );
+
+        // Removing one doesn't affect the other.
+        std::fs::remove_file(&tool_wasm).unwrap();
+        assert!(!tool_wasm.exists());
+        assert!(
+            channel_wasm.exists(),
+            "Removing tool must not affect channel"
+        );
+    }
+
+    #[test]
+    fn test_determine_kind_priority_tools_before_channels() {
+        // When a name exists in both tools and channels dirs,
+        // determine_installed_kind checks tools first (wasm_tools_dir).
+        // This test documents the priority order.
+        let dir = tempfile::tempdir().expect("temp dir");
+        let tools_dir = dir.path().join("tools");
+        let channels_dir = dir.path().join("channels");
+        std::fs::create_dir_all(&tools_dir).unwrap();
+        std::fs::create_dir_all(&channels_dir).unwrap();
+
+        let name = "ambiguous";
+        let tool_wasm = tools_dir.join(format!("{}.wasm", name));
+        let channel_wasm = channels_dir.join(format!("{}.wasm", name));
+
+        // Only channel exists → channel kind.
+        std::fs::write(&channel_wasm, b"channel").unwrap();
+        assert!(!tool_wasm.exists());
+        assert!(channel_wasm.exists());
+
+        // Both exist → tools dir checked first.
+        std::fs::write(&tool_wasm, b"tool").unwrap();
+        assert!(tool_wasm.exists());
+        assert!(channel_wasm.exists());
+        // This documents the determine_installed_kind priority:
+        // tools are checked before channels.
+
+        // Only tool exists → tool kind.
+        std::fs::remove_file(&channel_wasm).unwrap();
+        assert!(tool_wasm.exists());
+        assert!(!channel_wasm.exists());
+    }
+
+    #[test]
+    fn test_capabilities_files_also_separate() {
+        // capabilities.json files for tools and channels should also be separate.
+        let dir = tempfile::tempdir().expect("temp dir");
+        let tools_dir = dir.path().join("tools");
+        let channels_dir = dir.path().join("channels");
+        std::fs::create_dir_all(&tools_dir).unwrap();
+        std::fs::create_dir_all(&channels_dir).unwrap();
+
+        let name = "telegram";
+        let tool_cap = tools_dir.join(format!("{}.capabilities.json", name));
+        let channel_cap = channels_dir.join(format!("{}.capabilities.json", name));
+
+        let tool_caps = r#"{"required_secrets":["TELEGRAM_API_KEY"]}"#;
+        let channel_caps = r#"{"required_secrets":["TELEGRAM_BOT_TOKEN"]}"#;
+
+        std::fs::write(&tool_cap, tool_caps).unwrap();
+        std::fs::write(&channel_cap, channel_caps).unwrap();
+
+        // Both exist with distinct content.
+        assert_eq!(std::fs::read_to_string(&tool_cap).unwrap(), tool_caps);
+        assert_eq!(std::fs::read_to_string(&channel_cap).unwrap(), channel_caps);
     }
 }

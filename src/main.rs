@@ -348,6 +348,7 @@ async fn main() -> anyhow::Result<()> {
             &config,
             &components.secrets_store,
             components.extension_manager.as_ref(),
+            components.db.as_ref(),
         )
         .await;
 
@@ -602,6 +603,7 @@ async fn main() -> anyhow::Result<()> {
     if let Some(ref ext_mgr) = components.extension_manager
         && let Some((rt, ps, router)) = wasm_channel_runtime_state.take()
     {
+        ext_mgr.set_active_channels(loaded_wasm_channel_names).await;
         ext_mgr
             .set_channel_runtime(
                 Arc::clone(&channels),
@@ -862,6 +864,7 @@ async fn setup_wasm_channels(
     config: &ironclaw::config::Config,
     secrets_store: &Option<Arc<dyn SecretsStore + Send + Sync>>,
     extension_manager: Option<&Arc<ironclaw::extensions::ExtensionManager>>,
+    database: Option<&Arc<dyn ironclaw::db::Database>>,
 ) -> Option<WasmChannelSetup> {
     let runtime = match WasmChannelRuntime::new(WasmChannelRuntimeConfig::default()) {
         Ok(r) => Arc::new(r),
@@ -872,7 +875,13 @@ async fn setup_wasm_channels(
     };
 
     let pairing_store = Arc::new(PairingStore::new());
-    let loader = WasmChannelLoader::new(Arc::clone(&runtime), Arc::clone(&pairing_store));
+    let settings_store: Option<Arc<dyn ironclaw::db::SettingsStore>> =
+        database.map(|db| Arc::clone(db) as Arc<dyn ironclaw::db::SettingsStore>);
+    let loader = WasmChannelLoader::new(
+        Arc::clone(&runtime),
+        Arc::clone(&pairing_store),
+        settings_store,
+    );
 
     let results = match loader
         .load_from_dir(&config.channels.wasm_channels_dir)
@@ -895,6 +904,7 @@ async fn setup_wasm_channels(
         tracing::info!("Loaded WASM channel: {}", channel_name);
 
         let secret_name = loaded.webhook_secret_name();
+        let sig_key_secret_name = loaded.signature_key_secret_name();
 
         let webhook_secret = if let Some(secrets) = secrets_store {
             secrets
@@ -968,6 +978,25 @@ async fn setup_wasm_channels(
                 secret_header,
             )
             .await;
+
+        // Register Ed25519 signature key if declared in capabilities
+        if let Some(ref sig_key_name) = sig_key_secret_name
+            && let Some(secrets) = secrets_store
+            && let Ok(key_secret) = secrets.get_decrypted("default", sig_key_name).await
+        {
+            match wasm_router
+                .register_signature_key(&channel_name, key_secret.expose())
+                .await
+            {
+                Ok(()) => {
+                    tracing::info!(channel = %channel_name, "Registered Ed25519 signature key")
+                }
+                Err(e) => {
+                    tracing::error!(channel = %channel_name, error = %e, "Invalid signature key in secrets store")
+                }
+            }
+        }
+
         if let Some(secrets) = secrets_store {
             match inject_channel_credentials(&channel_arc, secrets.as_ref(), &channel_name).await {
                 Ok(count) => {
