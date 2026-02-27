@@ -13,7 +13,7 @@ mod embeddings;
 mod heartbeat;
 pub(crate) mod helpers;
 mod hygiene;
-mod llm;
+pub(crate) mod llm;
 mod routines;
 mod safety;
 mod sandbox;
@@ -211,6 +211,9 @@ impl Config {
 /// env-var-first resolution in `LlmConfig::resolve()`. Keys in the overlay
 /// are read by `optional_env()` before falling back to `std::env::var()`,
 /// so explicit env vars always win.
+///
+/// Also loads tokens from OS credential stores (macOS Keychain, Linux
+/// credentials files) which don't require the secrets DB.
 pub async fn inject_llm_keys_from_secrets(
     secrets: &dyn crate::secrets::SecretsStore,
     user_id: &str,
@@ -218,6 +221,7 @@ pub async fn inject_llm_keys_from_secrets(
     let mappings = [
         ("llm_openai_api_key", "OPENAI_API_KEY"),
         ("llm_anthropic_api_key", "ANTHROPIC_API_KEY"),
+        ("llm_anthropic_oauth_token", "ANTHROPIC_OAUTH_TOKEN"),
         ("llm_compatible_api_key", "LLM_API_KEY"),
         ("llm_nearai_api_key", "NEARAI_API_KEY"),
     ];
@@ -240,5 +244,31 @@ pub async fn inject_llm_keys_from_secrets(
         }
     }
 
+    inject_os_credential_store_tokens(&mut injected);
+
     let _ = INJECTED_VARS.set(injected);
+}
+
+/// Load tokens from OS credential stores (no DB required).
+///
+/// Called unconditionally during startup — even when the encrypted secrets DB
+/// is unavailable (no master key, no DB connection). This ensures OAuth tokens
+/// from `claude login` (macOS Keychain / Linux credentials.json)
+/// are available for config resolution.
+pub fn inject_os_credentials() {
+    let mut injected = HashMap::new();
+    inject_os_credential_store_tokens(&mut injected);
+    let _ = INJECTED_VARS.set(injected);
+}
+
+/// Shared helper: extract tokens from OS credential stores into the overlay map.
+fn inject_os_credential_store_tokens(injected: &mut HashMap<String, String>) {
+    // Try the OS credential store for a fresh Anthropic OAuth token.
+    // Tokens from `claude login` expire in 8-12h, so the DB copy may be stale.
+    // A fresh extraction from macOS Keychain / Linux credentials.json wins
+    // over the (possibly expired) copy stored in the encrypted secrets DB.
+    if let Some(fresh) = crate::config::ClaudeCodeConfig::extract_oauth_token() {
+        injected.insert("ANTHROPIC_OAUTH_TOKEN".to_string(), fresh);
+        tracing::debug!("Refreshed ANTHROPIC_OAUTH_TOKEN from OS credential store");
+    }
 }

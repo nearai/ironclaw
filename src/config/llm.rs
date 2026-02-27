@@ -7,6 +7,16 @@ use crate::config::helpers::{optional_env, parse_optional_env};
 use crate::error::ConfigError;
 use crate::settings::Settings;
 
+/// Sentinel value used as `api_key` when only an OAuth token is present.
+///
+/// The Anthropic config block requires `api_key` to be populated so
+/// `anthropic.is_some()` is true. When we only have an OAuth token the
+/// provider factory in `llm/mod.rs` checks `oauth_token.is_some()` and
+/// routes to `AnthropicOAuthProvider`, so this placeholder is never sent
+/// over the wire. Guard against accidental leakage by checking for this
+/// value in `write_bootstrap_env()` and `step_claude_code_sandbox()`.
+pub const OAUTH_PLACEHOLDER: &str = "oauth-placeholder";
+
 /// Which LLM backend to use.
 ///
 /// Defaults to `NearAi` to keep IronClaw close to the NEAR ecosystem.
@@ -76,6 +86,8 @@ pub struct AnthropicDirectConfig {
     pub model: String,
     /// Optional base URL override (e.g. for proxies like VibeProxy).
     pub base_url: Option<String>,
+    /// OAuth token from `claude login` (uses `Authorization: Bearer` instead of `x-api-key`).
+    pub oauth_token: Option<SecretString>,
 }
 
 /// Configuration for local Ollama.
@@ -240,40 +252,69 @@ impl LlmConfig {
             smart_routing_cascade: parse_optional_env("SMART_ROUTING_CASCADE", true)?,
         };
 
-        // Resolve provider-specific configs based on backend
+        // Resolve provider-specific configs based on backend.
+        //
+        // Credentials may not be available yet during early startup (before the
+        // encrypted secrets store is loaded). In that case return `None` for the
+        // provider config; the re-resolution in `AppBuilder::build_all()` will
+        // fill it in after `inject_llm_keys_from_secrets()` runs.
         let openai = if backend == LlmBackend::OpenAi {
-            let api_key = optional_env("OPENAI_API_KEY")?
-                .map(SecretString::from)
-                .ok_or_else(|| ConfigError::MissingRequired {
-                    key: "OPENAI_API_KEY".to_string(),
-                    hint: "Set OPENAI_API_KEY when LLM_BACKEND=openai".to_string(),
-                })?;
-            let model = optional_env("OPENAI_MODEL")?.unwrap_or_else(|| "gpt-4o".to_string());
-            let base_url = optional_env("OPENAI_BASE_URL")?;
-            Some(OpenAiDirectConfig {
-                api_key,
-                model,
-                base_url,
-            })
+            match optional_env("OPENAI_API_KEY")?.map(SecretString::from) {
+                Some(api_key) => {
+                    let model = optional_env("OPENAI_MODEL")?
+                        .or_else(|| settings.selected_model.clone())
+                        .unwrap_or_else(|| "gpt-4o".to_string());
+                    let base_url = optional_env("OPENAI_BASE_URL")?;
+                    Some(OpenAiDirectConfig {
+                        api_key,
+                        model,
+                        base_url,
+                    })
+                }
+                None => {
+                    tracing::debug!(
+                        "OpenAI credentials not yet available; deferring config resolution"
+                    );
+                    None
+                }
+            }
         } else {
             None
         };
 
         let anthropic = if backend == LlmBackend::Anthropic {
-            let api_key = optional_env("ANTHROPIC_API_KEY")?
-                .map(SecretString::from)
-                .ok_or_else(|| ConfigError::MissingRequired {
-                    key: "ANTHROPIC_API_KEY".to_string(),
-                    hint: "Set ANTHROPIC_API_KEY when LLM_BACKEND=anthropic".to_string(),
-                })?;
-            let model = optional_env("ANTHROPIC_MODEL")?
-                .unwrap_or_else(|| "claude-sonnet-4-20250514".to_string());
-            let base_url = optional_env("ANTHROPIC_BASE_URL")?;
-            Some(AnthropicDirectConfig {
-                api_key,
-                model,
-                base_url,
-            })
+            let api_key_env = optional_env("ANTHROPIC_API_KEY")?.map(SecretString::from);
+            let oauth_token = optional_env("ANTHROPIC_OAUTH_TOKEN")?.map(SecretString::from);
+
+            let api_key = match (&api_key_env, &oauth_token) {
+                (Some(key), _) => Some(key.clone()),
+                // OAuth token present but no API key: use a placeholder so the
+                // config block is populated. The provider factory will route to
+                // the OAuth provider instead of rig-core's x-api-key client.
+                (None, Some(_)) => Some(SecretString::from(OAUTH_PLACEHOLDER.to_string())),
+                (None, None) => {
+                    tracing::debug!(
+                        "Anthropic credentials not yet available; deferring config resolution"
+                    );
+                    None
+                }
+            };
+
+            match api_key {
+                Some(api_key) => {
+                    let model = optional_env("ANTHROPIC_MODEL")?
+                        .or_else(|| settings.selected_model.clone())
+                        .unwrap_or_else(|| "claude-sonnet-4-20250514".to_string());
+                    let base_url = optional_env("ANTHROPIC_BASE_URL")?;
+                    Some(AnthropicDirectConfig {
+                        api_key,
+                        model,
+                        base_url,
+                        oauth_token,
+                    })
+                }
+                None => None,
+            }
         } else {
             None
         };
@@ -289,39 +330,50 @@ impl LlmConfig {
         };
 
         let openai_compatible = if backend == LlmBackend::OpenAiCompatible {
-            let base_url = optional_env("LLM_BASE_URL")?
+            match optional_env("LLM_BASE_URL")?
                 .or_else(|| settings.openai_compatible_base_url.clone())
-                .ok_or_else(|| ConfigError::MissingRequired {
-                    key: "LLM_BASE_URL".to_string(),
-                    hint: "Set LLM_BASE_URL when LLM_BACKEND=openai_compatible".to_string(),
-                })?;
-            let api_key = optional_env("LLM_API_KEY")?.map(SecretString::from);
-            let model = optional_env("LLM_MODEL")?
-                .or_else(|| settings.selected_model.clone())
-                .unwrap_or_else(|| "default".to_string());
-            let extra_headers = optional_env("LLM_EXTRA_HEADERS")?
-                .map(|val| parse_extra_headers(&val))
-                .transpose()?
-                .unwrap_or_default();
-            Some(OpenAiCompatibleConfig {
-                base_url,
-                api_key,
-                model,
-                extra_headers,
-            })
+            {
+                Some(base_url) => {
+                    let api_key = optional_env("LLM_API_KEY")?.map(SecretString::from);
+                    let model = optional_env("LLM_MODEL")?
+                        .or_else(|| settings.selected_model.clone())
+                        .unwrap_or_else(|| "default".to_string());
+                    let extra_headers = optional_env("LLM_EXTRA_HEADERS")?
+                        .map(|val| parse_extra_headers(&val))
+                        .transpose()?
+                        .unwrap_or_default();
+                    Some(OpenAiCompatibleConfig {
+                        base_url,
+                        api_key,
+                        model,
+                        extra_headers,
+                    })
+                }
+                None => {
+                    tracing::debug!(
+                        "OpenAI-compatible base URL not yet available; deferring config resolution"
+                    );
+                    None
+                }
+            }
         } else {
             None
         };
 
         let tinfoil = if backend == LlmBackend::Tinfoil {
-            let api_key = optional_env("TINFOIL_API_KEY")?
-                .map(SecretString::from)
-                .ok_or_else(|| ConfigError::MissingRequired {
-                    key: "TINFOIL_API_KEY".to_string(),
-                    hint: "Set TINFOIL_API_KEY when LLM_BACKEND=tinfoil".to_string(),
-                })?;
-            let model = optional_env("TINFOIL_MODEL")?.unwrap_or_else(|| "kimi-k2-5".to_string());
-            Some(TinfoilConfig { api_key, model })
+            match optional_env("TINFOIL_API_KEY")?.map(SecretString::from) {
+                Some(api_key) => {
+                    let model =
+                        optional_env("TINFOIL_MODEL")?.unwrap_or_else(|| "kimi-k2-5".to_string());
+                    Some(TinfoilConfig { api_key, model })
+                }
+                None => {
+                    tracing::debug!(
+                        "Tinfoil credentials not yet available; deferring config resolution"
+                    );
+                    None
+                }
+            }
         } else {
             None
         };
@@ -382,6 +434,26 @@ mod tests {
     use super::*;
     use crate::config::helpers::ENV_MUTEX;
     use crate::settings::Settings;
+    use secrecy::ExposeSecret;
+
+    /// Clear all provider-related env vars.
+    fn clear_provider_env() {
+        // SAFETY: Only called under ENV_MUTEX in tests.
+        unsafe {
+            std::env::remove_var("LLM_BACKEND");
+            std::env::remove_var("LLM_BASE_URL");
+            std::env::remove_var("LLM_MODEL");
+            std::env::remove_var("OPENAI_API_KEY");
+            std::env::remove_var("OPENAI_MODEL");
+            std::env::remove_var("OPENAI_BASE_URL");
+            std::env::remove_var("ANTHROPIC_API_KEY");
+            std::env::remove_var("ANTHROPIC_OAUTH_TOKEN");
+            std::env::remove_var("ANTHROPIC_MODEL");
+            std::env::remove_var("ANTHROPIC_BASE_URL");
+            std::env::remove_var("TINFOIL_API_KEY");
+            std::env::remove_var("TINFOIL_MODEL");
+        }
+    }
 
     /// Clear all openai-compatible-related env vars.
     fn clear_openai_compatible_env() {
@@ -505,5 +577,191 @@ mod tests {
                 ("X-Title".to_string(), "MyApp".to_string()),
             ]
         );
+    }
+
+    // ── Provider resolution tests ────────────────────────────────────
+
+    #[test]
+    fn anthropic_api_key_resolves() {
+        let _guard = ENV_MUTEX.lock().expect("env mutex poisoned");
+        clear_provider_env();
+        unsafe { std::env::set_var("ANTHROPIC_API_KEY", "sk-ant-test-key") };
+
+        let settings = Settings {
+            llm_backend: Some("anthropic".to_string()),
+            selected_model: Some("claude-opus-4-20250514".to_string()),
+            ..Default::default()
+        };
+        let cfg = LlmConfig::resolve(&settings).expect("resolve");
+        let anth = cfg.anthropic.expect("anthropic config should be present");
+
+        assert_eq!(anth.api_key.expose_secret(), "sk-ant-test-key");
+        assert_eq!(anth.model, "claude-opus-4-20250514");
+        assert!(anth.oauth_token.is_none());
+
+        clear_provider_env();
+    }
+
+    #[test]
+    fn anthropic_oauth_token_resolves_with_placeholder() {
+        let _guard = ENV_MUTEX.lock().expect("env mutex poisoned");
+        clear_provider_env();
+        unsafe { std::env::set_var("ANTHROPIC_OAUTH_TOKEN", "sk-ant-oat01-test") };
+
+        let settings = Settings {
+            llm_backend: Some("anthropic".to_string()),
+            ..Default::default()
+        };
+        let cfg = LlmConfig::resolve(&settings).expect("resolve");
+        let anth = cfg.anthropic.expect("anthropic config should be present");
+
+        assert_eq!(anth.api_key.expose_secret(), OAUTH_PLACEHOLDER);
+        assert!(anth.oauth_token.is_some());
+        assert_eq!(
+            anth.oauth_token.unwrap().expose_secret(),
+            "sk-ant-oat01-test"
+        );
+
+        clear_provider_env();
+    }
+
+    #[test]
+    fn anthropic_defers_when_no_credentials() {
+        let _guard = ENV_MUTEX.lock().expect("env mutex poisoned");
+        clear_provider_env();
+
+        let settings = Settings {
+            llm_backend: Some("anthropic".to_string()),
+            ..Default::default()
+        };
+        let cfg = LlmConfig::resolve(&settings).expect("resolve should NOT error");
+        assert!(
+            cfg.anthropic.is_none(),
+            "anthropic should be None when no credentials"
+        );
+
+        clear_provider_env();
+    }
+
+    #[test]
+    fn anthropic_env_model_overrides_selected_model() {
+        let _guard = ENV_MUTEX.lock().expect("env mutex poisoned");
+        clear_provider_env();
+        unsafe {
+            std::env::set_var("ANTHROPIC_API_KEY", "sk-ant-test");
+            std::env::set_var("ANTHROPIC_MODEL", "claude-haiku-4-5-20251001");
+        };
+
+        let settings = Settings {
+            llm_backend: Some("anthropic".to_string()),
+            selected_model: Some("claude-opus-4-20250514".to_string()),
+            ..Default::default()
+        };
+        let cfg = LlmConfig::resolve(&settings).expect("resolve");
+        let anth = cfg.anthropic.expect("anthropic config");
+
+        assert_eq!(anth.model, "claude-haiku-4-5-20251001");
+
+        clear_provider_env();
+    }
+
+    #[test]
+    fn openai_api_key_resolves() {
+        let _guard = ENV_MUTEX.lock().expect("env mutex poisoned");
+        clear_provider_env();
+        unsafe { std::env::set_var("OPENAI_API_KEY", "sk-openai-test") };
+
+        let settings = Settings {
+            llm_backend: Some("openai".to_string()),
+            selected_model: Some("gpt-5".to_string()),
+            ..Default::default()
+        };
+        let cfg = LlmConfig::resolve(&settings).expect("resolve");
+        let oai = cfg.openai.expect("openai config should be present");
+
+        assert_eq!(oai.api_key.expose_secret(), "sk-openai-test");
+        assert_eq!(oai.model, "gpt-5");
+
+        clear_provider_env();
+    }
+
+    #[test]
+    fn openai_defers_when_no_credentials() {
+        let _guard = ENV_MUTEX.lock().expect("env mutex poisoned");
+        clear_provider_env();
+
+        let settings = Settings {
+            llm_backend: Some("openai".to_string()),
+            ..Default::default()
+        };
+        let cfg = LlmConfig::resolve(&settings).expect("resolve should NOT error");
+        assert!(cfg.openai.is_none());
+
+        clear_provider_env();
+    }
+
+    #[test]
+    fn tinfoil_defers_when_no_credentials() {
+        let _guard = ENV_MUTEX.lock().expect("env mutex poisoned");
+        clear_provider_env();
+
+        let settings = Settings {
+            llm_backend: Some("tinfoil".to_string()),
+            ..Default::default()
+        };
+        let cfg = LlmConfig::resolve(&settings).expect("resolve should NOT error");
+        assert!(cfg.tinfoil.is_none());
+
+        clear_provider_env();
+    }
+
+    #[test]
+    fn tinfoil_resolves_with_key() {
+        let _guard = ENV_MUTEX.lock().expect("env mutex poisoned");
+        clear_provider_env();
+        unsafe { std::env::set_var("TINFOIL_API_KEY", "tf-key-123") };
+
+        let settings = Settings {
+            llm_backend: Some("tinfoil".to_string()),
+            ..Default::default()
+        };
+        let cfg = LlmConfig::resolve(&settings).expect("resolve");
+        let tf = cfg.tinfoil.expect("tinfoil config should be present");
+        assert_eq!(tf.api_key.expose_secret(), "tf-key-123");
+
+        clear_provider_env();
+    }
+
+    #[test]
+    fn ollama_always_resolves() {
+        let _guard = ENV_MUTEX.lock().expect("env mutex poisoned");
+        clear_provider_env();
+
+        let settings = Settings {
+            llm_backend: Some("ollama".to_string()),
+            ..Default::default()
+        };
+        let cfg = LlmConfig::resolve(&settings).expect("resolve");
+        assert!(
+            cfg.ollama.is_some(),
+            "ollama should always resolve (has defaults)"
+        );
+
+        clear_provider_env();
+    }
+
+    #[test]
+    fn nearai_always_resolves() {
+        let _guard = ENV_MUTEX.lock().expect("env mutex poisoned");
+        clear_provider_env();
+
+        let settings = Settings {
+            llm_backend: Some("nearai".to_string()),
+            ..Default::default()
+        };
+        let cfg = LlmConfig::resolve(&settings).expect("resolve");
+        assert_eq!(cfg.backend, LlmBackend::NearAi);
+
+        clear_provider_env();
     }
 }

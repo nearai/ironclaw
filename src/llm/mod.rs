@@ -7,6 +7,7 @@
 //! - **Ollama**: Local model inference
 //! - **OpenAI-compatible**: Any endpoint that speaks the OpenAI API
 
+mod anthropic_oauth;
 pub mod circuit_breaker;
 pub mod costs;
 pub mod failover;
@@ -130,6 +131,17 @@ fn create_anthropic_provider(config: &LlmConfig) -> Result<Arc<dyn LlmProvider>,
         .ok_or_else(|| LlmError::AuthFailed {
             provider: "anthropic".to_string(),
         })?;
+
+    // Route to OAuth provider when an OAuth token is present
+    if anth.oauth_token.is_some() {
+        tracing::info!(
+            "Using Anthropic OAuth API (model: {}, base_url: {})",
+            anth.model,
+            anth.base_url.as_deref().unwrap_or("default"),
+        );
+        let provider = anthropic_oauth::AnthropicOAuthProvider::new(anth)?;
+        return Ok(Arc::new(provider));
+    }
 
     use rig::providers::anthropic;
 
