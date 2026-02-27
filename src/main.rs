@@ -602,6 +602,7 @@ async fn main() -> anyhow::Result<()> {
     if let Some(ref ext_mgr) = components.extension_manager
         && let Some((rt, ps, router)) = wasm_channel_runtime_state.take()
     {
+        ext_mgr.set_active_channels(loaded_wasm_channel_names).await;
         ext_mgr
             .set_channel_runtime(
                 Arc::clone(&channels),
