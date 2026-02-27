@@ -198,9 +198,7 @@ impl Config {
             sandbox: SandboxModeConfig::resolve()?,
             claude_code: ClaudeCodeConfig::resolve()?,
             skills: SkillsConfig::resolve()?,
-            observability: crate::observability::ObservabilityConfig {
-                backend: std::env::var("OBSERVABILITY_BACKEND").unwrap_or_else(|_| "none".into()),
-            },
+            observability: crate::observability::ObservabilityConfig::resolve(settings)?,
         })
     }
 }

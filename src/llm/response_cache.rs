@@ -20,13 +20,12 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
-use rust_decimal::Decimal;
 use sha2::{Digest, Sha256};
 use tokio::sync::Mutex;
 
 use crate::error::LlmError;
 use crate::llm::provider::{
-    CompletionRequest, CompletionResponse, LlmProvider, ModelMetadata, ToolCompletionRequest,
+    CompletionRequest, CompletionResponse, LlmProvider, ToolCompletionRequest,
     ToolCompletionResponse,
 };
 
@@ -135,13 +134,7 @@ fn cache_key(model: &str, request: &CompletionRequest) -> String {
 
 #[async_trait]
 impl LlmProvider for CachedProvider {
-    fn model_name(&self) -> &str {
-        self.inner.model_name()
-    }
-
-    fn cost_per_token(&self) -> (Decimal, Decimal) {
-        self.inner.cost_per_token()
-    }
+    crate::delegate_llm_provider!(self.inner);
 
     async fn complete(&self, request: CompletionRequest) -> Result<CompletionResponse, LlmError> {
         let effective_model = self.inner.effective_model_name(request.model.as_deref());
@@ -156,7 +149,9 @@ impl LlmProvider for CachedProvider {
                     entry.last_accessed = now;
                     entry.hit_count += 1;
                     tracing::debug!(hits = entry.hit_count, "response cache hit");
-                    return Ok(entry.response.clone());
+                    let mut resp = entry.response.clone();
+                    resp.cached = true;
+                    return Ok(resp);
                 }
                 // Expired, remove it
                 guard.remove(&key);
@@ -207,26 +202,6 @@ impl LlmProvider for CachedProvider {
     ) -> Result<ToolCompletionResponse, LlmError> {
         // Never cache tool calls; they can trigger side effects.
         self.inner.complete_with_tools(request).await
-    }
-
-    async fn list_models(&self) -> Result<Vec<String>, LlmError> {
-        self.inner.list_models().await
-    }
-
-    async fn model_metadata(&self) -> Result<ModelMetadata, LlmError> {
-        self.inner.model_metadata().await
-    }
-
-    fn effective_model_name(&self, requested_model: Option<&str>) -> String {
-        self.inner.effective_model_name(requested_model)
-    }
-
-    fn active_model_name(&self) -> String {
-        self.inner.active_model_name()
-    }
-
-    fn set_model(&self, model: &str) -> Result<(), LlmError> {
-        self.inner.set_model(model)
     }
 }
 
@@ -474,5 +449,34 @@ mod tests {
         let stub = Arc::new(StubLlm::new("cached response"));
         let cached = CachedProvider::new(stub.clone(), ResponseCacheConfig::default());
         assert_eq!(cached.model_name(), "stub-model");
+    }
+
+    /// I4 regression: cache hits must set `cached: true` on the response
+    /// so observers can distinguish them from real LLM calls. Cache misses
+    /// must set `cached: false`.
+    #[tokio::test]
+    async fn cache_hit_marks_response_as_cached() {
+        let stub = Arc::new(StubLlm::new("cached response"));
+        let cached = CachedProvider::new(
+            stub.clone(),
+            ResponseCacheConfig {
+                ttl: Duration::from_secs(60),
+                max_entries: 100,
+            },
+        );
+
+        // First call: cache miss — response should NOT be marked cached
+        let r1 = cached.complete(simple_request()).await.unwrap();
+        assert!(!r1.cached, "Cache miss response must have cached=false");
+
+        // Second call: cache hit — response MUST be marked cached
+        let r2 = cached.complete(simple_request()).await.unwrap();
+        assert!(r2.cached, "Cache hit response must have cached=true");
+
+        // Content should still be the same
+        assert_eq!(r2.content, "cached response");
+        // Token counts from the original call are preserved
+        assert_eq!(r2.input_tokens, 10);
+        assert_eq!(r2.output_tokens, 5);
     }
 }

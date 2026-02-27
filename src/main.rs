@@ -184,9 +184,12 @@ async fn main() -> anyhow::Result<()> {
     let log_broadcaster = Arc::new(LogBroadcaster::new());
 
     // Initialize tracing with a reloadable EnvFilter so the gateway can switch
-    // log levels at runtime without restarting.
-    let log_level_handle =
-        ironclaw::channels::web::log_layer::init_tracing(Arc::clone(&log_broadcaster));
+    // log levels at runtime without restarting. Only attach the tracing-opentelemetry
+    // bridge when the backend config actually includes "otel".
+    let log_level_handle = ironclaw::channels::web::log_layer::init_tracing(
+        Arc::clone(&log_broadcaster),
+        config.observability.wants_otel(),
+    );
 
     tracing::info!("Starting IronClaw...");
     tracing::info!("Loaded configuration for agent: {}", config.agent.name);
@@ -635,6 +638,7 @@ async fn main() -> anyhow::Result<()> {
         skills_config: config.skills.clone(),
         hooks: components.hooks,
         cost_guard: components.cost_guard,
+        observer: components.observer,
     };
 
     let agent = Agent::new(

@@ -512,7 +512,10 @@ fn default_patterns() -> Vec<LeakPattern> {
         },
         // High entropy hex (potential secrets, warn only)
         // Uses word boundary since look-around isn't supported in the regex crate.
-        // This catches standalone 64-char hex strings (like SHA256 hashes used as secrets).
+        // Minimum 64 hex chars to catch SHA-256-derived secrets (HMAC signing keys,
+        // webhook verification tokens, unbranded API keys). May produce false
+        // positives on CSS integrity hashes and webpack chunks, but the action is
+        // Warn (mildest), so the cost is low.
         LeakPattern {
             name: "high_entropy_hex".to_string(),
             regex: Regex::new(r"\b[a-fA-F0-9]{64}\b").unwrap(),
@@ -716,5 +719,38 @@ mod tests {
 
         let result = detector.scan_http_request("https://api.example.com/exfil", &[], Some(&body));
         assert!(result.is_err(), "binary body should still be scanned");
+    }
+
+    #[test]
+    fn test_high_entropy_hex_detects_64_char() {
+        let detector = LeakDetector::new();
+
+        // 64-char hex string (SHA-256-length) SHOULD trigger high_entropy_hex.
+        // These are common as HMAC signing keys, webhook verification tokens,
+        // and unbranded API secrets.
+        let hex64 = "a".repeat(64);
+        let content = format!("secret: {}", hex64);
+        let result = detector.scan(&content);
+        let has_hex_match = result
+            .matches
+            .iter()
+            .any(|m| m.pattern_name == "high_entropy_hex");
+        assert!(has_hex_match, "64-char hex should trigger high_entropy_hex");
+        // Action should be Warn (not Block or Redact)
+        assert!(!result.should_block);
+        assert!(result.redacted_content.is_none());
+
+        // 63-char hex should NOT trigger (below threshold)
+        let hex63 = "b".repeat(63);
+        let content_short = format!("hash: {}", hex63);
+        let result_short = detector.scan(&content_short);
+        let has_short_match = result_short
+            .matches
+            .iter()
+            .any(|m| m.pattern_name == "high_entropy_hex");
+        assert!(
+            !has_short_match,
+            "63-char hex should NOT trigger high_entropy_hex"
+        );
     }
 }

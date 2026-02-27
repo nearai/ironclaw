@@ -48,6 +48,7 @@ pub struct AppComponents {
     pub skill_registry: Option<Arc<std::sync::RwLock<SkillRegistry>>>,
     pub skill_catalog: Option<Arc<SkillCatalog>>,
     pub cost_guard: Arc<crate::agent::cost_guard::CostGuard>,
+    pub observer: Arc<dyn crate::observability::Observer>,
     pub session: Arc<SessionManager>,
     pub catalog_entries: Vec<crate::extensions::RegistryEntry>,
     pub dev_loaded_tool_names: Vec<String>,
@@ -606,7 +607,10 @@ impl AppBuilder {
             use crate::secrets::{InMemorySecretsStore, SecretsCrypto};
             let ephemeral_key =
                 secrecy::SecretString::from(crate::secrets::keychain::generate_master_key_hex());
-            let crypto = Arc::new(SecretsCrypto::new(ephemeral_key).expect("ephemeral crypto"));
+            let crypto = Arc::new(
+                SecretsCrypto::new(ephemeral_key)
+                    .map_err(|e| anyhow::anyhow!("ephemeral crypto init failed: {e}"))?,
+            );
             tracing::debug!("Using ephemeral in-memory secrets store for extension manager");
             Arc::new(InMemorySecretsStore::new(crypto))
         };
@@ -706,6 +710,12 @@ impl AppBuilder {
             (None, None)
         };
 
+        // Create observer from config
+        let observer: Arc<dyn crate::observability::Observer> = Arc::from(
+            crate::observability::create_observer(&self.config.observability),
+        );
+        tracing::info!("Observability backend: {}", observer.name());
+
         let context_manager = Arc::new(ContextManager::new(self.config.agent.max_parallel_jobs));
         let cost_guard = Arc::new(crate::agent::cost_guard::CostGuard::new(
             crate::agent::cost_guard::CostGuardConfig {
@@ -738,6 +748,7 @@ impl AppBuilder {
             skill_registry,
             skill_catalog,
             cost_guard,
+            observer,
             session: self.session,
             catalog_entries,
             dev_loaded_tool_names,

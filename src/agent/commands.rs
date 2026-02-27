@@ -234,6 +234,7 @@ impl Agent {
             workspace.clone(),
             self.llm().clone(),
             self.safety().clone(),
+            self.observer().clone(),
         );
 
         match runner.check_heartbeat().await {

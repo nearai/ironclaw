@@ -19,6 +19,14 @@ pub trait Observer: Send + Sync {
     /// Flush any buffered data (e.g. OTLP batch exporter). No-op by default.
     fn flush(&self) {}
 
+    /// Shut down the observer backend, flushing remaining data and releasing
+    /// resources. After shutdown, further calls to `record_event` /
+    /// `record_metric` may silently no-op. Default implementation calls
+    /// `flush()`.
+    fn shutdown(&self) {
+        self.flush();
+    }
+
     /// Human-readable backend name (e.g. "noop", "log", "otel").
     fn name(&self) -> &str;
 }
@@ -34,6 +42,12 @@ pub enum ObserverEvent {
         provider: String,
         model: String,
         message_count: usize,
+        /// gen_ai.request.temperature
+        temperature: Option<f32>,
+        /// gen_ai.request.max_tokens
+        max_tokens: Option<u32>,
+        /// Thread/conversation identifier.
+        thread_id: Option<String>,
     },
 
     /// An LLM response was received.
@@ -43,20 +57,48 @@ pub enum ObserverEvent {
         duration: Duration,
         success: bool,
         error_message: Option<String>,
+        /// gen_ai.usage.input_tokens
+        input_tokens: Option<u32>,
+        /// gen_ai.usage.output_tokens
+        output_tokens: Option<u32>,
+        /// gen_ai.response.finish_reasons (array per spec)
+        finish_reasons: Option<Vec<String>>,
+        /// Estimated cost of this call in USD.
+        cost_usd: Option<f64>,
+        /// Whether this response was served from the response cache.
+        /// When `true`, duration is near-zero and no real LLM call was made.
+        cached: bool,
     },
 
     /// A tool call is about to start.
-    ToolCallStart { tool: String },
+    ToolCallStart {
+        tool: String,
+        /// Unique call ID for distinguishing concurrent calls to the same tool.
+        call_id: Option<String>,
+        /// Thread/conversation identifier.
+        thread_id: Option<String>,
+    },
 
     /// A tool call finished.
     ToolCallEnd {
         tool: String,
+        /// Must match the `call_id` from `ToolCallStart`.
+        call_id: Option<String>,
         duration: Duration,
         success: bool,
+        /// Error description when `success` is false.
+        error_message: Option<String>,
     },
 
     /// One reasoning turn completed.
-    TurnComplete,
+    TurnComplete {
+        /// Thread/conversation identifier.
+        thread_id: Option<String>,
+        /// Iteration number within the agentic loop.
+        iteration: u32,
+        /// Number of tool calls executed in this turn.
+        tool_calls_in_turn: u32,
+    },
 
     /// A message was sent or received on a channel.
     ChannelMessage { channel: String, direction: String },
@@ -68,6 +110,8 @@ pub enum ObserverEvent {
     AgentEnd {
         duration: Duration,
         tokens_used: Option<u64>,
+        /// Total estimated cost in USD for the entire agent invocation.
+        total_cost_usd: Option<f64>,
     },
 
     /// An error occurred in a component.
@@ -101,6 +145,9 @@ mod tests {
             provider: "nearai".into(),
             model: "test".into(),
             message_count: 3,
+            temperature: Some(0.7),
+            max_tokens: Some(4096),
+            thread_id: Some("thread-1".into()),
         };
         let _ = ObserverEvent::LlmResponse {
             provider: "nearai".into(),
@@ -108,16 +155,29 @@ mod tests {
             duration: Duration::from_millis(100),
             success: true,
             error_message: None,
+            input_tokens: Some(150),
+            output_tokens: Some(50),
+            finish_reasons: Some(vec!["stop".into()]),
+            cost_usd: Some(0.001),
+            cached: false,
         };
         let _ = ObserverEvent::ToolCallStart {
             tool: "echo".into(),
+            call_id: None,
+            thread_id: Some("thread-1".into()),
         };
         let _ = ObserverEvent::ToolCallEnd {
             tool: "echo".into(),
+            call_id: None,
             duration: Duration::from_millis(5),
             success: true,
+            error_message: None,
         };
-        let _ = ObserverEvent::TurnComplete;
+        let _ = ObserverEvent::TurnComplete {
+            thread_id: Some("thread-1".into()),
+            iteration: 1,
+            tool_calls_in_turn: 2,
+        };
         let _ = ObserverEvent::ChannelMessage {
             channel: "tui".into(),
             direction: "inbound".into(),
@@ -126,6 +186,7 @@ mod tests {
         let _ = ObserverEvent::AgentEnd {
             duration: Duration::from_secs(10),
             tokens_used: Some(1500),
+            total_cost_usd: Some(0.05),
         };
         let _ = ObserverEvent::Error {
             component: "llm".into(),
