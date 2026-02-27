@@ -161,6 +161,13 @@ fn validate_bind_mount_path(
 
     let projects_base = ironclaw_base_dir().join("projects");
 
+    if !projects_base.is_absolute() {
+        return Err(OrchestratorError::ContainerCreationFailed {
+            job_id,
+            reason: "base directory is not absolute; cannot safely validate bind mounts".into(),
+        });
+    }
+
     // Ensure the base exists so canonicalize always succeeds.
     std::fs::create_dir_all(&projects_base).map_err(|e| {
         OrchestratorError::ContainerCreationFailed {
@@ -614,7 +621,7 @@ mod tests {
 
     #[test]
     fn test_validate_bind_mount_valid_path() {
-        let base = ironclaw_base_dir().join("projects");
+        let base = crate::bootstrap::compute_ironclaw_base_dir().join("projects");
         std::fs::create_dir_all(&base).unwrap();
 
         let test_dir = base.join("test_validate_bind");

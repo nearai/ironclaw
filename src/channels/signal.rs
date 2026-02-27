@@ -2670,9 +2670,7 @@ mod tests {
         use std::fs;
 
         // Create test files in sandbox
-        let base_dir = dirs::home_dir()
-            .unwrap_or_else(|| std::path::PathBuf::from("."))
-            .join(".ironclaw");
+        let base_dir = crate::bootstrap::ironclaw_base_dir();
 
         // Create sandbox directory if it doesn't exist (needed for CI)
         let _ = fs::create_dir_all(&base_dir);

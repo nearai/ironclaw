@@ -19,15 +19,18 @@ static IRONCLAW_BASE_DIR: LazyLock<PathBuf> = LazyLock::new(compute_ironclaw_bas
 /// This is the underlying implementation used by both the public
 /// `ironclaw_base_dir()` function (which caches the result) and tests
 /// (which need to verify different configurations).
-fn compute_ironclaw_base_dir() -> PathBuf {
+pub fn compute_ironclaw_base_dir() -> PathBuf {
     std::env::var(IRONCLAW_BASE_DIR_ENV)
         .map(PathBuf::from)
         .map(|path| {
             if path.as_os_str().is_empty() {
                 default_base_dir()
-            } else if path.to_string_lossy().contains('\0') {
-                eprintln!("Warning: IRONCLAW_BASE_DIR contains null bytes, using default");
-                default_base_dir()
+            } else if !path.is_absolute() {
+                eprintln!(
+                    "Warning: IRONCLAW_BASE_DIR is a relative path '{}', resolved against current directory",
+                    path.display()
+                );
+                path
             } else {
                 path
             }
@@ -44,7 +47,9 @@ fn default_base_dir() -> PathBuf {
         home.join(".ironclaw")
     } else {
         eprintln!("Warning: Could not determine home directory, using current directory");
-        PathBuf::from(".").join(".ironclaw")
+        std::env::current_dir()
+            .unwrap_or_else(|_| PathBuf::from("/tmp"))
+            .join(".ironclaw")
     }
 }
 
@@ -792,6 +797,7 @@ INJECTED="pwned"#;
         // It verifies that when IRONCLAW_BASE_DIR is not set, the default path is used.
         let _guard = ENV_MUTEX.lock().unwrap();
         let old_val = std::env::var("IRONCLAW_BASE_DIR").ok();
+        // SAFETY: ENV_MUTEX ensures single-threaded access to env vars in tests
         unsafe { std::env::remove_var("IRONCLAW_BASE_DIR") };
 
         // Force re-evaluation by calling the computation function directly
@@ -800,6 +806,7 @@ INJECTED="pwned"#;
         assert_eq!(path, home.join(".ironclaw"));
 
         if let Some(val) = old_val {
+            // SAFETY: ENV_MUTEX ensures single-threaded access to env vars in tests
             unsafe { std::env::set_var("IRONCLAW_BASE_DIR", val) };
         }
     }
@@ -810,6 +817,7 @@ INJECTED="pwned"#;
         // the custom path is used. Must run before LazyLock is initialized.
         let _guard = ENV_MUTEX.lock().unwrap();
         let old_val = std::env::var("IRONCLAW_BASE_DIR").ok();
+        // SAFETY: ENV_MUTEX ensures single-threaded access to env vars in tests
         unsafe { std::env::set_var("IRONCLAW_BASE_DIR", "/custom/ironclaw/path") };
 
         // Force re-evaluation by calling the computation function directly
@@ -817,18 +825,21 @@ INJECTED="pwned"#;
         assert_eq!(path, std::path::PathBuf::from("/custom/ironclaw/path"));
 
         if let Some(val) = old_val {
+            // SAFETY: ENV_MUTEX ensures single-threaded access to env vars in tests
             unsafe { std::env::set_var("IRONCLAW_BASE_DIR", val) };
         } else {
+            // SAFETY: ENV_MUTEX ensures single-threaded access to env vars in tests
             unsafe { std::env::remove_var("IRONCLAW_BASE_DIR") };
         }
     }
 
     #[test]
-    fn test_ironclaw_env_path_uses_base_dir() {
+    fn test_compute_base_dir_env_path_join() {
         // Verifies that ironclaw_env_path correctly joins .env to the base dir.
         // Uses compute_ironclaw_base_dir directly to avoid LazyLock caching.
         let _guard = ENV_MUTEX.lock().unwrap();
         let old_val = std::env::var("IRONCLAW_BASE_DIR").ok();
+        // SAFETY: ENV_MUTEX ensures single-threaded access to env vars in tests
         unsafe { std::env::set_var("IRONCLAW_BASE_DIR", "/my/custom/dir") };
 
         // Test the path construction logic directly
@@ -837,8 +848,10 @@ INJECTED="pwned"#;
         assert_eq!(env_path, std::path::PathBuf::from("/my/custom/dir/.env"));
 
         if let Some(val) = old_val {
+            // SAFETY: ENV_MUTEX ensures single-threaded access to env vars in tests
             unsafe { std::env::set_var("IRONCLAW_BASE_DIR", val) };
         } else {
+            // SAFETY: ENV_MUTEX ensures single-threaded access to env vars in tests
             unsafe { std::env::remove_var("IRONCLAW_BASE_DIR") };
         }
     }
@@ -848,6 +861,7 @@ INJECTED="pwned"#;
         // Verifies that empty IRONCLAW_BASE_DIR falls back to default.
         let _guard = ENV_MUTEX.lock().unwrap();
         let old_val = std::env::var("IRONCLAW_BASE_DIR").ok();
+        // SAFETY: ENV_MUTEX ensures single-threaded access to env vars in tests
         unsafe { std::env::set_var("IRONCLAW_BASE_DIR", "") };
 
         // Force re-evaluation by calling the computation function directly
@@ -856,8 +870,10 @@ INJECTED="pwned"#;
         assert_eq!(path, home.join(".ironclaw"));
 
         if let Some(val) = old_val {
+            // SAFETY: ENV_MUTEX ensures single-threaded access to env vars in tests
             unsafe { std::env::set_var("IRONCLAW_BASE_DIR", val) };
         } else {
+            // SAFETY: ENV_MUTEX ensures single-threaded access to env vars in tests
             unsafe { std::env::remove_var("IRONCLAW_BASE_DIR") };
         }
     }
@@ -867,6 +883,7 @@ INJECTED="pwned"#;
         // Verifies that paths with special characters are handled correctly.
         let _guard = ENV_MUTEX.lock().unwrap();
         let old_val = std::env::var("IRONCLAW_BASE_DIR").ok();
+        // SAFETY: ENV_MUTEX ensures single-threaded access to env vars in tests
         unsafe { std::env::set_var("IRONCLAW_BASE_DIR", "/tmp/test_with-special.chars") };
 
         // Force re-evaluation by calling the computation function directly
@@ -877,8 +894,10 @@ INJECTED="pwned"#;
         );
 
         if let Some(val) = old_val {
+            // SAFETY: ENV_MUTEX ensures single-threaded access to env vars in tests
             unsafe { std::env::set_var("IRONCLAW_BASE_DIR", val) };
         } else {
+            // SAFETY: ENV_MUTEX ensures single-threaded access to env vars in tests
             unsafe { std::env::remove_var("IRONCLAW_BASE_DIR") };
         }
     }
