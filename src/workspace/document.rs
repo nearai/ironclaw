@@ -133,6 +133,10 @@ pub struct MemoryChunk {
     pub content: String,
     /// Embedding vector (if generated).
     pub embedding: Option<Vec<f32>>,
+    /// Starting line number (1-based, for citations).
+    pub line_start: Option<u32>,
+    /// Ending line number (1-based, inclusive).
+    pub line_end: Option<u32>,
     /// Creation timestamp.
     pub created_at: DateTime<Utc>,
 }
@@ -146,6 +150,28 @@ impl MemoryChunk {
             chunk_index,
             content: content.into(),
             embedding: None,
+            line_start: None,
+            line_end: None,
+            created_at: Utc::now(),
+        }
+    }
+
+    /// Create a new chunk with line position info.
+    pub fn with_lines(
+        document_id: Uuid,
+        chunk_index: i32,
+        content: impl Into<String>,
+        line_start: u32,
+        line_end: u32,
+    ) -> Self {
+        Self {
+            id: Uuid::new_v4(),
+            document_id,
+            chunk_index,
+            content: content.into(),
+            embedding: None,
+            line_start: Some(line_start),
+            line_end: Some(line_end),
             created_at: Utc::now(),
         }
     }
@@ -154,6 +180,15 @@ impl MemoryChunk {
     pub fn with_embedding(mut self, embedding: Vec<f32>) -> Self {
         self.embedding = Some(embedding);
         self
+    }
+
+    /// Format as citation string.
+    pub fn citation(&self) -> Option<String> {
+        match (self.line_start, self.line_end) {
+            (Some(start), Some(end)) if start == end => Some(format!("line {}", start)),
+            (Some(start), Some(end)) => Some(format!("lines {}-{}", start, end)),
+            _ => None,
+        }
     }
 }
 

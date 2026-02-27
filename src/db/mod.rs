@@ -372,6 +372,25 @@ pub trait WorkspaceStore: Send + Sync {
         content: &str,
         embedding: Option<&[f32]>,
     ) -> Result<Uuid, WorkspaceError>;
+
+    /// Insert a chunk with line number tracking for citations.
+    ///
+    /// Default implementation falls back to insert_chunk (line info is lost).
+    async fn insert_chunk_with_lines(
+        &self,
+        document_id: Uuid,
+        chunk_index: i32,
+        content: &str,
+        embedding: Option<&[f32]>,
+        line_start: Option<u32>,
+        line_end: Option<u32>,
+    ) -> Result<Uuid, WorkspaceError> {
+        // Default: ignore line info and use basic insert
+        let _ = (line_start, line_end);
+        self.insert_chunk(document_id, chunk_index, content, embedding)
+            .await
+    }
+
     async fn update_chunk_embedding(
         &self,
         chunk_id: Uuid,

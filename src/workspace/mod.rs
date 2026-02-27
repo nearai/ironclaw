@@ -48,10 +48,11 @@ pub mod hygiene;
 mod repository;
 mod search;
 
-pub use chunker::{ChunkConfig, chunk_document};
+pub use chunker::{ChunkConfig, ChunkWithPosition, chunk_document, chunk_document_with_positions};
 pub use document::{MemoryChunk, MemoryDocument, WorkspaceEntry, paths};
 pub use embeddings::{
-    EmbeddingProvider, MockEmbeddings, NearAiEmbeddings, OllamaEmbeddings, OpenAiEmbeddings,
+    EmbeddingProvider, GeminiEmbeddings, MockEmbeddings, NearAiEmbeddings, OllamaEmbeddings,
+    OpenAiEmbeddings,
 };
 #[cfg(feature = "postgres")]
 pub use repository::Repository;
@@ -321,6 +322,11 @@ impl Workspace {
     pub fn with_embeddings(mut self, provider: Arc<dyn EmbeddingProvider>) -> Self {
         self.embeddings = Some(provider);
         self
+    }
+
+    /// Check if embeddings are enabled.
+    pub fn has_embeddings(&self) -> bool {
+        self.embeddings.is_some()
     }
 
     /// Get the user ID.
