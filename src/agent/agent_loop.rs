@@ -413,7 +413,7 @@ impl Agent {
                     // Load initial event cache
                     engine.refresh_event_cache().await;
 
-                    // Spawn notification forwarder
+                    // Spawn notification forwarder (mirrors heartbeat pattern)
                     let channels = self.channels.clone();
                     tokio::spawn(async move {
                         while let Some(response) = notify_rx.recv().await {
@@ -423,14 +423,33 @@ impl Agent {
                                 .and_then(|v| v.as_str())
                                 .unwrap_or("default")
                                 .to_string();
-                            let results = channels.broadcast_all(&user, response).await;
-                            for (ch, result) in results {
-                                if let Err(e) = result {
-                                    tracing::warn!(
-                                        "Failed to broadcast routine notification to {}: {}",
-                                        ch,
-                                        e
-                                    );
+                            let notify_channel = response
+                                .metadata
+                                .get("notify_channel")
+                                .and_then(|v| v.as_str())
+                                .map(|s| s.to_string());
+
+                            // Try the configured channel first, fall back to
+                            // broadcasting on all channels.
+                            let targeted_ok = if let Some(ref channel) = notify_channel {
+                                channels
+                                    .broadcast(channel, &user, response.clone())
+                                    .await
+                                    .is_ok()
+                            } else {
+                                false
+                            };
+
+                            if !targeted_ok {
+                                let results = channels.broadcast_all(&user, response).await;
+                                for (ch, result) in results {
+                                    if let Err(e) = result {
+                                        tracing::warn!(
+                                            "Failed to broadcast routine notification to {}: {}",
+                                            ch,
+                                            e
+                                        );
+                                    }
                                 }
                             }
                         }
