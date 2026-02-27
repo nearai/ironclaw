@@ -402,19 +402,20 @@ impl AppBuilder {
 
         let mcp_session_manager = Arc::new(McpSessionManager::new());
 
-        // Create WASM tool runtime
-        let wasm_tool_runtime: Option<Arc<WasmToolRuntime>> =
-            if self.config.wasm.enabled && self.config.wasm.tools_dir.exists() {
-                match WasmToolRuntime::new(self.config.wasm.to_runtime_config()) {
-                    Ok(runtime) => Some(Arc::new(runtime)),
-                    Err(e) => {
-                        tracing::warn!("Failed to initialize WASM runtime: {}", e);
-                        None
-                    }
+        // Create WASM tool runtime eagerly so extensions installed after startup
+        // (e.g. via the web UI) can still be activated. The tools directory is only
+        // needed when loading modules, not for engine initialisation.
+        let wasm_tool_runtime: Option<Arc<WasmToolRuntime>> = if self.config.wasm.enabled {
+            match WasmToolRuntime::new(self.config.wasm.to_runtime_config()) {
+                Ok(runtime) => Some(Arc::new(runtime)),
+                Err(e) => {
+                    tracing::warn!("Failed to initialize WASM runtime: {}", e);
+                    None
                 }
-            } else {
-                None
-            };
+            }
+        } else {
+            None
+        };
 
         // Load WASM tools and MCP servers concurrently
         let wasm_tools_future = {
