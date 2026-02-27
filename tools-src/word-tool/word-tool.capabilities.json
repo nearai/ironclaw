@@ -1,0 +1,40 @@
+{
+  "capabilities": {
+    "workspace": {
+      "read_paths": [
+        "*.docx",
+        "**/*.docx",
+        "documents/*.docx",
+        "papers/*.docx",
+        "research/*.docx"
+      ],
+      "write_paths": [
+        "*.docx",
+        "**/*.docx",
+        "documents/*.docx",
+        "papers/*.docx",
+        "research/*.docx",
+        "output/*.docx"
+      ]
+    },
+    "fuel": {
+      "initial": 10000000,
+      "max_per_execution": 50000000
+    },
+    "memory": {
+      "max_pages": 64
+    }
+  },
+  "metadata": {
+    "name": "word-tool",
+    "display_name": "Microsoft Word",
+    "version": "0.1.0",
+    "description": "Read, write, and modify Microsoft Word (.docx) documents",
+    "category": "documents"
+  },
+  "config": {
+    "max_file_size_mb": 10,
+    "max_paragraphs": 10000,
+    "max_text_length": 1000000
+  }
+}

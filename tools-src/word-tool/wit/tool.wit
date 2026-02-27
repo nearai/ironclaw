@@ -1,0 +1,152 @@
+// WASM Tool Sandbox Interface
+//
+// Defines the contract between sandboxed tools and the host runtime.
+// Tools export the `tool` interface; the host provides the `host` interface.
+//
+// Security Model:
+// - WASM tools are untrusted and run in a sandbox
+// - All capabilities are opt-in (default: no access)
+// - Secrets are NEVER exposed to WASM; credentials are injected at host boundary
+// - All outputs are scanned for secret leakage before returning to WASM
+
+package near:agent;
+
+/// Host-provided capabilities for sandboxed tools.
+///
+/// These are the only ways a sandboxed tool can interact with the outside world.
+/// The set is intentionally minimal to reduce attack surface.
+interface host {
+    /// Log levels for structured logging.
+    enum log-level {
+        trace,
+        debug,
+        info,
+        warn,
+        error,
+    }
+
+    /// Emit a log message.
+    ///
+    /// Messages are collected and emitted after execution completes.
+    /// Rate-limited to 1000 entries per execution, 4KB per message.
+    log: func(level: log-level, message: string);
+
+    /// Get the current timestamp in milliseconds since Unix epoch.
+    now-millis: func() -> u64;
+
+    /// Read a file from the workspace (if capability granted).
+    ///
+    /// Path must be relative (no leading /) and cannot contain "..".
+    /// Returns None if the file doesn't exist or capability not granted.
+    workspace-read: func(path: string) -> option<string>;
+
+    // ==================== HTTP Capability ====================
+
+    /// Response from an HTTP request.
+    record http-response {
+        /// HTTP status code.
+        status: u16,
+        /// Response headers as JSON object string.
+        headers-json: string,
+        /// Response body bytes.
+        body: list<u8>,
+    }
+
+    /// Make an HTTP request (if capability granted).
+    ///
+    /// Security:
+    /// - Only allowed endpoints (host/path patterns) can be accessed
+    /// - Credentials are injected by the host; WASM never sees them
+    /// - Response is scanned for leaked secrets before returning
+    /// - Rate-limited per tool
+    ///
+    /// Returns Err with error message if:
+    /// - Endpoint not in allowlist
+    /// - Rate limit exceeded
+    /// - Request/response size limit exceeded
+    /// - Network error
+    /// - Timeout
+    /// - Secret leak detected in response
+    ///
+    /// The optional timeout-ms parameter controls the HTTP client timeout
+    /// in milliseconds. Defaults to 30000 (30s) when not provided.
+    /// Capped at the callback timeout to prevent hangs.
+    http-request: func(
+        method: string,
+        url: string,
+        headers-json: string,
+        body: option<list<u8>>,
+        timeout-ms: option<u32>,
+    ) -> result<http-response, string>;
+
+    // ==================== Tool Invocation Capability ====================
+
+    /// Invoke another tool by alias (if capability granted).
+    ///
+    /// Security:
+    /// - WASM calls tools by alias, not real name (indirection layer)
+    /// - Only aliased tools can be invoked
+    /// - Rate-limited per tool
+    /// - Output is scanned for leaked secrets before returning
+    ///
+    /// Returns the tool output as JSON string, or Err with error message.
+    tool-invoke: func(alias: string, params-json: string) -> result<string, string>;
+
+    // ==================== Secrets Capability ====================
+
+    /// Check if a secret exists (if capability granted).
+    ///
+    /// Security:
+    /// - WASM can only check existence, NEVER read values
+    /// - Only allowed secret names can be checked
+    /// - Actual credentials are injected by host during HTTP requests
+    ///
+    /// Returns true if the secret exists and is accessible to this tool.
+    secret-exists: func(name: string) -> bool;
+}
+
+/// Tool interface that sandboxed tools must implement.
+interface tool {
+    /// Request payload for tool execution.
+    record request {
+        /// JSON-encoded parameters matching the tool's schema.
+        params: string,
+        /// Optional JSON-encoded job context for stateful operations.
+        context: option<string>,
+    }
+
+    /// Response from tool execution.
+    record response {
+        /// JSON-encoded output on success.
+        output: option<string>,
+        /// Error message on failure.
+        error: option<string>,
+    }
+
+    /// Execute the tool with the given request.
+    ///
+    /// This is the main entry point. The tool should:
+    /// 1. Parse params as JSON according to its schema
+    /// 2. Perform the operation
+    /// 3. Return a response with either result or error set
+    execute: func(req: request) -> response;
+
+    /// Get the JSON Schema for this tool's parameters.
+    ///
+    /// Must return a valid JSON Schema object describing the expected
+    /// structure of the `params` field in requests.
+    schema: func() -> string;
+
+    /// Get a human-readable description of what this tool does.
+    ///
+    /// Used by the LLM to understand when to invoke the tool.
+    description: func() -> string;
+}
+
+/// World definition for sandboxed tools.
+///
+/// Tools import host capabilities and export the tool interface.
+world sandboxed-tool {
+    import host;
+    export tool;
+}
