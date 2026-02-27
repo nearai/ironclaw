@@ -1796,6 +1796,7 @@ impl ExtensionManager {
         let channel_name = loaded.name().to_string();
         let webhook_secret_name = loaded.webhook_secret_name();
         let secret_header = loaded.webhook_secret_header().map(|s| s.to_string());
+        let sig_key_secret_name = loaded.signature_key_secret_name();
 
         // Get webhook secret from secrets store
         let webhook_secret = self
@@ -1861,6 +1862,26 @@ impl ExtensionManager {
                 )
                 .await;
             tracing::info!(channel = %channel_name, "Registered hot-activated channel with webhook router");
+
+            // Register Ed25519 signature key if declared in capabilities
+            if let Some(ref sig_key_name) = sig_key_secret_name
+                && let Ok(key_secret) = self
+                    .secrets
+                    .get_decrypted(&self.user_id, sig_key_name)
+                    .await
+            {
+                match wasm_channel_router
+                    .register_signature_key(&channel_name, key_secret.expose())
+                    .await
+                {
+                    Ok(()) => {
+                        tracing::info!(channel = %channel_name, "Registered signature key for hot-activated channel")
+                    }
+                    Err(e) => {
+                        tracing::error!(channel = %channel_name, error = %e, "Failed to register signature key")
+                    }
+                }
+            }
         }
 
         // Inject credentials
@@ -1994,6 +2015,37 @@ impl ExtensionManager {
                 serde_json::Value::String(secret.expose().to_string()),
             );
             existing_channel.update_config(config_updates).await;
+        }
+
+        // Also refresh signature key in the router
+        let sig_key_secret_name = {
+            let cap_path = self
+                .wasm_channels_dir
+                .join(format!("{}.capabilities.json", name));
+            match tokio::fs::read(&cap_path).await {
+                Ok(bytes) => crate::channels::wasm::ChannelCapabilitiesFile::from_bytes(&bytes)
+                    .ok()
+                    .and_then(|f| f.signature_key_secret_name().map(|s| s.to_string())),
+                Err(_) => None,
+            }
+        };
+        if let Some(ref sig_key_name) = sig_key_secret_name
+            && let Ok(key_secret) = self
+                .secrets
+                .get_decrypted(&self.user_id, sig_key_name)
+                .await
+        {
+            match router
+                .register_signature_key(name, key_secret.expose())
+                .await
+            {
+                Ok(()) => {
+                    tracing::info!(channel = %name, "Refreshed signature verification key")
+                }
+                Err(e) => {
+                    tracing::error!(channel = %name, error = %e, "Failed to refresh signature key")
+                }
+            }
         }
 
         // Refresh tunnel_url in case it wasn't set at startup
