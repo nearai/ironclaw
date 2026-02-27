@@ -406,13 +406,10 @@ impl AppBuilder {
         // (e.g. via the web UI) can still be activated. The tools directory is only
         // needed when loading modules, not for engine initialisation.
         let wasm_tool_runtime: Option<Arc<WasmToolRuntime>> = if self.config.wasm.enabled {
-            match WasmToolRuntime::new(self.config.wasm.to_runtime_config()) {
-                Ok(runtime) => Some(Arc::new(runtime)),
-                Err(e) => {
-                    tracing::warn!("Failed to initialize WASM runtime: {}", e);
-                    None
-                }
-            }
+            WasmToolRuntime::new(self.config.wasm.to_runtime_config())
+                .map(Arc::new)
+                .map_err(|e| tracing::warn!("Failed to initialize WASM runtime: {}", e))
+                .ok()
         } else {
             None
         };
