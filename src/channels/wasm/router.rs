@@ -516,6 +516,7 @@ mod tests {
             capabilities,
             "{}".to_string(),
             Arc::new(PairingStore::new()),
+            None,
         ))
     }
 
