@@ -751,6 +751,7 @@ impl SetupWizard {
                     "openai" => "OpenAI",
                     "ollama" => "Ollama (local)",
                     "openai_compatible" => "OpenAI-compatible endpoint",
+                    "openai_codex" => "OpenAI Codex (Responses API)",
                     other => other,
                 }
             };
@@ -759,7 +760,7 @@ impl SetupWizard {
 
             let is_known = matches!(
                 current.as_str(),
-                "nearai" | "anthropic" | "openai" | "ollama" | "openai_compatible"
+                "nearai" | "anthropic" | "openai" | "ollama" | "openai_compatible" | "openai_codex"
             );
 
             if is_known && confirm("Keep current provider?", true).map_err(SetupError::Io)? {
@@ -773,6 +774,7 @@ impl SetupWizard {
                     "openai" => return self.setup_openai().await,
                     "ollama" => return self.setup_ollama(),
                     "openai_compatible" => return self.setup_openai_compatible().await,
+                    "openai_codex" => return self.setup_openai_codex().await,
                     _ => {
                         return Err(SetupError::Config(format!(
                             "Unhandled provider: {}",
@@ -800,6 +802,7 @@ impl SetupWizard {
             "Ollama           - local models, no API key needed",
             "OpenRouter       - 200+ models via single API key",
             "OpenAI-compatible - custom endpoint (vLLM, LiteLLM, etc.)",
+            "OpenAI Codex     - Responses API (ChatGPT OAuth or API key)",
         ];
 
         let choice = select_one("Provider:", options).map_err(SetupError::Io)?;
@@ -811,6 +814,7 @@ impl SetupWizard {
             3 => self.setup_ollama()?,
             4 => self.setup_openrouter().await?,
             5 => self.setup_openai_compatible().await?,
+            6 => self.setup_openai_codex().await?,
             _ => return Err(SetupError::Config("Invalid provider selection".to_string())),
         }
 
@@ -1066,6 +1070,100 @@ impl SetupWizard {
         Ok(())
     }
 
+    /// OpenAI Codex provider setup: API key or Codex CLI OAuth.
+    async fn setup_openai_codex(&mut self) -> Result<(), SetupError> {
+        self.settings.llm_backend = Some("openai_codex".to_string());
+        if self.settings.selected_model.is_some() {
+            self.settings.selected_model = None;
+        }
+
+        let auth_options = &[
+            "API key         - standard OpenAI billing (api.openai.com)",
+            "Codex CLI OAuth - ChatGPT subscription billing (~/.codex/auth.json)",
+        ];
+
+        let auth_choice =
+            select_one("Authentication mode:", auth_options).map_err(SetupError::Io)?;
+
+        match auth_choice {
+            0 => {
+                // API key mode — delegate to shared helper
+                self.setup_api_key_provider(
+                    "openai_codex",
+                    "OPENAI_CODEX_API_KEY",
+                    "llm_codex_api_key",
+                    "OpenAI API key (for Codex)",
+                    "https://platform.openai.com/api-keys",
+                    Some("OpenAI Codex"),
+                )
+                .await?;
+            }
+            1 => {
+                // OAuth mode — read from Codex CLI auth.json
+                let auth_path = std::env::var("CODEX_AUTH_PATH").unwrap_or_else(|_| {
+                    dirs::home_dir()
+                        .unwrap_or_else(|| std::path::PathBuf::from("."))
+                        .join(".codex")
+                        .join("auth.json")
+                        .to_string_lossy()
+                        .to_string()
+                });
+
+                let path = std::path::Path::new(&auth_path);
+                match crate::config::extract_codex_oauth_token(path) {
+                    Some(token) => {
+                        print_info(&format!(
+                            "Found Codex OAuth token: {}",
+                            mask_api_key(&token)
+                        ));
+                        if !confirm("Use this token?", true).map_err(SetupError::Io)? {
+                            return Err(SetupError::Cancelled);
+                        }
+                        print_success("OpenAI Codex configured (OAuth from Codex CLI)");
+                    }
+                    None => {
+                        print_error(&format!("No Codex OAuth token found at {}", path.display()));
+                        print_info(
+                            "Run `npx codex --full-setup` to authenticate, then retry setup.",
+                        );
+                        if confirm("Retry after authenticating?", true).map_err(SetupError::Io)? {
+                            // Check again after user's action
+                            match crate::config::extract_codex_oauth_token(path) {
+                                Some(_) => {
+                                    print_success("OpenAI Codex configured (OAuth from Codex CLI)");
+                                }
+                                None => {
+                                    return Err(SetupError::Auth(format!(
+                                        "Still no token found at {}. Run Codex CLI setup first.",
+                                        path.display()
+                                    )));
+                                }
+                            }
+                        } else {
+                            return Err(SetupError::Cancelled);
+                        }
+                    }
+                }
+
+                // Prompt for account ID (required for ChatGPT endpoint)
+                let account_id = optional_input(
+                    "OpenAI account ID (for ChatGPT endpoint, optional)",
+                    Some("leave blank if unknown"),
+                )
+                .map_err(SetupError::Io)?;
+
+                if let Some(ref id) = account_id
+                    && !id.is_empty()
+                {
+                    print_info(&format!("Account ID: {}", id));
+                }
+            }
+            _ => return Err(SetupError::Config("Invalid auth choice".to_string())),
+        }
+
+        Ok(())
+    }
+
     /// Step 4: Model selection.
     ///
     /// Branches on the selected LLM backend and fetches models from the
@@ -1126,6 +1224,14 @@ impl SetupWizard {
                 }
                 self.settings.selected_model = Some(model_id.clone());
                 print_success(&format!("Selected {}", model_id));
+            }
+            "openai_codex" => {
+                // OAuth tokens can't call /v1/models — use hardcoded list
+                let models: Vec<(String, String)> = crate::llm::openai_codex::CODEX_MODELS
+                    .iter()
+                    .map(|(id, desc)| (id.to_string(), desc.to_string()))
+                    .collect();
+                self.select_from_model_list(&models)?;
             }
             _ => {
                 // NEAR AI: use existing provider list_models()
@@ -1230,6 +1336,7 @@ impl SetupWizard {
             ollama: None,
             openai_compatible: None,
             tinfoil: None,
+            openai_codex: None,
         };
 
         match create_llm_provider(&config, session) {

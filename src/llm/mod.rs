@@ -11,6 +11,7 @@ pub mod circuit_breaker;
 pub mod costs;
 pub mod failover;
 mod nearai_chat;
+pub mod openai_codex;
 mod provider;
 mod reasoning;
 pub mod response_cache;
@@ -43,6 +44,7 @@ use secrecy::ExposeSecret;
 
 use crate::config::{LlmBackend, LlmConfig, NearAiConfig};
 use crate::error::LlmError;
+use crate::llm::openai_codex::OpenAiCodexProvider;
 
 /// Create an LLM provider based on configuration.
 ///
@@ -60,6 +62,7 @@ pub fn create_llm_provider(
         LlmBackend::Ollama => create_ollama_provider(config),
         LlmBackend::OpenAiCompatible => create_openai_compatible_provider(config),
         LlmBackend::Tinfoil => create_tinfoil_provider(config),
+        LlmBackend::OpenAiCodex => create_openai_codex_provider(config),
     }
 }
 
@@ -263,6 +266,28 @@ fn create_openai_compatible_provider(config: &LlmConfig) -> Result<Arc<dyn LlmPr
         compat.model
     );
     Ok(Arc::new(RigAdapter::new(model, &compat.model)))
+}
+
+fn create_openai_codex_provider(config: &LlmConfig) -> Result<Arc<dyn LlmProvider>, LlmError> {
+    let codex = config
+        .openai_codex
+        .as_ref()
+        .ok_or_else(|| LlmError::AuthFailed {
+            provider: "openai_codex".to_string(),
+        })?;
+
+    let auth_mode = if codex.api_key.is_some() {
+        "API key"
+    } else {
+        "OAuth (Codex CLI)"
+    };
+    tracing::info!(
+        model = %codex.model,
+        base_url = %codex.base_url,
+        auth = auth_mode,
+        "Using OpenAI Codex (Responses API)"
+    );
+    Ok(Arc::new(OpenAiCodexProvider::new(codex.clone())?))
 }
 
 /// Create a cheap/fast LLM provider for lightweight tasks (heartbeat, routing, evaluation).
@@ -472,6 +497,7 @@ mod tests {
             ollama: None,
             openai_compatible: None,
             tinfoil: None,
+            openai_codex: None,
         }
     }
 

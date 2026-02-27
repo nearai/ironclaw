@@ -25,6 +25,8 @@ pub enum LlmBackend {
     OpenAiCompatible,
     /// Tinfoil private inference
     Tinfoil,
+    /// OpenAI Codex via Responses API (ChatGPT OAuth or API key)
+    OpenAiCodex,
 }
 
 impl std::str::FromStr for LlmBackend {
@@ -38,8 +40,9 @@ impl std::str::FromStr for LlmBackend {
             "ollama" => Ok(Self::Ollama),
             "openai_compatible" | "openai-compatible" | "compatible" => Ok(Self::OpenAiCompatible),
             "tinfoil" => Ok(Self::Tinfoil),
+            "openai_codex" | "codex" => Ok(Self::OpenAiCodex),
             _ => Err(format!(
-                "invalid LLM backend '{}', expected one of: nearai, openai, anthropic, ollama, openai_compatible, tinfoil",
+                "invalid LLM backend '{}', expected one of: nearai, openai, anthropic, ollama, openai_compatible, tinfoil, openai_codex",
                 s
             )),
         }
@@ -55,6 +58,7 @@ impl std::fmt::Display for LlmBackend {
             Self::Ollama => write!(f, "ollama"),
             Self::OpenAiCompatible => write!(f, "openai_compatible"),
             Self::Tinfoil => write!(f, "tinfoil"),
+            Self::OpenAiCodex => write!(f, "openai_codex"),
         }
     }
 }
@@ -102,6 +106,29 @@ pub struct TinfoilConfig {
     pub model: String,
 }
 
+/// Configuration for OpenAI Codex via Responses API.
+///
+/// Supports two auth modes:
+/// - **API key**: Standard OpenAI billing via `api.openai.com/v1/responses`
+/// - **OAuth**: ChatGPT subscription billing via `chatgpt.com/backend-api/codex/responses`,
+///   using tokens from the Codex CLI (`~/.codex/auth.json`)
+#[derive(Debug, Clone)]
+pub struct OpenAiCodexConfig {
+    /// Model name (default: "gpt-5.3-codex").
+    pub model: String,
+    /// Base URL. Defaults based on auth mode:
+    /// - API key: `https://api.openai.com/v1`
+    /// - OAuth: `https://chatgpt.com/backend-api/codex`
+    pub base_url: String,
+    /// API key for api.openai.com (standard billing).
+    pub api_key: Option<SecretString>,
+    /// Path to Codex CLI auth.json for OAuth tokens.
+    /// Default: `~/.codex/auth.json` (or `$CODEX_HOME/auth.json`).
+    pub auth_path: PathBuf,
+    /// OpenAI account ID (required for ChatGPT endpoint).
+    pub account_id: Option<String>,
+}
+
 /// LLM provider configuration.
 ///
 /// NEAR AI remains the default backend. Users can switch to other providers
@@ -122,6 +149,8 @@ pub struct LlmConfig {
     pub openai_compatible: Option<OpenAiCompatibleConfig>,
     /// Tinfoil config (populated when backend=tinfoil)
     pub tinfoil: Option<TinfoilConfig>,
+    /// OpenAI Codex config (populated when backend=openai_codex)
+    pub openai_codex: Option<OpenAiCodexConfig>,
 }
 
 /// NEAR AI configuration.
@@ -325,6 +354,32 @@ impl LlmConfig {
             None
         };
 
+        let openai_codex = if backend == LlmBackend::OpenAiCodex {
+            let api_key = optional_env("OPENAI_CODEX_API_KEY")?.map(SecretString::from);
+            let model =
+                optional_env("OPENAI_CODEX_MODEL")?.unwrap_or_else(|| "gpt-5.3-codex".to_string());
+            let auth_path = optional_env("CODEX_AUTH_PATH")?
+                .map(PathBuf::from)
+                .unwrap_or_else(default_codex_auth_path);
+            let account_id = optional_env("OPENAI_CODEX_ACCOUNT_ID")?;
+            let base_url = optional_env("OPENAI_CODEX_BASE_URL")?.unwrap_or_else(|| {
+                if api_key.is_some() {
+                    "https://api.openai.com/v1".to_string()
+                } else {
+                    "https://chatgpt.com/backend-api/codex".to_string()
+                }
+            });
+            Some(OpenAiCodexConfig {
+                model,
+                base_url,
+                api_key,
+                auth_path,
+                account_id,
+            })
+        } else {
+            None
+        };
+
         Ok(Self {
             backend,
             nearai,
@@ -333,6 +388,7 @@ impl LlmConfig {
             ollama,
             openai_compatible,
             tinfoil,
+            openai_codex,
         })
     }
 }
@@ -369,6 +425,49 @@ fn parse_extra_headers(val: &str) -> Result<Vec<(String, String)>, ConfigError> 
         headers.push((key.to_string(), value.trim().to_string()));
     }
     Ok(headers)
+}
+
+/// Get the default Codex CLI auth.json path.
+///
+/// Respects `$CODEX_HOME` if set, otherwise defaults to `~/.codex/auth.json`.
+fn default_codex_auth_path() -> PathBuf {
+    if let Ok(codex_home) = std::env::var("CODEX_HOME") {
+        return PathBuf::from(codex_home).join("auth.json");
+    }
+    dirs::home_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join(".codex")
+        .join("auth.json")
+}
+
+/// Extract an OAuth access token from a Codex CLI `auth.json` file.
+///
+/// Tries fields in order: `tokens.access_token`, `token`, `api_key`, `access_token`.
+/// Returns `None` on any failure (file not found, parse error, no matching field).
+pub fn extract_codex_oauth_token(auth_path: &std::path::Path) -> Option<String> {
+    let content = std::fs::read_to_string(auth_path).ok()?;
+    let json: serde_json::Value = serde_json::from_str(&content).ok()?;
+
+    // Try nested tokens.access_token first (Codex CLI format)
+    if let Some(token) = json
+        .get("tokens")
+        .and_then(|t| t.get("access_token"))
+        .and_then(|v| v.as_str())
+        && !token.is_empty()
+    {
+        return Some(token.to_string());
+    }
+
+    // Try top-level fields
+    for field in &["token", "api_key", "access_token"] {
+        if let Some(val) = json.get(field).and_then(|v| v.as_str())
+            && !val.is_empty()
+        {
+            return Some(val.to_string());
+        }
+    }
+
+    None
 }
 
 /// Get the default session file path (~/.ironclaw/session.json).
@@ -507,5 +606,168 @@ mod tests {
                 ("X-Title".to_string(), "MyApp".to_string()),
             ]
         );
+    }
+
+    /// Clear codex-related env vars for testing.
+    fn clear_codex_env() {
+        // SAFETY: Only called under ENV_MUTEX in tests.
+        unsafe {
+            std::env::remove_var("LLM_BACKEND");
+            std::env::remove_var("OPENAI_CODEX_API_KEY");
+            std::env::remove_var("OPENAI_CODEX_MODEL");
+            std::env::remove_var("OPENAI_CODEX_BASE_URL");
+            std::env::remove_var("OPENAI_CODEX_ACCOUNT_ID");
+            std::env::remove_var("CODEX_AUTH_PATH");
+        }
+    }
+
+    #[test]
+    fn codex_defaults_model_and_oauth_base_url() {
+        let _guard = ENV_MUTEX.lock().expect("env mutex poisoned");
+        clear_codex_env();
+
+        let settings = Settings {
+            llm_backend: Some("openai_codex".to_string()),
+            ..Default::default()
+        };
+
+        let cfg = LlmConfig::resolve(&settings).expect("resolve should succeed");
+        let codex = cfg.openai_codex.expect("codex config should be present");
+
+        assert_eq!(codex.model, "gpt-5.3-codex");
+        // No API key → OAuth mode → ChatGPT base URL
+        assert!(codex.api_key.is_none());
+        assert_eq!(codex.base_url, "https://chatgpt.com/backend-api/codex");
+        assert!(codex.auth_path.to_string_lossy().contains("auth.json"));
+    }
+
+    #[test]
+    fn codex_api_key_sets_openai_base_url() {
+        let _guard = ENV_MUTEX.lock().expect("env mutex poisoned");
+        clear_codex_env();
+        // SAFETY: Under ENV_MUTEX.
+        unsafe {
+            std::env::set_var("OPENAI_CODEX_API_KEY", "sk-test-key");
+        }
+
+        let settings = Settings {
+            llm_backend: Some("openai_codex".to_string()),
+            ..Default::default()
+        };
+
+        let cfg = LlmConfig::resolve(&settings).expect("resolve should succeed");
+        let codex = cfg.openai_codex.expect("codex config should be present");
+
+        assert!(codex.api_key.is_some());
+        assert_eq!(codex.base_url, "https://api.openai.com/v1");
+
+        // Cleanup
+        unsafe {
+            std::env::remove_var("OPENAI_CODEX_API_KEY");
+        }
+    }
+
+    #[test]
+    fn codex_env_vars_override_defaults() {
+        let _guard = ENV_MUTEX.lock().expect("env mutex poisoned");
+        clear_codex_env();
+        // SAFETY: Under ENV_MUTEX.
+        unsafe {
+            std::env::set_var("OPENAI_CODEX_MODEL", "gpt-5.1-codex");
+            std::env::set_var("OPENAI_CODEX_BASE_URL", "https://custom.example.com/v1");
+            std::env::set_var("OPENAI_CODEX_ACCOUNT_ID", "acct_123");
+            std::env::set_var("CODEX_AUTH_PATH", "/tmp/test-auth.json");
+        }
+
+        let settings = Settings {
+            llm_backend: Some("openai_codex".to_string()),
+            ..Default::default()
+        };
+
+        let cfg = LlmConfig::resolve(&settings).expect("resolve should succeed");
+        let codex = cfg.openai_codex.expect("codex config should be present");
+
+        assert_eq!(codex.model, "gpt-5.1-codex");
+        assert_eq!(codex.base_url, "https://custom.example.com/v1");
+        assert_eq!(codex.account_id.as_deref(), Some("acct_123"));
+        assert_eq!(
+            codex.auth_path,
+            std::path::PathBuf::from("/tmp/test-auth.json")
+        );
+
+        // Cleanup
+        unsafe {
+            std::env::remove_var("OPENAI_CODEX_MODEL");
+            std::env::remove_var("OPENAI_CODEX_BASE_URL");
+            std::env::remove_var("OPENAI_CODEX_ACCOUNT_ID");
+            std::env::remove_var("CODEX_AUTH_PATH");
+        }
+    }
+
+    #[test]
+    fn codex_not_populated_for_other_backends() {
+        let _guard = ENV_MUTEX.lock().expect("env mutex poisoned");
+        clear_codex_env();
+
+        let settings = Settings {
+            llm_backend: Some("nearai".to_string()),
+            ..Default::default()
+        };
+
+        let cfg = LlmConfig::resolve(&settings).expect("resolve should succeed");
+        assert!(cfg.openai_codex.is_none());
+    }
+
+    #[test]
+    fn test_extract_codex_oauth_token_nested() {
+        let dir = std::env::temp_dir().join("ironclaw-test-codex");
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("auth-nested.json");
+        std::fs::write(
+            &path,
+            r#"{"tokens":{"access_token":"oauth-tok-123","refresh_token":"rt_456"}}"#,
+        )
+        .expect("write test file");
+
+        let token = extract_codex_oauth_token(&path);
+        assert_eq!(token, Some("oauth-tok-123".to_string()));
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn test_extract_codex_oauth_token_flat() {
+        let dir = std::env::temp_dir().join("ironclaw-test-codex");
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("auth-flat.json");
+        std::fs::write(&path, r#"{"token":"flat-tok-789"}"#).expect("write test file");
+
+        let token = extract_codex_oauth_token(&path);
+        assert_eq!(token, Some("flat-tok-789".to_string()));
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn test_extract_codex_oauth_token_missing_file() {
+        let path = std::path::Path::new("/tmp/ironclaw-nonexistent-auth.json");
+        assert!(extract_codex_oauth_token(path).is_none());
+    }
+
+    #[test]
+    fn test_extract_codex_oauth_token_empty_fields() {
+        let dir = std::env::temp_dir().join("ironclaw-test-codex");
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("auth-empty.json");
+        std::fs::write(
+            &path,
+            r#"{"tokens":{"access_token":""},"token":"","api_key":""}"#,
+        )
+        .expect("write test file");
+
+        let token = extract_codex_oauth_token(&path);
+        assert!(token.is_none());
+
+        let _ = std::fs::remove_file(&path);
     }
 }
