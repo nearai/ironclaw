@@ -939,6 +939,7 @@ async fn setup_wasm_channels(
 
         let secret_name = loaded.webhook_secret_name();
         let sig_key_secret_name = loaded.signature_key_secret_name();
+        let hmac_secret_name = loaded.hmac_secret_name();
 
         let webhook_secret = if let Some(secrets) = secrets_store {
             secrets
@@ -951,6 +952,7 @@ async fn setup_wasm_channels(
         };
 
         let secret_header = loaded.webhook_secret_header().map(|s| s.to_string());
+        let verification_mode = loaded.verification_mode().map(|s| s.to_string());
 
         let webhook_path = format!("/webhook/{}", channel_name);
         let endpoints = vec![RegisteredEndpoint {
@@ -1010,6 +1012,7 @@ async fn setup_wasm_channels(
                 endpoints,
                 webhook_secret.clone(),
                 secret_header,
+                verification_mode,
             )
             .await;
 
@@ -1029,6 +1032,16 @@ async fn setup_wasm_channels(
                     tracing::error!(channel = %channel_name, error = %e, "Invalid signature key in secrets store")
                 }
             }
+        }
+
+        // Register HMAC secret if declared in capabilities (WhatsApp/Slack style)
+        if let Some(ref hmac_name) = hmac_secret_name
+            && let Some(secrets) = secrets_store
+            && let Ok(hmac_secret) = secrets.get_decrypted("default", hmac_name).await
+        {
+            wasm_router
+                .register_hmac_secret(&channel_name, hmac_secret.expose().to_string())
+                .await;
         }
 
         if let Some(secrets) = secrets_store {
