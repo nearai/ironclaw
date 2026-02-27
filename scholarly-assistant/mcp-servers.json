@@ -1,0 +1,17 @@
+{
+  "servers": [
+    {
+      "name": "semantic_scholar",
+      "url": "http://localhost:3100/semantic-scholar",
+      "enabled": true,
+      "description": "Semantic Scholar paper database - Search 200M+ academic papers, get citations, author profiles"
+    },
+    {
+      "name": "arxiv",
+      "url": "http://localhost:3100/arxiv",
+      "enabled": true,
+      "description": "ArXiv preprint repository - Download and analyze papers from arXiv (CS, physics, math)"
+    }
+  ],
+  "schema_version": 1
+}
