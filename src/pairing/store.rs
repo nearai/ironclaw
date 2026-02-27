@@ -12,6 +12,8 @@ use fs4::FileExt;
 use rand::Rng;
 use serde::{Deserialize, Serialize};
 
+use crate::bootstrap::ironclaw_base_dir;
+
 const PAIRING_CODE_LENGTH: usize = 8;
 const PAIRING_ALPHABET: &[u8] = b"ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
 /// TTL for pending pairing requests (minutes, not hours — reduces brute-force window).
@@ -70,9 +72,7 @@ struct AllowFromStoreFile {
 }
 
 fn default_pairing_dir() -> PathBuf {
-    dirs::home_dir()
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join(".ironclaw")
+    ironclaw_base_dir()
 }
 
 fn safe_channel_key(channel: &str) -> Result<String, PairingStoreError> {
