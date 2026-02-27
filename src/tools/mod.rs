@@ -11,6 +11,7 @@ pub mod builder;
 pub mod builtin;
 pub mod mcp;
 pub mod rate_limiter;
+pub mod schema_validator;
 pub mod wasm;
 
 mod registry;
@@ -23,4 +24,7 @@ pub use builder::{
 };
 pub use rate_limiter::RateLimiter;
 pub use registry::ToolRegistry;
-pub use tool::{ApprovalRequirement, Tool, ToolDomain, ToolError, ToolOutput, ToolRateLimitConfig};
+pub use tool::{
+    ApprovalRequirement, Tool, ToolDomain, ToolError, ToolOutput, ToolRateLimitConfig,
+    validate_tool_schema,
+};

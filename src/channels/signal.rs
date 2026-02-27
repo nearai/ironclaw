@@ -2742,7 +2742,7 @@ mod tests {
         let ctx = ch.conversation_context(&metadata);
         assert_eq!(ctx.get("sender"), Some(&"+1234567890".to_string()));
         assert_eq!(ctx.get("sender_uuid"), Some(&"uuid-123".to_string()));
-        assert!(ctx.get("group").is_none());
+        assert!(!ctx.contains_key("group"));
     }
 
     #[test]
