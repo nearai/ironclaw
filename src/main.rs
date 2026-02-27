@@ -474,6 +474,11 @@ async fn main() -> anyhow::Result<()> {
     // ── Gateway channel ────────────────────────────────────────────────
 
     let mut gateway_url: Option<String> = None;
+    let mut sse_sender: Option<
+        tokio::sync::broadcast::Sender<ironclaw::channels::web::types::SseEvent>,
+    > = None;
+    let mut gateway_state: Option<std::sync::Arc<ironclaw::channels::web::server::GatewayState>> =
+        None;
     if let Some(ref gw_config) = config.channels.gateway {
         let mut gw =
             GatewayChannel::new(gw_config.clone()).with_llm_provider(Arc::clone(&components.llm));
@@ -525,6 +530,12 @@ async fn main() -> anyhow::Result<()> {
         ));
 
         tracing::info!("Web UI: http://{}:{}/", gw_config.host, gw_config.port);
+
+        // Capture SSE sender before moving gw into channels.
+        // IMPORTANT: This must come after all `with_*` calls since `rebuild_state`
+        // creates a new SseManager, which would orphan this sender.
+        sse_sender = Some(gw.state().sse.sender());
+        gateway_state = Some(Arc::clone(gw.state()));
 
         channel_names.push("gateway".to_string());
         channels.add(Box::new(gw)).await;
@@ -581,10 +592,17 @@ async fn main() -> anyhow::Result<()> {
 
     let channels = Arc::new(channels);
 
+    // Register message tool for sending messages to connected channels
+    components
+        .tools
+        .register_message_tools(Arc::clone(&channels))
+        .await;
+
     // Wire up channel runtime for hot-activation of WASM channels.
     if let Some(ref ext_mgr) = components.extension_manager
         && let Some((rt, ps, router)) = wasm_channel_runtime_state.take()
     {
+        ext_mgr.set_active_channels(loaded_wasm_channel_names).await;
         ext_mgr
             .set_channel_runtime(
                 Arc::clone(&channels),
@@ -595,6 +613,13 @@ async fn main() -> anyhow::Result<()> {
             )
             .await;
         tracing::info!("Channel runtime wired into extension manager for hot-activation");
+    }
+
+    // Wire SSE sender into extension manager for broadcasting status events.
+    if let Some(ref ext_mgr) = components.extension_manager
+        && let Some(sender) = sse_sender
+    {
+        ext_mgr.set_sse_sender(sender).await;
     }
 
     let deps = AgentDeps {
@@ -639,6 +664,17 @@ async fn main() -> anyhow::Result<()> {
     }
 
     tracing::info!("Agent shutdown complete");
+
+    // Check if a restart was requested via the gateway API.
+    if let Some(ref gw_state) = gateway_state
+        && gw_state
+            .restart_requested
+            .load(std::sync::atomic::Ordering::Relaxed)
+    {
+        eprintln!("Restarting IronClaw (exit code 75)...");
+        std::process::exit(75);
+    }
+
     Ok(())
 }
 
@@ -851,7 +887,6 @@ async fn setup_wasm_channels(
     };
 
     let wasm_router = Arc::new(WasmChannelRouter::new());
-    let mut has_webhook_channels = false;
     let mut channels: Vec<(String, Box<dyn ironclaw::channels::Channel>)> = Vec::new();
     let mut channel_names: Vec<String> = Vec::new();
 
@@ -861,6 +896,7 @@ async fn setup_wasm_channels(
         tracing::info!("Loaded WASM channel: {}", channel_name);
 
         let secret_name = loaded.webhook_secret_name();
+        let sig_key_secret_name = loaded.signature_key_secret_name();
 
         let webhook_secret = if let Some(secrets) = secrets_store {
             secrets
@@ -934,7 +970,24 @@ async fn setup_wasm_channels(
                 secret_header,
             )
             .await;
-        has_webhook_channels = true;
+
+        // Register Ed25519 signature key if declared in capabilities
+        if let Some(ref sig_key_name) = sig_key_secret_name
+            && let Some(secrets) = secrets_store
+            && let Ok(key_secret) = secrets.get_decrypted("default", sig_key_name).await
+        {
+            match wasm_router
+                .register_signature_key(&channel_name, key_secret.expose())
+                .await
+            {
+                Ok(()) => {
+                    tracing::info!(channel = %channel_name, "Registered Ed25519 signature key")
+                }
+                Err(e) => {
+                    tracing::error!(channel = %channel_name, error = %e, "Invalid signature key in secrets store")
+                }
+            }
+        }
 
         if let Some(secrets) = secrets_store {
             match inject_channel_credentials(&channel_arc, secrets.as_ref(), &channel_name).await {
@@ -964,13 +1017,13 @@ async fn setup_wasm_channels(
         tracing::warn!("Failed to load WASM channel {}: {}", path.display(), err);
     }
 
-    let webhook_routes = if has_webhook_channels {
+    // Always create webhook routes (even with no channels loaded) so that
+    // channels hot-added at runtime can receive webhooks without a restart.
+    let webhook_routes = {
         Some(create_wasm_channel_router(
             Arc::clone(&wasm_router),
             extension_manager.map(Arc::clone),
         ))
-    } else {
-        None
     };
 
     Some(WasmChannelSetup {

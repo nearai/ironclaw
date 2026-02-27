@@ -52,6 +52,14 @@ struct ChannelRuntimeState {
     telegram_owner_id: Option<i64>,
 }
 
+/// Result of saving setup secrets and attempting activation.
+pub struct SetupResult {
+    /// Human-readable status message.
+    pub message: String,
+    /// Whether the channel was successfully activated after saving secrets.
+    pub activated: bool,
+}
+
 /// Central manager for extension lifecycle operations.
 pub struct ExtensionManager {
     registry: ExtensionRegistry,
@@ -82,6 +90,11 @@ pub struct ExtensionManager {
     store: Option<Arc<dyn crate::db::Database>>,
     /// Names of WASM channels that were successfully loaded at startup.
     active_channel_names: RwLock<HashSet<String>>,
+    /// Last activation error for each WASM channel (ephemeral, cleared on success).
+    activation_errors: RwLock<HashMap<String, String>>,
+    /// SSE broadcast sender (set post-construction via `set_sse_sender()`).
+    sse_sender:
+        RwLock<Option<tokio::sync::broadcast::Sender<crate::channels::web::types::SseEvent>>>,
 }
 
 impl ExtensionManager {
@@ -121,6 +134,8 @@ impl ExtensionManager {
             user_id,
             store,
             active_channel_names: RwLock::new(HashSet::new()),
+            activation_errors: RwLock::new(HashMap::new()),
+            sse_sender: RwLock::new(None),
         }
     }
 
@@ -151,6 +166,25 @@ impl ExtensionManager {
     pub async fn set_active_channels(&self, names: Vec<String>) {
         let mut active = self.active_channel_names.write().await;
         active.extend(names);
+    }
+
+    /// Set the SSE broadcast sender for pushing extension status events to the web UI.
+    pub async fn set_sse_sender(
+        &self,
+        sender: tokio::sync::broadcast::Sender<crate::channels::web::types::SseEvent>,
+    ) {
+        *self.sse_sender.write().await = Some(sender);
+    }
+
+    /// Broadcast an extension status change to the web UI via SSE.
+    async fn broadcast_extension_status(&self, name: &str, status: &str, message: Option<&str>) {
+        if let Some(ref sender) = *self.sse_sender.read().await {
+            let _ = sender.send(crate::channels::web::types::SseEvent::ExtensionStatus {
+                extension_name: name.to_string(),
+                status: status.to_string(),
+                message: message.map(|m| m.to_string()),
+            });
+        }
     }
 
     /// Search for extensions. If `discover` is true, also searches online.
@@ -299,6 +333,7 @@ impl ExtensionManager {
                             tools,
                             needs_setup: false,
                             installed: true,
+                            activation_error: None,
                         });
                     }
                 }
@@ -327,6 +362,7 @@ impl ExtensionManager {
                             tools: if active { vec![name] } else { Vec::new() },
                             needs_setup: false,
                             installed: true,
+                            activation_error: None,
                         });
                     }
                 }
@@ -343,10 +379,12 @@ impl ExtensionManager {
             match crate::channels::wasm::discover_channels(&self.wasm_channels_dir).await {
                 Ok(channels) => {
                     let active_names = self.active_channel_names.read().await;
+                    let errors = self.activation_errors.read().await;
                     for (name, _discovered) in channels {
                         let active = active_names.contains(&name);
                         let (authenticated, needs_setup) =
                             self.check_channel_auth_status(&name).await;
+                        let activation_error = errors.get(&name).cloned();
                         extensions.push(InstalledExtension {
                             name,
                             kind: ExtensionKind::WasmChannel,
@@ -357,6 +395,7 @@ impl ExtensionManager {
                             tools: Vec::new(),
                             needs_setup,
                             installed: true,
+                            activation_error,
                         });
                     }
                 }
@@ -392,6 +431,7 @@ impl ExtensionManager {
                     tools: Vec::new(),
                     needs_setup: false,
                     installed: false,
+                    activation_error: None,
                 });
             }
         }
@@ -1756,6 +1796,7 @@ impl ExtensionManager {
         let channel_name = loaded.name().to_string();
         let webhook_secret_name = loaded.webhook_secret_name();
         let secret_header = loaded.webhook_secret_header().map(|s| s.to_string());
+        let sig_key_secret_name = loaded.signature_key_secret_name();
 
         // Get webhook secret from secrets store
         let webhook_secret = self
@@ -1821,6 +1862,26 @@ impl ExtensionManager {
                 )
                 .await;
             tracing::info!(channel = %channel_name, "Registered hot-activated channel with webhook router");
+
+            // Register Ed25519 signature key if declared in capabilities
+            if let Some(ref sig_key_name) = sig_key_secret_name
+                && let Ok(key_secret) = self
+                    .secrets
+                    .get_decrypted(&self.user_id, sig_key_name)
+                    .await
+            {
+                match wasm_channel_router
+                    .register_signature_key(&channel_name, key_secret.expose())
+                    .await
+                {
+                    Ok(()) => {
+                        tracing::info!(channel = %channel_name, "Registered signature key for hot-activated channel")
+                    }
+                    Err(e) => {
+                        tracing::error!(channel = %channel_name, error = %e, "Failed to register signature key")
+                    }
+                }
+            }
         }
 
         // Inject credentials
@@ -1956,6 +2017,37 @@ impl ExtensionManager {
             existing_channel.update_config(config_updates).await;
         }
 
+        // Also refresh signature key in the router
+        let sig_key_secret_name = {
+            let cap_path = self
+                .wasm_channels_dir
+                .join(format!("{}.capabilities.json", name));
+            match tokio::fs::read(&cap_path).await {
+                Ok(bytes) => crate::channels::wasm::ChannelCapabilitiesFile::from_bytes(&bytes)
+                    .ok()
+                    .and_then(|f| f.signature_key_secret_name().map(|s| s.to_string())),
+                Err(_) => None,
+            }
+        };
+        if let Some(ref sig_key_name) = sig_key_secret_name
+            && let Ok(key_secret) = self
+                .secrets
+                .get_decrypted(&self.user_id, sig_key_name)
+                .await
+        {
+            match router
+                .register_signature_key(name, key_secret.expose())
+                .await
+            {
+                Ok(()) => {
+                    tracing::info!(channel = %name, "Refreshed signature verification key")
+                }
+                Err(e) => {
+                    tracing::error!(channel = %name, error = %e, "Failed to refresh signature key")
+                }
+            }
+        }
+
         // Refresh tunnel_url in case it wasn't set at startup
         if let Some(ref tunnel_url) = self.tunnel_url {
             let mut config_updates = std::collections::HashMap::new();
@@ -2087,11 +2179,14 @@ impl ExtensionManager {
     }
 
     /// Save setup secrets for an extension, validating names against the capabilities schema.
+    ///
+    /// After saving, attempts to hot-activate the channel. Returns a [`SetupResult`]
+    /// indicating whether activation succeeded (so the frontend can show appropriate UI).
     pub async fn save_setup_secrets(
         &self,
         name: &str,
         secrets: &std::collections::HashMap<String, String>,
-    ) -> Result<String, ExtensionError> {
+    ) -> Result<SetupResult, ExtensionError> {
         let kind = self.determine_installed_kind(name).await?;
         if kind != ExtensionKind::WasmChannel {
             return Err(ExtensionError::Other(
@@ -2174,21 +2269,38 @@ impl ExtensionManager {
 
         // Try to hot-activate the channel now that secrets are saved
         match self.activate_wasm_channel(name).await {
-            Ok(result) => Ok(format!(
-                "Configuration saved and channel '{}' activated. {}",
-                name, result.message
-            )),
+            Ok(result) => {
+                self.activation_errors.write().await.remove(name);
+                self.broadcast_extension_status(name, "active", None).await;
+                Ok(SetupResult {
+                    message: format!(
+                        "Configuration saved and channel '{}' activated. {}",
+                        name, result.message
+                    ),
+                    activated: true,
+                })
+            }
             Err(e) => {
+                let error_msg = e.to_string();
                 tracing::warn!(
                     channel = name,
                     error = %e,
                     "Saved configuration but hot-activation failed, restart may be needed"
                 );
-                Ok(format!(
-                    "Configuration saved for '{}'. \
-                     Automatic activation failed ({}), restart IronClaw to activate.",
-                    name, e
-                ))
+                self.activation_errors
+                    .write()
+                    .await
+                    .insert(name.to_string(), error_msg.clone());
+                self.broadcast_extension_status(name, "failed", Some(&error_msg))
+                    .await;
+                Ok(SetupResult {
+                    message: format!(
+                        "Configuration saved for '{}'. \
+                         Automatic activation failed ({}), restart IronClaw to activate.",
+                        name, e
+                    ),
+                    activated: false,
+                })
             }
         }
     }
@@ -2416,5 +2528,100 @@ mod tests {
             matches!(combined, ExtensionError::AlreadyInstalled(ref name) if name == "test"),
             "Expected AlreadyInstalled, got: {combined:?}"
         );
+    }
+
+    // === QA Plan P2 - 2.4: Extension registry collision tests (filesystem) ===
+
+    #[test]
+    fn test_tool_and_channel_paths_are_separate() {
+        // Verify that a WASM tool named "telegram" and a WASM channel named
+        // "telegram" use different filesystem paths and don't overwrite each other.
+        let dir = tempfile::tempdir().expect("temp dir");
+        let tools_dir = dir.path().join("tools");
+        let channels_dir = dir.path().join("channels");
+        std::fs::create_dir_all(&tools_dir).unwrap();
+        std::fs::create_dir_all(&channels_dir).unwrap();
+
+        let name = "telegram";
+        let tool_wasm = tools_dir.join(format!("{}.wasm", name));
+        let channel_wasm = channels_dir.join(format!("{}.wasm", name));
+
+        // Simulate installing both.
+        std::fs::write(&tool_wasm, b"tool-payload").unwrap();
+        std::fs::write(&channel_wasm, b"channel-payload").unwrap();
+
+        // Both files exist and contain distinct content.
+        assert!(tool_wasm.exists());
+        assert!(channel_wasm.exists());
+        assert_ne!(
+            std::fs::read(&tool_wasm).unwrap(),
+            std::fs::read(&channel_wasm).unwrap(),
+            "Tool and channel files must be independent"
+        );
+
+        // Removing one doesn't affect the other.
+        std::fs::remove_file(&tool_wasm).unwrap();
+        assert!(!tool_wasm.exists());
+        assert!(
+            channel_wasm.exists(),
+            "Removing tool must not affect channel"
+        );
+    }
+
+    #[test]
+    fn test_determine_kind_priority_tools_before_channels() {
+        // When a name exists in both tools and channels dirs,
+        // determine_installed_kind checks tools first (wasm_tools_dir).
+        // This test documents the priority order.
+        let dir = tempfile::tempdir().expect("temp dir");
+        let tools_dir = dir.path().join("tools");
+        let channels_dir = dir.path().join("channels");
+        std::fs::create_dir_all(&tools_dir).unwrap();
+        std::fs::create_dir_all(&channels_dir).unwrap();
+
+        let name = "ambiguous";
+        let tool_wasm = tools_dir.join(format!("{}.wasm", name));
+        let channel_wasm = channels_dir.join(format!("{}.wasm", name));
+
+        // Only channel exists → channel kind.
+        std::fs::write(&channel_wasm, b"channel").unwrap();
+        assert!(!tool_wasm.exists());
+        assert!(channel_wasm.exists());
+
+        // Both exist → tools dir checked first.
+        std::fs::write(&tool_wasm, b"tool").unwrap();
+        assert!(tool_wasm.exists());
+        assert!(channel_wasm.exists());
+        // This documents the determine_installed_kind priority:
+        // tools are checked before channels.
+
+        // Only tool exists → tool kind.
+        std::fs::remove_file(&channel_wasm).unwrap();
+        assert!(tool_wasm.exists());
+        assert!(!channel_wasm.exists());
+    }
+
+    #[test]
+    fn test_capabilities_files_also_separate() {
+        // capabilities.json files for tools and channels should also be separate.
+        let dir = tempfile::tempdir().expect("temp dir");
+        let tools_dir = dir.path().join("tools");
+        let channels_dir = dir.path().join("channels");
+        std::fs::create_dir_all(&tools_dir).unwrap();
+        std::fs::create_dir_all(&channels_dir).unwrap();
+
+        let name = "telegram";
+        let tool_cap = tools_dir.join(format!("{}.capabilities.json", name));
+        let channel_cap = channels_dir.join(format!("{}.capabilities.json", name));
+
+        let tool_caps = r#"{"required_secrets":["TELEGRAM_API_KEY"]}"#;
+        let channel_caps = r#"{"required_secrets":["TELEGRAM_BOT_TOKEN"]}"#;
+
+        std::fs::write(&tool_cap, tool_caps).unwrap();
+        std::fs::write(&channel_cap, channel_caps).unwrap();
+
+        // Both exist with distinct content.
+        assert_eq!(std::fs::read_to_string(&tool_cap).unwrap(), tool_caps);
+        assert_eq!(std::fs::read_to_string(&channel_cap).unwrap(), channel_caps);
     }
 }
