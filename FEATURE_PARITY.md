@@ -220,6 +220,7 @@ This document tracks feature parity between IronClaw (Rust implementation) and O
 | NVIDIA API | ✅ | ❌ | P3 | New provider |
 | OpenRouter | ✅ | ✅ | - | Via OpenAI-compatible provider (RigAdapter) |
 | Tinfoil | ❌ | ✅ | - | Private inference provider (IronClaw-only) |
+| Avian | ❌ | ✅ | - | DeepSeek, Kimi, GLM models (IronClaw-only) |
 | OpenAI-compatible | ❌ | ✅ | - | Generic OpenAI-compatible endpoint (RigAdapter) |
 | Ollama (local) | ✅ | ✅ | - | via `rig::providers::ollama` (full support) |
 | Perplexity | ✅ | ❌ | P3 | Freshness parameter for web_search |
@@ -521,6 +522,7 @@ This document tracks feature parity between IronClaw (Rust implementation) and O
 - ✅ Memory CLI commands (search, read, write, tree, status)
 - ✅ Shell env scrubbing + command injection detection
 - ✅ Tinfoil private inference provider
+- ✅ Avian inference provider
 - ✅ OpenAI-compatible / OpenRouter provider support
 
 ### P1 - High Priority
@@ -579,7 +581,8 @@ IronClaw intentionally differs from OpenClaw in these ways:
 5. **No mobile/desktop apps**: Focus on server-side and CLI initially
 6. **WASM channels**: Novel extension mechanism not in OpenClaw
 7. **Tinfoil private inference**: IronClaw-only provider for private/encrypted inference
-8. **GitHub WASM tool**: Native GitHub integration as WASM tool
-9. **Prompt-based skills**: Different approach than OpenClaw capability bundles (trust gating, attenuation)
+8. **Avian inference**: IronClaw-only provider for DeepSeek, Kimi, GLM, and MiniMax models
+9. **GitHub WASM tool**: Native GitHub integration as WASM tool
+10. **Prompt-based skills**: Different approach than OpenClaw capability bundles (trust gating, attenuation)
 
 These are intentional architectural choices, not gaps to be filled.
