@@ -156,6 +156,16 @@ pub enum ValidationError {
     InvalidDateTimeFormat { field: String, reason: String },
 }
 
+// ==================== System Fields ====================
+
+/// Returns true if the field name is a system field (prefixed with `_`).
+///
+/// System fields like `_source` and `_timestamp` are injected by the event
+/// ingest API and bypass schema validation.
+pub fn is_system_field(name: &str) -> bool {
+    name.starts_with('_')
+}
+
 // ==================== Name Validation ====================
 
 /// Validate that an identifier (collection name or field name) contains only
@@ -229,9 +239,9 @@ impl CollectionSchema {
                 got: json_type_name(data).to_string(),
             })?;
 
-        // Reject unknown fields.
+        // Reject unknown fields (system fields pass through).
         for key in obj.keys() {
-            if !self.fields.contains_key(key) {
+            if !self.fields.contains_key(key) && !is_system_field(key) {
                 return Err(ValidationError::UnknownField {
                     field: key.clone(),
                 });
@@ -239,6 +249,13 @@ impl CollectionSchema {
         }
 
         let mut result = serde_json::Map::new();
+
+        // Pass through system fields without validation.
+        for (key, value) in obj {
+            if is_system_field(key) {
+                result.insert(key.clone(), value.clone());
+            }
+        }
 
         for (field_name, field_def) in &self.fields {
             match obj.get(field_name) {

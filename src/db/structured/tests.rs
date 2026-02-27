@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 
 use crate::db::structured::{
-    CollectionSchema, FieldDef, FieldType, ValidationError, validate_field_name,
+    CollectionSchema, FieldDef, FieldType, ValidationError, is_system_field, validate_field_name,
 };
 
 // ==================== Fixture Schemas ====================
@@ -460,4 +460,44 @@ fn partial_update_allows_null_on_optional_field() {
     });
     let result = schema.validate_partial(&updates).unwrap();
     assert_eq!(result["notes"], serde_json::Value::Null);
+}
+
+// ==================== System Field Support ====================
+
+#[test]
+fn is_system_field_detection() {
+    assert!(is_system_field("_source"));
+    assert!(is_system_field("_timestamp"));
+    assert!(is_system_field("_ingested_at"));
+    assert!(!is_system_field("source"));
+    assert!(!is_system_field("name"));
+    assert!(!is_system_field(""));
+}
+
+#[test]
+fn system_fields_pass_through_validation() {
+    let schema = nanny_schema();
+    let data = serde_json::json!({
+        "date": "2026-02-22",
+        "start_time": "2026-02-22T09:00:00+00:00",
+        "end_time": "2026-02-22T17:00:00+00:00",
+        "_source": "home_assistant",
+        "_timestamp": "2026-02-22T09:00:00Z"
+    });
+    let result = schema.validate_record(&data).unwrap();
+
+    // System fields should be preserved in output.
+    assert_eq!(result["_source"], "home_assistant");
+    assert_eq!(result["_timestamp"], "2026-02-22T09:00:00Z");
+    // Regular fields still validated.
+    assert_eq!(result["date"], "2026-02-22");
+    // Default still applied.
+    assert_eq!(result["status"], "scheduled");
+}
+
+#[test]
+fn user_defined_underscore_field_rejected() {
+    // validate_field_name rejects _ prefix for user-defined fields.
+    assert!(validate_field_name("_source").is_err());
+    assert!(validate_field_name("_timestamp").is_err());
 }
