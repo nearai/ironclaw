@@ -2,6 +2,7 @@ use std::path::PathBuf;
 
 use secrecy::SecretString;
 
+use crate::bootstrap::ironclaw_base_dir;
 use crate::config::helpers::{optional_env, parse_optional_env};
 use crate::error::ConfigError;
 use crate::settings::Settings;
@@ -373,10 +374,7 @@ fn parse_extra_headers(val: &str) -> Result<Vec<(String, String)>, ConfigError> 
 
 /// Get the default session file path (~/.ironclaw/session.json).
 fn default_session_path() -> PathBuf {
-    dirs::home_dir()
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join(".ironclaw")
-        .join("session.json")
+    ironclaw_base_dir().join("session.json")
 }
 
 #[cfg(test)]

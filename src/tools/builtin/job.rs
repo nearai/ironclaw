@@ -14,6 +14,7 @@ use async_trait::async_trait;
 use chrono::Utc;
 use uuid::Uuid;
 
+use crate::bootstrap::ironclaw_base_dir;
 use crate::channels::IncomingMessage;
 use crate::channels::web::types::SseEvent;
 use crate::context::{ContextManager, JobContext, JobState};
@@ -554,10 +555,7 @@ fn validate_env_var_name(name: &str) -> Result<(), ToolError> {
 }
 
 fn projects_base() -> PathBuf {
-    dirs::home_dir()
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join(".ironclaw")
-        .join("projects")
+    ironclaw_base_dir().join("projects")
 }
 
 /// Resolve the project directory, creating it if it doesn't exist.

@@ -5,6 +5,7 @@
 
 use std::path::PathBuf;
 
+use crate::bootstrap::ironclaw_base_dir;
 use crate::settings::Settings;
 
 /// Run the status command, printing system health info.
@@ -206,15 +207,9 @@ fn count_wasm_files(dir: &std::path::Path) -> usize {
 }
 
 fn default_tools_dir() -> PathBuf {
-    dirs::home_dir()
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join(".ironclaw")
-        .join("tools")
+    ironclaw_base_dir().join("tools")
 }
 
 fn default_channels_dir() -> PathBuf {
-    dirs::home_dir()
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join(".ironclaw")
-        .join("channels")
+    ironclaw_base_dir().join("channels")
 }

@@ -9,6 +9,7 @@ use std::sync::Arc;
 use clap::Subcommand;
 use tokio::fs;
 
+use crate::bootstrap::ironclaw_base_dir;
 use crate::config::Config;
 #[allow(unused_imports)]
 use crate::db::Database;
@@ -19,9 +20,7 @@ use crate::tools::wasm::{CapabilitiesFile, compute_binary_hash};
 
 /// Default tools directory.
 fn default_tools_dir() -> PathBuf {
-    dirs::home_dir()
-        .map(|h| h.join(".ironclaw").join("tools"))
-        .unwrap_or_else(|| PathBuf::from(".ironclaw/tools"))
+    ironclaw_base_dir().join("tools")
 }
 
 #[derive(Subcommand, Debug, Clone)]

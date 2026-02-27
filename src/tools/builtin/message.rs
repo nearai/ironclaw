@@ -8,6 +8,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use tokio::sync::RwLock;
 
+use crate::bootstrap::ironclaw_base_dir;
 use crate::channels::{ChannelManager, OutgoingResponse};
 use crate::context::JobContext;
 use crate::tools::tool::{
@@ -27,9 +28,7 @@ pub struct MessageTool {
 
 impl MessageTool {
     pub fn new(channel_manager: Arc<ChannelManager>) -> Self {
-        let base_dir = dirs::home_dir()
-            .unwrap_or_else(|| std::path::PathBuf::from("."))
-            .join(".ironclaw");
+        let base_dir = ironclaw_base_dir();
 
         Self {
             channel_manager,

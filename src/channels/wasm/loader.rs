@@ -11,6 +11,7 @@ use std::sync::Arc;
 
 use tokio::fs;
 
+use crate::bootstrap::ironclaw_base_dir;
 use crate::channels::wasm::capabilities::ChannelCapabilities;
 use crate::channels::wasm::error::WasmChannelError;
 use crate::channels::wasm::runtime::WasmChannelRuntime;
@@ -356,10 +357,7 @@ pub struct DiscoveredChannel {
 /// Returns ~/.ironclaw/channels/
 #[allow(dead_code)]
 pub fn default_channels_dir() -> PathBuf {
-    dirs::home_dir()
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join(".ironclaw")
-        .join("channels")
+    ironclaw_base_dir().join("channels")
 }
 
 #[cfg(test)]
