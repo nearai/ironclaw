@@ -562,6 +562,33 @@ pub struct WasmChannel {
     settings_store: Option<Arc<dyn crate::db::SettingsStore>>,
 }
 
+/// Update broadcast metadata in memory and persist to the settings store when
+/// it changes. Extracted as a free function so both the `WasmChannel` instance
+/// method and the static polling helper share one implementation.
+async fn do_update_broadcast_metadata(
+    channel_name: &str,
+    metadata: &str,
+    last_broadcast_metadata: &tokio::sync::RwLock<Option<String>>,
+    settings_store: Option<&Arc<dyn crate::db::SettingsStore>>,
+) {
+    let mut guard = last_broadcast_metadata.write().await;
+    let changed = guard.as_deref() != Some(metadata);
+    *guard = Some(metadata.to_string());
+    drop(guard);
+
+    if changed && let Some(store) = settings_store {
+        let key = format!("channel_broadcast_metadata_{}", channel_name);
+        let value = serde_json::Value::String(metadata.to_string());
+        if let Err(e) = store.set_setting("default", &key, &value).await {
+            tracing::warn!(
+                channel = %channel_name,
+                "Failed to persist broadcast metadata: {}",
+                e
+            );
+        }
+    }
+}
+
 impl WasmChannel {
     /// Create a new WASM channel.
     pub fn new(
@@ -651,24 +678,13 @@ impl WasmChannel {
     /// Compares with the current value to avoid redundant DB writes on every
     /// incoming message (the chat_id rarely changes).
     async fn update_broadcast_metadata(&self, metadata: &str) {
-        let mut guard = self.last_broadcast_metadata.write().await;
-        let changed = guard.as_deref() != Some(metadata);
-        *guard = Some(metadata.to_string());
-        drop(guard);
-
-        if changed && let Some(ref store) = self.settings_store {
-            let value = serde_json::Value::String(metadata.to_string());
-            if let Err(e) = store
-                .set_setting("default", &self.broadcast_metadata_key(), &value)
-                .await
-            {
-                tracing::warn!(
-                    channel = %self.name,
-                    "Failed to persist broadcast metadata: {}",
-                    e
-                );
-            }
-        }
+        do_update_broadcast_metadata(
+            &self.name,
+            metadata,
+            &self.last_broadcast_metadata,
+            self.settings_store.as_ref(),
+        )
+        .await;
     }
 
     /// Load broadcast metadata from settings store on startup.
@@ -1933,23 +1949,13 @@ impl WasmChannel {
             if let Ok(metadata) = serde_json::from_str(&emitted.metadata_json) {
                 msg = msg.with_metadata(metadata);
                 // Store for broadcast routing (chat_id etc.)
-                // Only persist to DB when the value actually changes.
-                let mut guard = last_broadcast_metadata.write().await;
-                let changed = guard.as_deref() != Some(&emitted.metadata_json);
-                *guard = Some(emitted.metadata_json.clone());
-                drop(guard);
-
-                if changed && let Some(store) = settings_store {
-                    let key = format!("channel_broadcast_metadata_{}", channel_name);
-                    let value = serde_json::Value::String(emitted.metadata_json.clone());
-                    if let Err(e) = store.set_setting("default", &key, &value).await {
-                        tracing::warn!(
-                            channel = %channel_name,
-                            "Failed to persist broadcast metadata: {}",
-                            e
-                        );
-                    }
-                }
+                do_update_broadcast_metadata(
+                    channel_name,
+                    &emitted.metadata_json,
+                    last_broadcast_metadata,
+                    settings_store,
+                )
+                .await;
             }
 
             // Send to stream
