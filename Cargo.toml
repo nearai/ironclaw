@@ -100,6 +100,9 @@ aho-corasick = "1"
 # YAML parsing for SKILL.md frontmatter
 serde_yml = "0.0.12"
 
+# JSON5 parsing for OpenClaw config import
+json5 = "0.4"
+
 # Filesystem paths
 dirs = "6"
 fs4 = "0.6"

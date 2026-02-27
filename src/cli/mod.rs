@@ -14,6 +14,7 @@
 mod completion;
 mod config;
 mod doctor;
+mod import;
 mod mcp;
 pub mod memory;
 pub mod oauth_defaults;
@@ -26,6 +27,7 @@ mod tool;
 pub use completion::Completion;
 pub use config::{ConfigCommand, run_config_command};
 pub use doctor::run_doctor_command;
+pub use import::{ImportCommand, run_import_command_with_db};
 pub use mcp::{McpCommand, run_mcp_command};
 pub use memory::MemoryCommand;
 #[cfg(feature = "postgres")]
@@ -113,6 +115,10 @@ pub enum Command {
     /// Manage OS service (launchd / systemd)
     #[command(subcommand)]
     Service(ServiceCommand),
+
+    /// Import data from another personal AI assistant
+    #[command(subcommand)]
+    Import(ImportCommand),
 
     /// Probe external dependencies and validate configuration
     Doctor,
