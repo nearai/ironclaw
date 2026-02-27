@@ -44,6 +44,10 @@ pub struct WasmChannelRouter {
     secret_headers: RwLock<HashMap<String, String>>,
     /// Ed25519 public keys for signature verification by channel name (hex-encoded).
     signature_keys: RwLock<HashMap<String, String>>,
+    /// Verification mode per channel: "query_param", "signature", etc.
+    verification_modes: RwLock<HashMap<String, String>>,
+    /// HMAC secrets for signature verification by channel name (WhatsApp/Slack style).
+    hmac_secrets: RwLock<HashMap<String, String>>,
 }
 
 impl WasmChannelRouter {
@@ -55,6 +59,8 @@ impl WasmChannelRouter {
             secrets: RwLock::new(HashMap::new()),
             secret_headers: RwLock::new(HashMap::new()),
             signature_keys: RwLock::new(HashMap::new()),
+            verification_modes: RwLock::new(HashMap::new()),
+            hmac_secrets: RwLock::new(HashMap::new()),
         }
     }
 
@@ -66,12 +72,16 @@ impl WasmChannelRouter {
     /// * `secret` - Optional webhook secret for validation
     /// * `secret_header` - Optional HTTP header name for secret validation
     ///   (e.g., "X-Telegram-Bot-Api-Secret-Token"). Defaults to "X-Webhook-Secret".
+    /// * `verification_mode` - Optional verification mode for GET requests:
+    ///   - "query_param": Skip host-level secret validation for GET, WASM validates via query param
+    ///   - "signature": Always require signature validation
     pub async fn register(
         &self,
         channel: Arc<WasmChannel>,
         endpoints: Vec<RegisteredEndpoint>,
         secret: Option<String>,
         secret_header: Option<String>,
+        verification_mode: Option<String>,
     ) {
         let name = channel.channel_name().to_string();
 
@@ -97,7 +107,12 @@ impl WasmChannelRouter {
 
         // Store secret header if provided
         if let Some(h) = secret_header {
-            self.secret_headers.write().await.insert(name, h);
+            self.secret_headers.write().await.insert(name.clone(), h);
+        }
+
+        // Store verification mode if provided
+        if let Some(m) = verification_mode {
+            self.verification_modes.write().await.insert(name, m);
         }
     }
 
@@ -111,6 +126,17 @@ impl WasmChannelRouter {
             .get(channel_name)
             .cloned()
             .unwrap_or_else(|| "X-Webhook-Secret".to_string())
+    }
+
+    /// Get the verification mode for a channel.
+    ///
+    /// Returns the configured mode or None (default behavior).
+    pub async fn get_verification_mode(&self, channel_name: &str) -> Option<String> {
+        self.verification_modes
+            .read()
+            .await
+            .get(channel_name)
+            .cloned()
     }
 
     /// Update the webhook secret for an already-registered channel.
@@ -134,6 +160,8 @@ impl WasmChannelRouter {
         self.secrets.write().await.remove(channel_name);
         self.secret_headers.write().await.remove(channel_name);
         self.signature_keys.write().await.remove(channel_name);
+        self.verification_modes.write().await.remove(channel_name);
+        self.hmac_secrets.write().await.remove(channel_name);
 
         // Remove all paths for this channel
         self.path_to_channel
@@ -207,6 +235,28 @@ impl WasmChannelRouter {
     /// Returns `None` if no key is registered (no signature check needed).
     pub async fn get_signature_key(&self, channel_name: &str) -> Option<String> {
         self.signature_keys.read().await.get(channel_name).cloned()
+    }
+
+    /// Register an HMAC secret for a channel.
+    ///
+    /// The secret is used for HMAC-SHA256 signature verification
+    /// (WhatsApp/Slack style with X-Hub-Signature-256 header).
+    pub async fn register_hmac_secret(&self, channel_name: &str, secret: String) {
+        self.hmac_secrets
+            .write()
+            .await
+            .insert(channel_name.to_string(), secret);
+        tracing::info!(
+            channel = %channel_name,
+            "Registered HMAC secret for webhook signature verification"
+        );
+    }
+
+    /// Get the HMAC secret for a channel.
+    ///
+    /// Returns `None` if no HMAC secret is registered.
+    pub async fn get_hmac_secret(&self, channel_name: &str) -> Option<String> {
+        self.hmac_secrets.read().await.get(channel_name).cloned()
     }
 }
 
@@ -312,7 +362,13 @@ async fn webhook_handler(
     let channel_name = channel.channel_name();
 
     // Check if secret is required
-    if state.router.requires_secret(channel_name).await {
+    // Skip secret validation if using query_param verification mode
+    // (e.g., WhatsApp uses hub.verify_token for GET verification and X-Hub-Signature-256
+    // for POST validation - both handled by the WASM module internally)
+    let verification_mode = state.router.get_verification_mode(channel_name).await;
+    let skip_secret_validation = verification_mode.as_deref() == Some("query_param");
+
+    if !skip_secret_validation && state.router.requires_secret(channel_name).await {
         // Get the secret header name for this channel (from capabilities or default)
         let secret_header_name = state.router.get_secret_header(channel_name).await;
 
@@ -374,6 +430,12 @@ async fn webhook_handler(
                 );
             }
         }
+    } else if skip_secret_validation {
+        tracing::debug!(
+            channel = %channel_name,
+            verification_mode = ?verification_mode,
+            "Skipping secret validation for channel with query_param verification mode"
+        );
     }
 
     // Ed25519 signature verification (Discord-style)
@@ -421,6 +483,47 @@ async fn webhook_handler(
                     StatusCode::UNAUTHORIZED,
                     Json(serde_json::json!({
                         "error": "Missing signature headers"
+                    })),
+                );
+            }
+        }
+    }
+
+    // HMAC-SHA256 signature verification (WhatsApp/Slack style)
+    if let Some(hmac_secret) = state.router.get_hmac_secret(channel_name).await {
+        let signature_header = headers
+            .get("X-Hub-Signature-256")
+            .and_then(|v| v.to_str().ok());
+
+        match signature_header {
+            Some(sig) => {
+                if !crate::channels::wasm::signature::verify_hmac_sha256(
+                    &hmac_secret,
+                    sig,
+                    &body,
+                ) {
+                    tracing::warn!(
+                        channel = %channel_name,
+                        "HMAC-SHA256 signature verification failed"
+                    );
+                    return (
+                        StatusCode::UNAUTHORIZED,
+                        Json(serde_json::json!({
+                            "error": "Invalid signature"
+                        })),
+                    );
+                }
+                tracing::debug!(channel = %channel_name, "HMAC-SHA256 signature verified");
+            }
+            None => {
+                tracing::warn!(
+                    channel = %channel_name,
+                    "X-Hub-Signature-256 header missing but HMAC secret is registered"
+                );
+                return (
+                    StatusCode::UNAUTHORIZED,
+                    Json(serde_json::json!({
+                        "error": "Missing signature header"
                     })),
                 );
             }
@@ -618,7 +721,13 @@ mod tests {
         }];
 
         router
-            .register(channel, endpoints, Some("secret123".to_string()), None)
+            .register(
+                channel,
+                endpoints,
+                Some("secret123".to_string()),
+                None,
+                None,
+            )
             .await;
 
         // Should find channel by path
@@ -637,7 +746,7 @@ mod tests {
         let channel = create_test_channel("slack");
 
         router
-            .register(channel, vec![], Some("secret123".to_string()), None)
+            .register(channel, vec![], Some("secret123".to_string()), None, None)
             .await;
 
         // Correct secret
@@ -648,7 +757,7 @@ mod tests {
 
         // Channel without secret always validates
         let channel2 = create_test_channel("telegram");
-        router.register(channel2, vec![], None, None).await;
+        router.register(channel2, vec![], None, None, None).await;
         assert!(router.validate_secret("telegram", "anything").await);
     }
 
@@ -664,7 +773,7 @@ mod tests {
             require_secret: false,
         }];
 
-        router.register(channel, endpoints, None, None).await;
+        router.register(channel, endpoints, None, None, None).await;
 
         // Should exist
         assert!(
@@ -693,8 +802,8 @@ mod tests {
         let channel1 = create_test_channel("slack");
         let channel2 = create_test_channel("telegram");
 
-        router.register(channel1, vec![], None, None).await;
-        router.register(channel2, vec![], None, None).await;
+        router.register(channel1, vec![], None, None, None).await;
+        router.register(channel2, vec![], None, None, None).await;
 
         let channels = router.list_channels().await;
         assert_eq!(channels.len(), 2);
@@ -714,6 +823,7 @@ mod tests {
                 vec![],
                 Some("secret123".to_string()),
                 Some("X-Telegram-Bot-Api-Secret-Token".to_string()),
+                None,
             )
             .await;
 
@@ -726,7 +836,7 @@ mod tests {
         // Channel without custom header should use default
         let channel2 = create_test_channel("slack");
         router
-            .register(channel2, vec![], Some("secret456".to_string()), None)
+            .register(channel2, vec![], Some("secret456".to_string()), None, None)
             .await;
         assert_eq!(router.get_secret_header("slack").await, "X-Webhook-Secret");
     }
@@ -738,7 +848,7 @@ mod tests {
         let router = WasmChannelRouter::new();
         let channel = create_test_channel("discord");
 
-        router.register(channel, vec![], None, None).await;
+        router.register(channel, vec![], None, None, None).await;
 
         let fake_pub_key = "a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f0a1b2";
         router
@@ -754,7 +864,7 @@ mod tests {
     async fn test_no_signature_key_returns_none() {
         let router = WasmChannelRouter::new();
         let channel = create_test_channel("slack");
-        router.register(channel, vec![], None, None).await;
+        router.register(channel, vec![], None, None, None).await;
 
         // Slack has no signature key registered
         let key = router.get_signature_key("slack").await;
@@ -773,7 +883,7 @@ mod tests {
             require_secret: false,
         }];
 
-        router.register(channel, endpoints, None, None).await;
+        router.register(channel, endpoints, None, None, None).await;
         // Use a valid 32-byte Ed25519 key for this test
         let valid_key = "d75a980182b10ab7d54bfed3c964073a0ee172f3daa3f4a18446b7e8c7ac6602";
         router
@@ -797,7 +907,7 @@ mod tests {
     async fn test_register_valid_signature_key_succeeds() {
         let router = WasmChannelRouter::new();
         let channel = create_test_channel("discord");
-        router.register(channel, vec![], None, None).await;
+        router.register(channel, vec![], None, None, None).await;
 
         // Valid 32-byte Ed25519 public key (from test keypair)
         let valid_key = "d75a980182b10ab7d54bfed3c964073a0ee172f3daa3f4a18446b7e8c7ac6602";
@@ -809,7 +919,7 @@ mod tests {
     async fn test_register_invalid_hex_key_fails() {
         let router = WasmChannelRouter::new();
         let channel = create_test_channel("discord");
-        router.register(channel, vec![], None, None).await;
+        router.register(channel, vec![], None, None, None).await;
 
         let result = router
             .register_signature_key("discord", "not-valid-hex-zzz")
@@ -821,7 +931,7 @@ mod tests {
     async fn test_register_wrong_length_key_fails() {
         let router = WasmChannelRouter::new();
         let channel = create_test_channel("discord");
-        router.register(channel, vec![], None, None).await;
+        router.register(channel, vec![], None, None, None).await;
 
         // 16 bytes instead of 32
         let short_key = hex::encode([0u8; 16]);
@@ -833,7 +943,7 @@ mod tests {
     async fn test_register_empty_key_fails() {
         let router = WasmChannelRouter::new();
         let channel = create_test_channel("discord");
-        router.register(channel, vec![], None, None).await;
+        router.register(channel, vec![], None, None, None).await;
 
         let result = router.register_signature_key("discord", "").await;
         assert!(result.is_err(), "Empty key should be rejected");
@@ -843,7 +953,7 @@ mod tests {
     async fn test_valid_key_is_retrievable() {
         let router = WasmChannelRouter::new();
         let channel = create_test_channel("discord");
-        router.register(channel, vec![], None, None).await;
+        router.register(channel, vec![], None, None, None).await;
 
         let valid_key = "d75a980182b10ab7d54bfed3c964073a0ee172f3daa3f4a18446b7e8c7ac6602";
         router
@@ -859,7 +969,7 @@ mod tests {
     async fn test_invalid_key_does_not_store() {
         let router = WasmChannelRouter::new();
         let channel = create_test_channel("discord");
-        router.register(channel, vec![], None, None).await;
+        router.register(channel, vec![], None, None, None).await;
 
         // Attempt to register invalid key
         let _ = router
@@ -893,7 +1003,9 @@ mod tests {
             require_secret: false,
         }];
 
-        wasm_router.register(channel, endpoints, None, None).await;
+        wasm_router
+            .register(channel, endpoints, None, None, None)
+            .await;
 
         let app = create_wasm_channel_router(wasm_router.clone(), None);
         (wasm_router, app)
@@ -1120,7 +1232,13 @@ mod tests {
 
         // Register with BOTH secret and signature key
         wasm_router
-            .register(channel, endpoints, Some("my-secret".to_string()), None)
+            .register(
+                channel,
+                endpoints,
+                Some("my-secret".to_string()),
+                None,
+                None,
+            )
             .await;
 
         let signing_key = test_signing_key();
@@ -1161,6 +1279,195 @@ mod tests {
             resp.status(),
             StatusCode::UNAUTHORIZED,
             "Valid secret + valid signature should not return 401"
+        );
+    }
+
+    // ── HMAC-SHA256 Router Tests (WhatsApp/Slack style) ─────────────────
+
+    /// Helper: compute HMAC-SHA256 signature in WhatsApp format.
+    fn compute_hmac_signature(secret: &str, body: &[u8]) -> String {
+        use hmac::{Hmac, Mac};
+        use sha2::Sha256;
+        type HmacSha256 = Hmac<Sha256>;
+
+        let mut mac = HmacSha256::new_from_slice(secret.as_bytes()).unwrap();
+        mac.update(body);
+        let result = mac.finalize();
+        format!("sha256={}", hex::encode(result.into_bytes()))
+    }
+
+    #[tokio::test]
+    async fn test_register_and_get_hmac_secret() {
+        let router = WasmChannelRouter::new();
+        let channel = create_test_channel("whatsapp");
+
+        router.register(channel, vec![], None, None, None).await;
+
+        router
+            .register_hmac_secret("whatsapp", "my_app_secret".to_string())
+            .await;
+
+        let secret = router.get_hmac_secret("whatsapp").await;
+        assert_eq!(secret, Some("my_app_secret".to_string()));
+    }
+
+    #[tokio::test]
+    async fn test_no_hmac_secret_returns_none() {
+        let router = WasmChannelRouter::new();
+        let channel = create_test_channel("telegram");
+        router.register(channel, vec![], None, None, None).await;
+
+        let secret = router.get_hmac_secret("telegram").await;
+        assert!(secret.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_unregister_removes_hmac_secret() {
+        let router = WasmChannelRouter::new();
+        let channel = create_test_channel("whatsapp");
+
+        let endpoints = vec![RegisteredEndpoint {
+            channel_name: "whatsapp".to_string(),
+            path: "/webhook/whatsapp".to_string(),
+            methods: vec!["POST".to_string()],
+            require_secret: false,
+        }];
+
+        router.register(channel, endpoints, None, None, None).await;
+        router
+            .register_hmac_secret("whatsapp", "secret123".to_string())
+            .await;
+
+        // Secret should exist
+        assert!(router.get_hmac_secret("whatsapp").await.is_some());
+
+        // Unregister
+        router.unregister("whatsapp").await;
+
+        // Secret should be gone
+        assert!(router.get_hmac_secret("whatsapp").await.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_webhook_rejects_missing_hmac_header() {
+        let wasm_router = Arc::new(WasmChannelRouter::new());
+        let channel = create_test_channel("whatsapp");
+
+        let endpoints = vec![RegisteredEndpoint {
+            channel_name: "whatsapp".to_string(),
+            path: "/webhook/whatsapp".to_string(),
+            methods: vec!["POST".to_string()],
+            require_secret: false,
+        }];
+
+        wasm_router
+            .register(channel, endpoints, None, None, Some("query_param".to_string()))
+            .await;
+
+        // Register HMAC secret
+        wasm_router
+            .register_hmac_secret("whatsapp", "my_app_secret".to_string())
+            .await;
+
+        let app = create_wasm_channel_router(wasm_router.clone(), None);
+
+        // Send request without X-Hub-Signature-256 header
+        let req = Request::builder()
+            .method("POST")
+            .uri("/webhook/whatsapp")
+            .header("content-type", "application/json")
+            .body(Body::from(r#"{"entry":[]}"#))
+            .unwrap();
+
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::UNAUTHORIZED,
+            "Missing HMAC header should return 401"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_webhook_rejects_invalid_hmac_signature() {
+        let wasm_router = Arc::new(WasmChannelRouter::new());
+        let channel = create_test_channel("whatsapp");
+
+        let endpoints = vec![RegisteredEndpoint {
+            channel_name: "whatsapp".to_string(),
+            path: "/webhook/whatsapp".to_string(),
+            methods: vec!["POST".to_string()],
+            require_secret: false,
+        }];
+
+        wasm_router
+            .register(channel, endpoints, None, None, Some("query_param".to_string()))
+            .await;
+
+        wasm_router
+            .register_hmac_secret("whatsapp", "correct_secret".to_string())
+            .await;
+
+        let app = create_wasm_channel_router(wasm_router.clone(), None);
+
+        let body = br#"{"entry":[]}"#;
+        // Sign with wrong secret
+        let sig = compute_hmac_signature("wrong_secret", body);
+
+        let req = Request::builder()
+            .method("POST")
+            .uri("/webhook/whatsapp")
+            .header("content-type", "application/json")
+            .header("X-Hub-Signature-256", &sig)
+            .body(Body::from(&body[..]))
+            .unwrap();
+
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::UNAUTHORIZED,
+            "Invalid HMAC signature should return 401"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_webhook_accepts_valid_hmac_signature() {
+        let wasm_router = Arc::new(WasmChannelRouter::new());
+        let channel = create_test_channel("whatsapp");
+
+        let endpoints = vec![RegisteredEndpoint {
+            channel_name: "whatsapp".to_string(),
+            path: "/webhook/whatsapp".to_string(),
+            methods: vec!["POST".to_string()],
+            require_secret: false,
+        }];
+
+        wasm_router
+            .register(channel, endpoints, None, None, Some("query_param".to_string()))
+            .await;
+
+        wasm_router
+            .register_hmac_secret("whatsapp", "my_app_secret".to_string())
+            .await;
+
+        let app = create_wasm_channel_router(wasm_router.clone(), None);
+
+        let body = br#"{"entry":[]}"#;
+        let sig = compute_hmac_signature("my_app_secret", body);
+
+        let req = Request::builder()
+            .method("POST")
+            .uri("/webhook/whatsapp")
+            .header("content-type", "application/json")
+            .header("X-Hub-Signature-256", &sig)
+            .body(Body::from(&body[..]))
+            .unwrap();
+
+        let resp = app.oneshot(req).await.unwrap();
+        // Should pass HMAC check (may be 500 due to no WASM module, but not 401)
+        assert_ne!(
+            resp.status(),
+            StatusCode::UNAUTHORIZED,
+            "Valid HMAC signature should not return 401"
         );
     }
 }

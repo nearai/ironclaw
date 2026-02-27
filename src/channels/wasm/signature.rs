@@ -5,6 +5,12 @@
 //!
 //! See: <https://discord.com/developers/docs/interactions/overview#validating-security-request-headers>
 
+use hmac::{Hmac, Mac};
+use sha2::Sha256;
+use subtle::ConstantTimeEq;
+
+type HmacSha256 = Hmac<Sha256>;
+
 /// Verify a Discord interaction signature.
 ///
 /// Discord signs each interaction with Ed25519 using:
@@ -48,6 +54,44 @@ pub fn verify_discord_signature(
     message.extend_from_slice(timestamp.as_bytes());
     message.extend_from_slice(body);
     verifying_key.verify_strict(&message, &signature).is_ok()
+}
+
+/// Verify HMAC-SHA256 signature (WhatsApp/Slack style).
+///
+/// # Arguments
+/// * `secret` - The HMAC secret (App Secret)
+/// * `signature_header` - Value from X-Hub-Signature-256 header (format: "sha256=<hex>")
+/// * `body` - Raw request body bytes
+///
+/// # Returns
+/// `true` if signature is valid, `false` otherwise
+pub fn verify_hmac_sha256(secret: &str, signature_header: &str, body: &[u8]) -> bool {
+    // Parse header format: "sha256=<hex_signature>"
+    let Some(hex_signature) = signature_header.strip_prefix("sha256=") else {
+        return false;
+    };
+
+    // Decode expected signature
+    let Ok(expected_sig) = hex::decode(hex_signature) else {
+        return false;
+    };
+
+    // SHA-256 produces 32-byte signatures - reject wrong lengths early
+    if expected_sig.len() != 32 {
+        return false;
+    }
+
+    // Compute HMAC-SHA256
+    let mut mac = match HmacSha256::new_from_slice(secret.as_bytes()) {
+        Ok(m) => m,
+        Err(_) => return false,
+    };
+    mac.update(body);
+    let result = mac.finalize();
+    let computed_sig = result.into_bytes();
+
+    // Constant-time comparison to prevent timing attacks
+    computed_sig.as_slice().ct_eq(expected_sig.as_slice()).into()
 }
 
 #[cfg(test)]
@@ -336,6 +380,131 @@ mod tests {
         assert!(
             !verify_discord_signature(&pub_key, &sig, "-1", body, TEST_TS),
             "Negative timestamp should be rejected"
+        );
+    }
+
+    // ── Category: HMAC-SHA256 Verification ─────────────────────────────────
+
+    /// Helper: compute HMAC-SHA256 signature in WhatsApp format.
+    fn compute_hmac_signature(secret: &str, body: &[u8]) -> String {
+        use hmac::Mac;
+        let mut mac = HmacSha256::new_from_slice(secret.as_bytes()).unwrap();
+        mac.update(body);
+        let result = mac.finalize();
+        format!("sha256={}", hex::encode(result.into_bytes()))
+    }
+
+    #[test]
+    fn test_hmac_valid_signature_succeeds() {
+        let secret = "my_app_secret";
+        let body = br#"{"entry":[{"id":"123"}]}"#;
+        let sig_header = compute_hmac_signature(secret, body);
+
+        assert!(
+            verify_hmac_sha256(secret, &sig_header, body),
+            "Valid HMAC signature should verify"
+        );
+    }
+
+    #[test]
+    fn test_hmac_wrong_secret_fails() {
+        let secret = "correct_secret";
+        let wrong_secret = "wrong_secret";
+        let body = br#"{"test":"data"}"#;
+        let sig_header = compute_hmac_signature(secret, body);
+
+        assert!(
+            !verify_hmac_sha256(wrong_secret, &sig_header, body),
+            "Signature with wrong secret should fail"
+        );
+    }
+
+    #[test]
+    fn test_hmac_tampered_body_fails() {
+        let secret = "my_secret";
+        let body = br#"original body"#;
+        let sig_header = compute_hmac_signature(secret, body);
+        let tampered_body = br#"tampered body"#;
+
+        assert!(
+            !verify_hmac_sha256(secret, &sig_header, tampered_body),
+            "Signature for different body should fail"
+        );
+    }
+
+    #[test]
+    fn test_hmac_missing_prefix_fails() {
+        let secret = "my_secret";
+        let body = b"test body";
+        // Missing "sha256=" prefix
+        let sig_header = hex::encode([0u8; 32]);
+
+        assert!(
+            !verify_hmac_sha256(secret, &sig_header, body),
+            "Signature without sha256= prefix should fail"
+        );
+    }
+
+    #[test]
+    fn test_hmac_invalid_hex_fails() {
+        let secret = "my_secret";
+        let body = b"test body";
+        let sig_header = "sha256=not-valid-hex-zzz";
+
+        assert!(
+            !verify_hmac_sha256(secret, sig_header, body),
+            "Invalid hex signature should fail gracefully"
+        );
+    }
+
+    #[test]
+    fn test_hmac_empty_body_succeeds() {
+        let secret = "my_secret";
+        let body = b"";
+        let sig_header = compute_hmac_signature(secret, body);
+
+        assert!(
+            verify_hmac_sha256(secret, &sig_header, body),
+            "Empty body with valid signature should succeed"
+        );
+    }
+
+    #[test]
+    fn test_hmac_empty_secret_succeeds() {
+        let body = b"test body";
+        // Empty secret should still work (though not recommended in practice)
+        let sig_header = compute_hmac_signature("", body);
+
+        assert!(
+            verify_hmac_sha256("", &sig_header, body),
+            "Empty secret with matching signature should succeed"
+        );
+    }
+
+    #[test]
+    fn test_hmac_wrong_signature_length_fails() {
+        let secret = "my_secret";
+        let body = b"test body";
+        // Signature too short
+        let sig_header = "sha256=deadbeef";
+
+        assert!(
+            !verify_hmac_sha256(secret, sig_header, body),
+            "Wrong-length signature should fail"
+        );
+    }
+
+    #[test]
+    fn test_hmac_case_sensitive_prefix() {
+        let secret = "my_secret";
+        let body = b"test body";
+        let sig_header = compute_hmac_signature(secret, body);
+        // Uppercase prefix should fail
+        let bad_header = sig_header.replace("sha256=", "SHA256=");
+
+        assert!(
+            !verify_hmac_sha256(secret, &bad_header, body),
+            "Uppercase SHA256= prefix should fail"
         );
     }
 }

@@ -123,6 +123,20 @@ impl ChannelCapabilitiesFile {
             .and_then(|w| w.signature_key_secret_name.as_deref())
     }
 
+    /// Get the webhook verification mode for this channel.
+    ///
+    /// Returns the verification mode declared in `webhook.verification_mode`:
+    /// - None/default: Require secret header for all requests
+    /// - "query_param": Skip host-level secret validation for GET, WASM validates via query param
+    /// - "signature": Always require signature validation
+    pub fn webhook_verification_mode(&self) -> Option<&str> {
+        self.capabilities
+            .channel
+            .as_ref()
+            .and_then(|c| c.webhook.as_ref())
+            .and_then(|w| w.verification_mode.as_deref())
+    }
+
     /// Get the webhook secret name for this channel.
     ///
     /// Returns the configured secret name or defaults to "{channel_name}_webhook_secret".
@@ -133,6 +147,19 @@ impl ChannelCapabilitiesFile {
             .and_then(|c| c.webhook.as_ref())
             .and_then(|w| w.secret_name.clone())
             .unwrap_or_else(|| format!("{}_webhook_secret", self.name))
+    }
+
+    /// Get the HMAC secret name for webhook signature verification.
+    ///
+    /// Returns the secret name declared in `webhook.hmac_secret_name`,
+    /// used to look up the HMAC secret in the secrets store for
+    /// WhatsApp/Slack-style signature verification.
+    pub fn webhook_hmac_secret_name(&self) -> Option<&str> {
+        self.capabilities
+            .channel
+            .as_ref()
+            .and_then(|c| c.webhook.as_ref())
+            .and_then(|w| w.hmac_secret_name.as_deref())
     }
 }
 
@@ -247,6 +274,20 @@ pub struct WebhookSchema {
     /// for signature verification (e.g., Discord interaction verification).
     #[serde(default)]
     pub signature_key_secret_name: Option<String>,
+
+    /// How to handle GET request validation:
+    /// - None/default: Require secret header for all requests (current behavior)
+    /// - "query_param": Skip host-level secret validation for GET requests;
+    ///   the WASM module validates via query param (e.g., WhatsApp hub.verify_token)
+    /// - "signature": Always require signature validation (for Discord-style Ed25519)
+    #[serde(default)]
+    pub verification_mode: Option<String>,
+
+    /// Secret name in secrets store containing the HMAC secret
+    /// for signature verification (e.g., WhatsApp/Slack webhook signatures).
+    /// The header format is expected to be "sha256=<hex_signature>".
+    #[serde(default)]
+    pub hmac_secret_name: Option<String>,
 }
 
 /// Setup configuration schema.
@@ -686,6 +727,75 @@ mod tests {
         assert!(
             secrets_caps.is_allowed("discord_public_key"),
             "discord_public_key must be in the secrets allowlist"
+        );
+    }
+
+    // ── Category 6: HMAC Secret Name (WhatsApp/Slack style) ──────────────
+
+    #[test]
+    fn test_webhook_schema_hmac_secret_name() {
+        let json = r#"{
+            "name": "whatsapp",
+            "capabilities": {
+                "channel": {
+                    "allowed_paths": ["/webhook/whatsapp"],
+                    "webhook": {
+                        "hmac_secret_name": "whatsapp_app_secret"
+                    }
+                }
+            }
+        }"#;
+
+        let file = ChannelCapabilitiesFile::from_json(json).unwrap();
+        assert_eq!(file.webhook_hmac_secret_name(), Some("whatsapp_app_secret"));
+    }
+
+    #[test]
+    fn test_hmac_secret_name_none_when_missing() {
+        let json = r#"{
+            "name": "telegram",
+            "capabilities": {
+                "channel": {
+                    "allowed_paths": ["/webhook/telegram"],
+                    "webhook": {
+                        "secret_header": "X-Telegram-Bot-Api-Secret-Token"
+                    }
+                }
+            }
+        }"#;
+
+        let file = ChannelCapabilitiesFile::from_json(json).unwrap();
+        assert_eq!(file.webhook_hmac_secret_name(), None);
+    }
+
+    #[test]
+    fn test_whatsapp_capabilities_has_hmac_secret() {
+        let json = include_str!("../../../channels-src/whatsapp/whatsapp.capabilities.json");
+        let file = ChannelCapabilitiesFile::from_json(json).unwrap();
+        assert_eq!(
+            file.webhook_hmac_secret_name(),
+            Some("whatsapp_app_secret"),
+            "whatsapp.capabilities.json must declare hmac_secret_name"
+        );
+    }
+
+    #[test]
+    fn test_whatsapp_capabilities_has_app_secret_in_setup() {
+        let json = include_str!("../../../channels-src/whatsapp/whatsapp.capabilities.json");
+        let file = ChannelCapabilitiesFile::from_json(json).unwrap();
+
+        let secret_names: Vec<&str> = file
+            .setup
+            .required_secrets
+            .iter()
+            .map(|s| s.name.as_str())
+            .collect();
+
+        assert!(
+            secret_names.contains(&"whatsapp_app_secret"),
+            "whatsapp.capabilities.json must include whatsapp_app_secret in setup.required_secrets, \
+             found: {:?}",
+            secret_names
         );
     }
 }
