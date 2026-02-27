@@ -605,6 +605,8 @@ async fn send_notification(
             "source": "routine",
             "routine_name": routine_name,
             "status": status.to_string(),
+            "notify_user": notify.user,
+            "notify_channel": notify.channel,
         }),
     };
 

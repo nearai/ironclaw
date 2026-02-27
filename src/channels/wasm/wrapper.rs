@@ -553,6 +553,40 @@ pub struct WasmChannel {
     /// In-memory workspace store persisting writes across callback invocations.
     /// Ensures WASM channels can maintain state (e.g., polling offsets) between ticks.
     workspace_store: Arc<ChannelWorkspaceStore>,
+
+    /// Last-seen message metadata (contains chat_id for broadcast routing).
+    /// Populated from incoming messages so `broadcast()` knows where to send.
+    last_broadcast_metadata: Arc<tokio::sync::RwLock<Option<String>>>,
+
+    /// Settings store for persisting broadcast metadata across restarts.
+    settings_store: Option<Arc<dyn crate::db::SettingsStore>>,
+}
+
+/// Update broadcast metadata in memory and persist to the settings store when
+/// it changes. Extracted as a free function so both the `WasmChannel` instance
+/// method and the static polling helper share one implementation.
+async fn do_update_broadcast_metadata(
+    channel_name: &str,
+    metadata: &str,
+    last_broadcast_metadata: &tokio::sync::RwLock<Option<String>>,
+    settings_store: Option<&Arc<dyn crate::db::SettingsStore>>,
+) {
+    let mut guard = last_broadcast_metadata.write().await;
+    let changed = guard.as_deref() != Some(metadata);
+    *guard = Some(metadata.to_string());
+    drop(guard);
+
+    if changed && let Some(store) = settings_store {
+        let key = format!("channel_broadcast_metadata_{}", channel_name);
+        let value = serde_json::Value::String(metadata.to_string());
+        if let Err(e) = store.set_setting("default", &key, &value).await {
+            tracing::warn!(
+                channel = %channel_name,
+                "Failed to persist broadcast metadata: {}",
+                e
+            );
+        }
+    }
 }
 
 impl WasmChannel {
@@ -563,6 +597,7 @@ impl WasmChannel {
         capabilities: ChannelCapabilities,
         config_json: String,
         pairing_store: Arc<PairingStore>,
+        settings_store: Option<Arc<dyn crate::db::SettingsStore>>,
     ) -> Self {
         let name = prepared.name.clone();
         let rate_limiter = ChannelEmitRateLimiter::new(capabilities.emit_rate_limit.clone());
@@ -584,6 +619,8 @@ impl WasmChannel {
             typing_task: RwLock::new(None),
             pairing_store,
             workspace_store: Arc::new(ChannelWorkspaceStore::new()),
+            last_broadcast_metadata: Arc::new(tokio::sync::RwLock::new(None)),
+            settings_store,
         }
     }
 
@@ -629,6 +666,51 @@ impl WasmChannel {
     /// Get the channel name.
     pub fn channel_name(&self) -> &str {
         &self.name
+    }
+
+    /// Settings key for persisted broadcast metadata.
+    fn broadcast_metadata_key(&self) -> String {
+        format!("channel_broadcast_metadata_{}", self.name)
+    }
+
+    /// Update broadcast metadata in memory and persist if changed (best-effort).
+    ///
+    /// Compares with the current value to avoid redundant DB writes on every
+    /// incoming message (the chat_id rarely changes).
+    async fn update_broadcast_metadata(&self, metadata: &str) {
+        do_update_broadcast_metadata(
+            &self.name,
+            metadata,
+            &self.last_broadcast_metadata,
+            self.settings_store.as_ref(),
+        )
+        .await;
+    }
+
+    /// Load broadcast metadata from settings store on startup.
+    async fn load_broadcast_metadata(&self) {
+        if let Some(ref store) = self.settings_store {
+            match store
+                .get_setting("default", &self.broadcast_metadata_key())
+                .await
+            {
+                Ok(Some(serde_json::Value::String(meta))) => {
+                    *self.last_broadcast_metadata.write().await = Some(meta);
+                    tracing::debug!(
+                        channel = %self.name,
+                        "Restored broadcast metadata from settings"
+                    );
+                }
+                Ok(_) => {}
+                Err(e) => {
+                    tracing::warn!(
+                        channel = %self.name,
+                        "Failed to load broadcast metadata: {}",
+                        e
+                    );
+                }
+            }
+        }
     }
 
     /// Get the channel capabilities.
@@ -1613,6 +1695,8 @@ impl WasmChannel {
             // Parse metadata JSON
             if let Ok(metadata) = serde_json::from_str(&emitted.metadata_json) {
                 msg = msg.with_metadata(metadata);
+                // Store for broadcast routing (chat_id etc.)
+                self.update_broadcast_metadata(&emitted.metadata_json).await;
             }
 
             // Send to stream
@@ -1656,6 +1740,8 @@ impl WasmChannel {
         let pairing_store = self.pairing_store.clone();
         let callback_timeout = self.runtime.config().callback_timeout;
         let workspace_store = self.workspace_store.clone();
+        let last_broadcast_metadata = self.last_broadcast_metadata.clone();
+        let settings_store = self.settings_store.clone();
 
         tokio::spawn(async move {
             let mut interval_timer = tokio::time::interval(interval);
@@ -1690,6 +1776,8 @@ impl WasmChannel {
                                         emitted_messages,
                                         &message_tx,
                                         &rate_limiter,
+                                        &last_broadcast_metadata,
+                                        settings_store.as_ref(),
                                     ).await {
                                         tracing::warn!(
                                             channel = %channel_name,
@@ -1813,6 +1901,8 @@ impl WasmChannel {
         messages: Vec<EmittedMessage>,
         message_tx: &RwLock<Option<mpsc::Sender<IncomingMessage>>>,
         rate_limiter: &RwLock<ChannelEmitRateLimiter>,
+        last_broadcast_metadata: &tokio::sync::RwLock<Option<String>>,
+        settings_store: Option<&Arc<dyn crate::db::SettingsStore>>,
     ) -> Result<(), WasmChannelError> {
         tracing::info!(
             channel = %channel_name,
@@ -1858,6 +1948,14 @@ impl WasmChannel {
             // Parse metadata JSON
             if let Ok(metadata) = serde_json::from_str(&emitted.metadata_json) {
                 msg = msg.with_metadata(metadata);
+                // Store for broadcast routing (chat_id etc.)
+                do_update_broadcast_metadata(
+                    channel_name,
+                    &emitted.metadata_json,
+                    last_broadcast_metadata,
+                    settings_store,
+                )
+                .await;
             }
 
             // Send to stream
@@ -1893,6 +1991,9 @@ impl Channel for WasmChannel {
     }
 
     async fn start(&self) -> Result<MessageStream, ChannelError> {
+        // Restore broadcast metadata from settings (survives restarts)
+        self.load_broadcast_metadata().await;
+
         // Create message channel
         let (tx, rx) = mpsc::channel(256);
         *self.message_tx.write().await = Some(tx);
@@ -1982,6 +2083,8 @@ impl Channel for WasmChannel {
         // The original metadata contains channel-specific routing info (e.g., Telegram chat_id)
         // that the WASM channel needs to send the reply to the correct destination.
         let metadata_json = serde_json::to_string(&msg.metadata).unwrap_or_default();
+        // Store for broadcast routing (chat_id etc.)
+        self.update_broadcast_metadata(&metadata_json).await;
         self.call_on_respond(
             msg.id,
             &response.content,
@@ -1995,6 +2098,34 @@ impl Channel for WasmChannel {
         })?;
 
         Ok(())
+    }
+
+    async fn broadcast(
+        &self,
+        _user_id: &str,
+        response: OutgoingResponse,
+    ) -> Result<(), ChannelError> {
+        let metadata_json = self
+            .last_broadcast_metadata
+            .read()
+            .await
+            .clone()
+            .ok_or_else(|| ChannelError::SendFailed {
+                name: self.name.clone(),
+                reason: "No messages received yet — no chat_id available for broadcast".into(),
+            })?;
+
+        self.call_on_respond(
+            uuid::Uuid::new_v4(),
+            &response.content,
+            response.thread_id.as_deref(),
+            &metadata_json,
+        )
+        .await
+        .map_err(|e| ChannelError::SendFailed {
+            name: self.name.clone(),
+            reason: e.to_string(),
+        })
     }
 
     async fn send_status(
@@ -2099,6 +2230,14 @@ impl Channel for SharedWasmChannel {
         response: OutgoingResponse,
     ) -> Result<(), ChannelError> {
         self.inner.respond(msg, response).await
+    }
+
+    async fn broadcast(
+        &self,
+        user_id: &str,
+        response: OutgoingResponse,
+    ) -> Result<(), ChannelError> {
+        self.inner.broadcast(user_id, response).await
     }
 
     async fn send_status(
@@ -2384,6 +2523,7 @@ mod tests {
             capabilities,
             "{}".to_string(),
             Arc::new(PairingStore::new()),
+            None,
         )
     }
 
@@ -2489,11 +2629,14 @@ mod tests {
             EmittedMessage::new("user2", "Another message"),
         ];
 
+        let last_broadcast_metadata = Arc::new(tokio::sync::RwLock::new(None));
         let result = WasmChannel::dispatch_emitted_messages(
             "test-channel",
             messages,
             &message_tx,
             &rate_limiter,
+            &last_broadcast_metadata,
+            None,
         )
         .await;
 
@@ -2527,11 +2670,14 @@ mod tests {
         let messages = vec![EmittedMessage::new("user1", "Hello!")];
 
         // Should return Ok even without a sender (logs warning but doesn't fail)
+        let last_broadcast_metadata = Arc::new(tokio::sync::RwLock::new(None));
         let result = WasmChannel::dispatch_emitted_messages(
             "test-channel",
             messages,
             &message_tx,
             &rate_limiter,
+            &last_broadcast_metadata,
+            None,
         )
         .await;
 
@@ -2562,6 +2708,7 @@ mod tests {
             capabilities,
             "{}".to_string(),
             Arc::new(PairingStore::new()),
+            None,
         );
 
         // Start the channel

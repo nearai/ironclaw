@@ -17,20 +17,27 @@ use crate::channels::wasm::error::WasmChannelError;
 use crate::channels::wasm::runtime::WasmChannelRuntime;
 use crate::channels::wasm::schema::ChannelCapabilitiesFile;
 use crate::channels::wasm::wrapper::WasmChannel;
+use crate::db::SettingsStore;
 use crate::pairing::PairingStore;
 
 /// Loads WASM channels from the filesystem.
 pub struct WasmChannelLoader {
     runtime: Arc<WasmChannelRuntime>,
     pairing_store: Arc<PairingStore>,
+    settings_store: Option<Arc<dyn SettingsStore>>,
 }
 
 impl WasmChannelLoader {
     /// Create a new loader with the given runtime and pairing store.
-    pub fn new(runtime: Arc<WasmChannelRuntime>, pairing_store: Arc<PairingStore>) -> Self {
+    pub fn new(
+        runtime: Arc<WasmChannelRuntime>,
+        pairing_store: Arc<PairingStore>,
+        settings_store: Option<Arc<dyn SettingsStore>>,
+    ) -> Self {
         Self {
             runtime,
             pairing_store,
+            settings_store,
         }
     }
 
@@ -126,6 +133,7 @@ impl WasmChannelLoader {
             capabilities,
             config_json,
             self.pairing_store.clone(),
+            self.settings_store.clone(),
         );
 
         tracing::info!(
@@ -437,7 +445,7 @@ mod tests {
     async fn test_loader_invalid_name() {
         let config = WasmChannelRuntimeConfig::for_testing();
         let runtime = Arc::new(WasmChannelRuntime::new(config).unwrap());
-        let loader = WasmChannelLoader::new(runtime, Arc::new(PairingStore::new()));
+        let loader = WasmChannelLoader::new(runtime, Arc::new(PairingStore::new()), None);
 
         let dir = TempDir::new().unwrap();
         let wasm_path = dir.path().join("test.wasm");

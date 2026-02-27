@@ -348,6 +348,7 @@ async fn main() -> anyhow::Result<()> {
             &config,
             &components.secrets_store,
             components.extension_manager.as_ref(),
+            components.db.as_ref(),
         )
         .await;
 
@@ -863,6 +864,7 @@ async fn setup_wasm_channels(
     config: &ironclaw::config::Config,
     secrets_store: &Option<Arc<dyn SecretsStore + Send + Sync>>,
     extension_manager: Option<&Arc<ironclaw::extensions::ExtensionManager>>,
+    database: Option<&Arc<dyn ironclaw::db::Database>>,
 ) -> Option<WasmChannelSetup> {
     let runtime = match WasmChannelRuntime::new(WasmChannelRuntimeConfig::default()) {
         Ok(r) => Arc::new(r),
@@ -873,7 +875,13 @@ async fn setup_wasm_channels(
     };
 
     let pairing_store = Arc::new(PairingStore::new());
-    let loader = WasmChannelLoader::new(Arc::clone(&runtime), Arc::clone(&pairing_store));
+    let settings_store: Option<Arc<dyn ironclaw::db::SettingsStore>> =
+        database.map(|db| Arc::clone(db) as Arc<dyn ironclaw::db::SettingsStore>);
+    let loader = WasmChannelLoader::new(
+        Arc::clone(&runtime),
+        Arc::clone(&pairing_store),
+        settings_store,
+    );
 
     let results = match loader
         .load_from_dir(&config.channels.wasm_channels_dir)

@@ -1786,8 +1786,13 @@ impl ExtensionManager {
             None
         };
 
-        let loader =
-            WasmChannelLoader::new(Arc::clone(&channel_runtime), Arc::clone(&pairing_store));
+        let settings_store: Option<Arc<dyn crate::db::SettingsStore>> =
+            self.store.as_ref().map(|db| Arc::clone(db) as _);
+        let loader = WasmChannelLoader::new(
+            Arc::clone(&channel_runtime),
+            Arc::clone(&pairing_store),
+            settings_store,
+        );
         let loaded = loader
             .load_from_files(name, &wasm_path, cap_path_option)
             .await
