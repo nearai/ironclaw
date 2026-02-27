@@ -387,4 +387,134 @@ mod tests {
         };
         assert!(matches!(manual, RepairResult::ManualRequired { .. }));
     }
+
+    // === QA Plan - Self-repair stuck job tests ===
+
+    #[tokio::test]
+    async fn detect_no_stuck_jobs_when_all_healthy() {
+        let cm = Arc::new(ContextManager::new(10));
+
+        // Create a job and leave it Pending (not stuck).
+        cm.create_job("Job 1", "desc").await.unwrap();
+
+        let repair = DefaultSelfRepair::new(cm, Duration::from_secs(60), 3);
+        let stuck = repair.detect_stuck_jobs().await;
+        assert!(stuck.is_empty());
+    }
+
+    #[tokio::test]
+    async fn detect_stuck_job_finds_stuck_state() {
+        let cm = Arc::new(ContextManager::new(10));
+        let job_id = cm.create_job("Stuck job", "desc").await.unwrap();
+
+        // Transition to InProgress, then to Stuck.
+        cm.update_context(job_id, |ctx| ctx.transition_to(JobState::InProgress, None))
+            .await
+            .unwrap()
+            .unwrap();
+        cm.update_context(job_id, |ctx| {
+            ctx.transition_to(JobState::Stuck, Some("timed out".to_string()))
+        })
+        .await
+        .unwrap()
+        .unwrap();
+
+        let repair = DefaultSelfRepair::new(cm, Duration::from_secs(60), 3);
+        let stuck = repair.detect_stuck_jobs().await;
+        assert_eq!(stuck.len(), 1);
+        assert_eq!(stuck[0].job_id, job_id);
+    }
+
+    #[tokio::test]
+    async fn repair_stuck_job_succeeds_within_limit() {
+        let cm = Arc::new(ContextManager::new(10));
+        let job_id = cm.create_job("Repairable", "desc").await.unwrap();
+
+        // Move to InProgress -> Stuck.
+        cm.update_context(job_id, |ctx| ctx.transition_to(JobState::InProgress, None))
+            .await
+            .unwrap()
+            .unwrap();
+        cm.update_context(job_id, |ctx| ctx.transition_to(JobState::Stuck, None))
+            .await
+            .unwrap()
+            .unwrap();
+
+        let repair = DefaultSelfRepair::new(Arc::clone(&cm), Duration::from_secs(60), 3);
+
+        let stuck_job = StuckJob {
+            job_id,
+            last_activity: Utc::now(),
+            stuck_duration: Duration::from_secs(120),
+            last_error: None,
+            repair_attempts: 0,
+        };
+
+        let result = repair.repair_stuck_job(&stuck_job).await.unwrap();
+        assert!(
+            matches!(result, RepairResult::Success { .. }),
+            "Expected Success, got: {:?}",
+            result
+        );
+
+        // Job should be back to InProgress after recovery.
+        let ctx = cm.get_context(job_id).await.unwrap();
+        assert_eq!(ctx.state, JobState::InProgress);
+    }
+
+    #[tokio::test]
+    async fn repair_stuck_job_returns_manual_when_limit_exceeded() {
+        let cm = Arc::new(ContextManager::new(10));
+        let job_id = cm.create_job("Unrepairable", "desc").await.unwrap();
+
+        let repair = DefaultSelfRepair::new(cm, Duration::from_secs(60), 2);
+
+        let stuck_job = StuckJob {
+            job_id,
+            last_activity: Utc::now(),
+            stuck_duration: Duration::from_secs(300),
+            last_error: Some("persistent failure".to_string()),
+            repair_attempts: 2, // == max
+        };
+
+        let result = repair.repair_stuck_job(&stuck_job).await.unwrap();
+        assert!(
+            matches!(result, RepairResult::ManualRequired { .. }),
+            "Expected ManualRequired, got: {:?}",
+            result
+        );
+    }
+
+    #[tokio::test]
+    async fn detect_broken_tools_returns_empty_without_store() {
+        let cm = Arc::new(ContextManager::new(10));
+        let repair = DefaultSelfRepair::new(cm, Duration::from_secs(60), 3);
+
+        // No store configured, should return empty.
+        let broken = repair.detect_broken_tools().await;
+        assert!(broken.is_empty());
+    }
+
+    #[tokio::test]
+    async fn repair_broken_tool_returns_manual_without_builder() {
+        let cm = Arc::new(ContextManager::new(10));
+        let repair = DefaultSelfRepair::new(cm, Duration::from_secs(60), 3);
+
+        let broken = BrokenTool {
+            name: "test-tool".to_string(),
+            failure_count: 10,
+            last_error: Some("crash".to_string()),
+            first_failure: Utc::now(),
+            last_failure: Utc::now(),
+            last_build_result: None,
+            repair_attempts: 0,
+        };
+
+        let result = repair.repair_broken_tool(&broken).await.unwrap();
+        assert!(
+            matches!(result, RepairResult::ManualRequired { .. }),
+            "Expected ManualRequired without builder, got: {:?}",
+            result
+        );
+    }
 }
