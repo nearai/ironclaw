@@ -54,3 +54,16 @@ jobs:
         uses: actions/checkout@v6
       - name: Build Docker image
         run: docker build -t ironclaw-test:ci .
+
+  # Roll-up job for branch protection
+  run-tests:
+    name: Run Tests
+    runs-on: ubuntu-latest
+    if: always()
+    needs: [tests, telegram-tests, docker-build]
+    steps:
+      - run: |
+          if [[ "${{ needs.tests.result }}" != "success" || "${{ needs.telegram-tests.result }}" != "success" || "${{ needs.docker-build.result }}" != "success" ]]; then
+            echo "One or more jobs failed"
+            exit 1
+          fi

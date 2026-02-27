@@ -43,3 +43,16 @@ jobs:
         key: clippy-${{ matrix.name }}
     - name: Check lints
       run: cargo clippy --all --benches --tests --examples ${{ matrix.flags }} -- -D warnings
+
+  # Roll-up job for branch protection
+  code-style:
+    name: Code Style (fmt + clippy)
+    runs-on: ubuntu-latest
+    if: always()
+    needs: [format, clippy]
+    steps:
+      - run: |
+          if [[ "${{ needs.format.result }}" != "success" || "${{ needs.clippy.result }}" != "success" ]]; then
+            echo "One or more jobs failed"
+            exit 1
+          fi
