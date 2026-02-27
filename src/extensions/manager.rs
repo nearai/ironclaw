@@ -2566,9 +2566,7 @@ mod tests {
         use crate::secrets::{InMemorySecretsStore, SecretsCrypto};
         use crate::tools::mcp::session::McpSessionManager;
 
-        let key = secrecy::SecretString::from(
-            crate::secrets::keychain::generate_master_key_hex(),
-        );
+        let key = secrecy::SecretString::from(crate::secrets::keychain::generate_master_key_hex());
         let crypto = Arc::new(SecretsCrypto::new(key).expect("crypto"));
         let secrets: Arc<dyn crate::secrets::SecretsStore + Send + Sync> =
             Arc::new(InMemorySecretsStore::new(crypto));
@@ -2583,7 +2581,7 @@ mod tests {
             wasm_runtime,
             tools_dir.clone(),
             tools_dir, // channels dir (unused here)
-            None,       // tunnel_url
+            None,      // tunnel_url
             "test".to_string(),
             None, // db
             vec![],
@@ -2598,9 +2596,7 @@ mod tests {
         // be "not found", NOT "WASM runtime not available".
         let dir = tempfile::tempdir().expect("temp dir");
         let config = crate::tools::wasm::WasmRuntimeConfig::for_testing();
-        let runtime = Arc::new(
-            crate::tools::wasm::WasmToolRuntime::new(config).expect("runtime"),
-        );
+        let runtime = Arc::new(crate::tools::wasm::WasmToolRuntime::new(config).expect("runtime"));
         let mgr = make_test_manager(Some(runtime), dir.path().to_path_buf());
 
         let err = mgr.activate("nonexistent").await.unwrap_err();
@@ -2610,7 +2606,9 @@ mod tests {
             "Should not fail on runtime check, got: {msg}"
         );
         assert!(
-            msg.contains("not found") || msg.contains("not installed") || msg.contains("Not installed"),
+            msg.contains("not found")
+                || msg.contains("not installed")
+                || msg.contains("Not installed"),
             "Should fail on missing file, got: {msg}"
         );
     }
