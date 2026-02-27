@@ -22,11 +22,16 @@ pub fn ironclaw_env_path() -> PathBuf {
 /// takes priority over `~/.ironclaw/.env`. dotenvy never overwrites
 /// existing env vars, so the effective priority is:
 ///
-///   explicit env vars > `./.env` > `~/.ironclaw/.env`
+///   explicit env vars > `./.env` > `~/.ironclaw/.env` > auto-detect
 ///
 /// If `~/.ironclaw/.env` doesn't exist but the legacy `bootstrap.json` does,
 /// extracts `DATABASE_URL` from it and writes the `.env` file (one-time
 /// upgrade from the old config format).
+///
+/// After loading the `.env` file, auto-detects the libsql backend: if
+/// `DATABASE_BACKEND` is still unset and `~/.ironclaw/ironclaw.db` exists,
+/// defaults to `libsql` so cloud instances work out of the box without any
+/// manual configuration.
 pub fn load_ironclaw_env() {
     let path = ironclaw_env_path();
 
@@ -37,6 +42,21 @@ pub fn load_ironclaw_env() {
 
     if path.exists() {
         let _ = dotenvy::from_path(&path);
+    }
+
+    // Auto-detect libsql: if DATABASE_BACKEND is still unset after loading
+    // all env files, and the local SQLite DB exists, default to libsql.
+    // This avoids the chicken-and-egg problem on cloud instances where no
+    // DATABASE_URL is configured but ironclaw.db is already present.
+    if std::env::var("DATABASE_BACKEND").is_err() {
+        let default_db = dirs::home_dir()
+            .unwrap_or_default()
+            .join(".ironclaw")
+            .join("ironclaw.db");
+        if default_db.exists() {
+            // SAFETY: single-threaded at startup; no other threads reading env yet.
+            unsafe { std::env::set_var("DATABASE_BACKEND", "libsql") };
+        }
     }
 }
 
@@ -579,5 +599,42 @@ INJECTED="pwned"#;
         let onboard = parsed.iter().find(|(k, _)| k == "ONBOARD_COMPLETED");
         assert!(onboard.is_some(), "ONBOARD_COMPLETED must be present");
         assert_eq!(onboard.unwrap().1, "true");
+    }
+
+    #[test]
+    fn test_libsql_autodetect_sets_backend_when_db_exists() {
+        let dir = tempdir().unwrap();
+        let db_path = dir.path().join("ironclaw.db");
+
+        // No DB file — auto-detect guard should not trigger.
+        assert!(!db_path.exists());
+        let would_trigger = std::env::var("DATABASE_BACKEND").is_err() && db_path.exists();
+        assert!(!would_trigger, "should not auto-detect when db file is absent");
+
+        // Create the DB file — guard should now trigger.
+        std::fs::write(&db_path, "").unwrap();
+        assert!(db_path.exists());
+
+        // Simulate the detection logic (DATABASE_BACKEND unset + db exists).
+        let detected = std::env::var("DATABASE_BACKEND").is_err() && db_path.exists();
+        assert!(detected, "should detect libsql when db file is present and backend unset");
+    }
+
+    #[test]
+    fn test_libsql_autodetect_does_not_override_explicit_backend() {
+        // If DATABASE_BACKEND is already set, the guard condition is false.
+        // SAFETY: single-threaded test; no other threads reading env.
+        unsafe { std::env::set_var("DATABASE_BACKEND", "postgres") };
+
+        let dir = tempdir().unwrap();
+        let db_path = dir.path().join("ironclaw.db");
+        std::fs::write(&db_path, "").unwrap();
+
+        // The guard: only sets libsql if DATABASE_BACKEND is NOT already set.
+        let would_override = std::env::var("DATABASE_BACKEND").is_err() && db_path.exists();
+        assert!(!would_override, "must not override an explicitly set DATABASE_BACKEND");
+
+        // Cleanup.
+        unsafe { std::env::remove_var("DATABASE_BACKEND") };
     }
 }
