@@ -16,6 +16,7 @@ mod reasoning;
 pub mod response_cache;
 pub mod retry;
 mod rig_adapter;
+pub mod routing;
 pub mod session;
 pub mod smart_routing;
 

@@ -95,6 +95,7 @@ cron = "0.13"
 
 # Safety/sanitization
 regex = "1"
+lazy_static = "1.5"
 aho-corasick = "1"
 
 # YAML parsing for SKILL.md frontmatter
