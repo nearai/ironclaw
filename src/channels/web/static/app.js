@@ -15,6 +15,15 @@ let jobListRefreshTimer = null;
 let pairingPollInterval = null;
 const JOB_EVENTS_CAP = 500;
 const MEMORY_SEARCH_QUERY_MAX_LENGTH = 100;
+const THREAD_PAGE_SIZE = 50;
+const THREAD_LOAD_MORE_THRESHOLD_PX = 96;
+const THREAD_LOAD_RETRY_COOLDOWN_MS = 1500;
+let threadListOffset = 0;
+let threadListHasMore = false;
+let threadListLoading = false;
+let threadListGeneration = 0;
+let threadSeenIds = new Set();
+let threadListRetryAfterMs = 0;
 
 // --- Tool Activity State ---
 let _activeGroup = null;
@@ -137,8 +146,11 @@ function connectSSE() {
     addMessage('assistant', data.content);
     setStatus('');
     enableChatInput();
-    // Refresh thread list so new titles appear after first message
-    loadThreads();
+    // Refresh thread list only if we are still on the first page.
+    // Once the user paginates the sidebar, avoid resetting appended pages.
+    if (!threadListLoading && threadListOffset <= THREAD_PAGE_SIZE) {
+      loadThreads();
+    }
   });
 
   eventSource.addEventListener('thinking', (e) => {
@@ -958,50 +970,182 @@ function removeScrollSpinner() {
 
 // --- Threads ---
 
-function loadThreads() {
-  apiFetch('/api/chat/threads').then((data) => {
-    // Pinned assistant thread
-    if (data.assistant_thread) {
-      assistantThreadId = data.assistant_thread.id;
-      const el = document.getElementById('assistant-thread');
-      const isActive = currentThreadId === assistantThreadId;
-      el.className = 'assistant-item' + (isActive ? ' active' : '');
-      const meta = document.getElementById('assistant-meta');
-      const count = data.assistant_thread.turn_count || 0;
-      meta.textContent = count > 0 ? count + ' turns' : '';
-    }
+function threadPageUrl(offset, limit) {
+  const params = new URLSearchParams();
+  params.set('offset', String(offset));
+  params.set('limit', String(limit));
+  return '/api/chat/threads?' + params.toString();
+}
 
-    // Regular threads
+function updateAssistantThread(data) {
+  if (!data.assistant_thread) return;
+  assistantThreadId = data.assistant_thread.id;
+  const el = document.getElementById('assistant-thread');
+  const meta = document.getElementById('assistant-meta');
+  const count = data.assistant_thread.turn_count || 0;
+  meta.textContent = count > 0 ? count + ' turns' : '';
+  el.className = 'assistant-item' + (currentThreadId === assistantThreadId ? ' active' : '');
+}
+
+function createThreadItem(thread) {
+  const item = document.createElement('div');
+  item.className = 'thread-item' + (thread.id === currentThreadId ? ' active' : '');
+  item.dataset.threadId = String(thread.id);
+  const label = document.createElement('span');
+  label.className = 'thread-label';
+  label.textContent = thread.title || thread.id.substring(0, 8);
+  label.title = thread.title ? thread.title + ' (' + thread.id + ')' : thread.id;
+  item.appendChild(label);
+  const meta = document.createElement('span');
+  meta.className = 'thread-meta';
+  meta.textContent = (thread.turn_count || 0) + ' turns';
+  item.appendChild(meta);
+  item.addEventListener('click', () => switchThread(thread.id));
+  return item;
+}
+
+function refreshThreadSelection() {
+  const assistantEl = document.getElementById('assistant-thread');
+  assistantEl.className = 'assistant-item' + (currentThreadId === assistantThreadId ? ' active' : '');
+  const items = document.querySelectorAll('#thread-list .thread-item');
+  for (const item of items) {
+    item.classList.toggle('active', item.dataset.threadId === String(currentThreadId));
+  }
+}
+
+function updateThreadLoadIndicator() {
+  const list = document.getElementById('thread-list');
+  let indicator = document.getElementById('thread-list-loading');
+  let loadMore = document.getElementById('thread-list-load-more');
+
+  if (loadMore && threadListLoading) {
+    loadMore.remove();
+    loadMore = null;
+  }
+
+  if (threadListLoading && threadListOffset > 0) {
+    if (!indicator) {
+      indicator = document.createElement('div');
+      indicator.id = 'thread-list-loading';
+      indicator.className = 'thread-list-loading';
+      list.appendChild(indicator);
+    }
+    indicator.textContent = 'Loading more...';
+    return;
+  }
+
+  if (indicator) indicator.remove();
+
+  if (threadListHasMore) {
+    if (!loadMore) {
+      loadMore = document.createElement('button');
+      loadMore.id = 'thread-list-load-more';
+      loadMore.className = 'thread-list-load-more';
+      loadMore.type = 'button';
+      loadMore.textContent = 'Load more conversations';
+      loadMore.addEventListener('click', () => loadThreads({ append: true }));
+      list.appendChild(loadMore);
+    }
+  } else if (loadMore) {
+    loadMore.remove();
+  }
+}
+
+function maybeLoadMoreThreads() {
+  if (!threadListHasMore || threadListLoading) return;
+  if (Date.now() < threadListRetryAfterMs) return;
+  const list = document.getElementById('thread-list');
+  const remaining = list.scrollHeight - list.scrollTop - list.clientHeight;
+  if (remaining <= THREAD_LOAD_MORE_THRESHOLD_PX) {
+    loadThreads({ append: true });
+  }
+}
+
+function autoFillThreadList() {
+  if (!threadListHasMore || threadListLoading) return;
+  if (Date.now() < threadListRetryAfterMs) return;
+  const list = document.getElementById('thread-list');
+  if (list.scrollHeight <= list.clientHeight + THREAD_LOAD_MORE_THRESHOLD_PX) {
+    loadThreads({ append: true });
+  }
+}
+
+function loadThreads(options) {
+  const opts = options || {};
+  const append = opts.append === true;
+  if (threadListLoading) return;
+  if (append && !threadListHasMore) return;
+
+  if (!append) {
+    threadListGeneration += 1;
+    threadListOffset = 0;
+    threadListHasMore = false;
+    threadListRetryAfterMs = 0;
+    threadSeenIds = new Set();
     const list = document.getElementById('thread-list');
     list.innerHTML = '';
+  }
+
+  const requestGeneration = threadListGeneration;
+  const offset = append ? threadListOffset : 0;
+  threadListLoading = true;
+  updateThreadLoadIndicator();
+
+  apiFetch(threadPageUrl(offset, THREAD_PAGE_SIZE)).then((data) => {
+    if (requestGeneration !== threadListGeneration) return;
+    updateAssistantThread(data);
+
+    const list = document.getElementById('thread-list');
     const threads = data.threads || [];
+    let appendedCount = 0;
     for (const thread of threads) {
-      const item = document.createElement('div');
-      item.className = 'thread-item' + (thread.id === currentThreadId ? ' active' : '');
-      const label = document.createElement('span');
-      label.className = 'thread-label';
-      label.textContent = thread.title || thread.id.substring(0, 8);
-      label.title = thread.title ? thread.title + ' (' + thread.id + ')' : thread.id;
-      item.appendChild(label);
-      const meta = document.createElement('span');
-      meta.className = 'thread-meta';
-      meta.textContent = (thread.turn_count || 0) + ' turns';
-      item.appendChild(meta);
-      item.addEventListener('click', () => switchThread(thread.id));
-      list.appendChild(item);
+      const key = String(thread.id);
+      if (threadSeenIds.has(key)) continue;
+      threadSeenIds.add(key);
+      list.appendChild(createThreadItem(thread));
+      appendedCount += 1;
     }
 
-    // Default to assistant thread on first load if no thread selected
-    if (!currentThreadId && assistantThreadId) {
+    threadListHasMore = !!data.has_more;
+    if (Number.isInteger(data.next_offset)) {
+      threadListOffset = data.next_offset;
+    } else {
+      threadListOffset = offset + threads.length;
+    }
+
+    // Guard against repeated requests when a page yields only duplicates.
+    // Keep server offset progression, but pause auto-loading retries briefly.
+    if (append && threads.length > 0 && appendedCount === 0) {
+      threadListRetryAfterMs = Date.now() + THREAD_LOAD_RETRY_COOLDOWN_MS;
+    }
+
+    // Default to assistant thread on first load if no thread selected.
+    if (!append && !currentThreadId && assistantThreadId) {
       switchToAssistant();
+    } else {
+      refreshThreadSelection();
     }
 
-    // Enable chat input once a thread is available
+    // Enable chat input once a thread is available.
     if (currentThreadId) {
       enableChatInput();
     }
-  }).catch(() => {});
+  }).catch((err) => {
+    if (requestGeneration !== threadListGeneration) return;
+    const action = append ? 'load more conversations' : 'load conversations';
+    threadListRetryAfterMs = Date.now() + THREAD_LOAD_RETRY_COOLDOWN_MS;
+    showToast('Failed to ' + action + ': ' + err.message, 'error');
+  }).finally(() => {
+    if (requestGeneration !== threadListGeneration) return;
+    threadListLoading = false;
+    updateThreadLoadIndicator();
+    if (Date.now() >= threadListRetryAfterMs) {
+      autoFillThreadList();
+    }
+  });
 }
+
+document.getElementById('thread-list').addEventListener('scroll', maybeLoadMoreThreads);
 
 function switchToAssistant() {
   if (!assistantThreadId) return;
@@ -1010,7 +1154,7 @@ function switchToAssistant() {
   hasMore = false;
   oldestTimestamp = null;
   loadHistory();
-  loadThreads();
+  refreshThreadSelection();
 }
 
 function switchThread(threadId) {
@@ -1019,7 +1163,7 @@ function switchThread(threadId) {
   hasMore = false;
   oldestTimestamp = null;
   loadHistory();
-  loadThreads();
+  refreshThreadSelection();
 }
 
 function createNewThread() {

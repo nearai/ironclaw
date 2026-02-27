@@ -19,6 +19,7 @@
   <a href="#features">Features</a> •
   <a href="#installation">Installation</a> •
   <a href="#configuration">Configuration</a> •
+  <a href="#import-existing-claude-history">Import</a> •
   <a href="#security">Security</a> •
   <a href="#architecture">Architecture</a>
 </p>
@@ -103,6 +104,7 @@ irm https://github.com/nearai/ironclaw/releases/latest/download/ironclaw-install
 ```sh
 curl --proto '=https' --tlsv1.2 -LsSf https://github.com/nearai/ironclaw/releases/latest/download/ironclaw-installer.sh | sh
 ```
+
 </details>
 
 <details>
@@ -158,6 +160,18 @@ and secrets encryption (using your system keychain). Settings are persisted in t
 connected database; bootstrap variables (e.g. `DATABASE_URL`, `LLM_BACKEND`) are
 written to `~/.ironclaw/.env` so they are available before the database connects.
 
+## Import Existing Claude History
+
+If you are migrating from Claude Code or Claude.ai, import your existing chats into IronClaw:
+
+```bash
+# Import local Claude Code history (~/.claude/projects by default)
+ironclaw import claude-code
+
+# Import Claude.ai ZIP export (Settings -> Privacy -> Export Data)
+ironclaw import claude-web --path ~/Downloads/claude_export.zip
+```
+
 ### Alternative LLM Providers
 
 IronClaw defaults to NEAR AI but works with any OpenAI-compatible endpoint.
@@ -174,7 +188,6 @@ LLM_MODEL=anthropic/claude-sonnet-4
 ```
 
 See [docs/LLM_PROVIDERS.md](docs/LLM_PROVIDERS.md) for a full provider guide.
-
 ## Security
 
 IronClaw implements defense in depth to protect your data and prevent misuse.
@@ -254,17 +267,17 @@ External content passes through multiple security layers:
 
 ### Core Components
 
-| Component | Purpose |
-|-----------|---------|
-| **Agent Loop** | Main message handling and job coordination |
-| **Router** | Classifies user intent (command, query, task) |
-| **Scheduler** | Manages parallel job execution with priorities |
-| **Worker** | Executes jobs with LLM reasoning and tool calls |
-| **Orchestrator** | Container lifecycle, LLM proxying, per-job auth |
-| **Web Gateway** | Browser UI with chat, memory, jobs, logs, extensions, routines |
+| Component           | Purpose                                                         |
+| ------------------- | --------------------------------------------------------------- |
+| **Agent Loop**      | Main message handling and job coordination                      |
+| **Router**          | Classifies user intent (command, query, task)                   |
+| **Scheduler**       | Manages parallel job execution with priorities                  |
+| **Worker**          | Executes jobs with LLM reasoning and tool calls                 |
+| **Orchestrator**    | Container lifecycle, LLM proxying, per-job auth                 |
+| **Web Gateway**     | Browser UI with chat, memory, jobs, logs, extensions, routines  |
 | **Routines Engine** | Scheduled (cron) and reactive (event, webhook) background tasks |
-| **Workspace** | Persistent memory with hybrid search |
-| **Safety Layer** | Prompt injection defense and content sanitization |
+| **Workspace**       | Persistent memory with hybrid search                            |
+| **Safety Layer**    | Prompt injection defense and content sanitization               |
 
 ## Usage
 

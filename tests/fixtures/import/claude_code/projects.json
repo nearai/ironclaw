@@ -1,0 +1,6 @@
+{
+  "projects": [
+    { "id": "abc123", "name": "Payments Service" },
+    { "id": "def456", "name": "Infra Ops" }
+  ]
+}

@@ -109,6 +109,17 @@ pub trait ConversationStore: Send + Sync {
         role: &str,
         content: &str,
     ) -> Result<Uuid, DatabaseError>;
+
+    /// Add a message with an explicit creation timestamp.
+    async fn add_conversation_message_at(
+        &self,
+        conversation_id: Uuid,
+        role: &str,
+        content: &str,
+        created_at: DateTime<Utc>,
+    ) -> Result<Uuid, DatabaseError>;
+
+    /// Ensure a conversation row exists (upsert).
     async fn ensure_conversation(
         &self,
         id: Uuid,
@@ -120,6 +131,7 @@ pub trait ConversationStore: Send + Sync {
         &self,
         user_id: &str,
         channel: &str,
+        offset: i64,
         limit: i64,
     ) -> Result<Vec<ConversationSummary>, DatabaseError>;
     async fn get_or_create_assistant_conversation(
@@ -133,6 +145,28 @@ pub trait ConversationStore: Send + Sync {
         user_id: &str,
         metadata: &serde_json::Value,
     ) -> Result<Uuid, DatabaseError>;
+
+    /// Update conversation started/last-activity timestamps.
+    async fn set_conversation_time_bounds(
+        &self,
+        id: Uuid,
+        started_at: Option<DateTime<Utc>>,
+        last_activity: Option<DateTime<Utc>>,
+    ) -> Result<(), DatabaseError>;
+
+    /// Find an already-imported conversation by source key.
+    async fn find_conversation_by_import_source(
+        &self,
+        user_id: &str,
+        channel: &str,
+        source: &str,
+        source_id: &str,
+    ) -> Result<Option<Uuid>, DatabaseError>;
+
+    /// Delete a conversation and all dependent rows (messages, links via FK cascade).
+    async fn delete_conversation(&self, id: Uuid) -> Result<(), DatabaseError>;
+
+    /// Load messages with cursor-based pagination.
     async fn list_conversation_messages_paginated(
         &self,
         conversation_id: Uuid,
@@ -153,6 +187,10 @@ pub trait ConversationStore: Send + Sync {
         &self,
         conversation_id: Uuid,
     ) -> Result<Vec<ConversationMessage>, DatabaseError>;
+    async fn count_conversation_messages(
+        &self,
+        conversation_id: Uuid,
+    ) -> Result<i64, DatabaseError>;
     async fn conversation_belongs_to_user(
         &self,
         conversation_id: Uuid,

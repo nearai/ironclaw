@@ -424,9 +424,22 @@ pub fn build_turns_from_db_messages(
     turns
 }
 
+#[derive(Deserialize, Default)]
+pub struct ThreadListQuery {
+    #[serde(default)]
+    pub offset: usize,
+    #[serde(default)]
+    pub limit: Option<usize>,
+}
+
 pub async fn chat_threads_handler(
     State(state): State<Arc<GatewayState>>,
+    Query(query): Query<ThreadListQuery>,
 ) -> Result<Json<ThreadListResponse>, (StatusCode, String)> {
+    const THREAD_PAGE_DEFAULT: usize = 50;
+    const THREAD_PAGE_MAX: usize = 200;
+    const THREAD_OFFSET_MAX: usize = 50_000;
+
     let session_manager = state.session_manager.as_ref().ok_or((
         StatusCode::SERVICE_UNAVAILABLE,
         "Session manager not available".to_string(),
@@ -434,6 +447,13 @@ pub async fn chat_threads_handler(
 
     let session = session_manager.get_or_create_session(&state.user_id).await;
     let sess = session.lock().await;
+    let active_thread = sess.active_thread;
+    let offset = query.offset.min(THREAD_OFFSET_MAX);
+    let page_limit = query
+        .limit
+        .unwrap_or(THREAD_PAGE_DEFAULT)
+        .clamp(1, THREAD_PAGE_MAX);
+    let fetch_limit = page_limit.saturating_add(1);
 
     // Try DB first for persistent thread list
     if let Some(ref store) = state.store {
@@ -442,51 +462,71 @@ pub async fn chat_threads_handler(
             .get_or_create_assistant_conversation(&state.user_id, "gateway")
             .await
             .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-
-        if let Ok(summaries) = store
-            .list_conversations_with_preview(&state.user_id, "gateway", 50)
+        let assistant_message_count = store
+            .count_conversation_messages(assistant_id)
             .await
-        {
-            let mut assistant_thread = None;
-            let mut threads = Vec::new();
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
-            for s in &summaries {
-                let info = ThreadInfo {
-                    id: s.id,
-                    state: "Idle".to_string(),
-                    turn_count: (s.message_count / 2).max(0) as usize,
-                    created_at: s.started_at.to_rfc3339(),
-                    updated_at: s.last_activity.to_rfc3339(),
-                    title: s.title.clone(),
-                    thread_type: s.thread_type.clone(),
-                };
+        let summaries = store
+            .list_conversations_with_preview(
+                &state.user_id,
+                "gateway",
+                offset as i64,
+                fetch_limit as i64,
+            )
+            .await
+            .map_err(|e| {
+                tracing::error!(
+                    error = ?e,
+                    "Failed to list gateway conversations (user_id={}, offset={}, limit={}): {}",
+                    state.user_id,
+                    offset,
+                    page_limit,
+                    e
+                );
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "Failed to load conversation list".to_string(),
+                )
+            })?;
 
-                if s.id == assistant_id {
-                    assistant_thread = Some(info);
-                } else {
-                    threads.push(info);
-                }
-            }
+        let mut threads = Vec::new();
 
-            // If assistant wasn't in the list (0 messages), synthesize it
-            if assistant_thread.is_none() {
-                assistant_thread = Some(ThreadInfo {
-                    id: assistant_id,
-                    state: "Idle".to_string(),
-                    turn_count: 0,
-                    created_at: chrono::Utc::now().to_rfc3339(),
-                    updated_at: chrono::Utc::now().to_rfc3339(),
-                    title: None,
-                    thread_type: Some("assistant".to_string()),
-                });
-            }
-
-            return Ok(Json(ThreadListResponse {
-                assistant_thread,
-                threads,
-                active_thread: sess.active_thread,
-            }));
+        for s in &summaries {
+            let info = ThreadInfo {
+                id: s.id,
+                state: "Idle".to_string(),
+                turn_count: (s.message_count / 2).max(0) as usize,
+                created_at: s.started_at.to_rfc3339(),
+                updated_at: s.last_activity.to_rfc3339(),
+                title: s.title.clone(),
+                thread_type: s.thread_type.clone(),
+            };
+            threads.push(info);
         }
+        let has_more = threads.len() > page_limit;
+        if has_more {
+            threads.truncate(page_limit);
+        }
+        let next_offset = offset.saturating_add(threads.len());
+
+        let assistant_thread = ThreadInfo {
+            id: assistant_id,
+            state: "Idle".to_string(),
+            turn_count: (assistant_message_count / 2).max(0) as usize,
+            created_at: chrono::Utc::now().to_rfc3339(),
+            updated_at: chrono::Utc::now().to_rfc3339(),
+            title: None,
+            thread_type: Some("assistant".to_string()),
+        };
+
+        return Ok(Json(ThreadListResponse {
+            assistant_thread: Some(assistant_thread),
+            threads,
+            active_thread,
+            has_more,
+            next_offset: if has_more { Some(next_offset) } else { None },
+        }));
     }
 
     // Fallback: in-memory only (no assistant thread without DB)
@@ -503,11 +543,23 @@ pub async fn chat_threads_handler(
             thread_type: None,
         })
         .collect();
+    let mut threads = threads;
+    threads.sort_by(|a, b| {
+        b.updated_at
+            .cmp(&a.updated_at)
+            .then_with(|| b.id.cmp(&a.id))
+    });
+    let total_threads = threads.len();
+    let page_threads: Vec<ThreadInfo> = threads.into_iter().skip(offset).take(page_limit).collect();
+    let next_offset = offset.saturating_add(page_threads.len());
+    let has_more = total_threads > next_offset;
 
     Ok(Json(ThreadListResponse {
         assistant_thread: None,
-        threads,
-        active_thread: sess.active_thread,
+        threads: page_threads,
+        active_thread,
+        has_more,
+        next_offset: if has_more { Some(next_offset) } else { None },
     }))
 }
 
