@@ -54,7 +54,8 @@ pub fn load_ironclaw_env() {
             .join(".ironclaw")
             .join("ironclaw.db");
         if default_db.exists() {
-            // SAFETY: single-threaded at startup; no other threads reading env yet.
+            // SAFETY: `load_ironclaw_env` is called from a synchronous `fn main()`
+            // before the Tokio runtime is started, so no other threads exist yet.
             unsafe { std::env::set_var("DATABASE_BACKEND", "libsql") };
         }
     }
@@ -609,7 +610,10 @@ INJECTED="pwned"#;
         // No DB file — auto-detect guard should not trigger.
         assert!(!db_path.exists());
         let would_trigger = std::env::var("DATABASE_BACKEND").is_err() && db_path.exists();
-        assert!(!would_trigger, "should not auto-detect when db file is absent");
+        assert!(
+            !would_trigger,
+            "should not auto-detect when db file is absent"
+        );
 
         // Create the DB file — guard should now trigger.
         std::fs::write(&db_path, "").unwrap();
@@ -617,7 +621,10 @@ INJECTED="pwned"#;
 
         // Simulate the detection logic (DATABASE_BACKEND unset + db exists).
         let detected = std::env::var("DATABASE_BACKEND").is_err() && db_path.exists();
-        assert!(detected, "should detect libsql when db file is present and backend unset");
+        assert!(
+            detected,
+            "should detect libsql when db file is present and backend unset"
+        );
     }
 
     #[test]
@@ -632,7 +639,10 @@ INJECTED="pwned"#;
 
         // The guard: only sets libsql if DATABASE_BACKEND is NOT already set.
         let would_override = std::env::var("DATABASE_BACKEND").is_err() && db_path.exists();
-        assert!(!would_override, "must not override an explicitly set DATABASE_BACKEND");
+        assert!(
+            !would_override,
+            "must not override an explicitly set DATABASE_BACKEND"
+        );
 
         // Cleanup.
         unsafe { std::env::remove_var("DATABASE_BACKEND") };
