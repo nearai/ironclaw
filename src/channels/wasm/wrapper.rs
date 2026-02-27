@@ -329,14 +329,8 @@ impl near::agent::channel_host::Host for ChannelStoreData {
                 request = request.body(body_bytes);
             }
 
-            // Send request with caller-specified timeout (default 30s, max 5min),
-            // capped by callback timeout so HTTP doesn't outlive callback execution.
-            let callback_timeout_ms = self.host_state.capabilities().callback_timeout.as_millis();
-            let callback_timeout_ms = callback_timeout_ms.min(u32::MAX as u128) as u32;
-            let timeout_ms = timeout_ms
-                .unwrap_or(30_000)
-                .min(300_000)
-                .min(callback_timeout_ms) as u64;
+            // Send request with caller-specified timeout (default 30s, max 5min).
+            let timeout_ms = timeout_ms.unwrap_or(30_000).min(300_000) as u64;
             let timeout = std::time::Duration::from_millis(timeout_ms);
             let response = request.timeout(timeout).send().await.map_err(|e| {
                 // Walk the full error chain so we get the actual root cause
@@ -596,11 +590,6 @@ async fn do_update_broadcast_metadata(
 }
 
 impl WasmChannel {
-    #[inline]
-    fn callback_timeout(&self) -> Duration {
-        self.capabilities.callback_timeout
-    }
-
     /// Create a new WASM channel.
     pub fn new(
         runtime: Arc<WasmChannelRuntime>,
@@ -896,7 +885,7 @@ impl WasmChannel {
         let prepared = Arc::clone(&self.prepared);
         let capabilities = Self::inject_workspace_reader(&self.capabilities, &self.workspace_store);
         let config_json = self.config_json.read().await.clone();
-        let timeout = self.callback_timeout();
+        let timeout = self.runtime.config().callback_timeout;
         let channel_name = self.name.clone();
         let credentials = self.get_credentials().await;
         let pairing_store = self.pairing_store.clone();
@@ -1033,7 +1022,7 @@ impl WasmChannel {
         let runtime = Arc::clone(&self.runtime);
         let prepared = Arc::clone(&self.prepared);
         let capabilities = Self::inject_workspace_reader(&self.capabilities, &self.workspace_store);
-        let timeout = self.callback_timeout();
+        let timeout = self.runtime.config().callback_timeout;
         let credentials = self.get_credentials().await;
         let pairing_store = self.pairing_store.clone();
         let workspace_store = self.workspace_store.clone();
@@ -1131,7 +1120,7 @@ impl WasmChannel {
         let runtime = Arc::clone(&self.runtime);
         let prepared = Arc::clone(&self.prepared);
         let capabilities = Self::inject_workspace_reader(&self.capabilities, &self.workspace_store);
-        let timeout = self.callback_timeout();
+        let timeout = self.runtime.config().callback_timeout;
         let channel_name = self.name.clone();
         let credentials = self.get_credentials().await;
         let pairing_store = self.pairing_store.clone();
@@ -1232,7 +1221,7 @@ impl WasmChannel {
         let runtime = Arc::clone(&self.runtime);
         let prepared = Arc::clone(&self.prepared);
         let capabilities = self.capabilities.clone();
-        let timeout = self.callback_timeout();
+        let timeout = self.runtime.config().callback_timeout;
         let channel_name = self.name.clone();
         let credentials = self.get_credentials().await;
         let pairing_store = self.pairing_store.clone();
@@ -1345,7 +1334,7 @@ impl WasmChannel {
         let runtime = Arc::clone(&self.runtime);
         let prepared = Arc::clone(&self.prepared);
         let capabilities = self.capabilities.clone();
-        let timeout = self.callback_timeout();
+        let timeout = self.runtime.config().callback_timeout;
         let channel_name = self.name.clone();
         let credentials = self.get_credentials().await;
         let pairing_store = self.pairing_store.clone();
@@ -1508,7 +1497,7 @@ impl WasmChannel {
                 let capabilities = self.capabilities.clone();
                 let credentials = self.credentials.clone();
                 let pairing_store = self.pairing_store.clone();
-                let callback_timeout = self.callback_timeout();
+                let callback_timeout = self.runtime.config().callback_timeout;
                 let wit_update = status_to_wit(&status, metadata);
 
                 let handle = tokio::spawn(async move {
@@ -1749,7 +1738,7 @@ impl WasmChannel {
         let rate_limiter = self.rate_limiter.clone();
         let credentials = self.credentials.clone();
         let pairing_store = self.pairing_store.clone();
-        let callback_timeout = self.callback_timeout();
+        let callback_timeout = self.runtime.config().callback_timeout;
         let workspace_store = self.workspace_store.clone();
         let last_broadcast_metadata = self.last_broadcast_metadata.clone();
         let settings_store = self.settings_store.clone();
@@ -2148,6 +2137,14 @@ impl Channel for WasmChannel {
         self.handle_status_update(status, metadata).await
     }
 
+    /// Send a proactive outbound message for WASM channels.
+    ///
+    /// Current limitations:
+    /// - Only `telegram` channel is supported.
+    /// - Attachments are not supported.
+    /// - Uses `on_status(Status)` callback path instead of `on_respond`.
+    /// - `message_id: 0` in metadata is a sentinel to avoid reply threading.
+    /// - This path is private-chat only (`chat_id > 0`).
     async fn broadcast(
         &self,
         user_id: &str,
@@ -2174,12 +2171,18 @@ impl Channel for WasmChannel {
             name: self.name.clone(),
             reason: format!("Invalid telegram chat_id '{}': {}", user_id, e),
         })?;
+        if chat_id <= 0 {
+            return Err(ChannelError::SendFailed {
+                name: self.name.clone(),
+                reason: "Telegram proactive broadcast currently supports private chats only (chat_id must be > 0)".to_string(),
+            });
+        }
 
         let metadata = serde_json::json!({
             "chat_id": chat_id,
             "message_id": 0,
             "user_id": chat_id,
-            "is_private": true
+            "is_private": chat_id > 0
         });
 
         // Use on_status(Status) for proactive outbound sends. Telegram channel
@@ -2686,8 +2689,38 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_broadcast_rejects_non_private_telegram_chat_id() {
+        let channel = create_telegram_test_channel();
+        let result = channel
+            .broadcast("-100123", OutgoingResponse::text("hello"))
+            .await;
+
+        assert!(result.is_err());
+        let err = result.err().unwrap().to_string();
+        assert!(err.contains("private chats only"));
+    }
+
+    #[tokio::test]
+    async fn test_broadcast_rejects_attachments() {
+        let channel = create_telegram_test_channel();
+        let result = channel
+            .broadcast(
+                "146032821",
+                OutgoingResponse::text("hello")
+                    .with_attachments(vec!["/tmp/file.png".to_string()]),
+            )
+            .await;
+
+        assert!(result.is_err());
+        let err = result.err().unwrap().to_string();
+        assert!(err.contains("does not support attachments"));
+    }
+
+    #[tokio::test]
     async fn test_broadcast_accepts_valid_telegram_chat_id() {
         let channel = create_telegram_test_channel();
+        // This validates pre-WASM routing/metadata checks only. The test
+        // channel is created with `component: None`, so no WASM callback runs.
         let result = channel
             .broadcast("146032821", OutgoingResponse::text("hello"))
             .await;
