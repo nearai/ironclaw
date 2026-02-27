@@ -235,11 +235,6 @@ impl Agent {
         }
     }
 
-    /// List all jobs (convenience alias for process_job_status with no id).
-    pub(super) async fn process_job_list(&self, user_id: &str) -> Result<SubmissionResult, Error> {
-        self.process_job_status(user_id, None).await
-    }
-
     /// Cancel a job by ID.
     pub(super) async fn process_job_cancel(
         &self,

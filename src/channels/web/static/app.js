@@ -39,6 +39,7 @@ const SLASH_COMMANDS = [
 ];
 
 let _slashSelected = -1;
+let _slashMatches = [];
 
 // --- Tool Activity State ---
 let _activeGroup = null;
@@ -316,6 +317,7 @@ function enableChatInput() {
 function showSlashAutocomplete(matches) {
   const el = document.getElementById('slash-autocomplete');
   if (!el || matches.length === 0) { hideSlashAutocomplete(); return; }
+  _slashMatches = matches;
   _slashSelected = -1;
   el.innerHTML = '';
   matches.forEach((item, i) => {
@@ -337,6 +339,7 @@ function hideSlashAutocomplete() {
   const el = document.getElementById('slash-autocomplete');
   if (el) el.style.display = 'none';
   _slashSelected = -1;
+  _slashMatches = [];
 }
 
 function selectSlashItem(cmd) {
@@ -1189,8 +1192,7 @@ chatInput.addEventListener('keydown', (e) => {
     }
     if (e.key === 'Tab' || (e.key === 'Enter' && _slashSelected >= 0)) {
       e.preventDefault();
-      const matched = SLASH_COMMANDS.filter((c) => c.cmd.startsWith(chatInput.value.toLowerCase()));
-      const pick = _slashSelected >= 0 ? matched[_slashSelected] : matched[0];
+      const pick = _slashSelected >= 0 ? _slashMatches[_slashSelected] : _slashMatches[0];
       if (pick) selectSlashItem(pick.cmd);
       return;
     }

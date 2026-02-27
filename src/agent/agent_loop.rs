@@ -702,7 +702,6 @@ impl Agent {
                 self.process_job_status(&message.user_id, job_id.as_deref())
                     .await
             }
-            Submission::JobList => self.process_job_list(&message.user_id).await,
             Submission::JobCancel { job_id } => {
                 self.process_job_cancel(&message.user_id, &job_id).await
             }

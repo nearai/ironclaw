@@ -121,7 +121,7 @@ impl SubmissionParser {
             }
         }
         if lower == "/list" {
-            return Submission::JobList;
+            return Submission::JobStatus { job_id: None };
         }
         if let Some(rest) = lower.strip_prefix("/cancel ") {
             let id = rest.trim().to_string();
@@ -258,9 +258,6 @@ pub enum Submission {
         job_id: Option<String>,
     },
 
-    /// List all jobs (alias for JobStatus { job_id: None }).
-    JobList,
-
     /// Cancel a running job.
     JobCancel {
         /// Job ID (UUID or short prefix).
@@ -352,7 +349,6 @@ impl Submission {
                 | Self::Summarize
                 | Self::Suggest
                 | Self::JobStatus { .. }
-                | Self::JobList
                 | Self::JobCancel { .. }
                 | Self::SystemCommand { .. }
         )
@@ -806,11 +802,12 @@ mod tests {
 
     #[test]
     fn test_parser_job_list() {
+        // /list is an alias for /status with no job_id
         let s = SubmissionParser::parse("/list");
-        assert!(matches!(s, Submission::JobList));
+        assert!(matches!(s, Submission::JobStatus { job_id: None }));
 
         let s = SubmissionParser::parse("/LIST");
-        assert!(matches!(s, Submission::JobList));
+        assert!(matches!(s, Submission::JobStatus { job_id: None }));
     }
 
     #[test]
