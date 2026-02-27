@@ -479,7 +479,7 @@ impl SkillRegistry {
 /// Shared implementation used by both `SkillRegistry::load_skill_md` (discovery)
 /// and `SkillRegistry::prepare_install_to_disk` (installation). This avoids
 /// duplicating the read/parse/validate/hash pipeline.
-async fn load_and_validate_skill(
+pub(crate) async fn load_and_validate_skill(
     path: &Path,
     trust: SkillTrust,
     source: SkillSource,

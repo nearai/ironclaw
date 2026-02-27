@@ -370,7 +370,7 @@ impl AppBuilder {
                 .map(|g| g.user_id.as_str())
                 .unwrap_or("default");
             tools
-                .register_collection_tools(Arc::clone(db), user_id)
+                .register_collection_tools(Arc::clone(db), user_id, None, None)
                 .await;
 
             Some(ws)

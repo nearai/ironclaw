@@ -5,6 +5,7 @@
 //! **Management tools** (static, one instance each):
 //! - `collections_list` — List all registered collections
 //! - `collections_register` — Register a new collection schema
+//! - `collections_alter` — Alter an existing collection schema (add/remove fields, enum values)
 //! - `collections_drop` — Drop a collection and all its records
 //!
 //! **Per-collection tools** (dynamically generated per schema):
@@ -18,6 +19,7 @@
 //! tools are generated. When `collections_register` is called mid-session,
 //! it also registers the new per-collection tools dynamically.
 
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -25,7 +27,7 @@ use serde_json::json;
 
 use crate::context::JobContext;
 use crate::db::structured::{
-    AggOp, Aggregation, CollectionSchema, FieldType, Filter,
+    AggOp, Aggregation, AlterOperation, Alteration, CollectionSchema, FieldType, Filter,
 };
 use crate::db::Database;
 use crate::tools::registry::ToolRegistry;
@@ -58,6 +60,359 @@ pub fn generate_collection_tools(
         Arc::new(CollectionQueryTool::new(schema.clone(), Arc::clone(&db))),
         Arc::new(CollectionSummaryTool::new(schema.clone(), db)),
     ]
+}
+
+// ==================== Per-Collection Skill Generation ====================
+
+/// Generate and write a per-collection SKILL.md so future conversations can
+/// discover the collection's tools via skill activation keywords.
+///
+/// This is deterministic — no LLM call needed. The schema metadata (collection
+/// name, description, field names, enum values) is rich enough to produce good
+/// activation keywords. If keyword quality proves insufficient, this can be
+/// replaced with an LLM-assisted generation step later without changing the
+/// call site.
+///
+/// Errors are logged but not propagated — skill generation is best-effort and
+/// should never block collection registration.
+pub(crate) fn generate_collection_skill(schema: &CollectionSchema, skills_dir: &Path) {
+    let name = &schema.collection;
+    let description = schema
+        .description
+        .as_deref()
+        .unwrap_or("Structured data collection");
+
+    // Build activation keywords from schema metadata
+    let mut keywords: Vec<String> = Vec::new();
+
+    // Collection name words (split on underscores)
+    for word in name.split('_') {
+        if word.len() > 2 {
+            keywords.push(word.to_string());
+        }
+    }
+    // Full name with spaces
+    keywords.push(name.replace('_', " "));
+
+    // Description words (skip short/common ones)
+    let stopwords = [
+        "a", "an", "the", "and", "or", "of", "for", "to", "in", "on", "with", "is", "are",
+        "was", "were", "be", "been", "being", "has", "have", "had", "do", "does", "did", "this",
+        "that", "it", "its", "my", "our", "your",
+    ];
+    for word in description.split_whitespace() {
+        let w = word.trim_matches(|c: char| !c.is_alphanumeric()).to_lowercase();
+        if w.len() > 3 && !stopwords.contains(&w.as_str()) && !keywords.contains(&w) {
+            keywords.push(w);
+        }
+    }
+
+    // Enum values from fields
+    for def in schema.fields.values() {
+        if let FieldType::Enum { values } = &def.field_type {
+            for v in values {
+                let v_lower = v.to_lowercase().replace('_', " ");
+                if !keywords.contains(&v_lower) {
+                    keywords.push(v_lower);
+                }
+            }
+        }
+    }
+
+    // Cap keywords at a reasonable number
+    keywords.truncate(20);
+
+    let keywords_yaml: String = keywords
+        .iter()
+        .map(|k| format!("    - {k}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    // Build field documentation for the skill body
+    let fields_doc: String = schema
+        .fields
+        .iter()
+        .map(|(fname, fdef)| {
+            let type_str = field_type_display(&fdef.field_type);
+            let req = if fdef.required { ", required" } else { "" };
+            format!("  - `{fname}` ({type_str}{req})")
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    let human_name = name.replace('_', " ");
+    let human_name_title = titlecase(&human_name);
+
+    let skill_content = format!(
+        r#"---
+name: {name}
+version: 0.1.0
+description: "{description}"
+activation:
+  keywords:
+{keywords_yaml}
+  max_context_tokens: 800
+  tools_prefix: {name}
+---
+
+# {human_name_title}
+
+{description}
+
+## Tools
+
+Call these tools to manage records. ALWAYS call the tool — never just acknowledge in text.
+
+- **{name}_add** — Add a record. Fields:
+{fields_doc}
+- **{name}_query** — Search and filter records (eq, neq, gt, lt, gte, lte, between, in, contains).
+- **{name}_summary** — Aggregations: sum, count, avg, min, max. Use group_by for breakdowns.
+- **{name}_update** — Update a record by ID (partial update).
+- **{name}_delete** — Delete a record by ID.
+
+## Adding records
+
+When the user mentions items to add, ALWAYS call {name}_add immediately:
+- "Add X" → one {name}_add call
+- "Add X and Y" → two {name}_add calls (one per item)
+- "I also need X" / "and Y too" → one {name}_add call per item
+- Do NOT just respond in text. Call the tool.
+
+## Querying
+
+- "What's on my list?" / "Show me everything" → {name}_query with no filters
+- "Show me just [value]" → {name}_query with filter
+- "How many?" / "Total?" / "Summary by [field]?" → {name}_summary
+"#
+    );
+
+    let skill_dir = skills_dir.join(name);
+    let skill_path = skill_dir.join("SKILL.md");
+
+    if let Err(e) = std::fs::create_dir_all(&skill_dir) {
+        tracing::warn!(
+            "Failed to create skill directory {}: {e}",
+            skill_dir.display()
+        );
+        return;
+    }
+    if let Err(e) = std::fs::write(&skill_path, skill_content) {
+        tracing::warn!(
+            "Failed to write collection skill {}: {e}",
+            skill_path.display()
+        );
+        return;
+    }
+    tracing::info!(
+        "Generated per-collection skill: {}",
+        skill_path.display()
+    );
+}
+
+/// Human-readable display for a field type.
+fn field_type_display(ft: &FieldType) -> String {
+    match ft {
+        FieldType::Text => "text".to_string(),
+        FieldType::Number => "number".to_string(),
+        FieldType::Date => "date".to_string(),
+        FieldType::Time => "time".to_string(),
+        FieldType::DateTime => "datetime".to_string(),
+        FieldType::Bool => "bool".to_string(),
+        FieldType::Enum { values } => format!("enum: {}", values.join(", ")),
+    }
+}
+
+/// Simple titlecase: capitalize first letter of each word.
+fn titlecase(s: &str) -> String {
+    s.split_whitespace()
+        .map(|w| {
+            let mut chars = w.chars();
+            match chars.next() {
+                None => String::new(),
+                Some(c) => c.to_uppercase().to_string() + chars.as_str(),
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// Generate (or update) the collections-router SKILL.md.
+///
+/// The router skill matches broadly on any collection name keyword so the
+/// agent discovers structured collections even when no per-collection skill
+/// is active. It points the LLM at `collections_list` for schema discovery
+/// rather than injecting full schemas into the prompt.
+///
+/// If `schemas` is empty the router file is removed.
+pub(crate) fn generate_router_skill(schemas: &[CollectionSchema], skills_dir: &Path) {
+    let router_dir = skills_dir.join("collections-router");
+    let router_path = router_dir.join("SKILL.md");
+
+    if schemas.is_empty() {
+        // Nothing to route — clean up
+        let _ = std::fs::remove_file(&router_path);
+        let _ = std::fs::remove_dir(&router_dir);
+        return;
+    }
+
+    // Build keywords from all collection name words
+    let mut keywords: Vec<String> = Vec::new();
+    for schema in schemas {
+        for word in schema.collection.split('_') {
+            if word.len() > 2 {
+                let w = word.to_lowercase();
+                if !keywords.contains(&w) {
+                    keywords.push(w);
+                }
+            }
+        }
+        // Full name with spaces
+        let human = schema.collection.replace('_', " ");
+        if !keywords.contains(&human) {
+            keywords.push(human);
+        }
+    }
+    keywords.truncate(20);
+
+    let keywords_yaml: String = keywords
+        .iter()
+        .map(|k| format!("    - {k}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    let collection_list: String = schemas
+        .iter()
+        .map(|s| {
+            let desc = s.description.as_deref().unwrap_or("structured data");
+            format!("- **{}**: {}", s.collection, desc)
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    let content = format!(
+        r#"---
+name: collections-router
+version: 0.1.0
+description: Routes to structured data collections
+activation:
+  keywords:
+{keywords_yaml}
+  max_context_tokens: 400
+---
+
+# Structured Collections
+
+You have {count} collection(s):
+{collection_list}
+
+Call `collections_list` to discover schemas and available per-collection tools.
+"#,
+        count = schemas.len(),
+    );
+
+    if let Err(e) = std::fs::create_dir_all(&router_dir) {
+        tracing::warn!(
+            "Failed to create router skill directory {}: {e}",
+            router_dir.display()
+        );
+        return;
+    }
+    if let Err(e) = std::fs::write(&router_path, content) {
+        tracing::warn!(
+            "Failed to write router skill {}: {e}",
+            router_path.display()
+        );
+        return;
+    }
+    tracing::info!(
+        "Generated collections-router skill for {} collections",
+        schemas.len()
+    );
+}
+
+// ==================== Shared Tool Refresh ====================
+
+/// Unregister old per-collection tools, generate new ones from the schema,
+/// register them, and regenerate skills. Used by both register and alter tools.
+async fn refresh_collection_tools(
+    schema: &CollectionSchema,
+    db: &Arc<dyn Database>,
+    registry: &Arc<ToolRegistry>,
+    skills_dir: Option<&Path>,
+    skill_registry: Option<&Arc<std::sync::RwLock<crate::skills::SkillRegistry>>>,
+    user_id: &str,
+) -> Vec<String> {
+    // Unregister old per-collection tools (if they exist)
+    let suffixes = ["_add", "_update", "_delete", "_query", "_summary"];
+    for suffix in &suffixes {
+        let tool_name = format!("{}{suffix}", schema.collection);
+        registry.unregister(&tool_name).await;
+    }
+
+    // Generate and register new per-collection tools
+    let tools = generate_collection_tools(schema, Arc::clone(db));
+    let tool_names: Vec<String> = tools.iter().map(|t| t.name().to_string()).collect();
+    for tool in tools {
+        registry.register(tool).await;
+    }
+
+    // Generate per-collection skill for future session discovery (best-effort)
+    if let Some(skills_dir) = skills_dir {
+        generate_collection_skill(schema, skills_dir);
+
+        if let Some(sr) = skill_registry {
+            // Load the per-collection skill into the registry
+            let skill_path = skills_dir.join(&schema.collection).join("SKILL.md");
+            match crate::skills::load_and_validate_skill(
+                &skill_path,
+                crate::skills::SkillTrust::Trusted,
+                crate::skills::SkillSource::User(skills_dir.join(&schema.collection)),
+            )
+            .await
+            {
+                Ok((name, skill)) => {
+                    if let Ok(mut reg) = sr.write() {
+                        let _ = reg.commit_remove(&name);
+                        if let Err(e) = reg.commit_install(&name, skill) {
+                            tracing::warn!("Failed to install per-collection skill: {e}");
+                        } else {
+                            tracing::info!("Loaded per-collection skill into registry: {name}");
+                        }
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!("Failed to load per-collection skill: {e}");
+                }
+            }
+
+            // Update the router skill
+            if let Ok(schemas) = db.list_collections(user_id).await {
+                generate_router_skill(&schemas, skills_dir);
+                let router_path = skills_dir.join("collections-router").join("SKILL.md");
+                if router_path.exists() {
+                    match crate::skills::load_and_validate_skill(
+                        &router_path,
+                        crate::skills::SkillTrust::Trusted,
+                        crate::skills::SkillSource::User(skills_dir.join("collections-router")),
+                    )
+                    .await
+                    {
+                        Ok((rname, rskill)) => {
+                            if let Ok(mut reg) = sr.write() {
+                                let _ = reg.commit_remove(&rname);
+                                let _ = reg.commit_install(&rname, rskill);
+                            }
+                        }
+                        Err(e) => {
+                            tracing::warn!("Failed to load router skill: {e}");
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    tool_names
 }
 
 // ==================== Management Tools ====================
@@ -147,15 +502,36 @@ impl Tool for CollectionListTool {
 /// Tool to register a new structured collection.
 ///
 /// When called, this also dynamically registers per-collection tools
-/// so the LLM can immediately start using them.
+/// so the LLM can immediately start using them, and generates a
+/// per-collection skill file for future session discovery.
 pub struct CollectionRegisterTool {
     db: Arc<dyn Database>,
     registry: Arc<ToolRegistry>,
+    skills_dir: Option<PathBuf>,
+    skill_registry: Option<Arc<std::sync::RwLock<crate::skills::SkillRegistry>>>,
 }
 
 impl CollectionRegisterTool {
     pub fn new(db: Arc<dyn Database>, registry: Arc<ToolRegistry>) -> Self {
-        Self { db, registry }
+        Self {
+            db,
+            registry,
+            skills_dir: None,
+            skill_registry: None,
+        }
+    }
+
+    pub fn with_skills_dir(mut self, dir: PathBuf) -> Self {
+        self.skills_dir = Some(dir);
+        self
+    }
+
+    pub fn with_skill_registry(
+        mut self,
+        sr: Arc<std::sync::RwLock<crate::skills::SkillRegistry>>,
+    ) -> Self {
+        self.skill_registry = Some(sr);
+        self
     }
 }
 
@@ -236,12 +612,16 @@ impl Tool for CollectionRegisterTool {
                 ToolError::ExecutionFailed(format!("Failed to register collection: {e}"))
             })?;
 
-        // Generate and register per-collection tools dynamically
-        let tools = generate_collection_tools(&schema, Arc::clone(&self.db));
-        let tool_names: Vec<String> = tools.iter().map(|t| t.name().to_string()).collect();
-        for tool in tools {
-            self.registry.register(tool).await;
-        }
+        // Generate and register per-collection tools + skills
+        let tool_names = refresh_collection_tools(
+            &schema,
+            &self.db,
+            &self.registry,
+            self.skills_dir.as_deref(),
+            self.skill_registry.as_ref(),
+            &ctx.user_id,
+        )
+        .await;
 
         Ok(ToolOutput::success(
             json!({
@@ -266,11 +646,31 @@ impl Tool for CollectionRegisterTool {
 pub struct CollectionDropTool {
     db: Arc<dyn Database>,
     registry: Arc<ToolRegistry>,
+    skills_dir: Option<PathBuf>,
+    skill_registry: Option<Arc<std::sync::RwLock<crate::skills::SkillRegistry>>>,
 }
 
 impl CollectionDropTool {
     pub fn new(db: Arc<dyn Database>, registry: Arc<ToolRegistry>) -> Self {
-        Self { db, registry }
+        Self {
+            db,
+            registry,
+            skills_dir: None,
+            skill_registry: None,
+        }
+    }
+
+    pub fn with_skills_dir(mut self, dir: PathBuf) -> Self {
+        self.skills_dir = Some(dir);
+        self
+    }
+
+    pub fn with_skill_registry(
+        mut self,
+        sr: Arc<std::sync::RwLock<crate::skills::SkillRegistry>>,
+    ) -> Self {
+        self.skill_registry = Some(sr);
+        self
     }
 }
 
@@ -334,11 +734,270 @@ impl Tool for CollectionDropTool {
             }
         }
 
+        // Clean up per-collection skill (best-effort)
+        if let Some(ref skills_dir) = self.skills_dir {
+            let skill_dir = skills_dir.join(collection);
+            let skill_path = skill_dir.join("SKILL.md");
+            let _ = std::fs::remove_file(&skill_path);
+            let _ = std::fs::remove_dir(&skill_dir);
+
+            // Remove from in-memory registry
+            if let Some(ref sr) = self.skill_registry
+                && let Ok(mut reg) = sr.write()
+            {
+                let _ = reg.commit_remove(collection);
+            }
+
+            // Update the router skill
+            if let Some(ref sr) = self.skill_registry
+                && let Ok(schemas) = self.db.list_collections(&ctx.user_id).await
+            {
+                generate_router_skill(&schemas, skills_dir);
+                let router_path = skills_dir.join("collections-router").join("SKILL.md");
+                if router_path.exists() {
+                    match crate::skills::load_and_validate_skill(
+                        &router_path,
+                        crate::skills::SkillTrust::Trusted,
+                        crate::skills::SkillSource::User(
+                            skills_dir.join("collections-router"),
+                        ),
+                    )
+                    .await
+                    {
+                        Ok((rname, rskill)) => {
+                            if let Ok(mut reg) = sr.write() {
+                                let _ = reg.commit_remove(&rname);
+                                let _ = reg.commit_install(&rname, rskill);
+                            }
+                        }
+                        Err(e) => {
+                            tracing::warn!("Failed to reload router skill: {e}");
+                        }
+                    }
+                } else {
+                    // No router needed (all collections dropped)
+                    if let Ok(mut reg) = sr.write() {
+                        let _ = reg.commit_remove("collections-router");
+                    }
+                }
+            }
+        }
+
         Ok(ToolOutput::success(
             json!({
                 "status": "dropped",
                 "collection": collection,
                 "tools_removed": removed,
+            }),
+            start.elapsed(),
+        ))
+    }
+
+    fn requires_sanitization(&self) -> bool {
+        false
+    }
+
+    fn rate_limit_config(&self) -> Option<ToolRateLimitConfig> {
+        Some(ToolRateLimitConfig::new(5, 50))
+    }
+}
+
+// ==================== Alter Tool ====================
+
+/// Tool to alter the schema of an existing collection.
+///
+/// Supports targeted mutations: add/remove fields, add/remove enum values.
+/// Existing records are preserved — data is not migrated or deleted.
+pub struct CollectionsAlterTool {
+    db: Arc<dyn Database>,
+    registry: Arc<ToolRegistry>,
+    skills_dir: Option<PathBuf>,
+    skill_registry: Option<Arc<std::sync::RwLock<crate::skills::SkillRegistry>>>,
+}
+
+impl CollectionsAlterTool {
+    pub fn new(db: Arc<dyn Database>, registry: Arc<ToolRegistry>) -> Self {
+        Self {
+            db,
+            registry,
+            skills_dir: None,
+            skill_registry: None,
+        }
+    }
+
+    pub fn with_skills_dir(mut self, dir: PathBuf) -> Self {
+        self.skills_dir = Some(dir);
+        self
+    }
+
+    pub fn with_skill_registry(
+        mut self,
+        sr: Arc<std::sync::RwLock<crate::skills::SkillRegistry>>,
+    ) -> Self {
+        self.skill_registry = Some(sr);
+        self
+    }
+}
+
+#[async_trait]
+impl Tool for CollectionsAlterTool {
+    fn name(&self) -> &str {
+        "collections_alter"
+    }
+
+    fn description(&self) -> &str {
+        "Alter the schema of an existing collection. Add or remove fields, \
+         add or remove enum values. Existing records are preserved — use this \
+         instead of dropping and re-creating a collection."
+    }
+
+    fn parameters_schema(&self) -> serde_json::Value {
+        json!({
+            "type": "object",
+            "properties": {
+                "collection": {
+                    "type": "string",
+                    "description": "Name of the collection to alter"
+                },
+                "operation": {
+                    "type": "string",
+                    "enum": ["add_field", "remove_field", "add_enum_value", "remove_enum_value"],
+                    "description": "The alteration operation to perform"
+                },
+                "field": {
+                    "type": "string",
+                    "description": "Field name to add, remove, or modify"
+                },
+                "field_type": {
+                    "type": "string",
+                    "enum": ["text", "number", "date", "time", "datetime", "bool", "enum"],
+                    "description": "Type for the new field (add_field only)"
+                },
+                "required": {
+                    "type": "boolean",
+                    "description": "Whether the field is required (add_field only, default: false)"
+                },
+                "default": {
+                    "description": "Default value for the field (add_field only)"
+                },
+                "values": {
+                    "type": "array",
+                    "items": { "type": "string" },
+                    "description": "Enum values (add_field with enum type only)"
+                },
+                "value": {
+                    "type": "string",
+                    "description": "Single enum value to add or remove (add_enum_value / remove_enum_value)"
+                }
+            },
+            "required": ["collection", "operation", "field"]
+        })
+    }
+
+    async fn execute(
+        &self,
+        params: serde_json::Value,
+        ctx: &JobContext,
+    ) -> Result<ToolOutput, ToolError> {
+        let start = std::time::Instant::now();
+
+        let collection = require_str(&params, "collection")?;
+        let op_str = require_str(&params, "operation")?;
+        let field = require_str(&params, "field")?.to_string();
+
+        let operation: AlterOperation = serde_json::from_value(json!(op_str)).map_err(|e| {
+            ToolError::InvalidParameters(format!(
+                "Invalid operation '{op_str}': {e}. Must be one of: add_field, remove_field, add_enum_value, remove_enum_value"
+            ))
+        })?;
+
+        // Parse field_type for add_field
+        let field_type = if let Some(ft_str) = params.get("field_type").and_then(|v| v.as_str()) {
+            let ft = match ft_str {
+                "text" => FieldType::Text,
+                "number" => FieldType::Number,
+                "date" => FieldType::Date,
+                "time" => FieldType::Time,
+                "datetime" => FieldType::DateTime,
+                "bool" => FieldType::Bool,
+                "enum" => {
+                    let values: Vec<String> = params
+                        .get("values")
+                        .and_then(|v| serde_json::from_value(v.clone()).ok())
+                        .unwrap_or_default();
+                    FieldType::Enum { values }
+                }
+                other => {
+                    return Err(ToolError::InvalidParameters(format!(
+                        "Unknown field_type: {other}"
+                    )));
+                }
+            };
+            Some(ft)
+        } else {
+            None
+        };
+
+        let alteration = Alteration {
+            operation: operation.clone(),
+            field: field.clone(),
+            field_type,
+            required: params.get("required").and_then(|v| v.as_bool()),
+            default: params.get("default").cloned(),
+            value: params.get("value").and_then(|v| v.as_str()).map(String::from),
+        };
+
+        // Fetch current schema
+        let current = self
+            .db
+            .get_collection_schema(&ctx.user_id, collection)
+            .await
+            .map_err(|e| ToolError::ExecutionFailed(format!("Collection not found: {e}")))?;
+
+        // Apply mutation
+        let new_schema = current.apply_alteration(&alteration).map_err(|e| {
+            ToolError::InvalidParameters(format!("Invalid alteration: {e}"))
+        })?;
+
+        // Persist updated schema
+        self.db
+            .register_collection(&ctx.user_id, &new_schema)
+            .await
+            .map_err(|e| {
+                ToolError::ExecutionFailed(format!("Failed to update collection schema: {e}"))
+            })?;
+
+        // Regenerate tools + skills
+        let tool_names = refresh_collection_tools(
+            &new_schema,
+            &self.db,
+            &self.registry,
+            self.skills_dir.as_deref(),
+            self.skill_registry.as_ref(),
+            &ctx.user_id,
+        )
+        .await;
+
+        // Build human-readable description of the change
+        let description = match alteration.operation {
+            AlterOperation::AddField => format!("Added field '{field}' to {collection}"),
+            AlterOperation::RemoveField => format!("Removed field '{field}' from {collection}"),
+            AlterOperation::AddEnumValue => {
+                let v = alteration.value.as_deref().unwrap_or("?");
+                format!("Added enum value '{v}' to field '{field}' in {collection}")
+            }
+            AlterOperation::RemoveEnumValue => {
+                let v = alteration.value.as_deref().unwrap_or("?");
+                format!("Removed enum value '{v}' from field '{field}' in {collection}")
+            }
+        };
+
+        Ok(ToolOutput::success(
+            json!({
+                "status": "altered",
+                "collection": collection,
+                "description": description,
+                "tools_refreshed": tool_names,
             }),
             start.elapsed(),
         ))

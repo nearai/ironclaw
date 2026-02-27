@@ -17,7 +17,8 @@ mod time;
 mod web_fetch;
 
 pub use collections::{
-    CollectionDropTool, CollectionListTool, CollectionRegisterTool, generate_collection_tools,
+    CollectionDropTool, CollectionListTool, CollectionRegisterTool, CollectionsAlterTool,
+    generate_collection_tools,
 };
 pub use echo::EchoTool;
 pub use extension_tools::{

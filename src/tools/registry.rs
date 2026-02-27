@@ -69,6 +69,7 @@ const PROTECTED_TOOL_NAMES: &[&str] = &[
     "skill_remove",
     "message",
     "web_fetch",
+    "collections_alter",
 ];
 
 /// Registry of available tools.
@@ -445,26 +446,55 @@ impl ToolRegistry {
     /// when new schemas are created mid-session.
     ///
     /// `user_id` is needed to load existing schemas at startup.
+    /// `skills_dir` is the directory where per-collection skills are written
+    /// for future session discovery.
     pub async fn register_collection_tools(
         self: &Arc<Self>,
         db: Arc<dyn Database>,
         user_id: &str,
+        skills_dir: Option<std::path::PathBuf>,
+        skill_registry: Option<Arc<std::sync::RwLock<SkillRegistry>>>,
     ) {
         use crate::tools::builtin::{
-            CollectionDropTool, CollectionListTool, CollectionRegisterTool,
+            CollectionDropTool, CollectionListTool, CollectionRegisterTool, CollectionsAlterTool,
             generate_collection_tools,
         };
 
         // Register management tools
         self.register_sync(Arc::new(CollectionListTool::new(Arc::clone(&db))));
-        self.register_sync(Arc::new(CollectionRegisterTool::new(
+        let mut register_tool = CollectionRegisterTool::new(
             Arc::clone(&db),
             Arc::clone(self),
-        )));
-        self.register_sync(Arc::new(CollectionDropTool::new(
+        );
+        if let Some(ref dir) = skills_dir {
+            register_tool = register_tool.with_skills_dir(dir.clone());
+        }
+        if let Some(ref sr) = skill_registry {
+            register_tool = register_tool.with_skill_registry(Arc::clone(sr));
+        }
+        self.register_sync(Arc::new(register_tool));
+        let mut drop_tool = CollectionDropTool::new(
             Arc::clone(&db),
             Arc::clone(self),
-        )));
+        );
+        if let Some(ref dir) = skills_dir {
+            drop_tool = drop_tool.with_skills_dir(dir.clone());
+        }
+        if let Some(ref sr) = skill_registry {
+            drop_tool = drop_tool.with_skill_registry(Arc::clone(sr));
+        }
+        self.register_sync(Arc::new(drop_tool));
+        let mut alter_tool = CollectionsAlterTool::new(
+            Arc::clone(&db),
+            Arc::clone(self),
+        );
+        if let Some(ref dir) = skills_dir {
+            alter_tool = alter_tool.with_skills_dir(dir.clone());
+        }
+        if let Some(ref sr) = skill_registry {
+            alter_tool = alter_tool.with_skill_registry(Arc::clone(sr));
+        }
+        self.register_sync(Arc::new(alter_tool));
 
         // Load existing schemas and generate per-collection tools
         match db.list_collections(user_id).await {
@@ -478,14 +508,14 @@ impl ToolRegistry {
                     }
                 }
                 tracing::info!(
-                    "Registered 3 collection management tools + {} per-collection tools for {} schemas",
+                    "Registered 4 collection management tools + {} per-collection tools for {} schemas",
                     tool_count,
                     schemas.len()
                 );
             }
             Err(e) => {
                 tracing::warn!("Failed to load collection schemas: {e}");
-                tracing::info!("Registered 3 collection management tools (no existing schemas loaded)");
+                tracing::info!("Registered 4 collection management tools (no existing schemas loaded)");
             }
         }
     }

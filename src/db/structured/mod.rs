@@ -118,6 +118,28 @@ pub struct Aggregation {
     pub filters: Vec<Filter>,
 }
 
+// ==================== Schema Alteration ====================
+
+/// An operation to apply to a collection schema.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AlterOperation {
+    AddField,
+    RemoveField,
+    AddEnumValue,
+    RemoveEnumValue,
+}
+
+/// A targeted mutation to apply to a collection schema.
+pub struct Alteration {
+    pub operation: AlterOperation,
+    pub field: String,
+    pub field_type: Option<FieldType>,
+    pub required: Option<bool>,
+    pub default: Option<serde_json::Value>,
+    pub value: Option<String>,
+}
+
 // ==================== Validation ====================
 
 /// Validation errors for structured collection operations.
@@ -222,6 +244,119 @@ impl CollectionSchema {
     /// start with an underscore, must not be empty.
     pub fn validate_name(name: &str) -> Result<(), ValidationError> {
         validate_identifier(name, "collection name")
+    }
+
+    /// Apply a targeted mutation to this schema, returning the updated schema.
+    ///
+    /// Supports four operations:
+    /// - `AddField`: add a new field (must not already exist)
+    /// - `RemoveField`: remove an existing field
+    /// - `AddEnumValue`: add a value to an existing enum field
+    /// - `RemoveEnumValue`: remove a value from an existing enum field
+    pub fn apply_alteration(&self, alt: &Alteration) -> Result<CollectionSchema, ValidationError> {
+        let mut schema = self.clone();
+        match alt.operation {
+            AlterOperation::AddField => {
+                if schema.fields.contains_key(&alt.field) {
+                    return Err(ValidationError::InvalidName {
+                        name: alt.field.clone(),
+                        reason: "field already exists".to_string(),
+                    });
+                }
+                validate_field_name(&alt.field)?;
+                let field_type = alt.field_type.clone().ok_or_else(|| {
+                    ValidationError::InvalidName {
+                        name: alt.field.clone(),
+                        reason: "field_type is required for add_field".to_string(),
+                    }
+                })?;
+                if matches!(field_type, FieldType::Enum { ref values } if values.is_empty()) {
+                    return Err(ValidationError::InvalidName {
+                        name: alt.field.clone(),
+                        reason: "enum fields require at least one value".to_string(),
+                    });
+                }
+                schema.fields.insert(
+                    alt.field.clone(),
+                    FieldDef {
+                        field_type,
+                        required: alt.required.unwrap_or(false),
+                        default: alt.default.clone(),
+                    },
+                );
+            }
+            AlterOperation::RemoveField => {
+                if !schema.fields.contains_key(&alt.field) {
+                    return Err(ValidationError::UnknownField {
+                        field: alt.field.clone(),
+                    });
+                }
+                schema.fields.remove(&alt.field);
+            }
+            AlterOperation::AddEnumValue => {
+                let def = schema.fields.get_mut(&alt.field).ok_or_else(|| {
+                    ValidationError::UnknownField {
+                        field: alt.field.clone(),
+                    }
+                })?;
+                let values = match &mut def.field_type {
+                    FieldType::Enum { values } => values,
+                    _ => {
+                        return Err(ValidationError::TypeMismatch {
+                            field: alt.field.clone(),
+                            expected: "enum".to_string(),
+                            got: "non-enum field".to_string(),
+                        });
+                    }
+                };
+                let new_value = alt.value.as_ref().ok_or_else(|| {
+                    ValidationError::InvalidName {
+                        name: alt.field.clone(),
+                        reason: "value is required for add_enum_value".to_string(),
+                    }
+                })?;
+                if values.contains(new_value) {
+                    return Err(ValidationError::InvalidEnumValue {
+                        field: alt.field.clone(),
+                        value: new_value.clone(),
+                        allowed: values.clone(),
+                    });
+                }
+                values.push(new_value.clone());
+            }
+            AlterOperation::RemoveEnumValue => {
+                let def = schema.fields.get_mut(&alt.field).ok_or_else(|| {
+                    ValidationError::UnknownField {
+                        field: alt.field.clone(),
+                    }
+                })?;
+                let values = match &mut def.field_type {
+                    FieldType::Enum { values } => values,
+                    _ => {
+                        return Err(ValidationError::TypeMismatch {
+                            field: alt.field.clone(),
+                            expected: "enum".to_string(),
+                            got: "non-enum field".to_string(),
+                        });
+                    }
+                };
+                let rm_value = alt.value.as_ref().ok_or_else(|| {
+                    ValidationError::InvalidName {
+                        name: alt.field.clone(),
+                        reason: "value is required for remove_enum_value".to_string(),
+                    }
+                })?;
+                let pos = values.iter().position(|v| v == rm_value).ok_or_else(|| {
+                    ValidationError::InvalidEnumValue {
+                        field: alt.field.clone(),
+                        value: rm_value.clone(),
+                        allowed: values.clone(),
+                    }
+                })?;
+                values.remove(pos);
+            }
+        }
+        Ok(schema)
     }
 
     /// Validate a full record against this schema, applying defaults for

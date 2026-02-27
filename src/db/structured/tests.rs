@@ -1,7 +1,8 @@
 use std::collections::BTreeMap;
 
 use crate::db::structured::{
-    CollectionSchema, FieldDef, FieldType, ValidationError, is_system_field, validate_field_name,
+    AlterOperation, Alteration, CollectionSchema, FieldDef, FieldType, ValidationError,
+    is_system_field, validate_field_name,
 };
 
 // ==================== Fixture Schemas ====================
@@ -500,4 +501,201 @@ fn user_defined_underscore_field_rejected() {
     // validate_field_name rejects _ prefix for user-defined fields.
     assert!(validate_field_name("_source").is_err());
     assert!(validate_field_name("_timestamp").is_err());
+}
+
+// ==================== Schema Alteration ====================
+
+#[test]
+fn alter_add_field() {
+    let schema = grocery_schema();
+    let alt = Alteration {
+        operation: AlterOperation::AddField,
+        field: "priority".to_string(),
+        field_type: Some(FieldType::Enum {
+            values: vec!["low".to_string(), "medium".to_string(), "high".to_string()],
+        }),
+        required: None,
+        default: Some(serde_json::json!("medium")),
+        value: None,
+    };
+    let result = schema.apply_alteration(&alt).unwrap();
+    assert!(result.fields.contains_key("priority"));
+    let def = &result.fields["priority"];
+    assert!(!def.required);
+    assert_eq!(def.default, Some(serde_json::json!("medium")));
+    match &def.field_type {
+        FieldType::Enum { values } => assert_eq!(values.len(), 3),
+        other => panic!("expected Enum, got {other:?}"),
+    }
+}
+
+#[test]
+fn alter_add_field_already_exists() {
+    let schema = grocery_schema();
+    let alt = Alteration {
+        operation: AlterOperation::AddField,
+        field: "name".to_string(),
+        field_type: Some(FieldType::Text),
+        required: None,
+        default: None,
+        value: None,
+    };
+    let err = schema.apply_alteration(&alt).unwrap_err();
+    match err {
+        ValidationError::InvalidName { name, .. } => assert_eq!(name, "name"),
+        other => panic!("expected InvalidName, got {other}"),
+    }
+}
+
+#[test]
+fn alter_add_field_missing_type() {
+    let schema = grocery_schema();
+    let alt = Alteration {
+        operation: AlterOperation::AddField,
+        field: "priority".to_string(),
+        field_type: None,
+        required: None,
+        default: None,
+        value: None,
+    };
+    assert!(schema.apply_alteration(&alt).is_err());
+}
+
+#[test]
+fn alter_remove_field() {
+    let schema = grocery_schema();
+    assert!(schema.fields.contains_key("notes"));
+    let alt = Alteration {
+        operation: AlterOperation::RemoveField,
+        field: "notes".to_string(),
+        field_type: None,
+        required: None,
+        default: None,
+        value: None,
+    };
+    let result = schema.apply_alteration(&alt).unwrap();
+    assert!(!result.fields.contains_key("notes"));
+}
+
+#[test]
+fn alter_remove_field_not_found() {
+    let schema = grocery_schema();
+    let alt = Alteration {
+        operation: AlterOperation::RemoveField,
+        field: "nonexistent".to_string(),
+        field_type: None,
+        required: None,
+        default: None,
+        value: None,
+    };
+    let err = schema.apply_alteration(&alt).unwrap_err();
+    match err {
+        ValidationError::UnknownField { field } => assert_eq!(field, "nonexistent"),
+        other => panic!("expected UnknownField, got {other}"),
+    }
+}
+
+#[test]
+fn alter_add_enum_value() {
+    let schema = grocery_schema();
+    let alt = Alteration {
+        operation: AlterOperation::AddEnumValue,
+        field: "category".to_string(),
+        field_type: None,
+        required: None,
+        default: None,
+        value: Some("sweets".to_string()),
+    };
+    let result = schema.apply_alteration(&alt).unwrap();
+    match &result.fields["category"].field_type {
+        FieldType::Enum { values } => {
+            assert!(values.contains(&"sweets".to_string()));
+            assert_eq!(values.len(), 7); // 6 original + 1
+        }
+        other => panic!("expected Enum, got {other:?}"),
+    }
+}
+
+#[test]
+fn alter_add_enum_value_already_exists() {
+    let schema = grocery_schema();
+    let alt = Alteration {
+        operation: AlterOperation::AddEnumValue,
+        field: "category".to_string(),
+        field_type: None,
+        required: None,
+        default: None,
+        value: Some("dairy".to_string()),
+    };
+    let err = schema.apply_alteration(&alt).unwrap_err();
+    match err {
+        ValidationError::InvalidEnumValue { field, value, .. } => {
+            assert_eq!(field, "category");
+            assert_eq!(value, "dairy");
+        }
+        other => panic!("expected InvalidEnumValue, got {other}"),
+    }
+}
+
+#[test]
+fn alter_add_enum_value_non_enum_field() {
+    let schema = grocery_schema();
+    let alt = Alteration {
+        operation: AlterOperation::AddEnumValue,
+        field: "name".to_string(),
+        field_type: None,
+        required: None,
+        default: None,
+        value: Some("test".to_string()),
+    };
+    let err = schema.apply_alteration(&alt).unwrap_err();
+    match err {
+        ValidationError::TypeMismatch { field, expected, .. } => {
+            assert_eq!(field, "name");
+            assert_eq!(expected, "enum");
+        }
+        other => panic!("expected TypeMismatch, got {other}"),
+    }
+}
+
+#[test]
+fn alter_remove_enum_value() {
+    let schema = grocery_schema();
+    let alt = Alteration {
+        operation: AlterOperation::RemoveEnumValue,
+        field: "category".to_string(),
+        field_type: None,
+        required: None,
+        default: None,
+        value: Some("other".to_string()),
+    };
+    let result = schema.apply_alteration(&alt).unwrap();
+    match &result.fields["category"].field_type {
+        FieldType::Enum { values } => {
+            assert!(!values.contains(&"other".to_string()));
+            assert_eq!(values.len(), 5); // 6 original - 1
+        }
+        other => panic!("expected Enum, got {other:?}"),
+    }
+}
+
+#[test]
+fn alter_remove_enum_value_not_found() {
+    let schema = grocery_schema();
+    let alt = Alteration {
+        operation: AlterOperation::RemoveEnumValue,
+        field: "category".to_string(),
+        field_type: None,
+        required: None,
+        default: None,
+        value: Some("nonexistent".to_string()),
+    };
+    let err = schema.apply_alteration(&alt).unwrap_err();
+    match err {
+        ValidationError::InvalidEnumValue { field, value, .. } => {
+            assert_eq!(field, "category");
+            assert_eq!(value, "nonexistent");
+        }
+        other => panic!("expected InvalidEnumValue, got {other}"),
+    }
 }
