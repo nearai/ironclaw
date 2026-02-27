@@ -698,6 +698,14 @@ impl Agent {
             Submission::Heartbeat => self.process_heartbeat().await,
             Submission::Summarize => self.process_summarize(session, thread_id).await,
             Submission::Suggest => self.process_suggest(session, thread_id).await,
+            Submission::JobStatus { job_id } => {
+                self.process_job_status(&message.user_id, job_id.as_deref())
+                    .await
+            }
+            Submission::JobList => self.process_job_list(&message.user_id).await,
+            Submission::JobCancel { job_id } => {
+                self.process_job_cancel(&message.user_id, &job_id).await
+            }
             Submission::Quit => return Ok(None),
             Submission::SwitchThread { thread_id: target } => {
                 self.process_switch_thread(message, target).await

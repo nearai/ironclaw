@@ -220,6 +220,38 @@ impl Agent {
         }
     }
 
+    /// Show job status inline — either all jobs (no id) or a specific job.
+    pub(super) async fn process_job_status(
+        &self,
+        user_id: &str,
+        job_id: Option<&str>,
+    ) -> Result<SubmissionResult, Error> {
+        match self
+            .handle_check_status(user_id, job_id.map(|s| s.to_string()))
+            .await
+        {
+            Ok(text) => Ok(SubmissionResult::response(text)),
+            Err(e) => Ok(SubmissionResult::error(format!("Job status error: {}", e))),
+        }
+    }
+
+    /// List all jobs (convenience alias for process_job_status with no id).
+    pub(super) async fn process_job_list(&self, user_id: &str) -> Result<SubmissionResult, Error> {
+        self.process_job_status(user_id, None).await
+    }
+
+    /// Cancel a job by ID.
+    pub(super) async fn process_job_cancel(
+        &self,
+        user_id: &str,
+        job_id: &str,
+    ) -> Result<SubmissionResult, Error> {
+        match self.handle_cancel_job(user_id, job_id).await {
+            Ok(text) => Ok(SubmissionResult::response(text)),
+            Err(e) => Ok(SubmissionResult::error(format!("Cancel error: {}", e))),
+        }
+    }
+
     /// Trigger a manual heartbeat check.
     pub(super) async fn process_heartbeat(&self) -> Result<SubmissionResult, Error> {
         let Some(workspace) = self.workspace() else {

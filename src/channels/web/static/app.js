@@ -16,6 +16,30 @@ let pairingPollInterval = null;
 const JOB_EVENTS_CAP = 500;
 const MEMORY_SEARCH_QUERY_MAX_LENGTH = 100;
 
+// --- Slash Commands ---
+
+const SLASH_COMMANDS = [
+  { cmd: '/status',     desc: 'Show all jobs, or /status <id> for one job' },
+  { cmd: '/list',       desc: 'List all jobs' },
+  { cmd: '/cancel',     desc: '/cancel <job-id> — cancel a running job' },
+  { cmd: '/undo',       desc: 'Revert the last turn' },
+  { cmd: '/redo',       desc: 'Re-apply an undone turn' },
+  { cmd: '/compact',    desc: 'Compress the context window' },
+  { cmd: '/clear',      desc: 'Clear thread and start fresh' },
+  { cmd: '/interrupt',  desc: 'Stop the current turn' },
+  { cmd: '/heartbeat',  desc: 'Trigger manual heartbeat check' },
+  { cmd: '/summarize',  desc: 'Summarize the current thread' },
+  { cmd: '/suggest',    desc: 'Suggest next steps' },
+  { cmd: '/help',       desc: 'Show help' },
+  { cmd: '/version',    desc: 'Show version info' },
+  { cmd: '/tools',      desc: 'List available tools' },
+  { cmd: '/skills',     desc: 'List installed skills' },
+  { cmd: '/model',      desc: 'Show or switch the LLM model' },
+  { cmd: '/thread new', desc: 'Create a new conversation thread' },
+];
+
+let _slashSelected = -1;
+
 // --- Tool Activity State ---
 let _activeGroup = null;
 let _activeToolCards = {};
@@ -263,10 +287,8 @@ function isCurrentThread(threadId) {
 
 function sendMessage() {
   const input = document.getElementById('chat-input');
-  const sendBtn = document.getElementById('send-btn');
   if (!currentThreadId) {
     console.warn('sendMessage: no thread selected, ignoring');
-    setStatus('Waiting for thread to load...');
     return;
   }
   const content = input.value.trim();
@@ -275,27 +297,71 @@ function sendMessage() {
   addMessage('user', content);
   input.value = '';
   autoResizeTextarea(input);
-  sendBtn.disabled = true;
-  input.disabled = true;
+  input.focus();
 
   apiFetch('/api/chat/send', {
     method: 'POST',
     body: { content, thread_id: currentThreadId || undefined },
   }).catch((err) => {
     addMessage('system', 'Failed to send: ' + err.message);
-    setStatus('');
-    enableChatInput();
   });
 }
 
 function enableChatInput() {
-  // Don't re-enable until a thread is selected (prevents orphan messages)
-  if (!currentThreadId) return;
+  // no-op: input and send button are always enabled
+}
+
+// --- Slash Autocomplete ---
+
+function showSlashAutocomplete(matches) {
+  const el = document.getElementById('slash-autocomplete');
+  if (!el || matches.length === 0) { hideSlashAutocomplete(); return; }
+  _slashSelected = -1;
+  el.innerHTML = '';
+  matches.forEach((item, i) => {
+    const row = document.createElement('div');
+    row.className = 'slash-ac-item';
+    row.dataset.index = i;
+    row.innerHTML = '<span class="slash-ac-cmd">' + escapeHtml(item.cmd) + '</span>'
+      + '<span class="slash-ac-desc">' + escapeHtml(item.desc) + '</span>';
+    row.addEventListener('mousedown', (e) => {
+      e.preventDefault(); // prevent blur
+      selectSlashItem(item.cmd);
+    });
+    el.appendChild(row);
+  });
+  el.style.display = 'block';
+}
+
+function hideSlashAutocomplete() {
+  const el = document.getElementById('slash-autocomplete');
+  if (el) el.style.display = 'none';
+  _slashSelected = -1;
+}
+
+function selectSlashItem(cmd) {
   const input = document.getElementById('chat-input');
-  const sendBtn = document.getElementById('send-btn');
-  sendBtn.disabled = false;
-  input.disabled = false;
+  input.value = cmd + ' ';
   input.focus();
+  hideSlashAutocomplete();
+  autoResizeTextarea(input);
+}
+
+function updateSlashHighlight() {
+  const items = document.querySelectorAll('#slash-autocomplete .slash-ac-item');
+  items.forEach((el, i) => el.classList.toggle('selected', i === _slashSelected));
+}
+
+function filterSlashCommands(value) {
+  if (!value.startsWith('/')) { hideSlashAutocomplete(); return; }
+  // Only show autocomplete when the input is just a slash command prefix (no spaces except /thread new)
+  const lower = value.toLowerCase();
+  const matches = SLASH_COMMANDS.filter((c) => c.cmd.startsWith(lower));
+  if (matches.length === 0 || (matches.length === 1 && matches[0].cmd === lower.trimEnd())) {
+    hideSlashAutocomplete();
+  } else {
+    showSlashAutocomplete(matches);
+  }
 }
 
 function sendApprovalAction(requestId, action) {
@@ -394,15 +460,6 @@ function appendToLastAssistant(chunk) {
   } else {
     addMessage('assistant', chunk);
   }
-}
-
-function setStatus(text) {
-  const el = document.getElementById('chat-status');
-  if (!text) {
-    el.innerHTML = '';
-    return;
-  }
-  el.innerHTML = escapeHtml(text);
 }
 
 // --- Inline Tool Activity Cards ---
@@ -1097,7 +1154,6 @@ function createNewThread() {
   apiFetch('/api/chat/thread/new', { method: 'POST' }).then((data) => {
     currentThreadId = data.id || null;
     document.getElementById('chat-messages').innerHTML = '';
-    setStatus('');
     loadThreads();
   }).catch((err) => {
     showToast('Failed to create thread: ' + err.message, 'error');
@@ -1114,16 +1170,51 @@ function toggleThreadSidebar() {
 // Chat input auto-resize and keyboard handling
 const chatInput = document.getElementById('chat-input');
 chatInput.addEventListener('keydown', (e) => {
+  const acEl = document.getElementById('slash-autocomplete');
+  const acVisible = acEl && acEl.style.display !== 'none';
+
+  if (acVisible) {
+    const items = acEl.querySelectorAll('.slash-ac-item');
+    if (e.key === 'ArrowDown') {
+      e.preventDefault();
+      _slashSelected = Math.min(_slashSelected + 1, items.length - 1);
+      updateSlashHighlight();
+      return;
+    }
+    if (e.key === 'ArrowUp') {
+      e.preventDefault();
+      _slashSelected = Math.max(_slashSelected - 1, -1);
+      updateSlashHighlight();
+      return;
+    }
+    if (e.key === 'Tab' || (e.key === 'Enter' && _slashSelected >= 0)) {
+      e.preventDefault();
+      const matched = SLASH_COMMANDS.filter((c) => c.cmd.startsWith(chatInput.value.toLowerCase()));
+      const pick = _slashSelected >= 0 ? matched[_slashSelected] : matched[0];
+      if (pick) selectSlashItem(pick.cmd);
+      return;
+    }
+    if (e.key === 'Escape') {
+      e.preventDefault();
+      hideSlashAutocomplete();
+      return;
+    }
+  }
+
   if (e.key === 'Enter' && !e.shiftKey) {
     e.preventDefault();
+    hideSlashAutocomplete();
     sendMessage();
   }
 });
-chatInput.addEventListener('input', () => autoResizeTextarea(chatInput));
-
-// Disable send until a thread is selected (loadThreads will enable it)
-chatInput.disabled = true;
-document.getElementById('send-btn').disabled = true;
+chatInput.addEventListener('input', () => {
+  autoResizeTextarea(chatInput);
+  filterSlashCommands(chatInput.value);
+});
+chatInput.addEventListener('blur', () => {
+  // Small delay so mousedown on autocomplete item fires first
+  setTimeout(hideSlashAutocomplete, 150);
+});
 
 // Infinite scroll: load older messages when scrolled near the top
 document.getElementById('chat-messages').addEventListener('scroll', function () {
@@ -3612,8 +3703,13 @@ document.addEventListener('keydown', (e) => {
     return;
   }
 
-  // Escape: close job detail or blur input
+  // Escape: close autocomplete, job detail, or blur input
   if (e.key === 'Escape') {
+    const acEl = document.getElementById('slash-autocomplete');
+    if (acEl && acEl.style.display !== 'none') {
+      hideSlashAutocomplete();
+      return;
+    }
     if (currentJobId) {
       closeJobDetail();
     } else if (inInput) {
