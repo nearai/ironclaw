@@ -458,31 +458,6 @@ body {
 .message th { background: var(--bg-tertiary); }
 
 /* Status bar */
-.chat-status {
-  padding: 6px 16px;
-  font-size: 12px;
-  color: var(--text-secondary);
-  border-top: 1px solid var(--border);
-  background: var(--bg-secondary);
-  min-height: 28px;
-  display: flex;
-  align-items: center;
-  gap: 8px;
-}
-
-.chat-status .spinner {
-  width: 12px;
-  height: 12px;
-  border: 2px solid var(--border);
-  border-top-color: var(--accent);
-  border-radius: 50%;
-  animation: spin 0.6s linear infinite;
-}
-
-@keyframes spin {
-  to { transform: rotate(360deg); }
-}
-
 
 .scroll-load-spinner {
   display: flex;
@@ -3450,4 +3425,45 @@ mark {
   .ext-install-form input {
     width: 100%;
   }
+}
+
+/* Slash command autocomplete dropdown */
+.slash-autocomplete {
+  position: relative;
+  background: var(--bg-secondary);
+  border-top: 1px solid var(--border);
+  border-bottom: none;
+  max-height: 220px;
+  overflow-y: auto;
+  z-index: 50;
+}
+
+.slash-ac-item {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  padding: 7px 16px;
+  cursor: pointer;
+  transition: background 0.1s;
+}
+
+.slash-ac-item:hover,
+.slash-ac-item.selected {
+  background: var(--bg-tertiary);
+}
+
+.slash-ac-cmd {
+  font-family: var(--font-mono);
+  font-size: 13px;
+  color: var(--accent);
+  white-space: nowrap;
+  min-width: 130px;
+}
+
+.slash-ac-desc {
+  font-size: 12px;
+  color: var(--text-secondary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }

@@ -373,6 +373,10 @@ impl RoutineStore for PgBackend {
         self.store.list_routines(user_id).await
     }
 
+    async fn list_all_routines(&self) -> Result<Vec<Routine>, DatabaseError> {
+        self.store.list_all_routines().await
+    }
+
     async fn list_event_routines(&self) -> Result<Vec<Routine>, DatabaseError> {
         self.store.list_event_routines().await
     }
