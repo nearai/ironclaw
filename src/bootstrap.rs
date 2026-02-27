@@ -682,6 +682,11 @@ INJECTED="pwned"#;
 
     #[test]
     fn test_libsql_autodetect_sets_backend_when_db_exists() {
+        let _guard = ENV_MUTEX.lock().unwrap();
+        let old_val = std::env::var("DATABASE_BACKEND").ok();
+        // SAFETY: ENV_MUTEX ensures single-threaded access to env vars in tests
+        unsafe { std::env::remove_var("DATABASE_BACKEND") };
+
         let dir = tempdir().unwrap();
         let db_path = dir.path().join("ironclaw.db");
 
@@ -702,6 +707,15 @@ INJECTED="pwned"#;
         assert!(
             detected,
             "should detect libsql when db file is present and backend unset"
+        );
+
+        // Restore.
+        if let Some(val) = old_val {
+            // SAFETY: ENV_MUTEX ensures single-threaded access to env vars in tests
+            unsafe { std::env::set_var("DATABASE_BACKEND", val) };
+        }
+    }
+
     // === QA Plan P1 - 1.2: Bootstrap .env round-trip tests ===
 
     #[test]
@@ -739,8 +753,9 @@ INJECTED="pwned"#;
 
     #[test]
     fn test_libsql_autodetect_does_not_override_explicit_backend() {
-        // If DATABASE_BACKEND is already set, the guard condition is false.
-        // SAFETY: single-threaded test; no other threads reading env.
+        let _guard = ENV_MUTEX.lock().unwrap();
+        let old_val = std::env::var("DATABASE_BACKEND").ok();
+        // SAFETY: ENV_MUTEX ensures single-threaded access to env vars in tests
         unsafe { std::env::set_var("DATABASE_BACKEND", "postgres") };
 
         let dir = tempdir().unwrap();
@@ -754,8 +769,17 @@ INJECTED="pwned"#;
             "must not override an explicitly set DATABASE_BACKEND"
         );
 
-        // Cleanup.
-        unsafe { std::env::remove_var("DATABASE_BACKEND") };
+        // Restore.
+        if let Some(val) = old_val {
+            // SAFETY: ENV_MUTEX ensures single-threaded access to env vars in tests
+            unsafe { std::env::set_var("DATABASE_BACKEND", val) };
+        } else {
+            // SAFETY: ENV_MUTEX ensures single-threaded access to env vars in tests
+            unsafe { std::env::remove_var("DATABASE_BACKEND") };
+        }
+    }
+
+    #[test]
     fn bootstrap_env_special_chars_in_url() {
         let dir = tempdir().unwrap();
         let env_path = dir.path().join(".env");
