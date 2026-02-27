@@ -11,6 +11,7 @@ use std::sync::Arc;
 
 use tokio::fs;
 
+use crate::bootstrap::ironclaw_base_dir;
 use crate::channels::wasm::capabilities::ChannelCapabilities;
 use crate::channels::wasm::error::WasmChannelError;
 use crate::channels::wasm::runtime::WasmChannelRuntime;
@@ -248,6 +249,13 @@ impl LoadedChannel {
             .and_then(|f| f.webhook_secret_header())
     }
 
+    /// Get the signature verification key secret name from capabilities.
+    pub fn signature_key_secret_name(&self) -> Option<String> {
+        self.capabilities_file
+            .as_ref()
+            .and_then(|f| f.signature_key_secret_name().map(|s| s.to_string()))
+    }
+
     /// Get the webhook secret name from capabilities.
     pub fn webhook_secret_name(&self) -> String {
         self.capabilities_file
@@ -349,10 +357,7 @@ pub struct DiscoveredChannel {
 /// Returns ~/.ironclaw/channels/
 #[allow(dead_code)]
 pub fn default_channels_dir() -> PathBuf {
-    dirs::home_dir()
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join(".ironclaw")
-        .join("channels")
+    ironclaw_base_dir().join("channels")
 }
 
 #[cfg(test)]
@@ -414,6 +419,18 @@ mod tests {
         let channels = discover_channels(dir.path()).await.unwrap();
         assert_eq!(channels.len(), 1);
         assert!(channels.contains_key("channel"));
+    }
+
+    #[test]
+    fn test_loaded_channel_signature_key_none_without_caps() {
+        // We can't easily construct a WasmChannel without a runtime, so test
+        // the delegation logic directly: when capabilities_file is None, the
+        // chain returns None (same logic as LoadedChannel::signature_key_secret_name).
+        let cap_file: Option<crate::channels::wasm::schema::ChannelCapabilitiesFile> = None;
+        let result = cap_file
+            .as_ref()
+            .and_then(|f| f.signature_key_secret_name().map(|s| s.to_string()));
+        assert_eq!(result, None);
     }
 
     #[tokio::test]

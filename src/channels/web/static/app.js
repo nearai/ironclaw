@@ -135,7 +135,6 @@ function connectSSE() {
     if (!isCurrentThread(data.thread_id)) return;
     finalizeActivityGroup();
     addMessage('assistant', data.content);
-    setStatus('');
     enableChatInput();
     // Refresh thread list so new titles appear after first message
     loadThreads();
@@ -175,10 +174,10 @@ function connectSSE() {
   eventSource.addEventListener('status', (e) => {
     const data = JSON.parse(e.data);
     if (!isCurrentThread(data.thread_id)) return;
-    setStatus(data.message);
     // "Done" and "Awaiting approval" are terminal signals from the agent:
     // the agentic loop finished, so re-enable input as a safety net in case
     // the response SSE event is empty or lost.
+    // Status text is not displayed — inline activity cards handle visual feedback.
     if (data.message === 'Done' || data.message === 'Awaiting approval') {
       finalizeActivityGroup();
       enableChatInput();
@@ -320,6 +319,8 @@ function sendApprovalAction(requestId, action) {
     const labelText = action === 'approve' ? 'Approved' : action === 'always' ? 'Always approved' : 'Denied';
     label.textContent = labelText;
     actions.appendChild(label);
+    // Remove the card after showing the confirmation briefly
+    setTimeout(() => { card.remove(); }, 1500);
   }
 }
 
@@ -907,9 +908,21 @@ function loadHistory(before) {
       container.innerHTML = '';
       for (const turn of data.turns) {
         addMessage('user', turn.user_input);
+        if (turn.tool_calls && turn.tool_calls.length > 0) {
+          addToolCallsSummary(turn.tool_calls);
+        }
         if (turn.response) {
           addMessage('assistant', turn.response);
         }
+      }
+      // Show processing indicator if the last turn is still in-progress
+      var lastTurn = data.turns.length > 0 ? data.turns[data.turns.length - 1] : null;
+      if (lastTurn && !lastTurn.response && lastTurn.state === 'Processing') {
+        showActivityThinking('Processing...');
+      }
+      // Re-render pending approval card if the thread is awaiting approval
+      if (data.pending_approval) {
+        showApproval(data.pending_approval);
       }
     } else {
       // Pagination: prepend older messages
@@ -918,6 +931,9 @@ function loadHistory(before) {
       for (const turn of data.turns) {
         const userDiv = createMessageElement('user', turn.user_input);
         fragment.appendChild(userDiv);
+        if (turn.tool_calls && turn.tool_calls.length > 0) {
+          fragment.appendChild(createToolCallsSummaryElement(turn.tool_calls));
+        }
         if (turn.response) {
           const assistantDiv = createMessageElement('assistant', turn.response);
           fragment.appendChild(assistantDiv);
@@ -948,6 +964,61 @@ function createMessageElement(role, content) {
     div.setAttribute('data-raw', content);
     div.innerHTML = renderMarkdown(content);
   }
+  return div;
+}
+
+function addToolCallsSummary(toolCalls) {
+  const container = document.getElementById('chat-messages');
+  container.appendChild(createToolCallsSummaryElement(toolCalls));
+  container.scrollTop = container.scrollHeight;
+}
+
+function createToolCallsSummaryElement(toolCalls) {
+  const div = document.createElement('div');
+  div.className = 'tool-calls-summary';
+
+  const header = document.createElement('div');
+  header.className = 'tool-calls-header';
+  header.textContent = toolCalls.length + ' tool' + (toolCalls.length !== 1 ? 's' : '') + ' used';
+  div.appendChild(header);
+
+  const list = document.createElement('div');
+  list.className = 'tool-calls-list';
+
+  for (const tc of toolCalls) {
+    const item = document.createElement('div');
+    item.className = 'tool-call-item' + (tc.has_error ? ' tool-error' : '');
+
+    const icon = tc.has_error ? '\u2717' : '\u2713';
+    const nameSpan = document.createElement('span');
+    nameSpan.className = 'tool-call-name';
+    nameSpan.textContent = icon + ' ' + tc.name;
+    item.appendChild(nameSpan);
+
+    if (tc.result_preview) {
+      const preview = document.createElement('div');
+      preview.className = 'tool-call-preview';
+      preview.textContent = tc.result_preview;
+      item.appendChild(preview);
+    }
+    if (tc.error) {
+      const errDiv = document.createElement('div');
+      errDiv.className = 'tool-call-error-text';
+      errDiv.textContent = tc.error;
+      item.appendChild(errDiv);
+    }
+
+    list.appendChild(item);
+  }
+
+  div.appendChild(list);
+
+  header.style.cursor = 'pointer';
+  header.addEventListener('click', () => {
+    list.classList.toggle('expanded');
+    header.classList.toggle('expanded');
+  });
+
   return div;
 }
 
