@@ -68,6 +68,7 @@ pub struct AgentDeps {
     pub workspace: Option<Arc<Workspace>>,
     pub extension_manager: Option<Arc<ExtensionManager>>,
     pub skill_registry: Option<Arc<std::sync::RwLock<SkillRegistry>>>,
+    pub skill_catalog: Option<Arc<crate::skills::catalog::SkillCatalog>>,
     pub skills_config: SkillsConfig,
     pub hooks: Arc<HookRegistry>,
     /// Cost enforcement guardrails (daily budget, hourly rate limits).
@@ -98,7 +99,7 @@ impl Agent {
     pub fn new(
         config: AgentConfig,
         deps: AgentDeps,
-        channels: ChannelManager,
+        channels: Arc<ChannelManager>,
         heartbeat_config: Option<HeartbeatConfig>,
         hygiene_config: Option<crate::config::HygieneConfig>,
         routine_config: Option<RoutineConfig>,
@@ -123,7 +124,7 @@ impl Agent {
         Self {
             config,
             deps,
-            channels: Arc::new(channels),
+            channels,
             context_manager,
             scheduler,
             router: Router::new(),
@@ -172,6 +173,10 @@ impl Agent {
 
     pub(super) fn skill_registry(&self) -> Option<&Arc<std::sync::RwLock<SkillRegistry>>> {
         self.deps.skill_registry.as_ref()
+    }
+
+    pub(super) fn skill_catalog(&self) -> Option<&Arc<crate::skills::catalog::SkillCatalog>> {
+        self.deps.skill_catalog.as_ref()
     }
 
     /// Select active skills for a message using deterministic prefiltering.
@@ -397,6 +402,7 @@ impl Agent {
                         self.llm().clone(),
                         Arc::clone(workspace),
                         notify_tx,
+                        Some(self.scheduler.clone()),
                     ));
 
                     // Register routine tools
@@ -499,21 +505,41 @@ impl Agent {
                         Ok(crate::hooks::HookOutcome::Continue {
                             modified: Some(new_content),
                         }) => {
-                            let _ = self
+                            if let Err(e) = self
                                 .channels
                                 .respond(&message, OutgoingResponse::text(new_content))
-                                .await;
+                                .await
+                            {
+                                tracing::error!(
+                                    channel = %message.channel,
+                                    error = %e,
+                                    "Failed to send response to channel"
+                                );
+                            }
                         }
                         _ => {
-                            let _ = self
+                            if let Err(e) = self
                                 .channels
                                 .respond(&message, OutgoingResponse::text(response))
-                                .await;
+                                .await
+                            {
+                                tracing::error!(
+                                    channel = %message.channel,
+                                    error = %e,
+                                    "Failed to send response to channel"
+                                );
+                            }
                         }
                     }
                 }
-                Ok(Some(_)) => {
+                Ok(Some(empty)) => {
                     // Empty response, nothing to send (e.g. approval handled via send_status)
+                    tracing::debug!(
+                        channel = %message.channel,
+                        user = %message.user_id,
+                        empty_len = empty.len(),
+                        "Suppressed empty response (not sent to channel)"
+                    );
                 }
                 Ok(None) => {
                     // Shutdown signal received (/quit, /exit, /shutdown)
@@ -522,10 +548,17 @@ impl Agent {
                 }
                 Err(e) => {
                     tracing::error!("Error handling message: {}", e);
-                    let _ = self
+                    if let Err(send_err) = self
                         .channels
                         .respond(&message, OutgoingResponse::text(format!("Error: {}", e)))
-                        .await;
+                        .await
+                    {
+                        tracing::error!(
+                            channel = %message.channel,
+                            error = %send_err,
+                            "Failed to send error response to channel"
+                        );
+                    }
                 }
             }
 
@@ -555,6 +588,19 @@ impl Agent {
     }
 
     async fn handle_message(&self, message: &IncomingMessage) -> Result<Option<String>, Error> {
+        // Set message tool context for this turn (current channel and target)
+        // For Signal, use signal_target from metadata (group:ID or phone number),
+        // otherwise fall back to user_id
+        let target = message
+            .metadata
+            .get("signal_target")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| message.user_id.clone());
+        self.tools()
+            .set_message_tool_context(Some(message.channel.clone()), Some(target))
+            .await;
+
         // Parse submission type first
         let mut submission = SubmissionParser::parse(&message.content);
 
@@ -682,7 +728,15 @@ impl Agent {
 
         // Convert SubmissionResult to response string
         match result? {
-            SubmissionResult::Response { content } => Ok(Some(content)),
+            SubmissionResult::Response { content } => {
+                // Suppress silent replies (e.g. from group chat "nothing to say" responses)
+                if crate::llm::is_silent_reply(&content) {
+                    tracing::debug!("Suppressing silent reply token");
+                    Ok(None)
+                } else {
+                    Ok(Some(content))
+                }
+            }
             SubmissionResult::Ok { message } => Ok(message),
             SubmissionResult::Error { message } => Ok(Some(format!("Error: {}", message))),
             SubmissionResult::Interrupted => Ok(Some("Interrupted.".into())),

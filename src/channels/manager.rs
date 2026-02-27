@@ -14,7 +14,7 @@ use crate::error::ChannelError;
 /// Includes an injection channel so background tasks (e.g., job monitors) can
 /// push messages into the agent loop without being a full `Channel` impl.
 pub struct ChannelManager {
-    channels: Arc<RwLock<HashMap<String, Box<dyn Channel>>>>,
+    channels: Arc<RwLock<HashMap<String, Arc<dyn Channel>>>>,
     inject_tx: mpsc::Sender<IncomingMessage>,
     /// Taken once in `start_all()` and merged into the stream.
     inject_rx: tokio::sync::Mutex<Option<mpsc::Receiver<IncomingMessage>>>,
@@ -40,16 +40,45 @@ impl ChannelManager {
     }
 
     /// Add a channel to the manager.
-    pub fn add(&mut self, channel: Box<dyn Channel>) {
+    pub async fn add(&self, channel: Box<dyn Channel>) {
         let name = channel.name().to_string();
-        // We need to get the inner HashMap to insert
-        // Since we're in a sync context during setup, we'll use try_write
-        if let Ok(mut channels) = self.channels.try_write() {
-            channels.insert(name.clone(), channel);
-            tracing::debug!("Added channel: {}", name);
-        } else {
-            tracing::error!("Failed to add channel: {} (lock contention)", name);
-        }
+        self.channels
+            .write()
+            .await
+            .insert(name.clone(), Arc::from(channel));
+        tracing::debug!("Added channel: {}", name);
+    }
+
+    /// Hot-add a channel to a running agent.
+    ///
+    /// Starts the channel, registers it in the channels map for `respond()`/`broadcast()`,
+    /// and spawns a task that forwards its stream messages through `inject_tx` into
+    /// the agent loop.
+    pub async fn hot_add(&self, channel: Box<dyn Channel>) -> Result<(), ChannelError> {
+        let name = channel.name().to_string();
+        let stream = channel.start().await?;
+
+        // Register for respond/broadcast/send_status
+        self.channels
+            .write()
+            .await
+            .insert(name.clone(), Arc::from(channel));
+
+        // Forward stream messages through inject_tx
+        let tx = self.inject_tx.clone();
+        tokio::spawn(async move {
+            use futures::StreamExt;
+            let mut stream = stream;
+            while let Some(msg) = stream.next().await {
+                if tx.send(msg).await.is_err() {
+                    tracing::warn!(channel = %name, "Inject channel closed, stopping hot-added channel");
+                    break;
+                }
+            }
+            tracing::info!(channel = %name, "Hot-added channel stream ended");
+        });
+
+        Ok(())
     }
 
     /// Start all channels and return a merged stream of messages.
@@ -193,6 +222,11 @@ impl ChannelManager {
     /// Get list of channel names.
     pub async fn channel_names(&self) -> Vec<String> {
         self.channels.read().await.keys().cloned().collect()
+    }
+
+    /// Get a channel by name.
+    pub async fn get_channel(&self, name: &str) -> Option<Arc<dyn Channel>> {
+        self.channels.read().await.get(name).cloned()
     }
 }
 

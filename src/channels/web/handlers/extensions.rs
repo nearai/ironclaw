@@ -20,20 +20,47 @@ pub async fn extensions_list_handler(
     ))?;
 
     let installed = ext_mgr
-        .list(None)
+        .list(None, false)
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
+    let pairing_store = crate::pairing::PairingStore::new();
     let extensions = installed
         .into_iter()
-        .map(|ext| ExtensionInfo {
-            name: ext.name,
-            kind: ext.kind.to_string(),
-            description: ext.description,
-            url: ext.url,
-            authenticated: ext.authenticated,
-            active: ext.active,
-            tools: ext.tools,
+        .map(|ext| {
+            let activation_status = if ext.kind == crate::extensions::ExtensionKind::WasmChannel {
+                Some(if ext.activation_error.is_some() {
+                    "failed".to_string()
+                } else if !ext.authenticated {
+                    "installed".to_string()
+                } else if ext.active && ext.name == "telegram" {
+                    let has_paired = pairing_store
+                        .read_allow_from(&ext.name)
+                        .map(|list| !list.is_empty())
+                        .unwrap_or(false);
+                    if has_paired {
+                        "active".to_string()
+                    } else {
+                        "pairing".to_string()
+                    }
+                } else {
+                    "configured".to_string()
+                })
+            } else {
+                None
+            };
+            ExtensionInfo {
+                name: ext.name,
+                kind: ext.kind.to_string(),
+                description: ext.description,
+                url: ext.url,
+                authenticated: ext.authenticated,
+                active: ext.active,
+                tools: ext.tools,
+                needs_setup: ext.needs_setup,
+                activation_status,
+                activation_error: ext.activation_error,
+            }
         })
         .collect();
 

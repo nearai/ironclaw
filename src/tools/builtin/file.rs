@@ -11,6 +11,7 @@ use async_trait::async_trait;
 use tokio::fs;
 
 use crate::context::JobContext;
+use crate::tools::builtin::path_utils::validate_path;
 use crate::tools::tool::{
     ApprovalRequirement, Tool, ToolDomain, ToolError, ToolOutput, require_str,
 };
@@ -51,104 +52,6 @@ const MAX_WRITE_SIZE: usize = 5 * 1024 * 1024;
 
 /// Maximum directory listing entries.
 const MAX_DIR_ENTRIES: usize = 500;
-
-/// Normalize a path by resolving `.` and `..` components lexically (no filesystem access).
-///
-/// This is critical for security: `std::fs::canonicalize` only works on paths that exist,
-/// so for new files we must normalize without touching the filesystem.
-fn normalize_lexical(path: &Path) -> PathBuf {
-    let mut components = Vec::new();
-    for component in path.components() {
-        match component {
-            std::path::Component::ParentDir => {
-                // Only pop if there's a normal component to pop (don't escape root/prefix)
-                if components
-                    .last()
-                    .is_some_and(|c| matches!(c, std::path::Component::Normal(_)))
-                {
-                    components.pop();
-                }
-            }
-            std::path::Component::CurDir => {}
-            other => components.push(other),
-        }
-    }
-    components.iter().collect()
-}
-
-/// Validate that a path is safe (no traversal attacks).
-///
-/// For sandboxed paths (base_dir is set), we normalize the joined path lexically
-/// and then verify it lives under the canonical base. This prevents escapes through
-/// non-existent parent directories where `canonicalize()` would fall back to the
-/// raw (un-normalized) path.
-fn validate_path(path_str: &str, base_dir: Option<&Path>) -> Result<PathBuf, ToolError> {
-    let path = PathBuf::from(path_str);
-
-    // Resolve to absolute path
-    let resolved = if path.is_absolute() {
-        path.canonicalize()
-            .unwrap_or_else(|_| normalize_lexical(&path))
-    } else if let Some(base) = base_dir {
-        let joined = base.join(&path);
-        joined
-            .canonicalize()
-            .unwrap_or_else(|_| normalize_lexical(&joined))
-    } else {
-        let joined = std::env::current_dir()
-            .unwrap_or_else(|_| PathBuf::from("."))
-            .join(&path);
-        normalize_lexical(&joined)
-    };
-
-    // If base_dir is set, ensure the resolved path is within it
-    if let Some(base) = base_dir {
-        let base_canonical = base
-            .canonicalize()
-            .unwrap_or_else(|_| normalize_lexical(base));
-
-        // For existing paths, canonicalize to resolve symlinks.
-        // For non-existent paths, the lexical normalization above already removed
-        // all `..` components, so starts_with is reliable.
-        let check_path = if resolved.exists() {
-            resolved.canonicalize().unwrap_or_else(|_| resolved.clone())
-        } else {
-            // Walk up to the nearest existing ancestor directory, canonicalize it,
-            // then re-append the remaining tail. This handles the case where a
-            // symlink sits above the new file.
-            let mut ancestor = resolved.as_path();
-            let mut tail_parts: Vec<&std::ffi::OsStr> = Vec::new();
-            loop {
-                if ancestor.exists() {
-                    let canonical_ancestor = ancestor
-                        .canonicalize()
-                        .unwrap_or_else(|_| ancestor.to_path_buf());
-                    let mut result = canonical_ancestor;
-                    for part in tail_parts.into_iter().rev() {
-                        result = result.join(part);
-                    }
-                    break result;
-                }
-                if let Some(name) = ancestor.file_name() {
-                    tail_parts.push(name);
-                }
-                match ancestor.parent() {
-                    Some(parent) if parent != ancestor => ancestor = parent,
-                    _ => break resolved.clone(),
-                }
-            }
-        };
-
-        if !check_path.starts_with(&base_canonical) {
-            return Err(ToolError::NotAuthorized(format!(
-                "Path escapes sandbox: {}",
-                path_str
-            )));
-        }
-    }
-
-    Ok(resolved)
-}
 
 /// Read file contents tool.
 #[derive(Debug, Default)]
@@ -384,6 +287,10 @@ impl Tool for WriteFileTool {
 
     fn domain(&self) -> ToolDomain {
         ToolDomain::Container
+    }
+
+    fn rate_limit_config(&self) -> Option<crate::tools::tool::ToolRateLimitConfig> {
+        Some(crate::tools::tool::ToolRateLimitConfig::new(20, 200))
     }
 }
 
@@ -710,11 +617,16 @@ impl Tool for ApplyPatchTool {
     fn domain(&self) -> ToolDomain {
         ToolDomain::Container
     }
+
+    fn rate_limit_config(&self) -> Option<crate::tools::tool::ToolRateLimitConfig> {
+        Some(crate::tools::tool::ToolRateLimitConfig::new(20, 200))
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::tools::builtin::path_utils::normalize_lexical;
     use tempfile::TempDir;
 
     #[tokio::test]

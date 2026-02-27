@@ -22,6 +22,7 @@ use crate::skills::SkillRegistry;
 use crate::skills::catalog::SkillCatalog;
 use crate::tools::ToolRegistry;
 use crate::tools::mcp::McpSessionManager;
+use crate::tools::wasm::SharedCredentialRegistry;
 use crate::tools::wasm::WasmToolRuntime;
 use crate::workspace::{EmbeddingProvider, Workspace};
 
@@ -48,6 +49,8 @@ pub struct AppComponents {
     pub skill_catalog: Option<Arc<SkillCatalog>>,
     pub cost_guard: Arc<crate::agent::cost_guard::CostGuard>,
     pub session: Arc<SessionManager>,
+    pub catalog_entries: Vec<crate::extensions::RegistryEntry>,
+    pub dev_loaded_tool_names: Vec<String>,
 }
 
 /// Options that control optional init phases.
@@ -313,54 +316,41 @@ impl AppBuilder {
         ),
         anyhow::Error,
     > {
-        use crate::workspace::{NearAiEmbeddings, OpenAiEmbeddings};
-
         let safety = Arc::new(SafetyLayer::new(&self.config.safety));
         tracing::info!("Safety layer initialized");
 
-        let tools = Arc::new(ToolRegistry::new());
+        // Initialize tool registry with credential injection support
+        let credential_registry = Arc::new(SharedCredentialRegistry::new());
+        let tools = if let Some(ref ss) = self.secrets_store {
+            Arc::new(
+                ToolRegistry::new()
+                    .with_credentials(Arc::clone(&credential_registry), Arc::clone(ss)),
+            )
+        } else {
+            Arc::new(ToolRegistry::new())
+        };
         tools.register_builtin_tools();
 
-        // Create embeddings provider if configured
-        let embeddings: Option<Arc<dyn EmbeddingProvider>> = if self.config.embeddings.enabled {
-            match self.config.embeddings.provider.as_str() {
-                "nearai" => {
-                    tracing::info!(
-                        "Embeddings enabled via NEAR AI (model: {})",
-                        self.config.embeddings.model
-                    );
-                    Some(Arc::new(
-                        NearAiEmbeddings::new(
-                            &self.config.llm.nearai.base_url,
-                            self.session.clone(),
-                        )
-                        .with_model(&self.config.embeddings.model, 1536),
-                    ))
-                }
-                _ => {
-                    if let Some(api_key) = self.config.embeddings.openai_api_key() {
-                        tracing::info!(
-                            "Embeddings enabled via OpenAI (model: {})",
-                            self.config.embeddings.model
-                        );
-                        Some(Arc::new(OpenAiEmbeddings::with_model(
-                            api_key,
-                            &self.config.embeddings.model,
-                            match self.config.embeddings.model.as_str() {
-                                "text-embedding-3-large" => 3072,
-                                _ => 1536,
-                            },
-                        )))
-                    } else {
-                        tracing::warn!("Embeddings configured but OPENAI_API_KEY not set");
-                        None
-                    }
-                }
-            }
-        } else {
-            tracing::info!("Embeddings disabled (set OPENAI_API_KEY or EMBEDDING_ENABLED=true)");
-            None
-        };
+        // Create embeddings provider using the unified method
+        let embeddings = self
+            .config
+            .embeddings
+            .create_provider(&self.config.llm.nearai.base_url, self.session.clone());
+
+        // Warn if libSQL backend is used with non-1536 embedding dimension.
+        if self.config.database.backend == crate::config::DatabaseBackend::LibSql
+            && self.config.embeddings.enabled
+            && self.config.embeddings.dimension != 1536
+        {
+            tracing::warn!(
+                configured_dimension = self.config.embeddings.dimension,
+                "Embedding dimension {} is not 1536. The libSQL schema uses \
+                 F32_BLOB(1536) which requires exactly 1536 dimensions. \
+                 Embedding storage will fail. Use PostgreSQL or set \
+                 EMBEDDING_DIMENSION=1536.",
+                self.config.embeddings.dimension
+            );
+        }
 
         // Register memory tools if database is available
         let workspace = if let Some(ref db) = self.db {
@@ -402,6 +392,8 @@ impl AppBuilder {
             Arc<McpSessionManager>,
             Option<Arc<WasmToolRuntime>>,
             Option<Arc<ExtensionManager>>,
+            Vec<crate::extensions::RegistryEntry>,
+            Vec<String>,
         ),
         anyhow::Error,
     > {
@@ -431,6 +423,8 @@ impl AppBuilder {
             let tools = Arc::clone(tools);
             let wasm_config = self.config.wasm.clone();
             async move {
+                let mut dev_loaded_tool_names: Vec<String> = Vec::new();
+
                 if let Some(ref runtime) = wasm_tool_runtime {
                     let mut loader = WasmToolLoader::new(Arc::clone(runtime), Arc::clone(&tools));
                     if let Some(ref secrets) = secrets_store {
@@ -461,10 +455,11 @@ impl AppBuilder {
 
                     match load_dev_tools(&loader, &wasm_config.tools_dir).await {
                         Ok(results) => {
-                            if !results.loaded.is_empty() {
+                            dev_loaded_tool_names.extend(results.loaded.iter().cloned());
+                            if !dev_loaded_tool_names.is_empty() {
                                 tracing::info!(
                                     "Loaded {} dev WASM tools from build artifacts",
-                                    results.loaded.len()
+                                    dev_loaded_tool_names.len()
                                 );
                             }
                         }
@@ -473,6 +468,8 @@ impl AppBuilder {
                         }
                     }
                 }
+
+                dev_loaded_tool_names
             }
         };
 
@@ -577,13 +574,46 @@ impl AppBuilder {
             }
         };
 
-        tokio::join!(wasm_tools_future, mcp_servers_future);
+        let (dev_loaded_tool_names, _) = tokio::join!(wasm_tools_future, mcp_servers_future);
 
-        // Create extension manager
-        let extension_manager = if let Some(ref secrets) = self.secrets_store {
+        // Load registry catalog entries for extension discovery
+        let catalog_entries = match crate::registry::RegistryCatalog::load_or_embedded() {
+            Ok(catalog) => {
+                let entries: Vec<_> = catalog
+                    .all()
+                    .iter()
+                    .map(|m| m.to_registry_entry())
+                    .collect();
+                tracing::info!(
+                    count = entries.len(),
+                    "Loaded registry catalog entries for extension discovery"
+                );
+                entries
+            }
+            Err(e) => {
+                tracing::warn!("Failed to load registry catalog: {}", e);
+                Vec::new()
+            }
+        };
+
+        // Create extension manager. Use ephemeral in-memory secrets if no
+        // persistent store is configured (listing/install/activate still work).
+        let ext_secrets: Arc<dyn crate::secrets::SecretsStore + Send + Sync> = if let Some(ref s) =
+            self.secrets_store
+        {
+            Arc::clone(s)
+        } else {
+            use crate::secrets::{InMemorySecretsStore, SecretsCrypto};
+            let ephemeral_key =
+                secrecy::SecretString::from(crate::secrets::keychain::generate_master_key_hex());
+            let crypto = Arc::new(SecretsCrypto::new(ephemeral_key).expect("ephemeral crypto"));
+            tracing::debug!("Using ephemeral in-memory secrets store for extension manager");
+            Arc::new(InMemorySecretsStore::new(crypto))
+        };
+        let extension_manager = {
             let manager = Arc::new(ExtensionManager::new(
                 Arc::clone(&mcp_session_manager),
-                Arc::clone(secrets),
+                ext_secrets,
                 Arc::clone(tools),
                 Some(Arc::clone(hooks)),
                 wasm_tool_runtime.clone(),
@@ -592,16 +622,11 @@ impl AppBuilder {
                 self.config.tunnel.public_url.clone(),
                 "default".to_string(),
                 self.db.clone(),
+                catalog_entries.clone(),
             ));
             tools.register_extension_tools(Arc::clone(&manager));
             tracing::info!("Extension manager initialized with in-chat discovery tools");
             Some(manager)
-        } else {
-            tracing::debug!(
-                "Extension manager not available (no secrets store). \
-                 Extension tools won't be registered."
-            );
-            None
         };
 
         // register_builder_tool() already calls register_dev_tools() internally,
@@ -612,7 +637,13 @@ impl AppBuilder {
             tools.register_dev_tools();
         }
 
-        Ok((mcp_session_manager, wasm_tool_runtime, extension_manager))
+        Ok((
+            mcp_session_manager,
+            wasm_tool_runtime,
+            extension_manager,
+            catalog_entries,
+            dev_loaded_tool_names,
+        ))
     }
 
     /// Run all init phases in order and return the assembled components.
@@ -626,8 +657,13 @@ impl AppBuilder {
         // Create hook registry early so runtime extension activation can register hooks.
         let hooks = Arc::new(HookRegistry::new());
 
-        let (mcp_session_manager, wasm_tool_runtime, extension_manager) =
-            self.init_extensions(&tools, &hooks).await?;
+        let (
+            mcp_session_manager,
+            wasm_tool_runtime,
+            extension_manager,
+            catalog_entries,
+            dev_loaded_tool_names,
+        ) = self.init_extensions(&tools, &hooks).await?;
 
         // Seed workspace and backfill embeddings
         if let Some(ref ws) = workspace {
@@ -656,7 +692,8 @@ impl AppBuilder {
 
         // Skills system
         let (skill_registry, skill_catalog) = if self.config.skills.enabled {
-            let mut registry = SkillRegistry::new(self.config.skills.local_dir.clone());
+            let mut registry = SkillRegistry::new(self.config.skills.local_dir.clone())
+                .with_installed_dir(self.config.skills.installed_dir.clone());
             let loaded = registry.discover_all().await;
             if !loaded.is_empty() {
                 tracing::info!("Loaded {} skill(s): {}", loaded.len(), loaded.join(", "));
@@ -702,6 +739,8 @@ impl AppBuilder {
             skill_catalog,
             cost_guard,
             session: self.session,
+            catalog_entries,
+            dev_loaded_tool_names,
         })
     }
 }

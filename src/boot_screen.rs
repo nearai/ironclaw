@@ -20,8 +20,10 @@ pub struct BootInfo {
     pub heartbeat_enabled: bool,
     pub heartbeat_interval_secs: u64,
     pub sandbox_enabled: bool,
+    pub docker_status: crate::sandbox::detect::DockerStatus,
     pub claude_code_enabled: bool,
     pub routines_enabled: bool,
+    pub skills_enabled: bool,
     pub channels: Vec<String>,
     /// Public URL from a managed tunnel (e.g., "https://abc.ngrok.io").
     pub tunnel_url: Option<String>,
@@ -35,6 +37,7 @@ pub fn print_boot_screen(info: &BootInfo) {
     let bold = "\x1b[1m";
     let cyan = "\x1b[36m";
     let dim = "\x1b[90m";
+    let yellow = "\x1b[33m";
     let yellow_underline = "\x1b[33;4m";
     let reset = "\x1b[0m";
 
@@ -90,14 +93,28 @@ pub fn print_boot_screen(info: &BootInfo) {
         let mins = info.heartbeat_interval_secs / 60;
         features.push(format!("heartbeat ({mins}m)"));
     }
-    if info.sandbox_enabled {
-        features.push("sandbox".to_string());
+    match info.docker_status {
+        crate::sandbox::detect::DockerStatus::Available => {
+            features.push("sandbox".to_string());
+        }
+        crate::sandbox::detect::DockerStatus::NotInstalled => {
+            features.push(format!("{yellow}sandbox (docker not installed){reset}"));
+        }
+        crate::sandbox::detect::DockerStatus::NotRunning => {
+            features.push(format!("{yellow}sandbox (docker not running){reset}"));
+        }
+        crate::sandbox::detect::DockerStatus::Disabled => {
+            // Don't show sandbox when disabled
+        }
     }
     if info.claude_code_enabled {
         features.push("claude-code".to_string());
     }
     if info.routines_enabled {
         features.push("routines".to_string());
+    }
+    if info.skills_enabled {
+        features.push("skills".to_string());
     }
     if !features.is_empty() {
         println!(
@@ -140,6 +157,7 @@ pub fn print_boot_screen(info: &BootInfo) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::sandbox::detect::DockerStatus;
 
     #[test]
     fn test_print_boot_screen_full() {
@@ -158,8 +176,10 @@ mod tests {
             heartbeat_enabled: true,
             heartbeat_interval_secs: 1800,
             sandbox_enabled: true,
+            docker_status: DockerStatus::Available,
             claude_code_enabled: false,
             routines_enabled: true,
+            skills_enabled: true,
             channels: vec![
                 "repl".to_string(),
                 "gateway".to_string(),
@@ -189,8 +209,10 @@ mod tests {
             heartbeat_enabled: false,
             heartbeat_interval_secs: 0,
             sandbox_enabled: false,
+            docker_status: DockerStatus::Disabled,
             claude_code_enabled: false,
             routines_enabled: false,
+            skills_enabled: false,
             channels: vec![],
             tunnel_url: None,
             tunnel_provider: None,
@@ -216,8 +238,10 @@ mod tests {
             heartbeat_enabled: false,
             heartbeat_interval_secs: 0,
             sandbox_enabled: false,
+            docker_status: DockerStatus::Disabled,
             claude_code_enabled: false,
             routines_enabled: false,
+            skills_enabled: false,
             channels: vec!["repl".to_string()],
             tunnel_url: None,
             tunnel_provider: None,

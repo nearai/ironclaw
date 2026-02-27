@@ -22,6 +22,7 @@ use crate::tools::builtin::{
     SkillListTool, SkillRemoveTool, SkillSearchTool, TimeTool, ToolActivateTool, ToolAuthTool,
     ToolInstallTool, ToolListTool, ToolRemoveTool, ToolSearchTool, WriteFileTool,
 };
+use crate::tools::rate_limiter::RateLimiter;
 use crate::tools::tool::{Tool, ToolDomain};
 use crate::tools::wasm::{
     Capabilities, OAuthRefreshConfig, ResourceLimits, SharedCredentialRegistry, WasmError,
@@ -66,6 +67,7 @@ const PROTECTED_TOOL_NAMES: &[&str] = &[
     "skill_search",
     "skill_install",
     "skill_remove",
+    "message",
 ];
 
 /// Registry of available tools.
@@ -77,6 +79,10 @@ pub struct ToolRegistry {
     credential_registry: Option<Arc<SharedCredentialRegistry>>,
     /// Secrets store for credential injection (shared with HTTP tool).
     secrets_store: Option<Arc<dyn SecretsStore + Send + Sync>>,
+    /// Shared rate limiter for built-in tool invocations.
+    rate_limiter: RateLimiter,
+    /// Reference to the message tool for setting context per-turn.
+    message_tool: RwLock<Option<Arc<crate::tools::builtin::MessageTool>>>,
 }
 
 impl ToolRegistry {
@@ -87,6 +93,8 @@ impl ToolRegistry {
             builtin_names: RwLock::new(std::collections::HashSet::new()),
             credential_registry: None,
             secrets_store: None,
+            rate_limiter: RateLimiter::new(),
+            message_tool: RwLock::new(None),
         }
     }
 
@@ -104,6 +112,11 @@ impl ToolRegistry {
     /// Get a reference to the shared credential registry.
     pub fn credential_registry(&self) -> Option<&Arc<SharedCredentialRegistry>> {
         self.credential_registry.as_ref()
+    }
+
+    /// Get the shared rate limiter for checking built-in tool limits.
+    pub fn rate_limiter(&self) -> &RateLimiter {
+        &self.rate_limiter
     }
 
     /// Register a tool. Rejects dynamic tools that try to shadow a built-in name.
@@ -388,6 +401,33 @@ impl ToolRegistry {
         )));
         self.register_sync(Arc::new(RoutineHistoryTool::new(store)));
         tracing::info!("Registered 5 routine management tools");
+    }
+
+    /// Register message tool for sending messages to channels.
+    pub async fn register_message_tools(
+        &self,
+        channel_manager: Arc<crate::channels::ChannelManager>,
+    ) {
+        use crate::tools::builtin::MessageTool;
+        let tool = Arc::new(MessageTool::new(channel_manager));
+        *self.message_tool.write().await = Some(Arc::clone(&tool));
+        self.tools
+            .write()
+            .await
+            .insert(tool.name().to_string(), tool as Arc<dyn Tool>);
+        self.builtin_names
+            .write()
+            .await
+            .insert("message".to_string());
+        tracing::info!("Registered message tool");
+    }
+
+    /// Set the default channel and target for the message tool.
+    /// Call this before each agent turn with the current conversation's context.
+    pub async fn set_message_tool_context(&self, channel: Option<String>, target: Option<String>) {
+        if let Some(tool) = self.message_tool.read().await.as_ref() {
+            tool.set_context(channel, target).await;
+        }
     }
 
     /// Register the software builder tool.

@@ -490,8 +490,10 @@ mod tests {
             skill_registry: None,
             skill_catalog: None,
             chat_rate_limiter: crate::channels::web::server::RateLimiter::new(30, 60),
+            registry_entries: Vec::new(),
             cost_guard: None,
             startup_time: std::time::Instant::now(),
+            restart_requested: std::sync::atomic::AtomicBool::new(false),
         }
     }
 }

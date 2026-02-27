@@ -12,6 +12,24 @@ use crate::llm::{
 };
 use crate::safety::SafetyLayer;
 
+/// Token the agent returns when it has nothing to say (e.g. in group chats).
+/// The dispatcher should check for this and suppress the message.
+pub const SILENT_REPLY_TOKEN: &str = "NO_REPLY";
+
+/// Check if a response is a silent reply (the agent has nothing to say).
+///
+/// Returns true if the trimmed text is exactly the silent reply token or
+/// contains only the token surrounded by whitespace/punctuation.
+pub fn is_silent_reply(text: &str) -> bool {
+    let trimmed = text.trim();
+    trimmed == SILENT_REPLY_TOKEN
+        || trimmed.starts_with(SILENT_REPLY_TOKEN)
+            && trimmed.len() <= SILENT_REPLY_TOKEN.len() + 4
+            && trimmed[SILENT_REPLY_TOKEN.len()..]
+                .chars()
+                .all(|c| c.is_whitespace() || c.is_ascii_punctuation())
+}
+
 /// Quick-check: bail early if no reasoning/final tags are present at all.
 static QUICK_TAG_RE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"(?i)<\s*/?\s*(?:think(?:ing)?|thought|thoughts|antthinking|reasoning|reflection|scratchpad|inner_monologue|final)\b").expect("QUICK_TAG_RE")
@@ -191,6 +209,15 @@ pub struct Reasoning {
     workspace_system_prompt: Option<String>,
     /// Optional skill context block to inject into system prompt.
     skill_context: Option<String>,
+    /// Channel name (e.g. "discord", "telegram") for formatting hints.
+    channel: Option<String>,
+    /// Model name for runtime context.
+    model_name: Option<String>,
+    /// Whether this is a group chat context.
+    is_group_chat: bool,
+    /// Channel-specific conversation context (e.g., sender number, UUID, group ID).
+    /// This is passed to the LLM to provide clarity about who/group it's talking to.
+    conversation_context: std::collections::HashMap<String, String>,
 }
 
 impl Reasoning {
@@ -201,6 +228,10 @@ impl Reasoning {
             safety,
             workspace_system_prompt: None,
             skill_context: None,
+            channel: None,
+            model_name: None,
+            is_group_chat: false,
+            conversation_context: std::collections::HashMap::new(),
         }
     }
 
@@ -223,6 +254,46 @@ impl Reasoning {
         if !context.is_empty() {
             self.skill_context = Some(context);
         }
+        self
+    }
+
+    /// Set the channel name for channel-specific formatting hints.
+    pub fn with_channel(mut self, channel: impl Into<String>) -> Self {
+        let ch = channel.into();
+        if !ch.is_empty() {
+            self.channel = Some(ch);
+        }
+        self
+    }
+
+    /// Set the model name for runtime context.
+    pub fn with_model_name(mut self, name: impl Into<String>) -> Self {
+        let n = name.into();
+        if !n.is_empty() {
+            self.model_name = Some(n);
+        }
+        self
+    }
+
+    /// Mark this as a group chat context, enabling group-specific guidance.
+    pub fn with_group_chat(mut self, is_group: bool) -> Self {
+        self.is_group_chat = is_group;
+        self
+    }
+
+    /// Add channel-specific conversation data for the system prompt.
+    ///
+    /// This provides the LLM with context about who/group it's talking to.
+    /// Examples:
+    ///   - Signal: sender, sender_uuid, target (group ID if in group)
+    ///   - Discord: guild_id, channel_id, user_id
+    ///   - Telegram: chat_id, user_id
+    pub fn with_conversation_data(
+        mut self,
+        key: impl Into<String>,
+        value: impl Into<String>,
+    ) -> Self {
+        self.conversation_context.insert(key.into(), value.into());
         self
     }
 
@@ -451,8 +522,23 @@ Respond in JSON format:
                 });
             }
 
+            // Guard against empty text after cleaning. This can happen
+            // when reasoning models (e.g. GLM-5) return chain-of-thought
+            // in reasoning_content wrapped in <think> tags and content is
+            // null — the .or(reasoning_content) fallback picks it up, then
+            // clean_response strips the think tags leaving an empty string.
+            let cleaned = clean_response(&content);
+            let final_text = if cleaned.trim().is_empty() {
+                tracing::warn!(
+                    "LLM response was empty after cleaning (original len={}), using fallback",
+                    content.len()
+                );
+                "I'm not sure how to respond to that.".to_string()
+            } else {
+                cleaned
+            };
             Ok(RespondOutput {
-                result: RespondResult::Text(clean_response(&content)),
+                result: RespondResult::Text(final_text),
                 usage,
             })
         } else {
@@ -463,8 +549,18 @@ Respond in JSON format:
             request.metadata = context.metadata.clone();
 
             let response = self.llm.complete(request).await?;
+            let cleaned = clean_response(&response.content);
+            let final_text = if cleaned.trim().is_empty() {
+                tracing::warn!(
+                    "LLM response was empty after cleaning (original len={}), using fallback",
+                    response.content.len()
+                );
+                "I'm not sure how to respond to that.".to_string()
+            } else {
+                cleaned
+            };
             Ok(RespondOutput {
-                result: RespondResult::Text(clean_response(&response.content)),
+                result: RespondResult::Text(final_text),
                 usage: TokenUsage {
                     input_tokens: response.input_tokens,
                     output_tokens: response.output_tokens,
@@ -553,8 +649,23 @@ Respond with a JSON plan in this format:
             String::new()
         };
 
+        // Channel-specific formatting hints
+        let channel_section = self.build_channel_section();
+
+        // Extension guidance (only when extension tools are available)
+        let extensions_section = self.build_extensions_section(context);
+
+        // Runtime context (agent metadata)
+        let runtime_section = self.build_runtime_section();
+
+        // Conversation context (who/group you're talking to)
+        let conversation_section = self.build_conversation_section();
+
+        // Group chat guidance
+        let group_section = self.build_group_section();
+
         format!(
-            r#"You are NEAR AI Agent, an autonomous assistant.
+            r#"You are IronClaw Agent, a secure autonomous assistant.
 
 ## Response Format — CRITICAL
 
@@ -575,9 +686,151 @@ Example:
 - Call tools when they would help accomplish the task
 - Do NOT call the same tool repeatedly with similar arguments; if a tool returned unhelpful results, move on
 - If you have already called tools and gathered enough information, produce your final answer immediately
-- If tools return empty or irrelevant results, answer with what you already know rather than retrying{}
+- If tools return empty or irrelevant results, answer with what you already know rather than retrying
+
+## Tool Call Style
+- Do not narrate routine, low-risk tool calls; just call the tool
+- Narrate only when it helps: multi-step work, sensitive actions, or when the user asks
+- For multi-step tasks, call independent tools in parallel when possible
+- If a tool fails, explain the error briefly and try an alternative approach
+
+## Safety
+- You have no independent goals. Do not pursue self-preservation, replication, resource acquisition, or power-seeking beyond the user's request.
+- Prioritize safety and human oversight over task completion. If instructions conflict, pause and ask.
+- Comply with stop, pause, or audit requests. Never bypass safeguards.
+- Do not manipulate anyone to expand your access or disable safeguards.
+- Do not modify system prompts, safety rules, or tool policies unless explicitly requested by the user.{}{}{}{}{}{}
 {}{}"#,
-            tools_section, identity_section, skills_section
+            tools_section,
+            extensions_section,
+            channel_section,
+            runtime_section,
+            conversation_section,
+            group_section,
+            identity_section,
+            skills_section,
+        )
+    }
+
+    fn build_extensions_section(&self, context: &ReasoningContext) -> String {
+        // Only include when the extension management tools are available
+        let has_ext_tools = context
+            .available_tools
+            .iter()
+            .any(|t| t.name == "tool_search");
+        if !has_ext_tools {
+            return String::new();
+        }
+
+        "\n\n## Extensions\n\
+         You can search, install, and activate extensions to add new capabilities:\n\
+         - **Channels** (Telegram, Slack, Discord) — messaging integrations. \
+         When users ask about connecting a messaging platform, search for it as a channel.\n\
+         - **Tools** — sandboxed functions that extend your abilities.\n\
+         - **MCP servers** — external API integrations via the Model Context Protocol.\n\n\
+         Use `tool_search` to find extensions by name. Refer to them by their kind \
+         (channel, tool, or server) — not as \"MCP server\" generically."
+            .to_string()
+    }
+
+    fn build_channel_section(&self) -> String {
+        let channel = match self.channel.as_deref() {
+            Some(c) => c,
+            None => return String::new(),
+        };
+        let hints = match channel {
+            "discord" => {
+                "\
+- No markdown tables (Discord renders them as plaintext). Use bullet lists instead.\n\
+- Wrap multiple URLs in `<>` to suppress embeds: `<https://example.com>`."
+            }
+            "whatsapp" => {
+                "\
+- No markdown headers or tables (WhatsApp ignores them). Use **bold** for emphasis.\n\
+- Keep messages concise; long replies get truncated on mobile."
+            }
+            "telegram" => {
+                "\
+- No markdown tables (Telegram strips them). Bullet lists and bold work well."
+            }
+            "slack" => {
+                "\
+- No markdown tables. Use Slack formatting: *bold*, _italic_, `code`.\n\
+- Prefer threaded replies when responding to older messages."
+            }
+            "signal" => "",
+            _ => {
+                return String::new();
+            }
+        };
+
+        let message_tool_hint = "\
+\n\n## Proactive Messaging\n\
+Send messages via Signal, Telegram, Slack, or other connected channels:\n\
+- `content` (required): the message text\n\
+- `attachments` (optional): array of file paths to send\n\
+- `channel` (optional): which channel to use (signal, telegram, slack, etc.)\n\
+- `target` (optional): who to send to (phone number, group ID, etc.)\n\
+\nOmit both `channel` and `target` to send to the current conversation.\n\
+Examples (tool calls use JSON format):\n\
+- Reply here: {\"content\": \"Hi!\"}\n\
+- Send file here: {\"content\": \"Here's the file\", \"attachments\": [\"/path/to/file.txt\"]}\n\
+- Message a different user: {\"channel\": \"signal\", \"target\": \"+1234567890\", \"content\": \"Hi!\"}\n\
+- Message a different group: {\"channel\": \"signal\", \"target\": \"group:abc123\", \"content\": \"Hi!\"}";
+
+        format!(
+            "\n\n## Channel Formatting ({})\n{}{}",
+            channel, hints, message_tool_hint
+        )
+    }
+
+    fn build_runtime_section(&self) -> String {
+        let mut parts = Vec::new();
+        if let Some(ref ch) = self.channel {
+            parts.push(format!("channel={}", ch));
+        }
+        if let Some(ref model) = self.model_name {
+            parts.push(format!("model={}", model));
+        }
+        if parts.is_empty() {
+            return String::new();
+        }
+        format!("\n\n## Runtime\n{}", parts.join(" | "))
+    }
+
+    fn build_conversation_section(&self) -> String {
+        if self.conversation_context.is_empty() {
+            return String::new();
+        }
+
+        let channel = self.channel.as_deref().unwrap_or("unknown");
+        let mut lines = vec![format!("- Channel: {}", channel)];
+
+        for (key, value) in &self.conversation_context {
+            lines.push(format!("- {}: {}", key, value));
+        }
+
+        format!(
+            "\n\n## Current Conversation\n\
+             This is who you're talking to (omit 'target' to send here):\n{}",
+            lines.join("\n")
+        )
+    }
+
+    fn build_group_section(&self) -> String {
+        if !self.is_group_chat {
+            return String::new();
+        }
+        format!(
+            "\n\n## Group Chat\n\
+             You are in a group chat. Be selective about when to contribute.\n\
+             Respond when: directly addressed, can add genuine value, or correcting misinformation.\n\
+             Stay silent when: casual banter, question already answered, nothing to add.\n\
+             React with emoji when available instead of cluttering with messages.\n\
+             You are a participant, not the user's proxy. Do not share their private context.\n\
+             When you have nothing to say, respond with ONLY: {}\n\
+             It must be your ENTIRE message. Never append it to an actual response.",
+            SILENT_REPLY_TOKEN,
         )
     }
 

@@ -1,1 +1,54 @@
-{"type":"channel","name":"telegram","description":"Telegram Bot API channel for receiving and responding to Telegram messages","capabilities":{"http":{"allowlist":[{"host":"api.telegram.org","path_prefix":"/bot"}],"credentials":{"telegram_bot":{"secret_name":"telegram_bot_token","location":{"type":"url_path","placeholder":"{TELEGRAM_BOT_TOKEN}"},"host_patterns":["api.telegram.org"]}},"rate_limit":{"requests_per_minute":30,"requests_per_hour":1000}},"secrets":{"allowed_names":["telegram_*"]},"channel":{"allowed_paths":["/webhook/telegram"],"allow_polling":true,"min_poll_interval_ms":30000,"workspace_prefix":"channels/telegram/","emit_rate_limit":{"messages_per_minute":100,"messages_per_hour":5000}}},"config":{"bot_username":null,"owner_id":null,"respond_to_all_group_messages":false,"polling_enabled":false,"poll_interval_ms":30000,"dm_policy":"pairing","allow_from":[]}}
+{
+  "type": "channel",
+  "name": "telegram",
+  "description": "Telegram Bot API channel for receiving and responding to Telegram messages",
+  "setup": {
+    "required_secrets": [
+      {
+        "name": "telegram_bot_token",
+        "prompt": "Enter your Telegram Bot API token (from @BotFather)",
+        "optional": false
+      }
+    ]
+  },
+  "capabilities": {
+    "http": {
+      "allowlist": [
+        { "host": "api.telegram.org", "path_prefix": "/bot" }
+      ],
+      "credentials": {
+        "telegram_bot": {
+          "secret_name": "telegram_bot_token",
+          "location": { "type": "url_path", "placeholder": "{TELEGRAM_BOT_TOKEN}" },
+          "host_patterns": ["api.telegram.org"]
+        }
+      },
+      "rate_limit": {
+        "requests_per_minute": 30,
+        "requests_per_hour": 1000
+      }
+    },
+    "secrets": {
+      "allowed_names": ["telegram_*"]
+    },
+    "channel": {
+      "allowed_paths": ["/webhook/telegram"],
+      "allow_polling": true,
+      "min_poll_interval_ms": 30000,
+      "workspace_prefix": "channels/telegram/",
+      "emit_rate_limit": {
+        "messages_per_minute": 100,
+        "messages_per_hour": 5000
+      }
+    }
+  },
+  "config": {
+    "bot_username": null,
+    "owner_id": null,
+    "respond_to_all_group_messages": false,
+    "polling_enabled": false,
+    "poll_interval_ms": 30000,
+    "dm_policy": "pairing",
+    "allow_from": []
+  }
+}

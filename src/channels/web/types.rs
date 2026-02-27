@@ -195,6 +195,15 @@ pub enum SseEvent {
         #[serde(skip_serializing_if = "Option::is_none")]
         fallback: Option<serde_json::Value>,
     },
+
+    /// Extension activation status change (WASM channels).
+    #[serde(rename = "extension_status")]
+    ExtensionStatus {
+        extension_name: String,
+        status: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        message: Option<String>,
+    },
 }
 
 // --- Memory ---
@@ -348,6 +357,15 @@ pub struct ExtensionInfo {
     pub authenticated: bool,
     pub active: bool,
     pub tools: Vec<String>,
+    /// Whether this extension has configurable secrets (setup schema).
+    #[serde(default)]
+    pub needs_setup: bool,
+    /// WASM channel activation status: "installed", "configured", "active", "failed".
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub activation_status: Option<String>,
+    /// Human-readable error when activation_status is "failed".
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub activation_error: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -373,6 +391,31 @@ pub struct InstallExtensionRequest {
     pub kind: Option<String>,
 }
 
+// --- Extension Setup ---
+
+#[derive(Debug, Serialize)]
+pub struct ExtensionSetupResponse {
+    pub name: String,
+    pub kind: String,
+    pub secrets: Vec<SecretFieldInfo>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct SecretFieldInfo {
+    pub name: String,
+    pub prompt: String,
+    pub optional: bool,
+    /// Whether this secret is already stored.
+    pub provided: bool,
+    /// Whether the secret will be auto-generated if left empty.
+    pub auto_generate: bool,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ExtensionSetupRequest {
+    pub secrets: std::collections::HashMap<String, String>,
+}
+
 #[derive(Debug, Serialize)]
 pub struct ActionResponse {
     pub success: bool,
@@ -386,6 +429,12 @@ pub struct ActionResponse {
     /// Instructions for manual token entry.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub instructions: Option<String>,
+    /// Whether the channel was successfully activated after setup.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub activated: Option<bool>,
+    /// Whether a gateway restart is needed (activation failed).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub needs_restart: Option<bool>,
 }
 
 impl ActionResponse {
@@ -396,6 +445,8 @@ impl ActionResponse {
             auth_url: None,
             awaiting_token: None,
             instructions: None,
+            activated: None,
+            needs_restart: None,
         }
     }
 
@@ -406,8 +457,54 @@ impl ActionResponse {
             auth_url: None,
             awaiting_token: None,
             instructions: None,
+            activated: None,
+            needs_restart: None,
         }
     }
+}
+
+// --- Registry ---
+
+#[derive(Debug, Serialize)]
+pub struct RegistryEntryInfo {
+    pub name: String,
+    pub display_name: String,
+    pub kind: String,
+    pub description: String,
+    pub keywords: Vec<String>,
+    pub installed: bool,
+}
+
+#[derive(Debug, Serialize)]
+pub struct RegistrySearchResponse {
+    pub entries: Vec<RegistryEntryInfo>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct RegistrySearchQuery {
+    pub query: Option<String>,
+}
+
+// --- Pairing ---
+
+#[derive(Debug, Serialize)]
+pub struct PairingListResponse {
+    pub channel: String,
+    pub requests: Vec<PairingRequestInfo>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct PairingRequestInfo {
+    pub code: String,
+    pub sender_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub meta: Option<serde_json::Value>,
+    pub created_at: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct PairingApproveRequest {
+    pub code: String,
 }
 
 // --- Skills ---
@@ -438,6 +535,9 @@ pub struct SkillSearchResponse {
     pub catalog: Vec<serde_json::Value>,
     pub installed: Vec<SkillInfo>,
     pub registry_url: String,
+    /// If the catalog registry was unreachable or errored, a human-readable message.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub catalog_error: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -539,6 +639,7 @@ impl WsServerMessage {
             SseEvent::JobToolResult { .. } => "job_tool_result",
             SseEvent::JobStatus { .. } => "job_status",
             SseEvent::JobResult { .. } => "job_result",
+            SseEvent::ExtensionStatus { .. } => "extension_status",
         };
         let data = serde_json::to_value(event).unwrap_or(serde_json::Value::Null);
         WsServerMessage::Event {

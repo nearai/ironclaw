@@ -32,7 +32,7 @@
 # Format code
 cargo fmt
 
-# Lint (address warnings before committing)
+# Lint (fix ALL warnings before committing, including pre-existing ones)
 cargo clippy --all --benches --tests --examples --all-features
 
 # Run all tests
@@ -321,7 +321,10 @@ cargo check --all-features                           # all features
 ```
 Dead code behind the wrong `#[cfg]` gate will only show up when building with a single feature.
 
+**Zero clippy warnings policy:** Fix ALL clippy warnings before committing, including pre-existing ones in files you didn't change. Never leave warnings behind — treat `cargo clippy` output as a zero-tolerance gate.
+
 **Mechanical verification before committing:** Run these checks on changed files before committing:
+- `cargo clippy --all --benches --tests --examples --all-features` -- zero warnings
 - `grep -rnE '\.unwrap\(|\.expect\(' <files>` -- no panics in production
 - `grep -rn 'super::' <files>` -- use `crate::` imports
 - If you fixed a pattern bug, `grep` for other instances of that pattern across `src/`
@@ -568,6 +571,10 @@ Four built-in tools for managing skills at runtime:
 - `~/.ironclaw/skills/` -- User's global skills (trusted)
 - `<workspace>/skills/` -- Per-workspace skills (trusted)
 - `~/.ironclaw/installed_skills/` -- Registry-installed skills (installed trust)
+
+### Testing Skills
+
+- `skills/web-ui-test/` -- Manual test checklist for the web gateway UI via Claude for Chrome extension. Covers connection, chat, skills search/install/remove, and other tabs.
 
 Skills configuration: see Configuration section above.
 

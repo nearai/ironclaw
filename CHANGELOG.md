@@ -7,6 +7,87 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.12.0](https://github.com/nearai/ironclaw/compare/v0.11.1...v0.12.0) - 2026-02-26
+
+### Added
+
+- *(web)* improve WASM channel setup flow ([#380](https://github.com/nearai/ironclaw/pull/380))
+- *(web)* inline tool activity cards with auto-collapsing ([#376](https://github.com/nearai/ironclaw/pull/376))
+- *(web)* display logs newest-first in web gateway UI ([#369](https://github.com/nearai/ironclaw/pull/369))
+- *(signal)* tool approval workflow and status updates ([#350](https://github.com/nearai/ironclaw/pull/350))
+- add OpenRouter preset to setup wizard ([#270](https://github.com/nearai/ironclaw/pull/270))
+- *(channels)* add native Signal channel via signal-cli HTTP daemon ([#271](https://github.com/nearai/ironclaw/pull/271))
+
+### Fixed
+
+- correct MCP registry URLs and remove non-existent Google endpoints ([#370](https://github.com/nearai/ironclaw/pull/370))
+- resolve_thread adopts existing session threads by UUID ([#377](https://github.com/nearai/ironclaw/pull/377))
+- resolve telegram/slack name collision between tool and channel registries ([#346](https://github.com/nearai/ironclaw/pull/346))
+- make onboarding installs prefer release artifacts with source fallback ([#323](https://github.com/nearai/ironclaw/pull/323))
+- copy missing files in Dockerfile to fix build ([#322](https://github.com/nearai/ironclaw/pull/322))
+- fall back to build-from-source when extension download fails ([#312](https://github.com/nearai/ironclaw/pull/312))
+
+### Other
+
+- Add --version flag with clap built-in support and test ([#342](https://github.com/nearai/ironclaw/pull/342))
+- Update FEATURE_PARITY.md ([#337](https://github.com/nearai/ironclaw/pull/337))
+- add brew install ironclaw instructions ([#310](https://github.com/nearai/ironclaw/pull/310))
+- Fix skills system: enable by default, fix registry and install ([#300](https://github.com/nearai/ironclaw/pull/300))
+
+## [0.11.1](https://github.com/nearai/ironclaw/compare/v0.11.0...v0.11.1) - 2026-02-23
+
+### Other
+
+- Ignore out-of-date generated CI so custom release.yml jobs are allowed
+
+## [0.11.0](https://github.com/nearai/ironclaw/compare/v0.10.0...v0.11.0) - 2026-02-23
+
+### Fixed
+
+- auto-compact and retry on ContextLengthExceeded ([#315](https://github.com/nearai/ironclaw/pull/315))
+
+### Other
+
+- *(README)* Adding badges to readme ([#316](https://github.com/nearai/ironclaw/pull/316))
+- Feat/completion ([#240](https://github.com/nearai/ironclaw/pull/240))
+
+## [0.10.0](https://github.com/nearai/ironclaw/compare/v0.9.0...v0.10.0) - 2026-02-22
+
+### Added
+
+- update dashboard favicon ([#309](https://github.com/nearai/ironclaw/pull/309))
+- add web UI test skill for Chrome extension ([#302](https://github.com/nearai/ironclaw/pull/302))
+- implement FullJob routine mode with scheduler dispatch ([#288](https://github.com/nearai/ironclaw/pull/288))
+- hot-activate WASM channels, channel-first prompts, unified artifact resolution ([#297](https://github.com/nearai/ironclaw/pull/297))
+- add pairing/permission system to all WASM channels and fix extension registry ([#286](https://github.com/nearai/ironclaw/pull/286))
+- group chat privacy, channel-aware prompts, and safety hardening ([#285](https://github.com/nearai/ironclaw/pull/285))
+- embedded registry catalog and WASM bundle install pipeline ([#283](https://github.com/nearai/ironclaw/pull/283))
+- show token usage and cost tracker in gateway status popover ([#284](https://github.com/nearai/ironclaw/pull/284))
+- support custom HTTP headers for OpenAI-compatible provider ([#269](https://github.com/nearai/ironclaw/pull/269))
+- add smart routing provider for cost-optimized model selection ([#281](https://github.com/nearai/ironclaw/pull/281))
+
+### Fixed
+
+- persist user message at turn start before agentic loop ([#305](https://github.com/nearai/ironclaw/pull/305))
+- block send until thread is selected ([#306](https://github.com/nearai/ironclaw/pull/306))
+- reload chat history on SSE reconnect ([#307](https://github.com/nearai/ironclaw/pull/307))
+- map Esc to interrupt and Ctrl+C to graceful quit ([#267](https://github.com/nearai/ironclaw/pull/267))
+
+### Other
+
+- Fix tool schema OpenAI compatibility ([#301](https://github.com/nearai/ironclaw/pull/301))
+- simplify config resolution and consolidate main.rs init ([#287](https://github.com/nearai/ironclaw/pull/287))
+- Update image source in README.md
+- Add files via upload
+- remove ExtensionSource::Bundled, use download-only install for WASM channels ([#293](https://github.com/nearai/ironclaw/pull/293))
+- allow OAuth callback to work on remote servers (fixes #186) ([#212](https://github.com/nearai/ironclaw/pull/212))
+- add rate limiting for built-in tools (closes #171) ([#276](https://github.com/nearai/ironclaw/pull/276))
+- add LLM providers guide (OpenRouter, Together AI, Fireworks, Ollama, vLLM) ([#193](https://github.com/nearai/ironclaw/pull/193))
+- Feat/html to markdown #106  ([#115](https://github.com/nearai/ironclaw/pull/115))
+- adopt agent-market design language for web UI ([#282](https://github.com/nearai/ironclaw/pull/282))
+- speed up startup from ~15s to ~2s ([#280](https://github.com/nearai/ironclaw/pull/280))
+- consolidate tool approval into single param-aware method ([#274](https://github.com/nearai/ironclaw/pull/274))
+
 ## [0.9.0](https://github.com/nearai/ironclaw/compare/v0.8.0...v0.9.0) - 2026-02-21
 
 ### Added

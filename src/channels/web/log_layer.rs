@@ -90,6 +90,9 @@ impl LogBroadcaster {
     }
 
     /// Snapshot of recent entries for replaying to a new subscriber.
+    ///
+    /// Returns entries oldest-first so that the frontend's `prepend()`
+    /// naturally places the newest entry at the top of the DOM.
     pub fn recent_entries(&self) -> Vec<LogEntry> {
         self.recent
             .lock()

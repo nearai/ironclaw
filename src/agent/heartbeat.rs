@@ -294,6 +294,7 @@ impl HeartbeatRunner {
         let response = OutgoingResponse {
             content: format!("🔔 *Heartbeat Alert*\n\n{}", message),
             thread_id: None,
+            attachments: Vec::new(),
             metadata: serde_json::json!({
                 "source": "heartbeat",
             }),

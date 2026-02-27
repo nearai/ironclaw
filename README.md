@@ -1,11 +1,17 @@
 <p align="center">
-  <img src="ironclaw.png" alt="IronClaw" width="200"/>
+  <img src="ironclaw.png?v=2" alt="IronClaw" width="200"/>
 </p>
 
 <h1 align="center">IronClaw</h1>
 
 <p align="center">
   <strong>Your secure personal AI assistant, always on your side</strong>
+</p>
+
+<p align="center">
+  <a href="#license"><img src="https://img.shields.io/badge/license-MIT%20OR%20Apache%202.0-blue.svg" alt="License: MIT OR Apache-2.0" /></a>
+  <a href="https://t.me/ironclawAI"><img src="https://img.shields.io/badge/Telegram-%40ironclawAI-26A5E4?style=flat&logo=telegram&logoColor=white" alt="Telegram: @ironclawAI" /></a>
+  <a href="https://www.reddit.com/r/ironclawAI/"><img src="https://img.shields.io/badge/Reddit-r%2FironclawAI-FF4500?style=flat&logo=reddit&logoColor=white" alt="Reddit: r/ironclawAI" /></a>
 </p>
 
 <p align="center">
@@ -100,6 +106,15 @@ curl --proto '=https' --tlsv1.2 -LsSf https://github.com/nearai/ironclaw/release
 </details>
 
 <details>
+  <summary>Install via Homebrew (macOS/Linux)</summary>
+
+```sh
+brew install ironclaw
+```
+
+</details>
+
+<details>
   <summary>Compile the source code (Cargo on Windows, Linux, macOS)</summary>
 
 Install it with `cargo`, just make sure you have [Rust](https://rustup.rs) installed on your computer.
@@ -142,6 +157,23 @@ The wizard handles database connection, NEAR AI authentication (via browser OAut
 and secrets encryption (using your system keychain). Settings are persisted in the
 connected database; bootstrap variables (e.g. `DATABASE_URL`, `LLM_BACKEND`) are
 written to `~/.ironclaw/.env` so they are available before the database connects.
+
+### Alternative LLM Providers
+
+IronClaw defaults to NEAR AI but works with any OpenAI-compatible endpoint.
+Popular options include **OpenRouter** (300+ models), **Together AI**, **Fireworks AI**,
+**Ollama** (local), and self-hosted servers like **vLLM** or **LiteLLM**.
+
+Select *"OpenAI-compatible"* in the wizard, or set environment variables directly:
+
+```env
+LLM_BACKEND=openai_compatible
+LLM_BASE_URL=https://openrouter.ai/api/v1
+LLM_API_KEY=sk-or-...
+LLM_MODEL=anthropic/claude-sonnet-4
+```
+
+See [docs/LLM_PROVIDERS.md](docs/LLM_PROVIDERS.md) for a full provider guide.
 
 ## Security
 

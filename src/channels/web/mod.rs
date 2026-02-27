@@ -15,6 +15,7 @@
 //! ```
 
 pub mod auth;
+pub(crate) mod handlers;
 pub mod log_layer;
 pub mod openai_compat;
 pub mod server;
@@ -89,8 +90,10 @@ impl GatewayChannel {
             skill_registry: None,
             skill_catalog: None,
             chat_rate_limiter: server::RateLimiter::new(30, 60),
+            registry_entries: Vec::new(),
             cost_guard: None,
             startup_time: std::time::Instant::now(),
+            restart_requested: std::sync::atomic::AtomicBool::new(false),
         });
 
         Self {
@@ -121,8 +124,10 @@ impl GatewayChannel {
             skill_registry: self.state.skill_registry.clone(),
             skill_catalog: self.state.skill_catalog.clone(),
             chat_rate_limiter: server::RateLimiter::new(30, 60),
+            registry_entries: self.state.registry_entries.clone(),
             cost_guard: self.state.cost_guard.clone(),
             startup_time: self.state.startup_time,
+            restart_requested: std::sync::atomic::AtomicBool::new(false),
         };
         mutate(&mut new_state);
         self.state = Arc::new(new_state);
@@ -207,6 +212,12 @@ impl GatewayChannel {
     /// Inject the LLM provider for OpenAI-compatible API proxy.
     pub fn with_llm_provider(mut self, llm: Arc<dyn crate::llm::LlmProvider>) -> Self {
         self.rebuild_state(|s| s.llm_provider = Some(llm));
+        self
+    }
+
+    /// Inject registry catalog entries for the available extensions API.
+    pub fn with_registry_entries(mut self, entries: Vec<crate::extensions::RegistryEntry>) -> Self {
+        self.rebuild_state(|s| s.registry_entries = entries);
         self
     }
 

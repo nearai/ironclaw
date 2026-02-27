@@ -3,6 +3,7 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
+use crate::registry::embedded;
 use crate::registry::manifest::{BundleDefinition, BundlesFile, ExtensionManifest, ManifestKind};
 
 /// Error type for registry operations.
@@ -26,8 +27,41 @@ pub enum RegistryError {
         path: std::path::PathBuf,
     },
 
-    #[error("Download failed for {url}: {reason}")]
+    // `url` is stored for programmatic access (logs, retries) but intentionally
+    // omitted from the Display message to avoid leaking internal artifact URLs
+    // to end users.
+    #[error("Artifact download failed: {reason}")]
     DownloadFailed { url: String, reason: String },
+
+    #[error("Invalid extension manifest for '{name}' field '{field}': {reason}")]
+    InvalidManifest {
+        name: String,
+        field: &'static str,
+        reason: String,
+    },
+
+    #[error("Checksum verification failed: expected {expected_sha256}, got {actual_sha256}")]
+    ChecksumMismatch {
+        url: String,
+        expected_sha256: String,
+        actual_sha256: String,
+    },
+
+    #[error(
+        "Source fallback unavailable for '{name}' after artifact install failed. Retry artifact download or run from a repository checkout."
+    )]
+    SourceFallbackUnavailable {
+        name: String,
+        source_dir: PathBuf,
+        artifact_error: Box<RegistryError>,
+    },
+
+    #[error("Artifact install and source fallback both failed for '{name}'.")]
+    InstallFallbackFailed {
+        name: String,
+        artifact_error: Box<RegistryError>,
+        source_error: Box<RegistryError>,
+    },
 
     #[error(
         "Ambiguous name '{name}': exists as both {kind_a} and {kind_b}. Use '{prefix_a}/{name}' or '{prefix_b}/{name}'."
@@ -53,7 +87,7 @@ pub enum RegistryError {
 /// Central catalog loaded from the `registry/` directory.
 #[derive(Debug, Clone)]
 pub struct RegistryCatalog {
-    /// All loaded manifests, keyed by "<kind>/<name>" (e.g. "tools/slack").
+    /// All loaded manifests, keyed by "<kind>/<name>" (e.g. "tools/github").
     manifests: HashMap<String, ExtensionManifest>,
 
     /// Bundle definitions from `_bundles.json`.
@@ -64,6 +98,69 @@ pub struct RegistryCatalog {
 }
 
 impl RegistryCatalog {
+    /// Find the `registry/` directory by searching relative to cwd, the executable,
+    /// and `CARGO_MANIFEST_DIR`. Returns `None` if the directory cannot be found
+    /// (non-fatal at startup).
+    pub fn find_dir() -> Option<PathBuf> {
+        // Try relative to current directory (for dev usage)
+        if let Ok(cwd) = std::env::current_dir() {
+            let candidate = cwd.join("registry");
+            if candidate.is_dir() {
+                return Some(candidate);
+            }
+        }
+
+        // Try relative to executable (covers installed binary, target/debug/, target/release/)
+        if let Ok(exe) = std::env::current_exe()
+            && let Some(parent) = exe.parent()
+        {
+            // Walk up to 3 levels: exe dir, parent (target/release -> target), grandparent (-> repo root)
+            let mut dir = Some(parent);
+            for _ in 0..3 {
+                if let Some(d) = dir {
+                    let candidate = d.join("registry");
+                    if candidate.is_dir() {
+                        return Some(candidate);
+                    }
+                    dir = d.parent();
+                }
+            }
+        }
+
+        // Try CARGO_MANIFEST_DIR (compile-time, works in dev builds)
+        let manifest_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let candidate = manifest_dir.join("registry");
+        if candidate.is_dir() {
+            return Some(candidate);
+        }
+
+        None
+    }
+
+    /// Try to load from disk; if `registry/` cannot be found, fall back to
+    /// manifests embedded into the binary at compile time.
+    pub fn load_or_embedded() -> Result<Self, RegistryError> {
+        if let Some(dir) = Self::find_dir() {
+            return Self::load(&dir);
+        }
+
+        // Fall back to embedded catalog
+        let manifests = embedded::load_embedded();
+        let bundles = embedded::load_embedded_bundles();
+
+        tracing::info!(
+            "Loaded embedded registry catalog ({} extensions, {} bundles)",
+            manifests.len(),
+            bundles.len()
+        );
+
+        Ok(Self {
+            manifests,
+            bundles,
+            root: PathBuf::new(),
+        })
+    }
+
     /// Load the catalog from a registry directory.
     ///
     /// Expects the structure:
@@ -177,11 +274,11 @@ impl RegistryCatalog {
         results
     }
 
-    /// Get a manifest by name. Tries exact key match first ("tools/slack"),
-    /// then searches by bare name ("slack").
+    /// Get a manifest by name. Tries exact key match first ("tools/github"),
+    /// then searches by bare name ("github").
     ///
     /// If a bare name matches both a tool and a channel, returns `None`.
-    /// Use a qualified key ("tools/slack" or "channels/slack") to disambiguate.
+    /// Use a qualified key ("tools/github" or "channels/telegram") to disambiguate.
     pub fn get(&self, name: &str) -> Option<&ExtensionManifest> {
         // Try exact key first
         if let Some(m) = self.manifests.get(name) {
@@ -225,7 +322,7 @@ impl RegistryCatalog {
         }
     }
 
-    /// Get the full key ("tools/slack" or "channels/telegram") for a manifest.
+    /// Get the full key ("tools/github" or "channels/telegram") for a manifest.
     pub fn key_for(&self, name: &str) -> Option<String> {
         if self.manifests.contains_key(name) {
             return Some(name.to_string());
@@ -576,5 +673,35 @@ mod tests {
     fn test_directory_not_found() {
         let result = RegistryCatalog::load(Path::new("/nonexistent/path"));
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_load_or_embedded_succeeds() {
+        // Should always succeed: either finds registry/ on disk or falls back to embedded
+        let catalog = RegistryCatalog::load_or_embedded().unwrap();
+        // At minimum, the embedded catalog from the repo should have entries
+        assert!(!catalog.all().is_empty() || !catalog.bundle_names().is_empty());
+    }
+
+    #[test]
+    fn test_bundle_entries_resolve_against_real_registry() {
+        // Load the actual registry/ directory (catches stale bundle refs after renames)
+        let catalog = RegistryCatalog::load_or_embedded().unwrap();
+
+        for bundle_name in catalog.bundle_names() {
+            let (manifests, missing) = catalog.resolve_bundle(bundle_name).unwrap();
+            assert!(
+                missing.is_empty(),
+                "Bundle '{}' has unresolved entries: {:?}. \
+                 Check that _bundles.json entries match manifest name fields.",
+                bundle_name,
+                missing
+            );
+            assert!(
+                !manifests.is_empty(),
+                "Bundle '{}' resolved to zero manifests",
+                bundle_name
+            );
+        }
     }
 }

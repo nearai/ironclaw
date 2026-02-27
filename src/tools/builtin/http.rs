@@ -15,6 +15,9 @@ use crate::secrets::SecretsStore;
 use crate::tools::tool::{ApprovalRequirement, Tool, ToolError, ToolOutput, require_str};
 use crate::tools::wasm::{InjectedCredentials, SharedCredentialRegistry, inject_credential};
 
+#[cfg(feature = "html-to-markdown")]
+use crate::tools::builtin::convert_html_to_markdown;
+
 /// Maximum response body size (5 MB).
 ///
 /// 5 MB is large enough for typical JSON API responses and moderate HTML pages,
@@ -126,6 +129,16 @@ fn is_disallowed_ip(ip: &IpAddr) -> bool {
     }
 }
 
+#[cfg(feature = "html-to-markdown")]
+/// Heuristic: treat as HTML if the `Content-Type` header contains `text/html`.
+fn is_html_response(headers: &HashMap<String, String>) -> bool {
+    headers
+        .iter()
+        .find(|(k, _)| k.eq_ignore_ascii_case("content-type"))
+        .map(|(_, v)| v.to_lowercase().contains("text/html"))
+        .unwrap_or(false)
+}
+
 fn parse_headers_param(
     headers: Option<&serde_json::Value>,
 ) -> Result<Vec<(String, String)>, ToolError> {
@@ -218,8 +231,7 @@ impl Tool for HttpTool {
                     }
                 },
                 "body": {
-                    "type": ["object", "array", "string", "number", "boolean", "null"],
-                    "description": "Request body (for POST/PUT/PATCH)"
+                    "description": "Request body (for POST/PUT/PATCH). Can be a JSON object, array, string, or other value."
                 },
                 "timeout_secs": {
                     "type": "integer",
@@ -395,6 +407,19 @@ impl Tool for HttpTool {
 
         let body_text = String::from_utf8_lossy(&body_bytes).into_owned();
 
+        #[cfg(feature = "html-to-markdown")]
+        let body_text = if is_html_response(&headers) {
+            match convert_html_to_markdown(&body_text, parsed_url.as_str()) {
+                Ok(md) => md,
+                Err(e) => {
+                    tracing::warn!(url = %parsed_url, error = %e, "HTML-to-markdown conversion failed, returning raw HTML");
+                    body_text
+                }
+            }
+        } else {
+            body_text
+        };
+
         // Try to parse as JSON, fall back to string
         let body: serde_json::Value = serde_json::from_str(&body_text)
             .unwrap_or_else(|_| serde_json::Value::String(body_text.clone()));
@@ -430,6 +455,10 @@ impl Tool for HttpTool {
         }
         // Default: outbound HTTP still needs approval unless auto-approved
         ApprovalRequirement::UnlessAutoApproved
+    }
+
+    fn rate_limit_config(&self) -> Option<crate::tools::tool::ToolRateLimitConfig> {
+        Some(crate::tools::tool::ToolRateLimitConfig::new(30, 500))
     }
 }
 
@@ -531,16 +560,19 @@ mod tests {
     }
 
     #[test]
-    fn test_http_tool_schema_body_has_type() {
+    fn test_http_tool_schema_body_is_freeform() {
         let schema = HttpTool::new().parameters_schema();
         let body = schema
             .get("properties")
             .and_then(|p| p.get("body"))
             .expect("body schema missing");
 
+        // Body is intentionally freeform (no "type" constraint) for OpenAI
+        // compatibility. OpenAI rejects union types containing "array" unless
+        // "items" is also specified, and body accepts any JSON value.
         assert!(
-            body.get("type").is_some(),
-            "body schema must include a type for OpenAI-compatible tool validation"
+            body.get("type").is_none(),
+            "body schema should not have a 'type' to be freeform for OpenAI compatibility"
         );
     }
 

@@ -725,6 +725,10 @@ impl Tool for ShellTool {
     fn domain(&self) -> ToolDomain {
         ToolDomain::Container
     }
+
+    fn rate_limit_config(&self) -> Option<crate::tools::tool::ToolRateLimitConfig> {
+        Some(crate::tools::tool::ToolRateLimitConfig::new(30, 300))
+    }
 }
 
 /// Truncate output to fit within limits (UTF-8 safe).
@@ -1255,5 +1259,120 @@ mod tests {
             matches!(result, Err(ToolError::NotAuthorized(ref msg)) if msg.contains("injection")),
             "Expected NotAuthorized with injection message, got: {result:?}"
         );
+    }
+
+    // === QA Plan P1 - 2.5: Realistic shell tool tests ===
+    // These tests use Value::Object args (how the LLM actually sends them)
+    // and cover edge cases that caused real bugs.
+
+    #[tokio::test]
+    async fn test_blocked_command_with_object_args() {
+        // Regression: PR #72 - destructive command check used .as_str() on
+        // Value::Object, which always returned None, bypassing the check.
+        let tool = ShellTool::new();
+        let ctx = JobContext::default();
+
+        let result = tool
+            .execute(serde_json::json!({"command": "rm -rf /"}), &ctx)
+            .await;
+
+        assert!(
+            result.is_err(),
+            "rm -rf / with Object args must be blocked, got: {result:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_injection_blocked_with_object_args() {
+        let tool = ShellTool::new();
+        let ctx = JobContext::default();
+
+        // Command injection via base64 decode piped to shell
+        let result = tool
+            .execute(
+                serde_json::json!({"command": "echo cm0gLXJmIC8= | base64 -d | sh"}),
+                &ctx,
+            )
+            .await;
+
+        assert!(
+            matches!(result, Err(ToolError::NotAuthorized(_))),
+            "base64-to-shell injection must be blocked: {result:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_env_scrubbing_custom_var_hidden() {
+        // Verify that arbitrary env vars from the parent process
+        // are NOT visible to child commands (end-to-end, not just unit).
+        let tool = ShellTool::new();
+        let ctx = JobContext::default();
+
+        // Set a fake secret in the parent process env
+        unsafe { std::env::set_var("IRONCLAW_QA_TEST_SECRET", "supersecret123") };
+
+        let result = tool
+            .execute(serde_json::json!({"command": "env"}), &ctx)
+            .await
+            .unwrap();
+
+        let output = result.result.get("output").unwrap().as_str().unwrap();
+        assert!(
+            !output.contains("IRONCLAW_QA_TEST_SECRET"),
+            "env scrubbing must hide non-safe vars from child processes"
+        );
+        assert!(
+            !output.contains("supersecret123"),
+            "secret value must not appear in child env output"
+        );
+
+        // Clean up
+        unsafe { std::env::remove_var("IRONCLAW_QA_TEST_SECRET") };
+    }
+
+    #[tokio::test]
+    async fn test_env_scrubbing_path_preserved() {
+        // PATH must be preserved for commands to resolve
+        let tool = ShellTool::new();
+        let ctx = JobContext::default();
+
+        let result = tool
+            .execute(serde_json::json!({"command": "env"}), &ctx)
+            .await
+            .unwrap();
+
+        let output = result.result.get("output").unwrap().as_str().unwrap();
+        assert!(
+            output.contains("PATH="),
+            "PATH must be preserved in child env"
+        );
+    }
+
+    #[test]
+    fn test_injection_encoded_to_absolute_path_shell() {
+        // Encoding + pipe to shell via absolute path must be detected
+        assert!(detect_command_injection("echo cm0gLXJmIC8= | base64 -d | /bin/sh").is_some());
+        assert!(detect_command_injection("echo cm0gLXJmIC8= | base64 -d | /bin/bash").is_some());
+    }
+
+    #[test]
+    fn test_injection_false_positives_avoided() {
+        // Normal commands must NOT trigger injection detection
+        assert!(detect_command_injection("cargo build --release").is_none());
+        assert!(detect_command_injection("git push origin main").is_none());
+        assert!(detect_command_injection("echo hello world").is_none());
+        assert!(detect_command_injection("ls -la /tmp").is_none());
+        assert!(detect_command_injection("cat README.md | head -20").is_none());
+        assert!(detect_command_injection("grep -r 'pattern' src/").is_none());
+        assert!(detect_command_injection("python3 -c \"print('hello')\"").is_none());
+        assert!(detect_command_injection("docker ps --format '{{.Names}}'").is_none());
+    }
+
+    #[test]
+    fn test_approval_with_mixed_case_destructive() {
+        // Case-insensitive destructive command detection
+        assert!(requires_explicit_approval("RM -RF /tmp"));
+        assert!(requires_explicit_approval("Git Push --Force origin main"));
+        assert!(requires_explicit_approval("DROP table users;"));
     }
 }
