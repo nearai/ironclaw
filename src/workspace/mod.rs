@@ -436,6 +436,16 @@ impl Workspace {
     /// Validates that the layer exists and is writable. For shared layers,
     /// checks content sensitivity and redirects to the private layer if needed.
     ///
+    /// Note: privacy classification is pattern-based (regex) and can be bypassed
+    /// by obfuscated content. See `privacy::PatternPrivacyClassifier` for details.
+    ///
+    /// # Multi-tenant safety (Issue #59)
+    ///
+    /// Layer scopes are currently used directly as `user_id` for DB operations.
+    /// In a multi-tenant deployment, an operator could configure a scope that
+    /// collides with another user's ID, granting write access to their data.
+    /// Future work should namespace or validate scopes to prevent this.
+    ///
     /// Returns `(scope, actual_layer_name, redirected)`.
     fn resolve_layer_target(
         &self,

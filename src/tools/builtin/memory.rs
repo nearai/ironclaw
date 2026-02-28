@@ -163,8 +163,7 @@ impl Tool for MemoryWriteTool {
                 },
                 "layer": {
                     "type": "string",
-                    "description": "Memory layer to write to (e.g. 'private', 'household', 'finance').",
-                    "default": "private"
+                    "description": "Memory layer to write to (e.g. 'private', 'household', 'finance'). When omitted, writes to the workspace's default scope."
                 }
             },
             "required": ["content"]
@@ -230,7 +229,7 @@ impl Tool for MemoryWriteTool {
         };
 
         // When a layer is specified, route through layer-aware methods for ALL targets.
-        let (actual_layer, redirected) = if let Some(layer_name) = layer {
+        let layer_result = if let Some(layer_name) = layer {
             let result = if append {
                 self.workspace
                     .append_to_layer(layer_name, &resolved_path, content)
@@ -246,7 +245,7 @@ impl Tool for MemoryWriteTool {
                         ToolError::ExecutionFailed(format!("Write failed: {}", e))
                     })?
             };
-            (result.actual_layer, result.redirected)
+            Some((result.actual_layer, result.redirected))
         } else {
             // No layer specified -- use default workspace methods
             match target {
@@ -296,17 +295,19 @@ impl Tool for MemoryWriteTool {
                     }
                 }
             }
-            ("private".to_string(), false)
+            None
         };
 
-        let output = serde_json::json!({
+        let mut output = serde_json::json!({
             "status": "written",
             "path": resolved_path,
-            "layer": actual_layer,
-            "redirected": redirected,
             "append": append,
             "content_length": content.len(),
         });
+        if let Some((actual_layer, redirected)) = layer_result {
+            output["layer"] = serde_json::Value::String(actual_layer);
+            output["redirected"] = serde_json::Value::Bool(redirected);
+        }
 
         Ok(ToolOutput::success(output, start.elapsed()))
     }

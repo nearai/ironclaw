@@ -107,15 +107,48 @@ impl ChannelsConfig {
         let gateway = if gateway_enabled {
             let user_id = optional_env("GATEWAY_USER_ID")?.unwrap_or_else(|| "default".to_string());
 
-            let memory_layers = match optional_env("MEMORY_LAYERS")? {
-                Some(json_str) => {
-                    serde_json::from_str(&json_str).map_err(|e| ConfigError::InvalidValue {
+            let memory_layers: Vec<crate::workspace::layer::MemoryLayer> =
+                match optional_env("MEMORY_LAYERS")? {
+                    Some(json_str) => {
+                        serde_json::from_str(&json_str).map_err(|e| ConfigError::InvalidValue {
+                            key: "MEMORY_LAYERS".to_string(),
+                            message: format!("must be valid JSON array of layer objects: {e}"),
+                        })?
+                    }
+                    None => crate::workspace::layer::MemoryLayer::default_for_user(&user_id),
+                };
+
+            // Validate layer names and scopes
+            for layer in &memory_layers {
+                if layer.name.trim().is_empty() {
+                    return Err(ConfigError::InvalidValue {
                         key: "MEMORY_LAYERS".to_string(),
-                        message: format!("must be valid JSON array of layer objects: {e}"),
-                    })?
+                        message: "layer name must not be empty".to_string(),
+                    });
                 }
-                None => crate::workspace::layer::MemoryLayer::default_for_user(&user_id),
-            };
+                if layer.scope.trim().is_empty() {
+                    return Err(ConfigError::InvalidValue {
+                        key: "MEMORY_LAYERS".to_string(),
+                        message: format!(
+                            "layer '{}' has an empty scope",
+                            layer.name
+                        ),
+                    });
+                }
+            }
+
+            // Check for duplicate layer names
+            {
+                let mut seen = std::collections::HashSet::new();
+                for layer in &memory_layers {
+                    if !seen.insert(&layer.name) {
+                        return Err(ConfigError::InvalidValue {
+                            key: "MEMORY_LAYERS".to_string(),
+                            message: format!("duplicate layer name '{}'", layer.name),
+                        });
+                    }
+                }
+            }
 
             Some(GatewayConfig {
                 host: optional_env("GATEWAY_HOST")?.unwrap_or_else(|| "127.0.0.1".to_string()),
