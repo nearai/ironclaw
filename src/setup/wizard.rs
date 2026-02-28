@@ -20,6 +20,7 @@ use secrecy::{ExposeSecret, SecretString};
 #[cfg(feature = "postgres")]
 use tokio_postgres::NoTls;
 
+use crate::bootstrap::ironclaw_base_dir;
 use crate::channels::wasm::{
     ChannelCapabilitiesFile, available_channel_names, install_bundled_channel,
 };
@@ -1465,9 +1466,7 @@ impl SetupWizard {
         println!();
 
         // Discover available WASM channels
-        let channels_dir = dirs::home_dir()
-            .ok_or_else(|| SetupError::Config("Could not determine home directory".into()))?
-            .join(".ironclaw/channels");
+        let channels_dir = ironclaw_base_dir().join("channels");
 
         let mut discovered_channels = discover_wasm_channels(&channels_dir).await;
         let installed_names: HashSet<String> = discovered_channels
@@ -1697,9 +1696,7 @@ impl SetupWizard {
         println!();
 
         // Check which tools are already installed
-        let tools_dir = dirs::home_dir()
-            .ok_or_else(|| SetupError::Config("Could not determine home directory".into()))?
-            .join(".ironclaw/tools");
+        let tools_dir = ironclaw_base_dir().join("tools");
 
         let installed_tools = discover_installed_tools(&tools_dir).await;
 
@@ -1739,9 +1736,7 @@ impl SetupWizard {
         let installer = crate::registry::installer::RegistryInstaller::new(
             repo_root.to_path_buf(),
             tools_dir.clone(),
-            dirs::home_dir()
-                .unwrap_or_default()
-                .join(".ironclaw/channels"),
+            ironclaw_base_dir().join("channels"),
         );
 
         let mut installed_count = 0;
@@ -2795,7 +2790,7 @@ async fn install_selected_registry_channels(
 
         let installer = crate::registry::installer::RegistryInstaller::new(
             repo_root.clone(),
-            dirs::home_dir().unwrap_or_default().join(".ironclaw/tools"),
+            ironclaw_base_dir().join("tools"),
             channels_dir.to_path_buf(),
         );
 

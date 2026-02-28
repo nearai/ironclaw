@@ -61,17 +61,42 @@ pub struct CapabilitiesFile {
     /// Used by `ironclaw config` to guide users through auth setup.
     #[serde(default)]
     pub auth: Option<AuthCapabilitySchema>,
+
+    /// Nested capabilities wrapper for channel-level JSON compatibility.
+    ///
+    /// Channel capabilities files nest tool capabilities under a `"capabilities"` key.
+    /// This allows `from_json()`/`from_bytes()` to also parse channel-level JSON;
+    /// inner fields are promoted into top-level fields by `resolve_nested()`.
+    /// Always `None` after construction via the public parse methods.
+    #[serde(default, skip_serializing)]
+    pub capabilities: Option<Box<CapabilitiesFile>>,
 }
 
 impl CapabilitiesFile {
     /// Parse from JSON string.
     pub fn from_json(json: &str) -> Result<Self, serde_json::Error> {
-        serde_json::from_str(json)
+        serde_json::from_str::<Self>(json).map(Self::resolve_nested)
     }
 
     /// Parse from JSON bytes.
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, serde_json::Error> {
-        serde_json::from_slice(bytes)
+        serde_json::from_slice::<Self>(bytes).map(Self::resolve_nested)
+    }
+
+    /// Merge nested `capabilities` wrapper into top-level fields.
+    ///
+    /// Channel-level JSON nests tool capabilities under `"capabilities"`.
+    /// This promotes the inner fields so callers can access them uniformly.
+    fn resolve_nested(mut self) -> Self {
+        if let Some(inner) = self.capabilities.take() {
+            let inner = inner.resolve_nested();
+            self.http = self.http.or(inner.http);
+            self.secrets = self.secrets.or(inner.secrets);
+            self.tool_invoke = self.tool_invoke.or(inner.tool_invoke);
+            self.workspace = self.workspace.or(inner.workspace);
+            self.auth = self.auth.or(inner.auth);
+        }
+        self
     }
 
     /// Convert to runtime Capabilities.
@@ -234,6 +259,7 @@ pub enum CredentialLocationSchema {
 
     /// Custom header.
     Header {
+        #[serde(alias = "header_name")]
         name: String,
         #[serde(default)]
         prefix: Option<String>,
@@ -753,5 +779,218 @@ mod tests {
         assert_eq!(auth.secret_name, "my_api_key");
         assert!(auth.display_name.is_none());
         assert!(auth.setup_url.is_none());
+    }
+
+    // ── Category 1: Header field name alias ─────────────────────────────
+
+    #[test]
+    fn test_header_location_with_name_field() {
+        let json = r#"{
+            "http": {
+                "allowlist": [{ "host": "discord.com" }],
+                "credentials": {
+                    "bot_token": {
+                        "secret_name": "discord_bot_token",
+                        "location": { "type": "header", "name": "Authorization", "prefix": "Bot " },
+                        "host_patterns": ["discord.com"]
+                    }
+                }
+            }
+        }"#;
+
+        let caps = CapabilitiesFile::from_json(json).unwrap();
+        let http = caps.http.unwrap();
+        let cred = http.credentials.get("bot_token").unwrap();
+        match &cred.location {
+            CredentialLocationSchema::Header { name, prefix } => {
+                assert_eq!(name, "Authorization");
+                assert_eq!(prefix, &Some("Bot ".to_string()));
+            }
+            _ => panic!("Expected Header location"),
+        }
+    }
+
+    #[test]
+    fn test_header_location_with_header_name_alias() {
+        // Uses "header_name" instead of "name" — should parse via serde alias
+        let json = r#"{
+            "http": {
+                "allowlist": [{ "host": "discord.com" }],
+                "credentials": {
+                    "bot_token": {
+                        "secret_name": "discord_bot_token",
+                        "location": { "type": "header", "header_name": "Authorization", "prefix": "Bot " },
+                        "host_patterns": ["discord.com"]
+                    }
+                }
+            }
+        }"#;
+
+        let caps = CapabilitiesFile::from_json(json).unwrap();
+        let http = caps.http.unwrap();
+        let cred = http.credentials.get("bot_token").unwrap();
+        match &cred.location {
+            CredentialLocationSchema::Header { name, prefix } => {
+                assert_eq!(name, "Authorization");
+                assert_eq!(prefix, &Some("Bot ".to_string()));
+            }
+            _ => panic!("Expected Header location"),
+        }
+    }
+
+    #[test]
+    fn test_discord_capabilities_file_parses() {
+        // Full Discord capabilities JSON — tests end-to-end parsing
+        let json = r#"{
+            "type": "channel",
+            "name": "discord",
+            "description": "Discord channel",
+            "setup": {
+                "required_secrets": [
+                    {
+                        "name": "discord_bot_token",
+                        "prompt": "Enter your Discord Bot Token",
+                        "optional": false
+                    },
+                    {
+                        "name": "discord_public_key",
+                        "prompt": "Enter your Discord Public Key",
+                        "optional": false
+                    }
+                ]
+            },
+            "capabilities": {
+                "http": {
+                    "allowlist": [{ "host": "discord.com", "path_prefix": "/api/v10" }],
+                    "credentials": {
+                        "discord_bot_token": {
+                            "secret_name": "discord_bot_token",
+                            "location": { "type": "header", "name": "Authorization", "prefix": "Bot " },
+                            "host_patterns": ["discord.com"]
+                        }
+                    }
+                }
+            },
+            "config": {
+                "require_signature_verification": true
+            }
+        }"#;
+
+        // This must not panic — parsing should succeed
+        let caps = CapabilitiesFile::from_json(json).unwrap();
+        let http = caps.http.unwrap();
+        assert!(http.credentials.contains_key("discord_bot_token"));
+    }
+
+    #[test]
+    fn test_header_location_missing_name_fails() {
+        // Neither "name" nor "header_name" provided — should fail
+        let json = r#"{
+            "http": {
+                "allowlist": [{ "host": "example.com" }],
+                "credentials": {
+                    "api_key": {
+                        "secret_name": "my_key",
+                        "location": { "type": "header", "prefix": "Key " },
+                        "host_patterns": ["example.com"]
+                    }
+                }
+            }
+        }"#;
+
+        assert!(
+            CapabilitiesFile::from_json(json).is_err(),
+            "Header without name or header_name should fail deserialization"
+        );
+    }
+
+    // ── resolve_nested tests ──────────────────────────────────────────
+
+    #[test]
+    fn test_resolve_nested_outer_takes_precedence() {
+        // Outer http should win over inner http
+        let json = r#"{
+            "http": {
+                "allowlist": [{ "host": "outer.example.com" }]
+            },
+            "capabilities": {
+                "http": {
+                    "allowlist": [{ "host": "inner.example.com" }]
+                }
+            }
+        }"#;
+
+        let caps = CapabilitiesFile::from_json(json).unwrap();
+        let http = caps.http.unwrap();
+        assert_eq!(
+            http.allowlist[0].host, "outer.example.com",
+            "Outer http should take precedence over inner"
+        );
+    }
+
+    #[test]
+    fn test_resolve_nested_doubly_nested() {
+        // capabilities.capabilities.http should resolve to top-level
+        let json = r#"{
+            "capabilities": {
+                "capabilities": {
+                    "http": {
+                        "allowlist": [{ "host": "deep.example.com" }]
+                    }
+                }
+            }
+        }"#;
+
+        let caps = CapabilitiesFile::from_json(json).unwrap();
+        let http = caps.http.unwrap();
+        assert_eq!(
+            http.allowlist[0].host, "deep.example.com",
+            "Doubly-nested capabilities should be resolved"
+        );
+    }
+
+    #[test]
+    fn test_resolve_nested_all_fields_promoted() {
+        // Inner has secrets, workspace, and auth — all should be promoted
+        let json = r#"{
+            "capabilities": {
+                "secrets": {
+                    "allowed_names": ["my_secret"]
+                },
+                "workspace": {
+                    "allowed_prefixes": ["data/"]
+                },
+                "auth": {
+                    "secret_name": "my_auth_token"
+                }
+            }
+        }"#;
+
+        let caps = CapabilitiesFile::from_json(json).unwrap();
+        assert!(caps.secrets.is_some(), "secrets should be promoted");
+        assert!(caps.workspace.is_some(), "workspace should be promoted");
+        assert!(caps.auth.is_some(), "auth should be promoted");
+
+        assert_eq!(caps.secrets.unwrap().allowed_names, vec!["my_secret"]);
+        assert_eq!(caps.workspace.unwrap().allowed_prefixes, vec!["data/"]);
+        assert_eq!(caps.auth.unwrap().secret_name, "my_auth_token");
+    }
+
+    #[test]
+    fn test_resolve_nested_empty_capabilities_noop() {
+        // Empty inner capabilities should not clobber outer http
+        let json = r#"{
+            "http": {
+                "allowlist": [{ "host": "preserved.example.com" }]
+            },
+            "capabilities": {}
+        }"#;
+
+        let caps = CapabilitiesFile::from_json(json).unwrap();
+        let http = caps.http.unwrap();
+        assert_eq!(
+            http.allowlist[0].host, "preserved.example.com",
+            "Empty inner capabilities should not clobber outer http"
+        );
     }
 }
