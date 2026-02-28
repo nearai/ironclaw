@@ -513,7 +513,7 @@ fn setup_tunnel_cloudflare() -> Result<TunnelSettings, ChannelSetupError> {
     }
 
     print_success("Cloudflare tunnel token saved.");
-    if crate::skills::gating::binary_exists("cloudflared") {
+    if cloudflared_found {
         print_info("Start the tunnel with: cloudflared tunnel --no-autoupdate run --token <token>");
         print_info("For auto-start, install cloudflared as a system service:");
         print_info("  sudo cloudflared service install <token>");
