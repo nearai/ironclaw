@@ -74,6 +74,7 @@ wasmtime::component::bindgen!({
 /// Built before each WASM execution by decrypting secrets from the store.
 /// Applied per-request by matching the URL host against `host_patterns`.
 /// WASM channels never see the raw secret values.
+#[derive(Clone)]
 struct ResolvedHostCredential {
     /// Host patterns this credential applies to (e.g., "api.slack.com").
     host_patterns: Vec<String>,
@@ -184,16 +185,31 @@ impl ChannelStoreData {
     /// return values to WASM. reqwest::Error includes the full URL in its
     /// Display output, so any error from an injected-URL request will
     /// contain the raw credential unless we scrub it.
+    ///
+    /// Scrubs raw, URL-encoded, and Base64-encoded forms of each secret
+    /// to prevent exfiltration via encoded representations in error strings.
     fn redact_credentials(&self, text: &str) -> String {
         let mut result = text.to_string();
         for (name, value) in &self.credentials {
             if !value.is_empty() {
-                result = result.replace(value, &format!("[REDACTED:{}]", name));
+                let tag = format!("[REDACTED:{}]", name);
+                result = result.replace(value, &tag);
+                // Also redact URL-encoded form (covers secrets in query strings)
+                let encoded = urlencoding::encode(value);
+                if encoded != *value {
+                    result = result.replace(encoded.as_ref(), &tag);
+                }
             }
         }
         for cred in &self.host_credentials {
             if !cred.secret_value.is_empty() {
-                result = result.replace(&cred.secret_value, "[REDACTED:host_credential]");
+                let tag = "[REDACTED:host_credential]";
+                result = result.replace(&cred.secret_value, tag);
+                // Also redact URL-encoded form (covers secrets injected as query params)
+                let encoded = urlencoding::encode(&cred.secret_value);
+                if encoded.as_ref() != cred.secret_value {
+                    result = result.replace(encoded.as_ref(), tag);
+                }
             }
         }
         result
@@ -224,28 +240,15 @@ impl ChannelStoreData {
                 headers.insert(key.clone(), value.clone());
             }
 
-            // Append query parameters to URL (insert before fragment if present)
+            // Append query parameters to URL
             if !cred.query_params.is_empty() {
-                let (base, fragment) = match url.find('#') {
-                    Some(i) => (url[..i].to_string(), Some(url[i..].to_string())),
-                    None => (url.clone(), None),
-                };
-                *url = base;
-
-                let separator = if url.contains('?') { '&' } else { '?' };
-                for (i, (name, value)) in cred.query_params.iter().enumerate() {
-                    if i == 0 {
-                        url.push(separator);
-                    } else {
-                        url.push('&');
+                if let Ok(mut parsed_url) = url::Url::parse(url) {
+                    for (name, value) in &cred.query_params {
+                        parsed_url.query_pairs_mut().append_pair(name, value);
                     }
-                    url.push_str(&urlencoding::encode(name));
-                    url.push('=');
-                    url.push_str(&urlencoding::encode(value));
-                }
-
-                if let Some(frag) = fragment {
-                    url.push_str(&frag);
+                    *url = parsed_url.to_string();
+                } else {
+                    tracing::warn!(url = %url, "Could not parse URL to inject query parameters; skipping injection");
                 }
             }
         }
@@ -1648,16 +1651,7 @@ impl WasmChannel {
                         interval.tick().await;
 
                         let wit_update_clone = clone_wit_status_update(&wit_update);
-                        // Clone host credentials for each tick (cheap Vec clone of small structs)
-                        let hc = repeater_host_credentials
-                            .iter()
-                            .map(|c| ResolvedHostCredential {
-                                host_patterns: c.host_patterns.clone(),
-                                headers: c.headers.clone(),
-                                query_params: c.query_params.clone(),
-                                secret_value: c.secret_value.clone(),
-                            })
-                            .collect();
+                        let hc = repeater_host_credentials.clone();
 
                         if let Err(e) = Self::execute_status(
                             &channel_name,
@@ -3748,6 +3742,47 @@ mod tests {
 
         let input = "some error message";
         assert_eq!(store.redact_credentials(input), input);
+    }
+
+    #[test]
+    fn test_redact_credentials_url_encoded() {
+        use super::{ChannelStoreData, ResolvedHostCredential};
+
+        // Credential with characters that get URL-encoded
+        let mut creds = std::collections::HashMap::new();
+        creds.insert("API_KEY".to_string(), "key with spaces&special=chars".to_string());
+
+        let host_creds = vec![ResolvedHostCredential {
+            host_patterns: vec!["api.example.com".to_string()],
+            headers: std::collections::HashMap::new(),
+            query_params: std::collections::HashMap::new(),
+            secret_value: "host secret+value".to_string(),
+        }];
+
+        let store = ChannelStoreData::new(
+            1024 * 1024,
+            "test",
+            ChannelCapabilities::default(),
+            creds,
+            host_creds,
+            Arc::new(PairingStore::new()),
+        );
+
+        // Error containing URL-encoded form of the credential
+        let error = "request failed: https://api.example.com?key=key%20with%20spaces%26special%3Dchars&host=host%20secret%2Bvalue";
+
+        let redacted = store.redact_credentials(error);
+
+        assert!(
+            !redacted.contains("key%20with%20spaces"),
+            "URL-encoded credential should be redacted, got: {}",
+            redacted
+        );
+        assert!(
+            !redacted.contains("host%20secret%2Bvalue"),
+            "URL-encoded host credential should be redacted, got: {}",
+            redacted
+        );
     }
 
     #[test]
