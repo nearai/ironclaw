@@ -3750,7 +3750,10 @@ mod tests {
 
         // Credential with characters that get URL-encoded
         let mut creds = std::collections::HashMap::new();
-        creds.insert("API_KEY".to_string(), "key with spaces&special=chars".to_string());
+        creds.insert(
+            "API_KEY".to_string(),
+            "key with spaces&special=chars".to_string(),
+        );
 
         let host_creds = vec![ResolvedHostCredential {
             host_patterns: vec!["api.example.com".to_string()],
