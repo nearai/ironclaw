@@ -599,16 +599,16 @@ impl SetupWizard {
             })?;
 
         if pgvector_row.is_none() {
-            return Err(SetupError::Database(
+            return Err(SetupError::Database(format!(
                 "pgvector extension not found on your PostgreSQL server.\n\n\
                  Install it:\n  \
                  macOS:   brew install pgvector\n  \
-                 Ubuntu:  apt install postgresql-16-pgvector\n  \
-                 Docker:  use the pgvector/pgvector:pg16 image\n  \
+                 Ubuntu:  apt install postgresql-{0}-pgvector\n  \
+                 Docker:  use the pgvector/pgvector:pg{0} image\n  \
                  Source:  https://github.com/pgvector/pgvector#installation\n\n\
-                 Then restart PostgreSQL and re-run: ironclaw onboard"
-                    .to_string(),
-            ));
+                 Then restart PostgreSQL and re-run: ironclaw onboard",
+                major_version
+            )));
         }
 
         self.db_pool = Some(pool);
