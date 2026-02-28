@@ -1083,12 +1083,18 @@ async fn memory_write_handler(
         "Workspace not available".to_string(),
     ))?;
 
-    // Route through write_to_layer when a layer is specified
+    // Route through layer-aware methods when a layer is specified
     if let Some(ref layer_name) = req.layer {
-        let result = workspace
-            .write_to_layer(layer_name, &req.path, &req.content)
-            .await
-            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+        let result = if req.append {
+            workspace
+                .append_to_layer(layer_name, &req.path, &req.content)
+                .await
+        } else {
+            workspace
+                .write_to_layer(layer_name, &req.path, &req.content)
+                .await
+        }
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
         return Ok(Json(MemoryWriteResponse {
             path: req.path,
             status: "written",

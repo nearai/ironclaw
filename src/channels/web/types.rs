@@ -264,6 +264,10 @@ pub struct MemoryWriteRequest {
     /// Optional layer to write to. When present, uses `write_to_layer()`
     /// which enables privacy classification and redirect.
     pub layer: Option<String>,
+    /// When true and a layer is specified, appends to existing content
+    /// instead of replacing it.
+    #[serde(default)]
+    pub append: bool,
 }
 
 #[derive(Debug, Serialize)]
