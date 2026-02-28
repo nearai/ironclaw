@@ -1109,12 +1109,14 @@ impl WasmChannel {
         content: &str,
         thread_id: Option<&str>,
         metadata_json: &str,
+        attachments: &[String],
     ) -> Result<(), WasmChannelError> {
         tracing::info!(
             channel = %self.name,
             message_id = %message_id,
             content_len = content.len(),
             thread_id = ?thread_id,
+            attachment_count = attachments.len(),
             "call_on_respond invoked"
         );
 
@@ -1149,12 +1151,21 @@ impl WasmChannel {
         let content = content.to_string();
         let thread_id = thread_id.map(|s| s.to_string());
         let metadata_json = metadata_json.to_string();
+        let attachments = attachments.to_vec();
 
         // Execute in blocking task with timeout
         tracing::info!(channel = %channel_name, "Starting on_respond WASM execution");
 
         let result = tokio::time::timeout(timeout, async move {
             tokio::task::spawn_blocking(move || {
+                // Read attachment files from disk before entering WASM
+                let wit_attachments = read_attachments(&attachments).map_err(|e| {
+                    WasmChannelError::CallbackFailed {
+                        name: prepared.name.clone(),
+                        reason: e,
+                    }
+                })?;
+
                 tracing::info!("Creating WASM store for on_respond");
                 let mut store = Self::create_store(
                     &runtime,
@@ -1173,6 +1184,7 @@ impl WasmChannel {
                     content: content.clone(),
                     thread_id,
                     metadata_json,
+                    attachments: wit_attachments,
                 };
 
                 // Truncate at char boundary for logging (avoid panic on multi-byte UTF-8)
@@ -1232,6 +1244,120 @@ impl WasmChannel {
             Err(_) => Err(WasmChannelError::Timeout {
                 name: channel_name,
                 callback: "on_respond".to_string(),
+            }),
+        }
+    }
+
+    /// Execute the on_broadcast callback.
+    ///
+    /// Called to send a proactive message to a user without a prior incoming message.
+    pub async fn call_on_broadcast(
+        &self,
+        user_id: &str,
+        content: &str,
+        thread_id: Option<&str>,
+        attachments: &[String],
+    ) -> Result<(), WasmChannelError> {
+        tracing::info!(
+            channel = %self.name,
+            user_id = %user_id,
+            content_len = content.len(),
+            attachment_count = attachments.len(),
+            "call_on_broadcast invoked"
+        );
+
+        // If no WASM bytes, do nothing (for testing)
+        if self.prepared.component().is_none() {
+            tracing::debug!(
+                channel = %self.name,
+                "WASM channel on_broadcast called (no WASM module)"
+            );
+            return Ok(());
+        }
+
+        let runtime = Arc::clone(&self.runtime);
+        let prepared = Arc::clone(&self.prepared);
+        let capabilities = self.capabilities.clone();
+        let timeout = self.runtime.config().callback_timeout;
+        let channel_name = self.name.clone();
+        let credentials = self.get_credentials().await;
+        let pairing_store = self.pairing_store.clone();
+
+        let user_id = user_id.to_string();
+        let content = content.to_string();
+        let thread_id = thread_id.map(|s| s.to_string());
+        let attachments = attachments.to_vec();
+
+        let result = tokio::time::timeout(timeout, async move {
+            tokio::task::spawn_blocking(move || {
+                // Read attachment files from disk
+                let wit_attachments = read_attachments(&attachments).map_err(|e| {
+                    WasmChannelError::CallbackFailed {
+                        name: prepared.name.clone(),
+                        reason: e,
+                    }
+                })?;
+
+                let mut store = Self::create_store(
+                    &runtime,
+                    &prepared,
+                    &capabilities,
+                    credentials,
+                    pairing_store,
+                )?;
+
+                let instance = Self::instantiate_component(&runtime, &prepared, &mut store)?;
+
+                let wit_response = wit_channel::AgentResponse {
+                    message_id: String::new(),
+                    content: content.clone(),
+                    thread_id,
+                    metadata_json: String::new(),
+                    attachments: wit_attachments,
+                };
+
+                let channel_iface = instance.near_agent_channel();
+                let wasm_result = channel_iface
+                    .call_on_broadcast(&mut store, &user_id, &wit_response)
+                    .map_err(|e| {
+                        tracing::error!(error = %e, "WASM on_broadcast call failed");
+                        Self::map_wasm_error(e, &prepared.name, prepared.limits.fuel)
+                    })?;
+
+                if let Err(ref err_msg) = wasm_result {
+                    tracing::error!(error = %err_msg, "WASM on_broadcast returned error");
+                    return Err(WasmChannelError::CallbackFailed {
+                        name: prepared.name.clone(),
+                        reason: err_msg.clone(),
+                    });
+                }
+
+                let host_state =
+                    Self::extract_host_state(&mut store, &prepared.name, &capabilities);
+                tracing::info!("on_broadcast WASM execution completed successfully");
+                Ok(((), host_state))
+            })
+            .await
+            .map_err(|e| WasmChannelError::ExecutionPanicked {
+                name: channel_name.clone(),
+                reason: e.to_string(),
+            })?
+        })
+        .await;
+
+        let channel_name = self.name.clone();
+        match result {
+            Ok(Ok(((), _host_state))) => {
+                tracing::debug!(
+                    channel = %channel_name,
+                    "WASM channel on_broadcast completed"
+                );
+                Ok(())
+            }
+            Ok(Err(e)) => Err(e),
+            Err(_) => Err(WasmChannelError::Timeout {
+                name: channel_name,
+                callback: "on_broadcast".to_string(),
             }),
         }
     }
@@ -1508,7 +1634,7 @@ impl WasmChannel {
 
                 let metadata_json = serde_json::to_string(metadata).unwrap_or_default();
                 if let Err(e) = self
-                    .call_on_respond(uuid::Uuid::new_v4(), &prompt, None, &metadata_json)
+                    .call_on_respond(uuid::Uuid::new_v4(), &prompt, None, &metadata_json, &[])
                     .await
                 {
                     tracing::warn!(
@@ -1987,6 +2113,7 @@ impl Channel for WasmChannel {
             &response.content,
             response.thread_id.as_deref(),
             &metadata_json,
+            &response.attachments,
         )
         .await
         .map_err(|e| ChannelError::SendFailed {
@@ -2004,6 +2131,25 @@ impl Channel for WasmChannel {
     ) -> Result<(), ChannelError> {
         // Delegate to the typing indicator implementation
         self.handle_status_update(status, metadata).await
+    }
+
+    async fn broadcast(
+        &self,
+        user_id: &str,
+        response: OutgoingResponse,
+    ) -> Result<(), ChannelError> {
+        self.cancel_typing_task().await;
+        self.call_on_broadcast(
+            user_id,
+            &response.content,
+            response.thread_id.as_deref(),
+            &response.attachments,
+        )
+        .await
+        .map_err(|e| ChannelError::SendFailed {
+            name: self.name.clone(),
+            reason: e.to_string(),
+        })
     }
 
     async fn health_check(&self) -> Result<(), ChannelError> {
@@ -2107,6 +2253,14 @@ impl Channel for SharedWasmChannel {
         metadata: &serde_json::Value,
     ) -> Result<(), ChannelError> {
         self.inner.send_status(status, metadata).await
+    }
+
+    async fn broadcast(
+        &self,
+        user_id: &str,
+        response: OutgoingResponse,
+    ) -> Result<(), ChannelError> {
+        self.inner.broadcast(user_id, response).await
     }
 
     async fn health_check(&self) -> Result<(), ChannelError> {
@@ -2350,6 +2504,95 @@ impl HttpResponse {
             body: message.as_bytes().to_vec(),
         }
     }
+}
+
+// ============================================================================
+// Attachment Helpers
+// ============================================================================
+
+/// Maximum total attachment size (50 MB).
+const MAX_TOTAL_ATTACHMENT_BYTES: u64 = 50 * 1024 * 1024;
+
+/// Detect MIME type from file extension.
+fn mime_from_extension(path: &str) -> &'static str {
+    let ext = path.rsplit('.').next().unwrap_or("").to_ascii_lowercase();
+    match ext.as_str() {
+        "png" => "image/png",
+        "jpg" | "jpeg" => "image/jpeg",
+        "gif" => "image/gif",
+        "webp" => "image/webp",
+        "svg" => "image/svg+xml",
+        "bmp" => "image/bmp",
+        "ico" => "image/x-icon",
+        "tiff" | "tif" => "image/tiff",
+        "pdf" => "application/pdf",
+        "mp4" => "video/mp4",
+        "webm" => "video/webm",
+        "avi" => "video/x-msvideo",
+        "mov" => "video/quicktime",
+        "mp3" => "audio/mpeg",
+        "ogg" => "audio/ogg",
+        "wav" => "audio/wav",
+        "flac" => "audio/flac",
+        "zip" => "application/zip",
+        "gz" | "gzip" => "application/gzip",
+        "tar" => "application/x-tar",
+        "json" => "application/json",
+        "xml" => "application/xml",
+        "txt" => "text/plain",
+        "html" | "htm" => "text/html",
+        "css" => "text/css",
+        "js" => "application/javascript",
+        "csv" => "text/csv",
+        "doc" => "application/msword",
+        "docx" => "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        "xls" => "application/vnd.ms-excel",
+        "xlsx" => "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        "ppt" => "application/vnd.ms-powerpoint",
+        "pptx" => "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+        _ => "application/octet-stream",
+    }
+}
+
+/// Read attachment files from disk and build WIT attachment records.
+///
+/// Validates total size against `MAX_TOTAL_ATTACHMENT_BYTES`.
+fn read_attachments(paths: &[String]) -> Result<Vec<wit_channel::Attachment>, String> {
+    if paths.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let mut attachments = Vec::with_capacity(paths.len());
+    let mut total_bytes: u64 = 0;
+
+    for path in paths {
+        let data = std::fs::read(path)
+            .map_err(|e| format!("Failed to read attachment '{}': {}", path, e))?;
+
+        total_bytes += data.len() as u64;
+        if total_bytes > MAX_TOTAL_ATTACHMENT_BYTES {
+            return Err(format!(
+                "Total attachment size exceeds {} MB limit",
+                MAX_TOTAL_ATTACHMENT_BYTES / (1024 * 1024)
+            ));
+        }
+
+        let filename = std::path::Path::new(path)
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("file")
+            .to_string();
+
+        let mime_type = mime_from_extension(path).to_string();
+
+        attachments.push(wit_channel::Attachment {
+            filename,
+            mime_type,
+            data,
+        });
+    }
+
+    Ok(attachments)
 }
 
 #[cfg(test)]
@@ -3413,5 +3656,26 @@ mod tests {
         .expect("spawn_blocking panicked");
         // 404 because "000" is not a valid bot token
         assert_eq!(result, 404);
+    }
+
+    #[test]
+    fn test_mime_from_extension() {
+        use super::mime_from_extension;
+        assert_eq!(mime_from_extension("screenshot.png"), "image/png");
+        assert_eq!(mime_from_extension("photo.JPG"), "image/jpeg");
+        assert_eq!(mime_from_extension("photo.jpeg"), "image/jpeg");
+        assert_eq!(mime_from_extension("animation.gif"), "image/gif");
+        assert_eq!(mime_from_extension("doc.pdf"), "application/pdf");
+        assert_eq!(mime_from_extension("video.mp4"), "video/mp4");
+        assert_eq!(mime_from_extension("data.csv"), "text/csv");
+        assert_eq!(
+            mime_from_extension("unknown.xyz"),
+            "application/octet-stream"
+        );
+        assert_eq!(mime_from_extension("noext"), "application/octet-stream");
+        assert_eq!(
+            mime_from_extension("/home/user/.ironclaw/screenshot.png"),
+            "image/png"
+        );
     }
 }

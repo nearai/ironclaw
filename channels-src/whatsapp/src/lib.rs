@@ -476,6 +476,10 @@ impl Guest for WhatsAppChannel {
 
     fn on_status(_update: StatusUpdate) {}
 
+    fn on_broadcast(_user_id: String, _response: AgentResponse) -> Result<(), String> {
+        Ok(()) // Not yet implemented
+    }
+
     fn on_shutdown() {
         channel_host::log(
             channel_host::LogLevel::Info,

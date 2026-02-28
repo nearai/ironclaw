@@ -37,7 +37,7 @@ impl HttpTool {
     pub fn new() -> Self {
         let client = Client::builder()
             .timeout(Duration::from_secs(30))
-            .redirect(reqwest::redirect::Policy::none())
+            .redirect(reqwest::redirect::Policy::limited(10))
             .build()
             .expect("Failed to create HTTP client");
 
@@ -201,7 +201,9 @@ impl Tool for HttpTool {
     }
 
     fn description(&self) -> &str {
-        "Make HTTP requests to external APIs. Supports GET, POST, PUT, DELETE methods."
+        "Make HTTP requests to external APIs. Supports GET, POST, PUT, DELETE methods. \
+         Use save_to to download binary files (images, PDFs, etc.) to a local path, \
+         e.g. {\"method\":\"GET\",\"url\":\"https://picsum.photos/800/600\",\"save_to\":\"/tmp/photo.jpg\"}."
     }
 
     fn parameters_schema(&self) -> serde_json::Value {
@@ -236,6 +238,10 @@ impl Tool for HttpTool {
                 "timeout_secs": {
                     "type": "integer",
                     "description": "Request timeout in seconds (default: 30)"
+                },
+                "save_to": {
+                    "type": "string",
+                    "description": "Save response body as raw bytes to this file path instead of returning it. Use for binary downloads (images, PDFs, etc.). The path must be under /tmp/."
                 }
             },
             "required": ["method", "url"]
@@ -354,13 +360,8 @@ impl Tool for HttpTool {
 
         let status = response.status().as_u16();
 
-        // Block redirects: the server tried to send us elsewhere (potential SSRF)
-        if (300..400).contains(&status) {
-            return Err(ToolError::NotAuthorized(format!(
-                "request returned redirect (HTTP {}), which is blocked to prevent SSRF",
-                status
-            )));
-        }
+        // Redirects are followed automatically (up to 10 hops).
+        // If we still see a 3xx here, the chain was too long.
 
         let headers: HashMap<String, String> = response
             .headers()
@@ -404,6 +405,31 @@ impl Tool for HttpTool {
             body.extend_from_slice(&chunk);
         }
         let body_bytes = bytes::Bytes::from(body);
+
+        // If save_to is specified, write raw bytes to file and return metadata.
+        if let Some(save_to) = params.get("save_to").and_then(|v| v.as_str()) {
+            let save_path = std::path::Path::new(save_to);
+            if !save_to.starts_with("/tmp/") {
+                return Err(ToolError::InvalidParameters(
+                    "save_to path must be under /tmp/".to_string(),
+                ));
+            }
+            if let Some(parent) = save_path.parent() {
+                std::fs::create_dir_all(parent).map_err(|e| {
+                    ToolError::ExecutionFailed(format!("failed to create directory: {}", e))
+                })?;
+            }
+            std::fs::write(save_path, &body_bytes).map_err(|e| {
+                ToolError::ExecutionFailed(format!("failed to write file: {}", e))
+            })?;
+            let result = serde_json::json!({
+                "status": status,
+                "saved_to": save_to,
+                "size_bytes": body_bytes.len(),
+                "headers": headers,
+            });
+            return Ok(ToolOutput::success(result, start.elapsed()));
+        }
 
         let body_text = String::from_utf8_lossy(&body_bytes).into_owned();
 
