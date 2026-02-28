@@ -17,7 +17,7 @@ use crate::config::DatabaseConfig;
 use crate::context::{ActionRecord, JobContext, JobState};
 use crate::db::{
     ConversationStore, Database, JobStore, RoutineStore, SandboxStore, SettingsStore,
-    ToolFailureStore, WorkspaceStore,
+    ToolFailureStore, WebhookDedupStore, WorkspaceStore,
 };
 use crate::error::{DatabaseError, WorkspaceError};
 use crate::history::{
@@ -659,5 +659,59 @@ impl WorkspaceStore for PgBackend {
         self.repo
             .hybrid_search(user_id, agent_id, query, embedding, config)
             .await
+    }
+}
+
+// ==================== WebhookDedupStore ====================
+
+#[async_trait]
+impl WebhookDedupStore for PgBackend {
+    async fn is_webhook_message_processed(
+        &self,
+        channel: &str,
+        external_message_id: &str,
+    ) -> Result<bool, DatabaseError> {
+        let client = self.store.pool().get().await?;
+        let stmt = client
+            .prepare(
+                "SELECT 1 FROM webhook_message_dedup \
+                 WHERE channel = $1 AND external_message_id = $2",
+            )
+            .await?;
+
+        let rows = client
+            .query(&stmt, &[&channel, &external_message_id])
+            .await?;
+        Ok(!rows.is_empty())
+    }
+
+    async fn record_webhook_message_processed(
+        &self,
+        channel: &str,
+        external_message_id: &str,
+    ) -> Result<(), DatabaseError> {
+        let client = self.store.pool().get().await?;
+        let stmt = client
+            .prepare(
+                "INSERT INTO webhook_message_dedup (channel, external_message_id) \
+                 VALUES ($1, $2) \
+                 ON CONFLICT (channel, external_message_id) DO NOTHING",
+            )
+            .await?;
+
+        client.execute(&stmt, &[&channel, &external_message_id]).await?;
+        Ok(())
+    }
+
+    async fn cleanup_old_webhook_dedup_records(&self) -> Result<u64, DatabaseError> {
+        let client = self.store.pool().get().await?;
+        let stmt = client
+            .prepare(
+                "DELETE FROM webhook_message_dedup \
+                 WHERE processed_at < NOW() - INTERVAL '7 days'",
+            )
+            .await?;
+        let rows_deleted = client.execute(&stmt, &[]).await?;
+        Ok(rows_deleted)
     }
 }

@@ -652,9 +652,10 @@ fn handle_message(
         return;
     }
 
-    // Mark message as read (blue checkmarks) before processing
-    // This gives immediate feedback to the sender that we received their message
-    mark_message_as_read(phone_number_id, &message.id);
+    // Note: mark_as_read is now handled by the host after DB persistence.
+    // The host will call the WhatsApp API directly after receiving the ACK
+    // from the agent loop. This ensures the webhook returns 200 OK only after
+    // the message is durably stored.
 
     // Build metadata for response routing
     // This is critical - the response handler uses this to know where to send
@@ -683,73 +684,6 @@ fn handle_message(
             message.from, phone_number_id
         ),
     );
-}
-
-// ============================================================================
-// Utilities
-// ============================================================================
-
-/// Mark a WhatsApp message as read (blue checkmarks).
-///
-/// Calls the WhatsApp Cloud API to mark a message as read.
-/// This gives the sender visual confirmation that their message was received.
-fn mark_message_as_read(phone_number_id: &str, message_id: &str) {
-    // Read api_version from workspace (set during on_start), fallback to default
-    let api_version = channel_host::workspace_read("channels/whatsapp/api_version")
-        .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| "v18.0".to_string());
-
-    let api_url = format!(
-        "https://graph.facebook.com/{}/{}/messages",
-        api_version, phone_number_id
-    );
-
-    let payload = serde_json::json!({
-        "messaging_product": "whatsapp",
-        "status": "read",
-        "message_id": message_id
-    });
-
-    let payload_bytes = match serde_json::to_vec(&payload) {
-        Ok(b) => b,
-        Err(e) => {
-            channel_host::log(
-                channel_host::LogLevel::Warn,
-                &format!("Failed to serialize mark_as_read payload: {}", e),
-            );
-            return;
-        }
-    };
-
-    let headers = serde_json::json!({
-        "Content-Type": "application/json",
-        "Authorization": "Bearer {WHATSAPP_ACCESS_TOKEN}"
-    });
-
-    match channel_host::http_request("POST", &api_url, &headers.to_string(), Some(&payload_bytes), None) {
-        Ok(response) => {
-            if response.status >= 200 && response.status < 300 {
-                channel_host::log(
-                    channel_host::LogLevel::Debug,
-                    &format!("Marked message {} as read", message_id),
-                );
-            } else {
-                channel_host::log(
-                    channel_host::LogLevel::Warn,
-                    &format!(
-                        "Failed to mark message as read: HTTP {}",
-                        response.status
-                    ),
-                );
-            }
-        }
-        Err(e) => {
-            channel_host::log(
-                channel_host::LogLevel::Warn,
-                &format!("Failed to mark message as read: {}", e),
-            );
-        }
-    }
 }
 
 // ============================================================================

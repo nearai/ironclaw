@@ -2016,10 +2016,7 @@ impl ExtensionManager {
 
             // Register HMAC secret if declared in capabilities (WhatsApp/Slack style)
             if let Some(ref hmac_name) = hmac_secret_name
-                && let Ok(hmac_secret) = self
-                    .secrets
-                    .get_decrypted(&self.user_id, hmac_name)
-                    .await
+                && let Ok(hmac_secret) = self.secrets.get_decrypted(&self.user_id, hmac_name).await
             {
                 wasm_channel_router
                     .register_hmac_secret(&channel_name, hmac_secret.expose().to_string())
@@ -2207,10 +2204,7 @@ impl ExtensionManager {
             }
         };
         if let Some(ref hmac_name) = hmac_secret_name
-            && let Ok(hmac_secret) = self
-                .secrets
-                .get_decrypted(&self.user_id, hmac_name)
-                .await
+            && let Ok(hmac_secret) = self.secrets.get_decrypted(&self.user_id, hmac_name).await
         {
             router
                 .register_hmac_secret(name, hmac_secret.expose().to_string())

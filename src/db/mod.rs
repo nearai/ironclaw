@@ -331,6 +331,37 @@ pub trait SettingsStore: Send + Sync {
     async fn has_settings(&self, user_id: &str) -> Result<bool, DatabaseError>;
 }
 
+/// Webhook message deduplication store.
+///
+/// Tracks processed webhook messages to prevent duplicate processing
+/// when platforms like WhatsApp retry after a 500 response.
+#[async_trait]
+pub trait WebhookDedupStore: Send + Sync {
+    /// Check if a message has already been processed.
+    ///
+    /// Returns `true` if the message was already processed (duplicate),
+    /// `false` if this is a new message.
+    async fn is_webhook_message_processed(
+        &self,
+        channel: &str,
+        external_message_id: &str,
+    ) -> Result<bool, DatabaseError>;
+
+    /// Record that a message has been successfully processed.
+    ///
+    /// Should be called AFTER the message is fully processed (persisted to DB).
+    async fn record_webhook_message_processed(
+        &self,
+        channel: &str,
+        external_message_id: &str,
+    ) -> Result<(), DatabaseError>;
+
+    /// Clean up old dedup records (older than 7 days).
+    ///
+    /// Called periodically to keep the table small.
+    async fn cleanup_old_webhook_dedup_records(&self) -> Result<u64, DatabaseError>;
+}
+
 #[async_trait]
 pub trait WorkspaceStore: Send + Sync {
     async fn get_document_by_path(
@@ -411,6 +442,7 @@ pub trait Database:
     + ToolFailureStore
     + SettingsStore
     + WorkspaceStore
+    + WebhookDedupStore
     + Send
     + Sync
 {

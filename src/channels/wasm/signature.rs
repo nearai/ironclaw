@@ -91,7 +91,10 @@ pub fn verify_hmac_sha256(secret: &str, signature_header: &str, body: &[u8]) -> 
     let computed_sig = result.into_bytes();
 
     // Constant-time comparison to prevent timing attacks
-    computed_sig.as_slice().ct_eq(expected_sig.as_slice()).into()
+    computed_sig
+        .as_slice()
+        .ct_eq(expected_sig.as_slice())
+        .into()
 }
 
 #[cfg(test)]

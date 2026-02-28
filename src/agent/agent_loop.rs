@@ -73,6 +73,10 @@ pub struct AgentDeps {
     pub hooks: Arc<HookRegistry>,
     /// Cost enforcement guardrails (daily budget, hourly rate limits).
     pub cost_guard: Arc<crate::agent::cost_guard::CostGuard>,
+    /// WASM channel router for webhook ACK signaling.
+    /// When set, the agent will signal ACK after persisting messages,
+    /// allowing webhooks to wait for persistence before returning 200 OK.
+    pub wasm_router: Option<Arc<crate::channels::wasm::router::WasmChannelRouter>>,
 }
 
 /// The main agent that coordinates all components.

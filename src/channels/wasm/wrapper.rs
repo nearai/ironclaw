@@ -1225,6 +1225,170 @@ impl WasmChannel {
         }
     }
 
+    /// Execute the on_http_request callback and return emitted messages separately.
+    ///
+    /// Like `call_on_http_request`, but returns emitted messages to the caller
+    /// instead of processing them immediately. This allows the webhook handler
+    /// to register ACK keys before messages are sent to the agent.
+    ///
+    /// The caller should:
+    /// 1. Register ACK keys for each emitted message
+    /// 2. Call `process_emitted_messages` to send messages to the agent
+    /// 3. Wait for ACKs before returning the HTTP response
+    pub async fn call_on_http_request_with_messages(
+        &self,
+        method: &str,
+        path: &str,
+        headers: &HashMap<String, String>,
+        query: &HashMap<String, String>,
+        body: &[u8],
+        secret_validated: bool,
+    ) -> Result<HttpResponseWithMessages, WasmChannelError> {
+        tracing::info!(
+            channel = %self.name,
+            method = method,
+            path = path,
+            body_len = body.len(),
+            secret_validated = secret_validated,
+            "call_on_http_request_with_messages invoked"
+        );
+
+        // If no WASM bytes, return empty response (for testing)
+        if self.prepared.component().is_none() {
+            tracing::debug!(
+                channel = %self.name,
+                method = method,
+                path = path,
+                "WASM channel on_http_request called (no WASM module)"
+            );
+            return Ok(HttpResponseWithMessages {
+                response: HttpResponse::ok(),
+                emitted_messages: Vec::new(),
+            });
+        }
+
+        let runtime = Arc::clone(&self.runtime);
+        let prepared = Arc::clone(&self.prepared);
+        let capabilities = Self::inject_workspace_reader(&self.capabilities, &self.workspace_store);
+        let timeout = self.runtime.config().callback_timeout;
+        let credentials = self.get_credentials().await;
+        let pairing_store = self.pairing_store.clone();
+        let workspace_store = self.workspace_store.clone();
+
+        // Pre-resolve host credentials for automatic injection (before spawn_blocking)
+        let host_credentials = resolve_channel_host_credentials(
+            &self.capabilities,
+            self.secrets_store.as_deref(),
+        )
+        .await;
+
+        // Prepare request data
+        let method = method.to_string();
+        let path = path.to_string();
+        let headers_json = serde_json::to_string(&headers).unwrap_or_default();
+        let query_json = serde_json::to_string(&query).unwrap_or_default();
+        let body = body.to_vec();
+
+        let channel_name = self.name.clone();
+
+        // Execute in blocking task with timeout
+        let result = tokio::time::timeout(timeout, async move {
+            tokio::task::spawn_blocking(move || {
+                let mut store = Self::create_store(
+                    &runtime,
+                    &prepared,
+                    &capabilities,
+                    credentials,
+                    host_credentials,
+                    pairing_store,
+                )?;
+                let instance = Self::instantiate_component(&runtime, &prepared, &mut store)?;
+
+                // Build the WIT request type
+                let wit_request = wit_channel::IncomingHttpRequest {
+                    method,
+                    path,
+                    headers_json,
+                    query_json,
+                    body,
+                    secret_validated,
+                };
+
+                // Call on_http_request using the generated typed interface
+                let channel_iface = instance.near_agent_channel();
+                let wit_response = channel_iface
+                    .call_on_http_request(&mut store, &wit_request)
+                    .map_err(|e| Self::map_wasm_error(e, &prepared.name, prepared.limits.fuel))?;
+
+                let response = convert_http_response(wit_response);
+                let mut host_state =
+                    Self::extract_host_state(&mut store, &prepared.name, &capabilities);
+
+                // Commit pending workspace writes to the persistent store
+                let pending_writes = host_state.take_pending_writes();
+                workspace_store.commit_writes(&pending_writes);
+
+                // Extract emitted messages (but don't process them)
+                let emitted_messages = host_state.take_emitted_messages();
+
+                Ok((response, emitted_messages, host_state))
+            })
+            .await
+            .map_err(|e| WasmChannelError::ExecutionPanicked {
+                name: channel_name.clone(),
+                reason: e.to_string(),
+            })?
+        })
+        .await;
+
+        let channel_name = self.name.clone();
+        match result {
+            Ok(Ok((response, emitted_messages, mut host_state))) => {
+                // Surface WASM guest logs
+                for entry in host_state.take_logs() {
+                    match entry.level {
+                        crate::tools::wasm::LogLevel::Error => {
+                            tracing::error!(channel = %self.name, "{}", entry.message);
+                        }
+                        crate::tools::wasm::LogLevel::Warn => {
+                            tracing::warn!(channel = %self.name, "{}", entry.message);
+                        }
+                        _ => {
+                            tracing::debug!(channel = %self.name, "{}", entry.message);
+                        }
+                    }
+                }
+
+                tracing::debug!(
+                    channel = %channel_name,
+                    status = response.status,
+                    emitted_count = emitted_messages.len(),
+                    "WASM channel on_http_request_with_messages completed"
+                );
+
+                Ok(HttpResponseWithMessages {
+                    response,
+                    emitted_messages,
+                })
+            }
+            Ok(Err(e)) => Err(e),
+            Err(_) => Err(WasmChannelError::Timeout {
+                name: channel_name,
+                callback: "on_http_request".to_string(),
+            }),
+        }
+    }
+
+    /// Process emitted messages and send them to the agent.
+    ///
+    /// Call this after registering ACK keys for the messages.
+    pub async fn send_emitted_messages(
+        &self,
+        messages: Vec<EmittedMessage>,
+    ) -> Result<(), WasmChannelError> {
+        self.process_emitted_messages(messages).await
+    }
+
     /// Execute the on_poll callback.
     ///
     /// Called periodically if polling is configured.
@@ -2736,6 +2900,18 @@ async fn resolve_channel_host_credentials(
     }
 
     resolved
+}
+
+/// HTTP response from a WASM channel callback with emitted messages.
+///
+/// Used for webhook handlers that need to coordinate the HTTP response
+/// with message persistence (e.g., waiting for ACK before returning 200).
+#[derive(Debug)]
+pub struct HttpResponseWithMessages {
+    /// The HTTP response to return to the webhook caller.
+    pub response: HttpResponse,
+    /// Messages emitted by the WASM callback.
+    pub emitted_messages: Vec<EmittedMessage>,
 }
 
 #[cfg(test)]

@@ -667,6 +667,9 @@ async fn async_main() -> anyhow::Result<()> {
         skills_config: config.skills.clone(),
         hooks: components.hooks,
         cost_guard: components.cost_guard,
+        wasm_router: wasm_channel_runtime_state
+            .as_ref()
+            .map(|c| Arc::clone(&c.2)),
     };
 
     let agent = Agent::new(
@@ -1063,6 +1066,27 @@ async fn setup_wasm_channels(
                     );
                 }
             }
+
+            // Register access token for mark_as_read (WhatsApp-style channels)
+            // The host needs this to call the API directly after DB persistence
+            let access_token_name = format!("{}_access_token", channel_name);
+            if let Ok(token_secret) = secrets.get_decrypted("default", &access_token_name).await {
+                wasm_router
+                    .register_access_token(&channel_name, token_secret.expose().to_string())
+                    .await;
+                tracing::info!(
+                    channel = %channel_name,
+                    "Registered access token for host-side mark_as_read"
+                );
+            }
+
+            // Register API version for channels that need it
+            let api_version_name = format!("{}_api_version", channel_name);
+            if let Ok(version_secret) = secrets.get_decrypted("default", &api_version_name).await {
+                wasm_router
+                    .register_api_version(&channel_name, version_secret.expose().to_string())
+                    .await;
+            }
         }
 
         channels.push((channel_name, Box::new(SharedWasmChannel::new(channel_arc))));
@@ -1078,6 +1102,7 @@ async fn setup_wasm_channels(
         Some(create_wasm_channel_router(
             Arc::clone(&wasm_router),
             extension_manager.map(Arc::clone),
+            database.map(|d| Arc::clone(d)),
         ))
     };
 
