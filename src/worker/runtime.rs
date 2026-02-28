@@ -165,11 +165,13 @@ IMPORTANT - Completion behavior:
         match result {
             Ok(Ok(output)) => {
                 tracing::info!("Worker completed job {} successfully", self.config.job_id);
+                // Only post status in the "result" event; the output text was
+                // already sent as a "message" event to avoid duplication in the UI.
                 self.post_event(
                     "result",
                     serde_json::json!({
                         "success": true,
-                        "message": truncate(&output, 2000),
+                        "status": "completed",
                     }),
                 )
                 .await;
@@ -183,10 +185,13 @@ IMPORTANT - Completion behavior:
             }
             Ok(Err(e)) => {
                 tracing::error!("Worker failed for job {}: {}", self.config.job_id, e);
+                // Error messages are NOT sent via "message" events, so include
+                // them in the "result" event for visibility.
                 self.post_event(
                     "result",
                     serde_json::json!({
                         "success": false,
+                        "status": "failed",
                         "message": format!("Execution failed: {}", e),
                     }),
                 )
@@ -205,6 +210,7 @@ IMPORTANT - Completion behavior:
                     "result",
                     serde_json::json!({
                         "success": false,
+                        "status": "timed_out",
                         "message": "Execution timed out",
                     }),
                 )

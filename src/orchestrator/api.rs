@@ -236,7 +236,25 @@ async fn report_complete(
         );
     }
 
-    // Store the result and clean up the container
+    // Persist completion status to the database
+    if let Some(ref store) = state.store {
+        let status = if report.success { "completed" } else { "failed" };
+        if let Err(e) = store
+            .update_sandbox_job_status(
+                job_id,
+                status,
+                Some(report.success),
+                report.message.as_deref(),
+                None,
+                Some(chrono::Utc::now()),
+            )
+            .await
+        {
+            tracing::error!(job_id = %job_id, "Failed to persist sandbox job status: {}", e);
+        }
+    }
+
+    // Store the result in memory and clean up the container
     let result = crate::orchestrator::job_manager::CompletionResult {
         success: report.success,
         message: report.message.clone(),
