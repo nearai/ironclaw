@@ -282,6 +282,12 @@ async fn async_main() -> anyhow::Result<()> {
                 std::time::Duration::from_secs(60),
             ));
 
+            // Wire the executor into the shared slot so WASM tools registered
+            // during build_all() can resolve it lazily at execution time.
+            components
+                .tools
+                .set_tool_executor(Arc::clone(&tool_executor));
+
             // Start the orchestrator internal API in the background
             let orchestrator_state = OrchestratorState {
                 llm: components.llm.clone(),

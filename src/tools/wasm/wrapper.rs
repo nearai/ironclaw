@@ -504,8 +504,11 @@ pub struct WasmToolWrapper {
     secrets_store: Option<Arc<dyn SecretsStore + Send + Sync>>,
     /// OAuth refresh configuration for auto-refreshing expired tokens.
     oauth_refresh: Option<OAuthRefreshConfig>,
-    /// Tool executor for programmatic tool calling from within WASM tools.
+    /// Direct tool executor reference (for tests that wire it explicitly).
     tool_executor: Option<Arc<ToolExecutor>>,
+    /// Shared slot for lazy executor resolution (production path).
+    /// Reads happen inside `spawn_blocking`, so this uses `std::sync::RwLock`.
+    tool_executor_slot: Option<Arc<std::sync::RwLock<Option<Arc<ToolExecutor>>>>>,
 }
 
 impl WasmToolWrapper {
@@ -525,6 +528,7 @@ impl WasmToolWrapper {
             secrets_store: None,
             oauth_refresh: None,
             tool_executor: None,
+            tool_executor_slot: None,
         }
     }
 
@@ -565,12 +569,25 @@ impl WasmToolWrapper {
         self
     }
 
-    /// Set the tool executor for programmatic tool calling.
+    /// Set the tool executor for programmatic tool calling (direct reference).
     ///
     /// When set, the WASM `tool_invoke` host function can call other
     /// registered tools synchronously via a bridged resolver closure.
+    /// Prefer `with_tool_executor_slot()` for production use.
     pub fn with_tool_executor(mut self, executor: Arc<ToolExecutor>) -> Self {
         self.tool_executor = Some(executor);
+        self
+    }
+
+    /// Set the shared tool executor slot for lazy resolution.
+    ///
+    /// The executor is read from this slot at execution time, allowing
+    /// it to be set after tool registration (production startup order).
+    pub fn with_tool_executor_slot(
+        mut self,
+        slot: Arc<std::sync::RwLock<Option<Arc<ToolExecutor>>>>,
+    ) -> Self {
+        self.tool_executor_slot = Some(slot);
         self
     }
 
@@ -717,10 +734,22 @@ impl Tool for WasmToolWrapper {
         // Serialize context for WASM
         let context_json = serde_json::to_string(ctx).ok();
 
+        // Resolve the tool executor: direct reference takes priority, then shared slot.
+        let resolved_executor: Option<Arc<ToolExecutor>> = self
+            .tool_executor
+            .as_ref()
+            .cloned()
+            .or_else(|| {
+                self.tool_executor_slot
+                    .as_ref()
+                    .and_then(|slot| slot.read().ok())
+                    .and_then(|guard| guard.clone())
+            });
+
         // Build a tool resolver closure if we have a tool executor.
         // The resolver creates a single-threaded tokio runtime (same pattern
         // as http_request) to bridge the sync WASM callback to async tool execution.
-        let tool_resolver: Option<ToolResolver> = self.tool_executor.as_ref().map(|executor| {
+        let tool_resolver: Option<ToolResolver> = resolved_executor.as_ref().map(|executor| {
             let executor = Arc::clone(executor);
             let user_id = ctx.user_id.clone();
             Arc::new(move |name: &str, params: serde_json::Value, depth: u32| {
@@ -766,9 +795,10 @@ impl Tool for WasmToolWrapper {
                 description,
                 schema,
                 credentials,
-                secrets_store: None, // Not needed in blocking task
-                oauth_refresh: None, // Already used above for pre-refresh
-                tool_executor: None, // Resolver closure captures the executor
+                secrets_store: None,       // Not needed in blocking task
+                oauth_refresh: None,       // Already used above for pre-refresh
+                tool_executor: None,       // Resolver closure captures the executor
+                tool_executor_slot: None,  // Resolver closure captures the executor
             };
 
             tokio::task::spawn_blocking(move || {

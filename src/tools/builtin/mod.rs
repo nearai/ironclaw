@@ -9,6 +9,7 @@ mod json;
 mod memory;
 mod message;
 pub mod path_utils;
+pub mod ptc_script;
 pub mod routine;
 pub(crate) mod shell;
 pub mod skill_tools;
@@ -31,6 +32,7 @@ pub use message::MessageTool;
 pub use routine::{
     RoutineCreateTool, RoutineDeleteTool, RoutineHistoryTool, RoutineListTool, RoutineUpdateTool,
 };
+pub use ptc_script::PtcScriptTool;
 pub use shell::ShellTool;
 pub use skill_tools::{SkillInstallTool, SkillListTool, SkillRemoveTool, SkillSearchTool};
 pub use time::TimeTool;

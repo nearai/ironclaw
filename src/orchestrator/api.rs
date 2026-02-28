@@ -460,11 +460,13 @@ async fn tool_call_handler(
     );
 
     // Build a minimal JobContext for the tool execution
-    let ctx = JobContext::with_user(
+    let mut ctx = JobContext::with_user(
         state.user_id.clone(),
         format!("PTC call: {}", req.tool_name),
         format!("Programmatic tool call from job {}", job_id),
     );
+    // Propagate nesting depth so the executor enforces the global limit
+    ctx.tool_nesting_depth = req.nesting_depth;
 
     // Emit tool_use SSE event
     if let Some(ref tx) = state.job_event_tx {

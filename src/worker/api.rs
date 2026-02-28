@@ -114,6 +114,10 @@ pub struct ToolCallRequest {
     pub parameters: serde_json::Value,
     /// Optional timeout in seconds (capped at 300s by the orchestrator).
     pub timeout_secs: Option<u64>,
+    /// Current nesting depth for tool-invokes-tool chains.
+    /// Defaults to 0 for top-level calls (backward compatible).
+    #[serde(default)]
+    pub nesting_depth: u32,
 }
 
 /// Response from a programmatic tool call.
