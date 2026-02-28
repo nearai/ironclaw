@@ -8,6 +8,7 @@ use std::sync::Arc;
 
 use axum::{
     Json,
+    body::Bytes,
     extract::State,
     http::{HeaderValue, StatusCode},
     response::{
@@ -49,10 +50,25 @@ pub struct OpenAiChatRequest {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum OpenAiContent {
+    Text(String),
+    Parts(Vec<OpenAiContentPart>),
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OpenAiContentPart {
+    #[serde(rename = "type")]
+    pub part_type: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub text: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OpenAiMessage {
     pub role: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub content: Option<String>,
+    pub content: Option<OpenAiContent>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -194,10 +210,37 @@ pub struct OpenAiErrorDetail {
 fn parse_role(s: &str) -> Result<Role, String> {
     match s {
         "system" => Ok(Role::System),
+        // OpenAI newer models use "developer" role for high-priority instructions.
+        // IronClaw maps it to our internal System role.
+        "developer" => Ok(Role::System),
         "user" => Ok(Role::User),
         "assistant" => Ok(Role::Assistant),
         "tool" => Ok(Role::Tool),
         _ => Err(format!("Unknown role: '{}'", s)),
+    }
+}
+
+fn content_to_text(
+    content: Option<&OpenAiContent>,
+    message_index: usize,
+) -> Result<String, String> {
+    match content {
+        None => Ok(String::new()),
+        Some(OpenAiContent::Text(s)) => Ok(s.clone()),
+        Some(OpenAiContent::Parts(parts)) => {
+            let mut out = String::new();
+            for (part_index, part) in parts.iter().enumerate() {
+                if let Some(text) = part.text.as_deref() {
+                    out.push_str(text);
+                    continue;
+                }
+                return Err(format!(
+                    "messages[{}].content[{}]: unsupported content part type '{}'",
+                    message_index, part_index, part.part_type
+                ));
+            }
+            Ok(out)
+        }
     }
 }
 
@@ -207,6 +250,7 @@ pub fn convert_messages(messages: &[OpenAiMessage]) -> Result<Vec<ChatMessage>, 
         .enumerate()
         .map(|(i, m)| {
             let role = parse_role(&m.role).map_err(|e| format!("messages[{}]: {}", i, e))?;
+            let content = content_to_text(m.content.as_ref(), i)?;
             match role {
                 Role::Tool => {
                     let tool_call_id = m.tool_call_id.as_deref().ok_or_else(|| {
@@ -216,34 +260,44 @@ pub fn convert_messages(messages: &[OpenAiMessage]) -> Result<Vec<ChatMessage>, 
                         .name
                         .as_deref()
                         .ok_or_else(|| format!("messages[{}]: tool message requires 'name'", i))?;
-                    Ok(ChatMessage::tool_result(
-                        tool_call_id,
-                        name,
-                        m.content.as_deref().unwrap_or(""),
-                    ))
+                    Ok(ChatMessage::tool_result(tool_call_id, name, content))
                 }
                 Role::Assistant => {
                     if let Some(ref tcs) = m.tool_calls {
                         let calls: Vec<ToolCall> = tcs
                             .iter()
-                            .map(|tc| ToolCall {
-                                id: tc.id.clone(),
-                                name: tc.function.name.clone(),
-                                arguments: serde_json::from_str(&tc.function.arguments)
-                                    .unwrap_or(serde_json::Value::Object(Default::default())),
+                            .enumerate()
+                            .map(|(j, tc)| {
+                                let arguments: serde_json::Value =
+                                    serde_json::from_str(&tc.function.arguments).map_err(|e| {
+                                        format!(
+                                            "messages[{}].tool_calls[{}].function.arguments: invalid JSON: {}",
+                                            i, j, e
+                                        )
+                                    })?;
+                                Ok(ToolCall {
+                                    id: tc.id.clone(),
+                                    name: tc.function.name.clone(),
+                                    arguments,
+                                })
                             })
-                            .collect();
+                            .collect::<Result<Vec<_>, String>>()?;
+                        let assistant_content = if content.is_empty() {
+                            None
+                        } else {
+                            Some(content)
+                        };
                         Ok(ChatMessage::assistant_with_tool_calls(
-                            m.content.clone(),
+                            assistant_content,
                             calls,
                         ))
                     } else {
-                        Ok(ChatMessage::assistant(m.content.as_deref().unwrap_or("")))
+                        Ok(ChatMessage::assistant(content))
                     }
                 }
                 _ => Ok(ChatMessage {
                     role,
-                    content: m.content.as_deref().unwrap_or("").to_string(),
+                    content,
                     tool_call_id: None,
                     name: m.name.clone(),
                     tool_calls: None,
@@ -293,20 +347,70 @@ pub fn finish_reason_str(reason: FinishReason) -> String {
     }
 }
 
-fn normalize_tool_choice(val: &serde_json::Value) -> Option<String> {
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ToolChoice {
+    Mode(String),
+    NamedFunction(String),
+}
+
+fn normalize_tool_choice(val: &serde_json::Value) -> Result<Option<ToolChoice>, String> {
     match val {
-        serde_json::Value::String(s) => Some(s.clone()),
-        serde_json::Value::Object(obj) => {
-            // { "type": "function", "function": { "name": "foo" } } → "required"
-            if obj.contains_key("function") {
-                Some("required".to_string())
-            } else {
+        serde_json::Value::Null => Ok(None),
+        serde_json::Value::String(s) => match s.as_str() {
+            "auto" | "required" | "none" => Ok(Some(ToolChoice::Mode(s.clone()))),
+            other => Err(format!(
+                "tool_choice must be one of 'auto', 'required', or 'none'; got '{}'",
+                other
+            )),
+        },
+        serde_json::Value::Object(obj) => match obj.get("type").and_then(|v| v.as_str()) {
+            Some("auto" | "required" | "none") => Ok(Some(ToolChoice::Mode(
                 obj.get("type")
                     .and_then(|v| v.as_str())
-                    .map(|s| s.to_string())
+                    .unwrap_or_default()
+                    .to_string(),
+            ))),
+            Some("function") => {
+                let name = obj
+                    .get("function")
+                    .and_then(|f| f.get("name"))
+                    .and_then(|v| v.as_str())
+                    .filter(|s| !s.trim().is_empty())
+                    .ok_or_else(|| {
+                        "tool_choice.function.name must be a non-empty string".to_string()
+                    })?;
+                Ok(Some(ToolChoice::NamedFunction(name.to_string())))
             }
+            Some(other) => Err(format!(
+                "tool_choice.type must be 'auto', 'required', 'none', or 'function'; got '{}'",
+                other
+            )),
+            None => Err("tool_choice object must include a 'type' field".to_string()),
+        },
+        _ => Err("tool_choice must be a string or object".to_string()),
+    }
+}
+
+fn apply_named_tool_choice(
+    tools: Vec<ToolDefinition>,
+    tool_choice: Option<ToolChoice>,
+) -> Result<(Vec<ToolDefinition>, Option<String>), String> {
+    match tool_choice {
+        None => Ok((tools, None)),
+        Some(ToolChoice::Mode(mode)) => Ok((tools, Some(mode))),
+        Some(ToolChoice::NamedFunction(name)) => {
+            let filtered: Vec<ToolDefinition> =
+                tools.into_iter().filter(|t| t.name == name).collect();
+            if filtered.is_empty() {
+                return Err(format!(
+                    "tool_choice.function.name '{}' does not match any provided tool",
+                    name
+                ));
+            }
+            // Preserve named function semantics by narrowing tools to the named
+            // function and requiring a tool call.
+            Ok((filtered, Some("required".to_string())))
         }
-        _ => None,
     }
 }
 
@@ -424,8 +528,16 @@ fn parse_stop(val: &serde_json::Value) -> Option<Vec<String>> {
 
 pub async fn chat_completions_handler(
     State(state): State<Arc<GatewayState>>,
-    Json(req): Json<OpenAiChatRequest>,
+    body: Bytes,
 ) -> Result<impl IntoResponse, (StatusCode, Json<OpenAiErrorResponse>)> {
+    let req: OpenAiChatRequest = serde_json::from_slice(&body).map_err(|e| {
+        openai_error(
+            StatusCode::BAD_REQUEST,
+            format!("Invalid JSON body: {}", e),
+            "invalid_request_error",
+        )
+    })?;
+
     if !state.chat_rate_limiter.check() {
         return Err(openai_error(
             StatusCode::TOO_MANY_REQUESTS,
@@ -476,6 +588,15 @@ pub async fn chat_completions_handler(
 
     if has_tools {
         let tools = convert_tools(req.tools.as_deref().unwrap_or(&[]));
+        let parsed_choice = req
+            .tool_choice
+            .as_ref()
+            .map(normalize_tool_choice)
+            .transpose()
+            .map_err(|e| openai_error(StatusCode::BAD_REQUEST, e, "invalid_request_error"))?
+            .flatten();
+        let (tools, final_choice) = apply_named_tool_choice(tools, parsed_choice)
+            .map_err(|e| openai_error(StatusCode::BAD_REQUEST, e, "invalid_request_error"))?;
         let mut tool_req = ToolCompletionRequest::new(messages, tools).with_model(req.model);
         if let Some(t) = req.temperature {
             tool_req = tool_req.with_temperature(t);
@@ -483,9 +604,7 @@ pub async fn chat_completions_handler(
         if let Some(mt) = req.max_tokens {
             tool_req = tool_req.with_max_tokens(mt);
         }
-        if let Some(ref tc) = req.tool_choice
-            && let Some(choice) = normalize_tool_choice(tc)
-        {
+        if let Some(choice) = final_choice {
             tool_req = tool_req.with_tool_choice(choice);
         }
 
@@ -510,7 +629,7 @@ pub async fn chat_completions_handler(
                 index: 0,
                 message: OpenAiMessage {
                     role: "assistant".to_string(),
-                    content: resp.content.clone(),
+                    content: resp.content.clone().map(OpenAiContent::Text),
                     name: None,
                     tool_call_id: None,
                     tool_calls: tool_calls_openai,
@@ -549,7 +668,7 @@ pub async fn chat_completions_handler(
                 index: 0,
                 message: OpenAiMessage {
                     role: "assistant".to_string(),
-                    content: Some(resp.content),
+                    content: Some(OpenAiContent::Text(resp.content)),
                     name: None,
                     tool_call_id: None,
                     tool_calls: None,
@@ -596,6 +715,15 @@ async fn handle_streaming(
 
     let llm_result = if has_tools {
         let tools = convert_tools(req.tools.as_deref().unwrap_or(&[]));
+        let parsed_choice = req
+            .tool_choice
+            .as_ref()
+            .map(normalize_tool_choice)
+            .transpose()
+            .map_err(|e| openai_error(StatusCode::BAD_REQUEST, e, "invalid_request_error"))?
+            .flatten();
+        let (tools, final_choice) = apply_named_tool_choice(tools, parsed_choice)
+            .map_err(|e| openai_error(StatusCode::BAD_REQUEST, e, "invalid_request_error"))?;
         let mut tool_req = ToolCompletionRequest::new(messages, tools).with_model(req.model);
         if let Some(t) = req.temperature {
             tool_req = tool_req.with_temperature(t);
@@ -603,9 +731,7 @@ async fn handle_streaming(
         if let Some(mt) = req.max_tokens {
             tool_req = tool_req.with_max_tokens(mt);
         }
-        if let Some(ref tc) = req.tool_choice
-            && let Some(choice) = normalize_tool_choice(tc)
-        {
+        if let Some(choice) = final_choice {
             tool_req = tool_req.with_tool_choice(choice);
         }
         LlmResult::WithTools(
@@ -855,9 +981,14 @@ pub async fn models_handler(
 mod tests {
     use super::*;
 
+    fn text_content(text: &str) -> Option<OpenAiContent> {
+        Some(OpenAiContent::Text(text.to_string()))
+    }
+
     #[test]
     fn test_parse_role() {
         assert_eq!(parse_role("system").unwrap(), Role::System);
+        assert_eq!(parse_role("developer").unwrap(), Role::System);
         assert_eq!(parse_role("user").unwrap(), Role::User);
         assert_eq!(parse_role("assistant").unwrap(), Role::Assistant);
         assert_eq!(parse_role("tool").unwrap(), Role::Tool);
@@ -887,14 +1018,14 @@ mod tests {
         let msgs = vec![
             OpenAiMessage {
                 role: "system".to_string(),
-                content: Some("You are helpful.".to_string()),
+                content: text_content("You are helpful."),
                 name: None,
                 tool_call_id: None,
                 tool_calls: None,
             },
             OpenAiMessage {
                 role: "user".to_string(),
-                content: Some("Hello".to_string()),
+                content: text_content("Hello"),
                 name: None,
                 tool_call_id: None,
                 tool_calls: None,
@@ -913,7 +1044,7 @@ mod tests {
     fn test_convert_messages_with_tool_results() {
         let msgs = vec![OpenAiMessage {
             role: "tool".to_string(),
-            content: Some("42".to_string()),
+            content: text_content("42"),
             name: Some("calculator".to_string()),
             tool_call_id: Some("call_123".to_string()),
             tool_calls: None,
@@ -970,19 +1101,111 @@ mod tests {
     fn test_normalize_tool_choice() {
         // String variant
         let v = serde_json::json!("auto");
-        assert_eq!(normalize_tool_choice(&v), Some("auto".to_string()));
+        assert_eq!(
+            normalize_tool_choice(&v).unwrap(),
+            Some(ToolChoice::Mode("auto".to_string()))
+        );
 
-        // Object with function
+        // Named function object
         let v = serde_json::json!({"type": "function", "function": {"name": "foo"}});
-        assert_eq!(normalize_tool_choice(&v), Some("required".to_string()));
+        assert_eq!(
+            normalize_tool_choice(&v).unwrap(),
+            Some(ToolChoice::NamedFunction("foo".to_string()))
+        );
 
         // Object with type only
         let v = serde_json::json!({"type": "none"});
-        assert_eq!(normalize_tool_choice(&v), Some("none".to_string()));
+        assert_eq!(
+            normalize_tool_choice(&v).unwrap(),
+            Some(ToolChoice::Mode("none".to_string()))
+        );
 
         // Null
         let v = serde_json::Value::Null;
-        assert_eq!(normalize_tool_choice(&v), None);
+        assert_eq!(normalize_tool_choice(&v).unwrap(), None);
+    }
+
+    #[test]
+    fn test_apply_named_tool_choice_filters_to_named_tool() {
+        let tools = vec![
+            ToolDefinition {
+                name: "get_weather".to_string(),
+                description: "Get weather".to_string(),
+                parameters: serde_json::json!({"type":"object","properties":{}}),
+            },
+            ToolDefinition {
+                name: "search_web".to_string(),
+                description: "Search web".to_string(),
+                parameters: serde_json::json!({"type":"object","properties":{}}),
+            },
+        ];
+
+        let (filtered, choice) = apply_named_tool_choice(
+            tools,
+            Some(ToolChoice::NamedFunction("search_web".to_string())),
+        )
+        .unwrap();
+        assert_eq!(filtered.len(), 1);
+        assert_eq!(filtered[0].name, "search_web");
+        assert_eq!(choice.as_deref(), Some("required"));
+    }
+
+    #[test]
+    fn test_convert_messages_developer_role_maps_to_system() {
+        let msgs = vec![OpenAiMessage {
+            role: "developer".to_string(),
+            content: text_content("Follow these rules"),
+            name: None,
+            tool_call_id: None,
+            tool_calls: None,
+        }];
+        let converted = convert_messages(&msgs).unwrap();
+        assert_eq!(converted.len(), 1);
+        assert_eq!(converted[0].role, Role::System);
+        assert_eq!(converted[0].content, "Follow these rules");
+    }
+
+    #[test]
+    fn test_convert_messages_array_content_parts() {
+        let msgs = vec![OpenAiMessage {
+            role: "user".to_string(),
+            content: Some(OpenAiContent::Parts(vec![
+                OpenAiContentPart {
+                    part_type: "text".to_string(),
+                    text: Some("Hello ".to_string()),
+                },
+                OpenAiContentPart {
+                    part_type: "text".to_string(),
+                    text: Some("world".to_string()),
+                },
+            ])),
+            name: None,
+            tool_call_id: None,
+            tool_calls: None,
+        }];
+        let converted = convert_messages(&msgs).unwrap();
+        assert_eq!(converted[0].content, "Hello world");
+    }
+
+    #[test]
+    fn test_convert_messages_invalid_tool_arguments_error() {
+        let msgs = vec![OpenAiMessage {
+            role: "assistant".to_string(),
+            content: None,
+            name: None,
+            tool_call_id: None,
+            tool_calls: Some(vec![OpenAiToolCall {
+                id: "call_bad".to_string(),
+                call_type: "function".to_string(),
+                function: OpenAiToolCallFunction {
+                    name: "bad_tool".to_string(),
+                    arguments: "{not-json".to_string(),
+                },
+            }]),
+        }];
+        let err = convert_messages(&msgs).unwrap_err();
+        assert!(err.contains("function.arguments"));
+        assert!(err.contains("invalid JSON"));
     }
 
     #[test]
@@ -1014,7 +1237,7 @@ mod tests {
                 index: 0,
                 message: OpenAiMessage {
                     role: "assistant".to_string(),
-                    content: Some("Hello!".to_string()),
+                    content: text_content("Hello!"),
                     name: None,
                     tool_call_id: None,
                     tool_calls: None,
@@ -1049,7 +1272,7 @@ mod tests {
     fn test_convert_messages_unknown_role_rejected() {
         let msgs = vec![OpenAiMessage {
             role: "moderator".to_string(),
-            content: Some("Hi".to_string()),
+            content: text_content("Hi"),
             name: None,
             tool_call_id: None,
             tool_calls: None,
@@ -1064,7 +1287,7 @@ mod tests {
         // Missing tool_call_id
         let msgs = vec![OpenAiMessage {
             role: "tool".to_string(),
-            content: Some("result".to_string()),
+            content: text_content("result"),
             name: Some("calc".to_string()),
             tool_call_id: None,
             tool_calls: None,
@@ -1075,7 +1298,7 @@ mod tests {
         // Missing name
         let msgs = vec![OpenAiMessage {
             role: "tool".to_string(),
-            content: Some("result".to_string()),
+            content: text_content("result"),
             name: None,
             tool_call_id: Some("call_1".to_string()),
             tool_calls: None,
