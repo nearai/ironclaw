@@ -59,8 +59,12 @@ pub trait Tool: Send + Sync {
     fn estimated_cost(&self, _params: &serde_json::Value) -> Option<Decimal> { None }
     fn estimated_duration(&self, _params: &serde_json::Value) -> Option<Duration> { None }
     fn requires_sanitization(&self) -> bool { true }
-    fn requires_approval(&self) -> bool { false }
-    fn requires_approval_for(&self, _params: &serde_json::Value) -> bool { false }
+    fn requires_approval(&self, _params: &serde_json::Value) -> ApprovalRequirement {
+        ApprovalRequirement::Never
+    }
+    fn rate_limit_config(&self) -> Option<ToolRateLimitConfig> {
+        None
+    }
     fn execution_timeout(&self) -> Duration { Duration::from_secs(60) }
     fn domain(&self) -> ToolDomain { ToolDomain::Orchestrator }
     fn schema(&self) -> ToolSchema { /* derived from name+description+parameters_schema */ }
@@ -76,8 +80,7 @@ pub trait Tool: Send + Sync {
 | `parameters_schema()` | JSON Schema object for the `parameters` field in OpenAI function calling format |
 | `execute()` | Async execution with parsed params and job context |
 | `requires_sanitization()` | Whether output passes through the safety sanitizer before reaching LLM |
-| `requires_approval()` | Static approval flag; always prompts user before execution |
-| `requires_approval_for()` | Dynamic approval check based on actual parameter values |
+| `requires_approval()` | Dynamic approval policy for the invocation: `Never`, `UnlessAutoApproved`, or `Always` |
 | `domain()` | Execution domain: `Orchestrator` or `Container` |
 | `execution_timeout()` | Per-tool deadline; default 60 seconds |
 
@@ -102,9 +105,9 @@ pub struct ToolOutput {
 pub enum ToolError {
     InvalidParameters(String),
     ExecutionFailed(String),
-    Timeout,
+    Timeout(Duration),
     NotAuthorized(String),
-    RateLimited(String),
+    RateLimited(Option<Duration>),
     ExternalService(String),
     Sandbox(String),
 }
@@ -159,7 +162,7 @@ impl Tool for MyTool {
 
 ### Protected Tool Names
 
-35 names are protected at startup. Dynamic tools (WASM, MCP) cannot shadow these names:
+36 names are protected at startup. Dynamic tools (WASM, MCP) cannot shadow these names:
 
 ```
 echo, time, json, http, shell,
@@ -169,7 +172,7 @@ create_job, list_jobs, job_status, cancel_job, job_events, job_prompt,
 tool_search, tool_install, tool_auth, tool_activate, tool_list, tool_remove,
 skill_list, skill_search, skill_install, skill_remove,
 routine_create, routine_list, routine_update, routine_delete, routine_history,
-build_software
+build_software, message
 ```
 
 ### Registration Methods
@@ -179,11 +182,11 @@ build_software
 pub fn register_sync(&self, tool: Arc<dyn Tool>)
 
 // Runtime registration — rejects tools that shadow protected names
-pub async fn register(&self, tool: Arc<dyn Tool>) -> Result<(), RegistryError>
+pub async fn register(&self, tool: Arc<dyn Tool>)
 ```
 
-Dynamic tools registered via `register()` will receive `RegistryError::ProtectedName`
-if they attempt to use any name from the protected list.
+Dynamic tools registered via `register()` that attempt to use protected names are rejected
+and are not added to the registry.
 
 ### Registration Groups
 
@@ -198,6 +201,7 @@ The registry assembles built-in tools in these groups during startup:
 | `register_extension_tools()` | tool_search, tool_install, tool_auth, tool_activate, tool_list, tool_remove |
 | `register_skill_tools()` | skill_list, skill_search, skill_install, skill_remove |
 | `register_routine_tools()` | routine_create, routine_list, routine_update, routine_delete, routine_history |
+| `register_message_tools()` | message |
 | `register_builder_tool()` | build_software |
 | `register_wasm()` | WASM tools from `~/.ironclaw/tools/` directory |
 | `register_wasm_from_storage()` | WASM tools persisted in database |
@@ -247,6 +251,7 @@ The registry assembles built-in tools in these groups during startup:
 | `skill_install` | name* | Orchestrator | Yes |
 | `skill_remove` | name* | Orchestrator | Yes |
 | `build_software` | description* | Orchestrator | Yes |
+| `message` | content* | Orchestrator | Conditional (dynamic, depends on channel/target defaults) |
 | `html_to_markdown` | html*, url | Orchestrator | No |
 
 ---
@@ -373,7 +378,9 @@ Security controls enforced:
 - 3xx redirect blocking — redirects are not followed
 - Max response size: 5 MB (`MAX_RESPONSE_SIZE`)
 - LeakDetector scans outbound URL, headers, and body for credential exposure
-- `requires_approval: true` — every HTTP call prompts the user
+- `requires_approval()` logic:
+  - `Always` when params include manual credentials or mapped credentials for the host
+  - `UnlessAutoApproved` otherwise
 - `requires_sanitization: true` — response is sanitized before reaching LLM
 
 ---
@@ -500,8 +507,9 @@ Security layers applied in order:
    Secret environment variables like `API_KEY`, `TOKEN`, `PASSWORD` are never accessible
    to shell commands.
 
-`requires_approval: true` — every shell invocation prompts the user.
-`requires_approval_for()` also returns `true` for commands matching any NEVER_AUTO_APPROVE_PATTERNS.
+`requires_approval()` logic:
+- `Always` when command matches `NEVER_AUTO_APPROVE_PATTERNS`
+- `UnlessAutoApproved` for all other commands
 
 ---
 
@@ -717,7 +725,44 @@ Manage SKILL.md prompt extensions.
 
 ---
 
-### 4.12 HTML to Markdown Converter (`builtin/html_converter.rs`)
+### 4.12 `message` (`builtin/message.rs`)
+
+Send messages across connected channels, including optional attachments.
+
+```json
+{
+  "type": "object",
+  "properties": {
+    "content": { "type": "string", "description": "Message text to send" },
+    "channel": { "type": "string", "description": "Target channel. Defaults to current conversation channel if omitted" },
+    "target": { "type": "string", "description": "Recipient id. Defaults to current sender/group if omitted" },
+    "attachments": {
+      "type": "array",
+      "items": { "type": "string" },
+      "description": "Optional local file paths to attach"
+    }
+  },
+  "required": ["content"]
+}
+```
+
+Behavior:
+
+- Resolves `channel` and `target` from explicit params, and falls back to per-turn
+  conversation context provided by the dispatcher.
+- `attachments` are validated with shared path guards (`path_utils::validate_path`) and
+  must exist on disk before send.
+- Attachment paths are sandbox-limited to `~/.ironclaw/`.
+- `requires_approval()`:
+  - `Always` when `channel` is explicitly set and does not match the current default,
+    or when explicit `channel` is set and no default exists.
+  - `UnlessAutoApproved` when the message uses inferred defaults.
+- Applies message rate limit via `ToolRateLimitConfig::new(10, 100)` (10/min, 100/hr).
+- `requires_sanitization: false` (tool output does not include external content).
+
+---
+
+### 4.13 HTML to Markdown Converter (`builtin/html_converter.rs`)
 
 Added in v0.10.0. Built-in tool and two-stage pipeline for converting HTML content to clean Markdown. Used internally by the `http` tool when fetching HTML pages, and exposed directly as the `html_to_markdown` built-in tool for web content ingestion and formatting.
 
@@ -743,7 +788,7 @@ let markdown = convert_html_to_markdown(html_content, "https://example.com/artic
 
 ---
 
-### 4.13 Built-in Tool Rate Limiter (`src/tools/rate_limiter.rs`)
+### 4.14 Built-in Tool Rate Limiter (`src/tools/rate_limiter.rs`)
 
 Added in v0.10.0. Shared rate limiter for built-in tool invocations (separate from WASM tool rate limiting). Provides per-tool, per-user sliding window rate limiting checked before every built-in tool execution.
 
@@ -1425,23 +1470,26 @@ Servers with a remote HTTPS URL always require authentication. Authentication st
 
 The approval system has three levels of granularity:
 
-1. `requires_approval()` — static; always prompts before execution regardless of params
-2. `requires_approval_for(params)` — dynamic; prompts only when params match dangerous patterns
-3. No approval methods overridden — the tool executes without user confirmation
+1. `requires_approval()` returns one of: `Never`, `UnlessAutoApproved`, `Always`.
+2. `Never` — no user confirmation required.
+3. `UnlessAutoApproved` — requires confirmation unless AGENT-auto-approval is enabled.
+4. `Always` — explicit confirmation required for every invocation.
 
-Tools that are always approval-required: `http`, `shell`, `cancel_job`, `job_prompt`,
+Tools that currently usually require confirmation:
+`http` (for credentialed or manual-credential calls),
+`shell` (for dangerous command patterns),
+`cancel_job`, `job_prompt`,
 `tool_install`, `tool_auth`, `tool_remove`, `skill_install`, `skill_remove`,
 `build_software`.
 
-Shell adds `requires_approval_for()` on top of static approval, meaning any command
-matching `NEVER_AUTO_APPROVE_PATTERNS` (35 patterns) triggers an additional approval
-prompt even in contexts where static approval is bypassed.
+The `message` tool also has conditional `Always` approval behavior when explicit
+cross-channel or non-default targeting is used, and `UnlessAutoApproved` otherwise.
 
-**Consolidated Tool Approval (v0.10.0):** Tool approval was refactored into a single
-param-aware method (`consolidate tool approval`). The multi-tool approval flow can
-resume after the user approves or denies a batch — approval decisions are applied
-per-tool within the batch and execution continues for approved tools without restarting
-the entire flow.
+**Tool Approval Flow (v0.10.0):** Tool approval is resolved through the
+`requires_approval()` decision (`Never`, `UnlessAutoApproved`, or `Always`) at
+dispatch time. The thread dispatcher groups deferred tool calls by message turn,
+checks for the first blocked item, and continues with approved calls without restarting
+the whole assistant turn.
 
 ### Security Architecture Summary
 

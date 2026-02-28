@@ -191,8 +191,9 @@ default is possible.
 | `ROUTINES_DEFAULT_COOLDOWN` | u64 | `300` | No | Default cooldown in seconds between routine firings |
 | `ROUTINES_MAX_TOKENS` | u32 | `4096` | No | Max output tokens for lightweight routine LLM calls |
 | **Skills** | | | | |
-| `SKILLS_ENABLED` | bool | `false` | No | Enable the SKILL.md prompt extension system |
+| `SKILLS_ENABLED` | bool | `true` | No | Enable the SKILL.md prompt extension system |
 | `SKILLS_DIR` | path | `~/.ironclaw/skills/` | No | Directory containing local (trusted) skills |
+| `SKILLS_INSTALLED_DIR` | path | `~/.ironclaw/installed_skills/` | No | Directory for ClawHub-installed skills |
 | `SKILLS_MAX_ACTIVE` | usize | `3` | No | Maximum skills active simultaneously |
 | `SKILLS_MAX_CONTEXT_TOKENS` | usize | `4000` | No | Maximum total context tokens allocated to skill prompts |
 | **Safety** | | | | |
@@ -574,8 +575,9 @@ pub struct ClaudeCodeConfig {
 
 ```rust
 pub struct SkillsConfig {
-    pub enabled: bool,              // SKILLS_ENABLED (default: false)
+    pub enabled: bool,              // SKILLS_ENABLED (default: true)
     pub local_dir: PathBuf,         // SKILLS_DIR (default: ~/.ironclaw/skills/)
+    pub installed_dir: PathBuf,     // SKILLS_INSTALLED_DIR (default: ~/.ironclaw/installed_skills/)
     pub max_active_skills: usize,   // SKILLS_MAX_ACTIVE (default: 3)
     pub max_context_tokens: usize,  // SKILLS_MAX_CONTEXT_TOKENS (default: 4000)
 }
@@ -972,8 +974,9 @@ GATEWAY_AUTH_TOKEN="replace-with-random-hex-token"
 ##############################################
 # Skills
 ##############################################
-# SKILLS_ENABLED="false"
+# SKILLS_ENABLED="true"
 # SKILLS_DIR="~/.ironclaw/skills/"
+# SKILLS_INSTALLED_DIR="~/.ironclaw/installed_skills/"
 # SKILLS_MAX_ACTIVE="3"
 # SKILLS_MAX_CONTEXT_TOKENS="4000"
 
@@ -1012,3 +1015,20 @@ RUST_LOG="ironclaw=info,tower_http=info"
 # Verbose: RUST_LOG="ironclaw=debug,tower_http=debug"
 # Trace:   RUST_LOG="ironclaw=trace"
 ```
+
+## 9. Automated QA and CI Validation (`a24fd3e`)
+
+Commit `a24fd3e` added automated quality gates around schema correctness, CI coverage,
+and end-to-end behavior:
+
+- `src/tools/schema_validator.rs` — strict-mode tool schema validation used by tests.
+- `tests/tool_schema_validation.rs` — validates all built-in, MCP, and WASM schemas.
+- `tests/config_round_trip.rs` — validates bootstrap config read/write/read-back behavior.
+- `.github/workflows/test.yml` — matrix (`all-features`, `default`, `libsql-only`) plus
+  Telegram tests, Docker build checks, and a roll-up `Run Tests` status.
+- `.github/workflows/code_style.yml` — `cargo fmt`, matrixed clippy checks,
+  and a roll-up `Code Style (fmt + clippy)` status.
+- `.github/workflows/e2e.yml` — browser E2E workflow for web gateway and interaction flows.
+
+The workflow roll-ups are used to match branch protection check names and prevent partial
+matrix failures from passing through as green PR checks.

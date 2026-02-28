@@ -740,7 +740,18 @@ and integrates with `ChannelManager` like any other channel.
 WASM channel plugins can now be hot-activated without restarting the agent.
 `ChannelManager` supports runtime addition of channels via the extension
 activation flow. The activation call installs the WASM binary, loads it into
-wasmtime, and adds it to the active channel `select_all` stream.
+wasmtime, injects credentials and webhook secrets, and adds it to the active
+`select_all` stream.
+
+Recent fix (`e8eb4ca`, PR #390) prevents duplicate activation at startup:
+
+- During startup, loaded WASM channels are registered in `ExtensionManager` via
+  `set_active_channels(...)` *before* `set_channel_runtime(...)` is wired.
+- If a startup-loaded channel is activated again, `activate_wasm_channel()` now
+  detects it in `active_channel_names` and calls `refresh_active_channel()` instead
+  of re-registering the module.
+- Refresh updates credentials/webhook secrets on the already-running instance, which
+  avoids triggering duplicate backend polling loops (for example Telegram `getUpdates`).
 
 ### Pairing/Permission System (v0.10.0)
 
