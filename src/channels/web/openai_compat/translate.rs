@@ -1,8 +1,12 @@
 use crate::llm::{ChatMessage, FinishReason, Role, ToolCall, ToolDefinition};
 
+#[cfg(test)]
 use super::types::{
-    OpenAiChatRequest, OpenAiChatResponse, OpenAiContent, OpenAiContentPart, OpenAiFunction,
-    OpenAiMessage, OpenAiTool, OpenAiToolCall, OpenAiToolCallFunction, OpenAiUsage,
+    OpenAiChatRequest, OpenAiChatResponse, OpenAiChoice, OpenAiContentPart, OpenAiFunction,
+    OpenAiUsage,
+};
+use super::types::{
+    OpenAiContent, OpenAiMessage, OpenAiTool, OpenAiToolCall, OpenAiToolCallFunction,
 };
 
 const MAX_MODEL_NAME_BYTES: usize = 256;
@@ -506,7 +510,7 @@ mod tests {
             object: "chat.completion",
             created: 1234567890,
             model: "test-model".to_string(),
-            choices: vec![super::types::OpenAiChoice {
+            choices: vec![OpenAiChoice {
                 index: 0,
                 message: OpenAiMessage {
                     role: "assistant".to_string(),
