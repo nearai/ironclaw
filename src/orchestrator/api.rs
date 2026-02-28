@@ -15,15 +15,18 @@ use tokio::sync::{Mutex, broadcast};
 use uuid::Uuid;
 
 use crate::channels::web::types::SseEvent;
+use crate::context::JobContext;
 use crate::db::Database;
 use crate::llm::{CompletionRequest, LlmProvider, ToolCompletionRequest};
 use crate::orchestrator::auth::{TokenStore, worker_auth_middleware};
 use crate::orchestrator::job_manager::ContainerJobManager;
 use crate::secrets::SecretsStore;
+use crate::tools::ToolExecutor;
 use crate::worker::api::JobEventPayload;
 use crate::worker::api::{
     CompletionReport, CredentialResponse, JobDescription, ProxyCompletionRequest,
     ProxyCompletionResponse, ProxyToolCompletionRequest, ProxyToolCompletionResponse, StatusUpdate,
+    ToolCallRequest, ToolCallResponse,
 };
 
 /// A follow-up prompt queued for a Claude Code bridge.
@@ -49,6 +52,8 @@ pub struct OrchestratorState {
     pub secrets_store: Option<Arc<dyn SecretsStore + Send + Sync>>,
     /// User ID for secret lookups (single-tenant, typically "default").
     pub user_id: String,
+    /// Tool executor for programmatic tool calling (PTC).
+    pub tool_executor: Option<Arc<ToolExecutor>>,
 }
 
 /// The orchestrator's internal API server.
@@ -70,6 +75,7 @@ impl OrchestratorApi {
             .route("/worker/{job_id}/event", post(job_event_handler))
             .route("/worker/{job_id}/prompt", get(get_prompt_handler))
             .route("/worker/{job_id}/credentials", get(get_credentials_handler))
+            .route("/worker/{job_id}/tools/call", post(tool_call_handler))
             .route_layer(axum::middleware::from_fn_with_state(
                 state.token_store.clone(),
                 worker_auth_middleware,
@@ -432,6 +438,96 @@ async fn get_credentials_handler(
     ))
 }
 
+/// Execute a tool programmatically on behalf of a container worker (PTC).
+///
+/// Builds a minimal `JobContext` from the job metadata and delegates to
+/// `ToolExecutor::execute`. Emits SSE events for tool_use/tool_result so
+/// the web UI can observe PTC calls.
+async fn tool_call_handler(
+    State(state): State<OrchestratorState>,
+    Path(job_id): Path<Uuid>,
+    Json(req): Json<ToolCallRequest>,
+) -> Result<Json<ToolCallResponse>, StatusCode> {
+    let executor = state
+        .tool_executor
+        .as_ref()
+        .ok_or(StatusCode::SERVICE_UNAVAILABLE)?;
+
+    tracing::debug!(
+        job_id = %job_id,
+        tool = %req.tool_name,
+        "PTC tool call request"
+    );
+
+    // Build a minimal JobContext for the tool execution
+    let ctx = JobContext::with_user(
+        state.user_id.clone(),
+        format!("PTC call: {}", req.tool_name),
+        format!("Programmatic tool call from job {}", job_id),
+    );
+
+    // Emit tool_use SSE event
+    if let Some(ref tx) = state.job_event_tx {
+        let _ = tx.send((
+            job_id,
+            SseEvent::JobToolUse {
+                job_id: job_id.to_string(),
+                tool_name: req.tool_name.clone(),
+                input: req.parameters.clone(),
+            },
+        ));
+    }
+
+    // Determine timeout override
+    let timeout_override = req
+        .timeout_secs
+        .map(|s| std::time::Duration::from_secs(s.min(300)));
+
+    // Execute the tool
+    match executor
+        .execute(&req.tool_name, req.parameters, &ctx, timeout_override)
+        .await
+    {
+        Ok(result) => {
+            // Emit tool_result SSE event
+            if let Some(ref tx) = state.job_event_tx {
+                let _ = tx.send((
+                    job_id,
+                    SseEvent::JobToolResult {
+                        job_id: job_id.to_string(),
+                        tool_name: req.tool_name.clone(),
+                        output: result.output.clone(),
+                    },
+                ));
+            }
+
+            Ok(Json(ToolCallResponse {
+                success: true,
+                output: Some(result.output),
+                error: None,
+                duration_ms: result.duration.as_millis() as u64,
+                was_sanitized: result.was_sanitized,
+            }))
+        }
+        Err(e) => {
+            tracing::warn!(
+                job_id = %job_id,
+                tool = %req.tool_name,
+                error = %e,
+                "PTC tool call failed"
+            );
+
+            Ok(Json(ToolCallResponse {
+                success: false,
+                output: None,
+                error: Some(e.to_string()),
+                duration_ms: 0,
+                was_sanitized: false,
+            }))
+        }
+    }
+}
+
 fn format_finish_reason(reason: crate::llm::FinishReason) -> String {
     match reason {
         crate::llm::FinishReason::Stop => "stop".to_string(),
@@ -469,6 +565,7 @@ mod tests {
             store: None,
             secrets_store: None,
             user_id: "default".to_string(),
+            tool_executor: None,
         }
     }
 
@@ -701,6 +798,7 @@ mod tests {
             store: None,
             secrets_store: Some(secrets_store),
             user_id: "default".to_string(),
+            tool_executor: None,
         };
 
         let router = OrchestratorApi::router(state);
@@ -736,6 +834,7 @@ mod tests {
             store: None,
             secrets_store: None,
             user_id: "default".to_string(),
+            tool_executor: None,
         };
 
         let job_id = Uuid::new_v4();
@@ -791,6 +890,7 @@ mod tests {
             store: None,
             secrets_store: None,
             user_id: "default".to_string(),
+            tool_executor: None,
         };
 
         let job_id = Uuid::new_v4();
@@ -839,6 +939,7 @@ mod tests {
             store: None,
             secrets_store: None,
             user_id: "default".to_string(),
+            tool_executor: None,
         };
 
         let job_id = Uuid::new_v4();
@@ -917,5 +1018,322 @@ mod tests {
         let handle = jm.get_handle(job_id).await.unwrap();
         assert_eq!(handle.worker_iteration, 5);
         assert_eq!(handle.last_worker_status.as_deref(), Some("Iteration 5"));
+    }
+
+    // -- Programmatic tool calling (PTC) tests --
+
+    use std::time::Duration;
+
+    use crate::config::SafetyConfig;
+    use crate::context::JobContext;
+    use crate::safety::SafetyLayer;
+    use crate::tools::{Tool, ToolError, ToolExecutor, ToolOutput, ToolRegistry};
+
+    /// A tool that sleeps for 10 seconds (used to test timeout enforcement).
+    struct SlowTool;
+
+    #[async_trait::async_trait]
+    impl Tool for SlowTool {
+        fn name(&self) -> &str {
+            "slow_tool"
+        }
+        fn description(&self) -> &str {
+            "A tool that sleeps"
+        }
+        fn parameters_schema(&self) -> serde_json::Value {
+            serde_json::json!({"type": "object"})
+        }
+        async fn execute(
+            &self,
+            _params: serde_json::Value,
+            _ctx: &JobContext,
+        ) -> Result<ToolOutput, ToolError> {
+            tokio::time::sleep(Duration::from_secs(10)).await;
+            Ok(ToolOutput::text("done", Duration::from_secs(10)))
+        }
+        fn requires_sanitization(&self) -> bool {
+            false
+        }
+    }
+
+    /// Build an `OrchestratorState` with a real `ToolExecutor` wired in.
+    ///
+    /// Also returns the broadcast receiver when `with_broadcast` is true,
+    /// so SSE-related tests can observe emitted events.
+    fn test_state_with_executor(
+        with_broadcast: bool,
+    ) -> (
+        OrchestratorState,
+        Option<broadcast::Receiver<(Uuid, SseEvent)>>,
+    ) {
+        let tools = Arc::new(ToolRegistry::new());
+        tools.register_builtin_tools();
+
+        let safety = Arc::new(SafetyLayer::new(&SafetyConfig {
+            max_output_length: 100_000,
+            injection_check_enabled: true,
+        }));
+
+        let executor = ToolExecutor::new(Arc::clone(&tools), safety, Duration::from_secs(60));
+
+        let token_store = TokenStore::new();
+        let jm = ContainerJobManager::new(ContainerJobConfig::default(), token_store.clone());
+
+        let (tx, rx) = if with_broadcast {
+            let (tx, rx) = broadcast::channel(16);
+            (Some(tx), Some(rx))
+        } else {
+            (None, None)
+        };
+
+        let state = OrchestratorState {
+            llm: Arc::new(StubLlm::default()),
+            job_manager: Arc::new(jm),
+            token_store,
+            job_event_tx: tx,
+            prompt_queue: Arc::new(Mutex::new(HashMap::new())),
+            store: None,
+            secrets_store: None,
+            user_id: "default".to_string(),
+            tool_executor: Some(Arc::new(executor)),
+        };
+
+        (state, rx)
+    }
+
+    #[tokio::test]
+    async fn tool_call_echo_success() {
+        let (state, _) = test_state_with_executor(false);
+        let job_id = Uuid::new_v4();
+        let token = state.token_store.create_token(job_id).await;
+        let router = OrchestratorApi::router(state);
+
+        let payload = serde_json::json!({
+            "tool_name": "echo",
+            "parameters": {"message": "hello"},
+        });
+
+        let req = Request::builder()
+            .method("POST")
+            .uri(format!("/worker/{}/tools/call", job_id))
+            .header("Authorization", format!("Bearer {}", token))
+            .header("Content-Type", "application/json")
+            .body(Body::from(serde_json::to_vec(&payload).unwrap()))
+            .unwrap();
+
+        let resp = router.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let body = axum::body::to_bytes(resp.into_body(), 4096).await.unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["success"], true);
+        assert!(
+            json["output"]
+                .as_str()
+                .map(|s| s.contains("hello"))
+                .unwrap_or(false),
+            "output should contain 'hello', got: {:?}",
+            json["output"]
+        );
+        assert!(
+            json["duration_ms"].is_u64(),
+            "duration_ms should be present as a number"
+        );
+    }
+
+    #[tokio::test]
+    async fn tool_call_not_found() {
+        let (state, _) = test_state_with_executor(false);
+        let job_id = Uuid::new_v4();
+        let token = state.token_store.create_token(job_id).await;
+        let router = OrchestratorApi::router(state);
+
+        let payload = serde_json::json!({
+            "tool_name": "nonexistent_tool",
+            "parameters": {},
+        });
+
+        let req = Request::builder()
+            .method("POST")
+            .uri(format!("/worker/{}/tools/call", job_id))
+            .header("Authorization", format!("Bearer {}", token))
+            .header("Content-Type", "application/json")
+            .body(Body::from(serde_json::to_vec(&payload).unwrap()))
+            .unwrap();
+
+        let resp = router.oneshot(req).await.unwrap();
+        // Handler returns Ok(Json(...)) even on tool failure
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let body = axum::body::to_bytes(resp.into_body(), 4096).await.unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["success"], false);
+        assert!(
+            json["error"]
+                .as_str()
+                .map(|s| s.to_lowercase().contains("not found"))
+                .unwrap_or(false),
+            "error should mention 'not found', got: {:?}",
+            json["error"]
+        );
+    }
+
+    #[tokio::test]
+    async fn tool_call_no_executor() {
+        // Use regular test_state() which has tool_executor: None
+        let state = test_state();
+        let job_id = Uuid::new_v4();
+        let token = state.token_store.create_token(job_id).await;
+        let router = OrchestratorApi::router(state);
+
+        let payload = serde_json::json!({
+            "tool_name": "echo",
+            "parameters": {"message": "hello"},
+        });
+
+        let req = Request::builder()
+            .method("POST")
+            .uri(format!("/worker/{}/tools/call", job_id))
+            .header("Authorization", format!("Bearer {}", token))
+            .header("Content-Type", "application/json")
+            .body(Body::from(serde_json::to_vec(&payload).unwrap()))
+            .unwrap();
+
+        let resp = router.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+    }
+
+    #[tokio::test]
+    async fn tool_call_with_sse_events() {
+        let (state, rx) = test_state_with_executor(true);
+        let mut rx = rx.expect("broadcast receiver should be present");
+        let job_id = Uuid::new_v4();
+        let token = state.token_store.create_token(job_id).await;
+        let router = OrchestratorApi::router(state);
+
+        let payload = serde_json::json!({
+            "tool_name": "echo",
+            "parameters": {"message": "hello"},
+        });
+
+        let req = Request::builder()
+            .method("POST")
+            .uri(format!("/worker/{}/tools/call", job_id))
+            .header("Authorization", format!("Bearer {}", token))
+            .header("Content-Type", "application/json")
+            .body(Body::from(serde_json::to_vec(&payload).unwrap()))
+            .unwrap();
+
+        let resp = router.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        // Collect events from broadcast channel
+        let mut saw_tool_use = false;
+        let mut saw_tool_result = false;
+        while let Ok((recv_id, event)) = rx.try_recv() {
+            assert_eq!(recv_id, job_id);
+            match event {
+                SseEvent::JobToolUse { tool_name, .. } => {
+                    assert_eq!(tool_name, "echo");
+                    saw_tool_use = true;
+                }
+                SseEvent::JobToolResult { tool_name, .. } => {
+                    assert_eq!(tool_name, "echo");
+                    saw_tool_result = true;
+                }
+                _ => {}
+            }
+        }
+        assert!(saw_tool_use, "should have emitted JobToolUse event");
+        assert!(saw_tool_result, "should have emitted JobToolResult event");
+    }
+
+    #[tokio::test]
+    async fn tool_call_with_timeout() {
+        // Build a registry that includes our SlowTool
+        let tools = Arc::new(ToolRegistry::new());
+        tools.register(Arc::new(SlowTool)).await;
+
+        let safety = Arc::new(SafetyLayer::new(&SafetyConfig {
+            max_output_length: 100_000,
+            injection_check_enabled: true,
+        }));
+
+        let executor = ToolExecutor::new(Arc::clone(&tools), safety, Duration::from_secs(60));
+
+        let token_store = TokenStore::new();
+        let jm = ContainerJobManager::new(ContainerJobConfig::default(), token_store.clone());
+
+        let state = OrchestratorState {
+            llm: Arc::new(StubLlm::default()),
+            job_manager: Arc::new(jm),
+            token_store: token_store.clone(),
+            job_event_tx: None,
+            prompt_queue: Arc::new(Mutex::new(HashMap::new())),
+            store: None,
+            secrets_store: None,
+            user_id: "default".to_string(),
+            tool_executor: Some(Arc::new(executor)),
+        };
+
+        let job_id = Uuid::new_v4();
+        let token = token_store.create_token(job_id).await;
+        let router = OrchestratorApi::router(state);
+
+        let payload = serde_json::json!({
+            "tool_name": "slow_tool",
+            "parameters": {},
+            "timeout_secs": 1,
+        });
+
+        let req = Request::builder()
+            .method("POST")
+            .uri(format!("/worker/{}/tools/call", job_id))
+            .header("Authorization", format!("Bearer {}", token))
+            .header("Content-Type", "application/json")
+            .body(Body::from(serde_json::to_vec(&payload).unwrap()))
+            .unwrap();
+
+        let resp = router.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let body = axum::body::to_bytes(resp.into_body(), 4096).await.unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["success"], false);
+        assert!(
+            json["error"]
+                .as_str()
+                .map(|s| {
+                    let lower = s.to_lowercase();
+                    lower.contains("timed out") || lower.contains("timeout")
+                })
+                .unwrap_or(false),
+            "error should mention timeout, got: {:?}",
+            json["error"]
+        );
+    }
+
+    #[tokio::test]
+    async fn tool_call_auth_required() {
+        let (state, _) = test_state_with_executor(false);
+        let job_id = Uuid::new_v4();
+        // Do NOT create a token -- request should be rejected
+        let router = OrchestratorApi::router(state);
+
+        let payload = serde_json::json!({
+            "tool_name": "echo",
+            "parameters": {"message": "hello"},
+        });
+
+        let req = Request::builder()
+            .method("POST")
+            .uri(format!("/worker/{}/tools/call", job_id))
+            // No Authorization header
+            .header("Content-Type", "application/json")
+            .body(Body::from(serde_json::to_vec(&payload).unwrap()))
+            .unwrap();
+
+        let resp = router.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
     }
 }

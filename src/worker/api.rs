@@ -105,6 +105,32 @@ pub struct CredentialResponse {
     pub value: String,
 }
 
+/// Request to call a tool programmatically via the orchestrator.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct ToolCallRequest {
+    /// Name of the tool to invoke.
+    pub tool_name: String,
+    /// JSON parameters to pass to the tool.
+    pub parameters: serde_json::Value,
+    /// Optional timeout in seconds (capped at 300s by the orchestrator).
+    pub timeout_secs: Option<u64>,
+}
+
+/// Response from a programmatic tool call.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct ToolCallResponse {
+    /// Whether the tool call succeeded.
+    pub success: bool,
+    /// Tool output (present on success).
+    pub output: Option<String>,
+    /// Error message (present on failure).
+    pub error: Option<String>,
+    /// Execution duration in milliseconds.
+    pub duration_ms: u64,
+    /// Whether the output was modified by the safety layer.
+    pub was_sanitized: bool,
+}
+
 impl WorkerHttpClient {
     /// Create a new client from environment.
     ///
@@ -383,6 +409,14 @@ impl WorkerHttpClient {
                 secret_name: "(all)".to_string(),
                 reason: format!("failed to parse credentials response: {}", e),
             })
+    }
+
+    /// Call a tool programmatically via the orchestrator (PTC).
+    ///
+    /// This bypasses the LLM round-trip and invokes a tool directly on the
+    /// orchestrator side. Useful for scripted multi-step sequences.
+    pub async fn call_tool(&self, req: &ToolCallRequest) -> Result<ToolCallResponse, WorkerError> {
+        self.post_json("tools/call", req, "tool call").await
     }
 
     /// Signal job completion to the orchestrator.

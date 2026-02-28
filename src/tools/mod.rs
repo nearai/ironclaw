@@ -14,9 +14,11 @@ pub mod rate_limiter;
 pub mod schema_validator;
 pub mod wasm;
 
+mod executor;
 mod registry;
 mod tool;
 
+pub use executor::{PtcError, PtcToolResult, ToolExecutor};
 pub use builder::{
     BuildPhase, BuildRequirement, BuildResult, BuildSoftwareTool, BuilderConfig, Language,
     LlmSoftwareBuilder, SoftwareBuilder, SoftwareType, Template, TemplateEngine, TemplateType,

@@ -275,6 +275,13 @@ async fn async_main() -> anyhow::Result<()> {
             };
             let jm = Arc::new(ContainerJobManager::new(job_config, token_store.clone()));
 
+            // Build ToolExecutor for programmatic tool calling (PTC)
+            let tool_executor = Arc::new(ironclaw::tools::ToolExecutor::new(
+                Arc::clone(&components.tools),
+                Arc::clone(&components.safety),
+                std::time::Duration::from_secs(60),
+            ));
+
             // Start the orchestrator internal API in the background
             let orchestrator_state = OrchestratorState {
                 llm: components.llm.clone(),
@@ -285,6 +292,7 @@ async fn async_main() -> anyhow::Result<()> {
                 store: components.db.clone(),
                 secrets_store: components.secrets_store.clone(),
                 user_id: "default".to_string(),
+                tool_executor: Some(tool_executor),
             };
 
             tokio::spawn(async move {
