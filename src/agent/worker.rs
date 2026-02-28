@@ -921,9 +921,14 @@ Report when the job is complete or if you encounter issues you cannot resolve."#
     }
 
     async fn mark_failed(&self, reason: &str) -> Result<(), Error> {
+        // Build fallback deliverable from memory before transitioning.
+        let fallback = self.build_fallback(reason).await;
+
         self.context_manager()
             .update_context(self.job_id, |ctx| {
-                ctx.transition_to(JobState::Failed, Some(reason.to_string()))
+                ctx.transition_to(JobState::Failed, Some(reason.to_string()))?;
+                store_fallback_in_metadata(ctx, fallback.as_ref());
+                Ok(())
             })
             .await?
             .map_err(|s| crate::error::JobError::ContextError {
@@ -943,8 +948,15 @@ Report when the job is complete or if you encounter issues you cannot resolve."#
     }
 
     async fn mark_stuck(&self, reason: &str) -> Result<(), Error> {
+        // Build fallback deliverable from memory before transitioning.
+        let fallback = self.build_fallback(reason).await;
+
         self.context_manager()
-            .update_context(self.job_id, |ctx| ctx.mark_stuck(reason))
+            .update_context(self.job_id, |ctx| {
+                ctx.mark_stuck(reason)?;
+                store_fallback_in_metadata(ctx, fallback.as_ref());
+                Ok(())
+            })
             .await?
             .map_err(|s| crate::error::JobError::ContextError {
                 id: self.job_id,
@@ -960,6 +972,57 @@ Report when the job is complete or if you encounter issues you cannot resolve."#
         );
         self.persist_status(JobState::Stuck, Some(reason.to_string()));
         Ok(())
+    }
+
+    /// Build a [`FallbackDeliverable`] from the current job context and memory.
+    async fn build_fallback(&self, reason: &str) -> Option<crate::context::FallbackDeliverable> {
+        let memory = match self.context_manager().get_memory(self.job_id).await {
+            Ok(memory) => memory,
+            Err(e) => {
+                tracing::warn!(
+                    job_id = %self.job_id,
+                    "Failed to load memory while building fallback deliverable: {e}"
+                );
+                return None;
+            }
+        };
+        let ctx = match self.context_manager().get_context(self.job_id).await {
+            Ok(ctx) => ctx,
+            Err(e) => {
+                tracing::warn!(
+                    job_id = %self.job_id,
+                    "Failed to load context while building fallback deliverable: {e}"
+                );
+                return None;
+            }
+        };
+        Some(crate::context::FallbackDeliverable::build(
+            &ctx, &memory, reason,
+        ))
+    }
+}
+
+/// Store a fallback deliverable in the job context's metadata.
+fn store_fallback_in_metadata(
+    ctx: &mut crate::context::JobContext,
+    fallback: Option<&crate::context::FallbackDeliverable>,
+) {
+    let Some(fb) = fallback else {
+        return;
+    };
+    match serde_json::to_value(fb) {
+        Ok(val) => {
+            if !ctx.metadata.is_object() {
+                ctx.metadata = serde_json::json!({});
+            }
+            ctx.metadata["fallback_deliverable"] = val;
+        }
+        Err(e) => {
+            tracing::warn!(
+                "Failed to serialize fallback deliverable for job {}: {e}",
+                ctx.job_id
+            );
+        }
     }
 }
 
@@ -1267,5 +1330,56 @@ mod tests {
             results[0].result.is_err(),
             "Missing tool should produce an error, not a panic"
         );
+    }
+
+    #[test]
+    fn test_store_fallback_in_metadata_roundtrip() {
+        use crate::context::FallbackDeliverable;
+
+        let mut ctx = JobContext::new("Test", "fallback roundtrip");
+        let memory = crate::context::Memory::new(ctx.job_id);
+        let fb = FallbackDeliverable::build(&ctx, &memory, "test failure");
+
+        // Store into metadata
+        store_fallback_in_metadata(&mut ctx, Some(&fb));
+
+        // Verify it's stored and can be deserialized back
+        let stored = ctx.metadata.get("fallback_deliverable");
+        assert!(
+            stored.is_some(),
+            "fallback_deliverable missing from metadata"
+        );
+
+        let recovered: FallbackDeliverable =
+            serde_json::from_value(stored.unwrap().clone()).expect("deserialize fallback");
+        assert_eq!(recovered.failure_reason, "test failure");
+        assert!(!recovered.partial);
+    }
+
+    #[test]
+    fn test_store_fallback_handles_non_object_metadata() {
+        use crate::context::FallbackDeliverable;
+
+        let mut ctx = JobContext::new("Test", "non-object metadata");
+        ctx.metadata = serde_json::json!("not an object");
+
+        let memory = crate::context::Memory::new(ctx.job_id);
+        let fb = FallbackDeliverable::build(&ctx, &memory, "failed");
+
+        store_fallback_in_metadata(&mut ctx, Some(&fb));
+
+        // Must normalize to object and store
+        assert!(ctx.metadata.is_object());
+        assert!(ctx.metadata.get("fallback_deliverable").is_some());
+    }
+
+    #[test]
+    fn test_store_fallback_none_is_noop() {
+        let mut ctx = JobContext::new("Test", "noop");
+        let original = ctx.metadata.clone();
+
+        store_fallback_in_metadata(&mut ctx, None);
+
+        assert_eq!(ctx.metadata, original);
     }
 }
