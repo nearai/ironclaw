@@ -2227,34 +2227,6 @@ impl Channel for WasmChannel {
         Ok(())
     }
 
-    async fn broadcast(
-        &self,
-        _user_id: &str,
-        response: OutgoingResponse,
-    ) -> Result<(), ChannelError> {
-        let metadata_json = self
-            .last_broadcast_metadata
-            .read()
-            .await
-            .clone()
-            .ok_or_else(|| ChannelError::SendFailed {
-                name: self.name.clone(),
-                reason: "No messages received yet — no chat_id available for broadcast".into(),
-            })?;
-
-        self.call_on_respond(
-            uuid::Uuid::new_v4(),
-            &response.content,
-            response.thread_id.as_deref(),
-            &metadata_json,
-        )
-        .await
-        .map_err(|e| ChannelError::SendFailed {
-            name: self.name.clone(),
-            reason: e.to_string(),
-        })
-    }
-
     async fn send_status(
         &self,
         status: StatusUpdate,
@@ -2392,14 +2364,6 @@ impl Channel for SharedWasmChannel {
         metadata: &serde_json::Value,
     ) -> Result<(), ChannelError> {
         self.inner.send_status(status, metadata).await
-    }
-
-    async fn broadcast(
-        &self,
-        user_id: &str,
-        response: OutgoingResponse,
-    ) -> Result<(), ChannelError> {
-        self.inner.broadcast(user_id, response).await
     }
 
     async fn health_check(&self) -> Result<(), ChannelError> {
@@ -2652,45 +2616,11 @@ impl HttpResponse {
 /// Maximum total attachment size (50 MB).
 const MAX_TOTAL_ATTACHMENT_BYTES: u64 = 50 * 1024 * 1024;
 
-/// Detect MIME type from file extension.
-fn mime_from_extension(path: &str) -> &'static str {
-    let ext = path.rsplit('.').next().unwrap_or("").to_ascii_lowercase();
-    match ext.as_str() {
-        "png" => "image/png",
-        "jpg" | "jpeg" => "image/jpeg",
-        "gif" => "image/gif",
-        "webp" => "image/webp",
-        "svg" => "image/svg+xml",
-        "bmp" => "image/bmp",
-        "ico" => "image/x-icon",
-        "tiff" | "tif" => "image/tiff",
-        "pdf" => "application/pdf",
-        "mp4" => "video/mp4",
-        "webm" => "video/webm",
-        "avi" => "video/x-msvideo",
-        "mov" => "video/quicktime",
-        "mp3" => "audio/mpeg",
-        "ogg" => "audio/ogg",
-        "wav" => "audio/wav",
-        "flac" => "audio/flac",
-        "zip" => "application/zip",
-        "gz" | "gzip" => "application/gzip",
-        "tar" => "application/x-tar",
-        "json" => "application/json",
-        "xml" => "application/xml",
-        "txt" => "text/plain",
-        "html" | "htm" => "text/html",
-        "css" => "text/css",
-        "js" => "application/javascript",
-        "csv" => "text/csv",
-        "doc" => "application/msword",
-        "docx" => "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-        "xls" => "application/vnd.ms-excel",
-        "xlsx" => "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        "ppt" => "application/vnd.ms-powerpoint",
-        "pptx" => "application/vnd.openxmlformats-officedocument.presentationml.presentation",
-        _ => "application/octet-stream",
-    }
+/// Detect MIME type from file extension using the `mime_guess` crate.
+fn mime_from_extension(path: &str) -> String {
+    mime_guess::from_path(path)
+        .first_or_octet_stream()
+        .to_string()
 }
 
 /// Read attachment files from disk and build WIT attachment records.
@@ -2722,7 +2652,7 @@ fn read_attachments(paths: &[String]) -> Result<Vec<wit_channel::Attachment>, St
             .unwrap_or("file")
             .to_string();
 
-        let mime_type = mime_from_extension(path).to_string();
+        let mime_type = mime_from_extension(path);
 
         attachments.push(wit_channel::Attachment {
             filename,
@@ -3815,8 +3745,9 @@ mod tests {
         assert_eq!(mime_from_extension("doc.pdf"), "application/pdf");
         assert_eq!(mime_from_extension("video.mp4"), "video/mp4");
         assert_eq!(mime_from_extension("data.csv"), "text/csv");
+        // .xyz maps to chemical/x-xyz in mime_guess; use a truly unknown extension
         assert_eq!(
-            mime_from_extension("unknown.xyz"),
+            mime_from_extension("unknown.qqqzzz"),
             "application/octet-stream"
         );
         assert_eq!(mime_from_extension("noext"), "application/octet-stream");

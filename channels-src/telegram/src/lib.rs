@@ -887,11 +887,21 @@ fn write_multipart_file(
     content_type: &str,
     data: &[u8],
 ) {
+    // Sanitize filename: strip quotes, newlines, and non-ASCII to prevent header injection
+    let safe_filename: String = filename
+        .chars()
+        .filter(|c| *c != '"' && *c != '\r' && *c != '\n' && *c != '\\' && c.is_ascii())
+        .collect();
+    let safe_filename = if safe_filename.is_empty() {
+        "file".to_string()
+    } else {
+        safe_filename
+    };
     body.extend_from_slice(format!("--{}\r\n", boundary).as_bytes());
     body.extend_from_slice(
         format!(
             "Content-Disposition: form-data; name=\"{}\"; filename=\"{}\"\r\n",
-            field, filename
+            field, safe_filename
         )
         .as_bytes(),
     );
@@ -1012,13 +1022,21 @@ fn send_document(
     }
 }
 
+/// Image MIME types that Telegram's sendPhoto API supports.
+const PHOTO_MIME_TYPES: &[&str] = &[
+    "image/jpeg",
+    "image/png",
+    "image/gif",
+    "image/webp",
+];
+
 /// Send a single attachment, choosing sendPhoto or sendDocument based on MIME type.
 fn send_attachment(
     chat_id: i64,
     attachment: &Attachment,
     reply_to_message_id: Option<i64>,
 ) -> Result<(), String> {
-    if attachment.mime_type.starts_with("image/") {
+    if PHOTO_MIME_TYPES.contains(&attachment.mime_type.as_str()) {
         send_photo(
             chat_id,
             &attachment.filename,
