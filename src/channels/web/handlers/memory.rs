@@ -123,27 +123,8 @@ pub async fn memory_read_handler(
     }))
 }
 
-pub async fn memory_write_handler(
-    State(state): State<Arc<GatewayState>>,
-    Json(req): Json<MemoryWriteRequest>,
-) -> Result<Json<MemoryWriteResponse>, (StatusCode, String)> {
-    let workspace = state.workspace.as_ref().ok_or((
-        StatusCode::SERVICE_UNAVAILABLE,
-        "Workspace not available".to_string(),
-    ))?;
-
-    workspace
-        .write(&req.path, &req.content)
-        .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-
-    Ok(Json(MemoryWriteResponse {
-        path: req.path,
-        status: "written",
-        redirected: None,
-        actual_layer: None,
-    }))
-}
+// memory_write_handler lives in server.rs (layer-aware version with append,
+// privacy redirect, and proper error status codes).
 
 pub async fn memory_search_handler(
     State(state): State<Arc<GatewayState>>,
