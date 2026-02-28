@@ -476,6 +476,9 @@ impl Workspace {
                 );
                 let private = MemoryLayer::private_layer(&self.memory_layers)
                     .ok_or(WorkspaceError::PrivacyRedirectFailed)?;
+                if !private.writable {
+                    return Err(WorkspaceError::PrivacyRedirectFailed);
+                }
                 return Ok((private.scope.clone(), private.name.clone(), true));
             }
         }
@@ -525,11 +528,10 @@ impl Workspace {
             .storage
             .get_or_create_document_by_path(&scope, self.agent_id, &path)
             .await?;
-        let existing = self.storage.get_document_by_id(doc.id).await?;
-        let new_content = if existing.content.is_empty() {
+        let new_content = if doc.content.is_empty() {
             content.to_string()
         } else {
-            format!("{}\n\n{}", existing.content, content)
+            format!("{}\n\n{}", doc.content, content)
         };
         self.storage.update_document(doc.id, &new_content).await?;
         self.reindex_document(doc.id).await?;
