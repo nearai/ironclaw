@@ -176,6 +176,18 @@ impl Agent {
             return Ok(SubmissionResult::error("Input rejected by safety policy."));
         }
 
+        // Scan inbound messages for secrets (API keys, tokens).
+        // Catching them here prevents the LLM from echoing them back, which
+        // would trigger the outbound leak detector and create error loops.
+        if let Some(warning) = self.safety().scan_inbound_for_secrets(content) {
+            tracing::warn!(
+                user = %message.user_id,
+                channel = %message.channel,
+                "Inbound message blocked: contains leaked secret"
+            );
+            return Ok(SubmissionResult::error(warning));
+        }
+
         // Handle explicit commands (starting with /) directly
         // Everything else goes through the normal agentic loop with tools
         let temp_message = IncomingMessage {
