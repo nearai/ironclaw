@@ -2023,5 +2023,5 @@ _ironclaw__worker_commands() {
 if [ "$funcstack[1]" = "_ironclaw" ]; then
     _ironclaw "$@"
 else
-    compdef _ironclaw ironclaw
+    (( $+functions[compdef] )) && compdef _ironclaw ironclaw
 fi
