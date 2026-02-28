@@ -451,7 +451,7 @@ This document tracks feature parity between IronClaw (Rust implementation) and O
 | Cron webhook SSRF guard | ✅ | ❌ | SSRF checks on webhook delivery |
 | Loopback-first | ✅ | 🚧 | HTTP binds 0.0.0.0 |
 | Docker sandbox | ✅ | ✅ | Orchestrator/worker containers |
-| Podman support | ✅ | ❌ | Alternative to Docker |
+| Podman support | ✅ | ✅ | Alternative to Docker |
 | WASM sandbox | ❌ | ✅ | IronClaw innovation |
 | Sandbox env sanitization | ✅ | 🚧 | Shell tool scrubs env vars (secret detection); docker container env sanitization partial |
 | Tool policies | ✅ | ✅ | |
