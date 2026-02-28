@@ -132,6 +132,29 @@ impl ChannelsConfig {
                         message: "layer name must not be empty".to_string(),
                     });
                 }
+                if layer.name.len() > 64 {
+                    return Err(ConfigError::InvalidValue {
+                        key: "MEMORY_LAYERS".to_string(),
+                        message: format!(
+                            "layer name '{}' exceeds 64 characters",
+                            layer.name
+                        ),
+                    });
+                }
+                if !layer
+                    .name
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+                {
+                    return Err(ConfigError::InvalidValue {
+                        key: "MEMORY_LAYERS".to_string(),
+                        message: format!(
+                            "layer name '{}' contains invalid characters \
+                             (allowed: a-z, A-Z, 0-9, _, -)",
+                            layer.name
+                        ),
+                    });
+                }
                 if layer.scope.trim().is_empty() {
                     return Err(ConfigError::InvalidValue {
                         key: "MEMORY_LAYERS".to_string(),

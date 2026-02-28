@@ -534,6 +534,9 @@ impl Workspace {
     /// Uses a single `\n` separator (suitable for log-style entries).
     /// For semantic separation (e.g., memory entries), use `append_memory()`
     /// which uses `\n\n`.
+    ///
+    /// Uses a read-modify-write pattern that is not concurrency-safe:
+    /// concurrent appends to the same path may lose writes.
     pub async fn append(&self, path: &str, content: &str) -> Result<(), WorkspaceError> {
         let path = normalize_path(path);
         let doc = self
@@ -636,6 +639,13 @@ impl Workspace {
     }
 
     /// Write to a layer, with append semantics.
+    ///
+    /// Note: privacy classification only examines the new `content`, not the
+    /// full document after concatenation. See [`PatternPrivacyClassifier`]
+    /// limitations for details.
+    ///
+    /// Uses a read-modify-write pattern that is not concurrency-safe:
+    /// concurrent appends to the same path may lose writes.
     pub async fn append_to_layer(
         &self,
         layer_name: &str,
@@ -806,9 +816,18 @@ impl Workspace {
     ///
     /// This is for important facts, decisions, and preferences worth
     /// remembering long-term.
+    ///
+    /// Uses `get_or_create_document_by_path` with the primary `user_id`
+    /// instead of `self.memory()` to guarantee writes always target the
+    /// primary (write) scope.  `self.memory()` delegates to `read_or_create`,
+    /// which in multi-scope mode may return a document owned by a secondary
+    /// scope; writing to that document by UUID would violate write isolation.
     pub async fn append_memory(&self, entry: &str) -> Result<(), WorkspaceError> {
-        // Use double newline for memory entries (semantic separation)
-        let doc = self.memory().await?;
+        // Always get/create in the primary scope to preserve write isolation.
+        let doc = self
+            .storage
+            .get_or_create_document_by_path(&self.user_id, self.agent_id, paths::MEMORY)
+            .await?;
         let new_content = if doc.content.is_empty() {
             entry.to_string()
         } else {

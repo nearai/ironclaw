@@ -418,6 +418,13 @@ pub trait WorkspaceStore: Send + Sync {
         embedding: Option<&[f32]>,
         config: &SearchConfig,
     ) -> Result<Vec<SearchResult>, WorkspaceError> {
+        if user_ids.len() > 1 {
+            tracing::debug!(
+                scope_count = user_ids.len(),
+                "hybrid_search_multi: using default per-scope RRF merge; \
+                 cross-scope score comparison may be unreliable"
+            );
+        }
         let mut all_results = Vec::new();
         for uid in user_ids {
             let results = self

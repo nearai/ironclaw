@@ -15,6 +15,27 @@ pub trait PrivacyClassifier: Send + Sync {
 ///
 /// Detects PII patterns (SSN, credit card, phone), health/medical terms,
 /// and personal sentiment markers.
+///
+/// # Limitations
+///
+/// This classifier uses simple regex patterns and has known limitations:
+///
+/// - **Bypass**: Sensitive data can be obfuscated to evade detection —
+///   base64 encoding, whitespace insertion, Unicode lookalikes, natural
+///   language paraphrasing, or splitting across multiple writes.
+/// - **False positives**: The email regex matches any email address, so
+///   intentional shared content like "send to team@company.com" triggers
+///   a redirect. Medical terms like "treatment" or "doctor" match in
+///   non-medical contexts.
+/// - **Append gap**: When used with `append_to_layer`, only the new content
+///   being appended is classified, not the full document after concatenation.
+///   Sensitive data split across multiple individually-benign appends will
+///   not be detected.
+///
+/// The classifier is pluggable via the [`PrivacyClassifier`] trait.
+/// Operators who find the false-positive rate unacceptable can implement
+/// a custom classifier or disable auto-redirect by not configuring a
+/// shared layer with `sensitivity = "shared"`.
 pub struct PatternPrivacyClassifier {
     patterns: Vec<Regex>,
 }
