@@ -6,10 +6,10 @@
 //!
 //! # Detection Limitations
 //!
-//! - **macOS**: High confidence. Detects both standard Docker Desktop socket
-//!   (`~/.docker/run/docker.sock`) and the default `/var/run/docker.sock`.
-//!   Podman machine sockets under `~/.local/share/containers/podman/machine/`
-//!   are also checked.
+//! - **macOS**: High confidence. Detects standard Docker Desktop socket
+//!   (`~/.docker/run/docker.sock`), OrbStack (`~/.orbstack/run/docker.sock`),
+//!   and the default `/var/run/docker.sock`. Podman machine sockets under
+//!   `~/.local/share/containers/podman/machine/` are also checked.
 //!
 //! - **Linux**: High confidence for standard installs. Rootless Docker uses
 //!   a different socket path (`/run/user/$UID/docker.sock`) which is now

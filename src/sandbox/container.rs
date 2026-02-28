@@ -491,19 +491,21 @@ impl ContainerRunner {
 /// Tries these locations in order:
 /// 1. `DOCKER_HOST` env var (bollard default)
 /// 2. `/var/run/docker.sock` (Linux default; also used by OrbStack and Podman Desktop on macOS)
-/// 3. `~/.docker/run/docker.sock` (Docker Desktop 4.13+ on macOS — primary user-owned socket)
-/// 4. `~/.colima/default/docker.sock` (Colima — popular lightweight Docker Desktop alternative)
-/// 5. `~/.rd/docker.sock` (Rancher Desktop on macOS)
-/// 6. `$XDG_RUNTIME_DIR/docker.sock` (common rootless Docker socket on Linux)
-/// 7. `/run/user/$UID/docker.sock` (rootless Docker fallback on Linux)
-/// 8. `$XDG_RUNTIME_DIR/podman/podman.sock` (rootless Podman on Linux)
-/// 9. `/run/user/$UID/podman/podman.sock` (rootless Podman fallback on Linux)
-/// 10. `/run/podman/podman.sock` (rootful Podman on Linux)
-/// 11. `~/.local/share/containers/podman/machine/*/podman.sock` (Podman machine on macOS)
+/// 3. `~/.orbstack/run/docker.sock` (OrbStack on macOS — user-owned socket)
+/// 4. `~/.docker/run/docker.sock` (Docker Desktop 4.13+ on macOS — primary user-owned socket)
+/// 5. `~/.colima/default/docker.sock` (Colima — popular lightweight Docker Desktop alternative)
+/// 6. `~/.rd/docker.sock` (Rancher Desktop on macOS)
+/// 7. `$XDG_RUNTIME_DIR/docker.sock` (common rootless Docker socket on Linux)
+/// 8. `/run/user/$UID/docker.sock` (rootless Docker fallback on Linux)
+/// 9. `$XDG_RUNTIME_DIR/podman/podman.sock` (rootless Podman on Linux)
+/// 10. `/run/user/$UID/podman/podman.sock` (rootless Podman fallback on Linux)
+/// 11. `/run/podman/podman.sock` (rootful Podman on Linux)
+/// 12. `~/.local/share/containers/podman/machine/*/podman.sock` (Podman machine on macOS)
 pub async fn connect_docker() -> Result<Docker> {
     // First try bollard defaults (checks DOCKER_HOST env var, then /var/run/docker.sock).
-    // This covers Linux, OrbStack (updates the /var/run symlink), and any user with
-    // DOCKER_HOST set to their runtime's socket.
+    // This covers Linux and any user with DOCKER_HOST set to their runtime's socket.
+    // OrbStack may also create a /var/run/docker.sock symlink, but its user-owned
+    // socket at ~/.orbstack/run/docker.sock is checked separately below.
     if let Ok(docker) = Docker::connect_with_local_defaults()
         && docker.ping().await.is_ok()
     {
@@ -531,8 +533,8 @@ pub async fn connect_docker() -> Result<Docker> {
 
     Err(SandboxError::DockerNotAvailable {
         reason: "Could not connect to container runtime daemon. Tried: $DOCKER_HOST, \
-            /var/run/docker.sock, ~/.docker/run/docker.sock, \
-            ~/.colima/default/docker.sock, ~/.rd/docker.sock, \
+            /var/run/docker.sock, ~/.orbstack/run/docker.sock, \
+            ~/.docker/run/docker.sock, ~/.colima/default/docker.sock, ~/.rd/docker.sock, \
             $XDG_RUNTIME_DIR/docker.sock, /run/user/$UID/docker.sock, \
             $XDG_RUNTIME_DIR/podman/podman.sock, /run/user/$UID/podman/podman.sock, \
             /run/podman/podman.sock, ~/.local/share/containers/podman/machine/*/podman.sock"
@@ -564,6 +566,7 @@ fn unix_socket_candidates_from_env(
 
     // Docker sockets
     if let Some(ref home) = home {
+        push_unique(home.join(".orbstack/run/docker.sock")); // OrbStack on macOS
         push_unique(home.join(".docker/run/docker.sock")); // Docker Desktop 4.13+
         push_unique(home.join(".colima/default/docker.sock")); // Colima
         push_unique(home.join(".rd/docker.sock")); // Rancher Desktop
@@ -618,6 +621,7 @@ mod tests {
         );
 
         // Docker sockets
+        assert!(candidates.contains(&PathBuf::from("/home/tester/.orbstack/run/docker.sock")));
         assert!(candidates.contains(&PathBuf::from("/home/tester/.docker/run/docker.sock")));
         assert!(candidates.contains(&PathBuf::from("/home/tester/.colima/default/docker.sock")));
         assert!(candidates.contains(&PathBuf::from("/home/tester/.rd/docker.sock")));

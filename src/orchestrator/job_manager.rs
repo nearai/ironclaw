@@ -730,11 +730,7 @@ mod tests {
     #[test]
     fn test_host_alias_for_orchestrator_docker_default() {
         let host = host_alias_for_orchestrator(Some(ContainerRuntime::Docker));
-        if cfg!(target_os = "linux") {
-            assert_eq!(host, "host.docker.internal");
-        } else {
-            assert_eq!(host, "host.docker.internal");
-        }
+        assert_eq!(host, "host.docker.internal");
     }
 
     #[test]
