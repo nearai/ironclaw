@@ -49,7 +49,9 @@ use uuid::Uuid;
 use crate::channels::web::types::SseEvent;
 use crate::db::Database;
 use crate::llm::LlmProvider;
+use crate::safety::SafetyLayer;
 use crate::secrets::SecretsStore;
+use crate::tools::{ToolExecutor, ToolRegistry};
 
 /// Result of orchestrator setup, containing all handles needed by the agent.
 pub struct OrchestratorSetup {
@@ -66,6 +68,8 @@ pub async fn setup_orchestrator(
     llm: &Arc<dyn LlmProvider>,
     db: Option<&Arc<dyn Database>>,
     secrets_store: Option<&Arc<dyn SecretsStore + Send + Sync>>,
+    tools: &Arc<ToolRegistry>,
+    safety: &Arc<SafetyLayer>,
 ) -> OrchestratorSetup {
     let prompt_queue = Arc::new(Mutex::new(
         HashMap::<Uuid, VecDeque<api::PendingPrompt>>::new(),
@@ -115,6 +119,13 @@ pub async fn setup_orchestrator(
         };
         let jm = Arc::new(ContainerJobManager::new(job_config, token_store.clone()));
 
+        // Build ToolExecutor for programmatic tool calling (PTC)
+        let tool_executor = Arc::new(ToolExecutor::new(
+            Arc::clone(tools),
+            Arc::clone(safety),
+            std::time::Duration::from_secs(60),
+        ));
+
         let orchestrator_state = api::OrchestratorState {
             llm: Arc::clone(llm),
             job_manager: Arc::clone(&jm),
@@ -124,6 +135,7 @@ pub async fn setup_orchestrator(
             store: db.cloned(),
             secrets_store: secrets_store.cloned(),
             user_id: "default".to_string(),
+            tool_executor: Some(tool_executor),
         };
 
         tokio::spawn(async move {

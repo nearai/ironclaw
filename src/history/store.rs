@@ -254,6 +254,7 @@ impl Store {
                     // TODO(#661): persist user_timezone in agent_jobs table so
                     // background/routine jobs retain the session's timezone context.
                     user_timezone: "UTC".to_string(),
+                    tool_nesting_depth: 0,
                 }))
             }
             None => Ok(None),

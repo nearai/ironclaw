@@ -176,6 +176,12 @@ pub struct JobContext {
     pub tool_output_stash: Arc<tokio::sync::RwLock<HashMap<String, String>>>,
     /// User's preferred timezone (IANA name, e.g. "America/New_York"). Defaults to "UTC".
     pub user_timezone: String,
+    /// Current nesting depth for programmatic tool calling (PTC).
+    ///
+    /// Tracks how deep we are in a tool-invokes-tool chain so the executor
+    /// can enforce MAX_NESTING_DEPTH globally, even across WASM→executor→WASM chains.
+    #[serde(skip)]
+    pub tool_nesting_depth: u32,
 }
 
 impl JobContext {
@@ -216,6 +222,7 @@ impl JobContext {
             metadata: serde_json::Value::Null,
             tool_output_stash: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
             user_timezone: "UTC".to_string(),
+            tool_nesting_depth: 0,
         }
     }
 
