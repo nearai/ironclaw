@@ -8,6 +8,7 @@
 
 use std::sync::Arc;
 
+use base64::Engine;
 use reqwest::Client;
 use secrecy::{ExposeSecret, SecretString};
 use serde::Deserialize;
@@ -467,13 +468,59 @@ fn setup_tunnel_ngrok() -> Result<TunnelSettings, ChannelSetupError> {
 }
 
 fn setup_tunnel_cloudflare() -> Result<TunnelSettings, ChannelSetupError> {
+    // Check if cloudflared binary is on PATH
+    let cloudflared_found = crate::skills::gating::binary_exists("cloudflared");
+
+    if !cloudflared_found {
+        print_error("cloudflared not found in PATH.");
+        print_info("Install it:");
+        print_info("  macOS:   brew install cloudflared");
+        print_info("  Ubuntu:  https://pkg.cloudflare.com/");
+        print_info(
+            "  Other:   https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/downloads/",
+        );
+        println!();
+        if !confirm(
+            "Continue anyway (you can install cloudflared later)?",
+            false,
+        )? {
+            return Err(ChannelSetupError::Validation(
+                "cloudflared binary not found. Install it and re-run setup.".to_string(),
+            ));
+        }
+    }
+
     print_info("Get your tunnel token from the Cloudflare Zero Trust dashboard:");
     print_info("  https://one.dash.cloudflare.com/ > Networks > Tunnels");
     println!();
 
     let token = secret_input("Cloudflare tunnel token")?;
 
-    print_success("Cloudflare tunnel configured. Tunnel will start automatically at boot.");
+    let token_valid = validate_cloudflare_token_format(token.expose_secret());
+
+    if !token_valid {
+        print_error("Token does not appear to be a valid Cloudflare tunnel token.");
+        print_info("Tokens are base64-encoded and contain account/tunnel identifiers.");
+        print_info(
+            "Copy the full token from: Zero Trust dashboard > Networks > Tunnels > your tunnel",
+        );
+        println!();
+        if !confirm("Save this token anyway?", false)? {
+            return Err(ChannelSetupError::Validation(
+                "Invalid Cloudflare tunnel token format.".to_string(),
+            ));
+        }
+    }
+
+    print_success("Cloudflare tunnel token saved.");
+    if crate::skills::gating::binary_exists("cloudflared") {
+        print_info("Start the tunnel with: cloudflared tunnel --no-autoupdate run --token <token>");
+        print_info("For auto-start, install cloudflared as a system service:");
+        print_info("  sudo cloudflared service install <token>");
+    } else {
+        print_info("After installing cloudflared, start the tunnel with:");
+        print_info("  cloudflared tunnel --no-autoupdate run --token <token>");
+    }
 
     Ok(TunnelSettings {
         provider: Some("cloudflare".to_string()),
@@ -985,6 +1032,19 @@ pub async fn setup_wasm_channel(
     })
 }
 
+/// Validate that a Cloudflare tunnel token has the expected format.
+///
+/// Cloudflare tunnel tokens are base64-encoded JSON objects containing
+/// at least `"a"` (account tag) and `"t"` (tunnel ID) fields.
+fn validate_cloudflare_token_format(token: &str) -> bool {
+    base64::engine::general_purpose::STANDARD
+        .decode(token)
+        .or_else(|_| base64::engine::general_purpose::URL_SAFE.decode(token))
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
+        .is_some_and(|json| json.get("a").is_some() && json.get("t").is_some())
+}
+
 /// Generate a random secret of specified length (in bytes).
 fn generate_secret_with_length(length: usize) -> String {
     use rand::RngCore;
@@ -996,7 +1056,9 @@ fn generate_secret_with_length(length: usize) -> String {
 
 #[cfg(test)]
 mod tests {
-    use crate::setup::channels::generate_webhook_secret;
+    use base64::Engine;
+
+    use crate::setup::channels::{generate_webhook_secret, validate_cloudflare_token_format};
 
     #[test]
     fn test_generate_webhook_secret() {
@@ -1014,5 +1076,39 @@ mod tests {
 
         let s2 = generate_secret_with_length(1);
         assert_eq!(s2.len(), 2);
+    }
+
+    #[test]
+    fn test_validate_cloudflare_token_valid() {
+        // Simulate a valid Cloudflare tunnel token: base64-encoded JSON with "a" and "t" fields
+        let payload = serde_json::json!({"a": "account-tag", "t": "tunnel-id", "s": "secret"});
+        let token =
+            base64::engine::general_purpose::STANDARD.encode(payload.to_string().as_bytes());
+        assert!(validate_cloudflare_token_format(&token));
+    }
+
+    #[test]
+    fn test_validate_cloudflare_token_missing_fields() {
+        // JSON but missing required "a" and "t" fields
+        let payload = serde_json::json!({"foo": "bar"});
+        let token =
+            base64::engine::general_purpose::STANDARD.encode(payload.to_string().as_bytes());
+        assert!(!validate_cloudflare_token_format(&token));
+    }
+
+    #[test]
+    fn test_validate_cloudflare_token_not_base64() {
+        assert!(!validate_cloudflare_token_format("not-base64!!!"));
+    }
+
+    #[test]
+    fn test_validate_cloudflare_token_not_json() {
+        let token = base64::engine::general_purpose::STANDARD.encode(b"not json at all");
+        assert!(!validate_cloudflare_token_format(&token));
+    }
+
+    #[test]
+    fn test_validate_cloudflare_token_empty() {
+        assert!(!validate_cloudflare_token_format(""));
     }
 }
