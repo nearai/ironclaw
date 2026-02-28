@@ -42,6 +42,7 @@
 
 mod chunker;
 mod document;
+mod embedding_cache;
 mod embeddings;
 pub mod hygiene;
 #[cfg(feature = "postgres")]
@@ -50,6 +51,7 @@ mod search;
 
 pub use chunker::{ChunkConfig, chunk_document};
 pub use document::{MemoryChunk, MemoryDocument, WorkspaceEntry, paths};
+pub use embedding_cache::{CachedEmbeddingProvider, EmbeddingCacheConfig};
 pub use embeddings::{
     EmbeddingProvider, MockEmbeddings, NearAiEmbeddings, OllamaEmbeddings, OpenAiEmbeddings,
 };
@@ -318,7 +320,33 @@ impl Workspace {
     }
 
     /// Set the embedding provider for semantic search.
+    ///
+    /// The provider is automatically wrapped in a [`CachedEmbeddingProvider`]
+    /// with the default cache size (10,000 entries; payload ~58 MB for 1536-dim,
+    /// actual memory higher due to per-entry overhead).
     pub fn with_embeddings(mut self, provider: Arc<dyn EmbeddingProvider>) -> Self {
+        self.embeddings = Some(Arc::new(CachedEmbeddingProvider::new(
+            provider,
+            EmbeddingCacheConfig::default(),
+        )));
+        self
+    }
+
+    /// Set the embedding provider with a custom cache configuration.
+    pub fn with_embeddings_cached(
+        mut self,
+        provider: Arc<dyn EmbeddingProvider>,
+        cache_config: EmbeddingCacheConfig,
+    ) -> Self {
+        self.embeddings = Some(Arc::new(CachedEmbeddingProvider::new(
+            provider,
+            cache_config,
+        )));
+        self
+    }
+
+    /// Set the embedding provider **without** caching (for tests).
+    pub fn with_embeddings_uncached(mut self, provider: Arc<dyn EmbeddingProvider>) -> Self {
         self.embeddings = Some(provider);
         self
     }

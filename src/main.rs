@@ -246,6 +246,7 @@ async fn main() -> anyhow::Result<()> {
         ironclaw::sandbox::DockerStatus::Disabled
     };
 
+    // Shared state for job events (used by both orchestrator and web gateway)
     let job_event_tx: Option<
         tokio::sync::broadcast::Sender<(uuid::Uuid, ironclaw::channels::web::types::SseEvent)>,
     > = if config.sandbox.enabled && docker_status.is_ok() {
