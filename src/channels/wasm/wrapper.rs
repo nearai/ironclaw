@@ -52,8 +52,12 @@ use crate::channels::{Channel, IncomingMessage, MessageStream, OutgoingResponse,
 use crate::error::ChannelError;
 use crate::pairing::PairingStore;
 use crate::safety::LeakDetector;
+use crate::secrets::SecretsStore;
 use crate::tools::wasm::LogLevel;
 use crate::tools::wasm::WasmResourceLimiter;
+use crate::tools::wasm::credential_injector::{
+    InjectedCredentials, host_matches_pattern, inject_credential,
+};
 
 // Generate component model bindings from the WIT file
 wasmtime::component::bindgen!({
@@ -64,6 +68,22 @@ wasmtime::component::bindgen!({
         // Use our own store data type
     },
 });
+
+/// Pre-resolved credential for host-based injection.
+///
+/// Built before each WASM execution by decrypting secrets from the store.
+/// Applied per-request by matching the URL host against `host_patterns`.
+/// WASM channels never see the raw secret values.
+struct ResolvedHostCredential {
+    /// Host patterns this credential applies to (e.g., "api.slack.com").
+    host_patterns: Vec<String>,
+    /// Headers to add to matching requests (e.g., "Authorization: Bearer ...").
+    headers: HashMap<String, String>,
+    /// Query parameters to add to matching requests.
+    query_params: HashMap<String, String>,
+    /// Raw secret value for redaction in error messages.
+    secret_value: String,
+}
 
 /// Store data for WASM channel execution.
 ///
@@ -76,6 +96,9 @@ struct ChannelStoreData {
     /// Injected credentials for URL substitution (e.g., bot tokens).
     /// Keys are placeholder names like "TELEGRAM_BOT_TOKEN".
     credentials: HashMap<String, String>,
+    /// Pre-resolved credentials for automatic host-based injection.
+    /// Applied per-request by matching the URL host against host_patterns.
+    host_credentials: Vec<ResolvedHostCredential>,
     /// Pairing store for DM pairing (guest access control).
     pairing_store: Arc<PairingStore>,
     /// Dedicated tokio runtime for HTTP requests, lazily initialized.
@@ -89,6 +112,7 @@ impl ChannelStoreData {
         channel_name: &str,
         capabilities: ChannelCapabilities,
         credentials: HashMap<String, String>,
+        host_credentials: Vec<ResolvedHostCredential>,
         pairing_store: Arc<PairingStore>,
     ) -> Self {
         // Create a minimal WASI context (no filesystem, no env vars for security)
@@ -100,6 +124,7 @@ impl ChannelStoreData {
             wasi,
             table: ResourceTable::new(),
             credentials,
+            host_credentials,
             pairing_store,
             http_runtime: None,
         }
@@ -166,7 +191,64 @@ impl ChannelStoreData {
                 result = result.replace(value, &format!("[REDACTED:{}]", name));
             }
         }
+        for cred in &self.host_credentials {
+            if !cred.secret_value.is_empty() {
+                result = result.replace(&cred.secret_value, "[REDACTED:host_credential]");
+            }
+        }
         result
+    }
+
+    /// Inject pre-resolved host credentials into the request.
+    ///
+    /// Matches the URL host against each resolved credential's host_patterns.
+    /// Matching credentials have their headers merged and query params appended.
+    fn inject_host_credentials(
+        &self,
+        url_host: &str,
+        headers: &mut HashMap<String, String>,
+        url: &mut String,
+    ) {
+        for cred in &self.host_credentials {
+            let matches = cred
+                .host_patterns
+                .iter()
+                .any(|pattern| host_matches_pattern(url_host, pattern));
+
+            if !matches {
+                continue;
+            }
+
+            // Merge injected headers (host credentials take precedence)
+            for (key, value) in &cred.headers {
+                headers.insert(key.clone(), value.clone());
+            }
+
+            // Append query parameters to URL (insert before fragment if present)
+            if !cred.query_params.is_empty() {
+                let (base, fragment) = match url.find('#') {
+                    Some(i) => (url[..i].to_string(), Some(url[i..].to_string())),
+                    None => (url.clone(), None),
+                };
+                *url = base;
+
+                let separator = if url.contains('?') { '&' } else { '?' };
+                for (i, (name, value)) in cred.query_params.iter().enumerate() {
+                    if i == 0 {
+                        url.push(separator);
+                    } else {
+                        url.push('&');
+                    }
+                    url.push_str(&urlencoding::encode(name));
+                    url.push('=');
+                    url.push_str(&urlencoding::encode(value));
+                }
+
+                if let Some(frag) = fragment {
+                    url.push_str(&frag);
+                }
+            }
+        }
     }
 }
 
@@ -249,7 +331,7 @@ impl near::agent::channel_host::Host for ChannelStoreData {
         let raw_headers: std::collections::HashMap<String, String> =
             serde_json::from_str(&headers_json).unwrap_or_default();
 
-        let headers: std::collections::HashMap<String, String> = raw_headers
+        let mut headers: std::collections::HashMap<String, String> = raw_headers
             .into_iter()
             .map(|(k, v)| {
                 (
@@ -268,7 +350,12 @@ impl near::agent::channel_host::Host for ChannelStoreData {
             "Parsed and injected request headers"
         );
 
-        let url = injected_url;
+        let mut url = injected_url;
+
+        // Leak scan runs on WASM-provided values BEFORE host credential injection.
+        // This prevents false positives where the host-injected Bearer token
+        // (e.g., xoxb- Slack token) triggers the leak detector — WASM never saw
+        // the real value, so scanning the pre-injection state is correct.
         let leak_detector = LeakDetector::new();
         let header_vec: Vec<(String, String)> = headers
             .iter()
@@ -278,6 +365,12 @@ impl near::agent::channel_host::Host for ChannelStoreData {
         leak_detector
             .scan_http_request(&url, &header_vec, body.as_deref())
             .map_err(|e| format!("Potential secret leak blocked: {}", e))?;
+
+        // Inject pre-resolved host credentials (Bearer tokens, API keys, etc.)
+        // after the leak scan so host-injected secrets don't trigger false positives.
+        if let Some(host) = extract_host_from_url(&url) {
+            self.inject_host_credentials(&host, &mut headers, &mut url);
+        }
 
         // Get the max response size from capabilities (default 10MB).
         let max_response_bytes = self
@@ -560,6 +653,10 @@ pub struct WasmChannel {
 
     /// Settings store for persisting broadcast metadata across restarts.
     settings_store: Option<Arc<dyn crate::db::SettingsStore>>,
+
+    /// Secrets store for host-based credential injection.
+    /// Used to pre-resolve credentials before each WASM callback.
+    secrets_store: Option<Arc<dyn SecretsStore + Send + Sync>>,
 }
 
 /// Update broadcast metadata in memory and persist to the settings store when
@@ -621,7 +718,18 @@ impl WasmChannel {
             workspace_store: Arc::new(ChannelWorkspaceStore::new()),
             last_broadcast_metadata: Arc::new(tokio::sync::RwLock::new(None)),
             settings_store,
+            secrets_store: None,
         }
+    }
+
+    /// Set the secrets store for host-based credential injection.
+    ///
+    /// When set, credentials declared in the channel's capabilities are
+    /// automatically decrypted and injected into HTTP requests based on
+    /// the target host (e.g., Bearer token for api.slack.com).
+    pub fn with_secrets_store(mut self, store: Arc<dyn SecretsStore + Send + Sync>) -> Self {
+        self.secrets_store = Some(store);
+        self
     }
 
     /// Update the channel config before starting.
@@ -767,6 +875,7 @@ impl WasmChannel {
         prepared: &PreparedChannelModule,
         capabilities: &ChannelCapabilities,
         credentials: HashMap<String, String>,
+        host_credentials: Vec<ResolvedHostCredential>,
         pairing_store: Arc<PairingStore>,
     ) -> Result<Store<ChannelStoreData>, WasmChannelError> {
         let engine = runtime.engine();
@@ -778,6 +887,7 @@ impl WasmChannel {
             &prepared.name,
             capabilities.clone(),
             credentials,
+            host_credentials,
             pairing_store,
         );
         let mut store = Store::new(engine, store_data);
@@ -888,6 +998,9 @@ impl WasmChannel {
         let timeout = self.runtime.config().callback_timeout;
         let channel_name = self.name.clone();
         let credentials = self.get_credentials().await;
+        let host_credentials =
+            resolve_channel_host_credentials(&self.capabilities, self.secrets_store.as_deref())
+                .await;
         let pairing_store = self.pairing_store.clone();
         let workspace_store = self.workspace_store.clone();
 
@@ -899,6 +1012,7 @@ impl WasmChannel {
                     &prepared,
                     &capabilities,
                     credentials,
+                    host_credentials,
                     pairing_store,
                 )?;
                 let instance = Self::instantiate_component(&runtime, &prepared, &mut store)?;
@@ -1024,6 +1138,9 @@ impl WasmChannel {
         let capabilities = Self::inject_workspace_reader(&self.capabilities, &self.workspace_store);
         let timeout = self.runtime.config().callback_timeout;
         let credentials = self.get_credentials().await;
+        let host_credentials =
+            resolve_channel_host_credentials(&self.capabilities, self.secrets_store.as_deref())
+                .await;
         let pairing_store = self.pairing_store.clone();
         let workspace_store = self.workspace_store.clone();
 
@@ -1044,6 +1161,7 @@ impl WasmChannel {
                     &prepared,
                     &capabilities,
                     credentials,
+                    host_credentials,
                     pairing_store,
                 )?;
                 let instance = Self::instantiate_component(&runtime, &prepared, &mut store)?;
@@ -1123,6 +1241,9 @@ impl WasmChannel {
         let timeout = self.runtime.config().callback_timeout;
         let channel_name = self.name.clone();
         let credentials = self.get_credentials().await;
+        let host_credentials =
+            resolve_channel_host_credentials(&self.capabilities, self.secrets_store.as_deref())
+                .await;
         let pairing_store = self.pairing_store.clone();
         let workspace_store = self.workspace_store.clone();
 
@@ -1134,6 +1255,7 @@ impl WasmChannel {
                     &prepared,
                     &capabilities,
                     credentials,
+                    host_credentials,
                     pairing_store,
                 )?;
                 let instance = Self::instantiate_component(&runtime, &prepared, &mut store)?;
@@ -1224,6 +1346,9 @@ impl WasmChannel {
         let timeout = self.runtime.config().callback_timeout;
         let channel_name = self.name.clone();
         let credentials = self.get_credentials().await;
+        let host_credentials =
+            resolve_channel_host_credentials(&self.capabilities, self.secrets_store.as_deref())
+                .await;
         let pairing_store = self.pairing_store.clone();
 
         // Prepare response data
@@ -1243,6 +1368,7 @@ impl WasmChannel {
                     &prepared,
                     &capabilities,
                     credentials,
+                    host_credentials,
                     pairing_store,
                 )?;
 
@@ -1337,6 +1463,9 @@ impl WasmChannel {
         let timeout = self.runtime.config().callback_timeout;
         let channel_name = self.name.clone();
         let credentials = self.get_credentials().await;
+        let host_credentials =
+            resolve_channel_host_credentials(&self.capabilities, self.secrets_store.as_deref())
+                .await;
         let pairing_store = self.pairing_store.clone();
 
         let wit_update = status_to_wit(status, metadata);
@@ -1348,6 +1477,7 @@ impl WasmChannel {
                     &prepared,
                     &capabilities,
                     credentials,
+                    host_credentials,
                     pairing_store,
                 )?;
                 let instance = Self::instantiate_component(&runtime, &prepared, &mut store)?;
@@ -1394,6 +1524,7 @@ impl WasmChannel {
         prepared: &Arc<PreparedChannelModule>,
         capabilities: &ChannelCapabilities,
         credentials: &RwLock<HashMap<String, String>>,
+        host_credentials: Vec<ResolvedHostCredential>,
         pairing_store: Arc<PairingStore>,
         timeout: Duration,
         wit_update: wit_channel::StatusUpdate,
@@ -1415,6 +1546,7 @@ impl WasmChannel {
                     &prepared,
                     &capabilities,
                     credentials_snapshot,
+                    host_credentials,
                     pairing_store,
                 )?;
                 let instance = Self::instantiate_component(&runtime, &prepared, &mut store)?;
@@ -1496,6 +1628,13 @@ impl WasmChannel {
                 let prepared = Arc::clone(&self.prepared);
                 let capabilities = self.capabilities.clone();
                 let credentials = self.credentials.clone();
+                // Pre-resolve host credentials once for the lifetime of the repeater.
+                // Channels tokens rarely change, so a snapshot per-repeater is correct.
+                let repeater_host_credentials = resolve_channel_host_credentials(
+                    &self.capabilities,
+                    self.secrets_store.as_deref(),
+                )
+                .await;
                 let pairing_store = self.pairing_store.clone();
                 let callback_timeout = self.runtime.config().callback_timeout;
                 let wit_update = status_to_wit(&status, metadata);
@@ -1509,6 +1648,16 @@ impl WasmChannel {
                         interval.tick().await;
 
                         let wit_update_clone = clone_wit_status_update(&wit_update);
+                        // Clone host credentials for each tick (cheap Vec clone of small structs)
+                        let hc = repeater_host_credentials
+                            .iter()
+                            .map(|c| ResolvedHostCredential {
+                                host_patterns: c.host_patterns.clone(),
+                                headers: c.headers.clone(),
+                                query_params: c.query_params.clone(),
+                                secret_value: c.secret_value.clone(),
+                            })
+                            .collect();
 
                         if let Err(e) = Self::execute_status(
                             &channel_name,
@@ -1516,6 +1665,7 @@ impl WasmChannel {
                             &prepared,
                             &capabilities,
                             &credentials,
+                            hc,
                             pairing_store.clone(),
                             callback_timeout,
                             wit_update_clone,
@@ -1733,7 +1883,8 @@ impl WasmChannel {
         let channel_name = self.name.clone();
         let runtime = Arc::clone(&self.runtime);
         let prepared = Arc::clone(&self.prepared);
-        let capabilities = self.capabilities.clone();
+        let poll_capabilities = self.capabilities.clone();
+        let capabilities = Self::inject_workspace_reader(&self.capabilities, &self.workspace_store);
         let message_tx = self.message_tx.clone();
         let rate_limiter = self.rate_limiter.clone();
         let credentials = self.credentials.clone();
@@ -1742,6 +1893,7 @@ impl WasmChannel {
         let workspace_store = self.workspace_store.clone();
         let last_broadcast_metadata = self.last_broadcast_metadata.clone();
         let settings_store = self.settings_store.clone();
+        let poll_secrets_store = self.secrets_store.clone();
 
         tokio::spawn(async move {
             let mut interval_timer = tokio::time::interval(interval);
@@ -1755,6 +1907,13 @@ impl WasmChannel {
                             "Polling tick - calling on_poll"
                         );
 
+                        // Pre-resolve host credentials for this tick
+                        let host_credentials = resolve_channel_host_credentials(
+                            &poll_capabilities,
+                            poll_secrets_store.as_deref(),
+                        )
+                        .await;
+
                         // Execute on_poll with fresh WASM instance
                         let result = Self::execute_poll(
                             &channel_name,
@@ -1762,6 +1921,7 @@ impl WasmChannel {
                             &prepared,
                             &capabilities,
                             &credentials,
+                            host_credentials,
                             pairing_store.clone(),
                             callback_timeout,
                             &workspace_store,
@@ -1819,6 +1979,7 @@ impl WasmChannel {
         prepared: &Arc<PreparedChannelModule>,
         capabilities: &ChannelCapabilities,
         credentials: &RwLock<HashMap<String, String>>,
+        host_credentials: Vec<ResolvedHostCredential>,
         pairing_store: Arc<PairingStore>,
         timeout: Duration,
         workspace_store: &Arc<ChannelWorkspaceStore>,
@@ -1847,6 +2008,7 @@ impl WasmChannel {
                     &prepared,
                     &capabilities,
                     credentials_snapshot,
+                    host_credentials,
                     pairing_store,
                 )?;
                 let instance = Self::instantiate_component(&runtime, &prepared, &mut store)?;
@@ -2491,6 +2653,97 @@ impl HttpResponse {
     }
 }
 
+/// Extract the hostname from a URL string.
+///
+/// Returns `None` for malformed URLs or non-HTTP(S) schemes.
+fn extract_host_from_url(url: &str) -> Option<String> {
+    let parsed = url::Url::parse(url).ok()?;
+    if !matches!(parsed.scheme(), "http" | "https") {
+        return None;
+    }
+    parsed.host_str().map(|h| {
+        h.strip_prefix('[')
+            .and_then(|v| v.strip_suffix(']'))
+            .unwrap_or(h)
+            .to_lowercase()
+    })
+}
+
+/// Pre-resolve host credentials for all HTTP capability mappings.
+///
+/// Called once per callback (in async context, before spawn_blocking) so the
+/// synchronous WASM host function can inject credentials without needing async
+/// access to the secrets store.
+///
+/// Silently skips credentials that can't be resolved (e.g., missing secrets).
+/// The channel will get a 401/403 from the API, which is the expected UX when
+/// auth hasn't been configured yet.
+async fn resolve_channel_host_credentials(
+    capabilities: &ChannelCapabilities,
+    store: Option<&(dyn SecretsStore + Send + Sync)>,
+) -> Vec<ResolvedHostCredential> {
+    let store = match store {
+        Some(s) => s,
+        None => return Vec::new(),
+    };
+
+    let http_cap = match &capabilities.tool_capabilities.http {
+        Some(cap) => cap,
+        None => return Vec::new(),
+    };
+
+    if http_cap.credentials.is_empty() {
+        return Vec::new();
+    }
+
+    let mut resolved = Vec::new();
+
+    for mapping in http_cap.credentials.values() {
+        // Skip UrlPath credentials; they're handled by placeholder substitution
+        if matches!(
+            mapping.location,
+            crate::secrets::CredentialLocation::UrlPath { .. }
+        ) {
+            continue;
+        }
+
+        let secret = match store.get_decrypted("default", &mapping.secret_name).await {
+            Ok(s) => s,
+            Err(e) => {
+                tracing::debug!(
+                    secret_name = %mapping.secret_name,
+                    error = %e,
+                    "Could not resolve credential for WASM channel (auth may not be configured)"
+                );
+                continue;
+            }
+        };
+
+        let mut injected = InjectedCredentials::empty();
+        inject_credential(&mut injected, &mapping.location, &secret);
+
+        if injected.is_empty() {
+            continue;
+        }
+
+        resolved.push(ResolvedHostCredential {
+            host_patterns: mapping.host_patterns.clone(),
+            headers: injected.headers,
+            query_params: injected.query_params,
+            secret_value: secret.expose().to_string(),
+        });
+    }
+
+    if !resolved.is_empty() {
+        tracing::debug!(
+            count = resolved.len(),
+            "Pre-resolved host credentials for WASM channel execution"
+        );
+    }
+
+    resolved
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
@@ -2601,6 +2854,7 @@ mod tests {
             &prepared,
             &capabilities,
             &credentials,
+            Vec::new(), // no host credentials in test
             Arc::new(PairingStore::new()),
             timeout,
             &workspace_store,
@@ -3456,6 +3710,7 @@ mod tests {
             "test",
             ChannelCapabilities::default(),
             creds,
+            Vec::new(),
             Arc::new(PairingStore::new()),
         );
 
@@ -3487,6 +3742,7 @@ mod tests {
             "test",
             ChannelCapabilities::default(),
             std::collections::HashMap::new(),
+            Vec::new(),
             Arc::new(PairingStore::new()),
         );
 
@@ -3506,6 +3762,7 @@ mod tests {
             "test",
             ChannelCapabilities::default(),
             creds,
+            Vec::new(),
             Arc::new(PairingStore::new()),
         );
 
