@@ -1990,6 +1990,20 @@ impl SetupWizard {
             env_vars.push(("OLLAMA_BASE_URL", url.clone()));
         }
 
+        // Model name: same chicken-and-egg — Config::from_env() resolves the
+        // model before the DB is connected, so we must persist it to .env.
+        // Write the backend-specific env var so the correct resolution path
+        // picks it up.
+        if let Some(ref model) = self.settings.selected_model {
+            let backend: crate::config::LlmBackend = self
+                .settings
+                .llm_backend
+                .as_deref()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or_default();
+            env_vars.push((backend.model_env_var(), model.clone()));
+        }
+
         // Preserve NEARAI_API_KEY if present (set by API key auth flow)
         if let Ok(api_key) = std::env::var("NEARAI_API_KEY")
             && !api_key.is_empty()

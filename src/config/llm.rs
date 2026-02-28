@@ -60,6 +60,23 @@ impl std::fmt::Display for LlmBackend {
     }
 }
 
+impl LlmBackend {
+    /// The environment variable that configures the model name for this backend.
+    ///
+    /// Used by both `LlmConfig::resolve()` (reads the var) and the setup wizard
+    /// (writes the var to `.env`). Centralised here so the two stay in sync.
+    pub fn model_env_var(&self) -> &'static str {
+        match self {
+            Self::NearAi => "NEARAI_MODEL",
+            Self::OpenAi => "OPENAI_MODEL",
+            Self::Anthropic => "ANTHROPIC_MODEL",
+            Self::Ollama => "OLLAMA_MODEL",
+            Self::OpenAiCompatible => "LLM_MODEL",
+            Self::Tinfoil => "TINFOIL_MODEL",
+        }
+    }
+}
+
 /// Configuration for direct OpenAI API access.
 #[derive(Debug, Clone)]
 pub struct OpenAiDirectConfig {
@@ -248,7 +265,9 @@ impl LlmConfig {
                     key: "OPENAI_API_KEY".to_string(),
                     hint: "Set OPENAI_API_KEY when LLM_BACKEND=openai".to_string(),
                 })?;
-            let model = optional_env("OPENAI_MODEL")?.unwrap_or_else(|| "gpt-4o".to_string());
+            let model = optional_env("OPENAI_MODEL")?
+                .or_else(|| settings.selected_model.clone())
+                .unwrap_or_else(|| "gpt-4o".to_string());
             let base_url = optional_env("OPENAI_BASE_URL")?;
             Some(OpenAiDirectConfig {
                 api_key,
@@ -267,6 +286,7 @@ impl LlmConfig {
                     hint: "Set ANTHROPIC_API_KEY when LLM_BACKEND=anthropic".to_string(),
                 })?;
             let model = optional_env("ANTHROPIC_MODEL")?
+                .or_else(|| settings.selected_model.clone())
                 .unwrap_or_else(|| "claude-sonnet-4-20250514".to_string());
             let base_url = optional_env("ANTHROPIC_BASE_URL")?;
             Some(AnthropicDirectConfig {
@@ -282,7 +302,9 @@ impl LlmConfig {
             let base_url = optional_env("OLLAMA_BASE_URL")?
                 .or_else(|| settings.ollama_base_url.clone())
                 .unwrap_or_else(|| "http://localhost:11434".to_string());
-            let model = optional_env("OLLAMA_MODEL")?.unwrap_or_else(|| "llama3".to_string());
+            let model = optional_env("OLLAMA_MODEL")?
+                .or_else(|| settings.selected_model.clone())
+                .unwrap_or_else(|| "llama3".to_string());
             Some(OllamaConfig { base_url, model })
         } else {
             None
@@ -320,7 +342,9 @@ impl LlmConfig {
                     key: "TINFOIL_API_KEY".to_string(),
                     hint: "Set TINFOIL_API_KEY when LLM_BACKEND=tinfoil".to_string(),
                 })?;
-            let model = optional_env("TINFOIL_MODEL")?.unwrap_or_else(|| "kimi-k2-5".to_string());
+            let model = optional_env("TINFOIL_MODEL")?
+                .or_else(|| settings.selected_model.clone())
+                .unwrap_or_else(|| "kimi-k2-5".to_string());
             Some(TinfoilConfig { api_key, model })
         } else {
             None
@@ -504,6 +528,82 @@ mod tests {
                 ("HTTP-Referer".to_string(), "https://myapp.com".to_string()),
                 ("X-Title".to_string(), "MyApp".to_string()),
             ]
+        );
+    }
+
+    /// Clear all ollama-related env vars.
+    fn clear_ollama_env() {
+        // SAFETY: Only called under ENV_MUTEX in tests.
+        unsafe {
+            std::env::remove_var("LLM_BACKEND");
+            std::env::remove_var("OLLAMA_BASE_URL");
+            std::env::remove_var("OLLAMA_MODEL");
+        }
+    }
+
+    #[test]
+    fn ollama_uses_selected_model_when_ollama_model_unset() {
+        let _guard = ENV_MUTEX.lock().expect("env mutex poisoned");
+        clear_ollama_env();
+
+        let settings = Settings {
+            llm_backend: Some("ollama".to_string()),
+            selected_model: Some("llama3.2".to_string()),
+            ..Default::default()
+        };
+
+        let cfg = LlmConfig::resolve(&settings).expect("resolve should succeed");
+        let ollama = cfg.ollama.expect("ollama config should be present");
+
+        assert_eq!(ollama.model, "llama3.2");
+    }
+
+    #[test]
+    fn ollama_model_env_overrides_selected_model() {
+        let _guard = ENV_MUTEX.lock().expect("env mutex poisoned");
+        clear_ollama_env();
+        // SAFETY: Under ENV_MUTEX.
+        unsafe {
+            std::env::set_var("OLLAMA_MODEL", "mistral:latest");
+        }
+
+        let settings = Settings {
+            llm_backend: Some("ollama".to_string()),
+            selected_model: Some("llama3.2".to_string()),
+            ..Default::default()
+        };
+
+        let cfg = LlmConfig::resolve(&settings).expect("resolve should succeed");
+        let ollama = cfg.ollama.expect("ollama config should be present");
+
+        assert_eq!(ollama.model, "mistral:latest");
+
+        // SAFETY: Under ENV_MUTEX.
+        unsafe {
+            std::env::remove_var("OLLAMA_MODEL");
+        }
+    }
+
+    #[test]
+    fn openai_compatible_preserves_dotted_model_name() {
+        let _guard = ENV_MUTEX.lock().expect("env mutex poisoned");
+        clear_openai_compatible_env();
+
+        let settings = Settings {
+            llm_backend: Some("openai_compatible".to_string()),
+            openai_compatible_base_url: Some("http://localhost:11434/v1".to_string()),
+            selected_model: Some("llama3.2".to_string()),
+            ..Default::default()
+        };
+
+        let cfg = LlmConfig::resolve(&settings).expect("resolve should succeed");
+        let compat = cfg
+            .openai_compatible
+            .expect("openai-compatible config should be present");
+
+        assert_eq!(
+            compat.model, "llama3.2",
+            "model name with dot must not be truncated"
         );
     }
 }
