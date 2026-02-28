@@ -1,0 +1,28 @@
+{
+    "name": "atlas-notion",
+    "display_name": "Atlas Notion",
+    "kind": "tool",
+    "version": "0.1.0",
+    "description": "Direct write and update access to Atlas Notion databases",
+    "keywords": [
+        "atlas",
+        "notion",
+        "capture",
+        "write"
+    ],
+    "source": {
+        "dir": "tools-src/atlas-notion",
+        "capabilities": "atlas-notion-tool.capabilities.json",
+        "crate_name": "atlas-notion-tool"
+    },
+    "auth_summary": {
+        "method": "secret",
+        "secrets": [
+            "notion_token"
+        ]
+    },
+    "tags": [
+        "atlas",
+        "capture"
+    ]
+}

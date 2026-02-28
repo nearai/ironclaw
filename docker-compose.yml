@@ -7,7 +7,7 @@ services:
     environment:
       POSTGRES_DB: ironclaw
       POSTGRES_USER: ironclaw
-      POSTGRES_PASSWORD: ironclaw  # dev-only, change for any non-local deployment
+      POSTGRES_PASSWORD: ironclaw
     volumes:
       - pgdata:/var/lib/postgresql/data
     healthcheck:
@@ -16,5 +16,29 @@ services:
       timeout: 3s
       retries: 5
 
+  redis:
+    image: redis/redis-stack-server:latest
+    ports:
+      - "6379:6379"
+      - "8001:8001"
+    volumes:
+      - redisdata:/data
+    restart: always
+
+  litellm:
+    image: ghcr.io/berriai/litellm:main-latest
+    ports:
+      - "4000:4000"
+    volumes:
+      - ./litellm_config.yaml:/app/config.yaml
+    environment:
+      - XAI_API_KEY=${XAI_API_KEY}
+      - GEMINI_API_KEY=${GEMINI_API_KEY}
+    command: ["--config", "/app/config.yaml", "--port", "4000"]
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    restart: always
+
 volumes:
   pgdata:
+  redisdata:

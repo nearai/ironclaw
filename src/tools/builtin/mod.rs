@@ -9,8 +9,10 @@ mod json;
 mod memory;
 mod message;
 pub mod path_utils;
+pub mod platform_hooks;
 pub mod routine;
 pub(crate) mod shell;
+pub mod skill_builder;
 pub mod skill_tools;
 mod time;
 
@@ -27,10 +29,12 @@ pub use job::{
 pub use json::JsonTool;
 pub use memory::{MemoryReadTool, MemorySearchTool, MemoryTreeTool, MemoryWriteTool};
 pub use message::MessageTool;
+pub use platform_hooks::PlatformHooksTool;
 pub use routine::{
     RoutineCreateTool, RoutineDeleteTool, RoutineHistoryTool, RoutineListTool, RoutineUpdateTool,
 };
 pub use shell::ShellTool;
+pub use skill_builder::SkillBuilderTool;
 pub use skill_tools::{SkillInstallTool, SkillListTool, SkillRemoveTool, SkillSearchTool};
 pub use time::TimeTool;
 

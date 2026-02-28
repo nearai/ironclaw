@@ -1,0 +1,37 @@
+model_list:
+  # Tier 1: Self-hosted (via Ollama)
+  - model_name: local-router
+    litellm_params:
+      model: ollama/llama3.2:1b
+      api_base: http://host.docker.internal:11434
+      rpm_limit: 1000
+  
+  # Tier 2: xAI Direct
+  - model_name: grok-orchestrator
+    litellm_params:
+      model: xai/grok-4.1-fast
+      api_key: "os.environ/XAI_API_KEY"
+      rpm_limit: 60
+  
+  - model_name: grok-research
+    litellm_params:
+      model: xai/grok-3-mini
+      api_key: "os.environ/XAI_API_KEY"
+      rpm_limit: 60
+  
+  # Tier 3: Gemini Direct
+  - model_name: gemini-deep
+    litellm_params:
+      model: gemini/gemini-2.5-pro
+      api_key: "os.environ/GEMINI_API_KEY"
+      rpm_limit: 30
+  
+  - model_name: gemini-flash
+    litellm_params:
+      model: gemini/gemini-2.5-flash
+      api_key: "os.environ/GEMINI_API_KEY"
+      rpm_limit: 30
+
+general_settings:
+  master_key: sk-ironclaw-master-key
+  budget_alert: 50

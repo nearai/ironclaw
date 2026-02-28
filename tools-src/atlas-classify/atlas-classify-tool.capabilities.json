@@ -1,0 +1,24 @@
+{
+    "http": {
+        "allowlist": [
+            {
+                "host": "host.docker.internal",
+                "path_prefix": "/v1/chat/completions",
+                "methods": [
+                    "POST"
+                ]
+            },
+            {
+                "host": "host.docker.internal",
+                "path_prefix": "/v1/completions",
+                "methods": [
+                    "POST"
+                ]
+            }
+        ],
+        "rate_limit": {
+            "requests_per_minute": 1000
+        },
+        "timeout_secs": 10
+    }
+}

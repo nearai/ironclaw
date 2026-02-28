@@ -1,0 +1,22 @@
+{
+    "name": "atlas-classify",
+    "display_name": "Atlas Classifier",
+    "kind": "tool",
+    "version": "0.1.0",
+    "description": "Intent classification and PARA routing for Atlas Second Brain",
+    "keywords": [
+        "atlas",
+        "routing",
+        "para",
+        "classify"
+    ],
+    "source": {
+        "dir": "tools-src/atlas-classify",
+        "capabilities": "atlas-classify-tool.capabilities.json",
+        "crate_name": "atlas-classify-tool"
+    },
+    "tags": [
+        "atlas",
+        "productivity"
+    ]
+}

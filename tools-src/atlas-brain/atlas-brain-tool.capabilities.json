@@ -1,0 +1,36 @@
+{
+    "http": {
+        "allowlist": [
+            {
+                "host": "api.notion.com",
+                "path_prefix": "/v1/",
+                "methods": [
+                    "GET",
+                    "POST"
+                ]
+            }
+        ],
+        "credentials": {
+            "notion_token": {
+                "secret_name": "notion_token",
+                "location": {
+                    "type": "header",
+                    "name": "Authorization"
+                },
+                "host_patterns": [
+                    "api.notion.com"
+                ],
+                "template": "Bearer {{secret}}"
+            }
+        },
+        "rate_limit": {
+            "requests_per_minute": 180
+        },
+        "timeout_secs": 30
+    },
+    "secrets": {
+        "allowed_names": [
+            "notion_token"
+        ]
+    }
+}

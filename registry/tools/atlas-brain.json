@@ -1,0 +1,28 @@
+{
+    "name": "atlas-brain",
+    "display_name": "Atlas Brain",
+    "kind": "tool",
+    "version": "0.1.0",
+    "description": "Read-only query engine for the Atlas Second Brain in Notion",
+    "keywords": [
+        "atlas",
+        "notion",
+        "query",
+        "knowledge"
+    ],
+    "source": {
+        "dir": "tools-src/atlas-brain",
+        "capabilities": "atlas-brain-tool.capabilities.json",
+        "crate_name": "atlas-brain-tool"
+    },
+    "auth_summary": {
+        "method": "secret",
+        "secrets": [
+            "notion_token"
+        ]
+    },
+    "tags": [
+        "atlas",
+        "knowledge"
+    ]
+}

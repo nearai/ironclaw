@@ -15,6 +15,9 @@ exclude = [
     "tools-src/okta",
     "tools-src/slack",
     "tools-src/telegram",
+    "tools-src/atlas-classify",
+    "tools-src/atlas-notion",
+    "tools-src/atlas-brain",
 ]
 
 [package]

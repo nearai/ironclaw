@@ -18,9 +18,10 @@ use crate::tools::builder::{BuildSoftwareTool, BuilderConfig, LlmSoftwareBuilder
 use crate::tools::builtin::{
     ApplyPatchTool, CancelJobTool, CreateJobTool, EchoTool, HttpTool, JobEventsTool, JobPromptTool,
     JobStatusTool, JsonTool, ListDirTool, ListJobsTool, MemoryReadTool, MemorySearchTool,
-    MemoryTreeTool, MemoryWriteTool, PromptQueue, ReadFileTool, ShellTool, SkillInstallTool,
-    SkillListTool, SkillRemoveTool, SkillSearchTool, TimeTool, ToolActivateTool, ToolAuthTool,
-    ToolInstallTool, ToolListTool, ToolRemoveTool, ToolSearchTool, WriteFileTool,
+    MemoryTreeTool, MemoryWriteTool, PlatformHooksTool, PromptQueue, ReadFileTool, ShellTool,
+    SkillBuilderTool, SkillInstallTool, SkillListTool, SkillRemoveTool, SkillSearchTool, TimeTool,
+    ToolActivateTool, ToolAuthTool, ToolInstallTool, ToolListTool, ToolRemoveTool, ToolSearchTool,
+    WriteFileTool,
 };
 use crate::tools::rate_limiter::RateLimiter;
 use crate::tools::tool::{Tool, ToolDomain};
@@ -67,7 +68,9 @@ const PROTECTED_TOOL_NAMES: &[&str] = &[
     "skill_search",
     "skill_install",
     "skill_remove",
+    "skill_builder",
     "message",
+    "platform_hooks",
 ];
 
 /// Registry of available tools.
@@ -265,8 +268,10 @@ impl ToolRegistry {
         self.register_sync(Arc::new(WriteFileTool::new()));
         self.register_sync(Arc::new(ListDirTool::new()));
         self.register_sync(Arc::new(ApplyPatchTool::new()));
+        self.register_sync(Arc::new(SkillBuilderTool::new()));
+        self.register_sync(Arc::new(PlatformHooksTool::new()));
 
-        tracing::info!("Registered 5 development tools");
+        tracing::info!("Registered 7 development tools");
     }
 
     /// Register memory tools with a workspace.
