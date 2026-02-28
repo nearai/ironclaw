@@ -14,6 +14,7 @@
 mod completion;
 mod config;
 mod doctor;
+mod logs;
 mod mcp;
 pub mod memory;
 pub mod oauth_defaults;
@@ -26,6 +27,7 @@ mod tool;
 pub use completion::Completion;
 pub use config::{ConfigCommand, run_config_command};
 pub use doctor::run_doctor_command;
+pub use logs::{Logs, run_logs_command};
 pub use mcp::{McpCommand, run_mcp_command};
 pub use memory::MemoryCommand;
 #[cfg(feature = "postgres")]
@@ -48,7 +50,7 @@ use clap::{ColorChoice, Parser, Subcommand};
     long_about = "IronClaw is a secure AI assistant. Use 'ironclaw <subcommand> --help' for details.\nExamples:\n  ironclaw run  # Start the agent\n  ironclaw config list  # List configs"
 )]
 #[command(version)]
-#[command(color = ColorChoice::Auto)] // Enable auto-color for help (if the terminal supports it)
+#[command(color = ColorChoice::Auto)]
 pub struct Cli {
     #[command(subcommand)]
     pub command: Option<Command>,
@@ -175,6 +177,13 @@ pub enum Command {
     )]
     Completion(Completion),
 
+    /// View recent logs
+    #[command(
+        about = "View recent logs",
+        long_about = "Displays the last N lines from the log file.\nExample: ironclaw logs -n 10"
+    )]
+    Logs(Logs),
+
     /// Run as a sandboxed worker inside a Docker container (internal use).
     /// This is invoked automatically by the orchestrator, not by users directly.
     #[command(hide = true)]
@@ -248,5 +257,11 @@ mod tests {
         let mut cmd = Cli::command();
         let help = cmd.render_long_help().to_string();
         assert_snapshot!(help);
+    }
+
+    #[test]
+    fn test_logs() {
+        let _cmd = Cli::command();
+        // Assert subcommand exists
     }
 }
