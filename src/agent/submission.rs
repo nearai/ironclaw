@@ -111,6 +111,29 @@ impl SubmissionParser {
             return Submission::Quit;
         }
 
+        // Job commands
+        if lower == "/status" || lower == "/progress" {
+            return Submission::JobStatus { job_id: None };
+        }
+        if let Some(rest) = lower
+            .strip_prefix("/status ")
+            .or_else(|| lower.strip_prefix("/progress "))
+        {
+            let id = rest.trim().to_string();
+            if !id.is_empty() {
+                return Submission::JobStatus { job_id: Some(id) };
+            }
+        }
+        if lower == "/list" {
+            return Submission::JobStatus { job_id: None };
+        }
+        if let Some(rest) = lower.strip_prefix("/cancel ") {
+            let id = rest.trim().to_string();
+            if !id.is_empty() {
+                return Submission::JobCancel { job_id: id };
+            }
+        }
+
         // /thread <uuid> - switch thread
         if let Some(rest) = lower.strip_prefix("/thread ") {
             let rest = rest.trim();
@@ -239,6 +262,18 @@ pub enum Submission {
         arg: Option<String>,
     },
 
+    /// Check job status. No job_id shows all jobs; with job_id shows a specific job.
+    JobStatus {
+        /// Optional job ID (UUID or short prefix). If None, shows all jobs.
+        job_id: Option<String>,
+    },
+
+    /// Cancel a running job.
+    JobCancel {
+        /// Job ID (UUID or short prefix).
+        job_id: String,
+    },
+
     /// Quit the agent. Bypasses thread-state checks.
     Quit,
 
@@ -324,6 +359,8 @@ impl Submission {
                 | Self::Summarize
                 | Self::Suggest
                 | Self::Reasoning { .. }
+                | Self::JobStatus { .. }
+                | Self::JobCancel { .. }
                 | Self::SystemCommand { .. }
         )
     }
@@ -771,6 +808,56 @@ mod tests {
             matches!(submission, Submission::SystemCommand { command, args }
                 if command == "skills" && args == vec!["search", "code", "review", "tools"])
         );
+    }
+
+    #[test]
+    fn test_parser_job_status() {
+        // /status with no id → all jobs
+        let s = SubmissionParser::parse("/status");
+        assert!(matches!(s, Submission::JobStatus { job_id: None }));
+
+        // /progress alias
+        let s = SubmissionParser::parse("/progress");
+        assert!(matches!(s, Submission::JobStatus { job_id: None }));
+
+        // /status with id
+        let s = SubmissionParser::parse("/status abc123");
+        assert!(matches!(s, Submission::JobStatus { job_id: Some(id) } if id == "abc123"));
+
+        // /progress with id
+        let s = SubmissionParser::parse("/progress abc123");
+        assert!(matches!(s, Submission::JobStatus { job_id: Some(id) } if id == "abc123"));
+
+        // case insensitive
+        let s = SubmissionParser::parse("/STATUS");
+        assert!(matches!(s, Submission::JobStatus { job_id: None }));
+    }
+
+    #[test]
+    fn test_parser_job_list() {
+        // /list is an alias for /status with no job_id
+        let s = SubmissionParser::parse("/list");
+        assert!(matches!(s, Submission::JobStatus { job_id: None }));
+
+        let s = SubmissionParser::parse("/LIST");
+        assert!(matches!(s, Submission::JobStatus { job_id: None }));
+    }
+
+    #[test]
+    fn test_parser_job_cancel() {
+        let s = SubmissionParser::parse("/cancel abc123");
+        assert!(matches!(s, Submission::JobCancel { job_id } if job_id == "abc123"));
+
+        // /cancel with no id → falls through to UserInput
+        let s = SubmissionParser::parse("/cancel");
+        assert!(matches!(s, Submission::UserInput { .. }));
+    }
+
+    #[test]
+    fn test_job_commands_are_control() {
+        assert!(SubmissionParser::parse("/status").is_control());
+        assert!(SubmissionParser::parse("/list").is_control());
+        assert!(SubmissionParser::parse("/cancel abc").is_control());
     }
 
     #[test]

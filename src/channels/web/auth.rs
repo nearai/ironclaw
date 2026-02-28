@@ -23,8 +23,14 @@ fn allows_query_token(uri: &Uri) -> bool {
 }
 
 /// Extract token from an Authorization header value.
+///
+/// Auth scheme comparison is case-insensitive per RFC 6750 §2.1.
 fn bearer_token(value: &str) -> Option<&str> {
-    value.strip_prefix("Bearer ")
+    if value.len() > 7 && value[..7].eq_ignore_ascii_case("Bearer ") {
+        Some(&value[7..])
+    } else {
+        None
+    }
 }
 
 /// Extract token query parameter from URL query string.
@@ -44,7 +50,8 @@ pub async fn auth_middleware(
     request: Request,
     next: Next,
 ) -> Response {
-    // Try Authorization header first (constant-time comparison)
+    // Try Authorization header first (constant-time comparison).
+    // RFC 6750 Section 2.1: auth-scheme comparison is case-insensitive.
     if let Some(auth_header) = headers.get("authorization")
         && let Ok(value) = auth_header.to_str()
         && let Some(token) = bearer_token(value)
@@ -94,7 +101,7 @@ mod tests {
     #[test]
     fn test_bearer_token_parser() {
         assert_eq!(bearer_token("Bearer abc"), Some("abc"));
-        assert_eq!(bearer_token("bearer abc"), None);
+        assert_eq!(bearer_token("bearer abc"), Some("abc"));
         assert_eq!(bearer_token("Token abc"), None);
     }
 
@@ -104,5 +111,132 @@ mod tests {
         assert_eq!(query_token("x=1&token=abc&y=2"), Some("abc".to_string()));
         assert_eq!(query_token("token=a%2Bb%3Dc"), Some("a+b=c".to_string()));
         assert_eq!(query_token("x=1&y=2"), None);
+    }
+
+    // === QA Plan - Web gateway auth tests ===
+
+    use axum::Router;
+    use axum::body::Body;
+    use axum::middleware;
+    use axum::routing::get;
+    use tower::ServiceExt;
+
+    async fn dummy_handler() -> &'static str {
+        "ok"
+    }
+
+    fn test_app(token: &str) -> Router {
+        let state = AuthState {
+            token: token.to_string(),
+        };
+        Router::new()
+            .route("/test", get(dummy_handler))
+            .route("/api/chat/events", get(dummy_handler))
+            .layer(middleware::from_fn_with_state(state, auth_middleware))
+    }
+
+    #[tokio::test]
+    async fn test_valid_bearer_token_passes() {
+        let app = test_app("secret-token");
+        let req = Request::builder()
+            .uri("/test")
+            .header("Authorization", "Bearer secret-token")
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn test_invalid_bearer_token_rejected() {
+        let app = test_app("secret-token");
+        let req = Request::builder()
+            .uri("/test")
+            .header("Authorization", "Bearer wrong-token")
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn test_missing_auth_header_falls_through_to_query() {
+        let app = test_app("secret-token");
+        let req = Request::builder()
+            .uri("/api/chat/events?token=secret-token")
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn test_query_param_invalid_token_rejected() {
+        let app = test_app("secret-token");
+        let req = Request::builder()
+            .uri("/api/chat/events?token=wrong-token")
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn test_no_auth_at_all_rejected() {
+        let app = test_app("secret-token");
+        let req = Request::builder().uri("/test").body(Body::empty()).unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn test_bearer_prefix_case_insensitive() {
+        // RFC 6750 Section 2.1: auth-scheme comparison must be case-insensitive.
+        let app = test_app("secret-token");
+        let req = Request::builder()
+            .uri("/test")
+            .header("Authorization", "bearer secret-token")
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn test_bearer_prefix_mixed_case() {
+        let app = test_app("secret-token");
+        let req = Request::builder()
+            .uri("/test")
+            .header("Authorization", "BEARER secret-token")
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn test_empty_bearer_token_rejected() {
+        let app = test_app("secret-token");
+        let req = Request::builder()
+            .uri("/test")
+            .header("Authorization", "Bearer ")
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn test_token_with_whitespace_rejected() {
+        // Extra space after "Bearer " means the token value starts with a space,
+        // which should not match the expected token.
+        let app = test_app("secret-token");
+        let req = Request::builder()
+            .uri("/test")
+            .header("Authorization", "Bearer  secret-token")
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
     }
 }

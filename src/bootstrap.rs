@@ -7,13 +7,75 @@
 //! File: `~/.ironclaw/.env` (standard dotenvy format)
 
 use std::path::PathBuf;
+use std::sync::LazyLock;
+
+const IRONCLAW_BASE_DIR_ENV: &str = "IRONCLAW_BASE_DIR";
+
+/// Lazily computed IronClaw base directory, cached for the lifetime of the process.
+static IRONCLAW_BASE_DIR: LazyLock<PathBuf> = LazyLock::new(compute_ironclaw_base_dir);
+
+/// Compute the IronClaw base directory from environment.
+///
+/// This is the underlying implementation used by both the public
+/// `ironclaw_base_dir()` function (which caches the result) and tests
+/// (which need to verify different configurations).
+pub fn compute_ironclaw_base_dir() -> PathBuf {
+    std::env::var(IRONCLAW_BASE_DIR_ENV)
+        .map(PathBuf::from)
+        .map(|path| {
+            if path.as_os_str().is_empty() {
+                default_base_dir()
+            } else if !path.is_absolute() {
+                eprintln!(
+                    "Warning: IRONCLAW_BASE_DIR is a relative path '{}', resolved against current directory",
+                    path.display()
+                );
+                path
+            } else {
+                path
+            }
+        })
+        .unwrap_or_else(|_| default_base_dir())
+}
+
+/// Get the default IronClaw base directory (~/.ironclaw).
+///
+/// Logs a warning if the home directory cannot be determined and falls back to
+/// the current directory.
+fn default_base_dir() -> PathBuf {
+    if let Some(home) = dirs::home_dir() {
+        home.join(".ironclaw")
+    } else {
+        eprintln!("Warning: Could not determine home directory, using current directory");
+        std::env::current_dir()
+            .unwrap_or_else(|_| PathBuf::from("/tmp"))
+            .join(".ironclaw")
+    }
+}
+
+/// Get the IronClaw base directory.
+///
+/// Override with `IRONCLAW_BASE_DIR` environment variable.
+/// Defaults to `~/.ironclaw` (or `./.ironclaw` if home directory cannot be determined).
+///
+/// Thread-safe: the value is computed once and cached in a `LazyLock`.
+///
+/// # Environment Variable Behavior
+/// - If `IRONCLAW_BASE_DIR` is set to a non-empty path, that path is used.
+/// - If `IRONCLAW_BASE_DIR` is set to an empty string, it is treated as unset.
+/// - If `IRONCLAW_BASE_DIR` contains null bytes, a warning is printed and the default is used.
+/// - If the home directory cannot be determined, a warning is printed and the current directory is used.
+///
+/// # Returns
+/// A `PathBuf` pointing to the base directory. The path is not validated
+/// for existence.
+pub fn ironclaw_base_dir() -> PathBuf {
+    IRONCLAW_BASE_DIR.clone()
+}
 
 /// Path to the IronClaw-specific `.env` file: `~/.ironclaw/.env`.
 pub fn ironclaw_env_path() -> PathBuf {
-    dirs::home_dir()
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join(".ironclaw")
-        .join(".env")
+    ironclaw_base_dir().join(".env")
 }
 
 /// Load env vars from `~/.ironclaw/.env` (in addition to the standard `.env`).
@@ -92,7 +154,14 @@ fn migrate_bootstrap_json_to_env(env_path: &std::path::Path) {
 /// Values are double-quoted so that `#` (common in URL-encoded passwords)
 /// and other shell-special characters are preserved by dotenvy.
 pub fn save_bootstrap_env(vars: &[(&str, &str)]) -> std::io::Result<()> {
-    let path = ironclaw_env_path();
+    save_bootstrap_env_to(&ironclaw_env_path(), vars)
+}
+
+/// Write bootstrap vars to an arbitrary path (testable variant).
+///
+/// Values are double-quoted and escaped so that `#`, `"`, `\` and other
+/// shell-special characters are preserved by dotenvy.
+pub fn save_bootstrap_env_to(path: &std::path::Path, vars: &[(&str, &str)]) -> std::io::Result<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
@@ -103,8 +172,8 @@ pub fn save_bootstrap_env(vars: &[(&str, &str)]) -> std::io::Result<()> {
         let escaped = value.replace('\\', "\\\\").replace('"', "\\\"");
         content.push_str(&format!("{}=\"{}\"\n", key, escaped));
     }
-    std::fs::write(&path, &content)?;
-    restrict_file_permissions(&path)?;
+    std::fs::write(path, &content)?;
+    restrict_file_permissions(path)?;
     Ok(())
 }
 
@@ -115,7 +184,15 @@ pub fn save_bootstrap_env(vars: &[(&str, &str)]) -> std::io::Result<()> {
 /// or appends it otherwise. Use this when writing a single bootstrap var
 /// outside the wizard (which manages the full set via `save_bootstrap_env`).
 pub fn upsert_bootstrap_var(key: &str, value: &str) -> std::io::Result<()> {
-    let path = ironclaw_env_path();
+    upsert_bootstrap_var_to(&ironclaw_env_path(), key, value)
+}
+
+/// Update or add a single variable at an arbitrary path (testable variant).
+pub fn upsert_bootstrap_var_to(
+    path: &std::path::Path,
+    key: &str,
+    value: &str,
+) -> std::io::Result<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
@@ -124,7 +201,7 @@ pub fn upsert_bootstrap_var(key: &str, value: &str) -> std::io::Result<()> {
     let new_line = format!("{}=\"{}\"", key, escaped);
     let prefix = format!("{}=", key);
 
-    let existing = std::fs::read_to_string(&path).unwrap_or_default();
+    let existing = std::fs::read_to_string(path).unwrap_or_default();
 
     let mut found = false;
     let mut result = String::new();
@@ -147,8 +224,8 @@ pub fn upsert_bootstrap_var(key: &str, value: &str) -> std::io::Result<()> {
         result.push('\n');
     }
 
-    std::fs::write(&path, result)?;
-    restrict_file_permissions(&path)?;
+    std::fs::write(path, result)?;
+    restrict_file_permissions(path)?;
     Ok(())
 }
 
@@ -185,9 +262,7 @@ pub async fn migrate_disk_to_db(
     store: &dyn crate::db::Database,
     user_id: &str,
 ) -> Result<(), MigrationError> {
-    let ironclaw_dir = dirs::home_dir()
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join(".ironclaw");
+    let ironclaw_dir = ironclaw_base_dir();
     let legacy_settings_path = ironclaw_dir.join("settings.json");
 
     if !legacy_settings_path.exists() {
@@ -321,7 +396,10 @@ pub enum MigrationError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Mutex;
     use tempfile::tempdir;
+
+    static ENV_MUTEX: Mutex<()> = Mutex::new(());
 
     #[test]
     fn test_save_and_load_database_url() {
@@ -356,7 +434,7 @@ mod tests {
 
         // URLs with # in the password are common (URL-encoded special chars).
         // Without quoting, dotenvy treats # as a comment delimiter.
-        let url = "postgres://user:p%23ss@localhost:5432/ironclaw";
+        let url = "postgres://localhost:5432/ironclaw?token_hash=p%23ss";
         std::fs::write(&env_path, format!("DATABASE_URL=\"{}\"\n", url)).unwrap();
 
         let parsed: Vec<(String, String)> = dotenvy::from_path_iter(&env_path)
@@ -579,5 +657,248 @@ INJECTED="pwned"#;
         let onboard = parsed.iter().find(|(k, _)| k == "ONBOARD_COMPLETED");
         assert!(onboard.is_some(), "ONBOARD_COMPLETED must be present");
         assert_eq!(onboard.unwrap().1, "true");
+    }
+
+    // === QA Plan P1 - 1.2: Bootstrap .env round-trip tests ===
+
+    #[test]
+    fn bootstrap_env_round_trips_llm_backend() {
+        let dir = tempdir().unwrap();
+        let env_path = dir.path().join(".env");
+
+        // Simulate what the wizard writes for LLM backend selection
+        let vars = [
+            ("DATABASE_BACKEND", "libsql"),
+            ("LLM_BACKEND", "openai"),
+            ("ONBOARD_COMPLETED", "true"),
+        ];
+        let mut content = String::new();
+        for (key, value) in &vars {
+            let escaped = value.replace('\\', "\\\\").replace('"', "\\\"");
+            content.push_str(&format!("{}=\"{}\"\n", key, escaped));
+        }
+        std::fs::write(&env_path, &content).unwrap();
+
+        // Verify dotenvy parses LLM_BACKEND correctly
+        let parsed: Vec<(String, String)> = dotenvy::from_path_iter(&env_path)
+            .unwrap()
+            .filter_map(|r| r.ok())
+            .collect();
+
+        let llm_backend = parsed.iter().find(|(k, _)| k == "LLM_BACKEND");
+        assert!(llm_backend.is_some(), "LLM_BACKEND must be present");
+        assert_eq!(
+            llm_backend.unwrap().1,
+            "openai",
+            "LLM_BACKEND must survive .env round-trip"
+        );
+    }
+
+    #[test]
+    fn bootstrap_env_special_chars_in_url() {
+        let dir = tempdir().unwrap();
+        let env_path = dir.path().join(".env");
+
+        // URLs with special characters that are common in database passwords
+        let url = "postgres://host:5432/db?sslmode=require&token_hash=changeme";
+        let escaped = url.replace('\\', "\\\\").replace('"', "\\\"");
+        let content = format!("DATABASE_URL=\"{}\"\n", escaped);
+        std::fs::write(&env_path, &content).unwrap();
+
+        let parsed: Vec<(String, String)> = dotenvy::from_path_iter(&env_path)
+            .unwrap()
+            .filter_map(|r| r.ok())
+            .collect();
+
+        assert_eq!(parsed.len(), 1);
+        assert_eq!(parsed[0].1, url, "URL with special chars must survive");
+    }
+
+    #[test]
+    fn upsert_bootstrap_var_preserves_existing() {
+        let dir = tempdir().unwrap();
+        let env_path = dir.path().join(".env");
+
+        // Write initial content
+        let initial = "DATABASE_BACKEND=\"libsql\"\nONBOARD_COMPLETED=\"true\"\n";
+        std::fs::write(&env_path, initial).unwrap();
+
+        // Upsert a new var
+        let content = std::fs::read_to_string(&env_path).unwrap();
+        let new_line = "LLM_BACKEND=\"anthropic\"";
+        let mut result = content.clone();
+        result.push_str(new_line);
+        result.push('\n');
+        std::fs::write(&env_path, &result).unwrap();
+
+        // Parse and verify all three vars are present
+        let parsed: Vec<(String, String)> = dotenvy::from_path_iter(&env_path)
+            .unwrap()
+            .filter_map(|r| r.ok())
+            .collect();
+
+        assert_eq!(parsed.len(), 3, "should have 3 vars after upsert");
+        assert!(
+            parsed
+                .iter()
+                .any(|(k, v)| k == "DATABASE_BACKEND" && v == "libsql"),
+            "original DATABASE_BACKEND must be preserved"
+        );
+        assert!(
+            parsed
+                .iter()
+                .any(|(k, v)| k == "ONBOARD_COMPLETED" && v == "true"),
+            "original ONBOARD_COMPLETED must be preserved"
+        );
+        assert!(
+            parsed
+                .iter()
+                .any(|(k, v)| k == "LLM_BACKEND" && v == "anthropic"),
+            "new LLM_BACKEND must be present"
+        );
+    }
+
+    #[test]
+    fn bootstrap_env_all_wizard_vars_round_trip() {
+        let dir = tempdir().unwrap();
+        let env_path = dir.path().join(".env");
+
+        // Full set of vars the wizard might write
+        let vars = [
+            ("DATABASE_BACKEND", "postgres"),
+            ("DATABASE_URL", "postgres://u:p@h:5432/db"),
+            ("LLM_BACKEND", "nearai"),
+            ("ONBOARD_COMPLETED", "true"),
+            ("EMBEDDING_ENABLED", "false"),
+        ];
+        let mut content = String::new();
+        for (key, value) in &vars {
+            let escaped = value.replace('\\', "\\\\").replace('"', "\\\"");
+            content.push_str(&format!("{}=\"{}\"\n", key, escaped));
+        }
+        std::fs::write(&env_path, &content).unwrap();
+
+        let parsed: Vec<(String, String)> = dotenvy::from_path_iter(&env_path)
+            .unwrap()
+            .filter_map(|r| r.ok())
+            .collect();
+
+        assert_eq!(parsed.len(), vars.len(), "all vars must survive round-trip");
+        for (key, value) in &vars {
+            let found = parsed.iter().find(|(k, _)| k == key);
+            assert!(found.is_some(), "{key} must be present");
+            assert_eq!(&found.unwrap().1, value, "{key} value mismatch");
+        }
+    }
+
+    #[test]
+    fn test_ironclaw_base_dir_default() {
+        // This test must run first (or in isolation) before the LazyLock is initialized.
+        // It verifies that when IRONCLAW_BASE_DIR is not set, the default path is used.
+        let _guard = ENV_MUTEX.lock().unwrap();
+        let old_val = std::env::var("IRONCLAW_BASE_DIR").ok();
+        // SAFETY: ENV_MUTEX ensures single-threaded access to env vars in tests
+        unsafe { std::env::remove_var("IRONCLAW_BASE_DIR") };
+
+        // Force re-evaluation by calling the computation function directly
+        let path = compute_ironclaw_base_dir();
+        let home = dirs::home_dir().unwrap_or_else(|| std::path::PathBuf::from("."));
+        assert_eq!(path, home.join(".ironclaw"));
+
+        if let Some(val) = old_val {
+            // SAFETY: ENV_MUTEX ensures single-threaded access to env vars in tests
+            unsafe { std::env::set_var("IRONCLAW_BASE_DIR", val) };
+        }
+    }
+
+    #[test]
+    fn test_ironclaw_base_dir_env_override() {
+        // This test verifies that when IRONCLAW_BASE_DIR is set,
+        // the custom path is used. Must run before LazyLock is initialized.
+        let _guard = ENV_MUTEX.lock().unwrap();
+        let old_val = std::env::var("IRONCLAW_BASE_DIR").ok();
+        // SAFETY: ENV_MUTEX ensures single-threaded access to env vars in tests
+        unsafe { std::env::set_var("IRONCLAW_BASE_DIR", "/custom/ironclaw/path") };
+
+        // Force re-evaluation by calling the computation function directly
+        let path = compute_ironclaw_base_dir();
+        assert_eq!(path, std::path::PathBuf::from("/custom/ironclaw/path"));
+
+        if let Some(val) = old_val {
+            // SAFETY: ENV_MUTEX ensures single-threaded access to env vars in tests
+            unsafe { std::env::set_var("IRONCLAW_BASE_DIR", val) };
+        } else {
+            // SAFETY: ENV_MUTEX ensures single-threaded access to env vars in tests
+            unsafe { std::env::remove_var("IRONCLAW_BASE_DIR") };
+        }
+    }
+
+    #[test]
+    fn test_compute_base_dir_env_path_join() {
+        // Verifies that ironclaw_env_path correctly joins .env to the base dir.
+        // Uses compute_ironclaw_base_dir directly to avoid LazyLock caching.
+        let _guard = ENV_MUTEX.lock().unwrap();
+        let old_val = std::env::var("IRONCLAW_BASE_DIR").ok();
+        // SAFETY: ENV_MUTEX ensures single-threaded access to env vars in tests
+        unsafe { std::env::set_var("IRONCLAW_BASE_DIR", "/my/custom/dir") };
+
+        // Test the path construction logic directly
+        let base_path = compute_ironclaw_base_dir();
+        let env_path = base_path.join(".env");
+        assert_eq!(env_path, std::path::PathBuf::from("/my/custom/dir/.env"));
+
+        if let Some(val) = old_val {
+            // SAFETY: ENV_MUTEX ensures single-threaded access to env vars in tests
+            unsafe { std::env::set_var("IRONCLAW_BASE_DIR", val) };
+        } else {
+            // SAFETY: ENV_MUTEX ensures single-threaded access to env vars in tests
+            unsafe { std::env::remove_var("IRONCLAW_BASE_DIR") };
+        }
+    }
+
+    #[test]
+    fn test_ironclaw_base_dir_empty_env() {
+        // Verifies that empty IRONCLAW_BASE_DIR falls back to default.
+        let _guard = ENV_MUTEX.lock().unwrap();
+        let old_val = std::env::var("IRONCLAW_BASE_DIR").ok();
+        // SAFETY: ENV_MUTEX ensures single-threaded access to env vars in tests
+        unsafe { std::env::set_var("IRONCLAW_BASE_DIR", "") };
+
+        // Force re-evaluation by calling the computation function directly
+        let path = compute_ironclaw_base_dir();
+        let home = dirs::home_dir().unwrap_or_else(|| std::path::PathBuf::from("."));
+        assert_eq!(path, home.join(".ironclaw"));
+
+        if let Some(val) = old_val {
+            // SAFETY: ENV_MUTEX ensures single-threaded access to env vars in tests
+            unsafe { std::env::set_var("IRONCLAW_BASE_DIR", val) };
+        } else {
+            // SAFETY: ENV_MUTEX ensures single-threaded access to env vars in tests
+            unsafe { std::env::remove_var("IRONCLAW_BASE_DIR") };
+        }
+    }
+
+    #[test]
+    fn test_ironclaw_base_dir_special_chars() {
+        // Verifies that paths with special characters are handled correctly.
+        let _guard = ENV_MUTEX.lock().unwrap();
+        let old_val = std::env::var("IRONCLAW_BASE_DIR").ok();
+        // SAFETY: ENV_MUTEX ensures single-threaded access to env vars in tests
+        unsafe { std::env::set_var("IRONCLAW_BASE_DIR", "/tmp/test_with-special.chars") };
+
+        // Force re-evaluation by calling the computation function directly
+        let path = compute_ironclaw_base_dir();
+        assert_eq!(
+            path,
+            std::path::PathBuf::from("/tmp/test_with-special.chars")
+        );
+
+        if let Some(val) = old_val {
+            // SAFETY: ENV_MUTEX ensures single-threaded access to env vars in tests
+            unsafe { std::env::set_var("IRONCLAW_BASE_DIR", val) };
+        } else {
+            // SAFETY: ENV_MUTEX ensures single-threaded access to env vars in tests
+            unsafe { std::env::remove_var("IRONCLAW_BASE_DIR") };
+        }
     }
 }

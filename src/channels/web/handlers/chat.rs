@@ -14,6 +14,7 @@ use uuid::Uuid;
 use crate::channels::IncomingMessage;
 use crate::channels::web::server::GatewayState;
 use crate::channels::web::types::*;
+use crate::channels::web::util::{build_turns_from_db_messages, truncate_preview};
 
 pub async fn chat_send_handler(
     State(state): State<Arc<GatewayState>>,
@@ -317,12 +318,13 @@ pub async fn chat_history_handler(
             turns,
             has_more,
             oldest_timestamp,
+            pending_approval: None,
         }));
     }
 
     // Try in-memory first (freshest data for active threads)
     if let Some(thread) = sess.threads.get(&thread_id)
-        && !thread.turns.is_empty()
+        && (!thread.turns.is_empty() || thread.pending_approval.is_some())
     {
         let turns: Vec<TurnInfo> = thread
             .turns
@@ -341,17 +343,36 @@ pub async fn chat_history_handler(
                         name: tc.name.clone(),
                         has_result: tc.result.is_some(),
                         has_error: tc.error.is_some(),
+                        result_preview: tc.result.as_ref().map(|r| {
+                            let s = match r {
+                                serde_json::Value::String(s) => s.clone(),
+                                other => other.to_string(),
+                            };
+                            truncate_preview(&s, 500)
+                        }),
+                        error: tc.error.clone(),
                     })
                     .collect(),
                 reasoning: None,
             })
             .collect();
 
+        let pending_approval = thread
+            .pending_approval
+            .as_ref()
+            .map(|pa| PendingApprovalInfo {
+                request_id: pa.request_id.to_string(),
+                tool_name: pa.tool_name.clone(),
+                description: pa.description.clone(),
+                parameters: serde_json::to_string_pretty(&pa.parameters).unwrap_or_default(),
+            });
+
         return Ok(Json(HistoryResponse {
             thread_id,
             turns,
             has_more: false,
             oldest_timestamp: None,
+            pending_approval,
         }));
     }
 
@@ -370,6 +391,7 @@ pub async fn chat_history_handler(
                 turns,
                 has_more,
                 oldest_timestamp,
+                pending_approval: None,
             }));
         }
     }
@@ -380,50 +402,8 @@ pub async fn chat_history_handler(
         turns: Vec::new(),
         has_more: false,
         oldest_timestamp: None,
+        pending_approval: None,
     }))
-}
-
-/// Build TurnInfo pairs from flat DB messages (alternating user/assistant).
-pub fn build_turns_from_db_messages(
-    messages: &[crate::history::ConversationMessage],
-) -> Vec<TurnInfo> {
-    let mut turns = Vec::new();
-    let mut turn_number = 1;
-    let mut iter = messages.iter().peekable();
-
-    while let Some(msg) = iter.next() {
-        if msg.role == "user" {
-            let mut turn = TurnInfo {
-                turn_number,
-                user_input: msg.content.clone(),
-                response: None,
-                state: "Completed".to_string(),
-                started_at: msg.created_at.to_rfc3339(),
-                completed_at: None,
-                tool_calls: Vec::new(),
-                reasoning: None,
-            };
-
-            // Check if next message is an assistant response
-            if let Some(next) = iter.peek()
-                && next.role == "assistant"
-            {
-                let assistant_msg = iter.next().expect("peeked");
-                turn.response = Some(assistant_msg.content.clone());
-                turn.completed_at = Some(assistant_msg.created_at.to_rfc3339());
-            }
-
-            // Incomplete turn (user message without response)
-            if turn.response.is_none() {
-                turn.state = "Failed".to_string();
-            }
-
-            turns.push(turn);
-            turn_number += 1;
-        }
-    }
-
-    turns
 }
 
 pub async fn chat_threads_handler(
@@ -456,7 +436,7 @@ pub async fn chat_threads_handler(
                 let info = ThreadInfo {
                     id: s.id,
                     state: "Idle".to_string(),
-                    turn_count: (s.message_count / 2).max(0) as usize,
+                    turn_count: s.message_count.max(0) as usize,
                     created_at: s.started_at.to_rfc3339(),
                     updated_at: s.last_activity.to_rfc3339(),
                     title: s.title.clone(),
@@ -634,5 +614,106 @@ mod tests {
         assert_eq!(turns[1].user_input, "Lost message");
         assert!(turns[1].response.is_none());
         assert_eq!(turns[1].state, "Failed");
+    }
+
+    #[test]
+    fn test_build_turns_with_tool_calls() {
+        let now = chrono::Utc::now();
+        let tool_calls_json = serde_json::json!([
+            {"name": "shell", "result_preview": "file1.txt\nfile2.txt"},
+            {"name": "http", "error": "timeout"}
+        ]);
+        let messages = vec![
+            crate::history::ConversationMessage {
+                id: Uuid::new_v4(),
+                role: "user".to_string(),
+                content: "List files".to_string(),
+                created_at: now,
+            },
+            crate::history::ConversationMessage {
+                id: Uuid::new_v4(),
+                role: "tool_calls".to_string(),
+                content: tool_calls_json.to_string(),
+                created_at: now + chrono::TimeDelta::milliseconds(500),
+            },
+            crate::history::ConversationMessage {
+                id: Uuid::new_v4(),
+                role: "assistant".to_string(),
+                content: "Here are the files".to_string(),
+                created_at: now + chrono::TimeDelta::seconds(1),
+            },
+        ];
+
+        let turns = build_turns_from_db_messages(&messages);
+        assert_eq!(turns.len(), 1);
+        assert_eq!(turns[0].tool_calls.len(), 2);
+        assert_eq!(turns[0].tool_calls[0].name, "shell");
+        assert!(turns[0].tool_calls[0].has_result);
+        assert!(!turns[0].tool_calls[0].has_error);
+        assert_eq!(
+            turns[0].tool_calls[0].result_preview.as_deref(),
+            Some("file1.txt\nfile2.txt")
+        );
+        assert_eq!(turns[0].tool_calls[1].name, "http");
+        assert!(turns[0].tool_calls[1].has_error);
+        assert_eq!(turns[0].tool_calls[1].error.as_deref(), Some("timeout"));
+        assert_eq!(turns[0].response.as_deref(), Some("Here are the files"));
+        assert_eq!(turns[0].state, "Completed");
+    }
+
+    #[test]
+    fn test_build_turns_with_malformed_tool_calls() {
+        let now = chrono::Utc::now();
+        let messages = vec![
+            crate::history::ConversationMessage {
+                id: Uuid::new_v4(),
+                role: "user".to_string(),
+                content: "Hello".to_string(),
+                created_at: now,
+            },
+            crate::history::ConversationMessage {
+                id: Uuid::new_v4(),
+                role: "tool_calls".to_string(),
+                content: "not valid json".to_string(),
+                created_at: now + chrono::TimeDelta::milliseconds(500),
+            },
+            crate::history::ConversationMessage {
+                id: Uuid::new_v4(),
+                role: "assistant".to_string(),
+                content: "Done".to_string(),
+                created_at: now + chrono::TimeDelta::seconds(1),
+            },
+        ];
+
+        let turns = build_turns_from_db_messages(&messages);
+        assert_eq!(turns.len(), 1);
+        assert!(turns[0].tool_calls.is_empty());
+        assert_eq!(turns[0].response.as_deref(), Some("Done"));
+    }
+
+    #[test]
+    fn test_build_turns_backward_compatible_no_tool_calls() {
+        // Old threads without tool_calls messages still work
+        let now = chrono::Utc::now();
+        let messages = vec![
+            crate::history::ConversationMessage {
+                id: Uuid::new_v4(),
+                role: "user".to_string(),
+                content: "Hello".to_string(),
+                created_at: now,
+            },
+            crate::history::ConversationMessage {
+                id: Uuid::new_v4(),
+                role: "assistant".to_string(),
+                content: "Hi!".to_string(),
+                created_at: now + chrono::TimeDelta::seconds(1),
+            },
+        ];
+
+        let turns = build_turns_from_db_messages(&messages);
+        assert_eq!(turns.len(), 1);
+        assert!(turns[0].tool_calls.is_empty());
+        assert_eq!(turns[0].response.as_deref(), Some("Hi!"));
+        assert_eq!(turns[0].state, "Completed");
     }
 }

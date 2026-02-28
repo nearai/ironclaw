@@ -6,6 +6,7 @@ use axum::{
     response::{Html, IntoResponse},
 };
 
+use crate::bootstrap::ironclaw_base_dir;
 use crate::channels::web::types::*;
 
 // --- Static file handlers ---
@@ -71,11 +72,7 @@ async fn serve_project_file(project_id: &str, path: &str) -> axum::response::Res
         return (StatusCode::BAD_REQUEST, "Invalid project ID").into_response();
     }
 
-    let base = dirs::home_dir()
-        .unwrap_or_else(|| std::path::PathBuf::from("."))
-        .join(".ironclaw")
-        .join("projects")
-        .join(project_id);
+    let base = ironclaw_base_dir().join("projects").join(project_id);
 
     let file_path = base.join(path);
 
