@@ -353,6 +353,7 @@ async fn async_main() -> anyhow::Result<()> {
 
         if let Some(result) = wasm_result {
             loaded_wasm_channel_names = result.channel_names;
+            let wasm_router_clone = Arc::clone(&result.wasm_channel_router);
             wasm_channel_runtime_state = Some((
                 result.wasm_channel_runtime,
                 result.pairing_store,
@@ -364,6 +365,27 @@ async fn async_main() -> anyhow::Result<()> {
             }
             if let Some(routes) = result.webhook_routes {
                 webhook_routes.push(routes);
+            }
+
+            // Spawn periodic cleanup task for webhook dedup records
+            let cleanup_interval_hours = config.wasm.webhook_dedup_cleanup_interval_hours;
+            if cleanup_interval_hours > 0 {
+                tokio::spawn(async move {
+                    let interval_duration =
+                        std::time::Duration::from_secs(cleanup_interval_hours * 3600);
+                    let mut interval = tokio::time::interval(interval_duration);
+                    // Don't run immediately on startup
+                    interval.tick().await;
+
+                    loop {
+                        interval.tick().await;
+                        wasm_router_clone.cleanup_old_dedup_records().await;
+                    }
+                });
+                tracing::info!(
+                    interval_hours = cleanup_interval_hours,
+                    "Webhook dedup cleanup task started"
+                );
             }
         }
     }
@@ -605,6 +627,11 @@ async fn async_main() -> anyhow::Result<()> {
         .register_message_tools(Arc::clone(&channels))
         .await;
 
+    // Clone router for AgentDeps before we move the state to extension manager
+    let wasm_router_for_deps = wasm_channel_runtime_state
+        .as_ref()
+        .map(|c| Arc::clone(&c.2));
+
     // Wire up channel runtime for hot-activation of WASM channels.
     if let Some(ref ext_mgr) = components.extension_manager
         && let Some((rt, ps, router)) = wasm_channel_runtime_state.take()
@@ -667,9 +694,7 @@ async fn async_main() -> anyhow::Result<()> {
         skills_config: config.skills.clone(),
         hooks: components.hooks,
         cost_guard: components.cost_guard,
-        wasm_router: wasm_channel_runtime_state
-            .as_ref()
-            .map(|c| Arc::clone(&c.2)),
+        wasm_router: wasm_router_for_deps,
     };
 
     let agent = Agent::new(
@@ -1098,11 +1123,15 @@ async fn setup_wasm_channels(
 
     // Always create webhook routes (even with no channels loaded) so that
     // channels hot-added at runtime can receive webhooks without a restart.
+    let webhook_ack_timeout = Some(std::time::Duration::from_secs(
+        config.wasm.webhook_ack_timeout_secs,
+    ));
     let webhook_routes = {
         Some(create_wasm_channel_router(
             Arc::clone(&wasm_router),
             extension_manager.map(Arc::clone),
             database.map(|d| Arc::clone(d)),
+            webhook_ack_timeout,
         ))
     };
 

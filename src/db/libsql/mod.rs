@@ -458,4 +458,104 @@ mod tests {
         let count: i64 = row.get(0).unwrap();
         assert_eq!(count, 20);
     }
+
+    // ==================== Webhook deduplication tests ====================
+
+    use crate::db::WebhookDedupStore;
+
+    #[tokio::test]
+    async fn test_webhook_dedup_not_processed_initially() {
+        // Use a temp file so connections share state (in-memory DBs are connection-local)
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("test_dedup_initial.db");
+        let backend = LibSqlBackend::new_local(&db_path).await.unwrap();
+        backend.run_migrations().await.unwrap();
+
+        // Message should not be marked as processed initially
+        let is_processed = backend
+            .is_webhook_message_processed("whatsapp", "wamid.test123")
+            .await
+            .unwrap();
+        assert!(!is_processed, "New message should not be marked as processed");
+    }
+
+    #[tokio::test]
+    async fn test_webhook_dedup_record_and_check() {
+        // Use a temp file so connections share state (in-memory DBs are connection-local)
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("test_dedup_record.db");
+        let backend = LibSqlBackend::new_local(&db_path).await.unwrap();
+        backend.run_migrations().await.unwrap();
+
+        // Record message as processed
+        backend
+            .record_webhook_message_processed("whatsapp", "wamid.test456")
+            .await
+            .unwrap();
+
+        // Now it should be marked as processed
+        let is_processed = backend
+            .is_webhook_message_processed("whatsapp", "wamid.test456")
+            .await
+            .unwrap();
+        assert!(is_processed, "Recorded message should be marked as processed");
+    }
+
+    #[tokio::test]
+    async fn test_webhook_dedup_different_channels_independent() {
+        // Use a temp file so connections share state (in-memory DBs are connection-local)
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("test_dedup_channels.db");
+        let backend = LibSqlBackend::new_local(&db_path).await.unwrap();
+        backend.run_migrations().await.unwrap();
+
+        // Record message for whatsapp
+        backend
+            .record_webhook_message_processed("whatsapp", "msg789")
+            .await
+            .unwrap();
+
+        // Same message_id on different channel should NOT be processed
+        let is_processed = backend
+            .is_webhook_message_processed("telegram", "msg789")
+            .await
+            .unwrap();
+        assert!(
+            !is_processed,
+            "Different channel should have independent dedup state"
+        );
+
+        // Original channel should be processed
+        let is_processed = backend
+            .is_webhook_message_processed("whatsapp", "msg789")
+            .await
+            .unwrap();
+        assert!(is_processed, "Original channel should be processed");
+    }
+
+    #[tokio::test]
+    async fn test_webhook_dedup_duplicate_record_is_idempotent() {
+        // Use a temp file so connections share state (in-memory DBs are connection-local)
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("test_dedup_idempotent.db");
+        let backend = LibSqlBackend::new_local(&db_path).await.unwrap();
+        backend.run_migrations().await.unwrap();
+
+        // Record same message twice (simulating webhook retry)
+        backend
+            .record_webhook_message_processed("whatsapp", "wamid.duplicate")
+            .await
+            .unwrap();
+        backend
+            .record_webhook_message_processed("whatsapp", "wamid.duplicate")
+            .await
+            .unwrap();
+
+        // Should still be marked as processed (no error, no duplicate row)
+        let is_processed = backend
+            .is_webhook_message_processed("whatsapp", "wamid.duplicate")
+            .await
+            .unwrap();
+        assert!(is_processed);
+    }
 }

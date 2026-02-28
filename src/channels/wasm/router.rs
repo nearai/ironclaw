@@ -20,6 +20,16 @@ use tokio::sync::{RwLock, oneshot};
 
 use crate::channels::wasm::wrapper::{HttpResponseWithMessages, WasmChannel};
 
+/// Metadata extracted from WhatsApp webhook messages.
+/// Used for ACK keys, deduplication, and mark_as_read API calls.
+#[derive(Deserialize)]
+struct WhatsAppMetadata {
+    /// The WhatsApp message ID (wamid.xxx) used for ACK and deduplication.
+    message_id: Option<String>,
+    /// The phone number ID for the WhatsApp Business account.
+    phone_number_id: Option<String>,
+}
+
 /// A registered HTTP endpoint for a WASM channel.
 #[derive(Debug, Clone)]
 pub struct RegisteredEndpoint {
@@ -86,6 +96,35 @@ impl WasmChannelRouter {
     /// Get the database for webhook message deduplication.
     pub async fn get_db(&self) -> Option<Arc<dyn crate::db::WebhookDedupStore + Send + Sync>> {
         self.db.read().await.clone()
+    }
+
+    /// Clean up old webhook dedup records.
+    ///
+    /// Called periodically to prevent unbounded growth of the dedup table.
+    /// Returns the number of records deleted.
+    pub async fn cleanup_old_dedup_records(&self) -> usize {
+        if let Some(db) = self.get_db().await {
+            match db.cleanup_old_webhook_dedup_records().await {
+                Ok(count) => {
+                    if count > 0 {
+                        tracing::info!(
+                            deleted_count = count,
+                            "Cleaned up old webhook dedup records"
+                        );
+                    }
+                    count as usize
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        error = %e,
+                        "Failed to clean up old webhook dedup records"
+                    );
+                    0
+                }
+            }
+        } else {
+            0
+        }
     }
 
     /// Register a channel with its endpoints.
@@ -309,7 +348,9 @@ impl WasmChannelRouter {
     ///
     /// Called by the agent loop after persist_user_message() completes.
     /// Also triggers mark_as_read for channels that support it (WhatsApp).
-    /// Records the message as processed in the database for deduplication.
+    ///
+    /// Note: Deduplication recording happens at webhook handler level (before
+    /// sending to agent) to prevent race conditions with concurrent webhooks.
     ///
     /// # Arguments
     /// * `key` - The same key passed to register_pending_ack()
@@ -319,25 +360,6 @@ impl WasmChannelRouter {
             // Signal the webhook handler to return 200 OK
             let _ = tx.send(());
             tracing::debug!(key = %key, "Webhook ACK signaled");
-
-            // Record message as processed for deduplication
-            // Parse key format: "channel:message_id"
-            if let Some(db) = self.get_db().await {
-                let parts: Vec<&str> = key.splitn(2, ':').collect();
-                if parts.len() == 2 {
-                    let channel = parts[0];
-                    let message_id = parts[1];
-                    if let Err(e) = db.record_webhook_message_processed(channel, message_id).await {
-                        tracing::warn!(
-                            key = %key,
-                            error = %e,
-                            "Failed to record webhook message as processed (dedup may not work on retry)"
-                        );
-                    } else {
-                        tracing::debug!(key = %key, "Recorded webhook message as processed");
-                    }
-                }
-            }
 
             // Trigger mark_as_read for supported channels
             if let Some(metadata) = message_metadata
@@ -396,12 +418,12 @@ impl WasmChannelRouter {
         }
 
         // Parse metadata to get phone_number_id
-        #[derive(Deserialize)]
-        struct WhatsAppMetadata {
-            phone_number_id: String,
-        }
         let metadata: WhatsAppMetadata =
             serde_json::from_str(metadata_json).map_err(|e| format!("Invalid metadata: {}", e))?;
+
+        let phone_number_id = metadata
+            .phone_number_id
+            .ok_or_else(|| "Missing phone_number_id in metadata".to_string())?;
 
         // Get stored credentials
         let access_token = self
@@ -416,7 +438,7 @@ impl WasmChannelRouter {
         // Call WhatsApp API to mark as read
         let url = format!(
             "https://graph.facebook.com/{}/{}/messages",
-            api_version, metadata.phone_number_id
+            api_version, phone_number_id
         );
         let payload = serde_json::json!({
             "messaging_product": "whatsapp",
@@ -460,6 +482,8 @@ pub struct RouterState {
     extension_manager: Option<Arc<crate::extensions::ExtensionManager>>,
     /// Database for webhook message deduplication.
     db: Option<Arc<dyn crate::db::Database>>,
+    /// Timeout for waiting on webhook ACK before returning 500.
+    webhook_ack_timeout: Duration,
 }
 
 impl RouterState {
@@ -468,6 +492,7 @@ impl RouterState {
             router,
             extension_manager: None,
             db: None,
+            webhook_ack_timeout: Duration::from_secs(10),
         }
     }
 
@@ -482,6 +507,12 @@ impl RouterState {
     /// Add database for webhook message deduplication.
     pub fn with_db(mut self, db: Arc<dyn crate::db::Database>) -> Self {
         self.db = Some(db);
+        self
+    }
+
+    /// Set the webhook ACK timeout.
+    pub fn with_webhook_ack_timeout(mut self, timeout: Duration) -> Self {
+        self.webhook_ack_timeout = timeout;
         self
     }
 }
@@ -775,11 +806,6 @@ async fn webhook_handler(
                 for msg in &emitted_messages {
                     // Parse metadata to extract message_id for ACK key and deduplication
                     // For WhatsApp, metadata contains: phone_number_id, sender_phone, message_id, timestamp
-                    #[derive(Deserialize)]
-                    struct WhatsAppMetadata {
-                        message_id: Option<String>,
-                    }
-
                     let (ack_key, external_msg_id) = if let Ok(meta) =
                         serde_json::from_str::<WhatsAppMetadata>(&msg.metadata_json)
                     {
@@ -794,6 +820,7 @@ async fn webhook_handler(
                     };
 
                     // Check for duplicate messages if database is available
+                    // Record immediately after check to prevent race conditions
                     if let Some(ref db) = state.db
                         && let Some(msg_id) = &external_msg_id
                     {
@@ -806,6 +833,16 @@ async fn webhook_handler(
                                         "Duplicate webhook message detected, skipping"
                                     );
                                     continue; // Skip this duplicate message
+                                }
+                                // Not a duplicate - record immediately to prevent races
+                                // This ensures concurrent webhooks for the same message will be caught
+                                if let Err(e) = db.record_webhook_message_processed(channel_name, msg_id).await {
+                                    tracing::warn!(
+                                        channel = %channel_name,
+                                        message_id = %msg_id,
+                                        error = %e,
+                                        "Failed to record message as processed, dedup may not work on retry"
+                                    );
                                 }
                             }
                             Err(e) => {
@@ -850,9 +887,9 @@ async fn webhook_handler(
                     // Continue to return response even if sending failed
                 }
 
-                // Wait for all ACKs with a single 10-second timeout for all messages
+                // Wait for all ACKs with a configurable timeout for all messages
                 // Using join_all ensures we don't accumulate timeouts (3 messages ≠ 30s wait)
-                let ack_timeout = Duration::from_secs(10);
+                let ack_timeout = state.webhook_ack_timeout;
 
                 let ack_futures: Vec<_> = ack_receivers
                     .into_iter()
@@ -880,7 +917,7 @@ async fn webhook_handler(
                     Err(_) => {
                         tracing::warn!(
                             channel = %channel_name,
-                            timeout_secs = 10,
+                            timeout_secs = ack_timeout.as_secs(),
                             "Webhook ACK wait timed out, returning 500 to trigger retry"
                         );
                         // Return 500 so WhatsApp retries - deduplication will handle duplicates
@@ -996,6 +1033,7 @@ pub fn create_wasm_channel_router(
     router: Arc<WasmChannelRouter>,
     extension_manager: Option<Arc<crate::extensions::ExtensionManager>>,
     db: Option<Arc<dyn crate::db::Database>>,
+    webhook_ack_timeout: Option<Duration>,
 ) -> Router {
     let mut state = RouterState::new(router);
     if let Some(manager) = extension_manager {
@@ -1003,6 +1041,9 @@ pub fn create_wasm_channel_router(
     }
     if let Some(database) = db {
         state = state.with_db(database);
+    }
+    if let Some(timeout) = webhook_ack_timeout {
+        state = state.with_webhook_ack_timeout(timeout);
     }
 
     Router::new()
@@ -1350,7 +1391,7 @@ mod tests {
             .register(channel, endpoints, None, None, None)
             .await;
 
-        let app = create_wasm_channel_router(wasm_router.clone(), None, None);
+        let app = create_wasm_channel_router(wasm_router.clone(), None, None, None);
         (wasm_router, app)
     }
 
@@ -1591,7 +1632,7 @@ mod tests {
             .await
             .unwrap();
 
-        let app = create_wasm_channel_router(wasm_router.clone(), None, None);
+        let app = create_wasm_channel_router(wasm_router.clone(), None, None, None);
 
         // Use current timestamp so staleness check passes
         let now_secs = std::time::SystemTime::now()
@@ -1718,7 +1759,7 @@ mod tests {
             .register_hmac_secret("whatsapp", "my_app_secret".to_string())
             .await;
 
-        let app = create_wasm_channel_router(wasm_router.clone(), None, None);
+        let app = create_wasm_channel_router(wasm_router.clone(), None, None, None);
 
         // Send request without X-Hub-Signature-256 header
         let req = Request::builder()
@@ -1762,7 +1803,7 @@ mod tests {
             .register_hmac_secret("whatsapp", "correct_secret".to_string())
             .await;
 
-        let app = create_wasm_channel_router(wasm_router.clone(), None, None);
+        let app = create_wasm_channel_router(wasm_router.clone(), None, None, None);
 
         let body = br#"{"entry":[]}"#;
         // Sign with wrong secret
@@ -1810,7 +1851,7 @@ mod tests {
             .register_hmac_secret("whatsapp", "my_app_secret".to_string())
             .await;
 
-        let app = create_wasm_channel_router(wasm_router.clone(), None, None);
+        let app = create_wasm_channel_router(wasm_router.clone(), None, None, None);
 
         let body = br#"{"entry":[]}"#;
         let sig = compute_hmac_signature("my_app_secret", body);
@@ -1830,5 +1871,68 @@ mod tests {
             StatusCode::UNAUTHORIZED,
             "Valid HMAC signature should not return 401"
         );
+    }
+
+    // ==================== Webhook ACK mechanism tests ====================
+
+    #[tokio::test]
+    async fn test_register_and_ack_message() {
+        let router = WasmChannelRouter::new();
+
+        // Register pending ACK
+        let ack_key = "whatsapp:wamid.test123";
+        let rx = router.register_pending_ack(ack_key.to_string()).await;
+
+        // Ack the message
+        router.ack_message(ack_key, None).await;
+
+        // Verify the ACK was received
+        let result = rx.await;
+        assert!(result.is_ok(), "ACK should be received");
+    }
+
+    #[tokio::test]
+    async fn test_ack_message_removes_pending_entry() {
+        let router = WasmChannelRouter::new();
+
+        let ack_key = "whatsapp:wamid.test456";
+        let _rx = router.register_pending_ack(ack_key.to_string()).await;
+
+        // Verify entry exists
+        assert!(
+            router.pending_acks.read().await.contains_key(ack_key),
+            "Pending ACK should exist"
+        );
+
+        // Ack the message
+        router.ack_message(ack_key, None).await;
+
+        // Verify entry was removed
+        assert!(
+            !router.pending_acks.read().await.contains_key(ack_key),
+            "Pending ACK should be removed after ACK"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_ack_nonexistent_key_is_safe() {
+        let router = WasmChannelRouter::new();
+
+        // Should not panic when ACKing a key that was never registered
+        router.ack_message("nonexistent:key", None).await;
+    }
+
+    #[tokio::test]
+    async fn test_double_ack_same_key() {
+        let router = WasmChannelRouter::new();
+
+        let ack_key = "whatsapp:wamid.test789";
+        let _rx = router.register_pending_ack(ack_key.to_string()).await;
+
+        // First ACK
+        router.ack_message(ack_key, None).await;
+
+        // Second ACK should be safe (no panic)
+        router.ack_message(ack_key, None).await;
     }
 }
