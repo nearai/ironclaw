@@ -1083,7 +1083,13 @@ async fn memory_write_handler(
         "Workspace not available".to_string(),
     ))?;
 
-    // Route through layer-aware methods when a layer is specified
+    // Route through layer-aware methods when a layer is specified.
+    //
+    // Note: unlike MemoryWriteTool, this endpoint does NOT block writes to
+    // identity files (IDENTITY.md, SOUL.md, etc.). The HTTP API is an
+    // authenticated admin interface; the supervisor uses it to seed identity
+    // files at startup. Identity-file protection is enforced at the tool
+    // layer (LLM-facing) where the write originates from an untrusted agent.
     if let Some(ref layer_name) = req.layer {
         let result = if req.append {
             workspace

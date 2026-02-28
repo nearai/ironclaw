@@ -668,7 +668,7 @@ impl Repository {
             )
             .await
             .map_err(|e| WorkspaceError::SearchFailed {
-                reason: format!("Query failed: {}", e),
+                reason: format!("get_document_by_path_multi failed: {}", e),
             })?;
 
         match row {

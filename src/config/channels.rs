@@ -179,7 +179,7 @@ impl ChannelsConfig {
                 }
             }
 
-            let workspace_read_scopes = optional_env("WORKSPACE_READ_SCOPES")?
+            let workspace_read_scopes: Vec<String> = optional_env("WORKSPACE_READ_SCOPES")?
                 .map(|s| {
                     s.split(',')
                         .map(|s| s.trim().to_string())
@@ -187,6 +187,18 @@ impl ChannelsConfig {
                         .collect()
                 })
                 .unwrap_or_default();
+
+            for scope in &workspace_read_scopes {
+                if scope.len() > 128 {
+                    return Err(ConfigError::InvalidValue {
+                        key: "WORKSPACE_READ_SCOPES".to_string(),
+                        message: format!(
+                            "scope '{}...' exceeds 128 characters",
+                            &scope[..32]
+                        ),
+                    });
+                }
+            }
 
             Some(GatewayConfig {
                 host: optional_env("GATEWAY_HOST")?.unwrap_or_else(|| "127.0.0.1".to_string()),

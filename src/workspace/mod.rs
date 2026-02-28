@@ -644,6 +644,13 @@ impl Workspace {
     /// full document after concatenation. See [`PatternPrivacyClassifier`]
     /// limitations for details.
     ///
+    /// When a privacy redirect occurs, the append targets a **separate
+    /// document** in the private scope at the same path — the shared-scope
+    /// document is left unmodified. Subsequent multi-scope reads will return
+    /// the private copy (primary scope wins), effectively shadowing the
+    /// shared document at that path. The `WriteResult::redirected` flag
+    /// indicates when this has happened.
+    ///
     /// Uses a read-modify-write pattern that is not concurrency-safe:
     /// concurrent appends to the same path may lose writes.
     pub async fn append_to_layer(
@@ -793,6 +800,13 @@ impl Workspace {
     /// When multi-scope reads are configured, checks all read scopes before
     /// creating. If the file exists in any scope, returns it. If not found in
     /// any scope, creates it in the primary (write) scope.
+    ///
+    /// **Important:** In multi-scope mode, the returned document may belong to
+    /// a secondary scope. Callers that intend to **write** to the document
+    /// (via `update_document(doc.id, ...)`) must NOT use this method — use
+    /// `storage.get_or_create_document_by_path(&self.user_id, ...)` instead
+    /// to guarantee writes target the primary scope. See `append_memory` for
+    /// the correct pattern.
     async fn read_or_create(&self, path: &str) -> Result<MemoryDocument, WorkspaceError> {
         if self.is_multi_scope() {
             match self
