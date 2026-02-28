@@ -225,6 +225,7 @@ Work independently to complete this job. Report when done."#,
         let mut last_output = String::new();
         let mut consecutive_llm_failures: u32 = 0;
         let mut consecutive_empty_tool_responses: u32 = 0;
+        let mut consecutive_text_only_responses: u32 = 0;
 
         // Load tool definitions
         reason_ctx.available_tools = self.tools.tool_definitions().await;
@@ -326,6 +327,9 @@ Work independently to complete this job. Report when done."#,
             };
 
             if selections.is_empty() {
+                consecutive_text_only_responses =
+                    consecutive_text_only_responses.saturating_add(1);
+
                 // No tools selected, try direct response
                 let respond_output =
                     reasoning
@@ -340,7 +344,25 @@ Work independently to complete this job. Report when done."#,
                 {
                     return Ok(last_output);
                 }
+
+                // Safety net: if the model has returned no tool calls for 2+
+                // consecutive iterations, it has nothing more to do. Treat the
+                // last text response as the final answer to avoid infinite loops
+                // when the completion-phrase heuristic doesn't match.
+                if consecutive_text_only_responses >= 2 {
+                    tracing::info!(
+                        job_id = %self.config.job_id,
+                        consecutive_text_only_responses,
+                        "Model returned text without tool calls for multiple iterations; treating as completion"
+                    );
+                    if last_output.is_empty() {
+                        last_output =
+                            "Task completed (no further tool calls requested).".to_string();
+                    }
+                    return Ok(last_output);
+                }
             } else {
+                consecutive_text_only_responses = 0;
                 // OpenAI/Anthropic tool protocol requires assistant tool_calls
                 // to precede tool_result messages. Without this, downstream
                 // providers rewrite results as orphaned.

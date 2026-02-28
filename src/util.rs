@@ -29,13 +29,16 @@ pub fn llm_signals_completion(response: &str) -> bool {
         "job is complete",
         "job is done",
         "job is finished",
+        "job complete",
         "task is complete",
         "task is done",
         "task is finished",
+        "task complete",
         "work is complete",
         "work is done",
         "work is finished",
         "successfully completed",
+        "completed successfully",
         "have completed the job",
         "have completed the task",
         "have finished the job",
@@ -46,6 +49,8 @@ pub fn llm_signals_completion(response: &str) -> bool {
         "i've completed",
         "all done",
         "all tasks complete",
+        "everything is done",
+        "everything is complete",
     ];
 
     let negative_phrases = [
@@ -130,6 +135,13 @@ mod tests {
         assert!(llm_signals_completion("All steps are done now."));
         assert!(llm_signals_completion("I've completed everything."));
         assert!(llm_signals_completion("All tasks complete."));
+        assert!(llm_signals_completion("Job Complete!"));
+        assert!(llm_signals_completion("Task complete."));
+        assert!(llm_signals_completion(
+            "The code is ready to use. Completed successfully!"
+        ));
+        assert!(llm_signals_completion("Everything is done."));
+        assert!(llm_signals_completion("Everything is complete!"));
     }
 
     #[test]

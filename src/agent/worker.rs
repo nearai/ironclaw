@@ -188,6 +188,7 @@ Report when the job is complete or if you encounter issues you cannot resolve."#
             .unwrap_or(50) as usize;
         let max_iterations = max_iterations.min(MAX_WORKER_ITERATIONS);
         let mut iteration = 0;
+        let mut consecutive_text_only_responses: u32 = 0;
 
         // Initial tool definitions for planning (will be refreshed in loop)
         reason_ctx.available_tools = self.tools().tool_definitions().await;
@@ -280,6 +281,9 @@ Report when the job is complete or if you encounter issues you cannot resolve."#
             let selections = reasoning.select_tools(reason_ctx).await?;
 
             if selections.is_empty() {
+                consecutive_text_only_responses =
+                    consecutive_text_only_responses.saturating_add(1);
+
                 // No tools from select_tools, ask LLM directly (may still return tool calls)
                 let respond_output = reasoning.respond_with_tools(reason_ctx).await?;
 
@@ -290,6 +294,20 @@ Report when the job is complete or if you encounter issues you cannot resolve."#
                         // "not done", or "unfinished". Only the LLM's own response
                         // (not tool output) can trigger this.
                         if crate::util::llm_signals_completion(&response) {
+                            self.mark_completed().await?;
+                            return Ok(());
+                        }
+
+                        // Safety net: if the model has returned no tool calls for 2+
+                        // consecutive iterations, it has nothing more to do. Treat the
+                        // last text response as the final answer to avoid infinite loops
+                        // when the completion-phrase heuristic doesn't match.
+                        if consecutive_text_only_responses >= 2 {
+                            tracing::info!(
+                                job_id = %self.job_id,
+                                consecutive_text_only_responses,
+                                "Model returned text without tool calls for multiple iterations; treating as completion"
+                            );
                             self.mark_completed().await?;
                             return Ok(());
                         }
@@ -316,6 +334,7 @@ Report when the job is complete or if you encounter issues you cannot resolve."#
                         tool_calls,
                         content,
                     } => {
+                        consecutive_text_only_responses = 0;
                         // Model returned tool calls - execute them
                         tracing::debug!(
                             "Job {} respond_with_tools returned {} tool calls",
@@ -361,6 +380,7 @@ Report when the job is complete or if you encounter issues you cannot resolve."#
                     }
                 }
             } else if selections.len() == 1 {
+                consecutive_text_only_responses = 0;
                 // Single tool: execute directly
                 let selection = &selections[0];
                 tracing::debug!(
@@ -377,6 +397,7 @@ Report when the job is complete or if you encounter issues you cannot resolve."#
                 self.process_tool_result(reason_ctx, selection, result)
                     .await?;
             } else {
+                consecutive_text_only_responses = 0;
                 // Multiple tools: execute in parallel
                 tracing::debug!(
                     "Job {} executing {} tools in parallel",
