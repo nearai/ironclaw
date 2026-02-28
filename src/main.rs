@@ -18,7 +18,7 @@ use ironclaw::{
         web::log_layer::LogBroadcaster,
     },
     cli::{
-        Cli, Command, run_mcp_command, run_pairing_command, run_service_command,
+        Cli, Command, run_logs_command, run_mcp_command, run_pairing_command, run_service_command,
         run_status_command, run_tool_command,
     },
     config::Config,
@@ -110,6 +110,10 @@ async fn main() -> anyhow::Result<()> {
         }) => {
             init_worker_tracing();
             return run_claude_bridge(*job_id, orchestrator_url, *max_turns, model).await;
+        }
+        Some(Command::Logs(logs_cmd)) => {
+            init_cli_tracing();
+            return run_logs_command(&logs_cmd.clone());
         }
         Some(Command::Onboard {
             skip_auth,
