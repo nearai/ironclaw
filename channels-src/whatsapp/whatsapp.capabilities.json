@@ -21,7 +21,7 @@
         "validation": "^[a-f0-9]{32}$"
       }
     ],
-    "validation_endpoint": "https://graph.facebook.com/v18.0/me?access_token={whatsapp_access_token}"
+    "validation_endpoint": "https://graph.facebook.com/v25.0/me?access_token={whatsapp_access_token}"
   },
   "capabilities": {
     "http": {
@@ -53,7 +53,7 @@
     }
   },
   "config": {
-    "api_version": "v18.0",
+    "api_version": "v25.0",
     "reply_to_message": true,
     "owner_id": null,
     "dm_policy": "pairing",

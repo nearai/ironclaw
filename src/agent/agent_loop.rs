@@ -75,6 +75,10 @@ pub struct AgentDeps {
     pub cost_guard: Arc<crate::agent::cost_guard::CostGuard>,
     /// SSE broadcast sender for live job event streaming to the web gateway.
     pub sse_tx: Option<tokio::sync::broadcast::Sender<crate::channels::web::types::SseEvent>>,
+    /// WASM channel router for webhook ACK signaling.
+    /// When set, the agent will signal ACK after persisting messages,
+    /// allowing webhooks to wait for persistence before returning 200 OK.
+    pub wasm_router: Option<Arc<crate::channels::wasm::router::WasmChannelRouter>>,
 }
 
 /// The main agent that coordinates all components.

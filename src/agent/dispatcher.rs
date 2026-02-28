@@ -983,6 +983,7 @@ mod tests {
             hooks: Arc::new(HookRegistry::new()),
             cost_guard: Arc::new(CostGuard::new(CostGuardConfig::default())),
             sse_tx: None,
+            wasm_router: None,
         };
 
         Agent::new(
@@ -1721,6 +1722,7 @@ mod tests {
             hooks: Arc::new(HookRegistry::new()),
             cost_guard: Arc::new(CostGuard::new(CostGuardConfig::default())),
             sse_tx: None,
+            wasm_router: None,
         };
 
         Agent::new(
@@ -1833,6 +1835,7 @@ mod tests {
                 hooks: Arc::new(HookRegistry::new()),
                 cost_guard: Arc::new(CostGuard::new(CostGuardConfig::default())),
                 sse_tx: None,
+                wasm_router: None,
             };
 
             Agent::new(
