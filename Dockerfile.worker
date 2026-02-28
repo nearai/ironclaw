@@ -1,3 +1,4 @@
+# syntax=docker/dockerfile:1
 # Multi-stage Dockerfile for the IronClaw worker container.
 #
 # This image runs the ironclaw binary in worker mode inside Docker containers.
@@ -14,8 +15,11 @@ FROM rust:1.92-bookworm AS builder
 WORKDIR /build
 COPY . .
 
-# Build only the ironclaw binary (release mode)
-RUN cargo build --release --bin ironclaw
+# Build only the ironclaw binary (release mode, with BuildKit cache mounts)
+RUN --mount=type=cache,target=/usr/local/cargo/registry \
+    --mount=type=cache,target=/build/target \
+    cargo build --release --bin ironclaw \
+    && cp /build/target/release/ironclaw /usr/local/bin/ironclaw
 
 # ---
 
@@ -53,7 +57,7 @@ RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --de
 RUN npm install -g @anthropic-ai/claude-code@latest
 
 # Copy the binary
-COPY --from=builder /build/target/release/ironclaw /usr/local/bin/ironclaw
+COPY --from=builder /usr/local/bin/ironclaw /usr/local/bin/ironclaw
 
 # Create non-root user (UID 1000 matches the orchestrator's container config)
 RUN useradd -m -u 1000 -s /bin/bash sandbox \
