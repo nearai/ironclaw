@@ -22,8 +22,8 @@ _ironclaw() {
 '--cli-only[Run in interactive CLI mode only (disable other channels)]' \
 '--no-db[Skip database connection (for testing)]' \
 '--no-onboard[Skip first-run onboarding check]' \
-'-h[Print help]' \
-'--help[Print help]' \
+'-h[Print help (see more with '\''--help'\'')]' \
+'--help[Print help (see more with '\''--help'\'')]' \
 '-V[Print version]' \
 '--version[Print version]' \
 ":: :_ironclaw_commands" \
@@ -44,8 +44,8 @@ _arguments "${_arguments_options[@]}" : \
 '--cli-only[Run in interactive CLI mode only (disable other channels)]' \
 '--no-db[Skip database connection (for testing)]' \
 '--no-onboard[Skip first-run onboarding check]' \
-'-h[Print help]' \
-'--help[Print help]' \
+'-h[Print help (see more with '\''--help'\'')]' \
+'--help[Print help (see more with '\''--help'\'')]' \
 && ret=0
 ;;
 (onboard)
@@ -59,8 +59,8 @@ _arguments "${_arguments_options[@]}" : \
 '--cli-only[Run in interactive CLI mode only (disable other channels)]' \
 '--no-db[Skip database connection (for testing)]' \
 '--no-onboard[Skip first-run onboarding check]' \
-'-h[Print help]' \
-'--help[Print help]' \
+'-h[Print help (see more with '\''--help'\'')]' \
+'--help[Print help (see more with '\''--help'\'')]' \
 && ret=0
 ;;
 (config)
@@ -72,8 +72,8 @@ _arguments "${_arguments_options[@]}" : \
 '--cli-only[Run in interactive CLI mode only (disable other channels)]' \
 '--no-db[Skip database connection (for testing)]' \
 '--no-onboard[Skip first-run onboarding check]' \
-'-h[Print help]' \
-'--help[Print help]' \
+'-h[Print help (see more with '\''--help'\'')]' \
+'--help[Print help (see more with '\''--help'\'')]' \
 ":: :_ironclaw__config_commands" \
 "*::: :->config" \
 && ret=0
@@ -228,8 +228,8 @@ _arguments "${_arguments_options[@]}" : \
 '--cli-only[Run in interactive CLI mode only (disable other channels)]' \
 '--no-db[Skip database connection (for testing)]' \
 '--no-onboard[Skip first-run onboarding check]' \
-'-h[Print help]' \
-'--help[Print help]' \
+'-h[Print help (see more with '\''--help'\'')]' \
+'--help[Print help (see more with '\''--help'\'')]' \
 ":: :_ironclaw__tool_commands" \
 "*::: :->tool" \
 && ret=0
@@ -374,7 +374,47 @@ esac
     ;;
 esac
 ;;
-(mcp)
+(registry)
+_arguments "${_arguments_options[@]}" : \
+'-m+[Single message mode - send one message and exit]:MESSAGE:_default' \
+'--message=[Single message mode - send one message and exit]:MESSAGE:_default' \
+'-c+[Configuration file path (optional, uses env vars by default)]:CONFIG:_files' \
+'--config=[Configuration file path (optional, uses env vars by default)]:CONFIG:_files' \
+'--cli-only[Run in interactive CLI mode only (disable other channels)]' \
+'--no-db[Skip database connection (for testing)]' \
+'--no-onboard[Skip first-run onboarding check]' \
+'-h[Print help (see more with '\''--help'\'')]' \
+'--help[Print help (see more with '\''--help'\'')]' \
+":: :_ironclaw__registry_commands" \
+"*::: :->registry" \
+&& ret=0
+
+    case $state in
+    (registry)
+        words=($line[1] "${words[@]}")
+        (( CURRENT += 1 ))
+        curcontext="${curcontext%:*:*}:ironclaw-registry-command-$line[1]:"
+        case $line[1] in
+            (list)
+_arguments "${_arguments_options[@]}" : \
+'-k+[Filter by kind\: "tool" or "channel"]:KIND:_default' \
+'--kind=[Filter by kind\: "tool" or "channel"]:KIND:_default' \
+'-t+[Filter by tag (e.g. "default", "google", "messaging")]:TAG:_default' \
+'--tag=[Filter by tag (e.g. "default", "google", "messaging")]:TAG:_default' \
+'-m+[Single message mode - send one message and exit]:MESSAGE:_default' \
+'--message=[Single message mode - send one message and exit]:MESSAGE:_default' \
+'-c+[Configuration file path (optional, uses env vars by default)]:CONFIG:_files' \
+'--config=[Configuration file path (optional, uses env vars by default)]:CONFIG:_files' \
+'-v[Show detailed information]' \
+'--verbose[Show detailed information]' \
+'--cli-only[Run in interactive CLI mode only (disable other channels)]' \
+'--no-db[Skip database connection (for testing)]' \
+'--no-onboard[Skip first-run onboarding check]' \
+'-h[Print help]' \
+'--help[Print help]' \
+&& ret=0
+;;
+(info)
 _arguments "${_arguments_options[@]}" : \
 '-m+[Single message mode - send one message and exit]:MESSAGE:_default' \
 '--message=[Single message mode - send one message and exit]:MESSAGE:_default' \
@@ -385,6 +425,93 @@ _arguments "${_arguments_options[@]}" : \
 '--no-onboard[Skip first-run onboarding check]' \
 '-h[Print help]' \
 '--help[Print help]' \
+':name -- Extension or bundle name (e.g. "slack", "google", "tools/gmail"):_default' \
+&& ret=0
+;;
+(install)
+_arguments "${_arguments_options[@]}" : \
+'-m+[Single message mode - send one message and exit]:MESSAGE:_default' \
+'--message=[Single message mode - send one message and exit]:MESSAGE:_default' \
+'-c+[Configuration file path (optional, uses env vars by default)]:CONFIG:_files' \
+'--config=[Configuration file path (optional, uses env vars by default)]:CONFIG:_files' \
+'-f[Force overwrite if already installed]' \
+'--force[Force overwrite if already installed]' \
+'--build[Build from source instead of downloading pre-built artifact]' \
+'--cli-only[Run in interactive CLI mode only (disable other channels)]' \
+'--no-db[Skip database connection (for testing)]' \
+'--no-onboard[Skip first-run onboarding check]' \
+'-h[Print help]' \
+'--help[Print help]' \
+':name -- Extension or bundle name (e.g. "slack", "google", "default"):_default' \
+&& ret=0
+;;
+(install-defaults)
+_arguments "${_arguments_options[@]}" : \
+'-m+[Single message mode - send one message and exit]:MESSAGE:_default' \
+'--message=[Single message mode - send one message and exit]:MESSAGE:_default' \
+'-c+[Configuration file path (optional, uses env vars by default)]:CONFIG:_files' \
+'--config=[Configuration file path (optional, uses env vars by default)]:CONFIG:_files' \
+'-f[Force overwrite if already installed]' \
+'--force[Force overwrite if already installed]' \
+'--build[Build from source instead of downloading pre-built artifact]' \
+'--cli-only[Run in interactive CLI mode only (disable other channels)]' \
+'--no-db[Skip database connection (for testing)]' \
+'--no-onboard[Skip first-run onboarding check]' \
+'-h[Print help]' \
+'--help[Print help]' \
+&& ret=0
+;;
+(help)
+_arguments "${_arguments_options[@]}" : \
+":: :_ironclaw__registry__help_commands" \
+"*::: :->help" \
+&& ret=0
+
+    case $state in
+    (help)
+        words=($line[1] "${words[@]}")
+        (( CURRENT += 1 ))
+        curcontext="${curcontext%:*:*}:ironclaw-registry-help-command-$line[1]:"
+        case $line[1] in
+            (list)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(info)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(install)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(install-defaults)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(help)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+        esac
+    ;;
+esac
+;;
+        esac
+    ;;
+esac
+;;
+(mcp)
+_arguments "${_arguments_options[@]}" : \
+'-m+[Single message mode - send one message and exit]:MESSAGE:_default' \
+'--message=[Single message mode - send one message and exit]:MESSAGE:_default' \
+'-c+[Configuration file path (optional, uses env vars by default)]:CONFIG:_files' \
+'--config=[Configuration file path (optional, uses env vars by default)]:CONFIG:_files' \
+'--cli-only[Run in interactive CLI mode only (disable other channels)]' \
+'--no-db[Skip database connection (for testing)]' \
+'--no-onboard[Skip first-run onboarding check]' \
+'-h[Print help (see more with '\''--help'\'')]' \
+'--help[Print help (see more with '\''--help'\'')]' \
 ":: :_ironclaw__mcp_commands" \
 "*::: :->mcp" \
 && ret=0
@@ -549,8 +676,8 @@ _arguments "${_arguments_options[@]}" : \
 '--cli-only[Run in interactive CLI mode only (disable other channels)]' \
 '--no-db[Skip database connection (for testing)]' \
 '--no-onboard[Skip first-run onboarding check]' \
-'-h[Print help]' \
-'--help[Print help]' \
+'-h[Print help (see more with '\''--help'\'')]' \
+'--help[Print help (see more with '\''--help'\'')]' \
 ":: :_ironclaw__memory_commands" \
 "*::: :->memory" \
 && ret=0
@@ -690,8 +817,8 @@ _arguments "${_arguments_options[@]}" : \
 '--cli-only[Run in interactive CLI mode only (disable other channels)]' \
 '--no-db[Skip database connection (for testing)]' \
 '--no-onboard[Skip first-run onboarding check]' \
-'-h[Print help]' \
-'--help[Print help]' \
+'-h[Print help (see more with '\''--help'\'')]' \
+'--help[Print help (see more with '\''--help'\'')]' \
 ":: :_ironclaw__pairing_commands" \
 "*::: :->pairing" \
 && ret=0
@@ -773,8 +900,8 @@ _arguments "${_arguments_options[@]}" : \
 '--cli-only[Run in interactive CLI mode only (disable other channels)]' \
 '--no-db[Skip database connection (for testing)]' \
 '--no-onboard[Skip first-run onboarding check]' \
-'-h[Print help]' \
-'--help[Print help]' \
+'-h[Print help (see more with '\''--help'\'')]' \
+'--help[Print help (see more with '\''--help'\'')]' \
 ":: :_ironclaw__service_commands" \
 "*::: :->service" \
 && ret=0
@@ -903,8 +1030,8 @@ _arguments "${_arguments_options[@]}" : \
 '--cli-only[Run in interactive CLI mode only (disable other channels)]' \
 '--no-db[Skip database connection (for testing)]' \
 '--no-onboard[Skip first-run onboarding check]' \
-'-h[Print help]' \
-'--help[Print help]' \
+'-h[Print help (see more with '\''--help'\'')]' \
+'--help[Print help (see more with '\''--help'\'')]' \
 && ret=0
 ;;
 (status)
@@ -916,13 +1043,13 @@ _arguments "${_arguments_options[@]}" : \
 '--cli-only[Run in interactive CLI mode only (disable other channels)]' \
 '--no-db[Skip database connection (for testing)]' \
 '--no-onboard[Skip first-run onboarding check]' \
-'-h[Print help]' \
-'--help[Print help]' \
+'-h[Print help (see more with '\''--help'\'')]' \
+'--help[Print help (see more with '\''--help'\'')]' \
 && ret=0
 ;;
 (completion)
 _arguments "${_arguments_options[@]}" : \
-'--shell=[The shell to generate completions for]:SHELL:(bash zsh fish powershell elvish)' \
+'--shell=[The shell to generate completions for]:SHELL:(bash elvish fish powershell zsh)' \
 '-m+[Single message mode - send one message and exit]:MESSAGE:_default' \
 '--message=[Single message mode - send one message and exit]:MESSAGE:_default' \
 '-c+[Configuration file path (optional, uses env vars by default)]:CONFIG:_files' \
@@ -930,8 +1057,8 @@ _arguments "${_arguments_options[@]}" : \
 '--cli-only[Run in interactive CLI mode only (disable other channels)]' \
 '--no-db[Skip database connection (for testing)]' \
 '--no-onboard[Skip first-run onboarding check]' \
-'-h[Print help]' \
-'--help[Print help]' \
+'-h[Print help (see more with '\''--help'\'')]' \
+'--help[Print help (see more with '\''--help'\'')]' \
 && ret=0
 ;;
 (worker)
@@ -1056,6 +1183,38 @@ _arguments "${_arguments_options[@]}" : \
 && ret=0
 ;;
 (auth)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+        esac
+    ;;
+esac
+;;
+(registry)
+_arguments "${_arguments_options[@]}" : \
+":: :_ironclaw__help__registry_commands" \
+"*::: :->registry" \
+&& ret=0
+
+    case $state in
+    (registry)
+        words=($line[1] "${words[@]}")
+        (( CURRENT += 1 ))
+        curcontext="${curcontext%:*:*}:ironclaw-help-registry-command-$line[1]:"
+        case $line[1] in
+            (list)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(info)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(install)
+_arguments "${_arguments_options[@]}" : \
+&& ret=0
+;;
+(install-defaults)
 _arguments "${_arguments_options[@]}" : \
 && ret=0
 ;;
@@ -1235,17 +1394,18 @@ esac
 (( $+functions[_ironclaw_commands] )) ||
 _ironclaw_commands() {
     local commands; commands=(
-'run:Run the agent (default if no subcommand given)' \
-'onboard:Interactive onboarding wizard' \
-'config:Manage configuration settings' \
+'run:Run the AI agent' \
+'onboard:Run interactive setup wizard' \
+'config:Manage app configs' \
 'tool:Manage WASM tools' \
-'mcp:Manage MCP servers (hosted tool providers)' \
-'memory:Query and manage workspace memory' \
-'pairing:DM pairing (approve inbound requests from unknown senders)' \
-'service:Manage OS service (launchd / systemd)' \
-'doctor:Probe external dependencies and validate configuration' \
-'status:Show system health and diagnostics' \
-'completion:Generate shell completion scripts' \
+'registry:Browse/install extensions' \
+'mcp:Manage MCP servers' \
+'memory:Manage workspace memory' \
+'pairing:Manage DM pairing' \
+'service:Manage OS service' \
+'doctor:Run diagnostics' \
+'status:Show system status' \
+'completion:Generate completions' \
 'worker:Run as a sandboxed worker inside a Docker container (internal use). This is invoked automatically by the orchestrator, not by users directly' \
 'claude-bridge:Run as a Claude Code bridge inside a Docker container (internal use). Spawns the \`claude\` CLI and streams output back to the orchestrator' \
 'help:Print this message or the help of the given subcommand(s)' \
@@ -1361,17 +1521,18 @@ _ironclaw__doctor_commands() {
 (( $+functions[_ironclaw__help_commands] )) ||
 _ironclaw__help_commands() {
     local commands; commands=(
-'run:Run the agent (default if no subcommand given)' \
-'onboard:Interactive onboarding wizard' \
-'config:Manage configuration settings' \
+'run:Run the AI agent' \
+'onboard:Run interactive setup wizard' \
+'config:Manage app configs' \
 'tool:Manage WASM tools' \
-'mcp:Manage MCP servers (hosted tool providers)' \
-'memory:Query and manage workspace memory' \
-'pairing:DM pairing (approve inbound requests from unknown senders)' \
-'service:Manage OS service (launchd / systemd)' \
-'doctor:Probe external dependencies and validate configuration' \
-'status:Show system health and diagnostics' \
-'completion:Generate shell completion scripts' \
+'registry:Browse/install extensions' \
+'mcp:Manage MCP servers' \
+'memory:Manage workspace memory' \
+'pairing:Manage DM pairing' \
+'service:Manage OS service' \
+'doctor:Run diagnostics' \
+'status:Show system status' \
+'completion:Generate completions' \
 'worker:Run as a sandboxed worker inside a Docker container (internal use). This is invoked automatically by the orchestrator, not by users directly' \
 'claude-bridge:Run as a Claude Code bridge inside a Docker container (internal use). Spawns the \`claude\` CLI and streams output back to the orchestrator' \
 'help:Print this message or the help of the given subcommand(s)' \
@@ -1540,6 +1701,36 @@ _ironclaw__help__pairing__approve_commands() {
 _ironclaw__help__pairing__list_commands() {
     local commands; commands=()
     _describe -t commands 'ironclaw help pairing list commands' commands "$@"
+}
+(( $+functions[_ironclaw__help__registry_commands] )) ||
+_ironclaw__help__registry_commands() {
+    local commands; commands=(
+'list:List available extensions in the registry' \
+'info:Show detailed information about an extension or bundle' \
+'install:Install an extension or bundle from the registry' \
+'install-defaults:Install the default bundle of recommended extensions' \
+    )
+    _describe -t commands 'ironclaw help registry commands' commands "$@"
+}
+(( $+functions[_ironclaw__help__registry__info_commands] )) ||
+_ironclaw__help__registry__info_commands() {
+    local commands; commands=()
+    _describe -t commands 'ironclaw help registry info commands' commands "$@"
+}
+(( $+functions[_ironclaw__help__registry__install_commands] )) ||
+_ironclaw__help__registry__install_commands() {
+    local commands; commands=()
+    _describe -t commands 'ironclaw help registry install commands' commands "$@"
+}
+(( $+functions[_ironclaw__help__registry__install-defaults_commands] )) ||
+_ironclaw__help__registry__install-defaults_commands() {
+    local commands; commands=()
+    _describe -t commands 'ironclaw help registry install-defaults commands' commands "$@"
+}
+(( $+functions[_ironclaw__help__registry__list_commands] )) ||
+_ironclaw__help__registry__list_commands() {
+    local commands; commands=()
+    _describe -t commands 'ironclaw help registry list commands' commands "$@"
 }
 (( $+functions[_ironclaw__help__run_commands] )) ||
 _ironclaw__help__run_commands() {
@@ -1845,6 +2036,73 @@ _ironclaw__pairing__help__list_commands() {
 _ironclaw__pairing__list_commands() {
     local commands; commands=()
     _describe -t commands 'ironclaw pairing list commands' commands "$@"
+}
+(( $+functions[_ironclaw__registry_commands] )) ||
+_ironclaw__registry_commands() {
+    local commands; commands=(
+'list:List available extensions in the registry' \
+'info:Show detailed information about an extension or bundle' \
+'install:Install an extension or bundle from the registry' \
+'install-defaults:Install the default bundle of recommended extensions' \
+'help:Print this message or the help of the given subcommand(s)' \
+    )
+    _describe -t commands 'ironclaw registry commands' commands "$@"
+}
+(( $+functions[_ironclaw__registry__help_commands] )) ||
+_ironclaw__registry__help_commands() {
+    local commands; commands=(
+'list:List available extensions in the registry' \
+'info:Show detailed information about an extension or bundle' \
+'install:Install an extension or bundle from the registry' \
+'install-defaults:Install the default bundle of recommended extensions' \
+'help:Print this message or the help of the given subcommand(s)' \
+    )
+    _describe -t commands 'ironclaw registry help commands' commands "$@"
+}
+(( $+functions[_ironclaw__registry__help__help_commands] )) ||
+_ironclaw__registry__help__help_commands() {
+    local commands; commands=()
+    _describe -t commands 'ironclaw registry help help commands' commands "$@"
+}
+(( $+functions[_ironclaw__registry__help__info_commands] )) ||
+_ironclaw__registry__help__info_commands() {
+    local commands; commands=()
+    _describe -t commands 'ironclaw registry help info commands' commands "$@"
+}
+(( $+functions[_ironclaw__registry__help__install_commands] )) ||
+_ironclaw__registry__help__install_commands() {
+    local commands; commands=()
+    _describe -t commands 'ironclaw registry help install commands' commands "$@"
+}
+(( $+functions[_ironclaw__registry__help__install-defaults_commands] )) ||
+_ironclaw__registry__help__install-defaults_commands() {
+    local commands; commands=()
+    _describe -t commands 'ironclaw registry help install-defaults commands' commands "$@"
+}
+(( $+functions[_ironclaw__registry__help__list_commands] )) ||
+_ironclaw__registry__help__list_commands() {
+    local commands; commands=()
+    _describe -t commands 'ironclaw registry help list commands' commands "$@"
+}
+(( $+functions[_ironclaw__registry__info_commands] )) ||
+_ironclaw__registry__info_commands() {
+    local commands; commands=()
+    _describe -t commands 'ironclaw registry info commands' commands "$@"
+}
+(( $+functions[_ironclaw__registry__install_commands] )) ||
+_ironclaw__registry__install_commands() {
+    local commands; commands=()
+    _describe -t commands 'ironclaw registry install commands' commands "$@"
+}
+(( $+functions[_ironclaw__registry__install-defaults_commands] )) ||
+_ironclaw__registry__install-defaults_commands() {
+    local commands; commands=()
+    _describe -t commands 'ironclaw registry install-defaults commands' commands "$@"
+}
+(( $+functions[_ironclaw__registry__list_commands] )) ||
+_ironclaw__registry__list_commands() {
+    local commands; commands=()
+    _describe -t commands 'ironclaw registry list commands' commands "$@"
 }
 (( $+functions[_ironclaw__run_commands] )) ||
 _ironclaw__run_commands() {
