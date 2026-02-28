@@ -244,6 +244,10 @@ impl Tool for MemoryWriteTool {
             ));
         }
 
+        // Normalize the target path early so protection checks can't be bypassed
+        // with trailing slashes, double slashes, or leading slashes.
+        let target = target.trim_matches('/');
+
         // Reject writes to identity files that are loaded into the system prompt.
         // An attacker could use prompt injection to trick the agent into overwriting
         // these, poisoning future conversations.
@@ -272,11 +276,10 @@ impl Tool for MemoryWriteTool {
             }
             "heartbeat" => paths::HEARTBEAT.to_string(),
             path => {
-                // Protect identity files from LLM overwrites (prompt injection defense).
-                let normalized = path.trim_start_matches('/');
+                // Second protection check: case-insensitive match after normalization.
                 if PROTECTED_IDENTITY_FILES
                     .iter()
-                    .any(|p| normalized.eq_ignore_ascii_case(p))
+                    .any(|p| path.eq_ignore_ascii_case(p))
                 {
                     return Err(ToolError::NotAuthorized(format!(
                         "writing to '{}' is not allowed (identity file protected from tool access)",
