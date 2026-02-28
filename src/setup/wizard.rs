@@ -577,11 +577,13 @@ impl SetupWizard {
             .and_then(|v| v.parse::<u32>().ok())
             .unwrap_or(0);
 
-        if major_version < 15 {
+        const MIN_PG_MAJOR_VERSION: u32 = 15;
+
+        if major_version < MIN_PG_MAJOR_VERSION {
             return Err(SetupError::Database(format!(
-                "PostgreSQL {} detected. IronClaw requires PostgreSQL 15 or later for pgvector support.\n\
+                "PostgreSQL {} detected. IronClaw requires PostgreSQL {} or later for pgvector support.\n\
                  Upgrade: https://www.postgresql.org/download/",
-                version_str
+                version_str, MIN_PG_MAJOR_VERSION
             )));
         }
 
@@ -599,11 +601,11 @@ impl SetupWizard {
         if pgvector_row.is_none() {
             return Err(SetupError::Database(
                 "pgvector extension not found on your PostgreSQL server.\n\n\
-                 Install it:\n\
-                 \x20 macOS:   brew install pgvector\n\
-                 \x20 Ubuntu:  apt install postgresql-16-pgvector\n\
-                 \x20 Docker:  use the pgvector/pgvector:pg16 image\n\
-                 \x20 Source:  https://github.com/pgvector/pgvector#installation\n\n\
+                 Install it:\n  \
+                 macOS:   brew install pgvector\n  \
+                 Ubuntu:  apt install postgresql-16-pgvector\n  \
+                 Docker:  use the pgvector/pgvector:pg16 image\n  \
+                 Source:  https://github.com/pgvector/pgvector#installation\n\n\
                  Then restart PostgreSQL and re-run: ironclaw onboard"
                     .to_string(),
             ));
