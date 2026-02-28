@@ -13,6 +13,7 @@ pub mod routine;
 pub(crate) mod shell;
 pub mod skill_tools;
 mod time;
+mod web_fetch;
 
 pub use echo::EchoTool;
 pub use extension_tools::{
@@ -20,6 +21,7 @@ pub use extension_tools::{
 };
 pub use file::{ApplyPatchTool, ListDirTool, ReadFileTool, WriteFileTool};
 pub use http::HttpTool;
+pub use web_fetch::WebFetchTool;
 pub use job::{
     CancelJobTool, CreateJobTool, JobEventsTool, JobPromptTool, JobStatusTool, ListJobsTool,
     PromptQueue,
