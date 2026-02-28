@@ -15,7 +15,8 @@ use crate::config::SafetyConfig;
 use crate::context::JobContext;
 use crate::error::WorkerError;
 use crate::llm::{
-    ChatMessage, LlmProvider, Reasoning, ReasoningContext, RespondResult, ToolSelection,
+    ChatMessage, LlmProvider, Reasoning, ReasoningContext, RespondOutput, RespondResult, ToolCall,
+    ToolSelection,
 };
 use crate::safety::SafetyLayer;
 use crate::tools::ToolRegistry;
@@ -222,6 +223,8 @@ Work independently to complete this job. Report when done."#,
     ) -> Result<String, WorkerError> {
         let max_iterations = self.config.max_iterations;
         let mut last_output = String::new();
+        let mut consecutive_llm_failures: u32 = 0;
+        let mut consecutive_empty_tool_responses: u32 = 0;
 
         // Load tool definitions
         reason_ctx.available_tools = self.tools.tool_definitions().await;
@@ -246,104 +249,113 @@ Work independently to complete this job. Report when done."#,
             reason_ctx.available_tools = self.tools.tool_definitions().await;
 
             // Ask the LLM what to do next
-            let selections = reasoning.select_tools(reason_ctx).await.map_err(|e| {
-                WorkerError::ExecutionFailed {
-                    reason: format!("tool selection failed: {}", e),
+            let selections = match reasoning.select_tools(reason_ctx).await {
+                Ok(selections) => {
+                    consecutive_llm_failures = 0;
+                    consecutive_empty_tool_responses = 0;
+                    selections
                 }
-            })?;
+                Err(e) => {
+                    consecutive_llm_failures = consecutive_llm_failures.saturating_add(1);
+                    if is_empty_tool_response_error(&e.to_string()) {
+                        consecutive_empty_tool_responses =
+                            consecutive_empty_tool_responses.saturating_add(1);
+                    } else {
+                        consecutive_empty_tool_responses = 0;
+                    }
+                    tracing::warn!(
+                        job_id = %self.config.job_id,
+                        iteration,
+                        consecutive_llm_failures,
+                        consecutive_empty_tool_responses,
+                        error = %e,
+                        "Tool selection failed; attempting fallback respond_with_tools"
+                    );
+
+                    if consecutive_empty_tool_responses >= 1 {
+                        tracing::warn!(
+                            job_id = %self.config.job_id,
+                            iteration,
+                            "Empty tool response detected; forcing text-only LLM turn"
+                        );
+                        consecutive_empty_tool_responses = 0;
+                        if self
+                            .run_forced_text_turn(reasoning, reason_ctx, &mut last_output)
+                            .await?
+                        {
+                            return Ok(last_output);
+                        }
+                        tokio::time::sleep(Duration::from_millis(150)).await;
+                        continue;
+                    }
+
+                    // Fallback: some providers intermittently return empty tool-selection
+                    // responses. Try the broader respond_with_tools path before failing.
+                    match reasoning.respond_with_tools(reason_ctx).await {
+                        Ok(respond_output) => {
+                            consecutive_llm_failures = 0;
+                            if self
+                                .handle_respond_output(reason_ctx, respond_output, &mut last_output)
+                                .await?
+                            {
+                                return Ok(last_output);
+                            }
+                            tokio::time::sleep(Duration::from_millis(150)).await;
+                            continue;
+                        }
+                        Err(fallback_err) => {
+                            if is_empty_tool_response_error(&fallback_err.to_string()) {
+                                consecutive_empty_tool_responses =
+                                    consecutive_empty_tool_responses.saturating_add(1);
+                            } else {
+                                consecutive_empty_tool_responses = 0;
+                            }
+                            if consecutive_llm_failures >= 3 {
+                                return Err(WorkerError::ExecutionFailed {
+                                    reason: format!(
+                                        "tool selection failed: {}; fallback respond_with_tools failed: {}",
+                                        e, fallback_err
+                                    ),
+                                });
+                            }
+                            tokio::time::sleep(Duration::from_millis(300)).await;
+                            continue;
+                        }
+                    }
+                }
+            };
 
             if selections.is_empty() {
                 // No tools selected, try direct response
-                let respond_result =
+                let respond_output =
                     reasoning
                         .respond_with_tools(reason_ctx)
                         .await
                         .map_err(|e| WorkerError::ExecutionFailed {
                             reason: format!("respond_with_tools failed: {}", e),
                         })?;
-
-                match respond_result.result {
-                    RespondResult::Text(response) => {
-                        self.post_event(
-                            "message",
-                            serde_json::json!({
-                                "role": "assistant",
-                                "content": truncate(&response, 2000),
-                            }),
-                        )
-                        .await;
-
-                        if crate::util::llm_signals_completion(&response) {
-                            if last_output.is_empty() {
-                                last_output = response.clone();
-                            }
-                            return Ok(last_output);
-                        }
-                        reason_ctx.messages.push(ChatMessage::assistant(&response));
-                    }
-                    RespondResult::ToolCalls {
-                        tool_calls,
-                        content,
-                    } => {
-                        if let Some(ref text) = content {
-                            self.post_event(
-                                "message",
-                                serde_json::json!({
-                                    "role": "assistant",
-                                    "content": truncate(text, 2000),
-                                }),
-                            )
-                            .await;
-                        }
-
-                        // Add assistant message with tool_calls (OpenAI protocol)
-                        reason_ctx
-                            .messages
-                            .push(ChatMessage::assistant_with_tool_calls(
-                                content,
-                                tool_calls.clone(),
-                            ));
-
-                        for tc in tool_calls {
-                            self.post_event(
-                                "tool_use",
-                                serde_json::json!({
-                                    "tool_name": tc.name,
-                                    "input": truncate(&tc.arguments.to_string(), 500),
-                                }),
-                            )
-                            .await;
-
-                            let result = self.execute_tool(&tc.name, &tc.arguments).await;
-
-                            self.post_event(
-                                "tool_result",
-                                serde_json::json!({
-                                    "tool_name": tc.name,
-                                    "output": match &result {
-                                        Ok(output) => truncate(output, 2000),
-                                        Err(e) => format!("Error: {}", truncate(e, 500)),
-                                    },
-                                    "success": result.is_ok(),
-                                }),
-                            )
-                            .await;
-
-                            if let Ok(ref output) = result {
-                                last_output = output.clone();
-                            }
-                            let selection = ToolSelection {
-                                tool_name: tc.name.clone(),
-                                parameters: tc.arguments.clone(),
-                                reasoning: String::new(),
-                                alternatives: vec![],
-                                tool_call_id: tc.id.clone(),
-                            };
-                            self.process_result(reason_ctx, &selection, result);
-                        }
-                    }
+                if self
+                    .handle_respond_output(reason_ctx, respond_output, &mut last_output)
+                    .await?
+                {
+                    return Ok(last_output);
                 }
             } else {
+                // OpenAI/Anthropic tool protocol requires assistant tool_calls
+                // to precede tool_result messages. Without this, downstream
+                // providers rewrite results as orphaned.
+                let tool_calls: Vec<ToolCall> = selections
+                    .iter()
+                    .map(|s| ToolCall {
+                        id: s.tool_call_id.clone(),
+                        name: s.tool_name.clone(),
+                        arguments: s.parameters.clone(),
+                    })
+                    .collect();
+                reason_ctx
+                    .messages
+                    .push(ChatMessage::assistant_with_tool_calls(None, tool_calls));
+
                 // Execute selected tools
                 for selection in &selections {
                     self.post_event(
@@ -390,6 +402,116 @@ Work independently to complete this job. Report when done."#,
         Err(WorkerError::ExecutionFailed {
             reason: format!("max iterations ({}) exceeded", max_iterations),
         })
+    }
+
+    async fn handle_respond_output(
+        &self,
+        reason_ctx: &mut ReasoningContext,
+        respond_output: RespondOutput,
+        last_output: &mut String,
+    ) -> Result<bool, WorkerError> {
+        match respond_output.result {
+            RespondResult::Text(response) => {
+                self.post_event(
+                    "message",
+                    serde_json::json!({
+                        "role": "assistant",
+                        "content": truncate(&response, 2000),
+                    }),
+                )
+                .await;
+
+                if crate::util::llm_signals_completion(&response) {
+                    if last_output.is_empty() {
+                        *last_output = response.clone();
+                    }
+                    return Ok(true);
+                }
+                reason_ctx.messages.push(ChatMessage::assistant(&response));
+            }
+            RespondResult::ToolCalls {
+                tool_calls,
+                content,
+            } => {
+                if let Some(ref text) = content {
+                    self.post_event(
+                        "message",
+                        serde_json::json!({
+                            "role": "assistant",
+                            "content": truncate(text, 2000),
+                        }),
+                    )
+                    .await;
+                }
+
+                reason_ctx
+                    .messages
+                    .push(ChatMessage::assistant_with_tool_calls(
+                        content,
+                        tool_calls.clone(),
+                    ));
+
+                for tc in tool_calls {
+                    self.post_event(
+                        "tool_use",
+                        serde_json::json!({
+                            "tool_name": tc.name,
+                            "input": truncate(&tc.arguments.to_string(), 500),
+                        }),
+                    )
+                    .await;
+
+                    let result = self.execute_tool(&tc.name, &tc.arguments).await;
+
+                    self.post_event(
+                        "tool_result",
+                        serde_json::json!({
+                            "tool_name": tc.name,
+                            "output": match &result {
+                                Ok(output) => truncate(output, 2000),
+                                Err(e) => format!("Error: {}", truncate(e, 500)),
+                            },
+                            "success": result.is_ok(),
+                        }),
+                    )
+                    .await;
+
+                    if let Ok(ref output) = result {
+                        *last_output = output.clone();
+                    }
+                    let selection = ToolSelection {
+                        tool_name: tc.name.clone(),
+                        parameters: tc.arguments.clone(),
+                        reasoning: String::new(),
+                        alternatives: vec![],
+                        tool_call_id: tc.id.clone(),
+                    };
+                    self.process_result(reason_ctx, &selection, result);
+                }
+            }
+        }
+
+        Ok(false)
+    }
+
+    async fn run_forced_text_turn(
+        &self,
+        reasoning: &Reasoning,
+        reason_ctx: &mut ReasoningContext,
+        last_output: &mut String,
+    ) -> Result<bool, WorkerError> {
+        let prev_force_text = reason_ctx.force_text;
+        reason_ctx.force_text = true;
+        let result = reasoning.respond_with_tools(reason_ctx).await.map_err(|e| {
+            WorkerError::ExecutionFailed {
+                reason: format!("forced text fallback failed: {}", e),
+            }
+        });
+        reason_ctx.force_text = prev_force_text;
+
+        let respond_output = result?;
+        self.handle_respond_output(reason_ctx, respond_output, last_output)
+            .await
     }
 
     async fn execute_tool(
@@ -508,6 +630,10 @@ Work independently to complete this job. Report when done."#,
             }
         }
     }
+}
+
+fn is_empty_tool_response_error(err: &str) -> bool {
+    err.contains("Response contained no message or tool call (empty)")
 }
 
 fn truncate(s: &str, max: usize) -> String {

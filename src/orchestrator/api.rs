@@ -140,7 +140,7 @@ async fn llm_complete(
     State(state): State<OrchestratorState>,
     Path(job_id): Path<Uuid>,
     Json(req): Json<ProxyCompletionRequest>,
-) -> Result<Json<ProxyCompletionResponse>, StatusCode> {
+) -> Result<Json<ProxyCompletionResponse>, (StatusCode, String)> {
     let completion_req = CompletionRequest {
         messages: req.messages,
         model: req.model,
@@ -152,7 +152,10 @@ async fn llm_complete(
 
     let resp = state.llm.complete(completion_req).await.map_err(|e| {
         tracing::error!("LLM completion failed for job {}: {}", job_id, e);
-        StatusCode::BAD_GATEWAY
+        (
+            StatusCode::BAD_GATEWAY,
+            format!("upstream llm completion failed: {}", e),
+        )
     })?;
 
     Ok(Json(ProxyCompletionResponse {
@@ -167,7 +170,7 @@ async fn llm_complete_with_tools(
     State(state): State<OrchestratorState>,
     Path(job_id): Path<Uuid>,
     Json(req): Json<ProxyToolCompletionRequest>,
-) -> Result<Json<ProxyToolCompletionResponse>, StatusCode> {
+) -> Result<Json<ProxyToolCompletionResponse>, (StatusCode, String)> {
     let tool_req = ToolCompletionRequest {
         messages: req.messages,
         tools: req.tools,
@@ -180,7 +183,10 @@ async fn llm_complete_with_tools(
 
     let resp = state.llm.complete_with_tools(tool_req).await.map_err(|e| {
         tracing::error!("LLM tool completion failed for job {}: {}", job_id, e);
-        StatusCode::BAD_GATEWAY
+        (
+            StatusCode::BAD_GATEWAY,
+            format!("upstream llm tool completion failed: {}", e),
+        )
     })?;
 
     Ok(Json(ProxyToolCompletionResponse {

@@ -279,6 +279,7 @@ async fn main() -> anyhow::Result<()> {
                 claude_code_max_turns: config.claude_code.max_turns,
                 claude_code_memory_limit_mb: config.claude_code.memory_limit_mb,
                 claude_code_allowed_tools: config.claude_code.allowed_tools.clone(),
+                container_runtime,
             };
             let jm = Arc::new(ContainerJobManager::new(job_config, token_store.clone()));
 

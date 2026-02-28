@@ -311,17 +311,25 @@ impl ToolRegistry {
             create_tool = create_tool.with_secrets(secrets);
         }
         self.register_sync(Arc::new(create_tool));
-        self.register_sync(Arc::new(ListJobsTool::new(Arc::clone(&context_manager))));
-        self.register_sync(Arc::new(JobStatusTool::new(Arc::clone(&context_manager))));
+
+        let mut list_tool = ListJobsTool::new(Arc::clone(&context_manager));
+        let mut status_tool = JobStatusTool::new(Arc::clone(&context_manager));
+        if let Some(ref db) = store {
+            list_tool = list_tool.with_store(Arc::clone(db));
+            status_tool = status_tool.with_store(Arc::clone(db));
+        }
+
+        self.register_sync(Arc::new(list_tool));
+        self.register_sync(Arc::new(status_tool));
         self.register_sync(Arc::new(CancelJobTool::new(Arc::clone(&context_manager))));
 
         // Base tools: create, list, status, cancel
         let mut job_tool_count = 4;
 
         // Register event reader if store is available
-        if let Some(store) = store {
+        if let Some(ref store) = store {
             self.register_sync(Arc::new(JobEventsTool::new(
-                store,
+                Arc::clone(store),
                 Arc::clone(&context_manager),
             )));
             job_tool_count += 1;
@@ -329,10 +337,11 @@ impl ToolRegistry {
 
         // Register prompt tool if queue is available
         if let Some(pq) = prompt_queue {
-            self.register_sync(Arc::new(JobPromptTool::new(
-                pq,
-                Arc::clone(&context_manager),
-            )));
+            let mut prompt_tool = JobPromptTool::new(pq, Arc::clone(&context_manager));
+            if let Some(ref db) = store {
+                prompt_tool = prompt_tool.with_store(Arc::clone(db));
+            }
+            self.register_sync(Arc::new(prompt_tool));
             job_tool_count += 1;
         }
 

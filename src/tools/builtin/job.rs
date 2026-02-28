@@ -19,7 +19,7 @@ use crate::channels::IncomingMessage;
 use crate::channels::web::types::SseEvent;
 use crate::context::{ContextManager, JobContext, JobState};
 use crate::db::Database;
-use crate::history::SandboxJobRecord;
+use crate::history::{SandboxJobRecord, SandboxJobSummary};
 use crate::orchestrator::auth::CredentialGrant;
 use crate::orchestrator::job_manager::{ContainerJobManager, JobMode};
 use crate::secrets::SecretsStore;
@@ -52,6 +52,88 @@ async fn resolve_job_id(input: &str, context_manager: &ContextManager) -> Result
             hex.starts_with(&input_lower)
         })
         .collect();
+
+    match matches.len() {
+        1 => Ok(matches[0]),
+        0 => Err(ToolError::InvalidParameters(format!(
+            "no job found matching prefix '{}'",
+            input
+        ))),
+        n => Err(ToolError::InvalidParameters(format!(
+            "ambiguous prefix '{}' matches {} jobs, provide more characters",
+            input, n
+        ))),
+    }
+}
+
+/// Resolve a job ID across in-memory local jobs and persisted sandbox jobs.
+///
+/// This is user-scoped and supports both full UUIDs and short prefixes.
+async fn resolve_job_id_any(
+    input: &str,
+    user_id: &str,
+    context_manager: &ContextManager,
+    sandbox_store: Option<&Arc<dyn Database>>,
+) -> Result<Uuid, ToolError> {
+    if let Ok(id) = Uuid::parse_str(input) {
+        if let Ok(ctx) = context_manager.get_context(id).await
+            && ctx.user_id == user_id
+        {
+            return Ok(id);
+        }
+
+        if let Some(store) = sandbox_store {
+            let belongs = store
+                .sandbox_job_belongs_to_user(id, user_id)
+                .await
+                .map_err(|e| {
+                    ToolError::ExecutionFailed(format!(
+                        "failed to check sandbox job ownership: {}",
+                        e
+                    ))
+                })?;
+            if belongs {
+                return Ok(id);
+            }
+        }
+
+        return Err(ToolError::InvalidParameters(format!(
+            "no job found matching '{}'",
+            input
+        )));
+    }
+
+    if input.len() < 4 {
+        return Err(ToolError::InvalidParameters(
+            "job ID prefix must be at least 4 hex characters".to_string(),
+        ));
+    }
+
+    let input_lower = input.to_lowercase();
+    let mut matches = Vec::new();
+
+    for id in context_manager.all_jobs_for(user_id).await {
+        let hex = id.to_string().replace('-', "");
+        if hex.starts_with(&input_lower) {
+            matches.push(id);
+        }
+    }
+
+    if let Some(store) = sandbox_store {
+        let sandbox_jobs = store
+            .list_sandbox_jobs_for_user(user_id)
+            .await
+            .map_err(|e| {
+                ToolError::ExecutionFailed(format!("failed to list sandbox jobs: {}", e))
+            })?;
+        for job in sandbox_jobs {
+            let id = job.id;
+            let hex = id.to_string().replace('-', "");
+            if hex.starts_with(&input_lower) && !matches.contains(&id) {
+                matches.push(id);
+            }
+        }
+    }
 
     match matches.len() {
         1 => Ok(matches[0]),
@@ -759,11 +841,20 @@ impl Tool for CreateJobTool {
 /// Tool for listing jobs.
 pub struct ListJobsTool {
     context_manager: Arc<ContextManager>,
+    store: Option<Arc<dyn Database>>,
 }
 
 impl ListJobsTool {
     pub fn new(context_manager: Arc<ContextManager>) -> Self {
-        Self { context_manager }
+        Self {
+            context_manager,
+            store: None,
+        }
+    }
+
+    pub fn with_store(mut self, store: Arc<dyn Database>) -> Self {
+        self.store = Some(store);
+        self
     }
 }
 
@@ -828,7 +919,48 @@ impl Tool for ListJobsTool {
             }
         }
 
-        let summary = self.context_manager.summary_for(&ctx.user_id).await;
+        let mut summary = self.context_manager.summary_for(&ctx.user_id).await;
+
+        if let Some(store) = &self.store {
+            let sandbox_jobs = store
+                .list_sandbox_jobs_for_user(&ctx.user_id)
+                .await
+                .map_err(|e| {
+                    ToolError::ExecutionFailed(format!("failed to list sandbox jobs: {}", e))
+                })?;
+
+            for job in sandbox_jobs {
+                let include = match filter {
+                    "completed" => job.status == "completed",
+                    "failed" => matches!(job.status.as_str(), "failed" | "interrupted"),
+                    "active" => matches!(job.status.as_str(), "creating" | "running"),
+                    _ => true,
+                };
+
+                if include {
+                    jobs.push(serde_json::json!({
+                        "job_id": job.id.to_string(),
+                        "title": job.task,
+                        "status": job.status,
+                        "created_at": job.created_at.to_rfc3339(),
+                        "source": "sandbox"
+                    }));
+                }
+            }
+
+            let sandbox_summary: SandboxJobSummary = store
+                .sandbox_job_summary_for_user(&ctx.user_id)
+                .await
+                .map_err(|e| {
+                    ToolError::ExecutionFailed(format!("failed to summarize sandbox jobs: {}", e))
+                })?;
+
+            summary.total += sandbox_summary.total;
+            summary.pending += sandbox_summary.creating;
+            summary.in_progress += sandbox_summary.running;
+            summary.completed += sandbox_summary.completed;
+            summary.failed += sandbox_summary.failed + sandbox_summary.interrupted;
+        }
 
         let result = serde_json::json!({
             "jobs": jobs,
@@ -852,11 +984,20 @@ impl Tool for ListJobsTool {
 /// Tool for checking job status.
 pub struct JobStatusTool {
     context_manager: Arc<ContextManager>,
+    store: Option<Arc<dyn Database>>,
 }
 
 impl JobStatusTool {
     pub fn new(context_manager: Arc<ContextManager>) -> Self {
-        Self { context_manager }
+        Self {
+            context_manager,
+            store: None,
+        }
+    }
+
+    pub fn with_store(mut self, store: Arc<dyn Database>) -> Self {
+        self.store = Some(store);
+        self
     }
 }
 
@@ -889,19 +1030,17 @@ impl Tool for JobStatusTool {
         ctx: &JobContext,
     ) -> Result<ToolOutput, ToolError> {
         let start = std::time::Instant::now();
-        let requester_id = ctx.user_id.clone();
-
         let job_id_str = require_str(&params, "job_id")?;
-        let job_id = resolve_job_id(job_id_str, &self.context_manager).await?;
+        let job_id = resolve_job_id_any(
+            job_id_str,
+            &ctx.user_id,
+            &self.context_manager,
+            self.store.as_ref(),
+        )
+        .await?;
 
         match self.context_manager.get_context(job_id).await {
             Ok(job_ctx) => {
-                if job_ctx.user_id != requester_id {
-                    let result = serde_json::json!({
-                        "error": "Job not found".to_string()
-                    });
-                    return Ok(ToolOutput::success(result, start.elapsed()));
-                }
                 let result = serde_json::json!({
                     "job_id": job_id.to_string(),
                     "title": job_ctx.title,
@@ -910,14 +1049,48 @@ impl Tool for JobStatusTool {
                     "created_at": job_ctx.created_at.to_rfc3339(),
                     "started_at": job_ctx.started_at.map(|t| t.to_rfc3339()),
                     "completed_at": job_ctx.completed_at.map(|t| t.to_rfc3339()),
-                    "actual_cost": job_ctx.actual_cost.to_string()
+                    "actual_cost": job_ctx.actual_cost.to_string(),
+                    "source": "local"
                 });
                 Ok(ToolOutput::success(result, start.elapsed()))
             }
-            Err(e) => {
-                let result = serde_json::json!({
-                    "error": format!("Job not found: {}", e)
-                });
+            Err(_) => {
+                if let Some(store) = &self.store {
+                    let sandbox_job = store.get_sandbox_job(job_id).await.map_err(|e| {
+                        ToolError::ExecutionFailed(format!("failed to read sandbox job: {}", e))
+                    })?;
+                    if let Some(job) = sandbox_job {
+                        if job.user_id != ctx.user_id {
+                            let result = serde_json::json!({ "error": "Job not found" });
+                            return Ok(ToolOutput::success(result, start.elapsed()));
+                        }
+
+                        let mode = store.get_sandbox_job_mode(job_id).await.map_err(|e| {
+                            ToolError::ExecutionFailed(format!(
+                                "failed to read sandbox job mode: {}",
+                                e
+                            ))
+                        })?;
+
+                        let result = serde_json::json!({
+                            "job_id": job.id.to_string(),
+                            "title": job.task,
+                            "description": serde_json::Value::Null,
+                            "status": job.status,
+                            "created_at": job.created_at.to_rfc3339(),
+                            "started_at": job.started_at.map(|t| t.to_rfc3339()),
+                            "completed_at": job.completed_at.map(|t| t.to_rfc3339()),
+                            "source": "sandbox",
+                            "project_dir": job.project_dir,
+                            "success": job.success,
+                            "failure_reason": job.failure_reason,
+                            "mode": mode,
+                        });
+                        return Ok(ToolOutput::success(result, start.elapsed()));
+                    }
+                }
+
+                let result = serde_json::json!({ "error": "Job not found" });
                 Ok(ToolOutput::success(result, start.elapsed()))
             }
         }
@@ -1080,27 +1253,13 @@ impl Tool for JobEventsTool {
             .and_then(|v| v.as_str())
             .ok_or_else(|| ToolError::InvalidParameters("missing 'job_id' parameter".into()))?;
 
-        let job_id = resolve_job_id(job_id_str, &self.context_manager).await?;
-
-        // Verify the caller owns this job. A missing context is treated as
-        // unauthorized to prevent leaking events after process restarts.
-        let job_ctx = self
-            .context_manager
-            .get_context(job_id)
-            .await
-            .map_err(|_| {
-                ToolError::ExecutionFailed(format!(
-                    "job {} not found or context unavailable",
-                    job_id
-                ))
-            })?;
-
-        if job_ctx.user_id != ctx.user_id {
-            return Err(ToolError::ExecutionFailed(format!(
-                "job {} does not belong to current user",
-                job_id
-            )));
-        }
+        let job_id = resolve_job_id_any(
+            job_id_str,
+            &ctx.user_id,
+            &self.context_manager,
+            Some(&self.store),
+        )
+        .await?;
 
         const MAX_EVENT_LIMIT: i64 = 1000;
         let limit = params
@@ -1151,6 +1310,7 @@ impl Tool for JobEventsTool {
 pub struct JobPromptTool {
     prompt_queue: PromptQueue,
     context_manager: Arc<ContextManager>,
+    store: Option<Arc<dyn Database>>,
 }
 
 /// Type alias matching `crate::channels::web::server::PromptQueue`.
@@ -1168,7 +1328,13 @@ impl JobPromptTool {
         Self {
             prompt_queue,
             context_manager,
+            store: None,
         }
+    }
+
+    pub fn with_store(mut self, store: Arc<dyn Database>) -> Self {
+        self.store = Some(store);
+        self
     }
 }
 
@@ -1218,27 +1384,13 @@ impl Tool for JobPromptTool {
             .and_then(|v| v.as_str())
             .ok_or_else(|| ToolError::InvalidParameters("missing 'job_id' parameter".into()))?;
 
-        let job_id = resolve_job_id(job_id_str, &self.context_manager).await?;
-
-        // Verify the caller owns this job. A missing context is treated as
-        // unauthorized to prevent sending prompts to jobs after process restarts.
-        let job_ctx = self
-            .context_manager
-            .get_context(job_id)
-            .await
-            .map_err(|_| {
-                ToolError::ExecutionFailed(format!(
-                    "job {} not found or context unavailable",
-                    job_id
-                ))
-            })?;
-
-        if job_ctx.user_id != ctx.user_id {
-            return Err(ToolError::ExecutionFailed(format!(
-                "job {} does not belong to current user",
-                job_id
-            )));
-        }
+        let job_id = resolve_job_id_any(
+            job_id_str,
+            &ctx.user_id,
+            &self.context_manager,
+            self.store.as_ref(),
+        )
+        .await?;
 
         let content = params
             .get("content")
@@ -1734,8 +1886,8 @@ mod tests {
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
         assert!(
-            err.contains("does not belong to current user"),
-            "expected ownership error, got: {}",
+            err.contains("no job found matching"),
+            "expected not-found error, got: {}",
             err
         );
     }
