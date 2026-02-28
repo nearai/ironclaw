@@ -26,6 +26,8 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use chrono::TimeZone as _;
+use chrono_tz::Tz;
 use tokio::sync::mpsc;
 
 use crate::channels::OutgoingResponse;
@@ -37,7 +39,7 @@ use crate::workspace::hygiene::HygieneConfig;
 /// Configuration for the heartbeat runner.
 #[derive(Debug, Clone)]
 pub struct HeartbeatConfig {
-    /// Interval between heartbeat checks.
+    /// Interval between heartbeat checks (used when fire_at is not set).
     pub interval: Duration,
     /// Whether heartbeat is enabled.
     pub enabled: bool,
@@ -47,11 +49,13 @@ pub struct HeartbeatConfig {
     pub notify_user_id: Option<String>,
     /// Channel to notify on heartbeat findings.
     pub notify_channel: Option<String>,
+    /// Fixed time-of-day to fire (24h). When set, interval is ignored.
+    pub fire_at: Option<chrono::NaiveTime>,
     /// Hour (0-23) when quiet hours start.
     pub quiet_hours_start: Option<u32>,
     /// Hour (0-23) when quiet hours end.
     pub quiet_hours_end: Option<u32>,
-    /// Timezone for quiet hours evaluation (IANA name).
+    /// Timezone for fire_at and quiet hours evaluation (IANA name).
     pub timezone: Option<String>,
 }
 
@@ -63,6 +67,7 @@ impl Default for HeartbeatConfig {
             max_failures: 3,
             notify_user_id: None,
             notify_channel: None,
+            fire_at: None,
             quiet_hours_start: None,
             quiet_hours_end: None,
             timezone: None,
@@ -109,6 +114,21 @@ impl HeartbeatConfig {
         self.notify_channel = Some(channel.into());
         self
     }
+
+    /// Set a fixed time-of-day to fire (overrides interval).
+    pub fn with_fire_at(mut self, time: chrono::NaiveTime, tz: Option<String>) -> Self {
+        self.fire_at = Some(time);
+        self.timezone = tz;
+        self
+    }
+
+    /// Resolve timezone string to chrono_tz::Tz (defaults to UTC).
+    fn resolved_tz(&self) -> Tz {
+        self.timezone
+            .as_deref()
+            .and_then(crate::timezone::parse_timezone)
+            .unwrap_or(chrono_tz::UTC)
+    }
 }
 
 /// Result of a heartbeat check.
@@ -122,6 +142,35 @@ pub enum HeartbeatResult {
     Skipped,
     /// Heartbeat failed.
     Failed(String),
+}
+
+/// Compute how long to sleep until the next occurrence of `fire_at` in `tz`.
+///
+/// If the target time today is still in the future, sleep until then.
+/// Otherwise sleep until the same time tomorrow.
+fn duration_until_next_fire(fire_at: chrono::NaiveTime, tz: Tz) -> Duration {
+    let now = chrono::Utc::now().with_timezone(&tz);
+    let today = now.date_naive();
+
+    // Try to build today's target datetime in the given timezone.
+    // `.earliest()` picks the first occurrence if DST creates ambiguity.
+    let candidate = tz
+        .from_local_datetime(&today.and_time(fire_at))
+        .earliest();
+
+    let target = match candidate {
+        Some(t) if t > now => t,
+        _ => {
+            // Already past (or ambiguous) — schedule for tomorrow
+            let tomorrow = today + chrono::Duration::days(1);
+            tz.from_local_datetime(&tomorrow.and_time(fire_at))
+                .earliest()
+                .unwrap_or_else(|| now + chrono::Duration::days(1))
+        }
+    };
+
+    let secs = (target - now).num_seconds().max(1) as u64;
+    Duration::from_secs(secs)
 }
 
 /// Heartbeat runner for proactive periodic execution.
@@ -175,17 +224,28 @@ impl HeartbeatRunner {
             return;
         }
 
-        tracing::info!(
-            "Starting heartbeat loop with interval {:?}",
-            self.config.interval
-        );
-
-        let mut interval = tokio::time::interval(self.config.interval);
-        // Don't run immediately on startup
-        interval.tick().await;
+        if let Some(fire_at) = self.config.fire_at {
+            tracing::info!(
+                "Starting heartbeat loop: fire daily at {:?} {:?}",
+                fire_at,
+                self.config.timezone
+            );
+        } else {
+            tracing::info!(
+                "Starting heartbeat loop with interval {:?}",
+                self.config.interval
+            );
+        }
 
         loop {
-            interval.tick().await;
+            // Sleep until the next fire time
+            let sleep_dur = if let Some(fire_at) = self.config.fire_at {
+                duration_until_next_fire(fire_at, self.config.resolved_tz())
+            } else {
+                self.config.interval
+            };
+            tracing::info!("Next heartbeat in {:.1}h", sleep_dur.as_secs_f64() / 3600.0);
+            tokio::time::sleep(sleep_dur).await;
 
             // Skip during quiet hours
             if self.config.is_quiet_hours() {
