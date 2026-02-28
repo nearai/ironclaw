@@ -195,6 +195,17 @@ pub struct NearAiConfig {
 }
 
 impl LlmConfig {
+    /// Resolve a model name from env var → settings.selected_model → hardcoded default.
+    fn resolve_model(
+        env_var: &str,
+        settings: &Settings,
+        default: &str,
+    ) -> Result<String, ConfigError> {
+        Ok(optional_env(env_var)?
+            .or_else(|| settings.selected_model.clone())
+            .unwrap_or_else(|| default.to_string()))
+    }
+
     pub(crate) fn resolve(settings: &Settings) -> Result<Self, ConfigError> {
         // Determine backend: env var > settings > default (NearAi)
         let backend: LlmBackend = if let Some(b) = optional_env("LLM_BACKEND")? {
@@ -222,9 +233,7 @@ impl LlmConfig {
         let nearai_api_key = optional_env("NEARAI_API_KEY")?.map(SecretString::from);
 
         let nearai = NearAiConfig {
-            model: optional_env("NEARAI_MODEL")?
-                .or_else(|| settings.selected_model.clone())
-                .unwrap_or_else(|| "zai-org/GLM-latest".to_string()),
+            model: Self::resolve_model("NEARAI_MODEL", settings, "zai-org/GLM-latest")?,
             cheap_model: optional_env("NEARAI_CHEAP_MODEL")?,
             base_url: optional_env("NEARAI_BASE_URL")?.unwrap_or_else(|| {
                 if nearai_api_key.is_some() {
@@ -265,9 +274,7 @@ impl LlmConfig {
                     key: "OPENAI_API_KEY".to_string(),
                     hint: "Set OPENAI_API_KEY when LLM_BACKEND=openai".to_string(),
                 })?;
-            let model = optional_env("OPENAI_MODEL")?
-                .or_else(|| settings.selected_model.clone())
-                .unwrap_or_else(|| "gpt-4o".to_string());
+            let model = Self::resolve_model("OPENAI_MODEL", settings, "gpt-4o")?;
             let base_url = optional_env("OPENAI_BASE_URL")?;
             Some(OpenAiDirectConfig {
                 api_key,
@@ -285,9 +292,8 @@ impl LlmConfig {
                     key: "ANTHROPIC_API_KEY".to_string(),
                     hint: "Set ANTHROPIC_API_KEY when LLM_BACKEND=anthropic".to_string(),
                 })?;
-            let model = optional_env("ANTHROPIC_MODEL")?
-                .or_else(|| settings.selected_model.clone())
-                .unwrap_or_else(|| "claude-sonnet-4-20250514".to_string());
+            let model =
+                Self::resolve_model("ANTHROPIC_MODEL", settings, "claude-sonnet-4-20250514")?;
             let base_url = optional_env("ANTHROPIC_BASE_URL")?;
             Some(AnthropicDirectConfig {
                 api_key,
@@ -302,9 +308,7 @@ impl LlmConfig {
             let base_url = optional_env("OLLAMA_BASE_URL")?
                 .or_else(|| settings.ollama_base_url.clone())
                 .unwrap_or_else(|| "http://localhost:11434".to_string());
-            let model = optional_env("OLLAMA_MODEL")?
-                .or_else(|| settings.selected_model.clone())
-                .unwrap_or_else(|| "llama3".to_string());
+            let model = Self::resolve_model("OLLAMA_MODEL", settings, "llama3")?;
             Some(OllamaConfig { base_url, model })
         } else {
             None
@@ -318,9 +322,7 @@ impl LlmConfig {
                     hint: "Set LLM_BASE_URL when LLM_BACKEND=openai_compatible".to_string(),
                 })?;
             let api_key = optional_env("LLM_API_KEY")?.map(SecretString::from);
-            let model = optional_env("LLM_MODEL")?
-                .or_else(|| settings.selected_model.clone())
-                .unwrap_or_else(|| "default".to_string());
+            let model = Self::resolve_model("LLM_MODEL", settings, "default")?;
             let extra_headers = optional_env("LLM_EXTRA_HEADERS")?
                 .map(|val| parse_extra_headers(&val))
                 .transpose()?
@@ -342,9 +344,7 @@ impl LlmConfig {
                     key: "TINFOIL_API_KEY".to_string(),
                     hint: "Set TINFOIL_API_KEY when LLM_BACKEND=tinfoil".to_string(),
                 })?;
-            let model = optional_env("TINFOIL_MODEL")?
-                .or_else(|| settings.selected_model.clone())
-                .unwrap_or_else(|| "kimi-k2-5".to_string());
+            let model = Self::resolve_model("TINFOIL_MODEL", settings, "kimi-k2-5")?;
             Some(TinfoilConfig { api_key, model })
         } else {
             None
