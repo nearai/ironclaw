@@ -609,6 +609,8 @@ async fn async_main() -> anyhow::Result<()> {
     if let Some(ref ext_mgr) = components.extension_manager
         && let Some((rt, ps, router)) = wasm_channel_runtime_state.take()
     {
+        let active_at_startup: std::collections::HashSet<String> =
+            loaded_wasm_channel_names.iter().cloned().collect();
         ext_mgr.set_active_channels(loaded_wasm_channel_names).await;
         ext_mgr
             .set_channel_runtime(
@@ -620,6 +622,29 @@ async fn async_main() -> anyhow::Result<()> {
             )
             .await;
         tracing::info!("Channel runtime wired into extension manager for hot-activation");
+
+        // Auto-activate channels that were active in a previous session.
+        let persisted = ext_mgr.load_persisted_active_channels().await;
+        for name in &persisted {
+            if !active_at_startup.contains(name) {
+                match ext_mgr.activate(name).await {
+                    Ok(result) => {
+                        tracing::info!(
+                            channel = %name,
+                            message = %result.message,
+                            "Auto-activated persisted channel"
+                        );
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            channel = %name,
+                            error = %e,
+                            "Failed to auto-activate persisted channel"
+                        );
+                    }
+                }
+            }
+        }
     }
 
     // Wire SSE sender into extension manager for broadcasting status events.
