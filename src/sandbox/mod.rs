@@ -94,7 +94,7 @@ pub mod proxy;
 
 pub use config::{ResourceLimits, SandboxConfig, SandboxPolicy};
 pub use container::{ContainerOutput, ContainerRunner, connect_docker};
-pub use detect::{DockerDetection, DockerStatus, Platform, check_docker};
+pub use detect::{ContainerRuntime, DockerDetection, DockerStatus, Platform, check_docker};
 pub use error::{Result, SandboxError};
 pub use manager::{ExecOutput, SandboxManager, SandboxManagerBuilder};
 pub use proxy::{

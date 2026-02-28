@@ -486,7 +486,7 @@ impl ContainerRunner {
     }
 }
 
-/// Connect to the Docker daemon.
+/// Connect to the Docker-compatible container runtime daemon (Docker or Podman).
 ///
 /// Tries these locations in order:
 /// 1. `DOCKER_HOST` env var (bollard default)
@@ -496,6 +496,10 @@ impl ContainerRunner {
 /// 5. `~/.rd/docker.sock` (Rancher Desktop on macOS)
 /// 6. `$XDG_RUNTIME_DIR/docker.sock` (common rootless Docker socket on Linux)
 /// 7. `/run/user/$UID/docker.sock` (rootless Docker fallback on Linux)
+/// 8. `$XDG_RUNTIME_DIR/podman/podman.sock` (rootless Podman on Linux)
+/// 9. `/run/user/$UID/podman/podman.sock` (rootless Podman fallback on Linux)
+/// 10. `/run/podman/podman.sock` (rootful Podman on Linux)
+/// 11. `~/.local/share/containers/podman/machine/*/podman.sock` (Podman machine on macOS)
 pub async fn connect_docker() -> Result<Docker> {
     // First try bollard defaults (checks DOCKER_HOST env var, then /var/run/docker.sock).
     // This covers Linux, OrbStack (updates the /var/run symlink), and any user with
@@ -526,10 +530,12 @@ pub async fn connect_docker() -> Result<Docker> {
     }
 
     Err(SandboxError::DockerNotAvailable {
-        reason: "Could not connect to Docker daemon. Tried: $DOCKER_HOST, \
+        reason: "Could not connect to container runtime daemon. Tried: $DOCKER_HOST, \
             /var/run/docker.sock, ~/.docker/run/docker.sock, \
             ~/.colima/default/docker.sock, ~/.rd/docker.sock, \
-            $XDG_RUNTIME_DIR/docker.sock, /run/user/$UID/docker.sock"
+            $XDG_RUNTIME_DIR/docker.sock, /run/user/$UID/docker.sock, \
+            $XDG_RUNTIME_DIR/podman/podman.sock, /run/user/$UID/podman/podman.sock, \
+            /run/podman/podman.sock, ~/.local/share/containers/podman/machine/*/podman.sock"
             .to_string(),
     })
 }
@@ -556,18 +562,43 @@ fn unix_socket_candidates_from_env(
         }
     };
 
-    if let Some(home) = home {
+    // Docker sockets
+    if let Some(ref home) = home {
         push_unique(home.join(".docker/run/docker.sock")); // Docker Desktop 4.13+
         push_unique(home.join(".colima/default/docker.sock")); // Colima
         push_unique(home.join(".rd/docker.sock")); // Rancher Desktop
     }
 
-    if let Some(xdg_runtime_dir) = xdg_runtime_dir {
+    if let Some(ref xdg_runtime_dir) = xdg_runtime_dir {
         push_unique(xdg_runtime_dir.join("docker.sock"));
     }
 
-    if let Some(uid) = uid.filter(|value| !value.is_empty()) {
+    let uid = uid.filter(|value| !value.is_empty());
+
+    if let Some(ref uid) = uid {
         push_unique(PathBuf::from(format!("/run/user/{uid}/docker.sock")));
+    }
+
+    // Podman sockets
+    if let Some(ref xdg_runtime_dir) = xdg_runtime_dir {
+        push_unique(xdg_runtime_dir.join("podman/podman.sock")); // Rootless Podman
+    }
+
+    if let Some(ref uid) = uid {
+        push_unique(PathBuf::from(format!("/run/user/{uid}/podman/podman.sock"))); // Rootless Podman fallback
+    }
+
+    push_unique(PathBuf::from("/run/podman/podman.sock")); // Rootful Podman
+
+    if let Some(ref home) = home {
+        // Podman machine on macOS — glob for any machine name
+        let machine_dir = home.join(".local/share/containers/podman/machine");
+        if let Ok(entries) = std::fs::read_dir(&machine_dir) {
+            for entry in entries.flatten() {
+                let sock = entry.path().join("podman.sock");
+                push_unique(sock);
+            }
+        }
     }
 
     candidates
@@ -586,10 +617,15 @@ mod tests {
             Some("1000".to_string()),
         );
 
+        // Docker sockets
         assert!(candidates.contains(&PathBuf::from("/home/tester/.docker/run/docker.sock")));
         assert!(candidates.contains(&PathBuf::from("/home/tester/.colima/default/docker.sock")));
         assert!(candidates.contains(&PathBuf::from("/home/tester/.rd/docker.sock")));
         assert!(candidates.contains(&PathBuf::from("/run/user/1000/docker.sock")));
+
+        // Podman sockets
+        assert!(candidates.contains(&PathBuf::from("/run/user/1000/podman/podman.sock")));
+        assert!(candidates.contains(&PathBuf::from("/run/podman/podman.sock")));
     }
 
     #[tokio::test]

@@ -8,7 +8,7 @@
 //! 5. Embeddings
 //! 6. Channel configuration
 //! 7. Extensions (tool installation from registry)
-//! 8. Docker sandbox
+//! 8. Container sandbox (Docker/Podman)
 //! 9. Heartbeat (background tasks)
 
 use std::collections::{HashMap, HashSet};
@@ -198,8 +198,8 @@ impl SetupWizard {
             print_step(7, total_steps, "Extensions");
             self.step_extensions().await?;
 
-            // Step 8: Docker Sandbox
-            print_step(8, total_steps, "Docker Sandbox");
+            // Step 8: Container Sandbox
+            print_step(8, total_steps, "Container Sandbox");
             self.step_docker_sandbox().await?;
             self.persist_after_step().await;
 
@@ -1794,30 +1794,38 @@ impl SetupWizard {
         Ok(())
     }
 
-    /// Step 8: Docker Sandbox -- check Docker installation and availability.
+    /// Step 8: Container Sandbox -- check Docker/Podman installation and availability.
     async fn step_docker_sandbox(&mut self) -> Result<(), SetupError> {
-        print_info("IronClaw can execute code, run builds, and use tools inside Docker");
-        print_info("containers. This keeps your system safe -- commands from the LLM run");
-        print_info("in an isolated sandbox with no access to your credentials, limited");
+        print_info("IronClaw can execute code, run builds, and use tools inside Docker or");
+        print_info("Podman containers. This keeps your system safe -- commands from the LLM");
+        print_info("run in an isolated sandbox with no access to your credentials, limited");
         print_info("filesystem access, and network traffic restricted to an allowlist.");
         println!();
-        print_info("Without Docker, code execution tools (shell, file write) run directly");
-        print_info("on your machine with no isolation.");
+        print_info("Without a container runtime, code execution tools (shell, file write)");
+        print_info("run directly on your machine with no isolation.");
         println!();
 
-        if !confirm("Enable Docker sandbox?", false).map_err(SetupError::Io)? {
+        if !confirm("Enable container sandbox?", false).map_err(SetupError::Io)? {
             self.settings.sandbox.enabled = false;
             print_info("Sandbox disabled. You can enable it later with SANDBOX_ENABLED=true.");
             return Ok(());
         }
 
-        // Check Docker availability
+        // Check container runtime availability (Docker or Podman)
         let detection = crate::sandbox::detect::check_docker().await;
+        let rt_name = detection
+            .runtime
+            .as_ref()
+            .map(|r| r.to_string())
+            .unwrap_or_else(|| "Container runtime".to_string());
 
         match detection.status {
             crate::sandbox::detect::DockerStatus::Available => {
                 self.settings.sandbox.enabled = true;
-                print_success("Docker is installed and running. Sandbox enabled.");
+                print_success(&format!(
+                    "{} is installed and running. Sandbox enabled.",
+                    rt_name
+                ));
             }
             crate::sandbox::detect::DockerStatus::NotInstalled
             | crate::sandbox::detect::DockerStatus::NotRunning => {
@@ -1825,42 +1833,43 @@ impl SetupWizard {
                 let not_installed =
                     detection.status == crate::sandbox::detect::DockerStatus::NotInstalled;
                 if not_installed {
-                    print_error("Docker is not installed.");
+                    print_error("No container runtime (Docker or Podman) is installed.");
                     print_info(detection.platform.install_hint());
                 } else {
-                    print_error("Docker is installed but not running.");
+                    print_error(&format!("{} is installed but not running.", rt_name));
                     print_info(detection.platform.start_hint());
                 }
                 println!();
 
                 let retry_prompt = if not_installed {
-                    "Retry after installing Docker?"
+                    "Retry after installing a container runtime?"
                 } else {
-                    "Retry after starting Docker?"
+                    "Retry after starting the container runtime?"
                 };
                 if confirm(retry_prompt, false).map_err(SetupError::Io)? {
                     let retry = crate::sandbox::detect::check_docker().await;
                     if retry.status.is_ok() {
                         self.settings.sandbox.enabled = true;
-                        print_success(if not_installed {
-                            "Docker is now available. Sandbox enabled."
-                        } else {
-                            "Docker is now running. Sandbox enabled."
-                        });
+                        let retry_rt = retry
+                            .runtime
+                            .as_ref()
+                            .map(|r| r.to_string())
+                            .unwrap_or_else(|| "Container runtime".to_string());
+                        print_success(&format!("{} is now available. Sandbox enabled.", retry_rt));
                     } else {
                         self.settings.sandbox.enabled = false;
                         print_info(if not_installed {
-                            "Docker still not available. Sandbox disabled for now."
+                            "Container runtime still not available. Sandbox disabled for now."
                         } else {
-                            "Docker still not responding. Sandbox disabled for now."
+                            "Container runtime still not responding. Sandbox disabled for now."
                         });
                     }
                 } else {
                     self.settings.sandbox.enabled = false;
                     print_info(if not_installed {
-                        "Sandbox disabled. Install Docker and set SANDBOX_ENABLED=true later."
+                        "Sandbox disabled. Install Docker or Podman and set SANDBOX_ENABLED=true later."
                     } else {
-                        "Sandbox disabled. Start Docker and set SANDBOX_ENABLED=true later."
+                        "Sandbox disabled. Start the container runtime and set SANDBOX_ENABLED=true later."
                     });
                 }
             }

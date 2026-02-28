@@ -220,30 +220,36 @@ async fn main() -> anyhow::Result<()> {
 
     // ── Orchestrator / container job manager ────────────────────────────
 
-    // Proactive Docker detection
-    let docker_status = if config.sandbox.enabled {
+    // Proactive container runtime detection (Docker or Podman)
+    let (docker_status, container_runtime) = if config.sandbox.enabled {
         let detection = ironclaw::sandbox::check_docker().await;
+        let rt_name = detection
+            .runtime
+            .as_ref()
+            .map(|r| r.to_string())
+            .unwrap_or_else(|| "Container runtime".to_string());
         match detection.status {
             ironclaw::sandbox::DockerStatus::Available => {
-                tracing::info!("Docker is available");
+                tracing::info!("{} is available", rt_name);
             }
             ironclaw::sandbox::DockerStatus::NotInstalled => {
                 tracing::warn!(
-                    "Docker is not installed -- sandbox disabled for this session. {}",
+                    "No container runtime (Docker or Podman) is installed -- sandbox disabled for this session. {}",
                     detection.platform.install_hint()
                 );
             }
             ironclaw::sandbox::DockerStatus::NotRunning => {
                 tracing::warn!(
-                    "Docker is installed but not running -- sandbox disabled for this session. {}",
+                    "{} is installed but not running -- sandbox disabled for this session. {}",
+                    rt_name,
                     detection.platform.start_hint()
                 );
             }
             ironclaw::sandbox::DockerStatus::Disabled => {}
         }
-        detection.status
+        (detection.status, detection.runtime)
     } else {
-        ironclaw::sandbox::DockerStatus::Disabled
+        (ironclaw::sandbox::DockerStatus::Disabled, None)
     };
 
     let job_event_tx: Option<
@@ -576,6 +582,7 @@ async fn main() -> anyhow::Result<()> {
             heartbeat_interval_secs: config.heartbeat.interval_secs,
             sandbox_enabled: config.sandbox.enabled,
             docker_status,
+            container_runtime,
             claude_code_enabled: config.claude_code.enabled,
             routines_enabled: config.routines.enabled,
             skills_enabled: config.skills.enabled,

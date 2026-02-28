@@ -21,6 +21,7 @@ pub struct BootInfo {
     pub heartbeat_interval_secs: u64,
     pub sandbox_enabled: bool,
     pub docker_status: crate::sandbox::detect::DockerStatus,
+    pub container_runtime: Option<crate::sandbox::detect::ContainerRuntime>,
     pub claude_code_enabled: bool,
     pub routines_enabled: bool,
     pub skills_enabled: bool,
@@ -95,13 +96,23 @@ pub fn print_boot_screen(info: &BootInfo) {
     }
     match info.docker_status {
         crate::sandbox::detect::DockerStatus::Available => {
-            features.push("sandbox".to_string());
+            let rt = info
+                .container_runtime
+                .as_ref()
+                .map(|r| r.as_str())
+                .unwrap_or("docker");
+            features.push(format!("sandbox ({rt})"));
         }
         crate::sandbox::detect::DockerStatus::NotInstalled => {
-            features.push(format!("{yellow}sandbox (docker not installed){reset}"));
+            features.push(format!("{yellow}sandbox (no container runtime){reset}"));
         }
         crate::sandbox::detect::DockerStatus::NotRunning => {
-            features.push(format!("{yellow}sandbox (docker not running){reset}"));
+            let rt = info
+                .container_runtime
+                .as_ref()
+                .map(|r| r.as_str())
+                .unwrap_or("docker");
+            features.push(format!("{yellow}sandbox ({rt} not running){reset}"));
         }
         crate::sandbox::detect::DockerStatus::Disabled => {
             // Don't show sandbox when disabled
@@ -177,6 +188,7 @@ mod tests {
             heartbeat_interval_secs: 1800,
             sandbox_enabled: true,
             docker_status: DockerStatus::Available,
+            container_runtime: Some(crate::sandbox::detect::ContainerRuntime::Docker),
             claude_code_enabled: false,
             routines_enabled: true,
             skills_enabled: true,
@@ -210,6 +222,7 @@ mod tests {
             heartbeat_interval_secs: 0,
             sandbox_enabled: false,
             docker_status: DockerStatus::Disabled,
+            container_runtime: None,
             claude_code_enabled: false,
             routines_enabled: false,
             skills_enabled: false,
@@ -239,6 +252,7 @@ mod tests {
             heartbeat_interval_secs: 0,
             sandbox_enabled: false,
             docker_status: DockerStatus::Disabled,
+            container_runtime: None,
             claude_code_enabled: false,
             routines_enabled: false,
             skills_enabled: false,
