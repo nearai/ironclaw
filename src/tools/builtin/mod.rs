@@ -9,6 +9,7 @@ mod json;
 mod memory;
 mod message;
 pub mod path_utils;
+pub mod ptc_script;
 mod restart;
 pub mod routine;
 pub mod secrets_tools;
@@ -36,6 +37,7 @@ pub use routine::{
     EventEmitTool, RoutineCreateTool, RoutineDeleteTool, RoutineFireTool, RoutineHistoryTool,
     RoutineListTool, RoutineUpdateTool,
 };
+pub use ptc_script::PtcScriptTool;
 pub use secrets_tools::{SecretDeleteTool, SecretListTool};
 pub use shell::ShellTool;
 pub use skill_tools::{SkillInstallTool, SkillListTool, SkillRemoveTool, SkillSearchTool};

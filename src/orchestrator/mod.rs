@@ -126,6 +126,10 @@ pub async fn setup_orchestrator(
             std::time::Duration::from_secs(60),
         ));
 
+        // Wire the executor into the shared slot so WASM tools registered
+        // during build_all() can resolve it lazily at execution time.
+        tools.set_tool_executor(Arc::clone(&tool_executor));
+
         let orchestrator_state = api::OrchestratorState {
             llm: Arc::clone(llm),
             job_manager: Arc::clone(&jm),
