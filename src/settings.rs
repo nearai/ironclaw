@@ -308,6 +308,10 @@ pub struct HeartbeatSettings {
     #[serde(default)]
     pub notify_user: Option<String>,
 
+    /// Fixed time-of-day to fire (HH:MM, 24h). When set, interval_secs is ignored.
+    #[serde(default)]
+    pub fire_at: Option<String>,
+
     /// Hour (0-23) when quiet hours start (heartbeat skipped).
     #[serde(default)]
     pub quiet_hours_start: Option<u32>,
@@ -316,7 +320,7 @@ pub struct HeartbeatSettings {
     #[serde(default)]
     pub quiet_hours_end: Option<u32>,
 
-    /// Timezone for quiet hours evaluation (IANA name, e.g. "America/New_York").
+    /// Timezone for fire_at and quiet hours (IANA name, e.g. "Pacific/Auckland").
     #[serde(default)]
     pub timezone: Option<String>,
 }
@@ -332,6 +336,7 @@ impl Default for HeartbeatSettings {
             interval_secs: default_heartbeat_interval(),
             notify_channel: None,
             notify_user: None,
+            fire_at: None,
             quiet_hours_start: None,
             quiet_hours_end: None,
             timezone: None,
