@@ -386,6 +386,42 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn message_tool_with_attachments_in_tmp_no_channel() {
+        use std::fs;
+
+        let tool = MessageTool::new(Arc::new(ChannelManager::new()));
+        tool.set_context(Some("telegram".to_string()), Some("12345".to_string()))
+            .await;
+
+        // Create temp files under /tmp (allowed as secondary attachment dir)
+        let temp_dir = tempfile::tempdir_in("/tmp").unwrap();
+        let file1 = temp_dir.path().join("photo.jpg");
+        let file2 = temp_dir.path().join("doc.pdf");
+        fs::write(&file1, "fake image data").unwrap();
+        fs::write(&file2, "fake pdf data").unwrap();
+
+        let ctx = crate::context::JobContext::new("test", "test description");
+        let result = tool
+            .execute(
+                serde_json::json!({
+                    "content": "here are the files",
+                    "attachments": [file1.to_string_lossy(), file2.to_string_lossy()]
+                }),
+                &ctx,
+            )
+            .await;
+
+        // Path validation passes for /tmp paths, fails at channel send (no real channel)
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("channel") || err.contains("Channel"),
+            "expected channel error (path validation should pass), got: {}",
+            err
+        );
+    }
+
+    #[tokio::test]
     async fn message_tool_requires_content() {
         let tool = MessageTool::new(Arc::new(ChannelManager::new()));
 
