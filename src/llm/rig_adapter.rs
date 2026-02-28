@@ -355,6 +355,14 @@ fn extract_response(
     (text, tool_calls, finish)
 }
 
+/// Check if a rig-core error is the "empty response" error that occurs when
+/// the model returns `stop_reason: "end_turn"` with no content blocks.
+/// This is a valid completion signal (the model is done), not a real error.
+fn is_empty_response_error(err: &(dyn std::error::Error + 'static)) -> bool {
+    let msg = err.to_string();
+    msg.contains("Response contained no message or tool call (empty)")
+}
+
 /// Saturate u64 to u32 for token counts.
 fn saturate_u32(val: u64) -> u32 {
     val.min(u32::MAX as u64) as u32
@@ -429,14 +437,29 @@ where
             request.max_tokens,
         )?;
 
-        let response =
-            self.model
-                .completion(rig_req)
-                .await
-                .map_err(|e| LlmError::RequestFailed {
+        let response = match self.model.completion(rig_req).await {
+            Ok(resp) => resp,
+            Err(e) if is_empty_response_error(&e) => {
+                // The model returned stop_reason="end_turn" with no content blocks.
+                // This is a valid completion signal, not a real error.
+                tracing::debug!(
+                    provider = %self.model_name,
+                    "Model returned empty response (end_turn with no content); treating as empty completion"
+                );
+                return Ok(CompletionResponse {
+                    content: String::new(),
+                    input_tokens: 0,
+                    output_tokens: 0,
+                    finish_reason: FinishReason::Stop,
+                });
+            }
+            Err(e) => {
+                return Err(LlmError::RequestFailed {
                     provider: self.model_name.clone(),
                     reason: e.to_string(),
-                })?;
+                });
+            }
+        };
 
         let (text, _tool_calls, finish) = extract_response(&response.choice, &response.usage);
 
@@ -480,14 +503,30 @@ where
             request.max_tokens,
         )?;
 
-        let response =
-            self.model
-                .completion(rig_req)
-                .await
-                .map_err(|e| LlmError::RequestFailed {
+        let response = match self.model.completion(rig_req).await {
+            Ok(resp) => resp,
+            Err(e) if is_empty_response_error(&e) => {
+                // The model returned stop_reason="end_turn" with no content blocks.
+                // This is a valid signal meaning "I'm done, no more tool calls needed."
+                tracing::debug!(
+                    provider = %self.model_name,
+                    "Model returned empty response (end_turn with no content); treating as completion with no tool calls"
+                );
+                return Ok(ToolCompletionResponse {
+                    content: None,
+                    tool_calls: vec![],
+                    input_tokens: 0,
+                    output_tokens: 0,
+                    finish_reason: FinishReason::Stop,
+                });
+            }
+            Err(e) => {
+                return Err(LlmError::RequestFailed {
                     provider: self.model_name.clone(),
                     reason: e.to_string(),
-                })?;
+                });
+            }
+        };
 
         let (text, mut tool_calls, finish) = extract_response(&response.choice, &response.usage);
 

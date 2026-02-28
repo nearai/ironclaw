@@ -5,8 +5,8 @@ use std::time::Duration;
 /// Errors that can occur in the sandbox system.
 #[derive(Debug, thiserror::Error)]
 pub enum SandboxError {
-    /// Docker daemon is not available or not running.
-    #[error("Docker not available: {reason}")]
+    /// Container runtime (Docker/Podman) is not available or not running.
+    #[error("Container runtime not available: {reason}")]
     DockerNotAvailable { reason: String },
 
     /// Failed to create container.

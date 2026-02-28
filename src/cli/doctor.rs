@@ -49,6 +49,13 @@ pub async fn run_doctor_command() -> anyhow::Result<()> {
     );
 
     check(
+        "Podman",
+        check_binary("podman", &["--version"]),
+        &mut passed,
+        &mut failed,
+    );
+
+    check(
         "cloudflared",
         check_binary("cloudflared", &["--version"]),
         &mut passed,

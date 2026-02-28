@@ -15,6 +15,7 @@ use crate::bootstrap::ironclaw_base_dir;
 use crate::error::OrchestratorError;
 use crate::orchestrator::auth::{CredentialGrant, TokenStore};
 use crate::sandbox::connect_docker;
+use crate::sandbox::detect::ContainerRuntime;
 
 /// Which mode a sandbox container runs in.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -66,6 +67,8 @@ pub struct ContainerJobConfig {
     pub claude_code_memory_limit_mb: u64,
     /// Allowed tool patterns for Claude Code (passed as CLAUDE_CODE_ALLOWED_TOOLS env var).
     pub claude_code_allowed_tools: Vec<String>,
+    /// Detected container runtime to tailor networking behavior.
+    pub container_runtime: Option<ContainerRuntime>,
 }
 
 impl Default for ContainerJobConfig {
@@ -81,8 +84,38 @@ impl Default for ContainerJobConfig {
             claude_code_max_turns: 50,
             claude_code_memory_limit_mb: 4096,
             claude_code_allowed_tools: crate::config::ClaudeCodeConfig::default().allowed_tools,
+            container_runtime: None,
         }
     }
+}
+
+fn host_alias_for_orchestrator(runtime: Option<ContainerRuntime>) -> &'static str {
+    if cfg!(target_os = "linux") {
+        match runtime {
+            Some(ContainerRuntime::Podman) => "host.containers.internal",
+            _ => "host.docker.internal",
+        }
+    } else {
+        "host.docker.internal"
+    }
+}
+
+fn extra_hosts_for_runtime(runtime: Option<ContainerRuntime>) -> Option<Vec<String>> {
+    if cfg!(target_os = "linux") && !matches!(runtime, Some(ContainerRuntime::Podman)) {
+        Some(vec!["host.docker.internal:host-gateway".to_string()])
+    } else {
+        None
+    }
+}
+
+fn passthrough_debug_env() -> Vec<String> {
+    let mut env = Vec::new();
+    if let Ok(rust_log) = std::env::var("RUST_LOG")
+        && !rust_log.trim().is_empty()
+    {
+        env.push(format!("RUST_LOG={}", rust_log));
+    }
+    env
 }
 
 /// State of a container.
@@ -306,11 +339,7 @@ impl ContainerJobManager {
         let docker = self.docker().await?;
 
         // Build container configuration
-        let orchestrator_host = if cfg!(target_os = "linux") {
-            "172.17.0.1"
-        } else {
-            "host.docker.internal"
-        };
+        let orchestrator_host = host_alias_for_orchestrator(self.config.container_runtime);
 
         let orchestrator_url = format!(
             "http://{}:{}",
@@ -322,6 +351,7 @@ impl ContainerJobManager {
             format!("IRONCLAW_JOB_ID={}", job_id),
             format!("IRONCLAW_ORCHESTRATOR_URL={}", orchestrator_url),
         ];
+        env_vec.extend(passthrough_debug_env());
 
         // Build volume mounts (validate project_dir stays within ~/.ironclaw/projects/)
         let mut binds = Vec::new();
@@ -366,7 +396,7 @@ impl ContainerJobManager {
             memory: Some((memory_mb * 1024 * 1024) as i64),
             cpu_shares: Some(self.config.cpu_shares as i64),
             network_mode: Some("bridge".to_string()),
-            extra_hosts: Some(vec!["host.docker.internal:host-gateway".to_string()]),
+            extra_hosts: extra_hosts_for_runtime(self.config.container_runtime),
             cap_drop: Some(vec!["ALL".to_string()]),
             cap_add: Some(vec!["CHOWN".to_string()]),
             security_opt: Some(vec!["no-new-privileges:true".to_string()]),
@@ -695,5 +725,30 @@ mod tests {
         let handle = mgr.get_handle(job_id).await.unwrap();
         assert_eq!(handle.worker_iteration, 3);
         assert_eq!(handle.last_worker_status.as_deref(), Some("Iteration 3"));
+    }
+
+    #[test]
+    fn test_host_alias_for_orchestrator_docker_default() {
+        let host = host_alias_for_orchestrator(Some(ContainerRuntime::Docker));
+        assert_eq!(host, "host.docker.internal");
+    }
+
+    #[test]
+    fn test_host_alias_for_orchestrator_podman_linux() {
+        let host = host_alias_for_orchestrator(Some(ContainerRuntime::Podman));
+        if cfg!(target_os = "linux") {
+            assert_eq!(host, "host.containers.internal");
+        } else {
+            assert_eq!(host, "host.docker.internal");
+        }
+    }
+
+    #[test]
+    fn test_passthrough_debug_env_empty_when_unset() {
+        // Deterministic behavior for this test process: if RUST_LOG is unset,
+        // passthrough should be empty. If set, this test is not meaningful.
+        if std::env::var("RUST_LOG").is_err() {
+            assert!(passthrough_debug_env().is_empty());
+        }
     }
 }

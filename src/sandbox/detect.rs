@@ -1,18 +1,21 @@
-//! Proactive Docker detection with platform-specific guidance.
+//! Proactive container runtime detection with platform-specific guidance.
 //!
-//! Checks whether Docker is both installed (binary on PATH) and running
-//! (daemon responding to ping), and provides platform-appropriate
+//! Checks whether Docker or Podman is both installed (binary on PATH) and
+//! running (daemon responding to ping), and provides platform-appropriate
 //! installation or startup instructions when it is not.
 //!
 //! # Detection Limitations
 //!
-//! - **macOS**: High confidence. Detects both standard Docker Desktop socket
-//!   (`~/.docker/run/docker.sock`) and the default `/var/run/docker.sock`.
+//! - **macOS**: High confidence. Detects standard Docker Desktop socket
+//!   (`~/.docker/run/docker.sock`), OrbStack (`~/.orbstack/run/docker.sock`),
+//!   and the default `/var/run/docker.sock`. Podman machine sockets under
+//!   `~/.local/share/containers/podman/machine/` are also checked.
 //!
 //! - **Linux**: High confidence for standard installs. Rootless Docker uses
 //!   a different socket path (`/run/user/$UID/docker.sock`) which is now
-//!   checked by the fallback in `connect_docker()`. If `DOCKER_HOST` is set,
-//!   bollard's default connection still takes precedence.
+//!   checked by the fallback in `connect_docker()`. Rootless Podman sockets
+//!   at `$XDG_RUNTIME_DIR/podman/podman.sock` are also checked. If
+//!   `DOCKER_HOST` is set, bollard's default connection still takes precedence.
 //!
 //! - **Windows**: Medium confidence. Binary detection uses `where.exe` which
 //!   works reliably. Daemon detection relies on bollard's default named pipe
@@ -21,12 +24,40 @@
 //!   so detection also probes `docker version`/`docker info` via CLI if the
 //!   named pipe is unavailable.
 
+use std::fmt;
+
+/// Which container runtime was detected.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ContainerRuntime {
+    Docker,
+    Podman,
+}
+
+impl ContainerRuntime {
+    /// Short lowercase name suitable for log messages and display.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            ContainerRuntime::Docker => "docker",
+            ContainerRuntime::Podman => "podman",
+        }
+    }
+}
+
+impl fmt::Display for ContainerRuntime {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            ContainerRuntime::Docker => "Docker",
+            ContainerRuntime::Podman => "Podman",
+        })
+    }
+}
+
 /// Docker daemon availability status.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DockerStatus {
-    /// Docker binary found on PATH and daemon responding to ping.
+    /// A container runtime binary was found on PATH and daemon responding to ping.
     Available,
-    /// `docker` binary not found on PATH.
+    /// No container runtime binary (`docker` or `podman`) found on PATH.
     NotInstalled,
     /// Binary found but daemon not responding.
     NotRunning,
@@ -35,7 +66,7 @@ pub enum DockerStatus {
 }
 
 impl DockerStatus {
-    /// Returns true if Docker is available and ready.
+    /// Returns true if a container runtime is available and ready.
     pub fn is_ok(&self) -> bool {
         matches!(self, DockerStatus::Available)
     }
@@ -69,81 +100,120 @@ impl Platform {
         }
     }
 
-    /// Installation instructions for Docker on this platform.
+    /// Installation instructions for Docker/Podman on this platform.
     pub fn install_hint(&self) -> &'static str {
         match self {
             Platform::MacOS => {
-                "Install Docker Desktop: https://docs.docker.com/desktop/install/mac-install/"
+                "Install Docker Desktop: https://docs.docker.com/desktop/install/mac-install/\n\
+                 or Podman Desktop: https://podman-desktop.io/"
             }
-            Platform::Linux => "Install Docker Engine: https://docs.docker.com/engine/install/",
+            Platform::Linux => {
+                "Install Docker Engine: https://docs.docker.com/engine/install/\n\
+                 or Podman: https://podman.io/docs/installation#installing-on-linux"
+            }
             Platform::Windows => {
-                "Install Docker Desktop: https://docs.docker.com/desktop/install/windows-install/"
+                "Install Docker Desktop: https://docs.docker.com/desktop/install/windows-install/\n\
+                 or Podman Desktop: https://podman-desktop.io/"
             }
         }
     }
 
-    /// Instructions to start the Docker daemon on this platform.
+    /// Instructions to start the container runtime daemon on this platform.
     pub fn start_hint(&self) -> &'static str {
         match self {
-            Platform::MacOS => "Start Docker Desktop from Applications, or run: open -a Docker",
-            Platform::Linux => "Start the Docker daemon: sudo systemctl start docker",
-            Platform::Windows => "Start Docker Desktop from the Start menu",
+            Platform::MacOS => {
+                "Start Docker Desktop from Applications (open -a Docker), \
+                 or start Podman machine: podman machine start"
+            }
+            Platform::Linux => {
+                "Start Docker: sudo systemctl start docker, \
+                 or start Podman: systemctl --user start podman.socket"
+            }
+            Platform::Windows => "Start Docker Desktop or Podman Desktop from the Start menu",
         }
     }
 }
 
-/// Result of a Docker detection check.
+/// Result of a container runtime detection check.
 pub struct DockerDetection {
     pub status: DockerStatus,
     pub platform: Platform,
+    /// Which container runtime was detected (set when status is `Available` or `NotRunning`).
+    pub runtime: Option<ContainerRuntime>,
 }
 
-/// Check whether Docker is installed and running.
+/// Check whether a container runtime (Docker or Podman) is installed and running.
 ///
-/// 1. Checks if `docker` binary exists on PATH
-/// 2. If found, tries to connect and ping the Docker daemon via `connect_docker()`
+/// 1. Checks if `docker` or `podman` binary exists on PATH
+/// 2. If found, tries to connect and ping the daemon via `connect_docker()`
 /// 3. Returns `Available`, `NotInstalled`, or `NotRunning`
+///
+/// When both Docker and Podman binaries are present, Docker is preferred.
 pub async fn check_docker() -> DockerDetection {
     let platform = Platform::current();
 
-    // Step 1: Check if docker binary is on PATH
-    if !docker_binary_exists() {
+    let has_docker = docker_binary_exists();
+    let has_podman = podman_binary_exists();
+
+    // Step 1: Check if any container runtime binary is on PATH
+    if !has_docker && !has_podman {
         return DockerDetection {
             status: DockerStatus::NotInstalled,
             platform,
+            runtime: None,
         };
     }
 
-    // Step 2: Try to connect to the daemon
+    // Determine which runtime to attribute (prefer Docker when both present)
+    let runtime = if has_docker {
+        ContainerRuntime::Docker
+    } else {
+        ContainerRuntime::Podman
+    };
+
+    // Step 2: Try to connect to the daemon (bollard works with both Docker and Podman sockets)
     if crate::sandbox::connect_docker().await.is_ok() {
         return DockerDetection {
             status: DockerStatus::Available,
             platform,
+            runtime: Some(runtime),
         };
     }
 
     // Windows fallback: if the named pipe probe fails but docker CLI can still
-    // reach the daemon/server, treat Docker as available.
+    // reach the daemon/server, treat it as available.
     #[cfg(windows)]
-    if docker_cli_daemon_reachable() {
+    if has_docker && docker_cli_daemon_reachable() {
         return DockerDetection {
             status: DockerStatus::Available,
             platform,
+            runtime: Some(ContainerRuntime::Docker),
         };
     }
 
     DockerDetection {
         status: DockerStatus::NotRunning,
         platform,
+        runtime: Some(runtime),
     }
 }
 
 /// Check if the `docker` binary exists on PATH.
 fn docker_binary_exists() -> bool {
+    binary_exists("docker")
+}
+
+/// Check if the `podman` binary exists on PATH.
+fn podman_binary_exists() -> bool {
+    binary_exists("podman")
+}
+
+/// Check if a binary exists on PATH.
+fn binary_exists(name: &str) -> bool {
     #[cfg(unix)]
     {
         std::process::Command::new("which")
-            .arg("docker")
+            .arg(name)
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
             .status()
@@ -152,7 +222,7 @@ fn docker_binary_exists() -> bool {
     #[cfg(windows)]
     {
         std::process::Command::new("where")
-            .arg("docker")
+            .arg(name)
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
             .status()
@@ -226,8 +296,30 @@ mod tests {
     async fn test_check_docker_returns_valid_status() {
         let result = check_docker().await;
         match result.status {
-            DockerStatus::Available | DockerStatus::NotInstalled | DockerStatus::NotRunning => {}
+            DockerStatus::Available => {
+                assert!(
+                    result.runtime.is_some(),
+                    "Available status should have runtime"
+                );
+            }
+            DockerStatus::NotInstalled => {
+                assert!(
+                    result.runtime.is_none(),
+                    "NotInstalled should have no runtime"
+                );
+            }
+            DockerStatus::NotRunning => {
+                assert!(result.runtime.is_some(), "NotRunning should have runtime");
+            }
             DockerStatus::Disabled => panic!("check_docker should never return Disabled"),
         }
+    }
+
+    #[test]
+    fn test_container_runtime_display() {
+        assert_eq!(ContainerRuntime::Docker.to_string(), "Docker");
+        assert_eq!(ContainerRuntime::Podman.to_string(), "Podman");
+        assert_eq!(ContainerRuntime::Docker.as_str(), "docker");
+        assert_eq!(ContainerRuntime::Podman.as_str(), "podman");
     }
 }
