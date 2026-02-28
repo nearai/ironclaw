@@ -144,7 +144,13 @@ Description: {}
 
 You have access to tools to complete this job. Plan your approach and execute tools as needed.
 You may request multiple tools at once if they can be executed in parallel.
-Report when the job is complete or if you encounter issues you cannot resolve."#,
+
+IMPORTANT - Completion behavior:
+- When all required work is done, STOP calling tools and respond with a text message summarizing what you accomplished.
+- Your summary must include a phrase like "job is complete", "task is done", "successfully completed", or "all done".
+- Do NOT repeat work you have already done. If a file has been written and tested, do not write or test it again.
+- Do NOT call tools just to verify or re-read work you already completed in this session.
+- If you encounter issues you cannot resolve, report them in a text message."#,
             job_ctx.title, job_ctx.description
         )));
 

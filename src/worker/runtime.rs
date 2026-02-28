@@ -146,7 +146,13 @@ Job: {}
 Description: {}
 
 You have tools for shell commands, file operations, and code editing.
-Work independently to complete this job. Report when done."#,
+Work independently to complete this job.
+
+IMPORTANT - Completion behavior:
+- When all required work is done, STOP calling tools and respond with a text message summarizing what you accomplished.
+- Your summary must include a phrase like "job is complete", "task is done", "successfully completed", or "all done".
+- Do NOT repeat work you have already done. If a file has been written and tested, do not write or test it again.
+- Do NOT call tools just to verify or re-read work you already completed in this session."#,
             job.title, job.description
         )));
 
