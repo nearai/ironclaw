@@ -128,6 +128,42 @@ impl SessionManager {
             }
         }
 
+        // Check if external_thread_id is itself a known thread UUID that
+        // exists in the session but was never registered in the thread_map
+        // (e.g. created by chat_new_thread_handler or hydrated from DB).
+        // We only adopt it if no thread_map entry maps to this UUID —
+        // otherwise it belongs to a different channel scope.
+        if let Some(ext_tid) = external_thread_id
+            && let Ok(ext_uuid) = Uuid::parse_str(ext_tid)
+        {
+            let thread_map = self.thread_map.read().await;
+            let mapped_elsewhere = thread_map.values().any(|&v| v == ext_uuid);
+            drop(thread_map);
+
+            if !mapped_elsewhere {
+                let sess = session.lock().await;
+                if sess.threads.contains_key(&ext_uuid) {
+                    drop(sess);
+
+                    let mut thread_map = self.thread_map.write().await;
+                    // Re-check after acquiring write lock to prevent race condition
+                    // where another task mapped this UUID between our read and write.
+                    if !thread_map.values().any(|&v| v == ext_uuid) {
+                        thread_map.insert(key, ext_uuid);
+                        drop(thread_map);
+                        // Ensure undo manager exists
+                        let mut undo_managers = self.undo_managers.write().await;
+                        undo_managers
+                            .entry(ext_uuid)
+                            .or_insert_with(|| Arc::new(Mutex::new(UndoManager::new())));
+                        return (session, ext_uuid);
+                    }
+                    // If it was mapped elsewhere while we were unlocked, fall through
+                    // to create a new thread, preserving channel isolation.
+                }
+            }
+        }
+
         // Create new thread (always create a new one for a new key)
         let thread_id = {
             let mut sess = session.lock().await;
@@ -734,5 +770,154 @@ mod tests {
             .resolve_thread("user-cross", "telegram", Some(&tid.to_string()))
             .await;
         assert_ne!(resolved, tid);
+    }
+
+    // === QA Plan P3 - 4.2: Concurrent session stress tests ===
+
+    #[tokio::test]
+    async fn concurrent_get_or_create_same_user_returns_same_session() {
+        let manager = Arc::new(SessionManager::new());
+
+        let handles: Vec<_> = (0..30)
+            .map(|_| {
+                let mgr = Arc::clone(&manager);
+                tokio::spawn(async move { mgr.get_or_create_session("shared-user").await })
+            })
+            .collect();
+
+        let mut sessions = Vec::new();
+        for handle in handles {
+            sessions.push(handle.await.expect("task should not panic"));
+        }
+
+        // All 30 must return the *same* Arc (double-checked locking guarantee).
+        for s in &sessions {
+            assert!(Arc::ptr_eq(&sessions[0], s));
+        }
+    }
+
+    #[tokio::test]
+    async fn concurrent_resolve_thread_distinct_users_no_cross_talk() {
+        let manager = Arc::new(SessionManager::new());
+
+        let handles: Vec<_> = (0..20)
+            .map(|i| {
+                let mgr = Arc::clone(&manager);
+                tokio::spawn(async move {
+                    let user = format!("user-{i}");
+                    let (session, tid) = mgr.resolve_thread(&user, "gateway", None).await;
+                    (user, session, tid)
+                })
+            })
+            .collect();
+
+        let mut results = Vec::new();
+        for handle in handles {
+            results.push(handle.await.expect("task should not panic"));
+        }
+
+        // All thread IDs must be unique.
+        let tids: std::collections::HashSet<_> = results.iter().map(|(_, _, t)| *t).collect();
+        assert_eq!(tids.len(), 20);
+
+        // Each session should contain exactly 1 thread (its own).
+        for (_, session, tid) in &results {
+            let sess = session.lock().await;
+            assert!(sess.threads.contains_key(tid));
+            assert_eq!(sess.threads.len(), 1);
+        }
+    }
+
+    #[tokio::test]
+    async fn concurrent_resolve_thread_same_user_different_channels() {
+        let manager = Arc::new(SessionManager::new());
+        let channels = ["gateway", "telegram", "slack", "cli", "repl"];
+
+        let handles: Vec<_> = channels
+            .iter()
+            .map(|ch| {
+                let mgr = Arc::clone(&manager);
+                let channel = ch.to_string();
+                tokio::spawn(async move {
+                    let (session, tid) = mgr.resolve_thread("multi-ch", &channel, None).await;
+                    (channel, session, tid)
+                })
+            })
+            .collect();
+
+        let mut results = Vec::new();
+        for handle in handles {
+            results.push(handle.await.expect("task should not panic"));
+        }
+
+        // All 5 threads must be unique (different channels = different keys).
+        let tids: std::collections::HashSet<_> = results.iter().map(|(_, _, t)| *t).collect();
+        assert_eq!(tids.len(), 5);
+
+        // All threads should live in the same session.
+        let sess = results[0].1.lock().await;
+        assert_eq!(sess.threads.len(), 5);
+    }
+
+    #[tokio::test]
+    async fn concurrent_get_undo_manager_same_thread_returns_same_arc() {
+        let manager = Arc::new(SessionManager::new());
+        let (_, tid) = manager.resolve_thread("undo-user", "gateway", None).await;
+
+        let handles: Vec<_> = (0..20)
+            .map(|_| {
+                let mgr = Arc::clone(&manager);
+                tokio::spawn(async move { mgr.get_undo_manager(tid).await })
+            })
+            .collect();
+
+        let mut managers = Vec::new();
+        for handle in handles {
+            managers.push(handle.await.expect("task should not panic"));
+        }
+
+        // All 20 must point to the same UndoManager.
+        for m in &managers {
+            assert!(Arc::ptr_eq(&managers[0], m));
+        }
+    }
+
+    #[tokio::test]
+    async fn test_resolve_thread_finds_existing_session_thread_by_uuid() {
+        use crate::agent::session::{Session, Thread};
+
+        let manager = SessionManager::new();
+        let tid = Uuid::new_v4();
+
+        // Simulate chat_new_thread_handler: create thread directly in session
+        // without registering it in thread_map
+        let session = Arc::new(Mutex::new(Session::new("user-direct")));
+        {
+            let mut sess = session.lock().await;
+            let thread = Thread::with_id(tid, sess.id);
+            sess.threads.insert(tid, thread);
+        }
+        {
+            let mut sessions = manager.sessions.write().await;
+            sessions.insert("user-direct".to_string(), Arc::clone(&session));
+        }
+
+        // resolve_thread should find the existing thread by UUID
+        // instead of creating a duplicate
+        let (_, resolved) = manager
+            .resolve_thread("user-direct", "gateway", Some(&tid.to_string()))
+            .await;
+        assert_eq!(
+            resolved, tid,
+            "should reuse existing thread, not create a new one"
+        );
+
+        // Verify no duplicate threads were created
+        let sess = session.lock().await;
+        assert_eq!(
+            sess.threads.len(),
+            1,
+            "should have exactly 1 thread, not a duplicate"
+        );
     }
 }

@@ -546,10 +546,10 @@ async fn get_secrets_store() -> anyhow::Result<Arc<dyn SecretsStore + Send + Syn
             .await
             .map_err(|e| anyhow::anyhow!("{}", e))?;
 
-        return Ok(Arc::new(crate::secrets::LibSqlSecretsStore::new(
+        Ok(Arc::new(crate::secrets::LibSqlSecretsStore::new(
             backend.shared_db(),
             Arc::new(crypto),
-        )));
+        )))
     }
 
     #[cfg(not(any(feature = "postgres", feature = "libsql")))]

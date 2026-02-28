@@ -203,6 +203,9 @@ pub struct InstalledExtension {
     /// Whether this extension is installed locally (false = available in registry but not installed).
     #[serde(default = "default_true")]
     pub installed: bool,
+    /// Last activation error for WASM channels.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub activation_error: Option<String>,
 }
 
 /// Error type for extension operations.

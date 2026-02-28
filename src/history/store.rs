@@ -963,6 +963,15 @@ impl Store {
         rows.iter().map(row_to_routine).collect()
     }
 
+    /// List all routines across all users.
+    pub async fn list_all_routines(&self) -> Result<Vec<Routine>, DatabaseError> {
+        let conn = self.conn().await?;
+        let rows = conn
+            .query("SELECT * FROM routines ORDER BY name", &[])
+            .await?;
+        rows.iter().map(row_to_routine).collect()
+    }
+
     /// List all enabled routines with event triggers (for event matching).
     pub async fn list_event_routines(&self) -> Result<Vec<Routine>, DatabaseError> {
         let conn = self.conn().await?;
@@ -1316,7 +1325,7 @@ impl Store {
                     c.started_at,
                     c.last_activity,
                     c.metadata,
-                    (SELECT COUNT(*) FROM conversation_messages m WHERE m.conversation_id = c.id) AS message_count,
+                    (SELECT COUNT(*) FROM conversation_messages m WHERE m.conversation_id = c.id AND m.role = 'user') AS message_count,
                     (SELECT LEFT(m2.content, 100)
                      FROM conversation_messages m2
                      WHERE m2.conversation_id = c.id AND m2.role = 'user'

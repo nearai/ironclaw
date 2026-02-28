@@ -26,6 +26,7 @@ use tower_http::set_header::SetResponseHeaderLayer;
 use uuid::Uuid;
 
 use crate::agent::SessionManager;
+use crate::bootstrap::ironclaw_base_dir;
 use crate::channels::IncomingMessage;
 use crate::channels::web::auth::{AuthState, auth_middleware};
 use crate::channels::web::handlers::skills::{
@@ -34,6 +35,7 @@ use crate::channels::web::handlers::skills::{
 use crate::channels::web::log_layer::LogBroadcaster;
 use crate::channels::web::sse::SseManager;
 use crate::channels::web::types::*;
+use crate::channels::web::util::{build_turns_from_db_messages, truncate_preview};
 use crate::db::Database;
 use crate::extensions::ExtensionManager;
 use crate::orchestrator::job_manager::ContainerJobManager;
@@ -158,6 +160,8 @@ pub struct GatewayState {
     pub cost_guard: Option<Arc<crate::agent::cost_guard::CostGuard>>,
     /// Server startup time for uptime calculation.
     pub startup_time: std::time::Instant,
+    /// Flag set when a restart has been requested via the API.
+    pub restart_requested: std::sync::atomic::AtomicBool,
 }
 
 /// Start the gateway HTTP server.
@@ -238,6 +242,8 @@ pub async fn start_server(
             "/api/extensions/{name}/setup",
             get(extensions_setup_handler).post(extensions_setup_submit_handler),
         )
+        // Gateway management
+        .route("/api/gateway/restart", post(gateway_restart_handler))
         // Pairing
         .route("/api/pairing/{channel}", get(pairing_list_handler))
         .route(
@@ -730,12 +736,13 @@ async fn chat_history_handler(
             turns,
             has_more,
             oldest_timestamp,
+            pending_approval: None,
         }));
     }
 
     // Try in-memory first (freshest data for active threads)
     if let Some(thread) = sess.threads.get(&thread_id)
-        && !thread.turns.is_empty()
+        && (!thread.turns.is_empty() || thread.pending_approval.is_some())
     {
         let turns: Vec<TurnInfo> = thread
             .turns
@@ -754,16 +761,35 @@ async fn chat_history_handler(
                         name: tc.name.clone(),
                         has_result: tc.result.is_some(),
                         has_error: tc.error.is_some(),
+                        result_preview: tc.result.as_ref().map(|r| {
+                            let s = match r {
+                                serde_json::Value::String(s) => s.clone(),
+                                other => other.to_string(),
+                            };
+                            truncate_preview(&s, 500)
+                        }),
+                        error: tc.error.clone(),
                     })
                     .collect(),
             })
             .collect();
+
+        let pending_approval = thread
+            .pending_approval
+            .as_ref()
+            .map(|pa| PendingApprovalInfo {
+                request_id: pa.request_id.to_string(),
+                tool_name: pa.tool_name.clone(),
+                description: pa.description.clone(),
+                parameters: serde_json::to_string_pretty(&pa.parameters).unwrap_or_default(),
+            });
 
         return Ok(Json(HistoryResponse {
             thread_id,
             turns,
             has_more: false,
             oldest_timestamp: None,
+            pending_approval,
         }));
     }
 
@@ -782,6 +808,7 @@ async fn chat_history_handler(
                 turns,
                 has_more,
                 oldest_timestamp,
+                pending_approval: None,
             }));
         }
     }
@@ -792,47 +819,8 @@ async fn chat_history_handler(
         turns: Vec::new(),
         has_more: false,
         oldest_timestamp: None,
+        pending_approval: None,
     }))
-}
-
-/// Build TurnInfo pairs from flat DB messages (alternating user/assistant).
-fn build_turns_from_db_messages(messages: &[crate::history::ConversationMessage]) -> Vec<TurnInfo> {
-    let mut turns = Vec::new();
-    let mut turn_number = 0;
-    let mut iter = messages.iter().peekable();
-
-    while let Some(msg) = iter.next() {
-        if msg.role == "user" {
-            let mut turn = TurnInfo {
-                turn_number,
-                user_input: msg.content.clone(),
-                response: None,
-                state: "Completed".to_string(),
-                started_at: msg.created_at.to_rfc3339(),
-                completed_at: None,
-                tool_calls: Vec::new(),
-            };
-
-            // Check if next message is an assistant response
-            if let Some(next) = iter.peek()
-                && next.role == "assistant"
-            {
-                let assistant_msg = iter.next().expect("peeked");
-                turn.response = Some(assistant_msg.content.clone());
-                turn.completed_at = Some(assistant_msg.created_at.to_rfc3339());
-            }
-
-            // Incomplete turn (user message without response)
-            if turn.response.is_none() {
-                turn.state = "Failed".to_string();
-            }
-
-            turns.push(turn);
-            turn_number += 1;
-        }
-    }
-
-    turns
 }
 
 async fn chat_threads_handler(
@@ -865,7 +853,7 @@ async fn chat_threads_handler(
                 let info = ThreadInfo {
                     id: s.id,
                     state: "Idle".to_string(),
-                    turn_count: (s.message_count / 2).max(0) as usize,
+                    turn_count: s.message_count.max(0) as usize,
                     created_at: s.started_at.to_rfc3339(),
                     updated_at: s.last_activity.to_rfc3339(),
                     title: s.title.clone(),
@@ -1722,17 +1710,46 @@ async fn extensions_list_handler(
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
+    let pairing_store = crate::pairing::PairingStore::new();
     let extensions = installed
         .into_iter()
-        .map(|ext| ExtensionInfo {
-            name: ext.name,
-            kind: ext.kind.to_string(),
-            description: ext.description,
-            url: ext.url,
-            authenticated: ext.authenticated,
-            active: ext.active,
-            tools: ext.tools,
-            needs_setup: ext.needs_setup,
+        .map(|ext| {
+            let activation_status = if ext.kind == crate::extensions::ExtensionKind::WasmChannel {
+                Some(if ext.activation_error.is_some() {
+                    "failed".to_string()
+                } else if !ext.authenticated {
+                    // No credentials configured yet.
+                    "installed".to_string()
+                } else if ext.active && ext.name == "telegram" {
+                    // Telegram: check pairing status (end-to-end setup via web UI).
+                    let has_paired = pairing_store
+                        .read_allow_from(&ext.name)
+                        .map(|list| !list.is_empty())
+                        .unwrap_or(false);
+                    if has_paired {
+                        "active".to_string()
+                    } else {
+                        "pairing".to_string()
+                    }
+                } else {
+                    // Authenticated but not fully active (or non-Telegram).
+                    "configured".to_string()
+                })
+            } else {
+                None
+            };
+            ExtensionInfo {
+                name: ext.name,
+                kind: ext.kind.to_string(),
+                description: ext.description,
+                url: ext.url,
+                authenticated: ext.authenticated,
+                active: ext.active,
+                tools: ext.tools,
+                needs_setup: ext.needs_setup,
+                activation_status,
+                activation_error: ext.activation_error,
+            }
         })
         .collect();
 
@@ -1888,11 +1905,7 @@ async fn serve_project_file(project_id: &str, path: &str) -> axum::response::Res
         return (StatusCode::BAD_REQUEST, "Invalid project ID").into_response();
     }
 
-    let base = dirs::home_dir()
-        .unwrap_or_else(|| std::path::PathBuf::from("."))
-        .join(".ironclaw")
-        .join("projects")
-        .join(project_id);
+    let base = ironclaw_base_dir().join("projects").join(project_id);
 
     let file_path = base.join(path);
 
@@ -2037,9 +2050,42 @@ async fn extensions_setup_submit_handler(
     ))?;
 
     match ext_mgr.save_setup_secrets(&name, &req.secrets).await {
-        Ok(message) => Ok(Json(ActionResponse::ok(message))),
+        Ok(result) => {
+            let mut resp = ActionResponse::ok(result.message);
+            resp.activated = Some(result.activated);
+            if !result.activated {
+                resp.needs_restart = Some(true);
+            }
+            Ok(Json(resp))
+        }
         Err(e) => Ok(Json(ActionResponse::fail(e.to_string()))),
     }
+}
+
+// --- Gateway management handlers ---
+
+async fn gateway_restart_handler(State(state): State<Arc<GatewayState>>) -> Json<ActionResponse> {
+    // Idempotency guard: only allow one restart at a time.
+    if state
+        .restart_requested
+        .compare_exchange(
+            false,
+            true,
+            std::sync::atomic::Ordering::SeqCst,
+            std::sync::atomic::Ordering::SeqCst,
+        )
+        .is_err()
+    {
+        return Json(ActionResponse::ok("Restart already in progress"));
+    }
+
+    // Take the shutdown sender and trigger graceful shutdown.
+    if let Some(tx) = state.shutdown_tx.write().await.take() {
+        let _ = tx.send(());
+        tracing::info!("Gateway restart requested via API");
+    }
+
+    Json(ActionResponse::ok("Restarting..."))
 }
 
 // --- Pairing handlers ---
@@ -2100,7 +2146,7 @@ async fn routines_list_handler(
     ))?;
 
     let routines = store
-        .list_routines(&state.user_id)
+        .list_all_routines()
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
@@ -2118,7 +2164,7 @@ async fn routines_summary_handler(
     ))?;
 
     let routines = store
-        .list_routines(&state.user_id)
+        .list_all_routines()
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
