@@ -232,3 +232,85 @@ async fn exists_spans_scopes() {
         "Alice with multi-scope should see shared doc"
     );
 }
+
+#[tokio::test]
+async fn append_stays_in_primary_scope() {
+    let (db, _dir) = setup().await;
+
+    // Write a document as "shared"
+    let ws_shared = Workspace::new_with_db("shared", Arc::clone(&db));
+    ws_shared
+        .write("notes/log.md", "shared original content")
+        .await
+        .expect("shared write failed");
+
+    // Alice has "shared" as a read scope and appends to the same path
+    let ws_alice = Workspace::new_with_db("alice", Arc::clone(&db))
+        .with_additional_read_scopes(vec!["shared".to_string()]);
+    ws_alice
+        .append("notes/log.md", "alice appended line")
+        .await
+        .expect("alice append failed");
+
+    // Shared document must be unchanged (write isolation)
+    let shared_doc = ws_shared
+        .read("notes/log.md")
+        .await
+        .expect("shared read failed");
+    assert_eq!(
+        shared_doc.content, "shared original content",
+        "Append must not modify the secondary scope's document"
+    );
+
+    // Alice should have her own copy with the appended content
+    let ws_alice_plain = Workspace::new_with_db("alice", Arc::clone(&db));
+    let alice_doc = ws_alice_plain
+        .read("notes/log.md")
+        .await
+        .expect("alice read failed");
+    assert_eq!(
+        alice_doc.content, "alice appended line",
+        "Append should create a new document in alice's scope"
+    );
+}
+
+#[tokio::test]
+async fn append_memory_stays_in_primary_scope() {
+    let (db, _dir) = setup().await;
+
+    // Write MEMORY.md as "shared"
+    let ws_shared = Workspace::new_with_db("shared", Arc::clone(&db));
+    ws_shared
+        .write("MEMORY.md", "shared memory baseline")
+        .await
+        .expect("shared write failed");
+
+    // Alice has "shared" as a read scope and appends a memory entry
+    let ws_alice = Workspace::new_with_db("alice", Arc::clone(&db))
+        .with_additional_read_scopes(vec!["shared".to_string()]);
+    ws_alice
+        .append_memory("alice remembers this")
+        .await
+        .expect("alice append_memory failed");
+
+    // Shared MEMORY.md must be unchanged
+    let shared_doc = ws_shared
+        .read("MEMORY.md")
+        .await
+        .expect("shared read failed");
+    assert_eq!(
+        shared_doc.content, "shared memory baseline",
+        "append_memory must not modify the secondary scope's document"
+    );
+
+    // Alice should have her own MEMORY.md
+    let ws_alice_plain = Workspace::new_with_db("alice", Arc::clone(&db));
+    let alice_doc = ws_alice_plain
+        .read("MEMORY.md")
+        .await
+        .expect("alice read failed");
+    assert_eq!(
+        alice_doc.content, "alice remembers this",
+        "append_memory should create in alice's scope"
+    );
+}
