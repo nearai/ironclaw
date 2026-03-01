@@ -301,6 +301,56 @@ fn type_mismatch() {
 }
 
 #[test]
+fn number_string_coercion() {
+    let schema = grocery_schema();
+    // LLMs sometimes send numbers as strings — should be accepted and coerced.
+    let data = serde_json::json!({
+        "name": "Eggs",
+        "quantity": "12"
+    });
+    let result = schema.validate_record(&data).unwrap();
+    assert_eq!(result["quantity"], serde_json::json!(12));
+    assert!(result["quantity"].is_number());
+
+    // Float strings too.
+    let data = serde_json::json!({
+        "name": "Rice",
+        "quantity": "2.5"
+    });
+    let result = schema.validate_record(&data).unwrap();
+    assert_eq!(result["quantity"], serde_json::json!(2.5));
+}
+
+#[test]
+fn bool_string_coercion() {
+    let mut fields = BTreeMap::new();
+    fields.insert(
+        "active".to_string(),
+        FieldDef {
+            field_type: FieldType::Bool,
+            required: true,
+            default: None,
+        },
+    );
+    let schema = CollectionSchema {
+        collection: "test".to_string(),
+        description: None,
+        fields,
+    };
+    let data = serde_json::json!({"active": "true"});
+    let result = schema.validate_record(&data).unwrap();
+    assert_eq!(result["active"], serde_json::json!(true));
+
+    let data = serde_json::json!({"active": "false"});
+    let result = schema.validate_record(&data).unwrap();
+    assert_eq!(result["active"], serde_json::json!(false));
+
+    // Non-boolean strings still fail.
+    let data = serde_json::json!({"active": "yes"});
+    assert!(schema.validate_record(&data).is_err());
+}
+
+#[test]
 fn invalid_enum_value() {
     let schema = nanny_schema();
     let data = serde_json::json!({

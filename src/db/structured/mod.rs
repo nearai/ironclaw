@@ -396,7 +396,10 @@ impl CollectionSchema {
             match obj.get(field_name) {
                 Some(value) if !value.is_null() => {
                     validate_field_value(field_name, &field_def.field_type, value)?;
-                    result.insert(field_name.clone(), value.clone());
+                    result.insert(
+                        field_name.clone(),
+                        coerce_field_value(&field_def.field_type, value),
+                    );
                 }
                 _ => {
                     // Field is absent or null.
@@ -454,7 +457,10 @@ impl CollectionSchema {
                 } else {
                     validate_field_value(field_name, &field_def.field_type, value)?;
                 }
-                result.insert(field_name.clone(), value.clone());
+                result.insert(
+                    field_name.clone(),
+                    coerce_field_value(&field_def.field_type, value),
+                );
             }
         }
 
@@ -482,6 +488,13 @@ pub fn validate_field_value(
         }
         FieldType::Number => {
             if !value.is_number() {
+                // LLMs sometimes send numbers as strings (e.g. "6" instead of 6).
+                // Accept parseable numeric strings rather than rejecting them.
+                if let Some(s) = value.as_str()
+                    && s.parse::<f64>().is_ok()
+                {
+                    return Ok(());
+                }
                 return Err(ValidationError::TypeMismatch {
                     field: field.to_string(),
                     expected: "number".to_string(),
@@ -530,6 +543,12 @@ pub fn validate_field_value(
         }
         FieldType::Bool => {
             if !value.is_boolean() {
+                // Accept "true"/"false" strings from LLMs.
+                if let Some(s) = value.as_str()
+                    && (s == "true" || s == "false")
+                {
+                    return Ok(());
+                }
                 return Err(ValidationError::TypeMismatch {
                     field: field.to_string(),
                     expected: "bool".to_string(),
@@ -553,6 +572,47 @@ pub fn validate_field_value(
         }
     }
     Ok(())
+}
+
+/// Coerce a JSON value to its canonical type. Called after validation passes.
+/// LLMs sometimes send numbers as strings — this converts them to proper
+/// JSON types so storage and queries work correctly.
+fn coerce_field_value(field_type: &FieldType, value: &serde_json::Value) -> serde_json::Value {
+    match field_type {
+        FieldType::Number => {
+            if value.is_number() {
+                return value.clone();
+            }
+            // String that passed validation — parse to number.
+            if let Some(s) = value.as_str() {
+                if let Ok(i) = s.parse::<i64>() {
+                    return serde_json::Value::Number(i.into());
+                }
+                if let Ok(f) = s.parse::<f64>()
+                    && let Some(n) = serde_json::Number::from_f64(f)
+                {
+                    return serde_json::Value::Number(n);
+                }
+            }
+            value.clone()
+        }
+        FieldType::Bool => {
+            if value.is_boolean() {
+                return value.clone();
+            }
+            // String booleans from LLMs.
+            if let Some(s) = value.as_str() {
+                match s {
+                    "true" => return serde_json::Value::Bool(true),
+                    "false" => return serde_json::Value::Bool(false),
+                    _ => {}
+                }
+            }
+            value.clone()
+        }
+        // All other types are already the right JSON type after validation.
+        _ => value.clone(),
+    }
 }
 
 /// Convert a JSON value to its text representation, matching PostgreSQL

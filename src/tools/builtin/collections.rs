@@ -107,6 +107,16 @@ pub(crate) fn generate_collection_skill(schema: &CollectionSchema, skills_dir: &
         }
     }
 
+    // Field names as keywords (e.g., "task", "priority", "assignee")
+    for fname in schema.fields.keys() {
+        for word in fname.split('_') {
+            let w = word.to_lowercase();
+            if w.len() > 2 && !stopwords.contains(&w.as_str()) && !keywords.contains(&w) {
+                keywords.push(w);
+            }
+        }
+    }
+
     // Enum values from fields
     for def in schema.fields.values() {
         if let FieldType::Enum { values } = &def.field_type {
@@ -120,7 +130,7 @@ pub(crate) fn generate_collection_skill(schema: &CollectionSchema, skills_dir: &
     }
 
     // Cap keywords at a reasonable number
-    keywords.truncate(20);
+    keywords.truncate(25);
 
     let keywords_yaml: String = keywords
         .iter()
@@ -151,6 +161,10 @@ description: "{description}"
 activation:
   keywords:
 {keywords_yaml}
+  patterns:
+    - "(?i)(needs? to|have to|got to|should|must|going to)"
+    - "(?i)\\b(add|put|pick up|include|also need|another)\\b"
+    - "(?i)(what('s| do| does| is)|show me|how many|on my (list|plate))"
   max_context_tokens: 800
   tools_prefix: {name}
 ---
@@ -176,12 +190,15 @@ When the user mentions items to add, ALWAYS call {name}_add immediately:
 - "Add X" → one {name}_add call
 - "Add X and Y" → two {name}_add calls (one per item)
 - "I also need X" / "and Y too" → one {name}_add call per item
-- Do NOT just respond in text. Call the tool.
+- "[Person] needs to [task]" → one {name}_add call (extract person into assignee/person field)
+- "I need to [task]" → one {name}_add call (assign to the user)
+- ANY mention of something to track → call {name}_add. NEVER just respond in text.
 
 ## Querying
 
 - "What's on my list?" / "Show me everything" → {name}_query with no filters
 - "Show me just [value]" → {name}_query with filter
+- "What does [person] have?" → {name}_query with person/assignee filter
 - "How many?" / "Total?" / "Summary by [field]?" → {name}_summary
 "#
     );
@@ -545,8 +562,17 @@ impl Tool for CollectionRegisterTool {
         "Register a new structured data collection with a typed schema. \
          After registration, dedicated tools for adding, updating, deleting, \
          querying, and summarizing records become available immediately. \
-         Use this when you need to track structured data like schedules, \
-         lists, or any records with defined fields."
+         USE THIS for: todo lists, task boards, grocery lists, shopping lists, \
+         inventories, schedules, logs, trackers, budgets, meal plans, chore charts, \
+         contact lists, or ANY list/table the user wants to manage. \
+         If the user says 'keep track of', 'set up a list', 'organize my', \
+         'manage my', or 'I need a [something] list' — this is the right tool. \
+         Design a RICH schema: ALWAYS include a required text field for the \
+         main content (e.g. 'task', 'item', 'title', 'name' — whatever fits). \
+         Add fields the user will want to filter or group by \
+         (e.g. category, status, priority, assignee, date, due_date). \
+         Use enum types for fields with a known set of values. \
+         Mark key fields as required."
     }
 
     fn parameters_schema(&self) -> serde_json::Value {
@@ -1369,19 +1395,33 @@ impl Tool for CollectionQueryTool {
     ) -> Result<ToolOutput, ToolError> {
         let start = std::time::Instant::now();
 
-        // Parse filters
-        let filters: Vec<Filter> = if let Some(filters_val) = params.get("filters") {
-            serde_json::from_value(filters_val.clone()).map_err(|e| {
+        // Parse filters — LLMs sometimes send "{}" (string) instead of [] (array).
+        let filters: Vec<Filter> = match params.get("filters") {
+            Some(v) if v.is_array() => serde_json::from_value(v.clone()).map_err(|e| {
                 ToolError::InvalidParameters(format!("Invalid filters: {e}"))
-            })?
-        } else {
-            Vec::new()
+            })?,
+            Some(v) if v.is_string() => {
+                // Try parsing stringified JSON; treat "{}" or empty as no filters.
+                let s = v.as_str().unwrap_or("[]");
+                if s == "{}" || s.trim().is_empty() {
+                    Vec::new()
+                } else {
+                    serde_json::from_str(s).map_err(|e| {
+                        ToolError::InvalidParameters(format!("Invalid filters string: {e}"))
+                    })?
+                }
+            }
+            _ => Vec::new(),
         };
 
         let order_by = params.get("order_by").and_then(|v| v.as_str());
+        // LLMs sometimes send limit as string "50" instead of 50.
         let limit = params
             .get("limit")
-            .and_then(|v| v.as_u64())
+            .and_then(|v| {
+                v.as_u64()
+                    .or_else(|| v.as_str().and_then(|s| s.parse::<u64>().ok()))
+            })
             .unwrap_or(50)
             .min(200) as usize;
 
@@ -1527,12 +1567,21 @@ impl Tool for CollectionSummaryTool {
             .and_then(|v| v.as_str())
             .map(String::from);
 
-        let filters: Vec<Filter> = if let Some(filters_val) = params.get("filters") {
-            serde_json::from_value(filters_val.clone()).map_err(|e| {
+        let filters: Vec<Filter> = match params.get("filters") {
+            Some(v) if v.is_array() => serde_json::from_value(v.clone()).map_err(|e| {
                 ToolError::InvalidParameters(format!("Invalid filters: {e}"))
-            })?
-        } else {
-            Vec::new()
+            })?,
+            Some(v) if v.is_string() => {
+                let s = v.as_str().unwrap_or("[]");
+                if s == "{}" || s.trim().is_empty() {
+                    Vec::new()
+                } else {
+                    serde_json::from_str(s).map_err(|e| {
+                        ToolError::InvalidParameters(format!("Invalid filters string: {e}"))
+                    })?
+                }
+            }
+            _ => Vec::new(),
         };
 
         let aggregation = Aggregation {
