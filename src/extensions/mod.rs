@@ -187,6 +187,9 @@ fn default_true() -> bool {
 pub struct InstalledExtension {
     pub name: String,
     pub kind: ExtensionKind,
+    /// Human-readable display name (e.g. "Telegram Channel" vs "Telegram Tool").
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub display_name: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
     /// Server or source URL (e.g. MCP server endpoint).

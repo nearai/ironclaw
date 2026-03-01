@@ -51,6 +51,7 @@ pub async fn extensions_list_handler(
             };
             ExtensionInfo {
                 name: ext.name,
+                display_name: ext.display_name,
                 kind: ext.kind.to_string(),
                 description: ext.description,
                 url: ext.url,

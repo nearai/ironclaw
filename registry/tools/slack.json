@@ -1,9 +1,9 @@
 {
   "name": "slack-tool",
-  "display_name": "Slack",
+  "display_name": "Slack Tool",
   "kind": "tool",
   "version": "0.1.0",
-  "description": "Post messages, read channels, and manage conversations via Slack API",
+  "description": "Your agent uses Slack to post and read messages in your workspace",
   "keywords": ["messaging", "chat", "workspace"],
 
   "source": {
