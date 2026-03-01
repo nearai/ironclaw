@@ -1070,7 +1070,10 @@ impl Tool for CollectionAddTool {
     fn description(&self) -> &str {
         // Can't return dynamic string from &str, so use a static prefix.
         // The tool name already encodes the collection.
-        "Add a new record to this collection. Fields are validated against the schema."
+        "Add a new record to this collection. \
+         Call this when the user wants to track, remember, save, create, or log something new. \
+         Example triggers: 'I need to...', 'Add...', 'Don't forget...', 'Put X on my list', \
+         '[person] needs to...'. Fields are validated against the schema."
     }
 
     fn parameters_schema(&self) -> serde_json::Value {

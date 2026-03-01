@@ -11,7 +11,7 @@ mod tests;
 use std::collections::BTreeMap;
 
 use async_trait::async_trait;
-use chrono::{DateTime, FixedOffset, NaiveDate, NaiveTime};
+use chrono::{DateTime, Datelike, FixedOffset, NaiveDate, NaiveTime, Weekday};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -90,6 +90,8 @@ pub enum FilterOp {
 pub struct Filter {
     pub field: String,
     pub op: FilterOp,
+    /// Comparison value. Defaults to `null` (appropriate for `is_null`/`is_not_null`).
+    #[serde(default)]
     pub value: serde_json::Value,
 }
 
@@ -468,6 +470,72 @@ impl CollectionSchema {
     }
 }
 
+// ==================== Natural-Language Date Resolution ====================
+
+/// Try to resolve a natural-language date expression to a concrete `NaiveDate`.
+///
+/// LLMs (especially small models) often send relative expressions like "today",
+/// "tomorrow", "this week", or day names instead of YYYY-MM-DD. This handles
+/// the most common cases so the tool call doesn't fail validation.
+fn try_parse_natural_date(s: &str) -> Option<NaiveDate> {
+    let today = chrono::Local::now().date_naive();
+    let lower = s.trim().to_lowercase();
+
+    match lower.as_str() {
+        "today" => return Some(today),
+        "tomorrow" => return Some(today + chrono::Duration::days(1)),
+        "yesterday" => return Some(today - chrono::Duration::days(1)),
+        "this week" | "this week." => return Some(today),
+        "next week" => {
+            // Next Monday.
+            let days_until_monday = (Weekday::Mon.num_days_from_monday() as i64
+                + 7
+                - today.weekday().num_days_from_monday() as i64)
+                % 7;
+            let days = if days_until_monday == 0 { 7 } else { days_until_monday };
+            return Some(today + chrono::Duration::days(days));
+        }
+        _ => {}
+    }
+
+    // "monday", "tuesday", ... → next occurrence of that weekday.
+    if let Some(target) = parse_weekday(&lower) {
+        let days = (target.num_days_from_monday() as i64
+            + 7
+            - today.weekday().num_days_from_monday() as i64)
+            % 7;
+        let days = if days == 0 { 7 } else { days };
+        return Some(today + chrono::Duration::days(days));
+    }
+
+    // "next monday", "next tuesday", ...
+    if let Some(rest) = lower.strip_prefix("next ")
+        && let Some(target) = parse_weekday(rest.trim())
+    {
+        let days = (target.num_days_from_monday() as i64
+            + 7
+            - today.weekday().num_days_from_monday() as i64)
+            % 7;
+        let days = if days == 0 { 7 } else { days };
+        return Some(today + chrono::Duration::days(days));
+    }
+
+    None
+}
+
+fn parse_weekday(s: &str) -> Option<Weekday> {
+    match s {
+        "monday" | "mon" => Some(Weekday::Mon),
+        "tuesday" | "tue" | "tues" => Some(Weekday::Tue),
+        "wednesday" | "wed" => Some(Weekday::Wed),
+        "thursday" | "thu" | "thurs" => Some(Weekday::Thu),
+        "friday" | "fri" => Some(Weekday::Fri),
+        "saturday" | "sat" => Some(Weekday::Sat),
+        "sunday" | "sun" => Some(Weekday::Sun),
+        _ => None,
+    }
+}
+
 // ==================== Field Value Validation ====================
 
 /// Validate a single field value against its declared type.
@@ -508,12 +576,17 @@ pub fn validate_field_value(
                 expected: "date (string)".to_string(),
                 got: json_type_name(value).to_string(),
             })?;
-            NaiveDate::parse_from_str(s, "%Y-%m-%d").map_err(|e| {
-                ValidationError::InvalidDateFormat {
+            // Accept YYYY-MM-DD or common NL expressions ("today", "tomorrow", etc.)
+            if NaiveDate::parse_from_str(s, "%Y-%m-%d").is_err()
+                && try_parse_natural_date(s).is_none()
+            {
+                return Err(ValidationError::InvalidDateFormat {
                     field: field.to_string(),
-                    reason: e.to_string(),
-                }
-            })?;
+                    reason: format!(
+                        "expected YYYY-MM-DD or relative date (today, tomorrow, etc.), got {s:?}"
+                    ),
+                });
+            }
         }
         FieldType::Time => {
             let s = value.as_str().ok_or_else(|| ValidationError::TypeMismatch {
@@ -607,6 +680,16 @@ fn coerce_field_value(field_type: &FieldType, value: &serde_json::Value) -> serd
                     "false" => return serde_json::Value::Bool(false),
                     _ => {}
                 }
+            }
+            value.clone()
+        }
+        FieldType::Date => {
+            // Coerce NL date expressions to YYYY-MM-DD for storage.
+            if let Some(s) = value.as_str()
+                && NaiveDate::parse_from_str(s, "%Y-%m-%d").is_err()
+                && let Some(date) = try_parse_natural_date(s)
+            {
+                return serde_json::Value::String(date.format("%Y-%m-%d").to_string());
             }
             value.clone()
         }
