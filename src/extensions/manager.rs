@@ -2602,6 +2602,8 @@ fn combine_install_errors(
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
     use crate::extensions::manager::{
         FallbackDecision, combine_install_errors, fallback_decision, infer_kind_from_url,
     };
@@ -2778,6 +2780,86 @@ mod tests {
         std::fs::remove_file(&channel_wasm).unwrap();
         assert!(tool_wasm.exists());
         assert!(!channel_wasm.exists());
+    }
+
+    // === WASM runtime availability tests ===
+    //
+    // Regression tests for a bug where the WASM runtime was only created at
+    // startup when the tools directory already existed. Extensions installed
+    // after startup (e.g. via the web UI) would fail with "WASM runtime not
+    // available" because the ExtensionManager had `wasm_tool_runtime: None`.
+
+    /// Build a minimal ExtensionManager suitable for unit tests.
+    fn make_test_manager(
+        wasm_runtime: Option<Arc<crate::tools::wasm::WasmToolRuntime>>,
+        tools_dir: std::path::PathBuf,
+    ) -> crate::extensions::manager::ExtensionManager {
+        use crate::secrets::{InMemorySecretsStore, SecretsCrypto};
+        use crate::tools::mcp::session::McpSessionManager;
+
+        let key = secrecy::SecretString::from(crate::secrets::keychain::generate_master_key_hex());
+        let crypto = Arc::new(SecretsCrypto::new(key).expect("crypto"));
+        let secrets: Arc<dyn crate::secrets::SecretsStore + Send + Sync> =
+            Arc::new(InMemorySecretsStore::new(crypto));
+        let tools = Arc::new(crate::tools::ToolRegistry::new());
+        let mcp = Arc::new(McpSessionManager::new());
+
+        crate::extensions::manager::ExtensionManager::new(
+            mcp,
+            secrets,
+            tools,
+            None, // hooks
+            wasm_runtime,
+            tools_dir.clone(),
+            tools_dir, // channels dir (unused here)
+            None,      // tunnel_url
+            "test".to_string(),
+            None, // db
+            vec![],
+        )
+    }
+
+    #[tokio::test]
+    async fn test_activate_wasm_tool_with_runtime_passes_runtime_check() {
+        // When the ExtensionManager has a WASM runtime, activation should get
+        // past the "WASM runtime not available" check. It will still fail
+        // because no .wasm file exists on disk — but the error message should
+        // be "not found", NOT "WASM runtime not available".
+        let dir = tempfile::tempdir().expect("temp dir");
+        let config = crate::tools::wasm::WasmRuntimeConfig::for_testing();
+        let runtime = Arc::new(crate::tools::wasm::WasmToolRuntime::new(config).expect("runtime"));
+        let mgr = make_test_manager(Some(runtime), dir.path().to_path_buf());
+
+        let err = mgr.activate("nonexistent").await.unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            !msg.contains("WASM runtime not available"),
+            "Should not fail on runtime check, got: {msg}"
+        );
+        assert!(
+            msg.contains("not found")
+                || msg.contains("not installed")
+                || msg.contains("Not installed"),
+            "Should fail on missing file, got: {msg}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_activate_wasm_tool_without_runtime_fails_with_runtime_error() {
+        // When the ExtensionManager has no WASM runtime (None), activation
+        // must fail with the "WASM runtime not available" message.
+        let dir = tempfile::tempdir().expect("temp dir");
+        // Write a fake .wasm file so we don't fail on "not found" first.
+        std::fs::write(dir.path().join("fake.wasm"), b"not-a-real-wasm").unwrap();
+
+        let mgr = make_test_manager(None, dir.path().to_path_buf());
+
+        let err = mgr.activate("fake").await.unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("WASM runtime not available"),
+            "Expected runtime not available error, got: {msg}"
+        );
     }
 
     #[test]
