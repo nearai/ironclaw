@@ -897,81 +897,61 @@ fn register_webhook(tunnel_url: &str, webhook_secret: Option<&str>) -> Result<()
         None,
     );
 
-    match result {
-        Ok(response) => {
-            // On 409 Conflict, delete the existing webhook and retry once
-            if response.status == 409 {
-                channel_host::log(
-                    channel_host::LogLevel::Warn,
-                    "409 Conflict -- deleting existing webhook and retrying",
-                );
-                let _ = delete_webhook();
+    let mut response = match result {
+        Ok(response) => response,
+        Err(e) => return Err(format!("HTTP request failed: {}", e)),
+    };
 
-                let retry = channel_host::http_request(
-                    "POST",
-                    "https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/setWebhook",
-                    &headers.to_string(),
-                    Some(&body_bytes),
-                    None,
-                );
-                match retry {
-                    Ok(retry_resp) => {
-                        if retry_resp.status != 200 {
-                            let body_str = String::from_utf8_lossy(&retry_resp.body);
-                            return Err(format!(
-                                "HTTP {} (after 409 retry): {}",
-                                retry_resp.status, body_str
-                            ));
-                        }
-                        let api_response: TelegramApiResponse<serde_json::Value> =
-                            serde_json::from_slice(&retry_resp.body)
-                                .map_err(|e| format!("Failed to parse response: {}", e))?;
-                        if !api_response.ok {
-                            return Err(format!(
-                                "Telegram API error (after 409 retry): {}",
-                                api_response
-                                    .description
-                                    .unwrap_or_else(|| "unknown".to_string())
-                            ));
-                        }
-                        channel_host::log(
-                            channel_host::LogLevel::Info,
-                            &format!("Webhook registered successfully (after retry): {}", webhook_url),
-                        );
-                        return Ok(());
-                    }
-                    Err(e) => return Err(format!("HTTP request failed (after 409 retry): {}", e)),
-                }
-            }
+    let mut retried = false;
+    if response.status == 409 {
+        channel_host::log(
+            channel_host::LogLevel::Warn,
+            "409 Conflict -- deleting existing webhook and retrying",
+        );
+        let _ = delete_webhook();
+        retried = true;
 
-            if response.status != 200 {
-                let body_str = String::from_utf8_lossy(&response.body);
-                return Err(format!("HTTP {}: {}", response.status, body_str));
-            }
-
-            // Parse Telegram API response
-            let api_response: TelegramApiResponse<serde_json::Value> =
-                serde_json::from_slice(&response.body)
-                    .map_err(|e| format!("Failed to parse response: {}", e))?;
-
-            if !api_response.ok {
-                return Err(format!(
-                    "Telegram API error: {}",
-                    api_response
-                        .description
-                        .unwrap_or_else(|| "unknown".to_string())
-                ));
-            }
-
-            channel_host::log(
-                channel_host::LogLevel::Info,
-                &format!("Webhook registered successfully: {}", webhook_url),
-            );
-
-            Ok(())
-        }
-        Err(e) => Err(format!("HTTP request failed: {}", e)),
+        response = match channel_host::http_request(
+            "POST",
+            "https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/setWebhook",
+            &headers.to_string(),
+            Some(&body_bytes),
+            None,
+        ) {
+            Ok(resp) => resp,
+            Err(e) => return Err(format!("HTTP request failed (after 409 retry): {}", e)),
+        };
     }
+
+    if response.status != 200 {
+        let body_str = String::from_utf8_lossy(&response.body);
+        let context = if retried { " (after 409 retry)" } else { "" };
+        return Err(format!("HTTP {}{}: {}", response.status, context, body_str));
+    }
+
+    // Parse Telegram API response
+    let api_response: TelegramApiResponse<serde_json::Value> =
+        serde_json::from_slice(&response.body)
+            .map_err(|e| format!("Failed to parse response: {}", e))?;
+
+    if !api_response.ok {
+        let context = if retried { " (after 409 retry)" } else { "" };
+        return Err(format!(
+            "Telegram API error{}: {}",
+            context,
+            api_response
+                .description
+                .unwrap_or_else(|| "unknown".to_string())
+        ));
+    }
+
+    let context = if retried { " (after retry)" } else { "" };
+    channel_host::log(
+        channel_host::LogLevel::Info,
+        &format!("Webhook registered successfully{}: {}", context, webhook_url),
+    );
+
+    Ok(())
 }
 
 // ============================================================================
