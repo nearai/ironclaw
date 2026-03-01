@@ -803,4 +803,44 @@ mod tests {
         let params = serde_json::json!({"method": "GET"});
         assert_eq!(extract_host_from_params(&params), None);
     }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn requires_approval_multi_thread_no_panic() {
+        use crate::secrets::CredentialMapping;
+        use crate::tools::wasm::SharedCredentialRegistry;
+
+        // Test with credential registry (uses std::sync::RwLock - should be safe)
+        let registry = Arc::new(SharedCredentialRegistry::new());
+        registry.add_mappings(vec![CredentialMapping::bearer("test_key", "api.test.com")]);
+
+        let tool = HttpTool::new().with_credentials(
+            registry,
+            Arc::new(crate::secrets::InMemorySecretsStore::new(Arc::new(
+                crate::secrets::SecretsCrypto::new(secrecy::SecretString::from(
+                    "0123456789abcdef0123456789abcdef".to_string(),
+                ))
+                .unwrap(),
+            ))),
+        );
+
+        // These calls should not panic in multi-thread runtime
+        let params_no_auth = serde_json::json!({
+            "method": "GET",
+            "url": "https://api.example.com/data"
+        });
+        let _ = tool.requires_approval(&params_no_auth);
+
+        let params_with_cred = serde_json::json!({
+            "method": "GET",
+            "url": "https://api.test.com/v1/models"
+        });
+        let _ = tool.requires_approval(&params_with_cred);
+
+        let params_with_auth = serde_json::json!({
+            "method": "GET",
+            "url": "https://api.example.com",
+            "headers": {"Authorization": "Bearer token"}
+        });
+        let _ = tool.requires_approval(&params_with_auth);
+    }
 }

@@ -139,3 +139,29 @@ fn shell_tool_schema_is_valid() {
     let errors = validate_tool_schema(&schema, "shell");
     assert!(errors.is_empty(), "shell tool schema errors: {errors:?}");
 }
+
+/// Validates that all core tools work correctly under a multi-threaded tokio runtime.
+/// This catches sync-async boundary bugs like tokio::sync::RwLock::blocking_read()
+/// panicking when called from within a multi-threaded runtime context.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn all_core_tools_work_in_multi_thread_runtime() {
+    let registry = ToolRegistry::new();
+    registry.register_builtin_tools();
+    registry.register_dev_tools();
+
+    let tools = registry.all().await;
+    assert!(
+        !tools.is_empty(),
+        "registry should have tools after registration"
+    );
+
+    for tool in &tools {
+        // These sync trait methods must not panic in multi-thread runtime
+        let _ = tool.name();
+        let _ = tool.description();
+        let _ = tool.parameters_schema();
+        let _ = tool.requires_approval(&serde_json::json!({}));
+        let _ = tool.requires_sanitization();
+        let _ = tool.domain();
+    }
+}
