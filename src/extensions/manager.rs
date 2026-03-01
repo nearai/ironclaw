@@ -544,6 +544,12 @@ impl ExtensionManager {
                 // Unregister from tool registry
                 self.tool_registry.unregister(name).await;
 
+                // Revoke credential mappings from the shared registry
+                let cap_path = self
+                    .wasm_tools_dir
+                    .join(format!("{}.capabilities.json", name));
+                self.revoke_credential_mappings(&cap_path).await;
+
                 // Unregister hooks registered from this plugin source.
                 let removed_hooks = self
                     .unregister_hook_prefix(&format!("plugin.tool:{}::", name))
@@ -561,9 +567,6 @@ impl ExtensionManager {
 
                 // Delete files
                 let wasm_path = self.wasm_tools_dir.join(format!("{}.wasm", name));
-                let cap_path = self
-                    .wasm_tools_dir
-                    .join(format!("{}.capabilities.json", name));
 
                 if wasm_path.exists() {
                     tokio::fs::remove_file(&wasm_path)
@@ -586,6 +589,9 @@ impl ExtensionManager {
                 let cap_path = self
                     .wasm_channels_dir
                     .join(format!("{}.capabilities.json", name));
+
+                // Revoke credential mappings before deleting the capabilities file
+                self.revoke_credential_mappings(&cap_path).await;
 
                 if wasm_path.exists() {
                     tokio::fs::remove_file(&wasm_path)
@@ -671,16 +677,17 @@ impl ExtensionManager {
                     primary_error = %primary_err,
                     "Primary install failed, trying fallback source"
                 );
-                self.try_install_from_source(entry, fallback)
-                    .await
-                    .map_err(|fallback_err| {
+                match self.try_install_from_source(entry, fallback).await {
+                    Ok(result) => Ok(result),
+                    Err(fallback_err) => {
                         tracing::error!(
                             extension = %entry.name,
                             fallback_error = %fallback_err,
                             "Fallback install also failed"
                         );
-                        combine_install_errors(&primary_err, fallback_err)
-                    })
+                        Err(combine_install_errors(primary_err, fallback_err))
+                    }
+                }
             }
         }
     }
@@ -2538,6 +2545,47 @@ impl ExtensionManager {
         }
     }
 
+    /// Read a capabilities.json file and revoke its credential mappings from
+    /// the shared credential registry, so removed extensions lose injection
+    /// authority immediately.
+    async fn revoke_credential_mappings(&self, cap_path: &std::path::Path) {
+        if !cap_path.exists() {
+            return;
+        }
+        let Ok(bytes) = tokio::fs::read(cap_path).await else {
+            return;
+        };
+        // Extract secret names from the capabilities JSON.
+        // Structure: { "http": { "credentials": { "<key>": { "secret_name": "..." } } } }
+        let Ok(json) = serde_json::from_slice::<serde_json::Value>(&bytes) else {
+            return;
+        };
+        let secret_names: Vec<String> = json
+            .get("http")
+            .and_then(|h| h.get("credentials"))
+            .and_then(|c| c.as_object())
+            .map(|creds| {
+                creds
+                    .values()
+                    .filter_map(|v| v.get("secret_name").and_then(|s| s.as_str()))
+                    .map(String::from)
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        if secret_names.is_empty() {
+            return;
+        }
+
+        if let Some(cr) = self.tool_registry.credential_registry() {
+            cr.remove_mappings_for_secrets(&secret_names);
+            tracing::info!(
+                secrets = ?secret_names,
+                "Revoked credential mappings for removed extension"
+            );
+        }
+    }
+
     async fn unregister_hook_prefix(&self, prefix: &str) -> usize {
         let Some(ref hooks) = self.hooks else {
             return 0;
@@ -2640,18 +2688,18 @@ fn fallback_decision(
 /// Combine primary and fallback errors into a single error.
 ///
 /// Preserves `AlreadyInstalled` from the fallback directly; otherwise wraps
-/// both error messages into `ExtensionError::Other`.
+/// both errors into the structured `ExtensionError::FallbackFailed` variant.
 fn combine_install_errors(
-    primary_err: &ExtensionError,
+    primary_err: ExtensionError,
     fallback_err: ExtensionError,
 ) -> ExtensionError {
     if matches!(fallback_err, ExtensionError::AlreadyInstalled(_)) {
         return fallback_err;
     }
-    ExtensionError::Other(format!(
-        "Primary install failed: {}; fallback install also failed: {}",
-        primary_err, fallback_err
-    ))
+    ExtensionError::FallbackFailed {
+        primary: Box::new(primary_err),
+        fallback: Box::new(fallback_err),
+    }
 }
 
 #[cfg(test)]
@@ -2748,7 +2796,11 @@ mod tests {
     fn test_combine_errors_includes_both_messages() {
         let primary = ExtensionError::DownloadFailed("404 Not Found".to_string());
         let fallback = ExtensionError::InstallFailed("cargo not found".to_string());
-        let combined = combine_install_errors(&primary, fallback);
+        let combined = combine_install_errors(primary, fallback);
+        assert!(
+            matches!(combined, ExtensionError::FallbackFailed { .. }),
+            "Expected FallbackFailed, got: {combined:?}"
+        );
         let msg = combined.to_string();
         assert!(msg.contains("404 Not Found"), "missing primary: {msg}");
         assert!(msg.contains("cargo not found"), "missing fallback: {msg}");
@@ -2758,7 +2810,7 @@ mod tests {
     fn test_combine_errors_forwards_already_installed_from_fallback() {
         let primary = ExtensionError::DownloadFailed("404".to_string());
         let fallback = ExtensionError::AlreadyInstalled("test".to_string());
-        let combined = combine_install_errors(&primary, fallback);
+        let combined = combine_install_errors(primary, fallback);
         assert!(
             matches!(combined, ExtensionError::AlreadyInstalled(ref name) if name == "test"),
             "Expected AlreadyInstalled, got: {combined:?}"

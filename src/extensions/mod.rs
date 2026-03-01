@@ -244,6 +244,12 @@ pub enum ExtensionError {
     #[error("Config error: {0}")]
     Config(String),
 
+    #[error("Primary install failed: {primary}; fallback install also failed: {fallback}")]
+    FallbackFailed {
+        primary: Box<ExtensionError>,
+        fallback: Box<ExtensionError>,
+    },
+
     #[error("{0}")]
     Other(String),
 }

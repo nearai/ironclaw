@@ -20,8 +20,8 @@ use crate::secrets::SecretsCrypto;
 use crate::secrets::{CreateSecretParams, SecretsStore};
 use crate::settings::{Settings, TunnelSettings};
 use crate::setup::prompts::{
-    confirm, input, optional_input, print_error, print_info, print_success, secret_input,
-    select_one,
+    confirm, input, optional_input, print_error, print_info, print_success, print_warning,
+    secret_input, select_one,
 };
 
 /// Typed errors for channel setup flows.
@@ -38,6 +38,9 @@ pub enum ChannelSetupError {
 
     #[error("{0}")]
     Validation(String),
+
+    #[error("Setup cancelled by user")]
+    Cancelled,
 }
 
 /// Context for saving secrets during setup.
@@ -490,6 +493,15 @@ fn setup_tunnel_cloudflare() -> Result<TunnelSettings, ChannelSetupError> {
         }
     }
 
+    // Detect existing cloudflared services that may conflict
+    if let Some(warning) = detect_existing_cloudflared() {
+        print_warning(&warning);
+        if !confirm("Continue anyway?", true)? {
+            return Err(ChannelSetupError::Cancelled);
+        }
+        println!();
+    }
+
     print_info("Get your tunnel token from the Cloudflare Zero Trust dashboard:");
     print_info("  https://one.dash.cloudflare.com/ > Networks > Tunnels");
     println!();
@@ -527,6 +539,95 @@ fn setup_tunnel_cloudflare() -> Result<TunnelSettings, ChannelSetupError> {
         cf_token: Some(token.expose_secret().to_string()),
         ..Default::default()
     })
+}
+
+/// Detect running cloudflared processes or managed services that could conflict
+/// with IronClaw's tunnel management.
+fn detect_existing_cloudflared() -> Option<String> {
+    let mut conflicts = Vec::new();
+
+    // Check for running cloudflared processes (all platforms)
+    #[cfg(unix)]
+    {
+        let output = std::process::Command::new("pgrep")
+            .args(["-x", "cloudflared"])
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null())
+            .output();
+        if let Ok(out) = output
+            && out.status.success()
+        {
+            let pids = String::from_utf8_lossy(&out.stdout);
+            let pids: Vec<&str> = pids.trim().lines().collect();
+            if !pids.is_empty() {
+                conflicts.push(format!(
+                    "Running cloudflared process(es): PID {}",
+                    pids.join(", ")
+                ));
+            }
+        }
+    }
+
+    // macOS: check brew services
+    #[cfg(target_os = "macos")]
+    {
+        let output = std::process::Command::new("brew")
+            .args(["services", "list"])
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null())
+            .output();
+        if let Ok(out) = output {
+            let stdout = String::from_utf8_lossy(&out.stdout);
+            for line in stdout.lines() {
+                if line.contains("cloudflared") && line.contains("started") {
+                    conflicts.push("Homebrew service: cloudflared (started)".to_string());
+                    break;
+                }
+            }
+        }
+
+        let output = std::process::Command::new("launchctl")
+            .args(["list"])
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null())
+            .output();
+        if let Ok(out) = output {
+            let stdout = String::from_utf8_lossy(&out.stdout);
+            for line in stdout.lines() {
+                if line.contains("cloudflared") {
+                    conflicts.push("launchd service: cloudflared detected".to_string());
+                    break;
+                }
+            }
+        }
+    }
+
+    // Linux: check systemd
+    #[cfg(target_os = "linux")]
+    {
+        let output = std::process::Command::new("systemctl")
+            .args(["is-active", "cloudflared"])
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null())
+            .output();
+        if let Ok(out) = output {
+            let stdout = String::from_utf8_lossy(&out.stdout);
+            if stdout.trim() == "active" {
+                conflicts.push("systemd service: cloudflared (active)".to_string());
+            }
+        }
+    }
+
+    if conflicts.is_empty() {
+        None
+    } else {
+        Some(format!(
+            "Detected existing cloudflared service(s) that may conflict:\n  {}\n\
+             Consider stopping them first (e.g., `brew services stop cloudflared` or \
+             `sudo systemctl stop cloudflared`).",
+            conflicts.join("\n  ")
+        ))
+    }
 }
 
 fn setup_tunnel_tailscale() -> Result<TunnelSettings, ChannelSetupError> {
