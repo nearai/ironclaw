@@ -324,8 +324,14 @@ function showSlashAutocomplete(matches) {
     const row = document.createElement('div');
     row.className = 'slash-ac-item';
     row.dataset.index = i;
-    row.innerHTML = '<span class="slash-ac-cmd">' + escapeHtml(item.cmd) + '</span>'
-      + '<span class="slash-ac-desc">' + escapeHtml(item.desc) + '</span>';
+    var cmdSpan = document.createElement('span');
+    cmdSpan.className = 'slash-ac-cmd';
+    cmdSpan.textContent = item.cmd;
+    var descSpan = document.createElement('span');
+    descSpan.className = 'slash-ac-desc';
+    descSpan.textContent = item.desc;
+    row.appendChild(cmdSpan);
+    row.appendChild(descSpan);
     row.addEventListener('mousedown', (e) => {
       e.preventDefault(); // prevent blur
       selectSlashItem(item.cmd);
@@ -1643,6 +1649,8 @@ function loadServerLogLevel() {
 
 // --- Extensions ---
 
+var kindLabels = { 'wasm_channel': 'Channel', 'wasm_tool': 'Tool', 'mcp_server': 'MCP' };
+
 function loadExtensions() {
   const extList = document.getElementById('extensions-list');
   const wasmList = document.getElementById('available-wasm-list');
@@ -1718,7 +1726,7 @@ function renderAvailableExtensionCard(entry) {
 
   const kind = document.createElement('span');
   kind.className = 'ext-kind kind-' + entry.kind;
-  kind.textContent = entry.kind;
+  kind.textContent = kindLabels[entry.kind] || entry.kind;
   header.appendChild(kind);
 
   card.appendChild(header);
@@ -1784,7 +1792,7 @@ function renderMcpServerCard(entry, installedExt) {
 
   var kind = document.createElement('span');
   kind.className = 'ext-kind kind-mcp_server';
-  kind.textContent = 'mcp_server';
+  kind.textContent = kindLabels['mcp_server'] || 'mcp_server';
   header.appendChild(kind);
 
   if (installedExt) {
@@ -1868,12 +1876,12 @@ function renderExtensionCard(ext) {
 
   const name = document.createElement('span');
   name.className = 'ext-name';
-  name.textContent = ext.name;
+  name.textContent = ext.display_name || ext.name;
   header.appendChild(name);
 
   const kind = document.createElement('span');
   kind.className = 'ext-kind kind-' + ext.kind;
-  kind.textContent = ext.kind;
+  kind.textContent = kindLabels[ext.kind] || ext.kind;
   header.appendChild(kind);
 
   // Auth dot only for non-WASM-channel extensions (channels use the stepper instead)
@@ -1981,7 +1989,7 @@ function renderExtensionCard(ext) {
     if (ext.needs_setup) {
       const configBtn = document.createElement('button');
       configBtn.className = 'btn-ext configure';
-      configBtn.textContent = ext.authenticated ? 'Reconfigure' : 'Configure';
+      configBtn.textContent = ext.authenticated ? 'Reconfigure' : 'Setup';
       configBtn.addEventListener('click', () => showConfigureModal(ext.name));
       actions.appendChild(configBtn);
     }
@@ -2102,7 +2110,8 @@ function renderConfigureModal(name, secrets) {
     if (secret.provided) {
       const badge = document.createElement('span');
       badge.className = 'field-provided';
-      badge.textContent = 'Set';
+      badge.textContent = '\u2713';
+      badge.title = 'Already configured';
       inputRow.appendChild(badge);
     }
     if (secret.auto_generate && !secret.provided) {
