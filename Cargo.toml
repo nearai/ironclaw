@@ -52,6 +52,9 @@ deadpool-postgres = { version = "0.14", optional = true }
 tokio-postgres = { version = "0.7", features = ["with-uuid-1", "with-chrono-0_4", "with-serde_json-1"], optional = true }
 postgres-types = { version = "0.2", features = ["with-serde_json-1"], optional = true }
 refinery = { version = "0.8", features = ["tokio-postgres"], optional = true }
+tokio-postgres-rustls = { version = "0.13", optional = true }
+rustls = { version = "0.23", optional = true, default-features = false }
+rustls-native-certs = { version = "0.8", optional = true }
 
 # Database - libSQL/Turso (optional embedded database)
 libsql = { version = "0.6", optional = true, default-features = false, features = ["core", "replication"] }
@@ -179,6 +182,9 @@ default = ["postgres", "libsql", "html-to-markdown"]
 postgres = [
     "dep:deadpool-postgres",
     "dep:tokio-postgres",
+    "dep:tokio-postgres-rustls",
+    "dep:rustls",
+    "dep:rustls-native-certs",
     "dep:postgres-types",
     "dep:refinery",
     "dep:pgvector",

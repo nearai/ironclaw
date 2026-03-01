@@ -12,6 +12,9 @@
 #[cfg(feature = "postgres")]
 pub mod postgres;
 
+#[cfg(feature = "postgres")]
+pub mod tls;
+
 #[cfg(feature = "libsql")]
 pub mod libsql;
 
