@@ -34,7 +34,7 @@ impl Tunnel for TailscaleTunnel {
         "tailscale"
     }
 
-    async fn start(&self, _local_host: &str, local_port: u16) -> Result<String> {
+    async fn start(&self, local_host: &str, local_port: u16) -> Result<String> {
         let subcommand = if self.funnel { "funnel" } else { "serve" };
 
         let hostname = if let Some(ref h) = self.hostname {
@@ -65,19 +65,19 @@ impl Tunnel for TailscaleTunnel {
                 .to_string()
         };
 
-        let port_str = local_port.to_string();
+        let target = format!("http://{}:{}", local_host, local_port);
 
-        // `tailscale funnel --bg <port>` configures the tunnel and exits.
+        // `tailscale funnel --bg <target>` configures the tunnel and exits.
         // Without `--bg`, the command may hang without establishing the tunnel.
         let output = tokio::time::timeout(
             tokio::time::Duration::from_secs(15),
             Command::new("tailscale")
-                .args([subcommand, "--bg", &port_str])
+                .args([subcommand, "--bg", &target])
                 .output(),
         )
         .await
         .map_err(|_| {
-            anyhow::anyhow!("tailscale {subcommand} --bg {port_str} timed out after 15s")
+            anyhow::anyhow!("tailscale {subcommand} --bg {target} timed out after 15s")
         })??;
 
         if !output.status.success() {
@@ -119,9 +119,20 @@ impl Tunnel for TailscaleTunnel {
     }
 
     async fn health_check(&self) -> bool {
-        // The tunnel is managed by the tailscale daemon, not a child process.
-        // Check if tailscale reports a healthy connection.
-        self.url.read().ok().is_some_and(|guard| guard.is_some())
+        if self.url.read().ok().is_none_or(|g| g.is_none()) {
+            return false;
+        }
+        match tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            tokio::process::Command::new("tailscale")
+                .args(["status", "--json"])
+                .output(),
+        )
+        .await
+        {
+            Ok(Ok(output)) => output.status.success(),
+            _ => false,
+        }
     }
 
     fn public_url(&self) -> Option<String> {
