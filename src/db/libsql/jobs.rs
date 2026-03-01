@@ -117,6 +117,7 @@ impl JobStore for LibSqlBackend {
                     transitions: Vec::new(),
                     metadata: serde_json::Value::Null,
                     extra_env: std::sync::Arc::new(std::collections::HashMap::new()),
+                    tool_nesting_depth: 0,
                 }))
             }
             None => Ok(None),

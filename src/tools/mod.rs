@@ -14,6 +14,7 @@ pub mod rate_limiter;
 pub mod schema_validator;
 pub mod wasm;
 
+mod executor;
 mod registry;
 mod tool;
 
@@ -22,6 +23,7 @@ pub use builder::{
     LlmSoftwareBuilder, SoftwareBuilder, SoftwareType, Template, TemplateEngine, TemplateType,
     TestCase, TestHarness, TestResult, TestSuite, ValidationError, ValidationResult, WasmValidator,
 };
+pub use executor::{PtcError, PtcToolResult, ToolExecutor};
 pub use rate_limiter::RateLimiter;
 pub use registry::ToolRegistry;
 pub use tool::{

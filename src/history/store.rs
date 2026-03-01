@@ -237,6 +237,7 @@ impl Store {
                     total_tokens_used: 0,
                     max_tokens: 0,
                     extra_env: std::sync::Arc::new(std::collections::HashMap::new()),
+                    tool_nesting_depth: 0,
                 }))
             }
             None => Ok(None),

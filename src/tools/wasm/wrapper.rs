@@ -19,6 +19,7 @@ use wasmtime_wasi::{ResourceTable, WasiCtx, WasiCtxBuilder, WasiView};
 use crate::context::JobContext;
 use crate::safety::LeakDetector;
 use crate::secrets::SecretsStore;
+use crate::tools::ToolExecutor;
 use crate::tools::tool::{Tool, ToolError, ToolOutput};
 use crate::tools::wasm::capabilities::Capabilities;
 use crate::tools::wasm::credential_injector::{
@@ -28,6 +29,26 @@ use crate::tools::wasm::error::WasmError;
 use crate::tools::wasm::host::{HostState, LogLevel};
 use crate::tools::wasm::limits::{ResourceLimits, WasmResourceLimiter};
 use crate::tools::wasm::runtime::{EPOCH_TICK_INTERVAL, PreparedModule, WasmToolRuntime};
+
+/// Synchronous tool resolver callable from within a WASM host function.
+/// The closure internally creates a tokio runtime to bridge async tool execution.
+/// Closure that resolves a tool call by name. The `u32` parameter is the current
+/// nesting depth so the executor can enforce the global depth limit across
+/// WASM->executor->WASM chains.
+pub type ToolResolver =
+    Arc<dyn Fn(&str, serde_json::Value, u32) -> Result<String, String> + Send + Sync>;
+
+/// RAII guard that decrements the nesting depth counter on drop, ensuring the
+/// counter is restored even if the code between increment and decrement panics.
+struct NestingGuard<'a> {
+    depth: &'a mut u32,
+}
+
+impl Drop for NestingGuard<'_> {
+    fn drop(&mut self) {
+        *self.depth -= 1;
+    }
+}
 
 // Generate component model bindings from the WIT file.
 //
@@ -99,6 +120,11 @@ struct StoreData {
     /// Dedicated tokio runtime for HTTP requests, lazily initialized.
     /// Reused across multiple `http_request` calls within one execution.
     http_runtime: Option<tokio::runtime::Runtime>,
+    /// Optional tool resolver for programmatic tool calling (PTC).
+    /// When set, WASM tools can invoke other tools via the `tool_invoke` host function.
+    tool_resolver: Option<ToolResolver>,
+    /// Current nesting depth for tool_invoke calls. Prevents infinite recursion.
+    tool_nesting_depth: u32,
 }
 
 impl StoreData {
@@ -107,6 +133,7 @@ impl StoreData {
         capabilities: Capabilities,
         credentials: HashMap<String, String>,
         host_credentials: Vec<ResolvedHostCredential>,
+        tool_resolver: Option<ToolResolver>,
     ) -> Self {
         // Minimal WASI context: no filesystem, no env vars (security)
         let wasi = WasiCtxBuilder::new().build();
@@ -119,6 +146,8 @@ impl StoreData {
             credentials,
             host_credentials,
             http_runtime: None,
+            tool_resolver,
+            tool_nesting_depth: 0,
         }
     }
 
@@ -427,14 +456,39 @@ impl near::agent::host::Host for StoreData {
         result.map_err(|e| self.redact_credentials(&e))
     }
 
-    fn tool_invoke(&mut self, alias: String, _params_json: String) -> Result<String, String> {
+    fn tool_invoke(&mut self, alias: String, params_json: String) -> Result<String, String> {
+        use crate::tools::executor::MAX_NESTING_DEPTH;
+
         // Validate capability and resolve alias
-        let _real_name = self.host_state.check_tool_invoke_allowed(&alias)?;
+        let real_name = self.host_state.check_tool_invoke_allowed(&alias)?;
         self.host_state.record_tool_invoke()?;
 
-        // Tool invocation requires async context and access to the tool registry,
-        // which aren't available inside a synchronous WASM callback.
-        Err("Tool invocation from WASM tools is not yet supported".to_string())
+        // Check nesting depth
+        if self.tool_nesting_depth >= MAX_NESTING_DEPTH {
+            return Err(format!(
+                "Tool invoke nesting depth exceeded (max {})",
+                MAX_NESTING_DEPTH
+            ));
+        }
+
+        // Get the resolver
+        let resolver = self
+            .tool_resolver
+            .as_ref()
+            .ok_or("Tool invocation not available: no tool executor configured")?;
+
+        // Parse parameters
+        let params: serde_json::Value = serde_json::from_str(&params_json)
+            .map_err(|e| format!("Invalid tool parameters JSON: {}", e))?;
+
+        // Increment depth with RAII guard to ensure decrement even on panic
+        self.tool_nesting_depth += 1;
+        let current_depth = self.tool_nesting_depth;
+        let _guard = NestingGuard {
+            depth: &mut self.tool_nesting_depth,
+        };
+        // _guard drops at end of scope (or on panic), decrementing depth
+        resolver(&real_name, params, current_depth)
     }
 
     fn secret_exists(&mut self, name: String) -> bool {
@@ -464,6 +518,11 @@ pub struct WasmToolWrapper {
     secrets_store: Option<Arc<dyn SecretsStore + Send + Sync>>,
     /// OAuth refresh configuration for auto-refreshing expired tokens.
     oauth_refresh: Option<OAuthRefreshConfig>,
+    /// Direct tool executor reference (for tests that wire it explicitly).
+    tool_executor: Option<Arc<ToolExecutor>>,
+    /// Shared slot for lazy executor resolution (production path).
+    /// Reads happen inside `spawn_blocking`, so this uses `std::sync::RwLock`.
+    tool_executor_slot: Option<Arc<std::sync::RwLock<Option<Arc<ToolExecutor>>>>>,
 }
 
 impl WasmToolWrapper {
@@ -482,6 +541,8 @@ impl WasmToolWrapper {
             credentials: HashMap::new(),
             secrets_store: None,
             oauth_refresh: None,
+            tool_executor: None,
+            tool_executor_slot: None,
         }
     }
 
@@ -522,6 +583,28 @@ impl WasmToolWrapper {
         self
     }
 
+    /// Set the tool executor for programmatic tool calling (direct reference).
+    ///
+    /// When set, the WASM `tool_invoke` host function can call other
+    /// registered tools synchronously via a bridged resolver closure.
+    /// Prefer `with_tool_executor_slot()` for production use.
+    pub fn with_tool_executor(mut self, executor: Arc<ToolExecutor>) -> Self {
+        self.tool_executor = Some(executor);
+        self
+    }
+
+    /// Set the shared tool executor slot for lazy resolution.
+    ///
+    /// The executor is read from this slot at execution time, allowing
+    /// it to be set after tool registration (production startup order).
+    pub fn with_tool_executor_slot(
+        mut self,
+        slot: Arc<std::sync::RwLock<Option<Arc<ToolExecutor>>>>,
+    ) -> Self {
+        self.tool_executor_slot = Some(slot);
+        self
+    }
+
     /// Get the resource limits for this tool.
     pub fn limits(&self) -> &ResourceLimits {
         &self.prepared.limits
@@ -550,6 +633,7 @@ impl WasmToolWrapper {
         params: serde_json::Value,
         context_json: Option<String>,
         host_credentials: Vec<ResolvedHostCredential>,
+        tool_resolver: Option<ToolResolver>,
     ) -> Result<(String, Vec<crate::tools::wasm::host::LogEntry>), WasmError> {
         let engine = self.runtime.engine();
         let limits = &self.prepared.limits;
@@ -560,6 +644,7 @@ impl WasmToolWrapper {
             self.capabilities.clone(),
             self.credentials.clone(),
             host_credentials,
+            tool_resolver,
         );
         let mut store = Store::new(engine, store_data);
 
@@ -663,6 +748,48 @@ impl Tool for WasmToolWrapper {
         // Serialize context for WASM
         let context_json = serde_json::to_string(ctx).ok();
 
+        // Resolve the tool executor: direct reference takes priority, then shared slot.
+        let resolved_executor: Option<Arc<ToolExecutor>> =
+            self.tool_executor.as_ref().cloned().or_else(|| {
+                self.tool_executor_slot
+                    .as_ref()
+                    .and_then(|slot| slot.read().ok())
+                    .and_then(|guard| guard.clone())
+            });
+
+        // Build a tool resolver closure if we have a tool executor.
+        // The resolver creates a single-threaded tokio runtime (same pattern
+        // as http_request) to bridge the sync WASM callback to async tool execution.
+        let tool_resolver: Option<ToolResolver> = resolved_executor.as_ref().map(|executor| {
+            let executor = Arc::clone(executor);
+            let user_id = ctx.user_id.clone();
+            Arc::new(move |name: &str, params: serde_json::Value, depth: u32| {
+                let executor = Arc::clone(&executor);
+                let name = name.to_string();
+                let mut ctx = JobContext::with_user(
+                    user_id.clone(),
+                    format!("WASM PTC: {}", name),
+                    "Programmatic tool call from WASM tool".to_string(),
+                );
+                // Propagate depth so the executor enforces the global limit
+                ctx.tool_nesting_depth = depth;
+
+                let rt = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .map_err(|e| format!("Failed to create runtime: {}", e))?;
+
+                rt.block_on(async {
+                    executor
+                        .execute(&name, params, &ctx, None)
+                        .await
+                        .map(|r| r.output)
+                        .map_err(|e| e.to_string())
+                })
+            })
+                as Arc<dyn Fn(&str, serde_json::Value, u32) -> Result<String, String> + Send + Sync>
+        });
+
         // Clone what we need for the blocking task
         let runtime = Arc::clone(&self.runtime);
         let prepared = Arc::clone(&self.prepared);
@@ -680,12 +807,14 @@ impl Tool for WasmToolWrapper {
                 description,
                 schema,
                 credentials,
-                secrets_store: None, // Not needed in blocking task
-                oauth_refresh: None, // Already used above for pre-refresh
+                secrets_store: None,      // Not needed in blocking task
+                oauth_refresh: None,      // Already used above for pre-refresh
+                tool_executor: None,      // Resolver closure captures the executor
+                tool_executor_slot: None, // Resolver closure captures the executor
             };
 
             tokio::task::spawn_blocking(move || {
-                wrapper.execute_sync(params, context_json, host_credentials)
+                wrapper.execute_sync(params, context_json, host_credentials, tool_resolver)
             })
             .await
             .map_err(|e| WasmError::ExecutionPanicked(e.to_string()))?
@@ -1085,10 +1214,14 @@ fn is_private_ip(ip: std::net::IpAddr) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
     use std::sync::Arc;
 
+    use crate::tools::tool::{ToolError, ToolOutput};
     use crate::tools::wasm::capabilities::Capabilities;
     use crate::tools::wasm::runtime::{WasmRuntimeConfig, WasmToolRuntime};
+
+    use super::WasmToolWrapper;
 
     #[test]
     fn test_wrapper_creation() {
@@ -1167,6 +1300,7 @@ mod tests {
             Capabilities::default(),
             HashMap::new(),
             host_credentials,
+            None,
         );
 
         // Should inject for matching host
@@ -1206,6 +1340,7 @@ mod tests {
             Capabilities::default(),
             HashMap::new(),
             host_credentials,
+            None,
         );
 
         let mut headers = HashMap::new();
@@ -1232,6 +1367,7 @@ mod tests {
             Capabilities::default(),
             HashMap::new(),
             host_credentials,
+            None,
         );
 
         let text = "Error: request to https://api.example.com?key=super-secret-token failed";
@@ -1587,5 +1723,200 @@ mod tests {
         // 8.8.8.8 (Google DNS) is public
         let result = super::reject_private_ip("https://8.8.8.8/dns-query");
         assert!(result.is_ok());
+    }
+
+    // === Programmatic Tool Calling (PTC) integration tests ===
+    //
+    // These tests require the test-ptc WASM binary to be pre-built:
+    //   cargo build --target wasm32-wasip2 --release --manifest-path tools-src/test-ptc/Cargo.toml
+
+    use crate::config::SafetyConfig;
+    use crate::tools::executor::ToolExecutor;
+    use crate::tools::tool::Tool;
+
+    fn wasm_binary_path() -> std::path::PathBuf {
+        let manifest_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        manifest_dir.join("tools-src/test-ptc/target/wasm32-wasip2/release/test_ptc_tool.wasm")
+    }
+
+    fn load_wasm_binary() -> Option<Vec<u8>> {
+        let path = wasm_binary_path();
+        if !path.exists() {
+            eprintln!(
+                "WASM test binary not found at {:?}. Build with: \
+                 cargo build --target wasm32-wasip2 --release --manifest-path tools-src/test-ptc/Cargo.toml",
+                path
+            );
+            return None;
+        }
+        Some(std::fs::read(&path).expect("failed to read WASM binary"))
+    }
+
+    #[tokio::test]
+    #[ignore]
+    async fn test_wasm_tool_invoke_echo() {
+        let wasm_bytes = match load_wasm_binary() {
+            Some(b) => b,
+            None => return, // Skip if binary not built
+        };
+
+        // Set up runtime
+        let runtime = Arc::new(
+            WasmToolRuntime::new(WasmRuntimeConfig::default())
+                .expect("failed to create WASM runtime"),
+        );
+
+        // Set up tool registry with echo
+        let tools = Arc::new(crate::tools::registry::ToolRegistry::new());
+        tools.register_builtin_tools();
+        let safety = Arc::new(crate::safety::SafetyLayer::new(&SafetyConfig {
+            max_output_length: 100_000,
+            injection_check_enabled: true,
+        }));
+        let executor = Arc::new(ToolExecutor::new(
+            tools,
+            safety,
+            std::time::Duration::from_secs(60),
+        ));
+
+        // Prepare WASM module
+        let prepared = runtime
+            .prepare("test_ptc", &wasm_bytes, None)
+            .await
+            .expect("failed to prepare WASM module");
+
+        // Build capabilities with echo_alias -> echo
+        let mut aliases = HashMap::new();
+        aliases.insert("echo_alias".to_string(), "echo".to_string());
+        let capabilities = Capabilities::default().with_tool_invoke(aliases);
+
+        // Create wrapper with executor
+        let wrapper =
+            WasmToolWrapper::new(runtime, prepared, capabilities).with_tool_executor(executor);
+
+        // Execute
+        let ctx = crate::context::JobContext::new("test", "WASM PTC test");
+        let result: Result<ToolOutput, ToolError> = wrapper
+            .execute(serde_json::json!({"message": "hello"}), &ctx)
+            .await;
+        let result = result.expect("WASM tool execution should succeed");
+
+        let output = result.result.as_str().unwrap_or("");
+        assert!(
+            output.contains("via_wasm:"),
+            "Output should contain 'via_wasm:' prefix, got: {}",
+            output
+        );
+        assert!(
+            output.contains("hello"),
+            "Output should contain 'hello', got: {}",
+            output
+        );
+    }
+
+    #[tokio::test]
+    #[ignore]
+    async fn test_wasm_tool_invoke_alias_not_granted() {
+        let wasm_bytes = match load_wasm_binary() {
+            Some(b) => b,
+            None => return,
+        };
+
+        let runtime = Arc::new(
+            WasmToolRuntime::new(WasmRuntimeConfig::default())
+                .expect("failed to create WASM runtime"),
+        );
+
+        let tools = Arc::new(crate::tools::registry::ToolRegistry::new());
+        tools.register_builtin_tools();
+        let safety = Arc::new(crate::safety::SafetyLayer::new(&SafetyConfig {
+            max_output_length: 100_000,
+            injection_check_enabled: true,
+        }));
+        let executor = Arc::new(ToolExecutor::new(
+            tools,
+            safety,
+            std::time::Duration::from_secs(60),
+        ));
+
+        let prepared = runtime
+            .prepare("test_ptc", &wasm_bytes, None)
+            .await
+            .expect("failed to prepare WASM module");
+
+        // Only grant a DIFFERENT alias, not "echo_alias"
+        let mut aliases = HashMap::new();
+        aliases.insert("other_alias".to_string(), "echo".to_string());
+        let capabilities = Capabilities::default().with_tool_invoke(aliases);
+
+        let wrapper =
+            WasmToolWrapper::new(runtime, prepared, capabilities).with_tool_executor(executor);
+
+        let ctx = crate::context::JobContext::new("test", "WASM PTC test");
+        let result: Result<ToolOutput, ToolError> = wrapper
+            .execute(serde_json::json!({"message": "hello"}), &ctx)
+            .await;
+
+        // Should fail because "echo_alias" is not in the aliases
+        assert!(result.is_err(), "Should fail when alias not granted");
+        let err_msg = format!("{:?}", result.unwrap_err());
+        assert!(
+            err_msg.contains("Unknown tool alias") || err_msg.contains("echo_alias"),
+            "Error should mention unknown alias, got: {}",
+            err_msg
+        );
+    }
+
+    #[tokio::test]
+    #[ignore]
+    async fn test_wasm_tool_invoke_no_capability() {
+        let wasm_bytes = match load_wasm_binary() {
+            Some(b) => b,
+            None => return,
+        };
+
+        let runtime = Arc::new(
+            WasmToolRuntime::new(WasmRuntimeConfig::default())
+                .expect("failed to create WASM runtime"),
+        );
+
+        let tools = Arc::new(crate::tools::registry::ToolRegistry::new());
+        tools.register_builtin_tools();
+        let safety = Arc::new(crate::safety::SafetyLayer::new(&SafetyConfig {
+            max_output_length: 100_000,
+            injection_check_enabled: true,
+        }));
+        let executor = Arc::new(ToolExecutor::new(
+            tools,
+            safety,
+            std::time::Duration::from_secs(60),
+        ));
+
+        let prepared = runtime
+            .prepare("test_ptc", &wasm_bytes, None)
+            .await
+            .expect("failed to prepare WASM module");
+
+        // No tool_invoke capability at all
+        let capabilities = Capabilities::default();
+
+        let wrapper =
+            WasmToolWrapper::new(runtime, prepared, capabilities).with_tool_executor(executor);
+
+        let ctx = crate::context::JobContext::new("test", "WASM PTC test");
+        let result: Result<ToolOutput, ToolError> = wrapper
+            .execute(serde_json::json!({"message": "hello"}), &ctx)
+            .await;
+
+        assert!(
+            result.is_err(),
+            "Should fail when no tool_invoke capability"
+        );
+        let err_msg = format!("{:?}", result.unwrap_err());
+        assert!(
+            err_msg.contains("not granted") || err_msg.contains("capability"),
+            "Error should mention capability not granted, got: {}",
+            err_msg
+        );
     }
 }

@@ -9,6 +9,7 @@ mod json;
 mod memory;
 mod message;
 pub mod path_utils;
+pub mod ptc_script;
 pub mod routine;
 pub(crate) mod shell;
 pub mod skill_tools;
@@ -28,6 +29,7 @@ pub use job::{
 pub use json::JsonTool;
 pub use memory::{MemoryReadTool, MemorySearchTool, MemoryTreeTool, MemoryWriteTool};
 pub use message::MessageTool;
+pub use ptc_script::PtcScriptTool;
 pub use routine::{
     RoutineCreateTool, RoutineDeleteTool, RoutineHistoryTool, RoutineListTool, RoutineUpdateTool,
 };

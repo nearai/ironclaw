@@ -65,6 +65,7 @@ async fn core_registration_covers_expected_tools() {
         "http",
         "json",
         "list_dir",
+        "ptc_script",
         "read_file",
         "shell",
         "time",
