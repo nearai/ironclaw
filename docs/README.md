@@ -17,7 +17,7 @@
 | [SIGNAL_SETUP.md](SIGNAL_SETUP.md) | ~120 | Signal channel setup via signal-cli HTTP daemon |
 | [BUILDING_CHANNELS.md](BUILDING_CHANNELS.md) | ~442 | WASM channel authoring and build/deploy workflow |
 | [ARCHITECTURE.md](ARCHITECTURE.md) | ~876 | Master architecture: modules, data flows, diagrams |
-| [DEVELOPER-REFERENCE.md](DEVELOPER-REFERENCE.md) | ~1072 | Developer reference: errors, config, code review patterns |
+| [AGENT_README.md](AGENT_README.md) | ~1072 | Agent reference: errors, config, code review patterns |
 | [analysis/agent.md](analysis/agent.md) | ~930 | Agent loop, sessions, jobs, routines, heartbeat, cost guard |
 | [analysis/channels.md](analysis/channels.md) | ~906 | REPL, web gateway, HTTP, WASM, webhook channels + full API routes |
 | [analysis/cli.md](analysis/cli.md) | ~504 | CLI subcommands, doctor, service manager, MCP, registry |

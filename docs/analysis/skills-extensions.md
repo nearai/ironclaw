@@ -689,6 +689,7 @@ The host provides functions the channel WASM can call:
 |---------------------|---------|-------------|
 | `SKILLS_ENABLED` | `true` | Enable the skills system (enabled by default as of v0.10.0) |
 | `SKILLS_DIR` | `~/.ironclaw/skills/` | User skills directory |
+| `SKILLS_INSTALLED_DIR` | `~/.ironclaw/installed_skills/` | ClawHub-installed skills directory |
 | `SKILLS_MAX_ACTIVE` | `3` | Maximum simultaneously active skills |
 | `SKILLS_MAX_CONTEXT_TOKENS` | `4000` | Total prompt token budget for skills |
 | `CLAWHUB_REGISTRY` | `https://wry-manatee-359.convex.site` | Overrides the compiled-in Convex backend URL for the ClawHub registry |

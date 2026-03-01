@@ -513,7 +513,7 @@ systemctl --user status ironclaw
 Direct workspace operations without starting the agent:
 
 ```bash
-# Search workspace (hybrid FTS + semantic with PostgreSQL, FTS-only with libSQL)
+# Search workspace (hybrid FTS + semantic with PostgreSQL; hybrid FTS + vector with libSQL when embeddings are enabled; FTS-only when embeddings are disabled)
 ironclaw memory search "deployment notes"
 
 # Read a workspace file
@@ -719,4 +719,4 @@ launchctl load ~/Library/LaunchAgents/ai.ironclaw.plist
 
 ---
 
-*Source: IronClaw v0.12.0 · See also: [ARCHITECTURE.md](ARCHITECTURE.md), [DEVELOPER-REFERENCE.md](DEVELOPER-REFERENCE.md)*
+*Source: IronClaw v0.12.0 · See also: [ARCHITECTURE.md](ARCHITECTURE.md), [AGENT_README.md](AGENT_README.md)*

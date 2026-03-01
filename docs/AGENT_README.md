@@ -1,9 +1,9 @@
-# IronClaw Developer Reference
+# IronClaw AGENT README
 
 > **AI Agent Use**: Optimized for code review, bug triage, and targeted fixes.
 > Jump directly to the section relevant to the error or task — no narrative reading required.
 
-**Source**: IronClaw v0.12.0 (`v0.12.0`) · `~/src/ironclaw/` · ~113K Rust lines in `src/` (~129K repo-wide)
+**Source**: IronClaw v0.12.0 (`v0.12.0`) · `~/src/ironclaw/`
 
 ---
 
@@ -27,6 +27,7 @@
 16. [Key Grep Queries](#16-key-grep-queries)
 17. [Feature Flag Testing](#17-feature-flag-testing)
 18. [Module Spec Files](#18-module-spec-files)
+19. [AGENT Onboarding Playbook](#19-agent-onboarding-playbook)
 
 ---
 
@@ -39,7 +40,7 @@
 | Per-job LLM reasoning loop | `src/agent/worker.rs` |
 | Stuck job detection / recovery | `src/agent/self_repair.rs` |
 | Session / conversation model | `src/agent/session.rs` |
-| Context window compaction / ContextCompactor (v0.11.0) | `src/agent/compaction.rs` |
+| Context window compaction / ContextCompactor | `src/agent/compaction.rs` |
 | Memory pressure monitoring | `src/agent/context_monitor.rs` |
 | Routine (cron/event/webhook) engine | `src/agent/routine_engine.rs` |
 | Proactive heartbeat logic | `src/agent/heartbeat.rs` |
@@ -52,6 +53,8 @@
 | WASM channel runtime | `src/channels/wasm/` |
 | All error types | `src/error.rs` |
 | All config structs / env var loading | `src/config/mod.rs` |
+| Bootstrap and startup wiring | `src/bootstrap.rs` |
+| Runtime config overlay and defaults | `src/settings.rs` |
 | Tool trait definition | `src/tools/tool.rs` |
 | Tool registry / discovery | `src/tools/registry.rs` |
 | Built-in tool implementations | `src/tools/builtin/` |
@@ -68,8 +71,9 @@
 | WASM network allowlist | `src/tools/wasm/allowlist.rs` |
 | WASM credential injection | `src/tools/wasm/credential_injector.rs` |
 | Dynamic tool builder | `src/tools/builder/core.rs` |
-| MCP client (HTTP only) | `src/tools/mcp/client.rs` |
-| RateLimiter for tools (v0.10.0) | `src/tools/rate_limiter.rs` |
+| Message tool (attachments, context inference) | `src/tools/builtin/message.rs` |
+| MCP client (Streamable HTTP transport) | `src/tools/mcp/client.rs` |
+| Tool rate limiter | `src/tools/rate_limiter.rs` |
 | Prompt injection sanitizer | `src/safety/sanitizer.rs` |
 | Input validator | `src/safety/validator.rs` |
 | Policy rules engine | `src/safety/policy.rs` |
@@ -87,9 +91,9 @@
 | Session token auto-renewal | `src/llm/session.rs` |
 | Database trait (~60 async methods) | `src/db/mod.rs` |
 | PostgreSQL backend | `src/db/postgres.rs` |
-| libSQL/Turso backend | `src/db/libsql_backend.rs` |
+| libSQL/Turso backend | `src/db/libsql/mod.rs` |
 | libSQL schema (SQLite-dialect) | `src/db/libsql_migrations.rs` |
-| PostgreSQL migrations | `migrations/V1__initial.sql` |
+| PostgreSQL migrations | `migrations/V1__initial.sql` … `migrations/V9__flexible_embedding_dimension.sql` |
 | Workspace / memory system | `src/workspace/mod.rs` |
 | Document chunker (800 tok, 15% overlap) | `src/workspace/chunker.rs` |
 | Hybrid FTS+vector search (RRF) | `src/workspace/search.rs` |
@@ -107,7 +111,7 @@
 | Skill scoring / selection | `src/skills/selector.rs` |
 | Trust-based tool attenuation | `src/skills/attenuation.rs` |
 | ClawHub registry client | `src/skills/catalog.rs` |
-| Onboarding wizard (7-step) | `src/setup/wizard.rs` |
+| Onboarding wizard (9-step) | `src/setup/wizard.rs` |
 | Worker runtime (inside containers) | `src/worker/runtime.rs` |
 | Claude Code bridge | `src/worker/claude_bridge.rs` |
 | Orchestrator internal API | `src/orchestrator/api.rs` |
@@ -126,6 +130,7 @@
 | `channels` | `src/channels/` | REPL, web gateway, HTTP webhooks, Signal (v0.12.0), WASM plugin channels |
 | `llm` | `src/llm/` | Multi-provider LLM: retry, circuit breaker, cache, failover |
 | `tools` | `src/tools/` | Built-in tools, WASM sandbox, MCP client, dynamic builder |
+| `extensions` | `src/extensions/` | Dynamic extensions (WASM tools/channels), hot activation, secrets |
 | `safety` | `src/safety/` | Prompt injection defense: sanitize, validate, policy, leak-detect |
 | `db` | `src/db/` | Database abstraction: PostgreSQL + libSQL backends |
 | `workspace` | `src/workspace/` | Persistent memory: chunking, embeddings, hybrid RRF search |
@@ -138,7 +143,7 @@
 | `estimation` | `src/estimation/` | Cost/time/value estimation with EMA learner |
 | `evaluation` | `src/evaluation/` | Job success evaluation (rule-based + LLM) |
 | `history` | `src/history/` | PostgreSQL repositories, analytics aggregation |
-| `setup` | `src/setup/` | 7-step interactive onboarding wizard |
+| `setup` | `src/setup/` | 9-step interactive onboarding wizard |
 | `config` | `src/config/` | All env var loading and sub-config structs |
 | `error` | `src/error.rs` | All error types via `thiserror` |
 
@@ -163,7 +168,7 @@ All error types defined in `src/error.rs`. Top-level `Error` wraps domain errors
 | Variant | Message Pattern | Root Cause | Fix Location |
 |---------|-----------------|------------|--------------|
 | `Pool(String)` | `Connection pool error: {0}` | DB unreachable, wrong URL, pool exhausted | `DATABASE_URL` / `LIBSQL_PATH` env vars |
-| `Query(String)` | `Query failed: {0}` | SQL syntax error or schema mismatch | Check `libsql_migrations.rs` or `V1__initial.sql` |
+| `Query(String)` | `Query failed: {0}` | SQL syntax error or schema mismatch | Check `src/db/libsql_migrations.rs` or `migrations/V*.sql` |
 | `NotFound { entity, id }` | `Entity not found: {entity} with id {id}` | Row missing in DB | Expected — caller should handle |
 | `Constraint(String)` | `Constraint violation: {0}` | Duplicate key, FK violation | Schema design issue — check query |
 | `Migration(String)` | `Migration failed: {0}` | Schema migration error | Check migration files |
@@ -198,16 +203,25 @@ All error types defined in `src/error.rs`. Top-level `Error` wraps domain errors
 
 ### 3.5 ToolError
 
+**Important:** IronClaw has two tool error enums:
+- `crate::error::Error::Tool` wraps `src/error.rs::ToolError` (tool-level errors propagated by services).
+- `src/tools/tool.rs::ToolError` is the local tool execution error type used in trait methods.
+
 | Variant | Root Cause | Fix |
 |---------|------------|-----|
 | `NotFound { name }` | Tool name not in registry | Check registration in `src/tools/registry.rs` |
 | `ExecutionFailed { name, reason }` | Tool logic threw error | Check `reason` string and tool source |
-| `Timeout { name, timeout }` | Tool exceeded time limit | Increase `SANDBOX_TIMEOUT_SECS` or fix slow logic |
+| `Timeout { name, timeout }` | Tool call exceeded allowed time | Increase `SANDBOX_TIMEOUT_SECS` or fix slow logic |
 | `InvalidParameters { name, reason }` | JSON params don't match schema | Fix LLM prompt or tool schema |
 | `Disabled { name, reason }` | Tool gated behind feature flag or config | Check tool registration conditions |
 | `Sandbox { name, reason }` | WASM sandbox error | Check `src/tools/wasm/` for details |
 | `AuthRequired { name }` | Tool needs credentials not set | Set required secret via `ironclaw secret set` |
 | `BuilderFailed(String)` | Dynamic tool build failed | Check `src/tools/builder/core.rs` |
+| *(tool trait)* `NotAuthorized(String)` | Missing auth context | Usually resolved by orchestration/auth path |
+| *(tool trait)* `RateLimited(Option<Duration>)` | Tool execution temporarily throttled | Retry with exponential backoff |
+| *(tool trait)* `ExternalService(String)` | Upstream dependency failure | Inspect dependency logs |
+| *(tool trait)* `Sandbox(String)` | Tool sandbox-level execution fault | Usually returned from shell/file/runner paths |
+| *(tool trait)* `Timeout(Duration)` | Local tool executor hit duration limit | Increase timeout in tool implementation |
 
 ### 3.6 SafetyError
 
@@ -254,7 +268,16 @@ All error types defined in `src/error.rs`. Top-level `Error` wraps domain errors
 
 ## 4. Configuration Reference
 
-Config loaded in priority order: **shell env → ./.env → ~/.ironclaw/.env → config.toml → DB settings → defaults**
+Config loading is two-stage by function, then `resolve()`-level precedence is applied:
+
+- **Pre-DB phase** (`Config::from_env_with_toml`): build settings from env vars, then overlay `config.toml` on top.
+- **Post-DB phase** (`Config::from_db_with_toml`): load DB settings first, then overlay `config.toml`.
+- `LlmConfig::resolve` and other `resolve()` methods read each field through `optional_env()`:
+  - process env vars / loaded `.env` values (highest priority)
+  - injected secret overlay from `INJECTED_VARS`
+  - resolved settings (`env`-only/DB + `config.toml`)
+  - field defaults
+- Runtime settings are loaded once at process startup (`from_env_with_toml`/`from_db_with_toml`); edits to env/config/db during runtime do not trigger reload without a restart.
 
 Config struct: `src/config/mod.rs` · `INJECTED_VARS: OnceLock<HashMap<String,String>>` for secret overlay
 
@@ -262,8 +285,9 @@ Config struct: `src/config/mod.rs` · `INJECTED_VARS: OnceLock<HashMap<String,St
 
 | Env Var | Type | Default | Required | Notes |
 |---------|------|---------|----------|-------|
-| `DATABASE_BACKEND` | `"postgres"\|"libsql"\|"turso"` | `postgres` | No | Selects backend at runtime |
+| `DATABASE_BACKEND` | `"postgres"\|"postgresql"\|"pg"\|"libsql"\|"turso"\|"sqlite"` | `postgres` | No | Selects backend at runtime |
 | `DATABASE_URL` | string (URL) | — | Yes (postgres) | `postgres://user:pass@host/db` |
+| `DATABASE_POOL_SIZE` | usize | `10` | No | PostgreSQL/SQLite driver pool size |
 | `LIBSQL_PATH` | string (path) | `~/.ironclaw/ironclaw.db` | No | Local libSQL file path |
 | `LIBSQL_URL` | string (URL) | — | No | Turso cloud URL (overrides LIBSQL_PATH) |
 | `LIBSQL_AUTH_TOKEN` | string | — | Yes (with LIBSQL_URL) | Turso auth token |
@@ -274,9 +298,11 @@ Config struct: `src/config/mod.rs` · `INJECTED_VARS: OnceLock<HashMap<String,St
 |---------|------|---------|----------|-------|
 | `LLM_BACKEND` | enum | `nearai` | No | See §5 for all options |
 | `NEARAI_API_KEY` | string | — | No | Enables API-key mode for NEAR AI cloud |
-| `NEARAI_BASE_URL` | URL | `https://private.near.ai` | No | Override for cloud: `https://cloud-api.near.ai` |
-| `NEARAI_MODEL` | string | `fireworks::accounts/fireworks/models/llama4-maverick-instruct-basic` | No | Model name |
+| `NEARAI_BASE_URL` | URL | `https://private.near.ai` (or `https://cloud-api.near.ai` when `NEARAI_API_KEY` is set) | No | Override for provider endpoint |
+| `NEARAI_AUTH_URL` | URL | `https://private.near.ai` | No | Auth endpoint for session refresh |
+| `NEARAI_MODEL` | string | `zai-org/GLM-latest` (or `settings.selected_model`) | No | Model name |
 | `NEARAI_SESSION_PATH` | path | `~/.ironclaw/session.json` | No | Session file location |
+| `NEARAI_SESSION_TOKEN` | string | — | No | Optional session token override for token-based auth |
 | `OPENAI_API_KEY` | string | — | Yes (openai) | `sk-...` |
 | `OPENAI_BASE_URL` | URL | provider default | No | Optional override |
 | `OPENAI_MODEL` | string | `gpt-4o` | No | Model name |
@@ -290,6 +316,7 @@ Config struct: `src/config/mod.rs` · `INJECTED_VARS: OnceLock<HashMap<String,St
 | `LLM_MODEL` | string | `default` | No | Falls back to selected model from settings |
 | `LLM_EXTRA_HEADERS` | string | — | No | Comma-separated `Key:Value` headers for OpenAI-compatible providers. Added v0.10.0. |
 | `NEARAI_CHEAP_MODEL` | string | — | No | Cheap model for SmartRoutingProvider (e.g., `claude-haiku-4-20250514`). Added v0.10.0. |
+| `NEARAI_FALLBACK_MODEL` | string | — | No | Fallback model wrapped by `FailoverProvider` for retry behavior. |
 | `TINFOIL_API_KEY` | string | — | Yes (tinfoil) | |
 | `TINFOIL_MODEL` | string | `kimi-k2-5` | No | |
 
@@ -313,12 +340,42 @@ Config struct: `src/config/mod.rs` · `INJECTED_VARS: OnceLock<HashMap<String,St
 |---------|------|---------|-------|
 | `AGENT_NAME` | string | `ironclaw` | Display name |
 | `AGENT_MAX_PARALLEL_JOBS` | usize | `5` | Job concurrency limit |
-| `AGENT_JOB_TIMEOUT_SECS` | u64 | `1800` | Per-job timeout |
-| `AGENT_STUCK_THRESHOLD_SECS` | u64 | `1800` | Stuck-job detector threshold |
+| `AGENT_JOB_TIMEOUT_SECS` | u64 | `3600` | Per-job timeout |
+| `AGENT_STUCK_THRESHOLD_SECS` | u64 | `300` | Stuck-job detector threshold |
+| `SELF_REPAIR_CHECK_INTERVAL_SECS` | u64 | `60` | Self-repair polling interval |
+| `SELF_REPAIR_MAX_ATTEMPTS` | u32 | `3` | Max repair attempts before failure |
+| `AGENT_USE_PLANNING` | bool | `true` | Enable planning step before tool execution |
+| `SESSION_IDLE_TIMEOUT_SECS` | u64 | `604800` | Session prune timeout |
+| `ALLOW_LOCAL_TOOLS` | bool | `false` | Allow local tool execution outside sandbox |
+| `MAX_COST_PER_DAY_CENTS` | u64 | unlimited | Optional daily LLM cost cap |
+| `MAX_ACTIONS_PER_HOUR` | u64 | unlimited | Optional action-rate cap |
 | `AGENT_MAX_TOOL_ITERATIONS` | usize | `50` | Max agentic tool-call loop iterations |
 | `AGENT_AUTO_APPROVE_TOOLS` | bool | `false` | Skip tool approvals (CI/benchmarks) |
 
-### 4.5 Web Gateway
+### 4.5 Builder
+
+| Env Var | Type | Default | Notes |
+|---------|------|---------|-------|
+| `BUILDER_ENABLED` | bool | `true` | Enable the software builder tool |
+| `BUILDER_DIR` | path | temp dir | Optional custom build artifacts directory |
+| `BUILDER_MAX_ITERATIONS` | u32 | `20` | Max build loop iterations |
+| `BUILDER_TIMEOUT_SECS` | u64 | `600` | Per-build timeout |
+| `BUILDER_AUTO_REGISTER` | bool | `true` | Register built tools automatically |
+
+### 4.6 Safety
+
+| Env Var | Type | Default | Notes |
+|---------|------|---------|-------|
+| `SAFETY_MAX_OUTPUT_LENGTH` | usize | `100_000` | Truncation guard for tool output |
+| `SAFETY_INJECTION_CHECK_ENABLED` | bool | `true` | Enable prompt-injection heuristics on outputs |
+
+### 4.7 Secrets
+
+| Env Var | Type | Default | Notes |
+|---------|------|---------|-------|
+| `SECRETS_MASTER_KEY` | string | unset | Required if OS keychain not available. 32-byte minimum key |
+
+### 4.8 Web Gateway
 
 | Env Var | Type | Default | Required | Notes |
 |---------|------|---------|----------|-------|
@@ -328,28 +385,32 @@ Config struct: `src/config/mod.rs` · `INJECTED_VARS: OnceLock<HashMap<String,St
 | `GATEWAY_AUTH_TOKEN` | string | random if unset | No | Bearer token for protected API calls |
 | `GATEWAY_USER_ID` | string | `default` | No | Default user context |
 
-### 4.6 Signal Channel (v0.12.0)
+### 4.9 Signal Channel (v0.12.0)
 
 `SignalConfig` — Signal channel configuration. Source: `src/config/channels.rs`.
+Enablement is currently by setting `SIGNAL_HTTP_URL` (plus `SIGNAL_ACCOUNT`); there is no standalone `SIGNAL_ENABLED` env var.
 
 | Env Var | Type | Default | Required | Notes |
 |---------|------|---------|----------|-------|
-| `SIGNAL_ENABLED` | bool | `false` | No | Enable Signal channel |
 | `SIGNAL_HTTP_URL` | URL | — | Yes (if enabled) | signal-cli HTTP daemon endpoint |
 | `SIGNAL_ACCOUNT` | string | — | Yes (if enabled) | Registered Signal phone number |
 | `SIGNAL_ALLOW_FROM` | string list | — | No | Comma-separated allowed sender numbers |
-| `SIGNAL_DM_POLICY` | enum | `allow` | No | `allow\|block` — direct message handling |
-| `SIGNAL_GROUP_POLICY` | enum | `allow` | No | `allow\|block` — group message handling |
+| `SIGNAL_ALLOW_FROM_GROUPS` | string list | empty | No | Optional explicit group allowlist |
+| `SIGNAL_DM_POLICY` | enum | `pairing` | No | `open\|allowlist\|pairing` |
+| `SIGNAL_GROUP_POLICY` | enum | `allowlist` | No | `disabled\|allowlist\|open` |
+| `SIGNAL_GROUP_ALLOW_FROM` | string list | inherited from `SIGNAL_ALLOW_FROM_GROUPS` | No | Optional explicit group allowlist |
+| `SIGNAL_IGNORE_ATTACHMENTS` | bool | `false` | No | Skip attachment-only Signal messages |
+| `SIGNAL_IGNORE_STORIES` | bool | `true` | No | Skip story messages |
 
 Config struct fields: `http_url`, `account`, `allow_from`, `dm_policy`, `group_policy`.
 
-### 4.7 CLI / REPL
+### 4.10 CLI / REPL
 
 | Env Var | Type | Default | Notes |
 |---------|------|---------|-------|
 | `CLI_ENABLED` | bool | `true` | **Set `false` for service mode** (prevents REPL EOF crash with `/dev/null` stdin) |
 
-### 4.8 Docker Sandbox
+### 4.11 Docker Sandbox
 
 | Env Var | Type | Default | Notes |
 |---------|------|---------|-------|
@@ -360,18 +421,21 @@ Config struct fields: `http_url`, `account`, `allow_from`, `dm_policy`, `group_p
 | `SANDBOX_CPU_SHARES` | u32 | `1024` | Relative CPU weight |
 | `SANDBOX_POLICY` | enum | `readonly` | `readonly\|workspace_write\|full_access` |
 | `SANDBOX_AUTO_PULL` | bool | `true` | Auto-pull missing image |
+| `SANDBOX_EXTRA_DOMAINS` | string list | empty | Additional proxy allowlist entries |
 | `DOCKER_HOST` | string | system default | Set to Podman socket for Podman users |
 
-### 4.9 Claude Code Mode (in containers)
+### 4.12 Claude Code Mode (in containers)
 
 | Env Var | Type | Default | Notes |
 |---------|------|---------|-------|
 | `CLAUDE_CODE_ENABLED` | bool | `false` | Enable Claude Code bridge |
 | `CLAUDE_CODE_MODEL` | string | `sonnet` | Model for Claude Code |
 | `CLAUDE_CODE_MAX_TURNS` | u32 | `50` | Max turns per job |
+| `CLAUDE_CODE_MEMORY_LIMIT_MB` | u64 | `4096` | Container memory limit |
+| `CLAUDE_CODE_ALLOWED_TOOLS` | string list | See defaults in code | Allowed Claude tool patterns (comma-separated) |
 | `CLAUDE_CONFIG_DIR` | path | `~/.claude` | Host config dir for credential extraction |
 
-### 4.10 Routines
+### 4.13 Routines
 
 | Env Var | Type | Default | Notes |
 |---------|------|---------|-------|
@@ -381,16 +445,19 @@ Config struct fields: `http_url`, `account`, `allow_from`, `dm_policy`, `group_p
 | `ROUTINES_DEFAULT_COOLDOWN` | u64 | `300` | Default cooldown between runs |
 | `ROUTINES_MAX_TOKENS` | u32 | `4096` | Lightweight routine token budget |
 
-### 4.11 Skills
+### 4.14 Skills
 
 | Env Var | Type | Default | Notes |
 |---------|------|---------|-------|
-| `SKILLS_ENABLED` | bool | `false` | Enable skills system |
+| `SKILLS_ENABLED` | bool | `true` | Enable skills system |
 | `SKILLS_DIR` | path | `~/.ironclaw/skills` | Local skill directory |
+| `SKILLS_INSTALLED_DIR` | path | `~/.ironclaw/installed_skills/` | Installed skills directory |
 | `SKILLS_MAX_ACTIVE` | usize | `3` | Max active skills per request |
 | `SKILLS_MAX_CONTEXT_TOKENS` | usize | `4000` | Max prompt budget per turn |
+| `CLAWHUB_REGISTRY` | URL | compiled default in `src/skills/catalog.rs` | Override skill registry endpoint |
+| `CLAWDHUB_REGISTRY` | URL | unset | Legacy alias (fallback if `CLAWHUB_REGISTRY` is unset) |
 
-### 4.12 Workspace / Memory
+### 4.15 Workspace / Memory
 
 | Env Var | Type | Default | Notes |
 |---------|------|---------|-------|
@@ -402,8 +469,11 @@ Config struct fields: `http_url`, `account`, `allow_from`, `dm_policy`, `group_p
 | `HEARTBEAT_INTERVAL_SECS` | u64 | `1800` | 30 minutes default |
 | `HEARTBEAT_NOTIFY_CHANNEL` | string | unset | Channel to send findings |
 | `HEARTBEAT_NOTIFY_USER` | string | unset | User to notify |
+| `MEMORY_HYGIENE_ENABLED` | bool | `true` | Enable automatic workspace hygiene |
+| `MEMORY_HYGIENE_RETENTION_DAYS` | u32 | `30` | Daily document retention window |
+| `MEMORY_HYGIENE_CADENCE_HOURS` | u32 | `12` | Minimum hours between hygiene passes |
 
-### 4.13 Tunnel
+### 4.16 Tunnel
 
 | Env Var | Type | Default | Notes |
 |---------|------|---------|-------|
@@ -414,8 +484,11 @@ Config struct fields: `http_url`, `account`, `allow_from`, `dm_policy`, `group_p
 | `TUNNEL_CF_TOKEN` | string | — | Required for Cloudflare |
 | `TUNNEL_TS_FUNNEL` | bool | `false` | Use tailscale funnel |
 | `TUNNEL_TS_HOSTNAME` | string | — | Tailscale hostname |
+| `TUNNEL_CUSTOM_COMMAND` | string | unset | Custom tunnel command for `TUNNEL_PROVIDER=custom` |
+| `TUNNEL_CUSTOM_HEALTH_URL` | URL | unset | Custom tunnel health-check URL |
+| `TUNNEL_CUSTOM_URL_PATTERN` | string | unset | URL pattern for custom tunnel |
 
-### 4.14 WASM Runtime
+### 4.17 WASM Runtime
 
 | Env Var | Type | Default | Notes |
 |---------|------|---------|-------|
@@ -426,17 +499,36 @@ Config struct fields: `http_url`, `account`, `allow_from`, `dm_policy`, `group_p
 | `WASM_DEFAULT_TIMEOUT_SECS` | u64 | `60` | Execution timeout |
 | `WASM_CACHE_DIR` | path | unset | Compiled module cache override |
 
-### 4.15 Rate Limiting
+### 4.18 Rate Limiting
 
 | Env Var | Type | Default | Notes |
 |---------|------|---------|-------|
 | Built-in/WASM tool rate limiting is configured in tool/runtime capabilities and code defaults (`src/tools/rate_limiter.rs`, `src/tools/wasm/capabilities.rs`). |
 
-### 4.16 Logging
+### 4.19 Logging
 
 | Env Var | Type | Default | Notes |
 |---------|------|---------|-------|
 | `RUST_LOG` | string | `ironclaw=info` | See §Debugging for patterns |
+
+### 4.20 Cross-Cutting Runtime
+
+| Env Var | Type | Default | Notes |
+|---------|------|---------|-------|
+| `OBSERVABILITY_BACKEND` | enum | `none` | `none` (default), `noop`, `log` |
+
+### 4.21 Misc Channels and Runtime Env
+
+| Env Var | Type | Default | Required | Notes |
+|---------|------|---------|----------|-------|
+| `WASM_CHANNELS_DIR` | path | `~/.ironclaw/channels` | No | Directory containing installed WASM channels |
+| `WASM_CHANNELS_ENABLED` | bool | `true` | No | Enable/disable WASM channel support |
+| `WASM_CACHE_COMPILED` | bool | `true` | No | Cache compiled modules in `WASM_CACHE_DIR` |
+| `HTTP_HOST` | string | `0.0.0.0` | No | HTTP webhook bind host |
+| `HTTP_PORT` | u16 | `8080` | No | HTTP webhook port |
+| `HTTP_USER_ID` | string | `http` | No | Default user id for webhook messages |
+| `HTTP_WEBHOOK_SECRET` | string | none | Yes (when HTTP is enabled) | Required to start webhook channel |
+| `TELEGRAM_OWNER_ID` | i64 | unset | No | Telegram owner id for channel owner checks |
 
 ---
 
@@ -459,12 +551,12 @@ Config struct fields: `http_url`, `account`, `allow_from`, `dm_policy`, `group_p
 **Provider chain** (all backends, outermost to innermost):
 
 ```
-Request → SmartRoutingProvider → RetryProvider → CircuitBreakerProvider → CachedProvider → FailoverProvider → backend
+Request → RetryProvider → SmartRoutingProvider → FailoverProvider → CircuitBreakerProvider → ResponseCacheProvider → backend
 ```
 
 Source: `src/llm/smart_routing.rs`, `src/llm/retry.rs`, `src/llm/circuit_breaker.rs`, `src/llm/response_cache.rs`, `src/llm/failover.rs`
 
-**SmartRoutingProvider** (`src/llm/smart_routing.rs`, added v0.10.0): Sits at the top of the chain. Routes requests to cheap vs primary model based on message complexity classification.
+**SmartRoutingProvider** (`src/llm/smart_routing.rs`, added v0.10.0): Receives retried base provider requests and routes cheap vs primary model based on message complexity classification.
 - `Simple` (greetings, yes/no, ≤200 chars, simple keywords) → cheap model (`NEARAI_CHEAP_MODEL`)
 - `Complex` (code blocks, implementation/refactor/debug/analyze keywords, >1000 chars) → primary model
 - `Moderate` (everything else) → cheap model first; if response contains uncertainty phrases → escalate to primary (cascade escalation, controlled by `SMART_ROUTING_CASCADE`)
@@ -487,10 +579,11 @@ After compaction completes, the failed LLM request is automatically retried with
 ### Required Steps for Any DB Change
 
 1. Add method to `Database` trait in `src/db/mod.rs`
-2. Implement in `src/db/postgres.rs` (delegate to Store/Repository pattern)
-3. Implement in `src/db/libsql_backend.rs` (native SQLite-dialect SQL)
-4. Add schema in `migrations/V1__initial.sql` (PostgreSQL)
-5. Add schema in `src/db/libsql_migrations.rs` (SQLite-dialect)
+2. Implement in `src/db/postgres.rs` (PostgreSQL)
+3. Implement in `src/db/libsql/mod.rs` (SQLite dialect)
+4. Add/adjust migration SQL:
+   - `migrations/*.sql` for PostgreSQL
+   - `src/db/libsql_migrations.rs` (`SCHEMA`) for libSQL
 6. Test with both feature flags (see §16)
 
 ### Schema Translation Rules
@@ -503,39 +596,47 @@ After compaction completes, the failed LLM request is automatically retried with
 | `VECTOR(1536)` | `F32_BLOB(1536)` with `libsql_vector_idx` |
 | `tsvector` / `ts_rank_cd` | FTS5 virtual table + sync triggers |
 | PL/pgSQL functions | SQLite triggers |
-| `jsonb_set` (path-targeted) | `json_patch` (RFC 7396 merge patch — replaces top-level keys entirely) |
+| `jsonb_set` / path updates | `json_patch` merge patch (`UPDATE ...` semantics; apply with full-object updates when possible) |
 
 ### Database Tables
 
 | Table | Purpose |
 |-------|---------|
-| `conversations` | Multi-channel conversation tracking |
+| `_migrations` *(libSQL only)* | Applied schema marker / migration history |
 | `agent_jobs` | Job metadata and status |
-| `job_actions` | Event-sourced tool executions |
+| `conversation_messages` | Message transcript rows |
+| `conversations` | Multi-channel conversation tracking |
 | `dynamic_tools` | Agent-built tools |
-| `llm_calls` | Cost tracking |
 | `estimation_snapshots` | EMA learning data |
-| `memory_documents` | Workspace files (path-based, e.g., `"context/vision.md"`) |
-| `memory_chunks` | Chunked content (FTS + vector indexes) |
 | `heartbeat_state` | Periodic execution tracking |
+| `job_actions` | Event-sourced tool executions |
+| `job_events` | Container/tool/sandbox events |
+| `leak_detection_events` | Secret leak detections with context |
+| `leak_detection_patterns` | Secret patterns and detection rules |
+| `llm_calls` | Cost and provider usage tracking |
+| `memory_chunks` | Chunked content (FTS + vector indexes) |
+| `memory_documents` | Workspace files (path-based, e.g., `"context/vision.md"`) |
+| `repair_attempts` | Repair subsystem metadata |
 | `routines` | Scheduled/reactive routine definitions |
 | `routine_runs` | Routine execution history |
-| `settings` | Per-user key-value settings |
-| `tool_failures` | Self-repair tracking |
 | `secrets` | Encrypted credential storage |
-| `wasm_tools` | WASM tool registry |
+| `secret_usage_log` | Secret usage/audit logging |
+| `settings` | Per-user key-value settings |
 | `tool_capabilities` | Tool capability declarations |
+| `tool_failures` | Tool reliability and repair tracking |
+| `tool_rate_limit_state` | In-memory-style rate limit state persistence |
+| `wasm_tools` | WASM tool registry |
 
 ### libSQL Known Limitations
 
 | Limitation | Impact |
 |-----------|--------|
 | Secrets store available | AES-GCM encrypted secrets supported on both PostgreSQL and libSQL |
-| Hybrid search: FTS5 only (no vector) | Semantic search unavailable |
-| Settings reload from DB skipped | Config changes require restart |
-| No incremental migrations | Schema uses `CREATE IF NOT EXISTS`; no `ALTER TABLE` |
+| Hybrid search: supported (FTS + vector) when embeddings enabled | Full semantic search requires embeddings + query vector |
+| Settings reload from DB on startup only | Config changes require host process restart |
+| No incremental migration replay path in libSQL backend | New schema is applied via consolidated `SCHEMA` `execute_batch` on startup |
 | No encryption at rest | SQLite file is plaintext; use FileVault / LUKS |
-| `json_patch` vs `jsonb_set` semantics | Partial nested object updates may drop keys |
+| `json_patch` vs `jsonb_set` semantics | Partial nested updates require careful patch composition; prefer full-object merge |
 
 ---
 
@@ -550,21 +651,28 @@ Pending
         │     └─→ Submitted
         │           └─→ Accepted
         ├─→ Failed
+        ├─→ Cancelled
         └─→ Stuck
               ├─→ InProgress  (recovery attempt via self_repair.rs)
+              ├─→ Cancelled
               └─→ Failed
 ```
 
 | Transition | Trigger | Handler |
 |-----------|---------|---------|
 | `Pending → InProgress` | Job dispatched | `src/agent/scheduler.rs` |
+| `Pending → Cancelled` | User cancellation (API/tool) | `src/agent/scheduler.rs` |
 | `InProgress → Completed` | Worker loop exits cleanly | `src/agent/worker.rs` |
 | `InProgress → Failed` | Worker error, panic, timeout | `src/agent/worker.rs` |
 | `InProgress → Stuck` | Heartbeat detects stale job | `src/agent/self_repair.rs` |
+| `InProgress → Cancelled` | User cancellation during execution | `src/agent/scheduler.rs` |
 | `Stuck → InProgress` | Recovery attempt starts | `src/agent/self_repair.rs` |
 | `Stuck → Failed` | Max recovery attempts exceeded | `src/agent/self_repair.rs` (`RepairError::MaxAttemptsExceeded`) |
+| `Stuck → Cancelled` | User cancellation while stuck | `src/agent/scheduler.rs` |
 | `Completed → Submitted` | Job output submitted to user | `src/agent/submission.rs` |
 | `Submitted → Accepted` | User confirms acceptance | `src/agent/submission.rs` |
+
+**Terminal states**: `Accepted`, `Failed`, `Cancelled`
 
 **Invalid transitions** throw `JobError::InvalidTransition { id, state, target }`.
 
@@ -590,9 +698,23 @@ impl Tool for MyTool {
     }
     async fn execute(&self, params: serde_json::Value, ctx: &JobContext)
         -> Result<ToolOutput, ToolError> { ... }
+    fn estimated_cost(&self, _params: &serde_json::Value) -> Option<Decimal> { None }
+    fn estimated_duration(&self, _params: &serde_json::Value) -> Option<Duration> { None }
+    fn requires_approval(&self, _params: &serde_json::Value) -> ApprovalRequirement { ... }
+    fn execution_timeout(&self) -> Duration { ... }
+    fn domain(&self) -> ToolDomain { ... }
+    fn rate_limit_config(&self) -> Option<ToolRateLimitConfig> { ... }
+    fn schema(&self) -> ToolSchema { ... }
     fn requires_sanitization(&self) -> bool { true }  // true = output from external sources
 }
 ```
+
+`execute` call flow always allows the following extensions:
+- `estimated_cost` and `estimated_duration` can be used by scheduling and budget controls.
+- `requires_approval` integrates with auto-approval/session approval mode.
+- `domain` controls orchestrator vs container execution.
+- `rate_limit_config` is per-user, per-tool throttling.
+- `schema` is the tool declaration used by LLM tool-calling.
 
 **Schema rules**:
 
@@ -610,11 +732,13 @@ impl Tool for MyTool {
 | `http` | `builtin/http.rs` | Network |
 | `read_file`, `write_file`, `list_dir`, `apply_patch` | `builtin/file.rs` | Filesystem |
 | `shell` | `builtin/shell.rs` | Execution |
+| `message` | `builtin/message.rs` | Messaging |
 | `memory_search`, `memory_write`, `memory_read`, `memory_tree` | `builtin/memory.rs` | Workspace |
 | `create_job`, `list_jobs`, `job_status`, `cancel_job` | `builtin/job.rs` | Agent |
 | `routine_create`, `routine_list`, `routine_update`, `routine_delete`, `routine_history` | `builtin/routine.rs` | Routines |
 | `tool_search`, `tool_install`, `tool_auth`, `tool_activate`, `tool_list`, `tool_remove` | `builtin/extension_tools.rs` | Extensions |
 | `skill_list`, `skill_search`, `skill_install`, `skill_remove` | `builtin/skill_tools.rs` | Skills |
+| `build_software` | `builder/core.rs` | Builder |
 | `html_to_markdown` | `builtin/html_converter.rs` | Utility |
 
 ### 8.3 Protected Tool Names
@@ -624,12 +748,25 @@ The protected list is defined in `src/tools/registry.rs` (`PROTECTED_TOOL_NAMES`
 
 ### 8.4 Tool Registration
 
-Tools are registered in `src/tools/registry.rs` via `ToolRegistry::register()`. Discovery order:
+Tools are registered in three startup phases.
 
-1. Built-in tools (hardcoded, always present)
-2. WASM tools (loaded from `~/.ironclaw/tools/*.wasm` and workspace `tools/`)
-3. MCP tools (from configured MCP server URLs)
-4. Dynamically-built tools (from `dynamic_tools` DB table)
+- **Phase 1: App init (`AppBuilder::build_all`)**
+  - `register_builtin_tools()` registers orchestrator-safe built-ins (`echo`, `time`, `json`, `http`).
+  - `register_memory_tools()` adds memory tools when workspace is available.
+  - `register_builder_tool()` registers container dev tools (`shell`, `read_file`, `write_file`, `list_dir`, `apply_patch`) and `build_software`.
+  - `init_extensions()` creates WASM runtime and loads:
+    - WASM tools from `~/.ironclaw/tools` + built artifacts
+    - MCP tools from configured MCP servers (DB + local fallback)
+  - `register_extension_tools()` installs extension management tools (`tool_*`).
+  - `register_skill_tools()` installs `skill_*` when skills are enabled.
+- **Phase 2: Runtime setup (`main.rs`)**
+  - `register_job_tools()` after container manager and event channels are provisioned.
+  - `register_message_tools()` after `ChannelManager` is fully built and before `agent.run()`.
+  - Extension manager gets active channel runtime and SSE sender wiring for hot-activation/status forwarding.
+  - `set_active_channels()` uses a set semantics for loaded startup channels, so repeated activation attempts are idempotent.
+- **PR fix `e8eb4ca` behavior:** runtime channel activation path (`set_active_channels`, `activate_wasm_channel`, `refresh_active_channel`) refreshes auth/webhook config for already-loaded channels instead of duplicating runtime registrations.
+- **Phase 3: Runtime loop (`agent_loop.rs`)**
+  - `register_routine_tools()` when routine engine is active.
 
 ### 8.5 WASM Tool Constraints
 
@@ -649,11 +786,13 @@ Source: `src/tools/wasm/`
 
 Source: `src/tools/mcp/client.rs`
 
-- **Transport**: HTTP only (no stdio)
-- **Protocol**: JSON-RPC 2.0
-- **Tool discovery**: `tools/list` RPC method on startup
+- **Transport**: Streamable HTTP only (no stdio)
+- **Request headers**: `Accept: application/json, text/event-stream`, `Content-Type: application/json`, optional `Mcp-Session-Id`, optional `Authorization: Bearer ...`
+- **Protocol**: JSON-RPC 2.0 with `initialize`, `tools/list`, and `tools/call`
+- **Tool discovery**: `tools/list` RPC method on startup, then `create_tools()` builds IronClaw tool instances.
 - **Execution**: `tools/call` RPC method per tool invocation
-- Auth: Bearer token in `Authorization` header
+- Auth: OAuth/token flow preferred when configured; on first `401`, client retries once after token refresh.
+- Session handling: Successful responses may update and reuse `Mcp-Session-Id` via `McpSessionManager`.
 
 ---
 
@@ -661,33 +800,35 @@ Source: `src/tools/mcp/client.rs`
 
 Source: `src/safety/`
 
-All external tool output passes through the pipeline in this order:
+Ingress and egress validation are split across flow stages:
+
+- `thread_ops.rs` validates inbound user content before command routing.
+- `tool.execute` paths validate tool parameters (`validator.validate_tool_params`) before execution.
+- Tool outputs are hardened by `safety.sanitize_tool_output(...)` before being sent back into context.
+
+For tool output specifically, the effective order is:
 
 ```
 Tool Output
     │
     ▼
-[1] Sanitizer (src/safety/sanitizer.rs)
-    • Detects injection patterns (command chaining, subshells, path traversal)
-    • Escapes dangerous content
-    • Wraps output: <tool_output name="{}" sanitized="true">[escaped]</tool_output>
+[1] Length gate
+    • Checks output size against `max_output_length`; oversized output is replaced with truncation marker
     │
     ▼
-[2] Validator (src/safety/validator.rs)
-    • Checks length (→ SafetyError::OutputTooLarge)
-    • Encoding validation
-    • Forbidden pattern matching
+[2] Leak detection (src/safety/leak_detector.rs)
+    • Detect and redact known secret patterns
+    • Block irrecoverable leaks, return `[Output blocked due to potential secret leakage]`
     │
     ▼
-[3] Policy Engine (src/safety/policy.rs)
+[3] Policy engine (src/safety/policy.rs)
     • PolicyRule system: severity (Critical/High/Medium/Low) + action (Block/Warn/Review/Sanitize)
     • Critical = Block immediately (→ SafetyError::PolicyViolation)
     │
     ▼
-[4] Leak Detector (src/safety/leak_detector.rs)
-    • 15+ secret patterns: API keys, session tokens, private keys, connection strings, JWTs
-    • Per-pattern action: Block (reject) | Redact (mask) | Warn (flag)
-    • Runs at two points: before LLM sees tool output AND before user sees LLM response
+[4] Sanitizer (src/safety/sanitizer.rs)
+    • Escapes and wraps with provenance marker only when needed:
+    • `<tool_output name=\"{}\" sanitized=\"true\">...`
     │
     ▼
 LLM context (sanitized)
@@ -748,7 +889,9 @@ Source: `src/sandbox/config.rs`
 
 **Network proxy credential model** (`src/sandbox/proxy/`):
 
-- All container HTTP/HTTPS routes through host proxy on `SANDBOX_PROXY_PORT`
+- All container HTTP/HTTPS routes through host proxy when sandbox policy is enforced
+  (`ReadOnly`/`WorkspaceWrite`), using the configured runtime proxy port
+  (auto-selected when `proxy_port` is `0`).
 - CONNECT method validates target domain against `DomainAllowlist`
 - `CredentialResolver` trait injects auth headers at transit — containers never see raw keys
 - Custom policy via `NetworkPolicyDecider` trait
@@ -816,7 +959,7 @@ CLAUDE_CONFIG_DIR=~/.claude   # host dir for credential extraction
 
 ## 13. Code Review Checklist
 
-From `src/CLAUDE.md` review discipline. Run these on every changed file set:
+From `CLAUDE.md` review discipline. Run these on every changed file set:
 
 ### Mechanical Pre-Commit Checks
 
@@ -838,8 +981,8 @@ grep -rn '<the_pattern>' src/
 
 | Check | Description |
 |-------|-------------|
-| Both DB backends | Any new persistence method in `Database` trait? → Must be in BOTH `postgres.rs` AND `libsql_backend.rs` |
-| Schema sync | New table/index? → Must be in BOTH `migrations/V1__initial.sql` AND `libsql_migrations.rs` |
+| Both DB backends | Any new persistence method in `Database` trait? → Must be in BOTH `postgres.rs` AND `libsql/mod.rs` |
+| Schema sync | New table/index? → Must be in BOTH `migrations/V*.sql` and `src/db/libsql_migrations.rs` |
 | Seed data | Any `INSERT INTO` in migrations? → Check libSQL migration for same seed data |
 | Index parity | Diff `CREATE INDEX` between the two schema files |
 | Feature flag coverage | Code behind `#[cfg(feature)]`? → Test with each feature in isolation (§16) |
@@ -893,15 +1036,17 @@ grep -rn '<the_pattern>' src/
 ### Pattern: "libSQL workspace search returns no results"
 
 **Symptom**: `memory_search` returns empty even when documents exist
-**Root cause**: libSQL backend uses FTS5 only; vector search not implemented
-**Impact**: Semantic queries don't match; only exact keyword matches work
-**Fix**: Use PostgreSQL backend for full hybrid search, or phrase queries for FTS
+**Root cause**: No embeddings were provided to the search call, or vector search was disabled
+**Impact**: Semantic retrieval is bypassed and only FTS results are used
+**Fix**: Ensure `EMBEDDING_ENABLED=true` and a vector was produced, or set `SearchConfig::fts_only()` when expected
 
 ### Pattern: "Config value silently ignored"
 
 **Symptom**: Env var set but behavior unchanged
-**Root cause**: Wrong priority level; `.env` file in wrong location overriding shell env
-**Priority order**: shell env > `./.env` > `~/.ironclaw/.env` > config.toml > DB > defaults
+**Root cause**: Wrong priority model for config layering and secret injection
+**Priority order**:
+- Process env (including loaded `.env` files) > `INJECTED_VARS` secret overlay > config.toml > settings defaults (from `settings.json`)
+  - `std::env` values always win over overlays, including those from `inject_llm_keys_from_secrets`.
 **Grep**: `grep -rn 'INJECTED_VARS\|from_env\|env::var' src/config/`
 
 ### Pattern: "TOCTOU race in DB operations"
@@ -1011,8 +1156,8 @@ grep -rn 'ChannelManager\|channel.*start\|start.*channel' src/ --include="*.rs"
 # Find all DB trait method calls (both backends should handle)
 grep -rn '\.db\.' src/agent/ --include="*.rs" | head -30
 
-# Check libSQL migration for missing indexes vs PostgreSQL
-diff <(grep 'CREATE INDEX' migrations/V1__initial.sql) <(grep 'CREATE INDEX' src/db/libsql_migrations.rs)
+# Check migration/index parity across Postgres and libSQL
+diff <(cat migrations/V*.sql | grep 'CREATE INDEX') <(cat src/db/libsql_migrations.rs | grep 'CREATE INDEX')
 ```
 
 ---
@@ -1056,6 +1201,17 @@ Some modules have authoritative spec files. **Code must match spec** — spec is
 
 **Update both sides**: When changing behavior, update spec AND code. If spec and code disagree, fix spec first (or explicitly mark spec as outdated), then fix code.
 
+## 19. AGENT Onboarding Playbook
+
+Run this sequence before starting development or review:
+
+1. Read the task scope and map to concrete files (`src/agent`, `src/tools`, `src/db`, `src/config`, `src/channels` first).
+2. Confirm startup path and feature flags from `src/main.rs`, `src/app.rs`, `src/bootstrap.rs`, and `src/settings.rs`.
+3. Identify any spec files in section 18 for the touched module and update those together with code.
+4. Make one change per pass and validate with the section 17 feature-flag test matrix.
+5. Add/adjust tests in owning module and run focused grep checks from section 16.
+6. Before handoff, verify runtime registration side effects (tool registration, hooks, channels, DB traits, safety checks).
+
 ---
 
 ## Debugging
@@ -1086,4 +1242,4 @@ sqlite3 ~/.ironclaw/ironclaw.db "SELECT id, status, created_at FROM agent_jobs O
 
 ---
 
-*Source: IronClaw v0.12.0 (`v0.12.0`) · Docs: github.com/mudrii/ironclaw-docs · Generated: 2026-02-26*
+*Source: IronClaw v0.12.0 (`v0.12.0`) · Docs: github.com/nearai/ironclaw-docs · Generated: 2026-03-01*
