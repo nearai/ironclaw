@@ -1453,7 +1453,9 @@ function buildBreadcrumb(path) {
   let current = '';
   for (const part of parts) {
     current += (current ? '/' : '') + part;
-    html += ' / <a onclick="readMemoryFile(\'' + escapeHtml(current) + '\')">' + escapeHtml(part) + '</a>';
+    // Store the path in data-path (HTML-escaped) and read it back via this.dataset.path
+    // to avoid single-quote injection in inline JS string literals.
+    html += ' / <a onclick="readMemoryFile(this.dataset.path)" data-path="' + escapeHtml(current) + '">' + escapeHtml(part) + '</a>';
   }
   return html;
 }
@@ -1628,10 +1630,8 @@ function applyLogFilters() {
 function setServerLogLevel(level) {
   apiFetch('/api/logs/level', {
     method: 'PUT',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ level: level }),
+    body: { level },
   })
-    .then(r => r.json())
     .then(data => {
       document.getElementById('logs-server-level').value = data.level;
     })
@@ -1640,7 +1640,6 @@ function setServerLogLevel(level) {
 
 function loadServerLogLevel() {
   apiFetch('/api/logs/level')
-    .then(r => r.json())
     .then(data => {
       document.getElementById('logs-server-level').value = data.level;
     })
@@ -1957,11 +1956,6 @@ function renderExtensionCard(ext) {
       actions.appendChild(pairingLabel);
       actions.appendChild(createReconfigureButton(ext.name));
     } else if (status === 'failed') {
-      var restartBtn = document.createElement('button');
-      restartBtn.className = 'btn-ext activate';
-      restartBtn.textContent = 'Restart';
-      restartBtn.addEventListener('click', restartGateway);
-      actions.appendChild(restartBtn);
       actions.appendChild(createReconfigureButton(ext.name));
     } else {
       // installed or configured: show Setup button
@@ -2169,12 +2163,10 @@ function submitConfigureModal(name, fields) {
     .then((res) => {
       closeConfigureModal();
       if (res.success) {
-        if (res.activated && name === 'telegram') {
+        if (res.activated) {
           showToast('Configured and activated ' + name, 'success');
-        } else if (res.activated) {
-          showToast('Configured ' + name + ' successfully', 'success');
         } else if (res.needs_restart) {
-          showToast('Configured ' + name + '. Restart required to activate.', 'info');
+          showToast('Configured ' + name + '. Use Reconfigure to re-enter credentials and activate.', 'info');
         } else {
           showToast(res.message, 'success');
         }
