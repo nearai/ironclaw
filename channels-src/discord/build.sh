@@ -13,6 +13,11 @@ set -euo pipefail
 
 cd "$(dirname "$0")"
 
+if ! command -v wasm-tools &> /dev/null; then
+    echo "Error: wasm-tools not found. Install with: cargo install wasm-tools"
+    exit 1
+fi
+
 echo "Building Discord channel WASM component..."
 
 # Build the WASM module
