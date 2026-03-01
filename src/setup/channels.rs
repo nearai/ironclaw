@@ -1189,15 +1189,16 @@ async fn validate_cloudflare_token_live(token: &str) -> Result<(), String> {
     let result = tokio::time::timeout(std::time::Duration::from_secs(10), async {
         while let Ok(Some(line)) = reader.next_line().await {
             // A successful connection logs a URL like "https://xxx.cfargotunnel.com"
-            if line.contains("https://") {
+            if line.contains("https://")
+                && (line.contains("cfargotunnel.com") || line.contains("trycloudflare.com"))
+            {
                 return Ok(());
             }
             // Error indicators that appear before a URL mean the token is bad
             let lower = line.to_lowercase();
-            if lower.contains("err")
+            if lower.starts_with("err")
                 || lower.contains("failed to unmarshal")
                 || lower.contains("unauthorized")
-                || lower.contains("error")
             {
                 return Err(line);
             }
