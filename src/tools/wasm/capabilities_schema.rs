@@ -62,6 +62,11 @@ pub struct CapabilitiesFile {
     #[serde(default)]
     pub auth: Option<AuthCapabilitySchema>,
 
+    /// Setup schema: secrets the user must provide before the tool can be used.
+    /// Mirrors the channel `setup.required_secrets` pattern.
+    #[serde(default)]
+    pub setup: Option<ToolSetupSchema>,
+
     /// Nested capabilities wrapper for channel-level JSON compatibility.
     ///
     /// Channel capabilities files nest tool capabilities under a `"capabilities"` key.
@@ -95,6 +100,7 @@ impl CapabilitiesFile {
             self.tool_invoke = self.tool_invoke.or(inner.tool_invoke);
             self.workspace = self.workspace.or(inner.workspace);
             self.auth = self.auth.or(inner.auth);
+            self.setup = self.setup.or(inner.setup);
         }
         self
     }
@@ -514,6 +520,26 @@ fn default_method() -> String {
 
 fn default_success_status() -> u16 {
     200
+}
+
+/// Setup schema for WASM tools: secrets the user must provide via the UI.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ToolSetupSchema {
+    /// Secrets the user must provide before the tool can be used.
+    #[serde(default)]
+    pub required_secrets: Vec<ToolSecretSetupSchema>,
+}
+
+/// A single secret required during tool setup.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ToolSecretSetupSchema {
+    /// Secret name in the secrets store (e.g. "google_oauth_client_id").
+    pub name: String,
+    /// User-facing prompt (e.g. "Google OAuth Client ID").
+    pub prompt: String,
+    /// If true, the user may skip this secret.
+    #[serde(default)]
+    pub optional: bool,
 }
 
 #[cfg(test)]
@@ -974,6 +1000,55 @@ mod tests {
         assert_eq!(caps.secrets.unwrap().allowed_names, vec!["my_secret"]);
         assert_eq!(caps.workspace.unwrap().allowed_prefixes, vec!["data/"]);
         assert_eq!(caps.auth.unwrap().secret_name, "my_auth_token");
+    }
+
+    #[test]
+    fn test_parse_tool_setup_schema() {
+        let json = r#"{
+            "setup": {
+                "required_secrets": [
+                    {
+                        "name": "google_oauth_client_id",
+                        "prompt": "Google OAuth Client ID"
+                    },
+                    {
+                        "name": "google_oauth_client_secret",
+                        "prompt": "Google OAuth Client Secret",
+                        "optional": true
+                    }
+                ]
+            }
+        }"#;
+
+        let caps = CapabilitiesFile::from_json(json).unwrap();
+        let setup = caps.setup.unwrap();
+        assert_eq!(setup.required_secrets.len(), 2);
+        assert_eq!(setup.required_secrets[0].name, "google_oauth_client_id");
+        assert_eq!(setup.required_secrets[0].prompt, "Google OAuth Client ID");
+        assert!(!setup.required_secrets[0].optional);
+        assert_eq!(setup.required_secrets[1].name, "google_oauth_client_secret");
+        assert!(setup.required_secrets[1].optional);
+    }
+
+    #[test]
+    fn test_resolve_nested_setup_promoted() {
+        // setup inside capabilities wrapper should be promoted to top level
+        let json = r#"{
+            "capabilities": {
+                "setup": {
+                    "required_secrets": [
+                        { "name": "my_secret", "prompt": "Enter secret" }
+                    ]
+                }
+            }
+        }"#;
+
+        let caps = CapabilitiesFile::from_json(json).unwrap();
+        assert!(
+            caps.setup.is_some(),
+            "setup should be promoted from inner capabilities"
+        );
+        assert_eq!(caps.setup.unwrap().required_secrets[0].name, "my_secret");
     }
 
     #[test]
