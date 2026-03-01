@@ -1,5 +1,7 @@
 //! IronClaw - Main entry point.
 
+use anyhow::Context;
+use dirs::home_dir;
 use std::sync::Arc;
 
 use clap::Parser;
@@ -113,7 +115,12 @@ async fn main() -> anyhow::Result<()> {
         }
         Some(Command::Logs(logs_cmd)) => {
             init_cli_tracing();
-            return run_logs_command(&logs_cmd.clone());
+            let log_path = home_dir()
+                .context("Failed to get home directory")?
+                .join(".ironclaw")
+                .join("logs")
+                .join("ironclaw.log");
+            return run_logs_command(logs_cmd, &log_path);
         }
         Some(Command::Onboard {
             skip_auth,
