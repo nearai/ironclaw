@@ -132,24 +132,12 @@ impl SafetyLayer {
     /// so the caller can reject the message early instead of sending it to the
     /// LLM (which might echo it back and trigger an outbound block loop).
     pub fn scan_inbound_for_secrets(&self, input: &str) -> Option<String> {
+        let warning = "Your message appears to contain a secret (API key, token, or credential). \
+             For security, it was not sent to the AI. Please remove the secret and try again. \
+             To store credentials, use the setup form or `ironclaw config set <name> <value>`.";
         match self.leak_detector.scan_and_clean(input) {
-            Ok(cleaned) if cleaned != input => {
-                // The leak detector found and redacted something
-                Some(
-                    "Your message appears to contain a secret (API key, token, or credential). \
-                     For security, it was not sent to the AI. Please remove the secret and try again. \
-                     To store credentials, use the setup form or `ironclaw config set <name> <value>`."
-                        .to_string(),
-                )
-            }
-            Err(_) => {
-                // The leak detector blocked the content entirely
-                Some(
-                    "Your message was blocked because it contains what appears to be a secret. \
-                     Please remove credentials from your message and try again."
-                        .to_string(),
-                )
-            }
+            Ok(cleaned) if cleaned != input => Some(warning.to_string()),
+            Err(_) => Some(warning.to_string()),
             _ => None, // Clean input
         }
     }
