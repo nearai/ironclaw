@@ -138,6 +138,11 @@ impl Agent {
 
     // Convenience accessors
 
+    /// Get the scheduler (for external wiring, e.g. CreateJobTool).
+    pub fn scheduler(&self) -> Arc<Scheduler> {
+        Arc::clone(&self.scheduler)
+    }
+
     pub(super) fn store(&self) -> Option<&Arc<dyn Database>> {
         self.deps.store.as_ref()
     }
