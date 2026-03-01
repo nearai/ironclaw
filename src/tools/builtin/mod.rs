@@ -13,6 +13,7 @@ pub mod routine;
 pub(crate) mod shell;
 pub mod skill_tools;
 mod time;
+mod web_fetch;
 
 pub use echo::EchoTool;
 pub use extension_tools::{
@@ -33,6 +34,7 @@ pub use routine::{
 pub use shell::ShellTool;
 pub use skill_tools::{SkillInstallTool, SkillListTool, SkillRemoveTool, SkillSearchTool};
 pub use time::TimeTool;
+pub use web_fetch::WebFetchTool;
 
 mod html_converter;
 
