@@ -150,7 +150,36 @@ pub async fn routines_trigger_handler(
     let run_id = engine
         .fire_manual(routine_id, Some(&state.user_id))
         .await
+<<<<<<< HEAD
         .map_err(|e| (routine_error_status(&e), e.to_string()))?;
+=======
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+        .ok_or((StatusCode::NOT_FOUND, "Routine not found".to_string()))?;
+
+    // Send the routine prompt through the message pipeline as a manual trigger.
+    let prompt = match &routine.action {
+        crate::agent::routine::RoutineAction::Lightweight { prompt, .. } => prompt.clone(),
+        crate::agent::routine::RoutineAction::FullJob {
+            title, description, ..
+        } => format!("{}: {}", title, description),
+    };
+
+    let content = format!("[routine:{}] {}", routine.name, prompt);
+    let msg = IncomingMessage::new("gateway", &state.default_user_id, content);
+
+    let tx_guard = state.msg_tx.read().await;
+    let tx = tx_guard.as_ref().ok_or((
+        StatusCode::SERVICE_UNAVAILABLE,
+        "Channel not started".to_string(),
+    ))?;
+
+    tx.send(msg).await.map_err(|_| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "Channel closed".to_string(),
+        )
+    })?;
+>>>>>>> ea8150f (feat: handler auth and ownership checks)
 
     Ok(Json(serde_json::json!({
         "status": "triggered",

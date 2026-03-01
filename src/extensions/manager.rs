@@ -93,6 +93,7 @@ pub struct ExtensionManager {
     installed_relay_extensions: RwLock<HashSet<String>>,
     /// Last activation error for each WASM channel (ephemeral, cleared on success).
     activation_errors: RwLock<HashMap<String, String>>,
+<<<<<<< HEAD
     /// SSE broadcast sender (set post-construction via `set_sse_sender()`).
     sse_sender:
         RwLock<Option<tokio::sync::broadcast::Sender<crate::channels::web::types::SseEvent>>>,
@@ -140,6 +141,10 @@ fn sanitize_url_for_logging(url: &str) -> String {
         // Fallback: strip after ? or #
         url.split(['?', '#']).next().unwrap_or(url).to_string()
     }
+=======
+    /// SSE broadcast manager (set post-construction via `set_sse_sender()`).
+    sse_manager: RwLock<Option<Arc<crate::channels::web::sse::SseManager>>>,
+>>>>>>> ea8150f (feat: handler auth and ownership checks)
 }
 
 impl ExtensionManager {
@@ -184,12 +189,16 @@ impl ExtensionManager {
             active_channel_names: RwLock::new(HashSet::new()),
             installed_relay_extensions: RwLock::new(HashSet::new()),
             activation_errors: RwLock::new(HashMap::new()),
+<<<<<<< HEAD
             sse_sender: RwLock::new(None),
             pending_oauth_flows: crate::cli::oauth_defaults::new_pending_oauth_registry(),
             gateway_token: std::env::var("GATEWAY_AUTH_TOKEN").ok(),
             relay_config: crate::config::RelayConfig::from_env(),
             gateway_mode: std::sync::atomic::AtomicBool::new(false),
             gateway_base_url: RwLock::new(None),
+=======
+            sse_manager: RwLock::new(None),
+>>>>>>> ea8150f (feat: handler auth and ownership checks)
         }
     }
 
@@ -405,9 +414,9 @@ impl ExtensionManager {
     /// Set the SSE broadcast sender for pushing extension status events to the web UI.
     pub async fn set_sse_sender(
         &self,
-        sender: tokio::sync::broadcast::Sender<crate::channels::web::types::SseEvent>,
+        sse: Arc<crate::channels::web::sse::SseManager>,
     ) {
-        *self.sse_sender.write().await = Some(sender);
+        *self.sse_manager.write().await = Some(sse);
     }
 
     /// Returns the pending OAuth flow registry for sharing with the web gateway.
@@ -420,8 +429,8 @@ impl ExtensionManager {
 
     /// Broadcast an extension status change to the web UI via SSE.
     async fn broadcast_extension_status(&self, name: &str, status: &str, message: Option<&str>) {
-        if let Some(ref sender) = *self.sse_sender.read().await {
-            let _ = sender.send(crate::channels::web::types::SseEvent::ExtensionStatus {
+        if let Some(ref sse) = *self.sse_manager.read().await {
+            sse.broadcast(crate::channels::web::types::SseEvent::ExtensionStatus {
                 extension_name: name.to_string(),
                 status: status.to_string(),
                 message: message.map(|m| m.to_string()),
