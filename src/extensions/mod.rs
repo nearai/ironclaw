@@ -83,9 +83,10 @@ pub enum ExtensionSource {
         #[serde(default)]
         capabilities_url: Option<String>,
     },
-    /// Build from source repository.
+    /// Build from local source directory.
     WasmBuildable {
-        repo_url: String,
+        #[serde(alias = "repo_url")]
+        source_dir: String,
         #[serde(default)]
         build_dir: Option<String>,
         /// Crate name used to locate the build artifact binary.

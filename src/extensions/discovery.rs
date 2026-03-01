@@ -247,7 +247,7 @@ fn extract_url(source: &ExtensionSource) -> String {
         ExtensionSource::McpUrl { url } => url.clone(),
         ExtensionSource::Discovered { url } => url.clone(),
         ExtensionSource::WasmDownload { wasm_url, .. } => wasm_url.clone(),
-        ExtensionSource::WasmBuildable { repo_url, .. } => repo_url.clone(),
+        ExtensionSource::WasmBuildable { source_dir, .. } => source_dir.clone(),
     }
 }
 
