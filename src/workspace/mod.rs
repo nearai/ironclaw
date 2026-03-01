@@ -813,7 +813,16 @@ impl Workspace {
                     count += 1;
                 }
                 Err(e) => {
-                    tracing::warn!("Failed to embed chunk {}: {}", chunk.id, e);
+                    tracing::warn!(
+                        "Failed to embed chunk {}: {}{}",
+                        chunk.id,
+                        e,
+                        if matches!(e, embeddings::EmbeddingError::AuthFailed) {
+                            ". Check OPENAI_API_KEY or set EMBEDDING_PROVIDER=ollama for local embeddings"
+                        } else {
+                            ""
+                        }
+                    );
                 }
             }
         }
