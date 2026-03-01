@@ -731,4 +731,42 @@ mod tests {
         assert_eq!(desc, original_desc);
         assert_ne!(desc, "EVIL SHADOW");
     }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn concurrent_register_and_read_no_panic() {
+        use std::sync::Arc as StdArc;
+
+        let registry = StdArc::new(ToolRegistry::new());
+        registry.register_builtin_tools();
+
+        // Spawn concurrent readers and check they don't panic
+        let mut handles = Vec::new();
+
+        // Readers
+        for _ in 0..10 {
+            let reg = StdArc::clone(&registry);
+            handles.push(tokio::spawn(async move {
+                let tools = reg.all().await;
+                assert!(!tools.is_empty());
+                let names = reg.list().await;
+                assert!(!names.is_empty());
+                let _ = reg.get("echo").await;
+                let _ = reg.has("echo").await;
+                let _ = reg.tool_definitions().await;
+            }));
+        }
+
+        // Concurrent register attempts (will be rejected as shadowing)
+        for _ in 0..5 {
+            let reg = StdArc::clone(&registry);
+            handles.push(tokio::spawn(async move {
+                // This will be rejected (echo is protected) but should not panic
+                reg.register(Arc::new(EchoTool)).await;
+            }));
+        }
+
+        for handle in handles {
+            handle.await.expect("task should not panic");
+        }
+    }
 }

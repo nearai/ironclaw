@@ -48,8 +48,14 @@ impl MessageTool {
     /// Set the default channel and target for the current conversation turn.
     /// Call this before each agent turn with the incoming message's channel/target.
     pub async fn set_context(&self, channel: Option<String>, target: Option<String>) {
-        *self.default_channel.write().unwrap_or_else(|e| e.into_inner()) = channel;
-        *self.default_target.write().unwrap_or_else(|e| e.into_inner()) = target;
+        *self
+            .default_channel
+            .write()
+            .unwrap_or_else(|e| e.into_inner()) = channel;
+        *self
+            .default_target
+            .write()
+            .unwrap_or_else(|e| e.into_inner()) = target;
     }
 }
 
@@ -106,24 +112,32 @@ impl Tool for MessageTool {
         let channel = if let Some(c) = params.get("channel").and_then(|v| v.as_str()) {
             c.to_string()
         } else {
-            self.default_channel.read().unwrap_or_else(|e| e.into_inner()).clone().ok_or_else(|| {
-                ToolError::ExecutionFailed(
+            self.default_channel
+                .read()
+                .unwrap_or_else(|e| e.into_inner())
+                .clone()
+                .ok_or_else(|| {
+                    ToolError::ExecutionFailed(
                     "No channel specified and no active conversation. Provide channel parameter."
                         .to_string(),
                 )
-            })?
+                })?
         };
 
         // Get target: use param or fall back to default
         let target = if let Some(t) = params.get("target").and_then(|v| v.as_str()) {
             t.to_string()
         } else {
-            self.default_target.read().unwrap_or_else(|e| e.into_inner()).clone().ok_or_else(|| {
-                ToolError::ExecutionFailed(
-                    "No target specified and no active conversation. Provide target parameter."
-                        .to_string(),
-                )
-            })?
+            self.default_target
+                .read()
+                .unwrap_or_else(|e| e.into_inner())
+                .clone()
+                .ok_or_else(|| {
+                    ToolError::ExecutionFailed(
+                        "No target specified and no active conversation. Provide target parameter."
+                            .to_string(),
+                    )
+                })?
         };
 
         let attachments: Vec<String> = match params.get("attachments") {
@@ -199,7 +213,10 @@ impl Tool for MessageTool {
         let param_channel = params.get("channel").and_then(|v| v.as_str());
         if let Some(channel) = param_channel {
             // Check if it differs from the default channel
-            let default_channel = self.default_channel.read().unwrap_or_else(|e| e.into_inner());
+            let default_channel = self
+                .default_channel
+                .read()
+                .unwrap_or_else(|e| e.into_inner());
             if let Some(default) = default_channel.as_ref()
                 && channel != default
             {
@@ -514,5 +531,55 @@ mod tests {
             "Expected channel error, got: {}",
             err
         );
+    }
+
+    // ── Multi-thread runtime safety tests ─────────────────────────────
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn requires_approval_no_channel_multi_thread() {
+        let tool = MessageTool::new(Arc::new(ChannelManager::new()));
+        // No channel set, no channel param - should not panic in multi-thread runtime
+        let result = tool.requires_approval(&serde_json::json!({"content": "hello"}));
+        assert_eq!(result, ApprovalRequirement::UnlessAutoApproved);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn requires_approval_with_context_multi_thread() {
+        let tool = MessageTool::new(Arc::new(ChannelManager::new()));
+        tool.set_context(Some("signal".to_string()), Some("+1234567890".to_string()))
+            .await;
+
+        // No channel param - uses default, less risky
+        let result = tool.requires_approval(&serde_json::json!({"content": "hello"}));
+        assert_eq!(result, ApprovalRequirement::UnlessAutoApproved);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn requires_approval_cross_channel_multi_thread() {
+        let tool = MessageTool::new(Arc::new(ChannelManager::new()));
+        tool.set_context(Some("signal".to_string()), Some("+1234567890".to_string()))
+            .await;
+
+        // Different channel than default requires approval
+        let result = tool.requires_approval(&serde_json::json!({
+            "content": "hello",
+            "channel": "telegram"
+        }));
+        assert_eq!(result, ApprovalRequirement::Always);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn requires_approval_same_channel_explicit_multi_thread() {
+        let tool = MessageTool::new(Arc::new(ChannelManager::new()));
+        tool.set_context(Some("signal".to_string()), Some("+1234567890".to_string()))
+            .await;
+
+        // Explicit channel that matches default still returns Always
+        // (existing behavior: any explicit channel param triggers Always)
+        let result = tool.requires_approval(&serde_json::json!({
+            "content": "hello",
+            "channel": "signal"
+        }));
+        assert_eq!(result, ApprovalRequirement::Always);
     }
 }
