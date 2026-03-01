@@ -534,7 +534,10 @@ Browse and install extensions:
 
 ```bash
 # Search for extensions
-ironclaw registry search github
+ironclaw registry list
+
+# Optional filtering for specific providers
+ironclaw registry list | grep github-tools
 
 # Get extension info
 ironclaw registry info github-tools

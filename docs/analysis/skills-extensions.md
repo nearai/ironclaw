@@ -346,8 +346,8 @@ All operations flow through `ExtensionManager` (`src/extensions/manager.rs`):
 |------|-------------|-----|------|
 | `notion` | Notion | `https://mcp.notion.com/mcp` | DCR (Dynamic Client Registration) |
 | `linear` | Linear | `https://mcp.linear.app/sse` | DCR |
-| `github` | GitHub Copilot | `https://api.githubcopilot.com/mcp/` | DCR |
-| `slack` | Slack | `https://mcp.slack.com` | DCR |
+| `github` | GitHub | `https://api.githubcopilot.com/mcp/` | DCR |
+| `slack-mcp` | Slack MCP | `https://mcp.slack.com` | DCR |
 | `sentry` | Sentry | `https://mcp.sentry.dev/mcp` | DCR |
 | `stripe` | Stripe | — | DCR |
 | `cloudflare` | Cloudflare | `https://mcp.cloudflare.com/mcp` | DCR |
