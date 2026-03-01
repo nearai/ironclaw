@@ -50,14 +50,14 @@ impl OnlineDiscovery {
         let mut candidates: Vec<RegistryEntry> = Vec::new();
 
         for entry in patterns {
-            let url = extract_url(&entry.source);
+            let url = extract_source(&entry.source);
             if seen_urls.insert(url) {
                 candidates.push(entry);
             }
         }
 
         for entry in github.unwrap_or_default() {
-            let url = extract_url(&entry.source);
+            let url = extract_source(&entry.source);
             if seen_urls.insert(url) {
                 candidates.push(entry);
             }
@@ -242,7 +242,7 @@ async fn with_timeout<T>(
     tokio::time::timeout(duration, future).await.ok()
 }
 
-fn extract_url(source: &ExtensionSource) -> String {
+fn extract_source(source: &ExtensionSource) -> String {
     match source {
         ExtensionSource::McpUrl { url } => url.clone(),
         ExtensionSource::Discovered { url } => url.clone(),
@@ -286,7 +286,7 @@ struct GitHubRepo {
 mod tests {
     use crate::extensions::ExtensionSource;
     use crate::extensions::discovery::{
-        OnlineDiscovery, extract_url, titlecase, validate_mcp_url_with_client,
+        OnlineDiscovery, extract_source, titlecase, validate_mcp_url_with_client,
     };
 
     #[test]
@@ -297,16 +297,16 @@ mod tests {
     }
 
     #[test]
-    fn test_extract_url() {
+    fn test_extract_source() {
         let mcp = ExtensionSource::McpUrl {
             url: "https://mcp.notion.com".to_string(),
         };
-        assert_eq!(extract_url(&mcp), "https://mcp.notion.com");
+        assert_eq!(extract_source(&mcp), "https://mcp.notion.com");
 
         let discovered = ExtensionSource::Discovered {
             url: "https://example.com".to_string(),
         };
-        assert_eq!(extract_url(&discovered), "https://example.com");
+        assert_eq!(extract_source(&discovered), "https://example.com");
     }
 
     #[tokio::test]
