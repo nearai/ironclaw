@@ -476,7 +476,10 @@ mod tests {
             .is_webhook_message_processed("whatsapp", "wamid.test123")
             .await
             .unwrap();
-        assert!(!is_processed, "New message should not be marked as processed");
+        assert!(
+            !is_processed,
+            "New message should not be marked as processed"
+        );
     }
 
     #[tokio::test]
@@ -498,7 +501,10 @@ mod tests {
             .is_webhook_message_processed("whatsapp", "wamid.test456")
             .await
             .unwrap();
-        assert!(is_processed, "Recorded message should be marked as processed");
+        assert!(
+            is_processed,
+            "Recorded message should be marked as processed"
+        );
     }
 
     #[tokio::test]

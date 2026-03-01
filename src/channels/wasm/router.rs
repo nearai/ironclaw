@@ -836,7 +836,10 @@ async fn webhook_handler(
                                 }
                                 // Not a duplicate - record immediately to prevent races
                                 // This ensures concurrent webhooks for the same message will be caught
-                                if let Err(e) = db.record_webhook_message_processed(channel_name, msg_id).await {
+                                if let Err(e) = db
+                                    .record_webhook_message_processed(channel_name, msg_id)
+                                    .await
+                                {
                                     tracing::warn!(
                                         channel = %channel_name,
                                         message_id = %msg_id,
@@ -907,29 +910,27 @@ async fn webhook_handler(
                     })
                     .collect();
 
-                let all_acked = match tokio::time::timeout(
-                    ack_timeout,
-                    futures::future::join_all(ack_futures),
-                )
-                .await
-                {
-                    Ok(results) => results.iter().all(|&r| r),
-                    Err(_) => {
-                        tracing::warn!(
-                            channel = %channel_name,
-                            timeout_secs = ack_timeout.as_secs(),
-                            "Webhook ACK wait timed out, returning 500 to trigger retry"
-                        );
-                        // Return 500 so WhatsApp retries - deduplication will handle duplicates
-                        return (
-                            StatusCode::INTERNAL_SERVER_ERROR,
-                            Json(serde_json::json!({
-                                "error": "ACK timeout",
-                                "message": "Message processing timed out, will retry"
-                            })),
-                        );
-                    }
-                };
+                let all_acked =
+                    match tokio::time::timeout(ack_timeout, futures::future::join_all(ack_futures))
+                        .await
+                    {
+                        Ok(results) => results.iter().all(|&r| r),
+                        Err(_) => {
+                            tracing::warn!(
+                                channel = %channel_name,
+                                timeout_secs = ack_timeout.as_secs(),
+                                "Webhook ACK wait timed out, returning 500 to trigger retry"
+                            );
+                            // Return 500 so WhatsApp retries - deduplication will handle duplicates
+                            return (
+                                StatusCode::INTERNAL_SERVER_ERROR,
+                                Json(serde_json::json!({
+                                    "error": "ACK timeout",
+                                    "message": "Message processing timed out, will retry"
+                                })),
+                            );
+                        }
+                    };
 
                 if !all_acked {
                     tracing::warn!(

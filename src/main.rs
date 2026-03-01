@@ -1130,7 +1130,7 @@ async fn setup_wasm_channels(
         Some(create_wasm_channel_router(
             Arc::clone(&wasm_router),
             extension_manager.map(Arc::clone),
-            database.map(|d| Arc::clone(d)),
+            database.map(Arc::clone),
             webhook_ack_timeout,
         ))
     };

@@ -699,7 +699,9 @@ impl WebhookDedupStore for PgBackend {
             )
             .await?;
 
-        client.execute(&stmt, &[&channel, &external_message_id]).await?;
+        client
+            .execute(&stmt, &[&channel, &external_message_id])
+            .await?;
         Ok(())
     }
 
