@@ -84,7 +84,7 @@ def call_tool(name, params=None, timeout_secs=None):
     )
 
     try:
-        with urllib.request.urlopen(req, timeout=max(timeout_secs or 60, 60) + 5) as resp:
+        with urllib.request.urlopen(req, timeout=(timeout_secs or 60) + 5) as resp:
             result = json.loads(resp.read().decode("utf-8"))
     except urllib.error.HTTPError as e:
         body_text = e.read().decode("utf-8", errors="replace") if e.fp else ""

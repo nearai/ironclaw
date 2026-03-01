@@ -13,7 +13,9 @@ use tokio::io::AsyncReadExt;
 use tokio::process::Command;
 
 use crate::context::JobContext;
-use crate::tools::tool::{ApprovalRequirement, Tool, ToolDomain, ToolError, ToolOutput, require_str};
+use crate::tools::tool::{
+    ApprovalRequirement, Tool, ToolDomain, ToolError, ToolOutput, require_str,
+};
 
 /// Maximum output size before truncation (64KB).
 const MAX_OUTPUT_SIZE: usize = 64 * 1024;
@@ -26,11 +28,23 @@ const MAX_TIMEOUT_SECS: u64 = 300;
 
 /// Environment variables safe to forward to the Python subprocess.
 const SAFE_ENV_VARS: &[&str] = &[
-    "PATH", "HOME", "USER", "LOGNAME", "SHELL", "TERM",
-    "LANG", "LC_ALL", "LC_CTYPE",
-    "PWD", "TMPDIR", "TMP", "TEMP",
-    "CARGO_HOME", "RUSTUP_HOME",
-    "NODE_PATH", "NPM_CONFIG_PREFIX",
+    "PATH",
+    "HOME",
+    "USER",
+    "LOGNAME",
+    "SHELL",
+    "TERM",
+    "LANG",
+    "LC_ALL",
+    "LC_CTYPE",
+    "PWD",
+    "TMPDIR",
+    "TMP",
+    "TEMP",
+    "CARGO_HOME",
+    "RUSTUP_HOME",
+    "NODE_PATH",
+    "NPM_CONFIG_PREFIX",
 ];
 
 /// PTC environment variables required by the ironclaw_tools SDK.
@@ -84,7 +98,8 @@ impl PtcScriptTool {
 
     /// Build the full Python program from user script + preamble/postamble.
     fn build_program(script: &str) -> String {
-        let mut program = String::with_capacity(PREAMBLE.len() + script.len() + POSTAMBLE.len() + 256);
+        let mut program =
+            String::with_capacity(PREAMBLE.len() + script.len() + POSTAMBLE.len() + 256);
         program.push_str(PREAMBLE);
 
         // Indent user script into the try: block

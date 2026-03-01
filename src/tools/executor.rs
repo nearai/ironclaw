@@ -109,14 +109,7 @@ impl ToolExecutor {
         // Determine timeout: caller override -> tool's own timeout -> default,
         // capped at MAX_TIMEOUT_SECS.
         let timeout = timeout_override
-            .unwrap_or_else(|| {
-                let tool_timeout = tool.execution_timeout();
-                if tool_timeout > Duration::from_secs(MAX_TIMEOUT_SECS) {
-                    self.default_timeout
-                } else {
-                    tool_timeout
-                }
-            })
+            .unwrap_or_else(|| tool.execution_timeout())
             .min(Duration::from_secs(MAX_TIMEOUT_SECS));
 
         // Execute with timeout
@@ -127,12 +120,10 @@ impl ToolExecutor {
                 timeout,
             })?
             .map_err(|e| match e {
-                crate::tools::ToolError::InvalidParameters(reason) => {
-                    PtcError::InvalidParameters {
-                        name: tool_name.to_string(),
-                        reason,
-                    }
-                }
+                crate::tools::ToolError::InvalidParameters(reason) => PtcError::InvalidParameters {
+                    name: tool_name.to_string(),
+                    reason,
+                },
                 crate::tools::ToolError::RateLimited(_) => PtcError::RateLimited {
                     name: tool_name.to_string(),
                 },
@@ -159,9 +150,7 @@ impl ToolExecutor {
         // Sanitize output if the tool requires it
         let (output, was_sanitized) = if tool.requires_sanitization() {
             let sanitized = self.safety.sanitize_tool_output(tool_name, &raw_output);
-            if sanitized.was_modified
-                && sanitized.content.starts_with("[Output blocked")
-            {
+            if sanitized.was_modified && sanitized.content.starts_with("[Output blocked") {
                 return Err(PtcError::SafetyBlocked {
                     reason: sanitized.content,
                 });
@@ -249,18 +238,17 @@ mod tests {
 
         let ctx = JobContext::new("test", "test");
         let result = executor
-            .execute(
-                "echo",
-                serde_json::json!({"message": "hello"}),
-                &ctx,
-                None,
-            )
+            .execute("echo", serde_json::json!({"message": "hello"}), &ctx, None)
             .await;
 
         assert!(result.is_ok());
         let ptc_result = result.as_ref().ok();
         assert!(ptc_result.is_some());
-        assert!(ptc_result.map(|r| r.output.contains("hello")).unwrap_or(false));
+        assert!(
+            ptc_result
+                .map(|r| r.output.contains("hello"))
+                .unwrap_or(false)
+        );
     }
 
     #[tokio::test]
@@ -297,10 +285,7 @@ mod tests {
             .execute("echo", serde_json::json!({"message": "hello"}), &ctx, None)
             .await;
 
-        assert!(matches!(
-            result,
-            Err(PtcError::NestingDepthExceeded { .. })
-        ));
+        assert!(matches!(result, Err(PtcError::NestingDepthExceeded { .. })));
     }
 
     #[tokio::test]

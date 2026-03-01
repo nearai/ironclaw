@@ -18,12 +18,12 @@ mod executor;
 mod registry;
 mod tool;
 
-pub use executor::{PtcError, PtcToolResult, ToolExecutor};
 pub use builder::{
     BuildPhase, BuildRequirement, BuildResult, BuildSoftwareTool, BuilderConfig, Language,
     LlmSoftwareBuilder, SoftwareBuilder, SoftwareType, Template, TemplateEngine, TemplateType,
     TestCase, TestHarness, TestResult, TestSuite, ValidationError, ValidationResult, WasmValidator,
 };
+pub use executor::{PtcError, PtcToolResult, ToolExecutor};
 pub use rate_limiter::RateLimiter;
 pub use registry::ToolRegistry;
 pub use tool::{

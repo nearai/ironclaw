@@ -34,9 +34,21 @@ use crate::tools::wasm::runtime::{EPOCH_TICK_INTERVAL, PreparedModule, WasmToolR
 /// The closure internally creates a tokio runtime to bridge async tool execution.
 /// Closure that resolves a tool call by name. The `u32` parameter is the current
 /// nesting depth so the executor can enforce the global depth limit across
-/// WASM→executor→WASM chains.
+/// WASM->executor->WASM chains.
 pub type ToolResolver =
     Arc<dyn Fn(&str, serde_json::Value, u32) -> Result<String, String> + Send + Sync>;
+
+/// RAII guard that decrements the nesting depth counter on drop, ensuring the
+/// counter is restored even if the code between increment and decrement panics.
+struct NestingGuard<'a> {
+    depth: &'a mut u32,
+}
+
+impl Drop for NestingGuard<'_> {
+    fn drop(&mut self) {
+        *self.depth -= 1;
+    }
+}
 
 // Generate component model bindings from the WIT file.
 //
@@ -469,12 +481,14 @@ impl near::agent::host::Host for StoreData {
         let params: serde_json::Value = serde_json::from_str(&params_json)
             .map_err(|e| format!("Invalid tool parameters JSON: {}", e))?;
 
-        // Increment depth, call resolver with current depth, decrement on return
+        // Increment depth with RAII guard to ensure decrement even on panic
         self.tool_nesting_depth += 1;
-        let result = resolver(&real_name, params, self.tool_nesting_depth);
-        self.tool_nesting_depth -= 1;
-
-        result
+        let current_depth = self.tool_nesting_depth;
+        let _guard = NestingGuard {
+            depth: &mut self.tool_nesting_depth,
+        };
+        // _guard drops at end of scope (or on panic), decrementing depth
+        resolver(&real_name, params, current_depth)
     }
 
     fn secret_exists(&mut self, name: String) -> bool {
@@ -735,11 +749,8 @@ impl Tool for WasmToolWrapper {
         let context_json = serde_json::to_string(ctx).ok();
 
         // Resolve the tool executor: direct reference takes priority, then shared slot.
-        let resolved_executor: Option<Arc<ToolExecutor>> = self
-            .tool_executor
-            .as_ref()
-            .cloned()
-            .or_else(|| {
+        let resolved_executor: Option<Arc<ToolExecutor>> =
+            self.tool_executor.as_ref().cloned().or_else(|| {
                 self.tool_executor_slot
                     .as_ref()
                     .and_then(|slot| slot.read().ok())
@@ -775,7 +786,8 @@ impl Tool for WasmToolWrapper {
                         .map(|r| r.output)
                         .map_err(|e| e.to_string())
                 })
-            }) as Arc<dyn Fn(&str, serde_json::Value, u32) -> Result<String, String> + Send + Sync>
+            })
+                as Arc<dyn Fn(&str, serde_json::Value, u32) -> Result<String, String> + Send + Sync>
         });
 
         // Clone what we need for the blocking task
@@ -795,10 +807,10 @@ impl Tool for WasmToolWrapper {
                 description,
                 schema,
                 credentials,
-                secrets_store: None,       // Not needed in blocking task
-                oauth_refresh: None,       // Already used above for pre-refresh
-                tool_executor: None,       // Resolver closure captures the executor
-                tool_executor_slot: None,  // Resolver closure captures the executor
+                secrets_store: None,      // Not needed in blocking task
+                oauth_refresh: None,      // Already used above for pre-refresh
+                tool_executor: None,      // Resolver closure captures the executor
+                tool_executor_slot: None, // Resolver closure captures the executor
             };
 
             tokio::task::spawn_blocking(move || {
@@ -1205,9 +1217,9 @@ mod tests {
     use std::collections::HashMap;
     use std::sync::Arc;
 
+    use crate::tools::tool::{ToolError, ToolOutput};
     use crate::tools::wasm::capabilities::Capabilities;
     use crate::tools::wasm::runtime::{WasmRuntimeConfig, WasmToolRuntime};
-    use crate::tools::tool::{ToolError, ToolOutput};
 
     use super::WasmToolWrapper;
 
@@ -1779,8 +1791,8 @@ mod tests {
         let capabilities = Capabilities::default().with_tool_invoke(aliases);
 
         // Create wrapper with executor
-        let wrapper = WasmToolWrapper::new(runtime, prepared, capabilities)
-            .with_tool_executor(executor);
+        let wrapper =
+            WasmToolWrapper::new(runtime, prepared, capabilities).with_tool_executor(executor);
 
         // Execute
         let ctx = crate::context::JobContext::new("test", "WASM PTC test");
@@ -1837,8 +1849,8 @@ mod tests {
         aliases.insert("other_alias".to_string(), "echo".to_string());
         let capabilities = Capabilities::default().with_tool_invoke(aliases);
 
-        let wrapper = WasmToolWrapper::new(runtime, prepared, capabilities)
-            .with_tool_executor(executor);
+        let wrapper =
+            WasmToolWrapper::new(runtime, prepared, capabilities).with_tool_executor(executor);
 
         let ctx = crate::context::JobContext::new("test", "WASM PTC test");
         let result: Result<ToolOutput, ToolError> = wrapper
@@ -1888,15 +1900,18 @@ mod tests {
         // No tool_invoke capability at all
         let capabilities = Capabilities::default();
 
-        let wrapper = WasmToolWrapper::new(runtime, prepared, capabilities)
-            .with_tool_executor(executor);
+        let wrapper =
+            WasmToolWrapper::new(runtime, prepared, capabilities).with_tool_executor(executor);
 
         let ctx = crate::context::JobContext::new("test", "WASM PTC test");
         let result: Result<ToolOutput, ToolError> = wrapper
             .execute(serde_json::json!({"message": "hello"}), &ctx)
             .await;
 
-        assert!(result.is_err(), "Should fail when no tool_invoke capability");
+        assert!(
+            result.is_err(),
+            "Should fail when no tool_invoke capability"
+        );
         let err_msg = format!("{:?}", result.unwrap_err());
         assert!(
             err_msg.contains("not granted") || err_msg.contains("capability"),
