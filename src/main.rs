@@ -44,8 +44,19 @@ fn init_cli_tracing() {
         .init();
 }
 
-#[tokio::main]
-async fn main() -> anyhow::Result<()> {
+/// Synchronous entry point. Loads `.env` files before the Tokio runtime
+/// starts so that `std::env::set_var` is safe (no worker threads yet).
+fn main() -> anyhow::Result<()> {
+    let _ = dotenvy::dotenv();
+    ironclaw::bootstrap::load_ironclaw_env();
+
+    tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()?
+        .block_on(async_main())
+}
+
+async fn async_main() -> anyhow::Result<()> {
     let cli = Cli::parse();
 
     // Handle non-agent commands first (they don't need full setup)
@@ -80,14 +91,10 @@ async fn main() -> anyhow::Result<()> {
         }
         Some(Command::Doctor) => {
             init_cli_tracing();
-            let _ = dotenvy::dotenv();
-            ironclaw::bootstrap::load_ironclaw_env();
             return ironclaw::cli::run_doctor_command().await;
         }
         Some(Command::Status) => {
             init_cli_tracing();
-            let _ = dotenvy::dotenv();
-            ironclaw::bootstrap::load_ironclaw_env();
             return run_status_command().await;
         }
         Some(Command::Completion(completion)) => {
@@ -115,9 +122,6 @@ async fn main() -> anyhow::Result<()> {
             skip_auth,
             channels_only,
         }) => {
-            let _ = dotenvy::dotenv();
-            ironclaw::bootstrap::load_ironclaw_env();
-
             #[cfg(any(feature = "postgres", feature = "libsql"))]
             {
                 let config = SetupConfig {
@@ -140,11 +144,6 @@ async fn main() -> anyhow::Result<()> {
     }
 
     // ── Agent startup ──────────────────────────────────────────────────
-
-    // Load .env files early so DATABASE_URL (and any other vars) are
-    // available to all subsequent env-based config resolution.
-    let _ = dotenvy::dotenv();
-    ironclaw::bootstrap::load_ironclaw_env();
 
     // Enhanced first-run detection
     #[cfg(any(feature = "postgres", feature = "libsql"))]
