@@ -75,7 +75,7 @@ pub fn check_requirements_sync(requirements: &GatingRequirements) -> GatingResul
 }
 
 /// Check if a binary exists on PATH using `std::process::Command`.
-fn binary_exists(name: &str) -> bool {
+pub(crate) fn binary_exists(name: &str) -> bool {
     #[cfg(unix)]
     {
         std::process::Command::new("which")
