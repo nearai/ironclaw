@@ -152,7 +152,9 @@ fn create_anthropic_provider(config: &LlmConfig) -> Result<Arc<dyn LlmProvider>,
         anth.model,
         anth.base_url.as_deref().unwrap_or("default"),
     );
-    Ok(Arc::new(RigAdapter::new(model, &anth.model)))
+    Ok(Arc::new(
+        RigAdapter::new(model, &anth.model).with_cache_retention(anth.cache_retention),
+    ))
 }
 
 fn create_ollama_provider(config: &LlmConfig) -> Result<Arc<dyn LlmProvider>, LlmError> {

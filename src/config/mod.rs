@@ -13,7 +13,7 @@ mod embeddings;
 mod heartbeat;
 pub(crate) mod helpers;
 mod hygiene;
-mod llm;
+pub(crate) mod llm;
 mod routines;
 mod safety;
 mod sandbox;
@@ -37,7 +37,7 @@ pub use self::embeddings::EmbeddingsConfig;
 pub use self::heartbeat::HeartbeatConfig;
 pub use self::hygiene::HygieneConfig;
 pub use self::llm::{
-    AnthropicDirectConfig, LlmBackend, LlmConfig, NearAiConfig, OllamaConfig,
+    AnthropicDirectConfig, CacheRetention, LlmBackend, LlmConfig, NearAiConfig, OllamaConfig,
     OpenAiCompatibleConfig, OpenAiDirectConfig, TinfoilConfig,
 };
 pub use self::routines::RoutineConfig;

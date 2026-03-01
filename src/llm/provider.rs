@@ -153,6 +153,12 @@ pub struct CompletionResponse {
     pub input_tokens: u32,
     pub output_tokens: u32,
     pub finish_reason: FinishReason,
+    /// Tokens read from the provider's server-side prompt cache (Anthropic).
+    /// Zero when caching is not supported or on a cache miss.
+    pub cache_read_input_tokens: u32,
+    /// Tokens written to the provider's server-side prompt cache (Anthropic).
+    /// Zero when caching is not supported or no new prefix was cached.
+    pub cache_creation_input_tokens: u32,
 }
 
 /// Why the completion finished.
@@ -254,6 +260,10 @@ pub struct ToolCompletionResponse {
     pub input_tokens: u32,
     pub output_tokens: u32,
     pub finish_reason: FinishReason,
+    /// Tokens read from the provider's server-side prompt cache (Anthropic).
+    pub cache_read_input_tokens: u32,
+    /// Tokens written to the provider's server-side prompt cache (Anthropic).
+    pub cache_creation_input_tokens: u32,
 }
 
 /// Metadata about a model returned by the provider's API.
@@ -327,6 +337,14 @@ pub trait LlmProvider: Send + Sync {
     fn calculate_cost(&self, input_tokens: u32, output_tokens: u32) -> Decimal {
         let (input_cost, output_cost) = self.cost_per_token();
         input_cost * Decimal::from(input_tokens) + output_cost * Decimal::from(output_tokens)
+    }
+
+    /// Cost multiplier for cache-creation tokens (Anthropic prompt caching).
+    ///
+    /// Returns `1.0` by default (no surcharge). Anthropic providers return
+    /// `1.25` for 5-minute TTL or `2.0` for 1-hour TTL.
+    fn cache_write_multiplier(&self) -> Decimal {
+        Decimal::ONE
     }
 }
 

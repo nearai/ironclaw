@@ -169,6 +169,10 @@ pub struct ToolSelection {
 pub struct TokenUsage {
     pub input_tokens: u32,
     pub output_tokens: u32,
+    /// Tokens served from the provider's server-side prompt cache (Anthropic).
+    pub cache_read_input_tokens: u32,
+    /// Tokens written to the provider's prompt cache (Anthropic).
+    pub cache_creation_input_tokens: u32,
 }
 
 impl TokenUsage {
@@ -311,6 +315,8 @@ impl Reasoning {
         let usage = TokenUsage {
             input_tokens: response.input_tokens,
             output_tokens: response.output_tokens,
+            cache_read_input_tokens: response.cache_read_input_tokens,
+            cache_creation_input_tokens: response.cache_creation_input_tokens,
         };
         Ok((clean_response(&response.content), usage))
     }
@@ -486,6 +492,8 @@ Respond in JSON format:
             let usage = TokenUsage {
                 input_tokens: response.input_tokens,
                 output_tokens: response.output_tokens,
+                cache_read_input_tokens: response.cache_read_input_tokens,
+                cache_creation_input_tokens: response.cache_creation_input_tokens,
             };
 
             // If there were tool calls, return them for execution
@@ -564,6 +572,8 @@ Respond in JSON format:
                 usage: TokenUsage {
                     input_tokens: response.input_tokens,
                     output_tokens: response.output_tokens,
+                    cache_read_input_tokens: response.cache_read_input_tokens,
+                    cache_creation_input_tokens: response.cache_creation_input_tokens,
                 },
             })
         }
