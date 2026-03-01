@@ -48,8 +48,14 @@ impl MessageTool {
     /// Set the default channel and target for the current conversation turn.
     /// Call this before each agent turn with the incoming message's channel/target.
     pub async fn set_context(&self, channel: Option<String>, target: Option<String>) {
-        *self.default_channel.write().unwrap_or_else(|e| e.into_inner()) = channel;
-        *self.default_target.write().unwrap_or_else(|e| e.into_inner()) = target;
+        *self
+            .default_channel
+            .write()
+            .unwrap_or_else(|e| e.into_inner()) = channel;
+        *self
+            .default_target
+            .write()
+            .unwrap_or_else(|e| e.into_inner()) = target;
     }
 }
 
@@ -106,24 +112,32 @@ impl Tool for MessageTool {
         let channel = if let Some(c) = params.get("channel").and_then(|v| v.as_str()) {
             c.to_string()
         } else {
-            self.default_channel.read().unwrap_or_else(|e| e.into_inner()).clone().ok_or_else(|| {
-                ToolError::ExecutionFailed(
-                    "No channel specified and no active conversation. Provide channel parameter."
-                        .to_string(),
-                )
-            })?
+            self.default_channel
+                .read()
+                .unwrap_or_else(|e| e.into_inner())
+                .clone()
+                .ok_or_else(|| {
+                    ToolError::ExecutionFailed(
+                        "No channel specified and no active conversation. Provide channel parameter."
+                            .to_string(),
+                    )
+                })?
         };
 
         // Get target: use param or fall back to default
         let target = if let Some(t) = params.get("target").and_then(|v| v.as_str()) {
             t.to_string()
         } else {
-            self.default_target.read().unwrap_or_else(|e| e.into_inner()).clone().ok_or_else(|| {
-                ToolError::ExecutionFailed(
-                    "No target specified and no active conversation. Provide target parameter."
-                        .to_string(),
-                )
-            })?
+            self.default_target
+                .read()
+                .unwrap_or_else(|e| e.into_inner())
+                .clone()
+                .ok_or_else(|| {
+                    ToolError::ExecutionFailed(
+                        "No target specified and no active conversation. Provide target parameter."
+                            .to_string(),
+                    )
+                })?
         };
 
         let attachments: Vec<String> = match params.get("attachments") {
@@ -199,7 +213,10 @@ impl Tool for MessageTool {
         let param_channel = params.get("channel").and_then(|v| v.as_str());
         if let Some(channel) = param_channel {
             // Check if it differs from the default channel
-            let default_channel = self.default_channel.read().unwrap_or_else(|e| e.into_inner());
+            let default_channel = self
+                .default_channel
+                .read()
+                .unwrap_or_else(|e| e.into_inner());
             if let Some(default) = default_channel.as_ref()
                 && channel != default
             {
@@ -514,5 +531,43 @@ mod tests {
             "Expected channel error, got: {}",
             err
         );
+    }
+
+    /// Regression test: requires_approval() is a sync method called from async context.
+    /// With tokio::sync::RwLock, this would panic with:
+    ///   "Cannot block the current thread from within a runtime"
+    /// because blocking_read() cannot be called inside an async runtime.
+    /// With std::sync::RwLock, it works correctly since std locks are safe
+    /// for short-held locks in sync methods called from async contexts.
+    #[tokio::test]
+    async fn requires_approval_works_from_async_context() {
+        let tool = MessageTool::new(Arc::new(ChannelManager::new()));
+
+        // Set context asynchronously (simulating real usage pattern)
+        tool.set_context(Some("signal".to_string()), Some("+1234567890".to_string()))
+            .await;
+
+        // Call requires_approval (sync method) from async context.
+        // This is the critical test: with tokio::sync::RwLock::blocking_read(),
+        // this would panic. With std::sync::RwLock::read(), it works.
+        let approval = tool.requires_approval(&serde_json::json!({
+            "content": "hello",
+            "channel": "telegram"
+        }));
+        // Different channel from default -> Always
+        assert!(matches!(approval, ApprovalRequirement::Always));
+
+        // No channel specified (uses default) -> UnlessAutoApproved
+        let approval = tool.requires_approval(&serde_json::json!({
+            "content": "hello"
+        }));
+        assert!(matches!(approval, ApprovalRequirement::UnlessAutoApproved));
+
+        // Explicit channel (even if same as default) -> Always
+        let approval = tool.requires_approval(&serde_json::json!({
+            "content": "hello",
+            "channel": "signal"
+        }));
+        assert!(matches!(approval, ApprovalRequirement::Always));
     }
 }
