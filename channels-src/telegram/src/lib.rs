@@ -373,19 +373,16 @@ impl Guest for TelegramChannel {
                 "Webhook mode enabled (tunnel configured)",
             );
 
-            // Register webhook with Telegram API
+            // Register webhook with Telegram API — propagate errors so a bad token
+            // causes activation to fail rather than silently succeeding.
             if let Some(ref tunnel_url) = config.tunnel_url {
                 channel_host::log(
                     channel_host::LogLevel::Info,
                     &format!("Registering webhook: {}/webhook/telegram", tunnel_url),
                 );
 
-                if let Err(e) = register_webhook(tunnel_url, config.webhook_secret.as_deref()) {
-                    channel_host::log(
-                        channel_host::LogLevel::Error,
-                        &format!("Failed to register webhook: {}", e),
-                    );
-                }
+                register_webhook(tunnel_url, config.webhook_secret.as_deref())
+                    .map_err(|e| format!("Failed to register webhook: {}", e))?;
             }
         } else {
             channel_host::log(
@@ -393,14 +390,10 @@ impl Guest for TelegramChannel {
                 "Polling mode enabled (no tunnel configured)",
             );
 
-            // Delete any existing webhook before polling
-            // Telegram doesn't allow getUpdates while a webhook is active
-            if let Err(e) = delete_webhook() {
-                channel_host::log(
-                    channel_host::LogLevel::Warn,
-                    &format!("Failed to delete webhook (may not exist): {}", e),
-                );
-            }
+            // Delete any existing webhook before polling. Telegram returns success
+            // when no webhook exists, so any error here (e.g. 401) means a bad token.
+            delete_webhook()
+                .map_err(|e| format!("Bot token validation failed: {}", e))?;
         }
 
         // Configure polling only if not in webhook mode

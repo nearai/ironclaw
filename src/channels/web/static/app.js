@@ -324,8 +324,14 @@ function showSlashAutocomplete(matches) {
     const row = document.createElement('div');
     row.className = 'slash-ac-item';
     row.dataset.index = i;
-    row.innerHTML = '<span class="slash-ac-cmd">' + escapeHtml(item.cmd) + '</span>'
-      + '<span class="slash-ac-desc">' + escapeHtml(item.desc) + '</span>';
+    var cmdSpan = document.createElement('span');
+    cmdSpan.className = 'slash-ac-cmd';
+    cmdSpan.textContent = item.cmd;
+    var descSpan = document.createElement('span');
+    descSpan.className = 'slash-ac-desc';
+    descSpan.textContent = item.desc;
+    row.appendChild(cmdSpan);
+    row.appendChild(descSpan);
     row.addEventListener('mousedown', (e) => {
       e.preventDefault(); // prevent blur
       selectSlashItem(item.cmd);
@@ -1447,7 +1453,9 @@ function buildBreadcrumb(path) {
   let current = '';
   for (const part of parts) {
     current += (current ? '/' : '') + part;
-    html += ' / <a onclick="readMemoryFile(\'' + escapeHtml(current) + '\')">' + escapeHtml(part) + '</a>';
+    // Store the path in data-path (HTML-escaped) and read it back via this.dataset.path
+    // to avoid single-quote injection in inline JS string literals.
+    html += ' / <a onclick="readMemoryFile(this.dataset.path)" data-path="' + escapeHtml(current) + '">' + escapeHtml(part) + '</a>';
   }
   return html;
 }
@@ -1622,10 +1630,8 @@ function applyLogFilters() {
 function setServerLogLevel(level) {
   apiFetch('/api/logs/level', {
     method: 'PUT',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ level: level }),
+    body: { level },
   })
-    .then(r => r.json())
     .then(data => {
       document.getElementById('logs-server-level').value = data.level;
     })
@@ -1634,7 +1640,6 @@ function setServerLogLevel(level) {
 
 function loadServerLogLevel() {
   apiFetch('/api/logs/level')
-    .then(r => r.json())
     .then(data => {
       document.getElementById('logs-server-level').value = data.level;
     })
@@ -1642,6 +1647,8 @@ function loadServerLogLevel() {
 }
 
 // --- Extensions ---
+
+var kindLabels = { 'wasm_channel': 'Channel', 'wasm_tool': 'Tool', 'mcp_server': 'MCP' };
 
 function loadExtensions() {
   const extList = document.getElementById('extensions-list');
@@ -1718,7 +1725,7 @@ function renderAvailableExtensionCard(entry) {
 
   const kind = document.createElement('span');
   kind.className = 'ext-kind kind-' + entry.kind;
-  kind.textContent = entry.kind;
+  kind.textContent = kindLabels[entry.kind] || entry.kind;
   header.appendChild(kind);
 
   card.appendChild(header);
@@ -1784,7 +1791,7 @@ function renderMcpServerCard(entry, installedExt) {
 
   var kind = document.createElement('span');
   kind.className = 'ext-kind kind-mcp_server';
-  kind.textContent = 'mcp_server';
+  kind.textContent = kindLabels['mcp_server'] || 'mcp_server';
   header.appendChild(kind);
 
   if (installedExt) {
@@ -1868,12 +1875,12 @@ function renderExtensionCard(ext) {
 
   const name = document.createElement('span');
   name.className = 'ext-name';
-  name.textContent = ext.name;
+  name.textContent = ext.display_name || ext.name;
   header.appendChild(name);
 
   const kind = document.createElement('span');
   kind.className = 'ext-kind kind-' + ext.kind;
-  kind.textContent = ext.kind;
+  kind.textContent = kindLabels[ext.kind] || ext.kind;
   header.appendChild(kind);
 
   // Auth dot only for non-WASM-channel extensions (channels use the stepper instead)
@@ -1949,11 +1956,6 @@ function renderExtensionCard(ext) {
       actions.appendChild(pairingLabel);
       actions.appendChild(createReconfigureButton(ext.name));
     } else if (status === 'failed') {
-      var restartBtn = document.createElement('button');
-      restartBtn.className = 'btn-ext activate';
-      restartBtn.textContent = 'Restart';
-      restartBtn.addEventListener('click', restartGateway);
-      actions.appendChild(restartBtn);
       actions.appendChild(createReconfigureButton(ext.name));
     } else {
       // installed or configured: show Setup button
@@ -1981,7 +1983,7 @@ function renderExtensionCard(ext) {
     if (ext.needs_setup) {
       const configBtn = document.createElement('button');
       configBtn.className = 'btn-ext configure';
-      configBtn.textContent = ext.authenticated ? 'Reconfigure' : 'Configure';
+      configBtn.textContent = ext.authenticated ? 'Reconfigure' : 'Setup';
       configBtn.addEventListener('click', () => showConfigureModal(ext.name));
       actions.appendChild(configBtn);
     }
@@ -2102,7 +2104,8 @@ function renderConfigureModal(name, secrets) {
     if (secret.provided) {
       const badge = document.createElement('span');
       badge.className = 'field-provided';
-      badge.textContent = 'Set';
+      badge.textContent = '\u2713';
+      badge.title = 'Already configured';
       inputRow.appendChild(badge);
     }
     if (secret.auto_generate && !secret.provided) {
@@ -2160,12 +2163,10 @@ function submitConfigureModal(name, fields) {
     .then((res) => {
       closeConfigureModal();
       if (res.success) {
-        if (res.activated && name === 'telegram') {
+        if (res.activated) {
           showToast('Configured and activated ' + name, 'success');
-        } else if (res.activated) {
-          showToast('Configured ' + name + ' successfully', 'success');
         } else if (res.needs_restart) {
-          showToast('Configured ' + name + '. Restart required to activate.', 'info');
+          showToast('Configured ' + name + '. Use Reconfigure to re-enter credentials and activate.', 'info');
         } else {
           showToast(res.message, 'success');
         }

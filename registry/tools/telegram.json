@@ -1,9 +1,9 @@
 {
   "name": "telegram-mtproto",
-  "display_name": "Telegram",
+  "display_name": "Telegram Tool",
   "kind": "tool",
   "version": "0.1.0",
-  "description": "Telegram user-mode integration via MTProto for messages and contacts",
+  "description": "Your agent uses your Telegram account to read and send messages",
   "keywords": ["messaging", "chat", "telegram", "mtproto"],
 
   "source": {

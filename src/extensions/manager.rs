@@ -168,6 +168,53 @@ impl ExtensionManager {
         active.extend(names);
     }
 
+    /// Persist the set of active channel names to the settings store.
+    ///
+    /// Saved under key `activated_channels` so channels auto-activate on restart.
+    async fn persist_active_channels(&self) {
+        let Some(ref store) = self.store else {
+            return;
+        };
+        let names: Vec<String> = self
+            .active_channel_names
+            .read()
+            .await
+            .iter()
+            .cloned()
+            .collect();
+        let value = serde_json::json!(names);
+        if let Err(e) = store
+            .set_setting(&self.user_id, "activated_channels", &value)
+            .await
+        {
+            tracing::warn!(error = %e, "Failed to persist activated_channels setting");
+        }
+    }
+
+    /// Load previously activated channel names from the settings store.
+    ///
+    /// Returns channel names that were activated in a prior session so they can
+    /// be auto-activated at startup.
+    pub async fn load_persisted_active_channels(&self) -> Vec<String> {
+        let Some(ref store) = self.store else {
+            return Vec::new();
+        };
+        match store.get_setting(&self.user_id, "activated_channels").await {
+            Ok(Some(value)) => match serde_json::from_value(value) {
+                Ok(names) => names,
+                Err(e) => {
+                    tracing::warn!(error = %e, "Failed to deserialize activated_channels");
+                    Vec::new()
+                }
+            },
+            Ok(None) => Vec::new(),
+            Err(e) => {
+                tracing::warn!(error = %e, "Failed to load activated_channels setting");
+                Vec::new()
+            }
+        }
+    }
+
     /// Set the SSE broadcast sender for pushing extension status events to the web UI.
     pub async fn set_sse_sender(
         &self,
@@ -323,9 +370,15 @@ impl ExtensionManager {
                             Vec::new()
                         };
 
+                        let display_name = self
+                            .registry
+                            .get_with_kind(&server.name, Some(ExtensionKind::McpServer))
+                            .await
+                            .map(|e| e.display_name);
                         extensions.push(InstalledExtension {
                             name: server.name.clone(),
                             kind: ExtensionKind::McpServer,
+                            display_name,
                             description: server.description.clone(),
                             url: Some(server.url.clone()),
                             authenticated,
@@ -352,15 +405,22 @@ impl ExtensionManager {
                     for (name, _discovered) in tools {
                         let active = self.tool_registry.has(&name).await;
 
+                        let display_name = self
+                            .registry
+                            .get_with_kind(&name, Some(ExtensionKind::WasmTool))
+                            .await
+                            .map(|e| e.display_name);
+                        let (authenticated, needs_setup) = self.check_tool_auth_status(&name).await;
                         extensions.push(InstalledExtension {
                             name: name.clone(),
                             kind: ExtensionKind::WasmTool,
+                            display_name,
                             description: None,
                             url: None,
-                            authenticated: true, // WASM tools don't always need auth
+                            authenticated,
                             active,
                             tools: if active { vec![name] } else { Vec::new() },
-                            needs_setup: false,
+                            needs_setup,
                             installed: true,
                             activation_error: None,
                         });
@@ -385,9 +445,15 @@ impl ExtensionManager {
                         let (authenticated, needs_setup) =
                             self.check_channel_auth_status(&name).await;
                         let activation_error = errors.get(&name).cloned();
+                        let display_name = self
+                            .registry
+                            .get_with_kind(&name, Some(ExtensionKind::WasmChannel))
+                            .await
+                            .map(|e| e.display_name);
                         extensions.push(InstalledExtension {
                             name,
                             kind: ExtensionKind::WasmChannel,
+                            display_name,
                             description: None,
                             url: None,
                             authenticated,
@@ -424,6 +490,7 @@ impl ExtensionManager {
                 extensions.push(InstalledExtension {
                     name: entry.name,
                     kind: entry.kind,
+                    display_name: Some(entry.display_name),
                     description: Some(entry.description),
                     url: None,
                     authenticated: false,
@@ -477,6 +544,12 @@ impl ExtensionManager {
                 // Unregister from tool registry
                 self.tool_registry.unregister(name).await;
 
+                // Revoke credential mappings from the shared registry
+                let cap_path = self
+                    .wasm_tools_dir
+                    .join(format!("{}.capabilities.json", name));
+                self.revoke_credential_mappings(&cap_path).await;
+
                 // Unregister hooks registered from this plugin source.
                 let removed_hooks = self
                     .unregister_hook_prefix(&format!("plugin.tool:{}::", name))
@@ -494,9 +567,6 @@ impl ExtensionManager {
 
                 // Delete files
                 let wasm_path = self.wasm_tools_dir.join(format!("{}.wasm", name));
-                let cap_path = self
-                    .wasm_tools_dir
-                    .join(format!("{}.capabilities.json", name));
 
                 if wasm_path.exists() {
                     tokio::fs::remove_file(&wasm_path)
@@ -510,11 +580,18 @@ impl ExtensionManager {
                 Ok(format!("Removed WASM tool '{}'", name))
             }
             ExtensionKind::WasmChannel => {
+                // Remove from active set and persist
+                self.active_channel_names.write().await.remove(name);
+                self.persist_active_channels().await;
+
                 // Delete channel files
                 let wasm_path = self.wasm_channels_dir.join(format!("{}.wasm", name));
                 let cap_path = self
                     .wasm_channels_dir
                     .join(format!("{}.capabilities.json", name));
+
+                // Revoke credential mappings before deleting the capabilities file
+                self.revoke_credential_mappings(&cap_path).await;
 
                 if wasm_path.exists() {
                     tokio::fs::remove_file(&wasm_path)
@@ -600,16 +677,17 @@ impl ExtensionManager {
                     primary_error = %primary_err,
                     "Primary install failed, trying fallback source"
                 );
-                self.try_install_from_source(entry, fallback)
-                    .await
-                    .map_err(|fallback_err| {
+                match self.try_install_from_source(entry, fallback).await {
+                    Ok(result) => Ok(result),
+                    Err(fallback_err) => {
                         tracing::error!(
                             extension = %entry.name,
                             fallback_error = %fallback_err,
                             "Fallback install also failed"
                         );
-                        combine_install_errors(&primary_err, fallback_err)
-                    })
+                        Err(combine_install_errors(primary_err, fallback_err))
+                    }
+                }
             }
         }
     }
@@ -1442,6 +1520,51 @@ impl ExtensionManager {
         (all_provided, true)
     }
 
+    /// Load and parse a WASM tool's capabilities file.
+    ///
+    /// Returns `None` if the file doesn't exist or can't be parsed.
+    async fn load_tool_capabilities(
+        &self,
+        name: &str,
+    ) -> Option<crate::tools::wasm::CapabilitiesFile> {
+        let cap_path = self
+            .wasm_tools_dir
+            .join(format!("{}.capabilities.json", name));
+        let cap_bytes = tokio::fs::read(&cap_path).await.ok()?;
+        crate::tools::wasm::CapabilitiesFile::from_bytes(&cap_bytes).ok()
+    }
+
+    /// Check whether a WASM tool's required setup secrets are provided.
+    ///
+    /// Returns `(authenticated, needs_setup)` — same semantics as `check_channel_auth_status`.
+    async fn check_tool_auth_status(&self, name: &str) -> (bool, bool) {
+        let Some(cap_file) = self.load_tool_capabilities(name).await else {
+            return (true, false);
+        };
+        let Some(setup) = &cap_file.setup else {
+            return (true, false);
+        };
+        if setup.required_secrets.is_empty() {
+            return (true, false);
+        }
+        let mut all_provided = true;
+        for secret in &setup.required_secrets {
+            if secret.optional {
+                continue;
+            }
+            if !self
+                .secrets
+                .exists(&self.user_id, &secret.name)
+                .await
+                .unwrap_or(false)
+            {
+                all_provided = false;
+                break;
+            }
+        }
+        (all_provided, true)
+    }
+
     async fn auth_wasm_channel(
         &self,
         name: &str,
@@ -1928,6 +2051,9 @@ impl ExtensionManager {
             .await
             .insert(channel_name.clone());
 
+        // Persist activation state so the channel auto-activates on restart
+        self.persist_active_channels().await;
+
         tracing::info!(channel = %channel_name, "Hot-activated WASM channel");
 
         Ok(ActivateResult {
@@ -2179,6 +2305,30 @@ impl ExtensionManager {
                 }
                 Ok(fields)
             }
+            ExtensionKind::WasmTool => {
+                let Some(cap_file) = self.load_tool_capabilities(name).await else {
+                    return Ok(Vec::new());
+                };
+
+                let mut fields = Vec::new();
+                if let Some(setup) = &cap_file.setup {
+                    for secret in &setup.required_secrets {
+                        let provided = self
+                            .secrets
+                            .exists(&self.user_id, &secret.name)
+                            .await
+                            .unwrap_or(false);
+                        fields.push(crate::channels::web::types::SecretFieldInfo {
+                            name: secret.name.clone(),
+                            prompt: secret.prompt.clone(),
+                            optional: secret.optional,
+                            provided,
+                            auto_generate: false,
+                        });
+                    }
+                }
+                Ok(fields)
+            }
             _ => Ok(Vec::new()),
         }
     }
@@ -2193,34 +2343,82 @@ impl ExtensionManager {
         secrets: &std::collections::HashMap<String, String>,
     ) -> Result<SetupResult, ExtensionError> {
         let kind = self.determine_installed_kind(name).await?;
-        if kind != ExtensionKind::WasmChannel {
-            return Err(ExtensionError::Other(
-                "Setup is only supported for WASM channels".to_string(),
-            ));
-        }
 
-        let cap_path = self
-            .wasm_channels_dir
-            .join(format!("{}.capabilities.json", name));
-        if !cap_path.exists() {
-            return Err(ExtensionError::Other(format!(
-                "Capabilities file not found for '{}'",
-                name
-            )));
-        }
-        let cap_bytes = tokio::fs::read(&cap_path)
-            .await
-            .map_err(|e| ExtensionError::Other(e.to_string()))?;
-        let cap_file = crate::channels::wasm::ChannelCapabilitiesFile::from_bytes(&cap_bytes)
-            .map_err(|e| ExtensionError::Other(e.to_string()))?;
+        // Load allowed secret names from the extension's capabilities file
+        let allowed: std::collections::HashSet<String> = match kind {
+            ExtensionKind::WasmChannel => {
+                let cap_path = self
+                    .wasm_channels_dir
+                    .join(format!("{}.capabilities.json", name));
+                if !cap_path.exists() {
+                    return Err(ExtensionError::Other(format!(
+                        "Capabilities file not found for '{}'",
+                        name
+                    )));
+                }
+                let cap_bytes = tokio::fs::read(&cap_path)
+                    .await
+                    .map_err(|e| ExtensionError::Other(e.to_string()))?;
+                let cap_file =
+                    crate::channels::wasm::ChannelCapabilitiesFile::from_bytes(&cap_bytes)
+                        .map_err(|e| ExtensionError::Other(e.to_string()))?;
+                cap_file
+                    .setup
+                    .required_secrets
+                    .iter()
+                    .map(|s| s.name.clone())
+                    .collect()
+            }
+            ExtensionKind::WasmTool => {
+                let cap_file = self.load_tool_capabilities(name).await.ok_or_else(|| {
+                    ExtensionError::Other(format!("Capabilities file not found for '{}'", name))
+                })?;
+                match cap_file.setup {
+                    Some(s) => s.required_secrets.iter().map(|s| s.name.clone()).collect(),
+                    None => {
+                        return Err(ExtensionError::Other(format!(
+                            "Tool '{}' has no setup schema — no secrets to configure",
+                            name
+                        )));
+                    }
+                }
+            }
+            _ => {
+                return Err(ExtensionError::Other(
+                    "Setup is only supported for WASM channels and tools".to_string(),
+                ));
+            }
+        };
 
-        // Build allowed secret names from capabilities
-        let allowed: std::collections::HashSet<String> = cap_file
-            .setup
-            .required_secrets
-            .iter()
-            .map(|s| s.name.clone())
-            .collect();
+        // For Telegram, validate the bot token against the API before storing it.
+        // This catches bad tokens immediately (both on first setup and reconfigure),
+        // before the channel activates and potentially shows as active with a bad token.
+        if name == "telegram"
+            && let Some(token_value) = secrets.get("telegram_bot_token")
+        {
+            let token = token_value.trim();
+            if !token.is_empty() {
+                let encoded_token =
+                    url::form_urlencoded::byte_serialize(token.as_bytes()).collect::<String>();
+                let url = format!("https://api.telegram.org/bot{}/getMe", encoded_token);
+                let resp = reqwest::Client::builder()
+                    .timeout(std::time::Duration::from_secs(10))
+                    .build()
+                    .map_err(|e| ExtensionError::Other(e.to_string()))?
+                    .get(&url)
+                    .send()
+                    .await
+                    .map_err(|e| {
+                        ExtensionError::Other(format!("Failed to validate bot token: {}", e))
+                    })?;
+                if !resp.status().is_success() {
+                    return Err(ExtensionError::Other(format!(
+                        "Invalid bot token (Telegram API returned {})",
+                        resp.status()
+                    )));
+                }
+            }
+        }
 
         // Validate and store each submitted secret
         for (secret_name, secret_value) in secrets {
@@ -2241,33 +2439,70 @@ impl ExtensionManager {
                 .map_err(|e| ExtensionError::AuthFailed(e.to_string()))?;
         }
 
-        // Auto-generate any missing secrets that have auto_generate set
-        for secret_def in &cap_file.setup.required_secrets {
-            if let Some(ref auto_gen) = secret_def.auto_generate {
-                let already_provided = secrets
-                    .get(&secret_def.name)
-                    .is_some_and(|v| !v.trim().is_empty());
-                let already_stored = self
-                    .secrets
-                    .exists(&self.user_id, &secret_def.name)
-                    .await
-                    .unwrap_or(false);
-                if !already_provided && !already_stored {
-                    use rand::RngCore;
-                    let mut bytes = vec![0u8; auto_gen.length];
-                    rand::thread_rng().fill_bytes(&mut bytes);
-                    let hex_value: String = bytes.iter().map(|b| format!("{b:02x}")).collect();
-                    let params = CreateSecretParams::new(&secret_def.name, &hex_value)
-                        .with_provider(name.to_string());
-                    self.secrets
-                        .create(&self.user_id, params)
-                        .await
-                        .map_err(|e| ExtensionError::AuthFailed(e.to_string()))?;
-                    tracing::info!(
-                        "Auto-generated secret '{}' for channel '{}'",
-                        secret_def.name,
-                        name
+        // Auto-generate any missing secrets (channel-only feature)
+        if kind == ExtensionKind::WasmChannel {
+            let cap_path = self
+                .wasm_channels_dir
+                .join(format!("{}.capabilities.json", name));
+            if let Ok(cap_bytes) = tokio::fs::read(&cap_path).await
+                && let Ok(cap_file) =
+                    crate::channels::wasm::ChannelCapabilitiesFile::from_bytes(&cap_bytes)
+            {
+                for secret_def in &cap_file.setup.required_secrets {
+                    if let Some(ref auto_gen) = secret_def.auto_generate {
+                        let already_provided = secrets
+                            .get(&secret_def.name)
+                            .is_some_and(|v| !v.trim().is_empty());
+                        let already_stored = self
+                            .secrets
+                            .exists(&self.user_id, &secret_def.name)
+                            .await
+                            .unwrap_or(false);
+                        if !already_provided && !already_stored {
+                            use rand::RngCore;
+                            let mut bytes = vec![0u8; auto_gen.length];
+                            rand::thread_rng().fill_bytes(&mut bytes);
+                            let hex_value: String =
+                                bytes.iter().map(|b| format!("{b:02x}")).collect();
+                            let params = CreateSecretParams::new(&secret_def.name, &hex_value)
+                                .with_provider(name.to_string());
+                            self.secrets
+                                .create(&self.user_id, params)
+                                .await
+                                .map_err(|e| ExtensionError::AuthFailed(e.to_string()))?;
+                            tracing::info!(
+                                "Auto-generated secret '{}' for channel '{}'",
+                                secret_def.name,
+                                name
+                            );
+                        }
+                    }
+                }
+            }
+        }
+
+        // For tools, save and attempt auto-activation
+        if kind == ExtensionKind::WasmTool {
+            match self.activate_wasm_tool(name).await {
+                Ok(result) => {
+                    return Ok(SetupResult {
+                        message: format!(
+                            "Configuration saved and tool '{}' activated. {}",
+                            name, result.message
+                        ),
+                        activated: true,
+                    });
+                }
+                Err(e) => {
+                    tracing::debug!(
+                        "Auto-activation of tool '{}' after setup failed: {}",
+                        name,
+                        e
                     );
+                    return Ok(SetupResult {
+                        message: format!("Configuration saved for '{}'.", name),
+                        activated: false,
+                    });
                 }
             }
         }
@@ -2307,6 +2542,47 @@ impl ExtensionManager {
                     activated: false,
                 })
             }
+        }
+    }
+
+    /// Read a capabilities.json file and revoke its credential mappings from
+    /// the shared credential registry, so removed extensions lose injection
+    /// authority immediately.
+    async fn revoke_credential_mappings(&self, cap_path: &std::path::Path) {
+        if !cap_path.exists() {
+            return;
+        }
+        let Ok(bytes) = tokio::fs::read(cap_path).await else {
+            return;
+        };
+        // Extract secret names from the capabilities JSON.
+        // Structure: { "http": { "credentials": { "<key>": { "secret_name": "..." } } } }
+        let Ok(json) = serde_json::from_slice::<serde_json::Value>(&bytes) else {
+            return;
+        };
+        let secret_names: Vec<String> = json
+            .get("http")
+            .and_then(|h| h.get("credentials"))
+            .and_then(|c| c.as_object())
+            .map(|creds| {
+                creds
+                    .values()
+                    .filter_map(|v| v.get("secret_name").and_then(|s| s.as_str()))
+                    .map(String::from)
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        if secret_names.is_empty() {
+            return;
+        }
+
+        if let Some(cr) = self.tool_registry.credential_registry() {
+            cr.remove_mappings_for_secrets(&secret_names);
+            tracing::info!(
+                secrets = ?secret_names,
+                "Revoked credential mappings for removed extension"
+            );
         }
     }
 
@@ -2412,22 +2688,24 @@ fn fallback_decision(
 /// Combine primary and fallback errors into a single error.
 ///
 /// Preserves `AlreadyInstalled` from the fallback directly; otherwise wraps
-/// both error messages into `ExtensionError::Other`.
+/// both errors into the structured `ExtensionError::FallbackFailed` variant.
 fn combine_install_errors(
-    primary_err: &ExtensionError,
+    primary_err: ExtensionError,
     fallback_err: ExtensionError,
 ) -> ExtensionError {
     if matches!(fallback_err, ExtensionError::AlreadyInstalled(_)) {
         return fallback_err;
     }
-    ExtensionError::Other(format!(
-        "Primary install failed: {}; fallback install also failed: {}",
-        primary_err, fallback_err
-    ))
+    ExtensionError::FallbackFailed {
+        primary: Box::new(primary_err),
+        fallback: Box::new(fallback_err),
+    }
 }
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
     use crate::extensions::manager::{
         FallbackDecision, combine_install_errors, fallback_decision, infer_kind_from_url,
     };
@@ -2518,7 +2796,11 @@ mod tests {
     fn test_combine_errors_includes_both_messages() {
         let primary = ExtensionError::DownloadFailed("404 Not Found".to_string());
         let fallback = ExtensionError::InstallFailed("cargo not found".to_string());
-        let combined = combine_install_errors(&primary, fallback);
+        let combined = combine_install_errors(primary, fallback);
+        assert!(
+            matches!(combined, ExtensionError::FallbackFailed { .. }),
+            "Expected FallbackFailed, got: {combined:?}"
+        );
         let msg = combined.to_string();
         assert!(msg.contains("404 Not Found"), "missing primary: {msg}");
         assert!(msg.contains("cargo not found"), "missing fallback: {msg}");
@@ -2528,7 +2810,7 @@ mod tests {
     fn test_combine_errors_forwards_already_installed_from_fallback() {
         let primary = ExtensionError::DownloadFailed("404".to_string());
         let fallback = ExtensionError::AlreadyInstalled("test".to_string());
-        let combined = combine_install_errors(&primary, fallback);
+        let combined = combine_install_errors(primary, fallback);
         assert!(
             matches!(combined, ExtensionError::AlreadyInstalled(ref name) if name == "test"),
             "Expected AlreadyInstalled, got: {combined:?}"
@@ -2604,6 +2886,86 @@ mod tests {
         std::fs::remove_file(&channel_wasm).unwrap();
         assert!(tool_wasm.exists());
         assert!(!channel_wasm.exists());
+    }
+
+    // === WASM runtime availability tests ===
+    //
+    // Regression tests for a bug where the WASM runtime was only created at
+    // startup when the tools directory already existed. Extensions installed
+    // after startup (e.g. via the web UI) would fail with "WASM runtime not
+    // available" because the ExtensionManager had `wasm_tool_runtime: None`.
+
+    /// Build a minimal ExtensionManager suitable for unit tests.
+    fn make_test_manager(
+        wasm_runtime: Option<Arc<crate::tools::wasm::WasmToolRuntime>>,
+        tools_dir: std::path::PathBuf,
+    ) -> crate::extensions::manager::ExtensionManager {
+        use crate::secrets::{InMemorySecretsStore, SecretsCrypto};
+        use crate::tools::mcp::session::McpSessionManager;
+
+        let key = secrecy::SecretString::from(crate::secrets::keychain::generate_master_key_hex());
+        let crypto = Arc::new(SecretsCrypto::new(key).expect("crypto"));
+        let secrets: Arc<dyn crate::secrets::SecretsStore + Send + Sync> =
+            Arc::new(InMemorySecretsStore::new(crypto));
+        let tools = Arc::new(crate::tools::ToolRegistry::new());
+        let mcp = Arc::new(McpSessionManager::new());
+
+        crate::extensions::manager::ExtensionManager::new(
+            mcp,
+            secrets,
+            tools,
+            None, // hooks
+            wasm_runtime,
+            tools_dir.clone(),
+            tools_dir, // channels dir (unused here)
+            None,      // tunnel_url
+            "test".to_string(),
+            None, // db
+            vec![],
+        )
+    }
+
+    #[tokio::test]
+    async fn test_activate_wasm_tool_with_runtime_passes_runtime_check() {
+        // When the ExtensionManager has a WASM runtime, activation should get
+        // past the "WASM runtime not available" check. It will still fail
+        // because no .wasm file exists on disk — but the error message should
+        // be "not found", NOT "WASM runtime not available".
+        let dir = tempfile::tempdir().expect("temp dir");
+        let config = crate::tools::wasm::WasmRuntimeConfig::for_testing();
+        let runtime = Arc::new(crate::tools::wasm::WasmToolRuntime::new(config).expect("runtime"));
+        let mgr = make_test_manager(Some(runtime), dir.path().to_path_buf());
+
+        let err = mgr.activate("nonexistent").await.unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            !msg.contains("WASM runtime not available"),
+            "Should not fail on runtime check, got: {msg}"
+        );
+        assert!(
+            msg.contains("not found")
+                || msg.contains("not installed")
+                || msg.contains("Not installed"),
+            "Should fail on missing file, got: {msg}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_activate_wasm_tool_without_runtime_fails_with_runtime_error() {
+        // When the ExtensionManager has no WASM runtime (None), activation
+        // must fail with the "WASM runtime not available" message.
+        let dir = tempfile::tempdir().expect("temp dir");
+        // Write a fake .wasm file so we don't fail on "not found" first.
+        std::fs::write(dir.path().join("fake.wasm"), b"not-a-real-wasm").unwrap();
+
+        let mgr = make_test_manager(None, dir.path().to_path_buf());
+
+        let err = mgr.activate("fake").await.unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("WASM runtime not available"),
+            "Expected runtime not available error, got: {msg}"
+        );
     }
 
     #[test]
