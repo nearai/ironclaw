@@ -30,7 +30,7 @@ use serde::{Deserialize, Serialize};
 
 // Re-export generated types
 use exports::near::agent::channel::{
-    AgentResponse, ChannelConfig, Guest, HttpEndpointConfig, IncomingHttpRequest,
+    AgentResponse, Attachment, ChannelConfig, Guest, HttpEndpointConfig, IncomingHttpRequest,
     OutgoingHttpResponse, PollConfig, StatusType, StatusUpdate,
 };
 use near::agent::channel_host::{self, EmittedMessage};
@@ -236,6 +236,10 @@ struct TelegramConfig {
     /// Telegram will include this in the X-Telegram-Bot-Api-Secret-Token header.
     #[serde(default)]
     webhook_secret: Option<String>,
+
+    /// When true, use polling mode even if tunnel_url is available.
+    #[serde(default)]
+    polling_enabled: bool,
 }
 
 // ============================================================================
@@ -363,9 +367,8 @@ impl Guest for TelegramChannel {
             &config.respond_to_all_group_messages.to_string(),
         );
 
-        // Mode is determined by whether the host injected a tunnel_url
-        // If tunnel is configured, use webhooks. Otherwise, use polling.
-        let webhook_mode = config.tunnel_url.is_some();
+        // Mode: use polling if explicitly enabled, otherwise use webhooks when tunnel available.
+        let webhook_mode = config.tunnel_url.is_some() && !config.polling_enabled;
 
         if webhook_mode {
             channel_host::log(
@@ -484,7 +487,7 @@ impl Guest for TelegramChannel {
         );
 
         let headers_json = serde_json::json!({}).to_string();
-        let primary_url = get_updates_url(offset, 30);
+        let primary_url = get_updates_url(offset, 25);
 
         // 35s HTTP timeout outlives Telegram's 30s server-side long-poll.
         // If the TCP connection drops, retry once immediately with a short poll
@@ -588,6 +591,20 @@ impl Guest for TelegramChannel {
         let metadata: TelegramMessageMetadata = serde_json::from_str(&response.metadata_json)
             .map_err(|e| format!("Failed to parse metadata: {}", e))?;
 
+        // Send attachments first (photos/documents)
+        for attachment in &response.attachments {
+            send_attachment(
+                metadata.chat_id,
+                attachment,
+                Some(metadata.message_id),
+            )?;
+        }
+
+        // Send text content (skip if empty and we already sent attachments)
+        if response.content.is_empty() && !response.attachments.is_empty() {
+            return Ok(());
+        }
+
         // Try sending with Markdown first; fall back to plain text if Telegram
         // can't parse the entities (e.g. model leaked <tool_call> with underscores).
         let result = send_message(
@@ -629,6 +646,33 @@ impl Guest for TelegramChannel {
                     ),
                 );
                 Ok(())
+            }
+            Err(e) => Err(e.to_string()),
+        }
+    }
+
+    fn on_broadcast(user_id: String, response: AgentResponse) -> Result<(), String> {
+        let chat_id: i64 = user_id
+            .parse()
+            .map_err(|e| format!("Invalid chat_id '{}': {}", user_id, e))?;
+
+        // Send attachments first
+        for attachment in &response.attachments {
+            send_attachment(chat_id, attachment, None)?;
+        }
+
+        // Send text content (skip if empty and we already sent attachments)
+        if response.content.is_empty() && !response.attachments.is_empty() {
+            return Ok(());
+        }
+
+        // Try Markdown, fall back to plain text
+        match send_message(chat_id, &response.content, None, Some("Markdown")) {
+            Ok(_) => Ok(()),
+            Err(SendError::ParseEntities(_)) => {
+                send_message(chat_id, &response.content, None, None)
+                    .map(|_| ())
+                    .map_err(|e| format!("Plain-text retry also failed: {}", e))
             }
             Err(e) => Err(e.to_string()),
         }
@@ -814,6 +858,200 @@ fn send_message(
             Ok(api_response.result.map(|r| r.message_id).unwrap_or(0))
         }
         Err(e) => Err(SendError::Other(format!("HTTP request failed: {}", e))),
+    }
+}
+
+// ============================================================================
+// Attachment Sending (Photo / Document)
+// ============================================================================
+
+/// Maximum photo size for Telegram sendPhoto (10 MB).
+const MAX_PHOTO_SIZE: usize = 10 * 1024 * 1024;
+
+/// Write a multipart/form-data text field.
+fn write_multipart_field(body: &mut Vec<u8>, boundary: &str, name: &str, value: &str) {
+    body.extend_from_slice(format!("--{}\r\n", boundary).as_bytes());
+    body.extend_from_slice(
+        format!("Content-Disposition: form-data; name=\"{}\"\r\n\r\n", name).as_bytes(),
+    );
+    body.extend_from_slice(value.as_bytes());
+    body.extend_from_slice(b"\r\n");
+}
+
+/// Write a multipart/form-data file field.
+fn write_multipart_file(
+    body: &mut Vec<u8>,
+    boundary: &str,
+    field: &str,
+    filename: &str,
+    content_type: &str,
+    data: &[u8],
+) {
+    // Sanitize filename: strip quotes, newlines, and non-ASCII to prevent header injection
+    let safe_filename: String = filename
+        .chars()
+        .filter(|c| *c != '"' && *c != '\r' && *c != '\n' && *c != '\\' && c.is_ascii())
+        .collect();
+    let safe_filename = if safe_filename.is_empty() {
+        "file".to_string()
+    } else {
+        safe_filename
+    };
+    body.extend_from_slice(format!("--{}\r\n", boundary).as_bytes());
+    body.extend_from_slice(
+        format!(
+            "Content-Disposition: form-data; name=\"{}\"; filename=\"{}\"\r\n",
+            field, safe_filename
+        )
+        .as_bytes(),
+    );
+    body.extend_from_slice(format!("Content-Type: {}\r\n\r\n", content_type).as_bytes());
+    body.extend_from_slice(data);
+    body.extend_from_slice(b"\r\n");
+}
+
+/// Send a photo via the Telegram Bot API (multipart upload).
+///
+/// Falls back to `send_document()` if the photo exceeds 10 MB.
+fn send_photo(
+    chat_id: i64,
+    filename: &str,
+    mime_type: &str,
+    data: &[u8],
+    reply_to_message_id: Option<i64>,
+) -> Result<(), String> {
+    if data.len() > MAX_PHOTO_SIZE {
+        channel_host::log(
+            channel_host::LogLevel::Info,
+            &format!(
+                "Photo {} exceeds 10MB ({}), sending as document",
+                filename,
+                data.len()
+            ),
+        );
+        return send_document(chat_id, filename, mime_type, data, reply_to_message_id);
+    }
+
+    let boundary = format!("ironclaw-{}", channel_host::now_millis());
+    let mut body = Vec::new();
+
+    write_multipart_field(&mut body, &boundary, "chat_id", &chat_id.to_string());
+    if let Some(msg_id) = reply_to_message_id {
+        write_multipart_field(&mut body, &boundary, "reply_to_message_id", &msg_id.to_string());
+    }
+    write_multipart_file(&mut body, &boundary, "photo", filename, mime_type, data);
+    body.extend_from_slice(format!("--{}--\r\n", boundary).as_bytes());
+
+    let headers = serde_json::json!({
+        "Content-Type": format!("multipart/form-data; boundary={}", boundary)
+    });
+
+    let result = channel_host::http_request(
+        "POST",
+        "https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendPhoto",
+        &headers.to_string(),
+        Some(&body),
+        Some(60_000), // 60s timeout for file uploads
+    );
+
+    match result {
+        Ok(resp) if resp.status == 200 => {
+            channel_host::log(
+                channel_host::LogLevel::Debug,
+                &format!("Sent photo '{}' to chat {}", filename, chat_id),
+            );
+            Ok(())
+        }
+        Ok(resp) => {
+            let body_str = String::from_utf8_lossy(&resp.body);
+            Err(format!(
+                "sendPhoto failed (HTTP {}): {}",
+                resp.status, body_str
+            ))
+        }
+        Err(e) => Err(format!("sendPhoto HTTP request failed: {}", e)),
+    }
+}
+
+/// Send a document via the Telegram Bot API (multipart upload).
+fn send_document(
+    chat_id: i64,
+    filename: &str,
+    mime_type: &str,
+    data: &[u8],
+    reply_to_message_id: Option<i64>,
+) -> Result<(), String> {
+    let boundary = format!("ironclaw-{}", channel_host::now_millis());
+    let mut body = Vec::new();
+
+    write_multipart_field(&mut body, &boundary, "chat_id", &chat_id.to_string());
+    if let Some(msg_id) = reply_to_message_id {
+        write_multipart_field(&mut body, &boundary, "reply_to_message_id", &msg_id.to_string());
+    }
+    write_multipart_file(&mut body, &boundary, "document", filename, mime_type, data);
+    body.extend_from_slice(format!("--{}--\r\n", boundary).as_bytes());
+
+    let headers = serde_json::json!({
+        "Content-Type": format!("multipart/form-data; boundary={}", boundary)
+    });
+
+    let result = channel_host::http_request(
+        "POST",
+        "https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendDocument",
+        &headers.to_string(),
+        Some(&body),
+        Some(60_000), // 60s timeout for file uploads
+    );
+
+    match result {
+        Ok(resp) if resp.status == 200 => {
+            channel_host::log(
+                channel_host::LogLevel::Debug,
+                &format!("Sent document '{}' to chat {}", filename, chat_id),
+            );
+            Ok(())
+        }
+        Ok(resp) => {
+            let body_str = String::from_utf8_lossy(&resp.body);
+            Err(format!(
+                "sendDocument failed (HTTP {}): {}",
+                resp.status, body_str
+            ))
+        }
+        Err(e) => Err(format!("sendDocument HTTP request failed: {}", e)),
+    }
+}
+
+/// Image MIME types that Telegram's sendPhoto API supports.
+const PHOTO_MIME_TYPES: &[&str] = &[
+    "image/jpeg",
+    "image/png",
+    "image/gif",
+    "image/webp",
+];
+
+/// Send a single attachment, choosing sendPhoto or sendDocument based on MIME type.
+fn send_attachment(
+    chat_id: i64,
+    attachment: &Attachment,
+    reply_to_message_id: Option<i64>,
+) -> Result<(), String> {
+    if PHOTO_MIME_TYPES.contains(&attachment.mime_type.as_str()) {
+        send_photo(
+            chat_id,
+            &attachment.filename,
+            &attachment.mime_type,
+            &attachment.data,
+            reply_to_message_id,
+        )
+    } else {
+        send_document(
+            chat_id,
+            &attachment.filename,
+            &attachment.mime_type,
+            &attachment.data,
+            reply_to_message_id,
+        )
     }
 }
 

@@ -235,6 +235,16 @@ interface channel {
         body: list<u8>,
     }
 
+    /// A file or image attachment.
+    record attachment {
+        /// Original filename (e.g., "screenshot.png").
+        filename: string,
+        /// MIME type (e.g., "image/png").
+        mime-type: string,
+        /// Raw file bytes.
+        data: list<u8>,
+    }
+
     /// Agent response to be sent back to the channel.
     record agent-response {
         /// Unique message ID for correlation.
@@ -245,6 +255,8 @@ interface channel {
         thread-id: option<string>,
         /// Channel-specific metadata as JSON string.
         metadata-json: string,
+        /// File/image attachments to send.
+        attachments: list<attachment>,
     }
 
     // ==================== Status Types ====================
@@ -339,6 +351,20 @@ interface channel {
     /// Arguments:
     /// - update: The status update
     on-status: func(update: status-update);
+
+    /// Send a proactive message to a user without a prior incoming message.
+    ///
+    /// Used for broadcasts, alerts, and agent-initiated messages with attachments.
+    /// The user-id identifies the target user within the channel.
+    ///
+    /// Arguments:
+    /// - user-id: Target user identifier (e.g., Telegram chat_id)
+    /// - response: The message content and attachments to send
+    ///
+    /// Returns:
+    /// - Ok: Message delivered successfully
+    /// - Err(string): Delivery failure message
+    on-broadcast: func(user-id: string, response: agent-response) -> result<_, string>;
 
     /// Clean up channel resources.
     ///

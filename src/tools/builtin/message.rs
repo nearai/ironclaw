@@ -62,6 +62,9 @@ impl Tool for MessageTool {
     fn description(&self) -> &str {
         "Send a message to a channel. If channel/target omitted, uses the current conversation's \
          channel and sender/group. Use to proactively message users on any connected channel. \
+         Supports file attachments: first download the file with the http tool using save_to \
+         (e.g., http GET https://picsum.photos/800/600 save_to=/tmp/photo.jpg), then pass \
+         the file path in the attachments array. Images are sent as photos on Telegram. \
          - Signal: target accepts E.164 (+1234567890) or group ID \
          - Telegram: target accepts username or chat ID \
          - Slack: target accepts channel (#general) or user ID"
@@ -135,17 +138,24 @@ impl Tool for MessageTool {
 
         let attachment_count = attachments.len();
 
-        // Validate all attachment paths against the sandbox and verify existence
+        // Validate all attachment paths against the sandbox and verify existence.
+        // Allow paths under the base_dir (~/.ironclaw) or /tmp/.
         for path in &attachments {
-            let resolved =
-                crate::tools::builtin::path_utils::validate_path(path, Some(&self.base_dir))
-                    .map_err(|e| {
-                        ToolError::ExecutionFailed(format!(
-                            "Attachment path must be within {}: {}",
-                            self.base_dir.display(),
-                            e
-                        ))
-                    })?;
+            let tmp_dir = PathBuf::from("/tmp");
+            let resolved = crate::tools::builtin::path_utils::validate_path(
+                path,
+                Some(&self.base_dir),
+            )
+            .or_else(|_| {
+                crate::tools::builtin::path_utils::validate_path(path, Some(&tmp_dir))
+            })
+            .map_err(|e| {
+                ToolError::ExecutionFailed(format!(
+                    "Attachment path must be within {} or /tmp/: {}",
+                    self.base_dir.display(),
+                    e
+                ))
+            })?;
             if !resolved.exists() {
                 return Err(ToolError::ExecutionFailed(format!(
                     "Attachment file not found: {}",
@@ -324,22 +334,22 @@ mod tests {
         tool.set_context(Some("signal".to_string()), Some("+1234567890".to_string()))
             .await;
 
-        // Execute with attachments outside sandbox
+        // Execute with attachments outside both sandbox (~/.ironclaw) and /tmp/
         let ctx = crate::context::JobContext::new("test", "test description");
         let result = tool
             .execute(
                 serde_json::json!({
                     "content": "hello",
-                    "attachments": ["/tmp/file1.txt", "/tmp/file2.png"]
+                    "attachments": ["/etc/passwd", "/var/log/syslog"]
                 }),
                 &ctx,
             )
             .await;
 
-        // Should fail due to sandbox rejection (paths outside ~/.ironclaw/)
+        // Should fail due to sandbox rejection (paths outside allowed directories)
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
-        assert!(err.contains("sandbox") || err.contains("escapes"));
+        assert!(err.contains("sandbox") || err.contains("escapes") || err.contains("must be within"));
     }
 
     #[tokio::test]
@@ -373,6 +383,42 @@ mod tests {
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
         assert!(err.contains("channel") || err.contains("Channel"));
+    }
+
+    #[tokio::test]
+    async fn message_tool_with_attachments_in_tmp_no_channel() {
+        use std::fs;
+
+        let tool = MessageTool::new(Arc::new(ChannelManager::new()));
+        tool.set_context(Some("telegram".to_string()), Some("12345".to_string()))
+            .await;
+
+        // Create temp files under /tmp (allowed as secondary attachment dir)
+        let temp_dir = tempfile::tempdir_in("/tmp").unwrap();
+        let file1 = temp_dir.path().join("photo.jpg");
+        let file2 = temp_dir.path().join("doc.pdf");
+        fs::write(&file1, "fake image data").unwrap();
+        fs::write(&file2, "fake pdf data").unwrap();
+
+        let ctx = crate::context::JobContext::new("test", "test description");
+        let result = tool
+            .execute(
+                serde_json::json!({
+                    "content": "here are the files",
+                    "attachments": [file1.to_string_lossy(), file2.to_string_lossy()]
+                }),
+                &ctx,
+            )
+            .await;
+
+        // Path validation passes for /tmp paths, fails at channel send (no real channel)
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("channel") || err.contains("Channel"),
+            "expected channel error (path validation should pass), got: {}",
+            err
+        );
     }
 
     #[tokio::test]
