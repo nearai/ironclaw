@@ -231,15 +231,7 @@ impl JobStore for LibSqlBackend {
         {
             let status = get_text(&row, 0);
             let count = get_i64(&row, 1) as usize;
-            summary.total += count;
-            match status.as_str() {
-                "pending" => summary.pending += count,
-                "in_progress" => summary.in_progress += count,
-                "completed" | "submitted" | "accepted" => summary.completed += count,
-                "failed" | "cancelled" => summary.failed += count,
-                "stuck" => summary.stuck += count,
-                _ => {}
-            }
+            summary.add_count(&status, count);
         }
         Ok(summary)
     }

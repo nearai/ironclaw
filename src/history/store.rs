@@ -511,6 +511,21 @@ pub struct AgentJobSummary {
     pub stuck: usize,
 }
 
+impl AgentJobSummary {
+    /// Accumulate a status/count pair into the summary buckets.
+    pub fn add_count(&mut self, status: &str, count: usize) {
+        self.total += count;
+        match status {
+            "pending" => self.pending += count,
+            "in_progress" => self.in_progress += count,
+            "completed" | "submitted" | "accepted" => self.completed += count,
+            "failed" | "cancelled" => self.failed += count,
+            "stuck" => self.stuck += count,
+            _ => {}
+        }
+    }
+}
+
 #[cfg(feature = "postgres")]
 impl Store {
     /// Insert a new sandbox job into `agent_jobs`.
@@ -823,16 +838,7 @@ impl Store {
         for row in &rows {
             let status: String = row.get("status");
             let count: i64 = row.get("cnt");
-            let c = count as usize;
-            summary.total += c;
-            match status.as_str() {
-                "pending" => summary.pending += c,
-                "in_progress" => summary.in_progress += c,
-                "completed" | "submitted" | "accepted" => summary.completed += c,
-                "failed" | "cancelled" => summary.failed += c,
-                "stuck" => summary.stuck += c,
-                _ => {}
-            }
+            summary.add_count(&status, count as usize);
         }
         Ok(summary)
     }

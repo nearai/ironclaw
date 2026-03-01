@@ -182,7 +182,12 @@ Report when the job is complete or if you encounter issues you cannot resolve."#
                     Ok(_) => {
                         self.mark_completed().await?;
                     }
-                    Err(_) => {}
+                    Err(e) => {
+                        tracing::warn!(
+                            job_id = %self.job_id,
+                            "Failed to get job context, cannot mark as completed: {}", e
+                        );
+                    }
                 }
             }
             Ok(Err(e)) => {
