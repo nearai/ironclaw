@@ -533,7 +533,7 @@ The "chicken-and-egg" bootstrap problem — needing the database URL before conn
 | `config::wasm` | `WASM_ENABLED`, `WASM_TOOLS_DIR` |
 | `config::secrets` | `SECRETS_MASTER_KEY` (or OS keychain) |
 | `config::heartbeat` | `HEARTBEAT_ENABLED`, `HEARTBEAT_INTERVAL_SECS`, `HEARTBEAT_NOTIFY_CHANNEL` |
-| `config::skills` | `SKILLS_ENABLED`, `SKILLS_MAX_CONTEXT_TOKENS`, `SKILLS_MAX_ACTIVE`, `SKILLS_DIR` |
+| `config::skills` | `SKILLS_ENABLED`, `SKILLS_MAX_CONTEXT_TOKENS`, `SKILLS_MAX_ACTIVE`, `SKILLS_DIR`, `SKILLS_INSTALLED_DIR` |
 | `config::routines` | `ROUTINES_ENABLED`, `ROUTINES_MAX_CONCURRENT`, `ROUTINES_CRON_INTERVAL` |
 | `config::embeddings` | `EMBEDDING_ENABLED`, `EMBEDDING_PROVIDER`, `EMBEDDING_MODEL`, `EMBEDDING_DIMENSION`, `OPENAI_API_KEY` |
 | `config::tunnel` | `TUNNEL_URL`, `TUNNEL_PROVIDER`, `TUNNEL_CF_TOKEN`, `TUNNEL_NGROK_TOKEN`, `TUNNEL_TS_FUNNEL`, `TUNNEL_TS_HOSTNAME`, `TUNNEL_CUSTOM_COMMAND` |
@@ -693,17 +693,17 @@ On first boot, `Workspace::seed_if_empty()` creates six core files: `README.md`,
 All secrets are encrypted before storage. The encryption scheme:
 
 1. Master key from OS keychain or `SECRETS_MASTER_KEY` env var (32 random bytes)
-2. Per-secret key = HKDF-SHA256(master_key, salt=secret_name, info=user_id)
+2. Per-secret key = HKDF-SHA256(master_key, salt=32-byte random secret salt, info="near-agent-secrets-v1")
 3. Ciphertext = AES-256-GCM(per_secret_key, plaintext, random_nonce)
-4. Stored: Base64(nonce || ciphertext) in the `secrets` table
+4. Stored in separate columns: `key_salt` and `encrypted_value`, where encrypted_value is `nonce || ciphertext || GCM_tag`
 
 This means compromising one secret's storage does not reveal keys for other secrets, and the master key is never stored in the database.
 
 **Migration system:**
 
-PostgreSQL migrations use `refinery` with versioned SQL files in `migrations/`. The initial schema (`V1__initial.sql`) is 351 lines and includes pgvector indexes, FTS indexes, PL/pgSQL functions, and seed data for leak detection patterns.
+PostgreSQL migrations use `refinery` with versioned SQL files in `migrations/`. The initial schema (`V1__initial.sql`) is 350 lines and includes pgvector indexes, FTS indexes, PL/pgSQL functions, and seed data for leak detection patterns.
 
-The libSQL backend uses a consolidated schema in `src/db/libsql_migrations.rs` (~480 lines) using `CREATE TABLE IF NOT EXISTS` statements. Schema updates require manual `ALTER TABLE` workarounds since incremental migration versioning is not yet implemented for this backend.
+The libSQL backend uses a consolidated schema in `src/db/libsql_migrations.rs` (~549 lines) using `CREATE TABLE IF NOT EXISTS` statements. Schema updates require manual `ALTER TABLE` workarounds since incremental migration versioning is not yet implemented for this backend.
 
 ---
 
