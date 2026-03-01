@@ -1,46 +1,131 @@
 //! Bearer token authentication middleware for the web gateway.
+//!
+//! Supports multi-user mode: each token maps to a `UserIdentity` that carries
+//! the user_id. The identity is inserted into request extensions so downstream
+//! handlers can extract it via `AuthenticatedUser`.
+
+use std::collections::HashMap;
 
 use axum::{
-    extract::{Request, State},
-    http::{HeaderMap, StatusCode},
+    extract::{FromRequestParts, Request, State},
+    http::{HeaderMap, StatusCode, request::Parts},
     middleware::Next,
     response::{IntoResponse, Response},
 };
-use subtle::ConstantTimeEq;
 
-/// Shared auth state injected via axum middleware state.
+/// Identity resolved from a bearer token.
+#[derive(Debug, Clone)]
+pub struct UserIdentity {
+    pub user_id: String,
+    /// Additional user scopes this identity can read from.
+    pub workspace_read_scopes: Vec<String>,
+}
+
+/// Multi-user auth state: maps tokens to user identities.
+///
+/// In single-user mode (the default), contains exactly one entry.
 #[derive(Clone)]
-pub struct AuthState {
-    pub token: String,
+pub struct MultiAuthState {
+    tokens: HashMap<String, UserIdentity>,
+}
+
+impl MultiAuthState {
+    /// Create a single-user auth state (backwards compatible).
+    pub fn single(token: String, user_id: String) -> Self {
+        let mut tokens = HashMap::new();
+        tokens.insert(
+            token,
+            UserIdentity {
+                user_id,
+                workspace_read_scopes: Vec::new(),
+            },
+        );
+        Self { tokens }
+    }
+
+    /// Create a multi-user auth state from a map of tokens to identities.
+    pub fn multi(tokens: HashMap<String, UserIdentity>) -> Self {
+        Self { tokens }
+    }
+
+    /// Authenticate a token, returning the associated identity if valid.
+    ///
+    /// Uses direct HashMap lookup for O(1) performance. This is not
+    /// constant-time: an attacker observing response timing could
+    /// distinguish "token not found" from "token found" (and potentially
+    /// leak hash-bucket information). In practice, bearer tokens over
+    /// TLS are high-entropy random strings where timing attacks are
+    /// infeasible, and the prior O(N) iteration leaked more timing
+    /// information by short-circuiting on the first match.
+    pub fn authenticate(&self, candidate: &str) -> Option<&UserIdentity> {
+        self.tokens.get(candidate)
+    }
+
+    /// Get the first token (for backwards-compatible printing at startup).
+    pub fn first_token(&self) -> Option<&str> {
+        self.tokens.keys().next().map(|s| s.as_str())
+    }
+
+    /// Get the first user identity (for single-user fallback).
+    pub fn first_identity(&self) -> Option<&UserIdentity> {
+        self.tokens.values().next()
+    }
+}
+
+/// Axum extractor that provides the authenticated user identity.
+///
+/// Only available on routes behind `auth_middleware`. Extracts the
+/// `UserIdentity` that the middleware inserted into request extensions.
+pub struct AuthenticatedUser(pub UserIdentity);
+
+impl<S> FromRequestParts<S> for AuthenticatedUser
+where
+    S: Send + Sync,
+{
+    type Rejection = (StatusCode, &'static str);
+
+    async fn from_request_parts(parts: &mut Parts, _state: &S) -> Result<Self, Self::Rejection> {
+        parts
+            .extensions
+            .get::<UserIdentity>()
+            .cloned()
+            .map(AuthenticatedUser)
+            .ok_or((StatusCode::UNAUTHORIZED, "Not authenticated"))
+    }
 }
 
 /// Auth middleware that validates bearer token from header or query param.
 ///
 /// SSE connections can't set headers from `EventSource`, so we also accept
 /// `?token=xxx` as a query parameter.
+///
+/// On successful authentication, inserts the matching `UserIdentity` into
+/// request extensions for downstream extraction via `AuthenticatedUser`.
 pub async fn auth_middleware(
-    State(auth): State<AuthState>,
+    State(auth): State<MultiAuthState>,
     headers: HeaderMap,
-    request: Request,
+    mut request: Request,
     next: Next,
 ) -> Response {
-    // Try Authorization header first (constant-time comparison).
+    // Try Authorization header first.
     // RFC 6750 Section 2.1: auth-scheme comparison is case-insensitive.
     if let Some(auth_header) = headers.get("authorization")
         && let Ok(value) = auth_header.to_str()
         && value.len() > 7
         && value[..7].eq_ignore_ascii_case("Bearer ")
-        && bool::from(value.as_bytes()[7..].ct_eq(auth.token.as_bytes()))
+        && let Some(identity) = auth.authenticate(&value[7..])
     {
+        request.extensions_mut().insert(identity.clone());
         return next.run(request).await;
     }
 
-    // Fall back to query parameter for SSE EventSource (constant-time comparison)
+    // Fall back to query parameter for SSE EventSource
     if let Some(query) = request.uri().query() {
         for pair in query.split('&') {
             if let Some(token) = pair.strip_prefix("token=")
-                && bool::from(token.as_bytes().ct_eq(auth.token.as_bytes()))
+                && let Some(identity) = auth.authenticate(token)
             {
+                request.extensions_mut().insert(identity.clone());
                 return next.run(request).await;
             }
         }
@@ -49,17 +134,66 @@ pub async fn auth_middleware(
     (StatusCode::UNAUTHORIZED, "Invalid or missing auth token").into_response()
 }
 
+// Keep the old type as an alias for any external references during migration.
+pub type AuthState = MultiAuthState;
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn test_auth_state_clone() {
-        let state = AuthState {
-            token: "test-token".to_string(),
-        };
-        let cloned = state.clone();
-        assert_eq!(cloned.token, "test-token");
+    fn test_multi_auth_state_single() {
+        let state = MultiAuthState::single("tok-123".to_string(), "alice".to_string());
+        let identity = state.authenticate("tok-123");
+        assert!(identity.is_some());
+        assert_eq!(identity.unwrap().user_id, "alice");
+    }
+
+    #[test]
+    fn test_multi_auth_state_reject_wrong_token() {
+        let state = MultiAuthState::single("tok-123".to_string(), "alice".to_string());
+        assert!(state.authenticate("wrong-token").is_none());
+    }
+
+    #[test]
+    fn test_multi_auth_state_multi_users() {
+        let mut tokens = HashMap::new();
+        tokens.insert(
+            "tok-alice".to_string(),
+            UserIdentity {
+                user_id: "alice".to_string(),
+                workspace_read_scopes: Vec::new(),
+            },
+        );
+        tokens.insert(
+            "tok-bob".to_string(),
+            UserIdentity {
+                user_id: "bob".to_string(),
+                workspace_read_scopes: Vec::new(),
+            },
+        );
+        let state = MultiAuthState::multi(tokens);
+
+        let alice = state.authenticate("tok-alice").unwrap();
+        assert_eq!(alice.user_id, "alice");
+
+        let bob = state.authenticate("tok-bob").unwrap();
+        assert_eq!(bob.user_id, "bob");
+
+        assert!(state.authenticate("tok-charlie").is_none());
+    }
+
+    #[test]
+    fn test_multi_auth_state_first_token() {
+        let state = MultiAuthState::single("my-token".to_string(), "user1".to_string());
+        assert_eq!(state.first_token(), Some("my-token"));
+    }
+
+    #[test]
+    fn test_multi_auth_state_first_identity() {
+        let state = MultiAuthState::single("my-token".to_string(), "user1".to_string());
+        let identity = state.first_identity().unwrap();
+        assert_eq!(identity.user_id, "user1");
     }
 
     // === QA Plan - Web gateway auth tests ===
@@ -75,9 +209,7 @@ mod tests {
     }
 
     fn test_app(token: &str) -> Router {
-        let state = AuthState {
-            token: token.to_string(),
-        };
+        let state = MultiAuthState::single(token.to_string(), "test-user".to_string());
         Router::new()
             .route("/test", get(dummy_handler))
             .layer(middleware::from_fn_with_state(state, auth_middleware))
