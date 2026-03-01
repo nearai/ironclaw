@@ -1530,20 +1530,55 @@ async fn extensions_activate_handler(
 
 /// Redirect `/projects/{id}` to `/projects/{id}/` so relative paths in
 /// the served HTML resolve within the project namespace.
-async fn project_redirect_handler(Path(project_id): Path<String>) -> impl IntoResponse {
-    axum::response::Redirect::permanent(&format!("/projects/{project_id}/"))
+async fn project_redirect_handler(
+    State(state): State<Arc<GatewayState>>,
+    super::auth::AuthenticatedUser(user): super::auth::AuthenticatedUser,
+    Path(project_id): Path<String>,
+) -> impl IntoResponse {
+    if !verify_project_ownership(&state, &project_id, &user.user_id).await {
+        return (StatusCode::NOT_FOUND, "Not found").into_response();
+    }
+    axum::response::Redirect::permanent(&format!("/projects/{project_id}/")).into_response()
 }
 
 /// Serve `index.html` when hitting `/projects/{project_id}/`.
-async fn project_index_handler(Path(project_id): Path<String>) -> impl IntoResponse {
+async fn project_index_handler(
+    State(state): State<Arc<GatewayState>>,
+    super::auth::AuthenticatedUser(user): super::auth::AuthenticatedUser,
+    Path(project_id): Path<String>,
+) -> impl IntoResponse {
+    if !verify_project_ownership(&state, &project_id, &user.user_id).await {
+        return (StatusCode::NOT_FOUND, "Not found").into_response();
+    }
     serve_project_file(&project_id, "index.html").await
 }
 
 /// Serve any file under `/projects/{project_id}/{path}`.
 async fn project_file_handler(
+    State(state): State<Arc<GatewayState>>,
+    super::auth::AuthenticatedUser(user): super::auth::AuthenticatedUser,
     Path((project_id, path)): Path<(String, String)>,
 ) -> impl IntoResponse {
+    if !verify_project_ownership(&state, &project_id, &user.user_id).await {
+        return (StatusCode::NOT_FOUND, "Not found").into_response();
+    }
     serve_project_file(&project_id, &path).await
+}
+
+/// Check that a project directory belongs to a job owned by the given user.
+/// Returns false if the store is unavailable or the project is not found.
+async fn verify_project_ownership(state: &GatewayState, project_id: &str, user_id: &str) -> bool {
+    let Some(ref store) = state.store else {
+        return false;
+    };
+    // The project_id is a sandbox job UUID used as the directory name.
+    let Ok(job_id) = project_id.parse::<uuid::Uuid>() else {
+        return false;
+    };
+    match store.get_sandbox_job(job_id).await {
+        Ok(Some(job)) => job.user_id == user_id,
+        _ => false,
+    }
 }
 
 /// Shared logic: resolve the file inside `~/.ironclaw/projects/{project_id}/`,
