@@ -2,12 +2,12 @@
 //!
 //! Provides `ironclaw logs --lines N` to tail the application log file.
 
+use anyhow::{Context, Result};
+use clap::Args;
 use std::collections::VecDeque;
 use std::fs::File;
 use std::io::{BufRead, BufReader};
 use std::path::Path;
-use anyhow::{Context, Result};
-use clap::Args;
 
 #[derive(Args, Debug)]
 pub struct Logs {
@@ -27,10 +27,10 @@ pub fn run_logs_command(args: &Logs, log_path: &Path) -> Result<()> {
 
     let file = File::open(log_path)
         .with_context(|| format!("Failed to open log file: {}", log_path.display()))?;
-    
+
     let reader = BufReader::new(file);
     let mut recent_lines: VecDeque<String> = VecDeque::with_capacity(args.lines);
-    
+
     for line_result in reader.lines() {
         let line = line_result?;
         recent_lines.push_back(line);
@@ -38,11 +38,11 @@ pub fn run_logs_command(args: &Logs, log_path: &Path) -> Result<()> {
             recent_lines.pop_front();
         }
     }
-    
+
     for line in recent_lines {
         println!("{}", line);
     }
-    
+
     Ok(())
 }
 
@@ -52,11 +52,11 @@ fn read_last_n_lines(log_path: &Path, n: usize) -> Result<Vec<String>> {
     if !log_path.exists() {
         return Ok(Vec::new());
     }
-    
+
     let file = File::open(log_path)?;
     let reader = BufReader::new(file);
     let mut recent_lines: VecDeque<String> = VecDeque::with_capacity(n);
-    
+
     for line_result in reader.lines() {
         let line = line_result?;
         recent_lines.push_back(line);
@@ -64,7 +64,7 @@ fn read_last_n_lines(log_path: &Path, n: usize) -> Result<Vec<String>> {
             recent_lines.pop_front();
         }
     }
-    
+
     Ok(recent_lines.into_iter().collect())
 }
 
@@ -79,7 +79,7 @@ mod tests {
     fn test_logs_output_last_n_lines() -> Result<()> {
         let temp_dir = TempDir::new()?;
         let log_path = temp_dir.path().join("test.log");
-        
+
         let mut file = File::create(&log_path)?;
         for i in 1..=10 {
             writeln!(file, "Log line {}", i)?;
@@ -88,12 +88,12 @@ mod tests {
 
         let args = Logs { lines: 3 };
         let result = read_last_n_lines(&log_path, args.lines)?;
-        
+
         assert_eq!(result.len(), 3);
         assert_eq!(result[0], "Log line 8");
         assert_eq!(result[1], "Log line 9");
         assert_eq!(result[2], "Log line 10");
-        
+
         Ok(())
     }
 
@@ -101,10 +101,10 @@ mod tests {
     fn test_logs_file_not_found() -> Result<()> {
         let temp_dir = TempDir::new()?;
         let nonexistent_path = temp_dir.path().join("nonexistent.log");
-        
+
         let args = Logs { lines: 10 };
         let result = run_logs_command(&args, &nonexistent_path);
-        
+
         assert!(result.is_ok());
         Ok(())
     }
@@ -114,10 +114,10 @@ mod tests {
         let temp_dir = TempDir::new()?;
         let log_path = temp_dir.path().join("empty.log");
         File::create(&log_path)?;
-        
+
         let args = Logs { lines: 10 };
         let result = run_logs_command(&args, &log_path);
-        
+
         assert!(result.is_ok());
         Ok(())
     }
