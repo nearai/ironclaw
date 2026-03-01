@@ -21,8 +21,8 @@ use crate::db::{
 };
 use crate::error::{DatabaseError, WorkspaceError};
 use crate::history::{
-    ConversationMessage, ConversationSummary, JobEventRecord, LlmCallRecord, SandboxJobRecord,
-    SandboxJobSummary, SettingRow, Store,
+    AgentJobRecord, AgentJobSummary, ConversationMessage, ConversationSummary, JobEventRecord,
+    LlmCallRecord, SandboxJobRecord, SandboxJobSummary, SettingRow, Store,
 };
 use crate::workspace::{
     MemoryChunk, MemoryDocument, Repository, SearchConfig, SearchResult, WorkspaceEntry,
@@ -213,6 +213,14 @@ impl JobStore for PgBackend {
 
     async fn get_stuck_jobs(&self) -> Result<Vec<Uuid>, DatabaseError> {
         self.store.get_stuck_jobs().await
+    }
+
+    async fn list_agent_jobs(&self) -> Result<Vec<AgentJobRecord>, DatabaseError> {
+        self.store.list_agent_jobs().await
+    }
+
+    async fn agent_job_summary(&self) -> Result<AgentJobSummary, DatabaseError> {
+        self.store.agent_job_summary().await
     }
 
     async fn save_action(&self, job_id: Uuid, action: &ActionRecord) -> Result<(), DatabaseError> {

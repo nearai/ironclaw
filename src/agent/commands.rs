@@ -12,6 +12,7 @@ use crate::agent::session::Session;
 use crate::agent::submission::SubmissionResult;
 use crate::agent::{Agent, MessageIntent};
 use crate::channels::{IncomingMessage, StatusUpdate};
+use crate::context::JobState;
 use crate::error::Error;
 use crate::llm::{ChatMessage, Reasoning};
 
@@ -117,6 +118,22 @@ impl Agent {
                 let uuid = Uuid::parse_str(&id)
                     .map_err(|_| crate::error::JobError::NotFound { id: Uuid::nil() })?;
 
+                // Try DB first for persistent state, fall back to ContextManager.
+                if let Some(store) = self.store()
+                    && let Ok(Some(ctx)) = store.get_job(uuid).await
+                {
+                    return Ok(format!(
+                        "Job: {}\nStatus: {:?}\nCreated: {}\nStarted: {}\nActual cost: {}",
+                        ctx.title,
+                        ctx.state,
+                        ctx.created_at.format("%Y-%m-%d %H:%M:%S"),
+                        ctx.started_at
+                            .map(|t| t.format("%Y-%m-%d %H:%M:%S").to_string())
+                            .unwrap_or_else(|| "Not started".to_string()),
+                        ctx.actual_cost
+                    ));
+                }
+
                 let ctx = self.context_manager.get_context(uuid).await?;
                 if ctx.user_id != user_id {
                     return Err(crate::error::JobError::NotFound { id: uuid }.into());
@@ -134,10 +151,38 @@ impl Agent {
                 ))
             }
             None => {
-                // Show summary of all jobs
+                // Show summary from DB for consistency with Jobs tab.
+                if let Some(store) = self.store() {
+                    let mut total = 0;
+                    let mut in_progress = 0;
+                    let mut completed = 0;
+                    let mut failed = 0;
+                    let mut stuck = 0;
+
+                    if let Ok(s) = store.agent_job_summary().await {
+                        total += s.total;
+                        in_progress += s.in_progress;
+                        completed += s.completed;
+                        failed += s.failed;
+                        stuck += s.stuck;
+                    }
+                    if let Ok(s) = store.sandbox_job_summary().await {
+                        total += s.total;
+                        in_progress += s.running;
+                        completed += s.completed;
+                        failed += s.failed + s.interrupted;
+                    }
+
+                    return Ok(format!(
+                        "Jobs summary: Total: {} In Progress: {} Completed: {} Failed: {} Stuck: {}",
+                        total, in_progress, completed, failed, stuck
+                    ));
+                }
+
+                // Fallback to ContextManager if no DB.
                 let summary = self.context_manager.summary_for(user_id).await;
                 Ok(format!(
-                    "Jobs summary:\n  Total: {}\n  In Progress: {}\n  Completed: {}\n  Failed: {}\n  Stuck: {}",
+                    "Jobs summary: Total: {} In Progress: {} Completed: {} Failed: {} Stuck: {}",
                     summary.total,
                     summary.in_progress,
                     summary.completed,
@@ -159,6 +204,15 @@ impl Agent {
 
         self.scheduler.stop(uuid).await?;
 
+        // Also update DB so the Jobs tab reflects cancellation immediately.
+        if let Some(store) = self.store()
+            && let Err(e) = store
+                .update_job_status(uuid, JobState::Cancelled, Some("Cancelled by user"))
+                .await
+        {
+            tracing::warn!(job_id = %uuid, "Failed to persist cancellation to DB: {}", e);
+        }
+
         Ok(format!("Job {} has been cancelled.", job_id))
     }
 
@@ -167,21 +221,49 @@ impl Agent {
         user_id: &str,
         _filter: Option<String>,
     ) -> Result<String, Error> {
-        let jobs = self.context_manager.all_jobs_for(user_id).await;
+        // List from DB for consistency with Jobs tab.
+        if let Some(store) = self.store() {
+            let agent_jobs = match store.list_agent_jobs().await {
+                Ok(jobs) => jobs,
+                Err(e) => {
+                    tracing::warn!("Failed to list agent jobs: {}", e);
+                    Vec::new()
+                }
+            };
+            let sandbox_jobs = match store.list_sandbox_jobs().await {
+                Ok(jobs) => jobs,
+                Err(e) => {
+                    tracing::warn!("Failed to list sandbox jobs: {}", e);
+                    Vec::new()
+                }
+            };
 
+            if agent_jobs.is_empty() && sandbox_jobs.is_empty() {
+                return Ok("No jobs found.".to_string());
+            }
+
+            let mut output = String::from("Jobs:\n");
+            for j in &agent_jobs {
+                output.push_str(&format!("  {} - {} ({})\n", j.id, j.title, j.status));
+            }
+            for j in &sandbox_jobs {
+                output.push_str(&format!("  {} - {} ({})\n", j.id, j.task, j.status));
+            }
+            return Ok(output);
+        }
+
+        // Fallback to ContextManager if no DB.
+        let jobs = self.context_manager.all_jobs_for(user_id).await;
         if jobs.is_empty() {
             return Ok("No jobs found.".to_string());
         }
 
         let mut output = String::from("Jobs:\n");
         for job_id in jobs {
-            if let Ok(ctx) = self.context_manager.get_context(job_id).await
-                && ctx.user_id == user_id
-            {
+            if let Ok(ctx) = self.context_manager.get_context(job_id).await {
                 output.push_str(&format!("  {} - {} ({:?})\n", job_id, ctx.title, ctx.state));
             }
         }
-
         Ok(output)
     }
 
