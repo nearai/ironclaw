@@ -16,12 +16,14 @@ pub struct Logs {
 pub fn run_logs_command(args: &Logs) -> Result<()> {
     let log_path: PathBuf = home_dir()
         .context("Failed to get home directory")?
-        .join(".ironclaw/logs/ironclaw.log");
+        .join(".ironclaw")
+        .join("logs")
+        .join("ironclaw.log");
 
     if !log_path.exists() {
         eprintln!("Log file not found at: {}", log_path.display());
         eprintln!("Hint: Check if IronClaw has generated logs yet, or verify the path.");
-        return Ok(()); // Не крашимся, просто выходим gracefully
+        return Ok(()); // Exit gracefully if log file doesn't exist yet
     }
 
     let file = File::open(&log_path)
@@ -41,11 +43,11 @@ pub fn run_logs_command(args: &Logs) -> Result<()> {
 mod tests {
     use super::*;
     use std::io::Write;
-    use tempdir::TempDir;
+    use tempfile::TempDir;
 
     #[test]
     fn test_logs_output() -> Result<()> {
-        let temp_dir = TempDir::new("logs_test")?;
+        let temp_dir = TempDir::new()?;
         let log_path = temp_dir.path().join("test.log");
         let mut file = File::create(&log_path)?;
         writeln!(file, "Line1")?;
