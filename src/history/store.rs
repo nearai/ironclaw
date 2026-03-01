@@ -2,10 +2,8 @@
 
 use chrono::{DateTime, Utc};
 #[cfg(feature = "postgres")]
-use deadpool_postgres::{Config, Pool, Runtime};
+use deadpool_postgres::{Config, Pool};
 use rust_decimal::Decimal;
-#[cfg(feature = "postgres")]
-use tokio_postgres::NoTls;
 use uuid::Uuid;
 
 #[cfg(feature = "postgres")]
@@ -50,8 +48,7 @@ impl Store {
             ..Default::default()
         });
 
-        let pool = cfg
-            .create_pool(Some(Runtime::Tokio1), NoTls)
+        let pool = crate::db::tls::create_pool(&cfg, config.ssl_mode)
             .map_err(|e| DatabaseError::Pool(e.to_string()))?;
 
         // Test connection
