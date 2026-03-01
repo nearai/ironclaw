@@ -2157,7 +2157,7 @@ function submitConfigureModal(name, fields) {
         if (res.activated) {
           showToast('Configured and activated ' + name, 'success');
         } else if (res.needs_restart) {
-          showToast('Configured ' + name + '. Restart required to activate.', 'info');
+          showToast('Configured ' + name + '. Use Reconfigure to re-enter credentials and activate.', 'info');
         } else {
           showToast(res.message, 'success');
         }
