@@ -15,10 +15,8 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 #[cfg(feature = "postgres")]
-use deadpool_postgres::{Config as PoolConfig, Runtime};
+use deadpool_postgres::Config as PoolConfig;
 use secrecy::{ExposeSecret, SecretString};
-#[cfg(feature = "postgres")]
-use tokio_postgres::NoTls;
 
 use crate::bootstrap::ironclaw_base_dir;
 use crate::channels::wasm::{
@@ -556,8 +554,7 @@ impl SetupWizard {
             ..Default::default()
         });
 
-        let pool = cfg
-            .create_pool(Some(Runtime::Tokio1), NoTls)
+        let pool = crate::db::tls::create_pool(&cfg, crate::config::SslMode::from_env())
             .map_err(|e| SetupError::Database(format!("Failed to create pool: {}", e)))?;
 
         let client = pool
