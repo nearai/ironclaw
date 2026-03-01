@@ -235,14 +235,16 @@ impl CredentialInjector {
         Ok(result)
     }
 
-    /// Check if a secret name is in the allowed list.
+    /// Check if a secret name is in the allowed list (case-insensitive).
     fn is_secret_allowed(&self, name: &str) -> bool {
+        let name_lower = name.to_lowercase();
         for pattern in &self.allowed_secrets {
-            if pattern == name {
+            let pattern_lower = pattern.to_lowercase();
+            if pattern_lower == name_lower {
                 return true;
             }
-            if let Some(prefix) = pattern.strip_suffix('*')
-                && name.starts_with(prefix)
+            if let Some(prefix) = pattern_lower.strip_suffix('*')
+                && name_lower.starts_with(prefix)
             {
                 return true;
             }
