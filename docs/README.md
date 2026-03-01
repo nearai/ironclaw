@@ -3,7 +3,7 @@
 > Comprehensive developer reference for [IronClaw](https://github.com/nearai/ironclaw) v0.12.0
 > — a secure, self-hosted personal AI assistant written in Rust.
 
-**Documentation set for IronClaw v0.12.0, validated against tag `v0.12.0` (`1156884`) in `~/src/ironclaw`.**
+**Documentation set for IronClaw v0.12.0, validated against release tag `v0.12.0` (`1156884`).**
 
 ---
 
