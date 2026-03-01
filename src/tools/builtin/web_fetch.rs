@@ -215,6 +215,7 @@ impl Tool for WebFetchTool {
 
         let result = serde_json::json!({
             "url": url_str,
+            "status": status,
             "title": title,
             "content": content,
             "word_count": word_count,
