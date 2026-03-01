@@ -487,6 +487,30 @@ pub struct SandboxJobSummary {
     pub interrupted: usize,
 }
 
+/// Lightweight record for agent (non-sandbox) jobs, used by the web Jobs tab.
+#[derive(Debug, Clone)]
+pub struct AgentJobRecord {
+    pub id: Uuid,
+    pub title: String,
+    pub status: String,
+    pub user_id: String,
+    pub created_at: DateTime<Utc>,
+    pub started_at: Option<DateTime<Utc>>,
+    pub completed_at: Option<DateTime<Utc>>,
+    pub failure_reason: Option<String>,
+}
+
+/// Summary counts for agent (non-sandbox) jobs.
+#[derive(Debug, Clone, Default)]
+pub struct AgentJobSummary {
+    pub total: usize,
+    pub pending: usize,
+    pub in_progress: usize,
+    pub completed: usize,
+    pub failed: usize,
+    pub stuck: usize,
+}
+
 #[cfg(feature = "postgres")]
 impl Store {
     /// Insert a new sandbox job into `agent_jobs`.
@@ -749,6 +773,64 @@ impl Store {
                 "completed" => summary.completed += c,
                 "failed" => summary.failed += c,
                 "interrupted" => summary.interrupted += c,
+                _ => {}
+            }
+        }
+        Ok(summary)
+    }
+
+    /// List all agent (non-sandbox) jobs, most recent first.
+    pub async fn list_agent_jobs(&self) -> Result<Vec<AgentJobRecord>, DatabaseError> {
+        let conn = self.conn().await?;
+        let rows = conn
+            .query(
+                r#"
+                SELECT id, title, status, user_id, failure_reason,
+                       created_at, started_at, completed_at
+                FROM agent_jobs WHERE source = 'direct'
+                ORDER BY created_at DESC
+                "#,
+                &[],
+            )
+            .await?;
+
+        Ok(rows
+            .iter()
+            .map(|r| AgentJobRecord {
+                id: r.get("id"),
+                title: r.get("title"),
+                status: r.get("status"),
+                user_id: r.get::<_, Option<String>>("user_id").unwrap_or_default(),
+                created_at: r.get("created_at"),
+                started_at: r.get("started_at"),
+                completed_at: r.get("completed_at"),
+                failure_reason: r.get("failure_reason"),
+            })
+            .collect())
+    }
+
+    /// Summary counts for agent (non-sandbox) jobs.
+    pub async fn agent_job_summary(&self) -> Result<AgentJobSummary, DatabaseError> {
+        let conn = self.conn().await?;
+        let rows = conn
+            .query(
+                "SELECT status, COUNT(*) as cnt FROM agent_jobs WHERE source = 'direct' GROUP BY status",
+                &[],
+            )
+            .await?;
+
+        let mut summary = AgentJobSummary::default();
+        for row in &rows {
+            let status: String = row.get("status");
+            let count: i64 = row.get("cnt");
+            let c = count as usize;
+            summary.total += c;
+            match status.as_str() {
+                "pending" => summary.pending += c,
+                "in_progress" => summary.in_progress += c,
+                "completed" | "submitted" | "accepted" => summary.completed += c,
+                "failed" | "cancelled" => summary.failed += c,
+                "stuck" => summary.stuck += c,
                 _ => {}
             }
         }

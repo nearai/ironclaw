@@ -457,9 +457,16 @@ async fn main() -> anyhow::Result<()> {
     let session_manager =
         Arc::new(ironclaw::agent::SessionManager::new().with_hooks(components.hooks.clone()));
 
+    // Lazy scheduler slot — filled after Agent::new creates the Scheduler.
+    // Allows CreateJobTool to dispatch local jobs via the Scheduler even though
+    // the Scheduler is created after tools are registered (chicken-and-egg).
+    let scheduler_slot: ironclaw::tools::builtin::SchedulerSlot =
+        Arc::new(tokio::sync::RwLock::new(None));
+
     // Register job tools (sandbox deps auto-injected when container_job_manager is available)
     components.tools.register_job_tools(
         Arc::clone(&components.context_manager),
+        Some(scheduler_slot.clone()),
         container_job_manager.clone(),
         components.db.clone(),
         job_event_tx.clone(),
@@ -648,6 +655,9 @@ async fn main() -> anyhow::Result<()> {
         Some(components.context_manager),
         Some(session_manager),
     );
+
+    // Fill the scheduler slot now that Agent (and its Scheduler) exist.
+    *scheduler_slot.write().await = Some(agent.scheduler());
 
     agent.run().await?;
 

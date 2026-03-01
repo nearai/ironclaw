@@ -158,6 +158,32 @@ Report when the job is complete or if you encounter issues you cannot resolve."#
         match result {
             Ok(Ok(())) => {
                 tracing::info!("Worker for job {} completed successfully", self.job_id);
+                // Only mark completed if still in an active, non-stuck state.
+                // The execution_loop may have already called mark_completed or
+                // mark_stuck (e.g. "plan completed but work remains").
+                let current_state = self
+                    .context_manager()
+                    .get_context(self.job_id)
+                    .await
+                    .map(|ctx| ctx.state);
+                match current_state {
+                    Ok(state) if state.is_terminal() => {
+                        // Already in a terminal state (e.g. execution_loop
+                        // called mark_completed itself).
+                    }
+                    Ok(JobState::Stuck) => {
+                        // execution_loop marked this as stuck (e.g. "plan
+                        // completed but work remains"); leave for self-repair.
+                        tracing::info!(
+                            "Job {} returned Ok but is Stuck — leaving for self-repair",
+                            self.job_id
+                        );
+                    }
+                    Ok(_) => {
+                        self.mark_completed().await?;
+                    }
+                    Err(_) => {}
+                }
             }
             Ok(Err(e)) => {
                 tracing::error!("Worker for job {} failed: {}", self.job_id, e);
