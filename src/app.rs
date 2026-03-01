@@ -353,10 +353,34 @@ impl AppBuilder {
         }
 
         // Register memory tools if database is available
+        let workspace_user_id = self
+            .config
+            .channels
+            .gateway
+            .as_ref()
+            .map(|gw| gw.user_id.as_str())
+            .unwrap_or("default");
         let workspace = if let Some(ref db) = self.db {
-            let mut ws = Workspace::new_with_db("default", db.clone());
+            let mut ws = Workspace::new_with_db(workspace_user_id, db.clone());
+
+            // Wire additional read scopes from WORKSPACE_READ_SCOPES
+            if let Some(ref gw) = self.config.channels.gateway
+                && !gw.workspace_read_scopes.is_empty()
+            {
+                ws = ws.with_additional_read_scopes(gw.workspace_read_scopes.clone());
+                tracing::info!(
+                    user_id = workspace_user_id,
+                    read_scopes = ?ws.read_user_ids(),
+                    "Workspace configured with multi-scope reads"
+                );
+            }
+
             if let Some(ref emb) = embeddings {
                 ws = ws.with_embeddings(emb.clone());
+            }
+            // Wire memory layers from gateway config if present
+            if let Some(ref gw) = self.config.channels.gateway {
+                ws = ws.with_memory_layers(gw.memory_layers.clone());
             }
             let ws = Arc::new(ws);
             tools.register_memory_tools(Arc::clone(&ws));
