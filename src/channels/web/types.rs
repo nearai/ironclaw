@@ -261,12 +261,27 @@ pub struct MemoryReadResponse {
 pub struct MemoryWriteRequest {
     pub path: String,
     pub content: String,
+    /// Optional layer to write to. When present, uses `write_to_layer()`
+    /// which enables privacy classification and redirect.
+    pub layer: Option<String>,
+    /// When true and a layer is specified, appends to existing content
+    /// instead of replacing it.
+    #[serde(default)]
+    pub append: bool,
 }
 
 #[derive(Debug, Serialize)]
 pub struct MemoryWriteResponse {
     pub path: String,
     pub status: &'static str,
+    /// Whether the write was redirected to a different layer (e.g., sensitive
+    /// content redirected from shared to private).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub redirected: Option<bool>,
+    /// The layer the content was actually written to (may differ from requested
+    /// layer if privacy redirect occurred).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub actual_layer: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]

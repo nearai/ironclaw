@@ -1083,14 +1083,53 @@ async fn memory_write_handler(
         "Workspace not available".to_string(),
     ))?;
 
-    workspace
-        .write(&req.path, &req.content)
-        .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    // Route through layer-aware methods when a layer is specified
+    if let Some(ref layer_name) = req.layer {
+        let result = if req.append {
+            workspace
+                .append_to_layer(layer_name, &req.path, &req.content)
+                .await
+        } else {
+            workspace
+                .write_to_layer(layer_name, &req.path, &req.content)
+                .await
+        }
+        .map_err(|e| {
+            use crate::error::WorkspaceError;
+            let status = match &e {
+                WorkspaceError::LayerNotFound { .. } => StatusCode::BAD_REQUEST,
+                WorkspaceError::LayerReadOnly { .. } => StatusCode::FORBIDDEN,
+                WorkspaceError::PrivacyRedirectFailed => StatusCode::UNPROCESSABLE_ENTITY,
+                _ => StatusCode::INTERNAL_SERVER_ERROR,
+            };
+            (status, e.to_string())
+        })?;
+        return Ok(Json(MemoryWriteResponse {
+            path: req.path,
+            status: "written",
+            redirected: Some(result.redirected),
+            actual_layer: Some(result.actual_layer),
+        }));
+    }
+
+    // Non-layer path: honor the append field
+    if req.append {
+        workspace
+            .append(&req.path, &req.content)
+            .await
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    } else {
+        workspace
+            .write(&req.path, &req.content)
+            .await
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    }
 
     Ok(Json(MemoryWriteResponse {
         path: req.path,
         status: "written",
+        redirected: None,
+        actual_layer: None,
     }))
 }
 
