@@ -250,6 +250,7 @@ async fn async_main() -> anyhow::Result<()> {
 
     // ── Orchestrator / container job manager ────────────────────────────
 
+<<<<<<< HEAD
     let orch = ironclaw::orchestrator::setup_orchestrator(
         &config,
         &components.llm,
@@ -261,6 +262,93 @@ async fn async_main() -> anyhow::Result<()> {
     let job_event_tx = orch.job_event_tx;
     let prompt_queue = orch.prompt_queue;
     let docker_status = orch.docker_status;
+=======
+    // Proactive Docker detection
+    let docker_status = if config.sandbox.enabled {
+        let detection = ironclaw::sandbox::check_docker().await;
+        match detection.status {
+            ironclaw::sandbox::DockerStatus::Available => {
+                tracing::info!("Docker is available");
+            }
+            ironclaw::sandbox::DockerStatus::NotInstalled => {
+                tracing::warn!(
+                    "Docker is not installed -- sandbox disabled for this session. {}",
+                    detection.platform.install_hint()
+                );
+            }
+            ironclaw::sandbox::DockerStatus::NotRunning => {
+                tracing::warn!(
+                    "Docker is installed but not running -- sandbox disabled for this session. {}",
+                    detection.platform.start_hint()
+                );
+            }
+            ironclaw::sandbox::DockerStatus::Disabled => {}
+        }
+        detection.status
+    } else {
+        ironclaw::sandbox::DockerStatus::Disabled
+    };
+
+    let job_event_tx: Option<
+        tokio::sync::broadcast::Sender<(uuid::Uuid, String, ironclaw::channels::web::types::SseEvent)>,
+    > = if config.sandbox.enabled && docker_status.is_ok() {
+        let (tx, _) = tokio::sync::broadcast::channel(256);
+        Some(tx)
+    } else {
+        None
+    };
+    let prompt_queue = Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::<
+        uuid::Uuid,
+        std::collections::VecDeque<ironclaw::orchestrator::api::PendingPrompt>,
+    >::new()));
+
+    let container_job_manager: Option<Arc<ContainerJobManager>> =
+        if config.sandbox.enabled && docker_status.is_ok() {
+            let token_store = TokenStore::new();
+            let job_config = ContainerJobConfig {
+                image: config.sandbox.image.clone(),
+                memory_limit_mb: config.sandbox.memory_limit_mb,
+                cpu_shares: config.sandbox.cpu_shares,
+                orchestrator_port: 50051,
+                claude_code_api_key: std::env::var("ANTHROPIC_API_KEY").ok(),
+                claude_code_oauth_token: ironclaw::config::ClaudeCodeConfig::extract_oauth_token(),
+                claude_code_model: config.claude_code.model.clone(),
+                claude_code_max_turns: config.claude_code.max_turns,
+                claude_code_memory_limit_mb: config.claude_code.memory_limit_mb,
+                claude_code_allowed_tools: config.claude_code.allowed_tools.clone(),
+            };
+            let jm = Arc::new(ContainerJobManager::new(job_config, token_store.clone()));
+
+            // Start the orchestrator internal API in the background
+            let orchestrator_state = OrchestratorState {
+                llm: components.llm.clone(),
+                job_manager: Arc::clone(&jm),
+                token_store,
+                job_event_tx: job_event_tx.clone(),
+                prompt_queue: Arc::clone(&prompt_queue),
+                store: components.db.clone(),
+                secrets_store: components.secrets_store.clone(),
+                user_id: "default".to_string(),
+            };
+
+            tokio::spawn(async move {
+                if let Err(e) = OrchestratorApi::start(orchestrator_state, 50051).await {
+                    tracing::error!("Orchestrator API failed: {}", e);
+                }
+            });
+
+            if config.claude_code.enabled {
+                tracing::info!(
+                    "Claude Code sandbox mode available (model: {}, max_turns: {})",
+                    config.claude_code.model,
+                    config.claude_code.max_turns
+                );
+            }
+            Some(jm)
+        } else {
+            None
+        };
+>>>>>>> 1864723 (feat: wire multi-user config at startup)
 
     // ── Channel setup ──────────────────────────────────────────────────
 
@@ -461,14 +549,47 @@ async fn async_main() -> anyhow::Result<()> {
     // ── Gateway channel ────────────────────────────────────────────────
 
     let mut gateway_url: Option<String> = None;
+<<<<<<< HEAD
     let mut sse_sender: Option<
         tokio::sync::broadcast::Sender<ironclaw::channels::web::types::SseEvent>,
     > = None;
+=======
+    let mut sse_manager: Option<std::sync::Arc<ironclaw::channels::web::sse::SseManager>> = None;
+    let mut gateway_state: Option<std::sync::Arc<ironclaw::channels::web::server::GatewayState>> =
+        None;
+>>>>>>> 1864723 (feat: wire multi-user config at startup)
     if let Some(ref gw_config) = config.channels.gateway {
-        let mut gw =
-            GatewayChannel::new(gw_config.clone()).with_llm_provider(Arc::clone(&components.llm));
+        // Build multi-user auth state if user_tokens is configured, else single-user.
+        let mut gw = if let Some(ref user_tokens) = gw_config.user_tokens {
+            use ironclaw::channels::web::auth::{MultiAuthState, UserIdentity};
+            let tokens = user_tokens
+                .iter()
+                .map(|(token, cfg)| {
+                    (
+                        token.clone(),
+                        UserIdentity {
+                            user_id: cfg.user_id.clone(),
+                            workspace_read_scopes: cfg.workspace_read_scopes.clone(),
+                        },
+                    )
+                })
+                .collect();
+            let auth = MultiAuthState::multi(tokens);
+            GatewayChannel::new_multi_auth(gw_config.clone(), auth)
+        } else {
+            GatewayChannel::new(gw_config.clone())
+        };
+        gw = gw.with_llm_provider(Arc::clone(&components.llm));
         if let Some(ref ws) = components.workspace {
             gw = gw.with_workspace(Arc::clone(ws));
+        }
+        // Create per-user workspace pool for multi-user mode.
+        if let Some(ref db) = components.db {
+            let pool = Arc::new(ironclaw::channels::web::server::WorkspacePool::new(
+                Arc::clone(db),
+                components.embeddings.clone(),
+            ));
+            gw = gw.with_workspace_pool(pool);
         }
         gw = gw.with_session_manager(Arc::clone(&session_manager));
         gw = gw.with_log_broadcaster(Arc::clone(&log_broadcaster));
@@ -510,8 +631,12 @@ async fn async_main() -> anyhow::Result<()> {
                 let mut rx = tx.subscribe();
                 let gw_state = Arc::clone(gw.state());
                 tokio::spawn(async move {
-                    while let Ok((_job_id, event)) = rx.recv().await {
-                        gw_state.sse.broadcast(event);
+                    while let Ok((_job_id, user_id, event)) = rx.recv().await {
+                        if user_id.is_empty() {
+                            gw_state.sse.broadcast(event);
+                        } else {
+                            gw_state.sse.broadcast_for_user(&user_id, event);
+                        }
                     }
                 });
             }
@@ -529,7 +654,13 @@ async fn async_main() -> anyhow::Result<()> {
         // Capture SSE sender and routine engine slot before moving gw into channels.
         // IMPORTANT: This must come after all `with_*` calls since `rebuild_state`
         // creates a new SseManager, which would orphan this sender.
+<<<<<<< HEAD
         sse_sender = Some(gw.state().sse.sender());
+=======
+        sse_manager = Some(Arc::clone(&gw.state().sse));
+        gateway_state = Some(Arc::clone(gw.state()));
+
+>>>>>>> 1864723 (feat: wire multi-user config at startup)
         channel_names.push("gateway".to_string());
         channels.add(Box::new(gw)).await;
     }
@@ -646,9 +777,15 @@ async fn async_main() -> anyhow::Result<()> {
 
     // Wire SSE sender into extension manager for broadcasting status events.
     if let Some(ref ext_mgr) = components.extension_manager
+<<<<<<< HEAD
         && let Some(ref sender) = sse_sender
     {
         ext_mgr.set_sse_sender(sender.clone()).await;
+=======
+        && let Some(sse) = sse_manager
+    {
+        ext_mgr.set_sse_sender(sse).await;
+>>>>>>> 1864723 (feat: wire multi-user config at startup)
     }
 
     // Snapshot memory for trace recording before the agent starts
