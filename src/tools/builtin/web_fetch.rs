@@ -6,12 +6,13 @@
 //!
 //! - GET-only, no custom headers or body
 //! - Always attempts HTML → Markdown conversion via Readability
-//! - Returns structured output: `{url, title, content, word_count}`
+//! - Returns structured output: `{url, status, title, content, word_count}`
 //! - Auto-approved (no confirmation prompt)
+//! - Follows up to 3 redirects, SSRF-validating each hop
 //!
 //! All the same security infrastructure as `http`:
 //! HTTPS-only, SSRF protection, DNS rebinding defence, outbound/inbound leak
-//! scanning, 5 MB response cap, no redirect following.
+//! scanning, 5 MB response cap.
 
 use std::time::{Duration, Instant};
 
@@ -29,6 +30,13 @@ use crate::tools::builtin::convert_html_to_markdown;
 
 /// Maximum response body size — matches the `http` tool limit.
 const MAX_RESPONSE_SIZE: usize = 5 * 1024 * 1024;
+
+/// Maximum number of redirects to follow before giving up.
+const MAX_REDIRECTS: usize = 3;
+
+/// Chrome-like User-Agent — many sites block default `reqwest` strings.
+const USER_AGENT: &str = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) \
+    AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36";
 
 /// Extract the `<title>` text from raw HTML without a full DOM parser.
 ///
@@ -56,11 +64,15 @@ pub struct WebFetchTool {
 }
 
 impl WebFetchTool {
-    /// Create a new `WebFetchTool` with the same client settings as `HttpTool`.
+    /// Create a new `WebFetchTool` with a Chrome-like UA and no auto-redirects.
+    ///
+    /// Redirects are followed manually (up to [`MAX_REDIRECTS`] hops) so that
+    /// each `Location` URL is SSRF-validated before the next request is sent.
     pub fn new() -> Self {
         let client = Client::builder()
             .timeout(Duration::from_secs(30))
             .redirect(reqwest::redirect::Policy::none())
+            .user_agent(USER_AGENT)
             .build()
             .expect("Failed to create HTTP client for web_fetch");
 
@@ -113,37 +125,91 @@ impl Tool for WebFetchTool {
             .ok_or_else(|| ToolError::InvalidParameters("'url' is required".to_string()))?;
 
         // SSRF defence: HTTPS-only, no localhost, no private IPs, DNS rebinding check.
-        let parsed_url = validate_url(url_str)?;
+        let mut current_url = validate_url(url_str)?;
 
         // Outbound leak scan — reject if URL contains secrets.
         let detector = LeakDetector::new();
         detector
-            .scan_http_request(parsed_url.as_str(), &[], None)
+            .scan_http_request(current_url.as_str(), &[], None)
             .map_err(|e| ToolError::NotAuthorized(e.to_string()))?;
 
-        // Send GET request.
-        let response = self
-            .client
-            .get(parsed_url.clone())
-            .send()
-            .await
-            .map_err(|e| {
-                if e.is_timeout() {
-                    ToolError::Timeout(Duration::from_secs(30))
-                } else {
-                    ToolError::ExternalService(e.to_string())
+        // Follow redirects manually so every hop is SSRF-validated.
+        let response = {
+            let mut redirects_remaining = MAX_REDIRECTS;
+            loop {
+                let resp = self
+                    .client
+                    .get(current_url.clone())
+                    .header(reqwest::header::ACCEPT, "text/markdown, text/html;q=0.9, */*;q=0.8")
+                    .send()
+                    .await
+                    .map_err(|e| {
+                        if e.is_timeout() {
+                            ToolError::Timeout(Duration::from_secs(30))
+                        } else {
+                            ToolError::ExternalService(e.to_string())
+                        }
+                    })?;
+
+                let status = resp.status().as_u16();
+
+                if (300..400).contains(&status) {
+                    if redirects_remaining == 0 {
+                        return Err(ToolError::ExecutionFailed(format!(
+                            "too many redirects (max {})",
+                            MAX_REDIRECTS
+                        )));
+                    }
+
+                    let location = resp
+                        .headers()
+                        .get(reqwest::header::LOCATION)
+                        .and_then(|v| v.to_str().ok())
+                        .ok_or_else(|| {
+                            ToolError::ExecutionFailed(format!(
+                                "redirect (HTTP {}) has no Location header",
+                                status
+                            ))
+                        })?;
+
+                    // Resolve relative redirects against the current URL.
+                    let next_url_str = if location.starts_with("http://")
+                        || location.starts_with("https://")
+                    {
+                        location.to_string()
+                    } else {
+                        // Relative redirect — join with current URL.
+                        current_url
+                            .join(location)
+                            .map(|u| u.to_string())
+                            .map_err(|e| {
+                                ToolError::ExecutionFailed(format!(
+                                    "could not resolve relative redirect '{}': {}",
+                                    location, e
+                                ))
+                            })?
+                    };
+
+                    // SSRF re-validation on every hop.
+                    current_url = validate_url(&next_url_str)?;
+                    detector
+                        .scan_http_request(current_url.as_str(), &[], None)
+                        .map_err(|e| ToolError::NotAuthorized(e.to_string()))?;
+
+                    redirects_remaining -= 1;
+                    tracing::debug!(
+                        to = %current_url,
+                        hops_left = redirects_remaining,
+                        "web_fetch following redirect"
+                    );
+                    continue;
                 }
-            })?;
+
+                break resp;
+            }
+        };
 
         let status = response.status().as_u16();
-
-        // Block redirects — same SSRF defence as `http` tool.
-        if (300..400).contains(&status) {
-            return Err(ToolError::NotAuthorized(format!(
-                "request returned redirect (HTTP {}), which is blocked to prevent SSRF",
-                status
-            )));
-        }
 
         // Detect content type before consuming the response.
         let content_type = response
@@ -189,11 +255,11 @@ impl Tool for WebFetchTool {
         #[cfg(feature = "html-to-markdown")]
         let (content, title) = if is_html {
             let title = extract_title(&raw_text);
-            match convert_html_to_markdown(&raw_text, parsed_url.as_str()) {
+            match convert_html_to_markdown(&raw_text, current_url.as_str()) {
                 Ok(md) => (md, title),
                 Err(e) => {
                     tracing::warn!(
-                        url = %parsed_url,
+                        url = %current_url,
                         error = %e,
                         "HTML-to-markdown conversion failed, returning raw text"
                     );
