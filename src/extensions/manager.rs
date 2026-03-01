@@ -209,17 +209,10 @@ impl ExtensionManager {
             },
             Ok(None) => Vec::new(),
             Err(e) => {
-match store.get_setting(&self.user_id, "activated_channels").await {
-    Ok(Some(value)) => serde_json::from_value(value).unwrap_or_else(|e| {
-        tracing::warn!(error = %e, "Failed to deserialize activated_channels from settings");
-        Vec::new()
-    }),
-    Ok(None) => Vec::new(),
-    Err(e) => {
-        tracing::warn!(error = %e, "Failed to load activated_channels setting");
-        Vec::new()
-    }
-}
+                tracing::warn!(error = %e, "Failed to load activated_channels setting");
+                Vec::new()
+            }
+        }
     }
 
     /// Set the SSE broadcast sender for pushing extension status events to the web UI.
