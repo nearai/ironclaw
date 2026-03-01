@@ -543,6 +543,10 @@ impl SetupWizard {
     }
 
     /// Test PostgreSQL connection and store the pool.
+    ///
+    /// After connecting, validates:
+    /// 1. PostgreSQL version >= 15 (required for pgvector compatibility)
+    /// 2. pgvector extension is available (required for embeddings/vector search)
     #[cfg(feature = "postgres")]
     async fn test_database_connection_postgres(&mut self, url: &str) -> Result<(), SetupError> {
         let mut cfg = PoolConfig::new();
@@ -556,10 +560,56 @@ impl SetupWizard {
             .create_pool(Some(Runtime::Tokio1), NoTls)
             .map_err(|e| SetupError::Database(format!("Failed to create pool: {}", e)))?;
 
-        let _ = pool
+        let client = pool
             .get()
             .await
             .map_err(|e| SetupError::Database(format!("Failed to connect: {}", e)))?;
+
+        // Check PostgreSQL server version (need 15+ for pgvector)
+        let version_row = client
+            .query_one("SHOW server_version", &[])
+            .await
+            .map_err(|e| SetupError::Database(format!("Failed to query server version: {}", e)))?;
+        let version_str: &str = version_row.get(0);
+        let major_version = version_str
+            .split('.')
+            .next()
+            .and_then(|v| v.parse::<u32>().ok())
+            .unwrap_or(0);
+
+        const MIN_PG_MAJOR_VERSION: u32 = 15;
+
+        if major_version < MIN_PG_MAJOR_VERSION {
+            return Err(SetupError::Database(format!(
+                "PostgreSQL {} detected. IronClaw requires PostgreSQL {} or later for pgvector support.\n\
+                 Upgrade: https://www.postgresql.org/download/",
+                version_str, MIN_PG_MAJOR_VERSION
+            )));
+        }
+
+        // Check if pgvector extension is available
+        let pgvector_row = client
+            .query_opt(
+                "SELECT 1 FROM pg_available_extensions WHERE name = 'vector'",
+                &[],
+            )
+            .await
+            .map_err(|e| {
+                SetupError::Database(format!("Failed to check pgvector availability: {}", e))
+            })?;
+
+        if pgvector_row.is_none() {
+            return Err(SetupError::Database(format!(
+                "pgvector extension not found on your PostgreSQL server.\n\n\
+                 Install it:\n  \
+                 macOS:   brew install pgvector\n  \
+                 Ubuntu:  apt install postgresql-{0}-pgvector\n  \
+                 Docker:  use the pgvector/pgvector:pg{0} image\n  \
+                 Source:  https://github.com/pgvector/pgvector#installation\n\n\
+                 Then restart PostgreSQL and re-run: ironclaw onboard",
+                major_version
+            )));
+        }
 
         self.db_pool = Some(pool);
         Ok(())
