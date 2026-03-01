@@ -1,0 +1,16 @@
+# Fast production Dockerfile using host-built binary
+FROM ubuntu:24.04
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates libssl3 curl \
+    && rm -rf /var/lib/apt/lists/*
+
+# Copy the host-built binary 
+# (assumes 'target/release/ironclaw' exists in current dir)
+COPY target/release/ironclaw /usr/local/bin/ironclaw
+
+# Create config directories in container
+RUN mkdir -p /root/.ironclaw/workspace /root/.ironclaw/channels /root/.ironclaw/tools
+
+WORKDIR /app
+ENTRYPOINT ["ironclaw"]

@@ -9,7 +9,7 @@ model_list:
   # Tier 2: xAI Direct
   - model_name: grok-orchestrator
     litellm_params:
-      model: xai/grok-4.1-fast
+      model: xai/grok-3-fast
       api_key: "os.environ/XAI_API_KEY"
       rpm_limit: 60
   
@@ -33,5 +33,5 @@ model_list:
       rpm_limit: 30
 
 general_settings:
-  master_key: sk-ironclaw-master-key
-  budget_alert: 50
+  # No master_key — avoids needing a database (Prisma/SQLite).
+  # IronClaw is single-tenant so virtual key management is not required.

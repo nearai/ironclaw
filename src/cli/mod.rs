@@ -19,6 +19,7 @@ pub mod memory;
 pub mod oauth_defaults;
 mod pairing;
 mod registry;
+mod secret;
 mod service;
 pub mod status;
 mod tool;
@@ -33,6 +34,7 @@ pub use memory::run_memory_command;
 pub use memory::run_memory_command_with_db;
 pub use pairing::{PairingCommand, run_pairing_command, run_pairing_command_with_store};
 pub use registry::{RegistryCommand, run_registry_command};
+pub use secret::{SecretCommand, run_secret_command};
 pub use service::{ServiceCommand, run_service_command};
 pub use status::run_status_command;
 pub use tool::{ToolCommand, run_tool_command};
@@ -174,6 +176,14 @@ pub enum Command {
         long_about = "Generates shell completion scripts.\nExample: ironclaw completion --shell bash > ironclaw.bash"
     )]
     Completion(Completion),
+
+    /// Manage encrypted secrets
+    #[command(
+        subcommand,
+        about = "Manage app secrets",
+        long_about = "Commands for listing, getting, and setting encrypted secrets.\nExample: ironclaw secret set telegram_bot_token YOUR_TOKEN"
+    )]
+    Secret(SecretCommand),
 
     /// Run as a sandboxed worker inside a Docker container (internal use).
     /// This is invoked automatically by the orchestrator, not by users directly.

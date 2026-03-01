@@ -1,0 +1,39 @@
+# IronClaw configuration file.
+
+onboard_completed = true
+secrets_master_key_source = "env"
+database_url = "postgres://ironclaw:ironclaw@postgres:5432/ironclaw"
+
+# Top-level inference settings (Settings struct is flat for these)
+llm_backend = "openai_compatible"
+openai_compatible_base_url = "http://litellm:4000/v1"
+selected_model = "grok-orchestrator"
+
+[agent]
+name = "ironclaw"
+use_planning = true
+max_parallel_jobs = 5
+
+[workspace]
+path = "/root/.ironclaw/workspace"
+memory_path = "/root/.ironclaw/workspace/MEMORY.md"
+soul_path = "/root/.ironclaw/workspace/SOUL.md"
+agents_path = "/root/.ironclaw/workspace/AGENTS.md"
+
+[channels]
+wasm_channels_enabled = true
+wasm_channels_dir = "/root/.ironclaw/channels"
+wasm_channels = [
+    "/root/.ironclaw/channels/telegram.wasm"
+]
+
+[wasm]
+enabled = true
+tools_dir = "/root/.ironclaw/tools"
+
+[sandbox]
+enabled = false # Disable sandbox locally if not needed to avoid complexity
+
+[logging]
+level = "info"
+format = "json"

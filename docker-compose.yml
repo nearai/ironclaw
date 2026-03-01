@@ -1,30 +1,62 @@
-# Local development only — do NOT use these credentials in production.
 services:
+  # 1. IronClaw Agent (using host-built binary for speed)
+  ironclaw:
+    build:
+      context: .
+      dockerfile: Dockerfile.production
+    volumes:
+      - /root/.ironclaw:/root/.ironclaw
+      - ./scripts/vps-config.toml:/app/config.toml
+    environment:
+      - CLI_ENABLED=false
+      - TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN}
+      - DATABASE_URL=postgres://ironclaw:ironclaw@postgres:5432/ironclaw
+      - XAI_API_KEY=${XAI_API_KEY}
+      - GEMINI_API_KEY=${GEMINI_API_KEY}
+      - SECRETS_MASTER_KEY=${SECRETS_MASTER_KEY}
+      - LLM_BACKEND=openai_compatible
+      - LLM_BASE_URL=http://litellm:4000/v1
+      - LLM_MODEL=grok-orchestrator
+    command: ["run", "--config", "/app/config.toml", "--no-onboard"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+      litellm:
+        condition: service_started
+      redis:
+        condition: service_started
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    restart: always
+
+  # 2. Vector-enabled Postgres (Internal to IronClaw)
   postgres:
     image: pgvector/pgvector:pg16
     ports:
-      - "5432:5432"
+      - "5433:5432" # Use 5433 on host to avoid conflict with Tally
     environment:
       POSTGRES_DB: ironclaw
       POSTGRES_USER: ironclaw
       POSTGRES_PASSWORD: ironclaw
     volumes:
-      - pgdata:/var/lib/postgresql/data
+      - ironclaw_pgdata:/var/lib/postgresql/data
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U ironclaw"]
       interval: 5s
       timeout: 3s
       retries: 5
+    restart: always
 
+  # 3. Redis Stack for Quotas & Caching
   redis:
     image: redis/redis-stack-server:latest
     ports:
       - "6379:6379"
-      - "8001:8001"
     volumes:
       - redisdata:/data
     restart: always
 
+  # 4. LiteLLM Proxy for Provider Routing
   litellm:
     image: ghcr.io/berriai/litellm:main-latest
     ports:
@@ -40,5 +72,5 @@ services:
     restart: always
 
 volumes:
-  pgdata:
+  ironclaw_pgdata:
   redisdata:

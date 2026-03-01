@@ -1,0 +1,31 @@
+# IronClaw VPS Deployment Config
+workspace:
+  path: /root/.ironclaw/workspace
+  memory_path: /root/.ironclaw/workspace/MEMORY.md
+  soul_path: /root/.ironclaw/workspace/SOUL.md
+  agents_path: /root/.ironclaw/workspace/AGENTS.md
+
+channels:
+  - path: /root/.ironclaw/channels/telegram.wasm
+    capabilities: /root/.ironclaw/channels/telegram.capabilities.json
+
+tools:
+  - path: /root/.ironclaw/tools/atlas-classify.wasm
+    capabilities: /root/.ironclaw/tools/atlas-classify-tool.capabilities.json
+  - path: /root/.ironclaw/tools/atlas-notion.wasm
+    capabilities: /root/.ironclaw/tools/atlas-notion-tool.capabilities.json
+  - path: /root/.ironclaw/tools/atlas-brain.wasm
+    capabilities: /root/.ironclaw/tools/atlas-brain-tool.capabilities.json
+
+llm:
+  # Route via LiteLLM proxy service name
+  api_base: http://litellm:4000/v1
+  api_key: sk-ironclaw-master-key
+  default_model: grok-orchestrator
+
+database:
+  connection_string: "postgres://ironclaw:ironclaw@host.docker.internal:5432/ironclaw"
+
+logging:
+  level: info
+  format: json
