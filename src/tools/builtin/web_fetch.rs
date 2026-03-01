@@ -51,16 +51,13 @@ fn extract_title(html: &str) -> Option<String> {
     let tag_end = html[tag_start..].find('>')? + tag_start + 1;
     let close = lower[tag_end..].find("</title>")? + tag_end;
     let title = html[tag_end..close].trim().to_string();
-    if title.is_empty() {
-        None
-    } else {
-        Some(title)
-    }
+    if title.is_empty() { None } else { Some(title) }
 }
 
 /// Web fetch tool — retrieve a URL and return clean Markdown content.
 pub struct WebFetchTool {
     client: Client,
+    leak_detector: LeakDetector,
 }
 
 impl WebFetchTool {
@@ -76,7 +73,10 @@ impl WebFetchTool {
             .build()
             .expect("Failed to create HTTP client for web_fetch");
 
-        Self { client }
+        Self {
+            client,
+            leak_detector: LeakDetector::new(),
+        }
     }
 }
 
@@ -128,8 +128,7 @@ impl Tool for WebFetchTool {
         let mut current_url = validate_url(url_str)?;
 
         // Outbound leak scan — reject if URL contains secrets.
-        let detector = LeakDetector::new();
-        detector
+        self.leak_detector
             .scan_http_request(current_url.as_str(), &[], None)
             .map_err(|e| ToolError::NotAuthorized(e.to_string()))?;
 
@@ -140,7 +139,10 @@ impl Tool for WebFetchTool {
                 let resp = self
                     .client
                     .get(current_url.clone())
-                    .header(reqwest::header::ACCEPT, "text/markdown, text/html;q=0.9, */*;q=0.8")
+                    .header(
+                        reqwest::header::ACCEPT,
+                        "text/markdown, text/html;q=0.9, */*;q=0.8",
+                    )
                     .send()
                     .await
                     .map_err(|e| {
@@ -173,26 +175,25 @@ impl Tool for WebFetchTool {
                         })?;
 
                     // Resolve relative redirects against the current URL.
-                    let next_url_str = if location.starts_with("http://")
-                        || location.starts_with("https://")
-                    {
-                        location.to_string()
-                    } else {
-                        // Relative redirect — join with current URL.
-                        current_url
-                            .join(location)
-                            .map(|u| u.to_string())
-                            .map_err(|e| {
-                                ToolError::ExecutionFailed(format!(
-                                    "could not resolve relative redirect '{}': {}",
-                                    location, e
-                                ))
-                            })?
-                    };
+                    let next_url_str =
+                        if location.starts_with("http://") || location.starts_with("https://") {
+                            location.to_string()
+                        } else {
+                            // Relative redirect — join with current URL.
+                            current_url
+                                .join(location)
+                                .map(|u| u.to_string())
+                                .map_err(|e| {
+                                    ToolError::ExecutionFailed(format!(
+                                        "could not resolve relative redirect '{}': {}",
+                                        location, e
+                                    ))
+                                })?
+                        };
 
                     // SSRF re-validation on every hop.
                     current_url = validate_url(&next_url_str)?;
-                    detector
+                    self.leak_detector
                         .scan_http_request(current_url.as_str(), &[], None)
                         .map_err(|e| ToolError::NotAuthorized(e.to_string()))?;
 
@@ -252,27 +253,26 @@ impl Tool for WebFetchTool {
         // HTML → Markdown conversion (always attempted for HTML responses).
         let is_html = content_type.contains("text/html");
 
-        #[cfg(feature = "html-to-markdown")]
         let (content, title) = if is_html {
             let title = extract_title(&raw_text);
-            match convert_html_to_markdown(&raw_text, current_url.as_str()) {
-                Ok(md) => (md, title),
+
+            #[cfg(feature = "html-to-markdown")]
+            let content = match convert_html_to_markdown(&raw_text, current_url.as_str()) {
+                Ok(md) => md,
                 Err(e) => {
                     tracing::warn!(
                         url = %current_url,
                         error = %e,
                         "HTML-to-markdown conversion failed, returning raw text"
                     );
-                    (raw_text.clone(), title)
+                    raw_text.clone()
                 }
-            }
-        } else {
-            (raw_text.clone(), None)
-        };
+            };
 
-        #[cfg(not(feature = "html-to-markdown"))]
-        let (content, title) = if is_html {
-            (raw_text.clone(), extract_title(&raw_text))
+            #[cfg(not(feature = "html-to-markdown"))]
+            let content = raw_text.clone();
+
+            (content, title)
         } else {
             (raw_text.clone(), None)
         };
@@ -346,7 +346,10 @@ mod tests {
         // to_ascii_lowercase() preserves byte lengths and must not panic.
         let html = "<html><head><meta charset=\"utf-8\"/><title>ıTitle</title></head></html>";
         let result = extract_title(html);
-        assert!(result.is_some(), "should extract title with non-ASCII content");
+        assert!(
+            result.is_some(),
+            "should extract title with non-ASCII content"
+        );
         assert!(result.unwrap().contains("Title"));
     }
 
@@ -370,9 +373,6 @@ mod tests {
     fn web_fetch_never_requires_approval() {
         let tool = WebFetchTool::new();
         let params = serde_json::json!({"url": "https://example.com"});
-        assert_eq!(
-            tool.requires_approval(&params),
-            ApprovalRequirement::Never
-        );
+        assert_eq!(tool.requires_approval(&params), ApprovalRequirement::Never);
     }
 }
