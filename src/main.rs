@@ -20,7 +20,7 @@ use ironclaw::{
         web::log_layer::LogBroadcaster,
     },
     cli::{
-        Cli, Command, run_logs_command, run_mcp_command, run_pairing_command, run_service_command,
+        Cli, Command, run_mcp_command, run_pairing_command, run_service_command,
         run_status_command, run_tool_command,
     },
     config::Config,
@@ -120,7 +120,7 @@ async fn main() -> anyhow::Result<()> {
                 .join(".ironclaw")
                 .join("logs")
                 .join("ironclaw.log");
-            return run_logs_command(logs_cmd, &log_path);
+            return ironclaw::cli::run_logs_command(logs_cmd, &log_path);
         }
         Some(Command::Onboard {
             skip_auth,
