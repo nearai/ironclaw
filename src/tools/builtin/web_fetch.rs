@@ -6,7 +6,7 @@
 //!
 //! - GET-only, no custom headers or body
 //! - Always attempts HTML → Markdown conversion via Readability
-//! - Returns structured output: `{url, status, title, content, word_count}`
+//! - Returns structured output: `{url, final_url, status, title, content, word_count}`
 //! - Auto-approved (no confirmation prompt)
 //! - Follows up to 3 redirects, SSRF-validating each hop
 //!
@@ -281,6 +281,7 @@ impl Tool for WebFetchTool {
 
         let result = serde_json::json!({
             "url": url_str,
+            "final_url": current_url.as_str(),
             "status": status,
             "title": title,
             "content": content,
