@@ -538,43 +538,24 @@ fn print_capabilities_detail(caps: &CapabilitiesFile) {
     }
 }
 
-/// Configure authentication for a tool.
-async fn auth_tool(name: String, dir: Option<PathBuf>, user_id: String) -> anyhow::Result<()> {
-    let tools_dir = dir.unwrap_or_else(default_tools_dir);
-    let caps_path = tools_dir.join(format!("{}.capabilities.json", name));
-
-    if !caps_path.exists() {
+/// Validate a tool name to prevent path traversal.
+fn validate_tool_name(name: &str) -> anyhow::Result<()> {
+    if name.is_empty()
+        || name.contains('/')
+        || name.contains('\\')
+        || name.contains("..")
+        || name.contains('\0')
+    {
         anyhow::bail!(
-            "Tool '{}' not found or has no capabilities file at {}",
-            name,
-            caps_path.display()
+            "Invalid tool name '{}': must not contain path separators or '..'",
+            name
         );
     }
+    Ok(())
+}
 
-    // Parse capabilities
-    let content = fs::read_to_string(&caps_path).await?;
-    let caps = CapabilitiesFile::from_json(&content)
-        .map_err(|e| anyhow::anyhow!("Invalid capabilities file: {}", e))?;
-
-    // Check for auth section
-    let auth = caps.auth.ok_or_else(|| {
-        anyhow::anyhow!(
-            "Tool '{}' has no auth configuration.\n\
-             The tool may not require authentication, or auth setup is not defined.",
-            name
-        )
-    })?;
-
-    let display_name = auth.display_name.as_deref().unwrap_or(&name);
-
-    let header = format!("{} Authentication", display_name);
-    println!();
-    println!("╔════════════════════════════════════════════════════════════════╗");
-    println!("║  {:^62}║", header);
-    println!("╚════════════════════════════════════════════════════════════════╝");
-    println!();
-
-    // Initialize secrets store
+/// Initialize the secrets store from environment config.
+async fn init_secrets_store() -> anyhow::Result<Arc<dyn SecretsStore + Send + Sync>> {
     let config = Config::from_env().await?;
     let master_key = config.secrets.master_key().ok_or_else(|| {
         anyhow::anyhow!(
@@ -584,7 +565,7 @@ async fn auth_tool(name: String, dir: Option<PathBuf>, user_id: String) -> anyho
 
     let crypto = SecretsCrypto::new(master_key.clone())?;
 
-    let secrets_store: Arc<dyn SecretsStore + Send + Sync> = {
+    let store: Arc<dyn SecretsStore + Send + Sync> = {
         #[cfg(feature = "postgres")]
         {
             let store = crate::history::Store::new(&config.database).await?;
@@ -634,6 +615,47 @@ async fn auth_tool(name: String, dir: Option<PathBuf>, user_id: String) -> anyho
             );
         }
     };
+    Ok(store)
+}
+
+/// Configure authentication for a tool.
+async fn auth_tool(name: String, dir: Option<PathBuf>, user_id: String) -> anyhow::Result<()> {
+    validate_tool_name(&name)?;
+    let tools_dir = dir.unwrap_or_else(default_tools_dir);
+    let caps_path = tools_dir.join(format!("{}.capabilities.json", name));
+
+    if !caps_path.exists() {
+        anyhow::bail!(
+            "Tool '{}' not found or has no capabilities file at {}",
+            name,
+            caps_path.display()
+        );
+    }
+
+    // Parse capabilities
+    let content = fs::read_to_string(&caps_path).await?;
+    let caps = CapabilitiesFile::from_json(&content)
+        .map_err(|e| anyhow::anyhow!("Invalid capabilities file: {}", e))?;
+
+    // Check for auth section
+    let auth = caps.auth.ok_or_else(|| {
+        anyhow::anyhow!(
+            "Tool '{}' has no auth configuration.\n\
+             The tool may not require authentication, or auth setup is not defined.",
+            name
+        )
+    })?;
+
+    let display_name = auth.display_name.as_deref().unwrap_or(&name);
+
+    let header = format!("{} Authentication", display_name);
+    println!();
+    println!("╔════════════════════════════════════════════════════════════════╗");
+    println!("║  {:^62}║", header);
+    println!("╚════════════════════════════════════════════════════════════════╝");
+    println!();
+
+    let secrets_store = init_secrets_store().await?;
 
     // Check if already configured
     let already_configured = secrets_store
@@ -1176,6 +1198,7 @@ fn print_success(display_name: &str) {
 
 /// Configure required secrets for a tool via its `setup.required_secrets` schema.
 async fn setup_tool(name: String, dir: Option<PathBuf>, user_id: String) -> anyhow::Result<()> {
+    validate_tool_name(&name)?;
     let tools_dir = dir.unwrap_or_else(default_tools_dir);
     let caps_path = tools_dir.join(format!("{}.capabilities.json", name));
 
@@ -1218,66 +1241,7 @@ async fn setup_tool(name: String, dir: Option<PathBuf>, user_id: String) -> anyh
     println!("╚════════════════════════════════════════════════════════════════╝");
     println!();
 
-    // Initialize secrets store (reuse pattern from auth_tool)
-    let config = Config::from_env().await?;
-    let master_key = config.secrets.master_key().ok_or_else(|| {
-        anyhow::anyhow!(
-            "SECRETS_MASTER_KEY not set. Run 'ironclaw onboard' first or set it in .env"
-        )
-    })?;
-
-    let crypto = SecretsCrypto::new(master_key.clone())?;
-
-    let secrets_store: Arc<dyn SecretsStore + Send + Sync> = {
-        #[cfg(feature = "postgres")]
-        {
-            let store = crate::history::Store::new(&config.database).await?;
-            store.run_migrations().await?;
-            Arc::new(PostgresSecretsStore::new(store.pool(), Arc::new(crypto)))
-        }
-        #[cfg(all(feature = "libsql", not(feature = "postgres")))]
-        {
-            use crate::db::Database as _;
-            use crate::db::libsql::LibSqlBackend;
-            use secrecy::ExposeSecret as _;
-
-            let default_path = crate::config::default_libsql_path();
-            let db_path = config
-                .database
-                .libsql_path
-                .as_deref()
-                .unwrap_or(&default_path);
-
-            let backend = if let Some(ref url) = config.database.libsql_url {
-                let token = config.database.libsql_auth_token.as_ref().ok_or_else(|| {
-                    anyhow::anyhow!("LIBSQL_AUTH_TOKEN is required when LIBSQL_URL is set")
-                })?;
-                LibSqlBackend::new_remote_replica(db_path, url, token.expose_secret())
-                    .await
-                    .map_err(|e| anyhow::anyhow!("{}", e))?
-            } else {
-                LibSqlBackend::new_local(db_path)
-                    .await
-                    .map_err(|e| anyhow::anyhow!("{}", e))?
-            };
-            backend
-                .run_migrations()
-                .await
-                .map_err(|e| anyhow::anyhow!("{}", e))?;
-
-            Arc::new(crate::secrets::LibSqlSecretsStore::new(
-                backend.shared_db(),
-                Arc::new(crypto),
-            ))
-        }
-        #[cfg(not(any(feature = "postgres", feature = "libsql")))]
-        {
-            let _ = crypto;
-            anyhow::bail!(
-                "No database backend available for secrets. Enable 'postgres' or 'libsql' feature."
-            );
-        }
-    };
+    let secrets_store = init_secrets_store().await?;
 
     let mut any_saved = false;
 
