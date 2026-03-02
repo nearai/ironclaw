@@ -10,45 +10,23 @@ use crate::error::DatabaseError;
 
 #[async_trait]
 impl WebhookDedupStore for LibSqlBackend {
-    async fn is_webhook_message_processed(
+    async fn record_webhook_message_processed(
         &self,
         channel: &str,
         external_message_id: &str,
     ) -> Result<bool, DatabaseError> {
         let conn = self.connect().await?;
-        let mut rows = conn
-            .query(
-                "SELECT 1 FROM webhook_message_dedup \
-                 WHERE channel = ?1 AND external_message_id = ?2",
-                params![channel, external_message_id],
+        let id = Uuid::new_v4().to_string();
+        let rows_affected = conn
+            .execute(
+                "INSERT INTO webhook_message_dedup (id, channel, external_message_id) \
+                 VALUES (?1, ?2, ?3) \
+                 ON CONFLICT(channel, external_message_id) DO NOTHING",
+                params![id, channel, external_message_id],
             )
             .await
             .map_err(|e| DatabaseError::Query(e.to_string()))?;
-
-        let exists = rows
-            .next()
-            .await
-            .map_err(|e| DatabaseError::Query(e.to_string()))?
-            .is_some();
-        Ok(exists)
-    }
-
-    async fn record_webhook_message_processed(
-        &self,
-        channel: &str,
-        external_message_id: &str,
-    ) -> Result<(), DatabaseError> {
-        let conn = self.connect().await?;
-        let id = Uuid::new_v4().to_string();
-        conn.execute(
-            "INSERT INTO webhook_message_dedup (id, channel, external_message_id) \
-             VALUES (?1, ?2, ?3) \
-             ON CONFLICT(channel, external_message_id) DO NOTHING",
-            params![id, channel, external_message_id],
-        )
-        .await
-        .map_err(|e| DatabaseError::Query(e.to_string()))?;
-        Ok(())
+        Ok(rows_affected > 0)
     }
 
     async fn cleanup_old_webhook_dedup_records(&self) -> Result<u64, DatabaseError> {

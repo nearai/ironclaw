@@ -279,15 +279,20 @@ impl Agent {
             // For WhatsApp, metadata contains: phone_number_id, sender_phone, message_id, timestamp
             #[derive(serde::Deserialize)]
             struct WhatsAppMetadata {
-                message_id: String,
+                message_id: Option<String>,
             }
 
             let ack_key = if let Ok(meta) =
-                serde_json::from_str::<WhatsAppMetadata>(&message.metadata.to_string())
+                serde_json::from_value::<WhatsAppMetadata>(message.metadata.clone())
             {
-                format!("{}:{}", message.channel, meta.message_id)
+                if let Some(msg_id) = meta.message_id {
+                    format!("{}:{}", message.channel, msg_id)
+                } else {
+                    // Fallback to user_id if no message_id in metadata
+                    format!("{}:{}", message.channel, message.user_id)
+                }
             } else {
-                // Fallback to user_id if no message_id in metadata
+                // Fallback to user_id if metadata parsing fails
                 format!("{}:{}", message.channel, message.user_id)
             };
 
