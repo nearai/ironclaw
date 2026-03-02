@@ -341,12 +341,11 @@ async fn job_event_handler(
                 .and_then(|v| v.as_str())
                 .unwrap_or("unknown")
                 .to_string(),
-            input: crate::tools::redaction::redact_sensitive_json(
-                payload
-                    .data
-                    .get("input")
-                    .unwrap_or(&serde_json::Value::Null),
-            ),
+            input: payload
+                .data
+                .get("input")
+                .cloned()
+                .unwrap_or(serde_json::Value::Null),
         },
         "tool_result" => SseEvent::JobToolResult {
             job_id: job_id_str,
