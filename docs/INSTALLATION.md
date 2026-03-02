@@ -163,7 +163,8 @@ OPENAI_API_KEY=sk-proj-YOUR-KEY-HERE
 # Web Gateway
 GATEWAY_ENABLED=true
 GATEWAY_PORT=3000
-GATEWAY_AUTH_TOKEN=<generate with: openssl rand -hex 32>
+# Generate a secure token: openssl rand -hex 32
+GATEWAY_AUTH_TOKEN=REPLACE_WITH_SECURE_TOKEN
 
 # CRITICAL: Disable REPL for service/daemon mode
 CLI_ENABLED=false

@@ -1,4 +1,4 @@
-# IronClaw v0.12.0 — LLM Backend System Deep Dive
+# IronClaw v0.13.0 — LLM Backend System Deep Dive
 
 > **Scope:** `src/llm/`, `src/config/llm.rs`, `src/agent/cost_guard.rs`,
 > `src/agent/context_monitor.rs`, `src/agent/compaction.rs`,
@@ -797,7 +797,7 @@ async fn evaluate(
 
 ---
 
-*Generated from IronClaw v0.12.0 source — `src/llm/`, `src/config/llm.rs`,
+*Generated from IronClaw v0.13.0 source — `src/llm/`, `src/config/llm.rs`,
 `src/agent/cost_guard.rs`, `src/agent/context_monitor.rs`,
 `src/agent/compaction.rs`, `src/estimation/`, `src/evaluation/`,
 `src/observability/`.*
