@@ -43,7 +43,7 @@ pub struct Settings {
     pub secrets_master_key_source: KeySource,
 
     // === Step 3: Inference Provider ===
-    /// LLM backend: "nearai", "anthropic", "openai", "ollama", "openai_compatible".
+    /// LLM backend: "nearai", "anthropic", "openai", "ollama", "openai_compatible", "tinfoil", "bedrock".
     #[serde(default)]
     pub llm_backend: Option<String>,
 
@@ -54,6 +54,18 @@ pub struct Settings {
     /// OpenAI-compatible endpoint base URL (when llm_backend = "openai_compatible").
     #[serde(default)]
     pub openai_compatible_base_url: Option<String>,
+
+    /// Bedrock region (when llm_backend = "bedrock").
+    #[serde(default)]
+    pub bedrock_region: Option<String>,
+
+    /// Bedrock cross-region inference prefix (when llm_backend = "bedrock").
+    #[serde(default)]
+    pub bedrock_cross_region: Option<String>,
+
+    /// AWS profile name for Bedrock (when llm_backend = "bedrock").
+    #[serde(default)]
+    pub bedrock_profile: Option<String>,
 
     // === Step 4: Model Selection ===
     /// Currently selected model.

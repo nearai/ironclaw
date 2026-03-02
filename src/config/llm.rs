@@ -26,6 +26,8 @@ pub enum LlmBackend {
     OpenAiCompatible,
     /// Tinfoil private inference
     Tinfoil,
+    /// AWS Bedrock (native Converse API)
+    Bedrock,
 }
 
 impl std::str::FromStr for LlmBackend {
@@ -39,8 +41,9 @@ impl std::str::FromStr for LlmBackend {
             "ollama" => Ok(Self::Ollama),
             "openai_compatible" | "openai-compatible" | "compatible" => Ok(Self::OpenAiCompatible),
             "tinfoil" => Ok(Self::Tinfoil),
+            "bedrock" | "aws_bedrock" | "aws" => Ok(Self::Bedrock),
             _ => Err(format!(
-                "invalid LLM backend '{}', expected one of: nearai, openai, anthropic, ollama, openai_compatible, tinfoil",
+                "invalid LLM backend '{}', expected one of: nearai, openai, anthropic, ollama, openai_compatible, tinfoil, bedrock",
                 s
             )),
         }
@@ -56,6 +59,7 @@ impl std::fmt::Display for LlmBackend {
             Self::Ollama => write!(f, "ollama"),
             Self::OpenAiCompatible => write!(f, "openai_compatible"),
             Self::Tinfoil => write!(f, "tinfoil"),
+            Self::Bedrock => write!(f, "bedrock"),
         }
     }
 }
@@ -73,6 +77,7 @@ impl LlmBackend {
             Self::Ollama => "OLLAMA_MODEL",
             Self::OpenAiCompatible => "LLM_MODEL",
             Self::Tinfoil => "TINFOIL_MODEL",
+            Self::Bedrock => "BEDROCK_MODEL",
         }
     }
 }
@@ -120,6 +125,19 @@ pub struct TinfoilConfig {
     pub model: String,
 }
 
+/// Configuration for AWS Bedrock (native Converse API).
+#[derive(Debug, Clone)]
+pub struct BedrockConfig {
+    /// AWS region (e.g. "us-east-1").
+    pub region: String,
+    /// Bedrock model ID (e.g. "anthropic.claude-opus-4-6-v1").
+    pub model: String,
+    /// Cross-region inference prefix: "us", "eu", "apac", "global", or None.
+    pub cross_region: Option<String>,
+    /// AWS named profile (for SSO / assume-role workflows).
+    pub profile: Option<String>,
+}
+
 /// LLM provider configuration.
 ///
 /// NEAR AI remains the default backend. Users can switch to other providers
@@ -140,6 +158,8 @@ pub struct LlmConfig {
     pub openai_compatible: Option<OpenAiCompatibleConfig>,
     /// Tinfoil config (populated when backend=tinfoil)
     pub tinfoil: Option<TinfoilConfig>,
+    /// AWS Bedrock config (populated when backend=bedrock)
+    pub bedrock: Option<BedrockConfig>,
 }
 
 /// NEAR AI configuration.
@@ -350,6 +370,43 @@ impl LlmConfig {
             None
         };
 
+        let bedrock = if backend == LlmBackend::Bedrock {
+            let explicit_region =
+                optional_env("BEDROCK_REGION")?.or_else(|| settings.bedrock_region.clone());
+            if explicit_region.is_none() {
+                tracing::info!("BEDROCK_REGION not set, defaulting to us-east-1");
+            }
+            let region = explicit_region.unwrap_or_else(|| "us-east-1".to_string());
+            let model = optional_env("BEDROCK_MODEL")?
+                .or_else(|| settings.selected_model.clone())
+                .ok_or_else(|| ConfigError::MissingRequired {
+                    key: "BEDROCK_MODEL".to_string(),
+                    hint: "Set BEDROCK_MODEL when LLM_BACKEND=bedrock".to_string(),
+                })?;
+            let cross_region = optional_env("BEDROCK_CROSS_REGION")?
+                .or_else(|| settings.bedrock_cross_region.clone());
+            if let Some(ref cr) = cross_region
+                && !matches!(cr.as_str(), "us" | "eu" | "apac" | "global")
+            {
+                return Err(ConfigError::InvalidValue {
+                    key: "BEDROCK_CROSS_REGION".to_string(),
+                    message: format!(
+                        "'{}' is not valid, expected one of: us, eu, apac, global",
+                        cr
+                    ),
+                });
+            }
+            let profile = optional_env("AWS_PROFILE")?;
+            Some(BedrockConfig {
+                region,
+                model,
+                cross_region,
+                profile,
+            })
+        } else {
+            None
+        };
+
         Ok(Self {
             backend,
             nearai,
@@ -358,6 +415,7 @@ impl LlmConfig {
             ollama,
             openai_compatible,
             tinfoil,
+            bedrock,
         })
     }
 }

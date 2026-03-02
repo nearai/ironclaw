@@ -12,6 +12,7 @@ configurations.
 | Anthropic | `anthropic` | `ANTHROPIC_API_KEY` | Claude models |
 | OpenAI | `openai` | `OPENAI_API_KEY` | GPT models |
 | Ollama | `ollama` | No | Local inference |
+| AWS Bedrock | `bedrock` | `AWS_BEARER_TOKEN_BEDROCK` or AWS creds | Native Converse API |
 | OpenRouter | `openai_compatible` | `LLM_API_KEY` | 300+ models |
 | Together AI | `openai_compatible` | `LLM_API_KEY` | Fast inference |
 | Fireworks AI | `openai_compatible` | `LLM_API_KEY` | Fast inference |
@@ -65,6 +66,62 @@ OLLAMA_MODEL=llama3.2
 ```
 
 Pull a model first: `ollama pull llama3.2`
+
+---
+
+## AWS Bedrock (requires `--features bedrock`)
+
+Uses the native AWS Converse API via `aws-sdk-bedrockruntime`. Supports all Bedrock
+authentication methods: API key (bearer token), IAM credentials, SSO profiles, and
+instance roles.
+
+### With Bedrock API key (bearer token)
+
+```env
+LLM_BACKEND=bedrock
+BEDROCK_MODEL=anthropic.claude-opus-4-6-v1
+BEDROCK_REGION=us-east-1
+BEDROCK_CROSS_REGION=us
+AWS_BEARER_TOKEN_BEDROCK=<your-bedrock-api-key>
+```
+
+Generate a Bedrock API key from: AWS Console → Bedrock → API keys.
+
+### With AWS credentials (IAM, SSO, instance roles)
+
+```env
+LLM_BACKEND=bedrock
+BEDROCK_MODEL=anthropic.claude-opus-4-6-v1
+BEDROCK_REGION=us-east-1
+BEDROCK_CROSS_REGION=us
+# AWS_PROFILE=my-sso-profile   # optional, for named profiles
+```
+
+The AWS SDK credential chain automatically resolves credentials from environment
+variables (`AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`), shared credentials file
+(`~/.aws/credentials`), SSO profiles, and EC2/ECS instance roles.
+
+### Cross-region inference
+
+Set `BEDROCK_CROSS_REGION` to route requests across AWS regions for capacity:
+
+| Prefix | Routing |
+|---|---|
+| `us` | US regions (us-east-1, us-east-2, us-west-2) |
+| `eu` | European regions |
+| `apac` | Asia-Pacific regions |
+| `global` | All commercial AWS regions |
+| _(unset)_ | Single-region only |
+
+### Popular Bedrock model IDs
+
+| Model | ID |
+|---|---|
+| Claude Opus 4.6 | `anthropic.claude-opus-4-6-v1` |
+| Claude Sonnet 4.5 | `anthropic.claude-sonnet-4-5-20250929-v1:0` |
+| Claude Haiku 4.5 | `anthropic.claude-haiku-4-5-20251001-v1:0` |
+| Amazon Nova Pro | `amazon.nova-pro-v1:0` |
+| Llama 4 Maverick | `meta.llama4-maverick-17b-instruct-v1:0` |
 
 ---
 

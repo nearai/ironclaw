@@ -137,6 +137,11 @@ subtle = "2"  # Constant-time comparisons for token validation
 # Multi-provider LLM support
 rig-core = "0.30"
 
+# AWS Bedrock (native Converse API, opt-in via --features bedrock)
+aws-config = { version = "1", features = ["behavior-version-latest"], optional = true }
+aws-sdk-bedrockruntime = { version = "1", optional = true }
+aws-smithy-types = { version = "1", optional = true }
+
 # Docker sandbox
 bollard = "0.18"
 
@@ -193,6 +198,7 @@ postgres = [
 libsql = ["dep:libsql"]
 integration = []
 html-to-markdown = ["dep:html-to-markdown-rs", "dep:readabilityrs"]
+bedrock = ["dep:aws-config", "dep:aws-sdk-bedrockruntime", "dep:aws-smithy-types"]
 
 [[test]]
 name = "html_to_markdown"

@@ -6,7 +6,10 @@
 //! - **Anthropic**: Direct API access with your own key
 //! - **Ollama**: Local model inference
 //! - **OpenAI-compatible**: Any endpoint that speaks the OpenAI API
+//! - **AWS Bedrock**: Native Converse API via aws-sdk-bedrockruntime
 
+#[cfg(feature = "bedrock")]
+mod bedrock;
 pub mod circuit_breaker;
 pub mod costs;
 pub mod failover;
@@ -60,6 +63,13 @@ pub fn create_llm_provider(
         LlmBackend::Ollama => create_ollama_provider(config),
         LlmBackend::OpenAiCompatible => create_openai_compatible_provider(config),
         LlmBackend::Tinfoil => create_tinfoil_provider(config),
+        #[cfg(feature = "bedrock")]
+        LlmBackend::Bedrock => create_bedrock_provider(config),
+        #[cfg(not(feature = "bedrock"))]
+        LlmBackend::Bedrock => Err(LlmError::RequestFailed {
+            provider: "bedrock".to_string(),
+            reason: "Bedrock support not compiled. Rebuild with --features bedrock".to_string(),
+        }),
     }
 }
 
@@ -208,6 +218,24 @@ fn create_tinfoil_provider(config: &LlmConfig) -> Result<Arc<dyn LlmProvider>, L
     let model = client.completion_model(&tf.model);
     tracing::info!("Using Tinfoil private inference (model: {})", tf.model);
     Ok(Arc::new(RigAdapter::new(model, &tf.model)))
+}
+
+#[cfg(feature = "bedrock")]
+fn create_bedrock_provider(config: &LlmConfig) -> Result<Arc<dyn LlmProvider>, LlmError> {
+    let br = config
+        .bedrock
+        .as_ref()
+        .ok_or_else(|| LlmError::AuthFailed {
+            provider: "bedrock".to_string(),
+        })?;
+
+    let provider = bedrock::BedrockProvider::new(br)?;
+    tracing::info!(
+        "Using AWS Bedrock (Converse API, region: {}, model: {})",
+        br.region,
+        provider.active_model_name(),
+    );
+    Ok(Arc::new(provider))
 }
 
 fn create_openai_compatible_provider(config: &LlmConfig) -> Result<Arc<dyn LlmProvider>, LlmError> {
@@ -472,6 +500,7 @@ mod tests {
             ollama: None,
             openai_compatible: None,
             tinfoil: None,
+            bedrock: None,
         }
     }
 
