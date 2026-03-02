@@ -605,7 +605,7 @@ mod tests {
                 description: "Telegram Bot API channel".to_string(),
                 keywords: vec!["messaging".into(), "bot".into()],
                 source: ExtensionSource::WasmBuildable {
-                    repo_url: "channels-src/telegram".to_string(),
+                    source_dir: "channels-src/telegram".to_string(),
                     build_dir: Some("channels-src/telegram".to_string()),
                     crate_name: Some("telegram-channel".to_string()),
                 },
@@ -620,7 +620,7 @@ mod tests {
                 description: "Slack WASM tool".to_string(),
                 keywords: vec!["messaging".into()],
                 source: ExtensionSource::WasmBuildable {
-                    repo_url: "tools-src/slack".to_string(),
+                    source_dir: "tools-src/slack".to_string(),
                     build_dir: Some("tools-src/slack".to_string()),
                     crate_name: Some("slack-tool".to_string()),
                 },
@@ -683,7 +683,7 @@ mod tests {
                 description: "Telegram MTProto tool".to_string(),
                 keywords: vec!["messaging".into()],
                 source: ExtensionSource::WasmBuildable {
-                    repo_url: "tools-src/telegram".to_string(),
+                    source_dir: "tools-src/telegram".to_string(),
                     build_dir: Some("tools-src/telegram".to_string()),
                     crate_name: Some("telegram-tool".to_string()),
                 },
@@ -697,7 +697,7 @@ mod tests {
                 description: "Telegram Bot API channel".to_string(),
                 keywords: vec!["messaging".into(), "bot".into()],
                 source: ExtensionSource::WasmBuildable {
-                    repo_url: "channels-src/telegram".to_string(),
+                    source_dir: "channels-src/telegram".to_string(),
                     build_dir: Some("channels-src/telegram".to_string()),
                     crate_name: Some("telegram-channel".to_string()),
                 },
@@ -759,7 +759,7 @@ mod tests {
             description: "A cached tool".to_string(),
             keywords: vec![],
             source: ExtensionSource::WasmBuildable {
-                repo_url: "tools-src/cached".to_string(),
+                source_dir: "tools-src/cached".to_string(),
                 build_dir: None,
                 crate_name: None,
             },
@@ -773,7 +773,7 @@ mod tests {
             description: "A cached channel".to_string(),
             keywords: vec![],
             source: ExtensionSource::WasmBuildable {
-                repo_url: "channels-src/cached".to_string(),
+                source_dir: "channels-src/cached".to_string(),
                 build_dir: None,
                 crate_name: None,
             },
@@ -816,7 +816,7 @@ mod tests {
                 description: "Telegram messaging channel".to_string(),
                 keywords: vec!["messaging".into()],
                 source: ExtensionSource::WasmBuildable {
-                    repo_url: "channels-src/telegram".to_string(),
+                    source_dir: "channels-src/telegram".to_string(),
                     build_dir: None,
                     crate_name: None,
                 },
@@ -830,7 +830,7 @@ mod tests {
                 description: "Telegram API tool".to_string(),
                 keywords: vec!["messaging".into()],
                 source: ExtensionSource::WasmBuildable {
-                    repo_url: "tools-src/telegram".to_string(),
+                    source_dir: "tools-src/telegram".to_string(),
                     build_dir: None,
                     crate_name: None,
                 },
@@ -878,7 +878,7 @@ mod tests {
                 description: "Channel".to_string(),
                 keywords: vec![],
                 source: ExtensionSource::WasmBuildable {
-                    repo_url: "x".to_string(),
+                    source_dir: "x".to_string(),
                     build_dir: None,
                     crate_name: None,
                 },
@@ -892,7 +892,7 @@ mod tests {
                 description: "Tool".to_string(),
                 keywords: vec![],
                 source: ExtensionSource::WasmBuildable {
-                    repo_url: "y".to_string(),
+                    source_dir: "y".to_string(),
                     build_dir: None,
                     crate_name: None,
                 },

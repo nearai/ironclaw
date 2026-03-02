@@ -2743,7 +2743,7 @@ mod tests {
 
     fn make_fallback_source() -> Option<Box<ExtensionSource>> {
         Some(Box::new(ExtensionSource::WasmBuildable {
-            repo_url: "tools-src/test".to_string(),
+            source_dir: "tools-src/test".to_string(),
             build_dir: Some("tools-src/test".to_string()),
             crate_name: Some("test-tool".to_string()),
         }))
