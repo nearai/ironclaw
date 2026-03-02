@@ -33,15 +33,58 @@ impl Agent {
     /// even when the conversation has zero messages (e.g. a brand-new
     /// assistant thread). Without this, `resolve_thread` would mint a
     /// fresh UUID and all messages would land in the wrong conversation.
+    ///
+    /// For non-UUID thread IDs (WhatsApp, CLI, etc.), looks up the most recent
+    /// conversation for the user on the channel and loads its history.
     pub(super) async fn maybe_hydrate_thread(
         &self,
         message: &IncomingMessage,
         external_thread_id: &str,
     ) {
-        // Only hydrate UUID-shaped thread IDs (web gateway uses UUIDs)
+        // Try UUID parsing first (web gateway uses UUIDs)
         let thread_uuid = match Uuid::parse_str(external_thread_id) {
-            Ok(id) => id,
-            Err(_) => return,
+            Ok(id) => Some(id),
+            Err(_) => {
+                // For non-UUID thread IDs (WhatsApp, CLI, etc.), look up by user+channel
+                if let Some(store) = self.store() {
+                    match store
+                        .find_conversation_by_user_channel(&message.user_id, &message.channel)
+                        .await
+                    {
+                        Ok(Some(conv_id)) => {
+                            tracing::debug!(
+                                user_id = %message.user_id,
+                                channel = %message.channel,
+                                conversation_id = %conv_id,
+                                "Found existing conversation for non-UUID thread"
+                            );
+                            Some(conv_id)
+                        }
+                        Ok(None) => {
+                            tracing::debug!(
+                                user_id = %message.user_id,
+                                channel = %message.channel,
+                                "No existing conversation found for non-UUID thread"
+                            );
+                            None
+                        }
+                        Err(e) => {
+                            tracing::warn!(
+                                error = %e,
+                                "Failed to look up conversation by user+channel"
+                            );
+                            None
+                        }
+                    }
+                } else {
+                    None
+                }
+            }
+        };
+
+        let thread_uuid = match thread_uuid {
+            Some(id) => id,
+            None => return,
         };
 
         // Check if already in memory
