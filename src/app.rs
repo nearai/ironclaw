@@ -672,6 +672,28 @@ impl AppBuilder {
                 }
             }
 
+            // Import workspace files from disk if WORKSPACE_IMPORT_DIR is set.
+            // This lets Docker images / deployment scripts ship customized
+            // workspace templates (e.g., AGENTS.md, TOOLS.md) that override
+            // the generic seeds. Only imports files that don't already exist
+            // in the database — never overwrites user edits.
+            if let Ok(import_dir) = std::env::var("WORKSPACE_IMPORT_DIR") {
+                let import_path = std::path::Path::new(&import_dir);
+                match ws.import_from_directory(import_path).await {
+                    Ok(count) if count > 0 => {
+                        tracing::info!("Imported {} workspace file(s) from {}", count, import_dir);
+                    }
+                    Ok(_) => {}
+                    Err(e) => {
+                        tracing::warn!(
+                            "Failed to import workspace files from {}: {}",
+                            import_dir,
+                            e
+                        );
+                    }
+                }
+            }
+
             if embeddings.is_some() {
                 let ws_bg = Arc::clone(ws);
                 tokio::spawn(async move {
