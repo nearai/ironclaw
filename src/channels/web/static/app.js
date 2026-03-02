@@ -439,9 +439,11 @@ function sanitizeRenderedHtmlFallback(html) {
   html = html.replace(/<link\b[^>]*\/?>/gi, '');
   html = html.replace(/<base\b[^>]*\/?>/gi, '');
   html = html.replace(/<meta\b[^>]*\/?>/gi, '');
+  // Remove inline event handlers (onclick=, onerror=, etc.) across quoted/unquoted forms.
   html = html.replace(/\s+on\w+\s*=\s*"[^"]*"/gi, '');
   html = html.replace(/\s+on\w+\s*=\s*'[^']*'/gi, '');
   html = html.replace(/\s+on\w+\s*=\s*[^\s>]+/gi, '');
+  // Neutralize javascript:/data: URL schemes in link-like attributes.
   html = html.replace(/(href|src|action)\s*=\s*["']?\s*javascript\s*:/gi, '$1="');
   html = html.replace(/(href|src|action)\s*=\s*["']?\s*data\s*:/gi, '$1="');
   return html;
