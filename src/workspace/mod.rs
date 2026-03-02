@@ -271,6 +271,68 @@ const HEARTBEAT_SEED: &str = "\
      - Clean up context/ documents that are outdated
 -->";
 
+/// System prompt block injected when no psychographic profile exists yet.
+///
+/// Instructs the LLM to conduct a natural onboarding conversation that
+/// simultaneously helps the user and learns about them. The profile gets
+/// written via `memory_write` once the LLM has gathered enough signal.
+const FIRST_CONTACT_INTRO: &str = "\
+## First Contact — Conversational Onboarding
+
+This user is new — no profile built yet. Your goals for the first few turns:
+
+1. **Be immediately useful.** Start by greeting them warmly and showing 3-4 concrete things \
+you can do right now:
+   - Track tasks and break them into steps
+   - Set up routines (\"Check my GitHub PRs every morning at 9am\")
+   - Remember things across sessions
+   - Monitor anything periodic (news, builds, notifications)
+
+2. **Learn about them naturally.** Over the first 3-5 turns, weave in questions that help \
+you understand who they are. Use the ONE-STEP-REMOVED technique: ask about how they support \
+friends/family to understand their values. Instead of \"What are your values?\" ask \"When a \
+friend is going through something tough, what do you usually do?\" This indirect approach \
+reduces defensiveness and yields authentic insights.
+
+   Topics to cover naturally (not as a checklist — weave them in):
+   - What they like to be called
+   - How they naturally support people around them
+   - What they value in relationships
+   - How they prefer to communicate (terse vs detailed, formal vs casual)
+   - What they need help with right now
+
+3. **Ask about communication channels.** Early on, ask: \"What's your preferred way to stay \
+in touch — Telegram, Slack, something else?\" If they mention a channel that isn't set up, \
+let them know they can configure it with `ironclaw onboard --channels-only`.
+
+4. **Write the profile when ready.** After 3+ turns with substantive responses, use \
+`memory_write` to save the profile to `context/profile.json` as a JSON object matching the \
+schema below. Also use `memory_write` to update `USER.md` with a human-readable markdown \
+summary of what you've learned.
+
+STYLE GUIDELINES:
+- Think of yourself as a billionaire's chief of staff — hyper-competent, professional, warm
+- Skip filler phrases (\"Great question!\", \"I'd be happy to help!\")
+- Be direct. Have opinions. Match the user's energy.
+- One question at a time, short and conversational
+- Use \"tell me about...\" or \"what's it like when...\" phrasing
+- AVOID: yes/no questions, survey language, numbered interview lists, generic questions
+
+CONFIDENCE SCORING:
+Set the top-level `confidence` field (0.0-1.0) using this formula as a guide:
+  confidence = 0.4 + (message_count / 50) * 0.4 + (topic_variety / max(message_count, 1)) * 0.2
+First-interaction profiles will naturally have lower confidence — that's fine. The weekly \
+profile evolution routine will refine it over time.
+
+ANALYSIS FRAMEWORK (use this to structure the profile):";
+
+// JSON schema is shared via crate::profile::PROFILE_JSON_SCHEMA.
+// FIRST_CONTACT_SCHEMA_SUFFIX contains the wrapping instructions.
+const FIRST_CONTACT_SCHEMA_SUFFIX: &str = "\n\n\
+If the conversation doesn't reveal enough about a dimension, use defaults/unknown.\n\
+For personality trait scores: 40-60 is average range. Default to 50 if unclear.\n\
+Only score above 70 or below 30 with strong evidence.";
+
 /// Workspace provides database-backed memory storage for an agent.
 ///
 /// Each workspace is scoped to a user (and optionally an agent).
@@ -588,11 +650,184 @@ impl Workspace {
             }
         }
 
+        // Profile personalization and onboarding are skipped in group chats
+        // to avoid leaking personal context or asking onboarding questions publicly.
+        if !is_group_chat {
+            // Load psychographic profile for interaction style directives.
+            // Uses a three-tier system: Tier 1 (summary) always injected,
+            // Tier 2 (full context) only when confidence > 0.6 and profile is recent.
+            let mut has_profile_doc = false;
+            if let Ok(doc) = self.read(paths::PROFILE).await
+                && !doc.content.is_empty()
+                && let Ok(profile) =
+                    serde_json::from_str::<crate::profile::PsychographicProfile>(&doc.content)
+            {
+                has_profile_doc = true;
+                let has_rich_profile = profile.is_populated();
+
+                if has_rich_profile {
+                    // Tier 1: always-on summary line.
+                    let tier1 = format!(
+                        "## Interaction Style\n\n\
+                         {} | {} tone | {} detail | {} proactivity",
+                        profile.cohort.cohort,
+                        profile.communication.tone,
+                        profile.communication.detail_level,
+                        profile.assistance.proactivity,
+                    );
+                    parts.push(tier1);
+
+                    // Tier 2: full context — only when confidence is sufficient and profile is recent.
+                    let is_recent = is_profile_recent(&profile.updated_at, 7);
+                    if profile.confidence > 0.6 && is_recent {
+                        let mut tier2 = String::from("## Personalization\n\n");
+
+                        // Communication details.
+                        tier2.push_str(&format!(
+                            "Communication: {} tone, {} formality, {} detail, {} pace",
+                            profile.communication.tone,
+                            profile.communication.formality,
+                            profile.communication.detail_level,
+                            profile.communication.pace,
+                        ));
+                        if profile.communication.response_speed != "unknown" {
+                            tier2.push_str(&format!(
+                                ", {} response speed",
+                                profile.communication.response_speed
+                            ));
+                        }
+                        if profile.communication.decision_making != "unknown" {
+                            tier2.push_str(&format!(
+                                ", {} decision-making",
+                                profile.communication.decision_making
+                            ));
+                        }
+                        tier2.push('.');
+
+                        // Interaction preferences.
+                        if profile.interaction_preferences.feedback_style != "direct" {
+                            tier2.push_str(&format!(
+                                "\nFeedback style: {}.",
+                                profile.interaction_preferences.feedback_style
+                            ));
+                        }
+                        if profile.interaction_preferences.proactivity_style != "reactive" {
+                            tier2.push_str(&format!(
+                                "\nProactivity style: {}.",
+                                profile.interaction_preferences.proactivity_style
+                            ));
+                        }
+
+                        // Notification preferences.
+                        if profile.assistance.notification_preferences != "moderate"
+                            && profile.assistance.notification_preferences != "unknown"
+                        {
+                            tier2.push_str(&format!(
+                                "\nNotification preference: {}.",
+                                profile.assistance.notification_preferences
+                            ));
+                        }
+
+                        // Goals and pain points for behavioral guidance.
+                        if !profile.assistance.goals.is_empty() {
+                            tier2.push_str(&format!(
+                                "\nActive goals: {}.",
+                                profile.assistance.goals.join(", ")
+                            ));
+                        }
+                        if !profile.behavior.pain_points.is_empty() {
+                            tier2.push_str(&format!(
+                                "\nKnown pain points: {}.",
+                                profile.behavior.pain_points.join(", ")
+                            ));
+                        }
+
+                        parts.push(tier2);
+                    }
+                }
+            }
+
+            // First-contact: conversational onboarding for new users (no profile yet).
+            // This block stops injecting once the profile document is written via
+            // memory_write, because `has_profile_doc` will flip to true on the next turn.
+            if !has_profile_doc {
+                parts.push(format!(
+                    "{}\n\n{}\n\nPROFILE JSON SCHEMA:\nWrite to `context/profile.json` using `memory_write` with this exact structure:\n{}{}",
+                    FIRST_CONTACT_INTRO,
+                    crate::profile::ANALYSIS_FRAMEWORK,
+                    crate::profile::PROFILE_JSON_SCHEMA,
+                    FIRST_CONTACT_SCHEMA_SUFFIX,
+                ));
+            }
+        }
+
+        // Load assistant directives if present.
+        if let Ok(doc) = self.read(paths::ASSISTANT_DIRECTIVES).await
+            && !doc.content.is_empty()
+        {
+            parts.push(doc.content);
+        }
+
         Ok(parts.join("\n\n---\n\n"))
     }
 
-    // ==================== Search ====================
+    /// Sync derived identity documents from the psychographic profile.
+    ///
+    /// Reads `context/profile.json` and, if the profile is populated, writes:
+    /// - `USER.md` (from `to_user_md()`)
+    /// - `context/assistant-directives.md` (from `to_assistant_directives()`)
+    /// - `HEARTBEAT.md` (from `to_heartbeat_md()`, only if it doesn't already exist)
+    ///
+    /// Returns `Ok(true)` if documents were synced, `Ok(false)` if skipped.
+    pub async fn sync_profile_documents(&self) -> Result<bool, WorkspaceError> {
+        let doc = match self.read(paths::PROFILE).await {
+            Ok(d) if !d.content.is_empty() => d,
+            _ => return Ok(false),
+        };
 
+        let profile: crate::profile::PsychographicProfile = match serde_json::from_str(&doc.content)
+        {
+            Ok(p) => p,
+            Err(_) => return Ok(false),
+        };
+
+        if !profile.is_populated() {
+            return Ok(false);
+        }
+
+        self.write(paths::USER, &profile.to_user_md()).await?;
+        self.write(
+            paths::ASSISTANT_DIRECTIVES,
+            &profile.to_assistant_directives(),
+        )
+        .await?;
+
+        // Seed HEARTBEAT.md only if it doesn't exist yet (don't clobber user customizations).
+        if self.read(paths::HEARTBEAT).await.is_err() {
+            self.write(paths::HEARTBEAT, &profile.to_heartbeat_md())
+                .await?;
+        }
+
+        Ok(true)
+    }
+}
+
+/// Check whether a profile's `updated_at` timestamp is within `max_days` of now.
+fn is_profile_recent(updated_at: &str, max_days: i64) -> bool {
+    let Ok(parsed) = chrono::DateTime::parse_from_rfc3339(updated_at) else {
+        return false;
+    };
+    let age = Utc::now().signed_duration_since(parsed);
+    // Future timestamps are not "recent" (clock skew / bad data).
+    if age.num_seconds() < 0 {
+        return false;
+    }
+    age.num_days() <= max_days
+}
+
+// ==================== Search ====================
+
+impl Workspace {
     /// Hybrid search across all memory documents.
     ///
     /// Combines full-text search (BM25) with semantic search (vector similarity)
@@ -728,7 +963,14 @@ impl Workspace {
                  - Private things stay private. Never leak user context into group chats.\n\
                  - When in doubt about an external action, ask before acting.\n\
                  - Prefer reversible actions over destructive ones.\n\
-                 - You are not the user's voice in group settings.",
+                 - You are not the user's voice in group settings.\n\n\
+                 ## Autonomy\n\n\
+                 Start cautious. Ask before taking actions that affect others or the outside world.\n\
+                 Over time, as you demonstrate competence and earn trust, you may:\n\
+                 - Suggest increasing autonomy for specific task types\n\
+                 - Take initiative on internal tasks (memory, notes, organization)\n\
+                 - Ask: \"I've been handling X reliably — want me to do Y without asking?\"\n\
+                 Never self-promote autonomy without evidence of earned trust.",
             ),
             (
                 paths::AGENTS,
@@ -748,6 +990,25 @@ impl Workspace {
                  - Write important facts and decisions to memory for future reference\n\
                  - Use the daily log for session-level notes\n\
                  - Be concise but thorough\n\n\
+                 ## Profile Building\n\n\
+                 As you interact with the user, passively observe and remember:\n\
+                 - Their name, profession, tools they use, domain expertise\n\
+                 - Communication style (concise vs detailed, casual vs formal)\n\
+                 - Repeated tasks or workflows they describe\n\
+                 - Goals they mention (career, health, learning, etc.)\n\
+                 - Pain points and frustrations (\"I keep forgetting to...\", \"I always have to...\")\n\
+                 - Time patterns (when they're active, what they check regularly)\n\n\
+                 When you learn something notable, silently update `context/profile.json` and \
+                 `USER.md` using `memory_write`. Merge new data — don't replace the whole file.\n\
+                 Never interview the user. Pick up signals naturally through conversation.\n\n\
+                 ## Communication Style\n\n\
+                 Think of yourself as a billionaire's chief of staff — hyper-competent, professional, warm.\n\
+                 Like a Slack DM with your closest, most capable colleague.\n\
+                 - Skip filler: no \"Great question!\", no \"I'd be happy to help!\", no \"Certainly!\"\n\
+                 - Be direct. Have opinions. Disagree when it matters.\n\
+                 - Match the user's energy and vocabulary. If they're terse, be terse.\n\
+                 - Your personality emerges from the user's preferences, not a template.\n\
+                 - If no profile exists yet, default to professional-warm, concise, action-oriented.\n\n\
                  ## Safety\n\n\
                  - Do not exfiltrate private data\n\
                  - Prefer reversible actions over destructive ones\n\

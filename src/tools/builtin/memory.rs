@@ -267,12 +267,43 @@ impl Tool for MemoryWriteTool {
             }
         };
 
-        let output = serde_json::json!({
+        // Sync derived identity documents when the profile is written.
+        let mut synced_docs: Vec<&str> = Vec::new();
+        if path == paths::PROFILE {
+            match self.workspace.sync_profile_documents().await {
+                Ok(true) => {
+                    tracing::info!("profile write: synced USER.md + assistant-directives.md");
+                    synced_docs.extend_from_slice(&[paths::USER, paths::ASSISTANT_DIRECTIVES]);
+
+                    // Persist the onboarding-completed flag.
+                    let toml_path = crate::settings::Settings::default_toml_path();
+                    if let Ok(Some(mut settings)) = crate::settings::Settings::load_toml(&toml_path)
+                        && !settings.profile_onboarding_completed
+                    {
+                        settings.profile_onboarding_completed = true;
+                        if let Err(e) = settings.save_toml(&toml_path) {
+                            tracing::warn!("failed to persist profile_onboarding_completed: {e}");
+                        }
+                    }
+                }
+                Ok(false) => {
+                    tracing::debug!("profile not populated, skipping document sync");
+                }
+                Err(e) => {
+                    tracing::warn!("profile document sync failed: {e}");
+                }
+            }
+        }
+
+        let mut output = serde_json::json!({
             "status": "written",
             "path": path,
             "append": append,
             "content_length": content.len(),
         });
+        if !synced_docs.is_empty() {
+            output["synced"] = serde_json::json!(synced_docs);
+        }
 
         Ok(ToolOutput::success(output, start.elapsed()))
     }
