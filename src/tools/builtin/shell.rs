@@ -196,7 +196,9 @@ const SAFE_ENV_VARS: &[&str] = &[
     "WINDIR",
 ];
 
-/// Low-risk command prefixes: read-only, no side effects.
+/// Low-risk command prefixes: strictly read-only commands with no side effects.
+/// Note: `sed`, `awk`, and `find` are intentionally excluded — they have destructive
+/// modes (`sed -i`, `awk -i inplace`, `find -delete`) and are classified as Medium.
 static LOW_RISK_PATTERNS: LazyLock<Vec<&'static str>> = LazyLock::new(|| {
     vec![
         "ls",
@@ -211,9 +213,6 @@ static LOW_RISK_PATTERNS: LazyLock<Vec<&'static str>> = LazyLock::new(|| {
         "grep",
         "rg",
         "ag",
-        "awk",
-        "sed",
-        "find",
         "fd",
         "locate",
         "echo",
@@ -264,9 +263,14 @@ static LOW_RISK_PATTERNS: LazyLock<Vec<&'static str>> = LazyLock::new(|| {
     ]
 });
 
-/// Medium-risk command prefixes: mutations that are generally reversible.
+/// Medium-risk command prefixes: mutations that are generally reversible, plus commands with
+/// potentially destructive flags (e.g. `sed -i`, `awk -i inplace`, `find -delete`).
 static MEDIUM_RISK_PATTERNS: LazyLock<Vec<&'static str>> = LazyLock::new(|| {
     vec![
+        // Text processors with in-place/destructive modes
+        "awk",
+        "sed",
+        "find",
         "mkdir",
         "rmdir",
         "touch",
@@ -1039,6 +1043,24 @@ mod tests {
             classify_command_risk("my-custom-tool --flag"),
             RiskLevel::Medium
         );
+        // sed/awk/find are Medium — they have destructive flags (-i, -delete, -exec rm)
+        assert_eq!(
+            classify_command_risk("sed 's/foo/bar/g' file.txt"),
+            RiskLevel::Medium
+        );
+        assert_eq!(
+            classify_command_risk("sed -i 's/foo/bar/' file.txt"),
+            RiskLevel::Medium
+        );
+        assert_eq!(
+            classify_command_risk("awk '{print $1}' file.txt"),
+            RiskLevel::Medium
+        );
+        assert_eq!(
+            classify_command_risk("find . -name '*.rs'"),
+            RiskLevel::Medium
+        );
+        assert_eq!(classify_command_risk("find . -delete"), RiskLevel::Medium);
     }
 
     #[test]
