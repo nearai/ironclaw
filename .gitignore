@@ -19,3 +19,6 @@ bench-results/
 # WASM build artifacts (loaded from disk, not bundled)
 *.wasm
 
+# Local Factory config
+.factory/
+

@@ -39,7 +39,10 @@ use tokio_stream::wrappers::ReceiverStream;
 
 use crate::agent::truncate_for_preview;
 use crate::bootstrap::ironclaw_base_dir;
-use crate::channels::{Channel, IncomingMessage, MessageStream, OutgoingResponse, StatusUpdate};
+use crate::channels::{
+    Channel, IncomingMessage, MessageStream, OutgoingResponse, ReasoningDecisionUpdate,
+    StatusUpdate,
+};
 use crate::error::ChannelError;
 
 /// Max characters for tool result previews in the terminal.
@@ -71,6 +74,7 @@ const SLASH_COMMANDS: &[&str] = &[
     "/heartbeat",
     "/summarize",
     "/suggest",
+    "/reasoning",
     "/thread",
     "/resume",
 ];
@@ -198,6 +202,36 @@ fn format_json_params(params: &serde_json::Value, indent: &str) -> String {
     }
 }
 
+fn reasoning_decision_line(decision: &ReasoningDecisionUpdate) -> String {
+    let rationale = decision.rationale.trim();
+    let group_suffix = decision
+        .parallel_group
+        .map(|g| format!(" [parallel {g}]"))
+        .unwrap_or_default();
+    format!(
+        "  \x1b[90m┄\x1b[0m \x1b[36m{}\x1b[0m{}  \x1b[90m{}\x1b[0m",
+        decision.tool_name, group_suffix, rationale
+    )
+}
+
+fn print_repl_reasoning_update(
+    narrative: Option<&str>,
+    tool_decisions: &[ReasoningDecisionUpdate],
+) {
+    if narrative.is_none() && tool_decisions.is_empty() {
+        return;
+    }
+
+    eprintln!("\x1b[90m  ┄ Reasoning\x1b[0m");
+    if let Some(text) = narrative.map(str::trim).filter(|s| !s.is_empty()) {
+        let preview = truncate_for_preview(text, CLI_STATUS_MAX);
+        eprintln!("  \x1b[90m┄\x1b[0m {}", preview);
+    }
+    for decision in tool_decisions {
+        eprintln!("{}", reasoning_decision_line(decision));
+    }
+}
+
 /// REPL channel with line editing and markdown rendering.
 pub struct ReplChannel {
     /// Optional single message to send (for -m flag).
@@ -269,6 +303,7 @@ fn print_help() {
     println!("  {c}/compact{r}           {d}compact context window{r}");
     println!("  {c}/new{r}               {d}new conversation thread{r}");
     println!("  {c}/interrupt{r}         {d}stop current operation{r}");
+    println!("  {c}/reasoning [N|all]{r} {d}show reasoning summaries{r}");
     println!("  {c}esc{r}                {d}stop current operation{r}");
     println!();
     println!("  {h}Approval responses{r}");
@@ -488,6 +523,13 @@ impl Channel for ReplChannel {
                 }
                 print!("{chunk}");
                 let _ = io::stdout().flush();
+            }
+            StatusUpdate::ReasoningUpdate {
+                narrative,
+                tool_decisions,
+                ..
+            } => {
+                print_repl_reasoning_update(narrative.as_deref(), &tool_decisions);
             }
             StatusUpdate::JobStarted {
                 job_id,

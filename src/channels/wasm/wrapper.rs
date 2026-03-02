@@ -1680,6 +1680,9 @@ impl WasmChannel {
             StatusUpdate::StreamChunk(_) => {
                 // No-op, too noisy
             }
+            StatusUpdate::ReasoningUpdate { .. } => {
+                // No-op for WASM channels (web/UI-specific event)
+            }
             StatusUpdate::ApprovalNeeded {
                 tool_name,
                 description,
@@ -2502,6 +2505,36 @@ fn status_to_wit(status: &StatusUpdate, metadata: &serde_json::Value) -> wit_cha
             message: chunk.clone(),
             metadata_json,
         },
+        StatusUpdate::ReasoningUpdate {
+            narrative,
+            tool_decisions,
+            ..
+        } => {
+            let details = tool_decisions
+                .iter()
+                .map(|d| {
+                    let rationale = d.rationale.trim();
+                    format!("{}: {} [{}]", d.tool_name, rationale, d.outcome)
+                })
+                .collect::<Vec<_>>()
+                .join("; ");
+            let message = if let Some(n) = narrative.as_deref() {
+                if details.is_empty() {
+                    n.to_string()
+                } else {
+                    format!("{} | {}", n, details)
+                }
+            } else if details.is_empty() {
+                "Reasoning update".to_string()
+            } else {
+                details
+            };
+            wit_channel::StatusUpdate {
+                status: wit_channel::StatusType::Thinking,
+                message,
+                metadata_json,
+            }
+        }
         StatusUpdate::Status(msg) => {
             // Map well-known status strings to WIT types (case-insensitive
             // to stay consistent with is_terminal_text_status and the

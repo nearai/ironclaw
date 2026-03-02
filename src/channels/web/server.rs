@@ -26,6 +26,7 @@ use tower_http::set_header::SetResponseHeaderLayer;
 use uuid::Uuid;
 
 use crate::agent::SessionManager;
+use crate::agent::session::Turn;
 use crate::bootstrap::ironclaw_base_dir;
 use crate::channels::IncomingMessage;
 use crate::channels::web::auth::{AuthState, auth_middleware};
@@ -44,7 +45,7 @@ use crate::channels::web::util::{build_turns_from_db_messages, truncate_preview}
 use crate::db::Database;
 use crate::extensions::ExtensionManager;
 use crate::orchestrator::job_manager::ContainerJobManager;
-use crate::tools::ToolRegistry;
+use crate::tools::{ToolRegistry, redaction::redact_sensitive_json};
 use crate::workspace::Workspace;
 
 /// Shared prompt queue: maps job IDs to pending follow-up prompts for Claude Code bridges.
@@ -172,25 +173,7 @@ pub struct GatewayState {
 /// Start the gateway HTTP server.
 ///
 /// Returns the actual bound `SocketAddr` (useful when binding to port 0).
-pub async fn start_server(
-    addr: SocketAddr,
-    state: Arc<GatewayState>,
-    auth_token: String,
-) -> Result<SocketAddr, crate::error::ChannelError> {
-    let listener = tokio::net::TcpListener::bind(addr).await.map_err(|e| {
-        crate::error::ChannelError::StartupFailed {
-            name: "gateway".to_string(),
-            reason: format!("Failed to bind to {}: {}", addr, e),
-        }
-    })?;
-    let bound_addr =
-        listener
-            .local_addr()
-            .map_err(|e| crate::error::ChannelError::StartupFailed {
-                name: "gateway".to_string(),
-                reason: format!("Failed to get local addr: {}", e),
-            })?;
-
+fn build_gateway_router(addr: SocketAddr, state: Arc<GatewayState>, auth_token: String) -> Router {
     // Public routes (no auth)
     let public = Router::new().route("/api/health", get(health_handler));
 
@@ -305,6 +288,7 @@ pub async fn start_server(
         .route("/", get(index_handler))
         .route("/style.css", get(css_handler))
         .route("/app.js", get(js_handler))
+        .route("/dompurify.bundle.min.js", get(dompurify_bundle_handler))
         .route("/favicon.ico", get(favicon_handler));
 
     // Project file serving (behind auth to prevent unauthorized file access).
@@ -340,7 +324,7 @@ pub async fn start_server(
         ]))
         .allow_credentials(true);
 
-    let app = Router::new()
+    Router::new()
         .merge(public)
         .merge(statics)
         .merge(projects)
@@ -355,7 +339,29 @@ pub async fn start_server(
             header::X_FRAME_OPTIONS,
             header::HeaderValue::from_static("DENY"),
         ))
-        .with_state(state.clone());
+        .with_state(state)
+}
+
+pub async fn start_server(
+    addr: SocketAddr,
+    state: Arc<GatewayState>,
+    auth_token: String,
+) -> Result<SocketAddr, crate::error::ChannelError> {
+    let listener = tokio::net::TcpListener::bind(addr).await.map_err(|e| {
+        crate::error::ChannelError::StartupFailed {
+            name: "gateway".to_string(),
+            reason: format!("Failed to bind to {}: {}", addr, e),
+        }
+    })?;
+    let bound_addr =
+        listener
+            .local_addr()
+            .map_err(|e| crate::error::ChannelError::StartupFailed {
+                name: "gateway".to_string(),
+                reason: format!("Failed to get local addr: {}", e),
+            })?;
+
+    let app = build_gateway_router(bound_addr, state.clone(), auth_token);
 
     let (shutdown_tx, shutdown_rx) = oneshot::channel();
     *state.shutdown_tx.write().await = Some(shutdown_tx);
@@ -407,6 +413,16 @@ async fn js_handler() -> impl IntoResponse {
     )
 }
 
+async fn dompurify_bundle_handler() -> impl IntoResponse {
+    (
+        [
+            (header::CONTENT_TYPE, "application/javascript"),
+            (header::CACHE_CONTROL, "no-cache"),
+        ],
+        include_str!("static/dompurify.bundle.min.js"),
+    )
+}
+
 async fn favicon_handler() -> impl IntoResponse {
     (
         [
@@ -443,8 +459,10 @@ async fn chat_send_handler(
 
     if let Some(ref thread_id) = req.thread_id {
         msg = msg.with_thread(thread_id);
-        msg = msg.with_metadata(serde_json::json!({"thread_id": thread_id}));
     }
+
+    let metadata_thread_id = req.thread_id.clone().unwrap_or_else(|| msg.id.to_string());
+    msg = msg.with_metadata(serde_json::json!({"thread_id": metadata_thread_id}));
 
     let msg_id = msg.id;
 
@@ -512,6 +530,9 @@ async fn chat_approval_handler(
     if let Some(ref thread_id) = req.thread_id {
         msg = msg.with_thread(thread_id);
     }
+
+    let metadata_thread_id = req.thread_id.clone().unwrap_or_else(|| msg.id.to_string());
+    msg = msg.with_metadata(serde_json::json!({"thread_id": metadata_thread_id}));
 
     let msg_id = msg.id;
 
@@ -673,6 +694,43 @@ struct HistoryQuery {
     before: Option<String>,
 }
 
+fn turn_reasoning_from_in_memory(
+    session_id: Uuid,
+    thread_id: Uuid,
+    turn: &Turn,
+) -> Option<TurnReasoningInfo> {
+    if turn.tool_calls.is_empty() {
+        return None;
+    }
+
+    let tool_decisions: Vec<ToolDecisionInfo> = turn
+        .tool_calls
+        .iter()
+        .map(|tc| ToolDecisionInfo {
+            tool_call_id: tc.tool_call_id.clone(),
+            tool_name: tc.name.clone(),
+            rationale: tc.rationale.clone(),
+            parameters: redact_sensitive_json(&tc.parameters),
+            outcome: if tc.error.is_some() {
+                "error".to_string()
+            } else if tc.result.is_some() {
+                "success".to_string()
+            } else {
+                "pending".to_string()
+            },
+            parallel_group: tc.parallel_group,
+        })
+        .collect();
+
+    Some(TurnReasoningInfo {
+        session_id,
+        thread_id,
+        turn_number: turn.turn_number + 1,
+        narrative: turn.narrative.clone(),
+        tool_decisions,
+    })
+}
+
 async fn chat_history_handler(
     State(state): State<Arc<GatewayState>>,
     Query(query): Query<HistoryQuery>,
@@ -753,7 +811,7 @@ async fn chat_history_handler(
             .turns
             .iter()
             .map(|t| TurnInfo {
-                turn_number: t.turn_number,
+                turn_number: t.turn_number + 1,
                 user_input: t.user_input.clone(),
                 response: t.response.clone(),
                 state: format!("{:?}", t.state),
@@ -776,6 +834,7 @@ async fn chat_history_handler(
                         error: tc.error.clone(),
                     })
                     .collect(),
+                reasoning: turn_reasoning_from_in_memory(sess.id, thread_id, t),
             })
             .collect();
 
@@ -2142,6 +2201,39 @@ struct GatewayStatusResponse {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use axum::body::Body;
+    use axum::http::Request;
+    use tokio::sync::mpsc;
+    use tower::ServiceExt;
+
+    #[test]
+    fn test_turn_reasoning_from_in_memory() {
+        let session_id = Uuid::new_v4();
+        let thread_id = Uuid::new_v4();
+        let mut turn = crate::agent::session::Turn::new(0, "hello");
+        turn.set_narrative("Inspecting prior context");
+        turn.record_tool_call(
+            "memory_search",
+            serde_json::json!({"query": "context"}),
+            "find prior decisions".to_string(),
+            Some(0),
+        );
+        turn.record_tool_result(serde_json::json!("ok"));
+
+        let reasoning = turn_reasoning_from_in_memory(session_id, thread_id, &turn)
+            .expect("reasoning should exist");
+        assert_eq!(reasoning.session_id, session_id);
+        assert_eq!(reasoning.thread_id, thread_id);
+        assert_eq!(reasoning.turn_number, 1);
+        assert_eq!(
+            reasoning.narrative.as_deref(),
+            Some("Inspecting prior context")
+        );
+        assert_eq!(reasoning.tool_decisions.len(), 1);
+        assert_eq!(reasoning.tool_decisions[0].tool_call_id, None);
+        assert_eq!(reasoning.tool_decisions[0].tool_name, "memory_search");
+        assert_eq!(reasoning.tool_decisions[0].parallel_group, Some(0));
+    }
 
     #[test]
     fn test_build_turns_from_db_messages_complete() {
@@ -2175,9 +2267,11 @@ mod tests {
 
         let turns = build_turns_from_db_messages(&messages);
         assert_eq!(turns.len(), 2);
+        assert_eq!(turns[0].turn_number, 1);
         assert_eq!(turns[0].user_input, "Hello");
         assert_eq!(turns[0].response.as_deref(), Some("Hi there!"));
         assert_eq!(turns[0].state, "Completed");
+        assert_eq!(turns[1].turn_number, 2);
         assert_eq!(turns[1].user_input, "How are you?");
         assert_eq!(turns[1].response.as_deref(), Some("Doing well!"));
     }
@@ -2208,6 +2302,8 @@ mod tests {
 
         let turns = build_turns_from_db_messages(&messages);
         assert_eq!(turns.len(), 2);
+        assert_eq!(turns[0].turn_number, 1);
+        assert_eq!(turns[1].turn_number, 2);
         assert_eq!(turns[1].user_input, "Lost message");
         assert!(turns[1].response.is_none());
         assert_eq!(turns[1].state, "Failed");
@@ -2217,5 +2313,112 @@ mod tests {
     fn test_build_turns_from_db_messages_empty() {
         let turns = build_turns_from_db_messages(&[]);
         assert!(turns.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_chat_send_handler_attaches_metadata_thread_id() {
+        let (agent_tx, mut agent_rx) = mpsc::channel(8);
+        let state = Arc::new(GatewayState {
+            msg_tx: tokio::sync::RwLock::new(Some(agent_tx)),
+            sse: SseManager::new(),
+            workspace: None,
+            session_manager: None,
+            log_broadcaster: None,
+            log_level_handle: None,
+            extension_manager: None,
+            tool_registry: None,
+            store: None,
+            job_manager: None,
+            prompt_queue: None,
+            user_id: "test-user".to_string(),
+            shutdown_tx: tokio::sync::RwLock::new(None),
+            ws_tracker: None,
+            llm_provider: None,
+            skill_registry: None,
+            skill_catalog: None,
+            chat_rate_limiter: RateLimiter::new(30, 60),
+            registry_entries: Vec::new(),
+            cost_guard: None,
+            startup_time: std::time::Instant::now(),
+            restart_requested: std::sync::atomic::AtomicBool::new(false),
+        });
+
+        let app = build_gateway_router(
+            "127.0.0.1:3001".parse().expect("socket addr"),
+            state,
+            "test-token".to_string(),
+        );
+
+        let req = Request::builder()
+            .method("POST")
+            .uri("/api/chat/send")
+            .header("Authorization", "Bearer test-token")
+            .header("Content-Type", "application/json")
+            .body(Body::from(
+                serde_json::json!({"content":"hello","thread_id":"thread-42"}).to_string(),
+            ))
+            .expect("request");
+
+        let resp = app.oneshot(req).await.expect("response");
+        assert_eq!(resp.status(), StatusCode::ACCEPTED);
+
+        let incoming = agent_rx.recv().await.expect("incoming message");
+        assert_eq!(incoming.metadata["thread_id"], "thread-42");
+    }
+
+    #[tokio::test]
+    async fn test_chat_approval_handler_attaches_metadata_thread_id() {
+        let (agent_tx, mut agent_rx) = mpsc::channel(8);
+        let state = Arc::new(GatewayState {
+            msg_tx: tokio::sync::RwLock::new(Some(agent_tx)),
+            sse: SseManager::new(),
+            workspace: None,
+            session_manager: None,
+            log_broadcaster: None,
+            log_level_handle: None,
+            extension_manager: None,
+            tool_registry: None,
+            store: None,
+            job_manager: None,
+            prompt_queue: None,
+            user_id: "test-user".to_string(),
+            shutdown_tx: tokio::sync::RwLock::new(None),
+            ws_tracker: None,
+            llm_provider: None,
+            skill_registry: None,
+            skill_catalog: None,
+            chat_rate_limiter: RateLimiter::new(30, 60),
+            registry_entries: Vec::new(),
+            cost_guard: None,
+            startup_time: std::time::Instant::now(),
+            restart_requested: std::sync::atomic::AtomicBool::new(false),
+        });
+
+        let app = build_gateway_router(
+            "127.0.0.1:3001".parse().expect("socket addr"),
+            state,
+            "test-token".to_string(),
+        );
+
+        let req = Request::builder()
+            .method("POST")
+            .uri("/api/chat/approval")
+            .header("Authorization", "Bearer test-token")
+            .header("Content-Type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "request_id": Uuid::new_v4().to_string(),
+                    "action": "approve",
+                    "thread_id": "thread-7"
+                })
+                .to_string(),
+            ))
+            .expect("request");
+
+        let resp = app.oneshot(req).await.expect("response");
+        assert_eq!(resp.status(), StatusCode::ACCEPTED);
+
+        let incoming = agent_rx.recv().await.expect("incoming message");
+        assert_eq!(incoming.metadata["thread_id"], "thread-7");
     }
 }

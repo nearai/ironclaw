@@ -45,7 +45,7 @@ This document tracks feature parity between IronClaw (Rust implementation) and O
 | Tailscale integration | ✅ | ❌ | |
 | Health check endpoints | ✅ | ✅ | /api/health + /api/gateway/status |
 | `doctor` diagnostics | ✅ | ❌ | |
-| Agent event broadcast | ✅ | 🚧 | SSE broadcast manager exists (SseManager) but tool/job-state events not fully wired |
+| Agent event broadcast | ✅ | 🚧 | SSE broadcast manager exists; reasoning_update and job_reasoning are wired, but broader tool/job-state parity remains incomplete |
 | Channel health monitor | ✅ | ❌ | Auto-restart with configurable interval |
 | Presence system | ✅ | ❌ | Beacons on connect, system presence for agents |
 | Trusted-proxy auth mode | ✅ | ❌ | Header-based auth for reverse proxies |

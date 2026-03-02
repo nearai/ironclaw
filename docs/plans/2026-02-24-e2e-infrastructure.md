@@ -288,7 +288,7 @@ SEL = {
 TABS = ["chat", "memory", "jobs", "routines", "extensions", "skills"]
 
 # Auth token used across all tests
-AUTH_TOKEN = "e2e-test-token"
+AUTH_TOKEN = "changeme"
 
 
 async def wait_for_ready(url: str, *, timeout: float = 60, interval: float = 0.5):

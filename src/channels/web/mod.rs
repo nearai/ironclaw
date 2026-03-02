@@ -32,7 +32,10 @@ use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 
 use crate::agent::SessionManager;
-use crate::channels::{Channel, IncomingMessage, MessageStream, OutgoingResponse, StatusUpdate};
+use crate::channels::{
+    Channel, IncomingMessage, MessageStream, OutgoingResponse, ReasoningDecisionUpdate,
+    StatusUpdate,
+};
 use crate::config::GatewayConfig;
 use crate::db::Database;
 use crate::error::ChannelError;
@@ -310,6 +313,30 @@ impl Channel for GatewayChannel {
             StatusUpdate::StreamChunk(content) => SseEvent::StreamChunk {
                 content,
                 thread_id: thread_id.clone(),
+            },
+            StatusUpdate::ReasoningUpdate {
+                session_id,
+                thread_id,
+                turn_number,
+                narrative,
+                tool_decisions,
+            } => SseEvent::ReasoningUpdate {
+                session_id,
+                thread_id,
+                turn_number,
+                narrative,
+                tool_decisions: tool_decisions
+                    .into_iter()
+                    .map(|decision: ReasoningDecisionUpdate| {
+                        crate::channels::web::types::ToolDecisionSsePayload {
+                            tool_call_id: decision.tool_call_id,
+                            tool_name: decision.tool_name,
+                            rationale: decision.rationale,
+                            outcome: decision.outcome,
+                            parallel_group: decision.parallel_group,
+                        }
+                    })
+                    .collect(),
             },
             StatusUpdate::Status(msg) => SseEvent::Status {
                 message: msg,

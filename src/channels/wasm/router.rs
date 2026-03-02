@@ -618,7 +618,7 @@ mod tests {
         }];
 
         router
-            .register(channel, endpoints, Some("secret123".to_string()), None)
+            .register(channel, endpoints, Some("changeme".to_string()), None)
             .await;
 
         // Should find channel by path
@@ -637,11 +637,11 @@ mod tests {
         let channel = create_test_channel("slack");
 
         router
-            .register(channel, vec![], Some("secret123".to_string()), None)
+            .register(channel, vec![], Some("changeme".to_string()), None)
             .await;
 
         // Correct secret
-        assert!(router.validate_secret("slack", "secret123").await);
+        assert!(router.validate_secret("slack", "changeme").await);
 
         // Wrong secret
         assert!(!router.validate_secret("slack", "wrong").await);
@@ -712,7 +712,7 @@ mod tests {
             .register(
                 channel,
                 vec![],
-                Some("secret123".to_string()),
+                Some("changeme".to_string()),
                 Some("X-Telegram-Bot-Api-Secret-Token".to_string()),
             )
             .await;
@@ -726,7 +726,7 @@ mod tests {
         // Channel without custom header should use default
         let channel2 = create_test_channel("slack");
         router
-            .register(channel2, vec![], Some("secret456".to_string()), None)
+            .register(channel2, vec![], Some("placeholder".to_string()), None)
             .await;
         assert_eq!(router.get_secret_header("slack").await, "X-Webhook-Secret");
     }
@@ -740,14 +740,15 @@ mod tests {
 
         router.register(channel, vec![], None, None).await;
 
-        let fake_pub_key = "a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f0a1b2";
+        let signing_key = test_signing_key();
+        let fake_pub_key = hex::encode(signing_key.verifying_key().to_bytes());
         router
-            .register_signature_key("discord", fake_pub_key)
+            .register_signature_key("discord", &fake_pub_key)
             .await
             .unwrap();
 
         let key = router.get_signature_key("discord").await;
-        assert_eq!(key, Some(fake_pub_key.to_string()));
+        assert_eq!(key, Some(fake_pub_key));
     }
 
     #[tokio::test]
@@ -775,9 +776,10 @@ mod tests {
 
         router.register(channel, endpoints, None, None).await;
         // Use a valid 32-byte Ed25519 key for this test
-        let valid_key = "d75a980182b10ab7d54bfed3c964073a0ee172f3daa3f4a18446b7e8c7ac6602";
+        let signing_key = test_signing_key();
+        let valid_key = hex::encode(signing_key.verifying_key().to_bytes());
         router
-            .register_signature_key("discord", valid_key)
+            .register_signature_key("discord", &valid_key)
             .await
             .unwrap();
 
@@ -800,8 +802,9 @@ mod tests {
         router.register(channel, vec![], None, None).await;
 
         // Valid 32-byte Ed25519 public key (from test keypair)
-        let valid_key = "d75a980182b10ab7d54bfed3c964073a0ee172f3daa3f4a18446b7e8c7ac6602";
-        let result = router.register_signature_key("discord", valid_key).await;
+        let signing_key = test_signing_key();
+        let valid_key = hex::encode(signing_key.verifying_key().to_bytes());
+        let result = router.register_signature_key("discord", &valid_key).await;
         assert!(result.is_ok(), "Valid Ed25519 key should be accepted");
     }
 
@@ -845,14 +848,15 @@ mod tests {
         let channel = create_test_channel("discord");
         router.register(channel, vec![], None, None).await;
 
-        let valid_key = "d75a980182b10ab7d54bfed3c964073a0ee172f3daa3f4a18446b7e8c7ac6602";
+        let signing_key = test_signing_key();
+        let valid_key = hex::encode(signing_key.verifying_key().to_bytes());
         router
-            .register_signature_key("discord", valid_key)
+            .register_signature_key("discord", &valid_key)
             .await
             .unwrap();
 
         let stored = router.get_signature_key("discord").await;
-        assert_eq!(stored, Some(valid_key.to_string()));
+        assert_eq!(stored, Some(valid_key));
     }
 
     #[tokio::test]
@@ -1120,7 +1124,7 @@ mod tests {
 
         // Register with BOTH secret and signature key
         wasm_router
-            .register(channel, endpoints, Some("my-secret".to_string()), None)
+            .register(channel, endpoints, Some("changeme".to_string()), None)
             .await;
 
         let signing_key = test_signing_key();
@@ -1148,7 +1152,7 @@ mod tests {
         // Provide valid signature AND valid secret
         let req = Request::builder()
             .method("POST")
-            .uri("/webhook/discord?secret=my-secret")
+            .uri("/webhook/discord?secret=changeme")
             .header("content-type", "application/json")
             .header("x-signature-ed25519", &sig_hex)
             .header("x-signature-timestamp", &timestamp)

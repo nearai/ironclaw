@@ -11,10 +11,10 @@ use uuid::Uuid;
 
 use crate::agent::Agent;
 use crate::agent::session::{PendingApproval, Session, ThreadState};
-use crate::channels::{IncomingMessage, StatusUpdate};
+use crate::channels::{IncomingMessage, ReasoningDecisionUpdate, StatusUpdate};
 use crate::context::JobContext;
 use crate::error::Error;
-use crate::llm::{ChatMessage, Reasoning, ReasoningContext, RespondResult};
+use crate::llm::{ChatMessage, DEFAULT_TOOL_RATIONALE, Reasoning, ReasoningContext, RespondResult};
 
 /// Result of the agentic loop execution.
 pub(super) enum AgenticLoopResult {
@@ -297,12 +297,56 @@ impl Agent {
                     tool_calls,
                     content,
                 } => {
+                    let reasoning_sanitize = sanitize_reasoning_narrative(self.safety(), &content);
+
+                    if content.is_some() && reasoning_sanitize.summary.is_none() {
+                        match reasoning_sanitize.outcome {
+                            NarrativeSanitizeOutcome::Empty => {
+                                tracing::warn!(
+                                    thread_id = %thread_id,
+                                    "Reasoning narrative was empty"
+                                );
+                            }
+                            NarrativeSanitizeOutcome::BlockedByLeakDetector => {
+                                tracing::warn!(
+                                    thread_id = %thread_id,
+                                    "Reasoning narrative was blocked by leak detector"
+                                );
+                            }
+                            NarrativeSanitizeOutcome::BlockedByPolicy => {
+                                tracing::warn!(
+                                    thread_id = %thread_id,
+                                    "Reasoning narrative was blocked by safety policy"
+                                );
+                            }
+                            NarrativeSanitizeOutcome::Passed => {}
+                        }
+                    }
+
+                    let reasoning_summary = reasoning_sanitize.summary;
+
                     // Add the assistant message with tool_calls to context.
                     // OpenAI protocol requires this before tool-result messages.
                     context_messages.push(ChatMessage::assistant_with_tool_calls(
                         content,
                         tool_calls.clone(),
                     ));
+
+                    let (session_id, turn_number) = {
+                        let mut sess = session.lock().await;
+                        let session_id = sess.id;
+                        let turn_number = if let Some(thread) = sess.threads.get_mut(&thread_id)
+                            && let Some(turn) = thread.last_turn_mut()
+                        {
+                            if let Some(summary) = reasoning_summary.clone() {
+                                turn.set_narrative(summary);
+                            }
+                            turn.turn_number + 1
+                        } else {
+                            0
+                        };
+                        (session_id, turn_number)
+                    };
 
                     // Execute tools and add results to context
                     let _ = self
@@ -317,18 +361,6 @@ impl Agent {
                         )
                         .await;
 
-                    // Record tool calls in the thread
-                    {
-                        let mut sess = session.lock().await;
-                        if let Some(thread) = sess.threads.get_mut(&thread_id)
-                            && let Some(turn) = thread.last_turn_mut()
-                        {
-                            for tc in &tool_calls {
-                                turn.record_tool_call(&tc.name, tc.arguments.clone());
-                            }
-                        }
-                    }
-
                     // === Phase 1: Preflight (sequential) ===
                     // Walk tool_calls checking approval and hooks. Classify
                     // each tool as Rejected (by hook) or Runnable. Stop at the
@@ -340,7 +372,7 @@ impl Agent {
                         /// Hook rejected/blocked this tool; contains the error message.
                         Rejected(String),
                         /// Tool passed preflight and will be executed.
-                        Runnable,
+                        Runnable { rationale: String },
                     }
                     let mut preflight: Vec<(crate::llm::ToolCall, PreflightOutcome)> = Vec::new();
                     let mut runnable: Vec<(usize, crate::llm::ToolCall)> = Vec::new();
@@ -348,6 +380,7 @@ impl Agent {
                         usize,
                         crate::llm::ToolCall,
                         Arc<dyn crate::tools::Tool>,
+                        String,
                     )> = None;
 
                     for (idx, original_tc) in tool_calls.iter().enumerate() {
@@ -413,14 +446,89 @@ impl Agent {
                             };
 
                             if needs_approval {
-                                approval_needed = Some((idx, tc, tool));
+                                let rationale =
+                                    sanitize_tool_rationale(self.safety(), &tc.reasoning);
+                                approval_needed = Some((idx, tc, tool, rationale));
                                 break; // remaining tools are deferred
                             }
                         }
 
                         let preflight_idx = preflight.len();
-                        preflight.push((tc.clone(), PreflightOutcome::Runnable));
+                        preflight.push((
+                            tc.clone(),
+                            PreflightOutcome::Runnable {
+                                rationale: sanitize_tool_rationale(self.safety(), &tc.reasoning),
+                            },
+                        ));
                         runnable.push((preflight_idx, tc));
+                    }
+
+                    {
+                        let mut sess = session.lock().await;
+                        if let Some(thread) = sess.threads.get_mut(&thread_id)
+                            && let Some(turn) = thread.last_turn_mut()
+                        {
+                            let batch_group_for_iteration =
+                                parallel_group_for_iteration(runnable.len(), &turn.tool_calls);
+
+                            for (tc, outcome) in &preflight {
+                                match outcome {
+                                    PreflightOutcome::Runnable { rationale } => {
+                                        turn.record_tool_call_with_id(
+                                            Some(tc.id.clone()),
+                                            tc.name.clone(),
+                                            crate::tools::redaction::redact_sensitive_json(
+                                                &tc.arguments,
+                                            ),
+                                            rationale.clone(),
+                                            batch_group_for_iteration,
+                                        );
+                                    }
+                                    PreflightOutcome::Rejected(_) => {
+                                        turn.record_tool_call_with_id(
+                                            Some(tc.id.clone()),
+                                            tc.name.clone(),
+                                            crate::tools::redaction::redact_sensitive_json(
+                                                &tc.arguments,
+                                            ),
+                                            DEFAULT_TOOL_RATIONALE.to_string(),
+                                            None,
+                                        );
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    let pending_decision_events = {
+                        let sess = session.lock().await;
+                        if let Some(thread) = sess.threads.get(&thread_id)
+                            && let Some(turn) = thread.last_turn()
+                        {
+                            turn_reasoning_decision_events(turn)
+                        } else {
+                            Vec::new()
+                        }
+                    };
+
+                    if !pending_decision_events.is_empty() {
+                        let _ = self
+                            .channels
+                            .send_status(
+                                &message.channel,
+                                StatusUpdate::ReasoningUpdate {
+                                    session_id: session_id.to_string(),
+                                    thread_id: message
+                                        .thread_id
+                                        .clone()
+                                        .unwrap_or_else(|| thread_id.to_string()),
+                                    turn_number,
+                                    narrative: reasoning_summary.clone(),
+                                    tool_decisions: pending_decision_events,
+                                },
+                                &message.metadata,
+                            )
+                            .await;
                     }
 
                     // === Phase 2: Parallel execution ===
@@ -561,13 +669,14 @@ impl Agent {
                                     if let Some(thread) = sess.threads.get_mut(&thread_id)
                                         && let Some(turn) = thread.last_turn_mut()
                                     {
-                                        turn.record_tool_error(error_msg.clone());
+                                        turn.record_tool_error_for(&tc.id, error_msg.clone());
                                     }
                                 }
+
                                 context_messages
                                     .push(ChatMessage::tool_result(&tc.id, &tc.name, error_msg));
                             }
-                            PreflightOutcome::Runnable => {
+                            PreflightOutcome::Runnable { .. } => {
                                 // Retrieve the execution result for this slot
                                 let tool_result =
                                     exec_results[pf_idx].take().unwrap_or_else(|| {
@@ -603,10 +712,13 @@ impl Agent {
                                     {
                                         match &tool_result {
                                             Ok(output) => {
-                                                turn.record_tool_result(serde_json::json!(output));
+                                                turn.record_tool_result_for(
+                                                    &tc.id,
+                                                    serde_json::json!(output),
+                                                );
                                             }
                                             Err(e) => {
-                                                turn.record_tool_error(e.to_string());
+                                                turn.record_tool_error_for(&tc.id, e.to_string());
                                             }
                                         }
                                     }
@@ -664,19 +776,74 @@ impl Agent {
                         }
                     }
 
+                    let final_decision_events = {
+                        let sess = session.lock().await;
+                        if let Some(thread) = sess.threads.get(&thread_id)
+                            && let Some(turn) = thread.last_turn()
+                        {
+                            turn_reasoning_decision_events(turn)
+                        } else {
+                            Vec::new()
+                        }
+                    };
+
+                    if !final_decision_events.is_empty() {
+                        let narrative = {
+                            let sess = session.lock().await;
+                            if let Some(thread) = sess.threads.get(&thread_id)
+                                && let Some(turn) = thread.last_turn()
+                            {
+                                turn.narrative.clone()
+                            } else {
+                                None
+                            }
+                        };
+
+                        let _ = self
+                            .channels
+                            .send_status(
+                                &message.channel,
+                                StatusUpdate::ReasoningUpdate {
+                                    session_id: session_id.to_string(),
+                                    thread_id: message
+                                        .thread_id
+                                        .clone()
+                                        .unwrap_or_else(|| thread_id.to_string()),
+                                    turn_number,
+                                    narrative,
+                                    tool_decisions: final_decision_events,
+                                },
+                                &message.metadata,
+                            )
+                            .await;
+                    }
+
                     // Return auth response after all results are recorded
                     if let Some(instructions) = deferred_auth {
                         return Ok(AgenticLoopResult::Response(instructions));
                     }
 
                     // Handle approval if a tool needed it
-                    if let Some((approval_idx, tc, tool)) = approval_needed {
+                    if let Some((approval_idx, tc, tool, rationale)) = approval_needed {
+                        let pending_parallel_group = {
+                            let remaining = tool_calls.len() - approval_idx;
+                            let sess = session.lock().await;
+                            if let Some(thread) = sess.threads.get(&thread_id)
+                                && let Some(turn) = thread.last_turn()
+                            {
+                                parallel_group_for_iteration(remaining, &turn.tool_calls)
+                            } else {
+                                parallel_group_for_iteration(remaining, &[])
+                            }
+                        };
                         let pending = PendingApproval {
                             request_id: Uuid::new_v4(),
                             tool_name: tc.name.clone(),
                             parameters: tc.arguments.clone(),
                             description: tool.description().to_string(),
                             tool_call_id: tc.id.clone(),
+                            rationale,
+                            parallel_group: pending_parallel_group,
                             context_messages: context_messages.clone(),
                             deferred_tool_calls: tool_calls[approval_idx + 1..].to_vec(),
                         };
@@ -734,9 +901,10 @@ pub(super) async fn execute_chat_tool_standalone(
         .into());
     }
 
+    let redacted_params = crate::tools::redaction::redact_sensitive_json(params);
     tracing::debug!(
         tool = %tool_name,
-        params = %params,
+        params = %redacted_params,
         "Tool call started"
     );
 
@@ -848,6 +1016,118 @@ pub(super) fn check_auth_required(
     Some((name, instructions))
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum NarrativeSanitizeOutcome {
+    Passed,
+    Empty,
+    BlockedByLeakDetector,
+    BlockedByPolicy,
+}
+
+struct NarrativeSanitizeResult {
+    summary: Option<String>,
+    outcome: NarrativeSanitizeOutcome,
+}
+
+fn sanitize_reasoning_narrative(
+    safety: &crate::safety::SafetyLayer,
+    raw_content: &Option<String>,
+) -> NarrativeSanitizeResult {
+    let Some(raw) = raw_content.as_deref() else {
+        return NarrativeSanitizeResult {
+            summary: None,
+            outcome: NarrativeSanitizeOutcome::Empty,
+        };
+    };
+
+    let text = raw.trim();
+    if text.is_empty() {
+        return NarrativeSanitizeResult {
+            summary: None,
+            outcome: NarrativeSanitizeOutcome::Empty,
+        };
+    }
+
+    let sanitized = safety.sanitize_tool_output("reasoning", text);
+    let cleaned = sanitized.content.trim();
+    if cleaned.is_empty() {
+        return NarrativeSanitizeResult {
+            summary: None,
+            outcome: NarrativeSanitizeOutcome::Empty,
+        };
+    }
+
+    if safety.is_blocked_output(cleaned) {
+        let outcome = if cleaned == crate::safety::SafetyLayer::BLOCKED_BY_LEAK_DETECTOR {
+            NarrativeSanitizeOutcome::BlockedByLeakDetector
+        } else {
+            NarrativeSanitizeOutcome::BlockedByPolicy
+        };
+        return NarrativeSanitizeResult {
+            summary: None,
+            outcome,
+        };
+    }
+
+    NarrativeSanitizeResult {
+        summary: Some(cleaned.to_string()),
+        outcome: NarrativeSanitizeOutcome::Passed,
+    }
+}
+
+fn turn_reasoning_decision_events(
+    turn: &crate::agent::session::Turn,
+) -> Vec<ReasoningDecisionUpdate> {
+    turn.tool_calls
+        .iter()
+        .map(|call| ReasoningDecisionUpdate {
+            tool_call_id: call.tool_call_id.clone(),
+            tool_name: call.name.clone(),
+            rationale: call.rationale.clone(),
+            outcome: if call.error.is_some() {
+                "error".to_string()
+            } else if call.result.is_some() {
+                "success".to_string()
+            } else {
+                "pending".to_string()
+            },
+            parallel_group: call.parallel_group,
+        })
+        .collect()
+}
+
+fn sanitize_tool_rationale(safety: &crate::safety::SafetyLayer, raw_rationale: &str) -> String {
+    let rationale = crate::llm::normalize_tool_reasoning(raw_rationale);
+    let sanitized = safety.sanitize_tool_output("reasoning", &rationale);
+    let cleaned = sanitized.content.trim();
+
+    if cleaned.is_empty() || safety.is_blocked_output(cleaned) {
+        tracing::warn!("Tool rationale blocked by safety policy; applying deterministic fallback");
+        return DEFAULT_TOOL_RATIONALE.to_string();
+    }
+
+    cleaned.to_string()
+}
+
+fn parallel_group_for_iteration(
+    runnable_len: usize,
+    tool_calls: &[crate::agent::session::TurnToolCall],
+) -> Option<usize> {
+    if runnable_len > 1 {
+        Some(next_parallel_group_id(tool_calls))
+    } else {
+        None
+    }
+}
+
+fn next_parallel_group_id(tool_calls: &[crate::agent::session::TurnToolCall]) -> usize {
+    tool_calls
+        .iter()
+        .filter_map(|call| call.parallel_group)
+        .max()
+        .map_or(0, |max_group| max_group + 1)
+}
+
 /// Compact messages for retry after a context-length-exceeded error.
 ///
 /// Keeps all `System` messages (which carry the system prompt and instructions),
@@ -910,7 +1190,7 @@ mod tests {
 
     use crate::agent::agent_loop::{Agent, AgentDeps};
     use crate::agent::cost_guard::{CostGuard, CostGuardConfig};
-    use crate::agent::session::Session;
+    use crate::agent::session::{Session, Turn};
     use crate::channels::ChannelManager;
     use crate::config::{AgentConfig, SafetyConfig, SkillsConfig};
     use crate::context::ContextManager;
@@ -1077,6 +1357,8 @@ mod tests {
         assert!(parsed.deferred_tool_calls.is_empty());
         assert_eq!(parsed.tool_name, "http");
         assert_eq!(parsed.tool_call_id, "call_123");
+        assert_eq!(parsed.rationale, crate::llm::DEFAULT_TOOL_RATIONALE);
+        assert_eq!(parsed.parallel_group, None);
     }
 
     #[test]
@@ -1087,17 +1369,21 @@ mod tests {
             parameters: serde_json::json!({"command": "echo hi"}),
             description: "Run shell command".to_string(),
             tool_call_id: "call_1".to_string(),
+            rationale: "inspect repo state".to_string(),
+            parallel_group: Some(0),
             context_messages: vec![],
             deferred_tool_calls: vec![
                 ToolCall {
                     id: "call_2".to_string(),
                     name: "http".to_string(),
                     arguments: serde_json::json!({"url": "https://example.com"}),
+                    reasoning: crate::llm::normalize_tool_reasoning(""),
                 },
                 ToolCall {
                     id: "call_3".to_string(),
                     name: "echo".to_string(),
                     arguments: serde_json::json!({"message": "done"}),
+                    reasoning: crate::llm::normalize_tool_reasoning(""),
                 },
             ],
         };
@@ -1109,6 +1395,8 @@ mod tests {
         assert_eq!(parsed.deferred_tool_calls.len(), 2);
         assert_eq!(parsed.deferred_tool_calls[0].name, "http");
         assert_eq!(parsed.deferred_tool_calls[1].name, "echo");
+        assert_eq!(parsed.rationale, "inspect repo state");
+        assert_eq!(parsed.parallel_group, Some(0));
     }
 
     #[test]
@@ -1261,6 +1549,152 @@ mod tests {
         assert!(result.is_err());
     }
 
+    #[test]
+    fn test_parallel_group_for_iteration_single_tool_none() {
+        let turn = Turn::new(0, "inspect");
+        assert_eq!(
+            super::parallel_group_for_iteration(1, &turn.tool_calls),
+            None
+        );
+        assert_eq!(
+            super::parallel_group_for_iteration(0, &turn.tool_calls),
+            None
+        );
+    }
+
+    #[test]
+    fn test_parallel_group_for_iteration_multi_tool_monotonic() {
+        let mut turn = Turn::new(0, "inspect");
+
+        let first = super::parallel_group_for_iteration(2, &turn.tool_calls)
+            .expect("multi-tool run should get a parallel group");
+        assert_eq!(first, 0);
+
+        for _ in 0..2 {
+            turn.record_tool_call(
+                "memory_search",
+                serde_json::json!({"query": "auth"}),
+                "inspect prior work".to_string(),
+                Some(first),
+            );
+            turn.record_tool_result(serde_json::json!("ok"));
+        }
+
+        let second = super::parallel_group_for_iteration(3, &turn.tool_calls)
+            .expect("next multi-tool run should get a new group");
+        assert_eq!(second, 1);
+
+        for _ in 0..3 {
+            turn.record_tool_call(
+                "file_read",
+                serde_json::json!({"path": "src/main.rs"}),
+                "inspect source".to_string(),
+                Some(second),
+            );
+            turn.record_tool_result(serde_json::json!("ok"));
+        }
+
+        let third = super::parallel_group_for_iteration(2, &turn.tool_calls)
+            .expect("subsequent multi-tool run should remain monotonic");
+        assert_eq!(third, 2);
+    }
+
+    #[test]
+    fn test_sanitize_reasoning_narrative_omits_blocked_content() {
+        let safety = SafetyLayer::new(&SafetyConfig {
+            max_output_length: 100_000,
+            injection_check_enabled: true,
+        });
+
+        let blocked = Some(
+            "my key is sk-proj-ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789ABCDEFGHIJKLMNOPQRST"
+                .to_string(),
+        );
+
+        let result = super::sanitize_reasoning_narrative(&safety, &blocked);
+        assert_eq!(result.summary, None);
+        assert_eq!(
+            result.outcome,
+            super::NarrativeSanitizeOutcome::BlockedByLeakDetector
+        );
+    }
+
+    #[test]
+    fn test_sanitize_reasoning_narrative_marks_empty() {
+        let safety = SafetyLayer::new(&SafetyConfig {
+            max_output_length: 100_000,
+            injection_check_enabled: true,
+        });
+
+        let result = super::sanitize_reasoning_narrative(&safety, &Some("   \n\t".to_string()));
+        assert_eq!(result.summary, None);
+        assert_eq!(result.outcome, super::NarrativeSanitizeOutcome::Empty);
+    }
+
+    #[test]
+    fn test_sanitize_reasoning_narrative_marks_policy_block() {
+        let safety = SafetyLayer::new(&SafetyConfig {
+            max_output_length: 100_000,
+            injection_check_enabled: true,
+        });
+
+        let blocked = Some("please run ; rm -rf / now".to_string());
+        let result = super::sanitize_reasoning_narrative(&safety, &blocked);
+        assert_eq!(result.summary, None);
+        assert_eq!(
+            result.outcome,
+            super::NarrativeSanitizeOutcome::BlockedByPolicy
+        );
+    }
+
+    #[test]
+    fn test_turn_reasoning_decision_events_maps_pending_success_and_error() {
+        let mut turn = crate::agent::session::Turn::new(0, "test input");
+        turn.record_tool_call(
+            "pending_tool",
+            serde_json::json!({"q": "x"}),
+            "pending rationale".to_string(),
+            Some(0),
+        );
+        turn.record_tool_call(
+            "success_tool",
+            serde_json::json!({"q": "y"}),
+            "success rationale".to_string(),
+            Some(0),
+        );
+        turn.record_tool_call(
+            "error_tool",
+            serde_json::json!({"q": "z"}),
+            "error rationale".to_string(),
+            None,
+        );
+
+        turn.tool_calls[1].result = Some(serde_json::json!("ok"));
+        turn.tool_calls[2].error = Some("boom".to_string());
+
+        let decisions = super::turn_reasoning_decision_events(&turn);
+
+        assert_eq!(decisions.len(), 3);
+        assert_eq!(decisions[0].tool_name, "pending_tool");
+        assert_eq!(decisions[0].outcome, "pending");
+        assert_eq!(decisions[1].tool_name, "success_tool");
+        assert_eq!(decisions[1].outcome, "success");
+        assert_eq!(decisions[2].tool_name, "error_tool");
+        assert_eq!(decisions[2].outcome, "error");
+    }
+
+    #[test]
+    fn test_sanitize_tool_rationale_fallback_when_blocked() {
+        let safety = SafetyLayer::new(&SafetyConfig {
+            max_output_length: 100_000,
+            injection_check_enabled: true,
+        });
+
+        let blocked = "my key is sk-proj-ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789ABCDEFGHIJKLMNOPQRST";
+        let rationale = super::sanitize_tool_rationale(&safety, blocked);
+        assert_eq!(rationale, crate::llm::DEFAULT_TOOL_RATIONALE);
+    }
+
     // ---- compact_messages_for_retry tests ----
 
     use super::compact_messages_for_retry;
@@ -1281,6 +1715,7 @@ mod tests {
                     id: "call_1".to_string(),
                     name: "echo".to_string(),
                     arguments: serde_json::json!({"message": "hi"}),
+                    reasoning: crate::llm::normalize_tool_reasoning(""),
                 }],
             ),
             ChatMessage::tool_result("call_1", "echo", "hi"),
@@ -1373,11 +1808,13 @@ mod tests {
                         id: "c1".to_string(),
                         name: "http".to_string(),
                         arguments: serde_json::json!({}),
+                        reasoning: crate::llm::normalize_tool_reasoning(""),
                     },
                     ToolCall {
                         id: "c2".to_string(),
                         name: "echo".to_string(),
                         arguments: serde_json::json!({}),
+                        reasoning: crate::llm::normalize_tool_reasoning(""),
                     },
                 ],
             ),
@@ -1411,6 +1848,7 @@ mod tests {
                     id: "c1".to_string(),
                     name: "echo".to_string(),
                     arguments: serde_json::json!({}),
+                    reasoning: crate::llm::normalize_tool_reasoning(""),
                 }],
             ),
             ChatMessage::tool_result("c1", "echo", "done"),
@@ -1541,6 +1979,7 @@ mod tests {
                     id: format!("call_{}", uuid::Uuid::new_v4()),
                     name: "echo".to_string(),
                     arguments: serde_json::json!({"message": "looping"}),
+                    reasoning: crate::llm::normalize_tool_reasoning(""),
                 }],
                 input_tokens: 0,
                 output_tokens: 5,
@@ -1692,6 +2131,7 @@ mod tests {
                     id: format!("call_{}", uuid::Uuid::new_v4()),
                     name: "nonexistent_tool".to_string(),
                     arguments: serde_json::json!({}),
+                    reasoning: crate::llm::normalize_tool_reasoning(""),
                 }],
                 input_tokens: 0,
                 output_tokens: 5,

@@ -142,6 +142,7 @@ async fn test_ws_message_reaches_agent() {
     assert_eq!(incoming.thread_id.as_deref(), Some("t42"));
     assert_eq!(incoming.channel, "gateway");
     assert_eq!(incoming.user_id, "test-user");
+    assert_eq!(incoming.metadata["thread_id"], "t42");
 
     ws.close(None).await.unwrap();
 }

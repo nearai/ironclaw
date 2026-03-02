@@ -722,6 +722,7 @@ impl Agent {
             Submission::Heartbeat => self.process_heartbeat().await,
             Submission::Summarize => self.process_summarize(session, thread_id).await,
             Submission::Suggest => self.process_suggest(session, thread_id).await,
+            Submission::Reasoning { arg } => self.process_reasoning(session, thread_id, arg).await,
             Submission::JobStatus { job_id } => {
                 self.process_job_status(&message.user_id, job_id.as_deref())
                     .await

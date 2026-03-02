@@ -12,8 +12,11 @@ let loadingOlder = false;
 let sseHasConnectedBefore = false;
 let jobEvents = new Map(); // job_id -> Array of events
 let jobListRefreshTimer = null;
+let pendingReasoningByTurn = new Map(); // key: threadId:turnNumber -> reasoning payload
+let pendingThreadAliasByRequest = new Map(); // key: request-thread-id -> resolved-thread-id
 let pairingPollInterval = null;
 const JOB_EVENTS_CAP = 500;
+const PENDING_REASONING_CAP = 200;
 const MEMORY_SEARCH_QUERY_MAX_LENGTH = 100;
 
 // --- Slash Commands ---
@@ -153,13 +156,27 @@ function connectSSE() {
   eventSource.onerror = () => {
     document.getElementById('sse-dot').classList.add('disconnected');
     document.getElementById('sse-status').textContent = 'Reconnecting...';
+    pendingReasoningByTurn.clear();
   };
 
   eventSource.addEventListener('response', (e) => {
     const data = JSON.parse(e.data);
+    const resolvedThreadId = resolveThreadAlias(data.thread_id);
     if (!isCurrentThread(data.thread_id)) return;
+
+    if (data.thread_id && resolvedThreadId !== data.thread_id) {
+      pendingThreadAliasByRequest.delete(data.thread_id);
+    }
+
     finalizeActivityGroup();
-    addMessage('assistant', data.content);
+
+    const expectedTurnNumber = pendingReasoningTurnForThread(resolvedThreadId);
+    if (expectedTurnNumber != null) {
+      addMessage('assistant', data.content, { threadId: resolvedThreadId, turnNumber: expectedTurnNumber });
+    } else {
+      addMessage('assistant', data.content, { threadId: resolvedThreadId });
+    }
+
     enableChatInput();
     // Refresh thread list so new titles appear after first message
     loadThreads();
@@ -196,6 +213,12 @@ function connectSSE() {
     appendToLastAssistant(data.content);
   });
 
+  eventSource.addEventListener('reasoning_update', (e) => {
+    const data = JSON.parse(e.data);
+    if (!isCurrentThread(data.thread_id)) return;
+    appendReasoningByTurn(data);
+  });
+
   eventSource.addEventListener('status', (e) => {
     const data = JSON.parse(e.data);
     if (!isCurrentThread(data.thread_id)) return;
@@ -207,6 +230,10 @@ function connectSSE() {
       finalizeActivityGroup();
       enableChatInput();
     }
+  });
+
+  eventSource.addEventListener('result', () => {
+    pendingReasoningByTurn.clear();
   });
 
   eventSource.addEventListener('job_started', (e) => {
@@ -249,7 +276,7 @@ function connectSSE() {
   // Job event listeners (activity stream for all sandbox jobs)
   const jobEventTypes = [
     'job_message', 'job_tool_use', 'job_tool_result',
-    'job_status', 'job_result'
+    'job_reasoning', 'job_status', 'job_result'
   ];
   for (const evtType of jobEventTypes) {
     eventSource.addEventListener(evtType, (e) => {
@@ -278,10 +305,16 @@ function connectSSE() {
 
 // Check if an SSE event belongs to the currently viewed thread.
 // Events without a thread_id (legacy) are always shown.
+function resolveThreadAlias(threadId) {
+  if (!threadId) return threadId;
+  return pendingThreadAliasByRequest.get(threadId) || threadId;
+}
+
 function isCurrentThread(threadId) {
   if (!threadId) return true;
+  const resolvedThreadId = resolveThreadAlias(threadId);
   if (!currentThreadId) return true;
-  return threadId === currentThreadId;
+  return resolvedThreadId === currentThreadId;
 }
 
 // --- Chat ---
@@ -295,6 +328,9 @@ function sendMessage() {
   const content = input.value.trim();
   if (!content) return;
 
+  const requestThreadId = currentThreadId;
+  pendingThreadAliasByRequest.set(requestThreadId, currentThreadId);
+
   addMessage('user', content);
   input.value = '';
   autoResizeTextarea(input);
@@ -302,8 +338,9 @@ function sendMessage() {
 
   apiFetch('/api/chat/send', {
     method: 'POST',
-    body: { content, thread_id: currentThreadId || undefined },
+    body: { content, thread_id: requestThreadId || undefined },
   }).catch((err) => {
+    pendingThreadAliasByRequest.delete(requestThreadId);
     addMessage('system', 'Failed to send: ' + err.message);
   });
 }
@@ -401,19 +438,31 @@ function sendApprovalAction(requestId, action) {
 
 function renderMarkdown(text) {
   if (typeof marked !== 'undefined') {
-    let html = marked.parse(text);
+    const html = marked.parse(text);
     // Sanitize HTML output to prevent XSS from tool output or LLM responses.
-    html = sanitizeRenderedHtml(html);
-    // Inject copy buttons into <pre> blocks
-    html = html.replace(/<pre>/g, '<pre class="code-block-wrapper"><button class="copy-btn" onclick="copyCodeBlock(this)">Copy</button>');
-    return html;
+    const sanitized = sanitizeRenderedHtml(html);
+    return decorateCodeBlocksWithCopyButtons(sanitized);
   }
   return escapeHtml(text);
 }
 
-// Strip dangerous HTML elements and attributes from rendered markdown.
-// This prevents XSS from tool output or prompt injection in LLM responses.
 function sanitizeRenderedHtml(html) {
+  if (typeof DOMPurify !== 'undefined') {
+    return DOMPurify.sanitize(html, {
+      ALLOWED_URI_REGEXP: /^(?:(?:https?|mailto|tel|ftp):|[^a-z]|[a-z+.-]+(?:[^a-z+.-]|$))/i,
+    });
+  }
+
+  if (!window.__domPurifyMissingWarned) {
+    window.__domPurifyMissingWarned = true;
+    showToast('DOMPurify unavailable; using degraded HTML sanitizer.', 'error');
+    console.warn('DOMPurify unavailable; using fallback sanitizer');
+  }
+
+  return sanitizeRenderedHtmlFallback(html);
+}
+
+function sanitizeRenderedHtmlFallback(html) {
   html = html.replace(/<script\b[^<]*(?:(?!<\/script>)<[^<]*)*<\/script>/gi, '');
   html = html.replace(/<iframe\b[^>]*>[\s\S]*?<\/iframe>/gi, '');
   html = html.replace(/<object\b[^>]*>[\s\S]*?<\/object>/gi, '');
@@ -423,14 +472,28 @@ function sanitizeRenderedHtml(html) {
   html = html.replace(/<link\b[^>]*\/?>/gi, '');
   html = html.replace(/<base\b[^>]*\/?>/gi, '');
   html = html.replace(/<meta\b[^>]*\/?>/gi, '');
-  // Remove event handler attributes (onclick, onerror, onload, etc.)
   html = html.replace(/\s+on\w+\s*=\s*"[^"]*"/gi, '');
   html = html.replace(/\s+on\w+\s*=\s*'[^']*'/gi, '');
   html = html.replace(/\s+on\w+\s*=\s*[^\s>]+/gi, '');
-  // Remove javascript: and data: URLs in href/src attributes
   html = html.replace(/(href|src|action)\s*=\s*["']?\s*javascript\s*:/gi, '$1="');
   html = html.replace(/(href|src|action)\s*=\s*["']?\s*data\s*:/gi, '$1="');
   return html;
+}
+
+function decorateCodeBlocksWithCopyButtons(html) {
+  const template = document.createElement('template');
+  template.innerHTML = html;
+  const preBlocks = template.content.querySelectorAll('pre');
+  preBlocks.forEach((pre) => {
+    pre.classList.add('code-block-wrapper');
+    const btn = document.createElement('button');
+    btn.className = 'copy-btn';
+    btn.type = 'button';
+    btn.setAttribute('onclick', 'copyCodeBlock(this)');
+    btn.textContent = 'Copy';
+    pre.insertBefore(btn, pre.firstChild);
+  });
+  return template.innerHTML;
 }
 
 function copyCodeBlock(btn) {
@@ -443,16 +506,60 @@ function copyCodeBlock(btn) {
   });
 }
 
-function addMessage(role, content) {
+function applyPendingReasoning(threadId, assistantEl) {
+  if (!assistantEl) return;
+  const turn = assistantEl.getAttribute('data-turn-number');
+  if (!threadId || !turn) return;
+  const key = threadId + ':' + turn;
+  const pending = pendingReasoningByTurn.get(key);
+  if (pending) {
+    appendReasoningToAssistant(assistantEl, pending);
+    pendingReasoningByTurn.delete(key);
+  }
+}
+
+function setAssistantMessageContent(assistantEl, content, threadId) {
+  if (!assistantEl) return;
+  const raw = String(content || '');
+  const existingReasoning = assistantEl.querySelector('.reasoning-block');
+  const reasoningClone = existingReasoning ? existingReasoning.cloneNode(true) : null;
+
+  assistantEl.setAttribute('data-raw', raw);
+  assistantEl.innerHTML = raw ? renderMarkdown(raw) : '';
+
+  if (reasoningClone) {
+    assistantEl.appendChild(reasoningClone);
+  }
+  if (threadId) {
+    applyPendingReasoning(threadId, assistantEl);
+  }
+}
+
+function addMessage(role, content, options) {
   const container = document.getElementById('chat-messages');
+  if (role === 'assistant' && options && options.threadId && options.turnNumber != null) {
+    const existing = findAssistantByTurn(options.threadId, Number(options.turnNumber));
+    if (existing) {
+      setAssistantMessageContent(existing, content, options.threadId);
+      container.scrollTop = container.scrollHeight;
+      return;
+    }
+  }
+
   const div = document.createElement('div');
   div.className = 'message ' + role;
+  if (options && options.turnNumber != null) {
+    div.setAttribute('data-turn-number', String(options.turnNumber));
+  }
   if (role === 'user') {
     div.textContent = content;
+  } else if (role === 'assistant') {
+    setAssistantMessageContent(div, content, options && options.threadId);
   } else {
-    div.setAttribute('data-raw', content);
-    div.innerHTML = renderMarkdown(content);
+    div.setAttribute('data-raw', String(content || ''));
+    div.innerHTML = renderMarkdown(String(content || ''));
   }
+
   container.appendChild(div);
   container.scrollTop = container.scrollHeight;
 }
@@ -463,11 +570,119 @@ function appendToLastAssistant(chunk) {
   if (messages.length > 0) {
     const last = messages[messages.length - 1];
     const raw = (last.getAttribute('data-raw') || '') + chunk;
-    last.setAttribute('data-raw', raw);
-    last.innerHTML = renderMarkdown(raw);
+    setAssistantMessageContent(last, raw, currentThreadId);
     container.scrollTop = container.scrollHeight;
   } else {
     addMessage('assistant', chunk);
+  }
+}
+
+function reasoningHtml(data) {
+  const parts = [];
+  const narrative = (data && data.narrative) ? String(data.narrative).trim() : '';
+  if (narrative) {
+    parts.push('<div class="reasoning-narrative">' + escapeHtml(narrative) + '</div>');
+  }
+
+  const decisions = Array.isArray(data && data.tool_decisions) ? data.tool_decisions : [];
+  if (decisions.length > 0) {
+    const rows = [];
+    let openParallel = false;
+    let activeParallelGroup = null;
+
+    for (let i = 0; i < decisions.length; i++) {
+      const d = decisions[i];
+      const group = Number.isInteger(d.parallel_group) ? d.parallel_group : null;
+      const isParallel = group !== null;
+
+      if (openParallel && (!isParallel || group !== activeParallelGroup)) {
+        rows.push('</ul>');
+        openParallel = false;
+        activeParallelGroup = null;
+      }
+
+      if (isParallel && !openParallel) {
+        rows.push('<li class="reasoning-parallel-header">[parallel batch ' + group + ']</li>');
+        rows.push('<ul class="reasoning-parallel-list">');
+        openParallel = true;
+        activeParallelGroup = group;
+      }
+
+      const name = escapeHtml(d.tool_name || 'tool');
+      const toolCallId = d.tool_call_id == null
+        ? ''
+        : ' <span class="reasoning-id" title="tool_call_id">#' + escapeHtml(String(d.tool_call_id)) + '</span>';
+      const rationale = ' — ' + escapeHtml(String(d.rationale));
+      const outcome = d.outcome ? ' <span class="reasoning-outcome">[' + escapeHtml(String(d.outcome)) + ']</span>' : '';
+      const itemClass = isParallel ? 'reasoning-item reasoning-item-parallel' : 'reasoning-item';
+      const prefix = isParallel ? '<span class="reasoning-parallel-arrow">↳</span>' : '';
+      rows.push('<li class="' + itemClass + '">' + prefix + '<span class="reasoning-tool">' + name + '</span>' + toolCallId + rationale + outcome + '</li>');
+    }
+
+    if (openParallel) {
+      rows.push('</ul>');
+    }
+
+    parts.push('<ul class="reasoning-list">' + rows.join('') + '</ul>');
+  }
+
+  if (parts.length === 0) return '';
+  return '<div class="reasoning-block">'
+    + '<div class="reasoning-title">Reasoning</div>'
+    + parts.join('')
+    + '</div>';
+}
+
+function appendReasoningToAssistant(assistantEl, data) {
+  if (!assistantEl || !data) return;
+  let reasoningEl = assistantEl.querySelector('.reasoning-block');
+  const html = reasoningHtml(data);
+  if (!html) return;
+
+  if (!reasoningEl) {
+    const wrapper = document.createElement('div');
+    wrapper.innerHTML = html;
+    reasoningEl = wrapper.firstElementChild;
+    assistantEl.appendChild(reasoningEl);
+  } else {
+    reasoningEl.outerHTML = html;
+  }
+}
+
+function findAssistantByTurn(threadId, turnNumber) {
+  if (!threadId || turnNumber == null) return null;
+  const container = document.getElementById('chat-messages');
+  const selector = '.message.assistant[data-turn-number="' + String(turnNumber) + '"]';
+  return container.querySelector(selector);
+}
+
+function appendReasoningByTurn(data) {
+  if (!data || data.turn_number == null || !data.thread_id) return;
+  const turnNumber = Number(data.turn_number);
+  if (!Number.isInteger(turnNumber)) return;
+
+  const resolvedThreadId = resolveThreadAlias(data.thread_id);
+  const normalized = Object.assign({}, data, { thread_id: resolvedThreadId });
+
+  let assistant = findAssistantByTurn(resolvedThreadId, turnNumber);
+  if (!assistant && currentThreadId && resolvedThreadId === currentThreadId) {
+    // Create a live placeholder so reasoning can stream before final assistant text arrives.
+    addMessage('assistant', '', { threadId: resolvedThreadId, turnNumber: turnNumber });
+    assistant = findAssistantByTurn(resolvedThreadId, turnNumber);
+  }
+
+  if (assistant) {
+    appendReasoningToAssistant(assistant, normalized);
+  } else {
+    const key = resolvedThreadId + ':' + String(turnNumber);
+    pendingReasoningByTurn.set(key, normalized);
+  }
+
+  // Cap pending reasoning entries to avoid unbounded growth on intermittent failures.
+  while (pendingReasoningByTurn.size > PENDING_REASONING_CAP) {
+    const firstKey = pendingReasoningByTurn.keys().next().value;
+    if (firstKey == null) break;
+    pendingReasoningByTurn.delete(firstKey);
   }
 }
 
@@ -581,6 +796,23 @@ function addToolCard(name) {
   container.scrollTop = container.scrollHeight;
 }
 
+function pendingReasoningTurnForThread(threadId) {
+  if (!threadId) return null;
+  let best = null;
+  for (const key of pendingReasoningByTurn.keys()) {
+    const sep = key.lastIndexOf(':');
+    if (sep < 0) continue;
+    const keyThreadId = key.substring(0, sep);
+    if (keyThreadId !== threadId) continue;
+    const turn = Number(key.substring(sep + 1));
+    if (!Number.isInteger(turn)) continue;
+    if (best == null || turn < best) {
+      best = turn;
+    }
+  }
+  return best;
+}
+
 function completeToolCard(name, success) {
   const entries = _activeToolCards[name];
   if (!entries || entries.length === 0) return;
@@ -620,7 +852,8 @@ function setToolCardOutput(name, preview) {
 
   const output = entry.card.querySelector('.activity-tool-output');
   if (output) {
-    const truncated = preview.length > 2000 ? preview.substring(0, 2000) + '\n... (truncated)' : preview;
+    const safePreview = String(preview || '');
+    const truncated = safePreview.length > 2000 ? safePreview.substring(0, 2000) + '\n... (truncated)' : safePreview;
     output.textContent = truncated;
   }
 }
@@ -972,13 +1205,18 @@ function loadHistory(before) {
     if (!isPaginating) {
       // Fresh load: clear and render
       container.innerHTML = '';
+      pendingReasoningByTurn.clear();
       for (const turn of data.turns) {
-        addMessage('user', turn.user_input);
+        addMessage('user', turn.user_input, { turnNumber: turn.turn_number });
         if (turn.tool_calls && turn.tool_calls.length > 0) {
           addToolCallsSummary(turn.tool_calls);
         }
         if (turn.response) {
-          addMessage('assistant', turn.response);
+          const assistantOptions = { threadId: data.thread_id, turnNumber: turn.turn_number };
+          addMessage('assistant', turn.response, assistantOptions);
+          if (turn.reasoning) {
+            appendReasoningByTurn(turn.reasoning);
+          }
         }
       }
       // Show processing indicator if the last turn is still in-progress
@@ -995,13 +1233,19 @@ function loadHistory(before) {
       const savedHeight = container.scrollHeight;
       const fragment = document.createDocumentFragment();
       for (const turn of data.turns) {
-        const userDiv = createMessageElement('user', turn.user_input);
+        const userDiv = createMessageElement('user', turn.user_input, { turnNumber: turn.turn_number });
         fragment.appendChild(userDiv);
         if (turn.tool_calls && turn.tool_calls.length > 0) {
           fragment.appendChild(createToolCallsSummaryElement(turn.tool_calls));
         }
         if (turn.response) {
-          const assistantDiv = createMessageElement('assistant', turn.response);
+          const assistantDiv = createMessageElement('assistant', turn.response, {
+            threadId: data.thread_id,
+            turnNumber: turn.turn_number,
+          });
+          if (turn.reasoning) {
+            appendReasoningToAssistant(assistantDiv, turn.reasoning);
+          }
           fragment.appendChild(assistantDiv);
         }
       }
@@ -1021,14 +1265,19 @@ function loadHistory(before) {
 }
 
 // Create a message DOM element without appending it (for prepend operations)
-function createMessageElement(role, content) {
+function createMessageElement(role, content, options) {
   const div = document.createElement('div');
   div.className = 'message ' + role;
+  if (options && options.turnNumber != null) {
+    div.setAttribute('data-turn-number', String(options.turnNumber));
+  }
   if (role === 'user') {
     div.textContent = content;
+  } else if (role === 'assistant') {
+    setAssistantMessageContent(div, content, options && options.threadId);
   } else {
-    div.setAttribute('data-raw', content);
-    div.innerHTML = renderMarkdown(content);
+    div.setAttribute('data-raw', String(content || ''));
+    div.innerHTML = renderMarkdown(String(content || ''));
   }
   return div;
 }
@@ -1144,6 +1393,7 @@ function switchToAssistant() {
   if (!assistantThreadId) return;
   finalizeActivityGroup();
   currentThreadId = assistantThreadId;
+  pendingThreadAliasByRequest.clear();
   hasMore = false;
   oldestTimestamp = null;
   loadHistory();
@@ -1153,6 +1403,7 @@ function switchToAssistant() {
 function switchThread(threadId) {
   finalizeActivityGroup();
   currentThreadId = threadId;
+  pendingThreadAliasByRequest.clear();
   hasMore = false;
   oldestTimestamp = null;
   loadHistory();
@@ -1162,6 +1413,9 @@ function switchThread(threadId) {
 function createNewThread() {
   apiFetch('/api/chat/thread/new', { method: 'POST' }).then((data) => {
     currentThreadId = data.id || null;
+    pendingThreadAliasByRequest.clear();
+    pendingReasoningByTurn.clear();
+    finalizeActivityGroup();
     document.getElementById('chat-messages').innerHTML = '';
     loadThreads();
   }).catch((err) => {
@@ -2759,6 +3013,7 @@ function renderJobActivity(container, job) {
     + '<option value="message">Messages</option>'
     + '<option value="tool_use">Tool Calls</option>'
     + '<option value="tool_result">Results</option>'
+    + '<option value="reasoning">Reasoning</option>'
     + '</select>'
     + '<label class="logs-checkbox"><input type="checkbox" id="activity-autoscroll" checked> Auto-scroll</label>'
     + '</div>'
@@ -2857,6 +3112,33 @@ function appendActivityEvent(terminal, eventType, data) {
         + '</summary><pre class="activity-tool-output">'
         + escapeHtml(trOutput)
         + '</pre></details>';
+      break;
+    }
+    case 'reasoning': {
+      const narrative = data.narrative ? '<div class="activity-reasoning-narrative">'
+        + escapeHtml(String(data.narrative)) + '</div>' : '';
+      const decisions = Array.isArray(data.tool_decisions) ? data.tool_decisions : [];
+      const list = decisions.length > 0
+        ? '<ul class="activity-reasoning-list">'
+          + decisions.map((d) => {
+            const name = escapeHtml(d.tool_name || 'tool');
+            const toolCallId = d.tool_call_id == null
+              ? ''
+              : ' <span class="activity-reasoning-id" title="tool_call_id">#' + escapeHtml(String(d.tool_call_id)) + '</span>';
+            const rationale = ' — ' + escapeHtml(String(d.rationale));
+            const outcome = d.outcome ? ' [' + escapeHtml(String(d.outcome)) + ']' : '';
+            const parallel = Number.isInteger(d.parallel_group)
+              ? ' <span class="activity-reasoning-parallel">(parallel ' + d.parallel_group + ')</span>'
+              : '';
+            return '<li><span class="activity-reasoning-tool">' + name + '</span>'
+              + toolCallId + rationale + outcome + parallel + '</li>';
+          }).join('')
+          + '</ul>'
+        : '';
+      el.innerHTML = '<div class="activity-reasoning">'
+        + '<div class="activity-reasoning-title">Reasoning</div>'
+        + narrative + list
+        + '</div>';
       break;
     }
     case 'status':

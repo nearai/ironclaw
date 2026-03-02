@@ -330,7 +330,7 @@ pub async fn chat_history_handler(
             .turns
             .iter()
             .map(|t| TurnInfo {
-                turn_number: t.turn_number,
+                turn_number: t.turn_number + 1,
                 user_input: t.user_input.clone(),
                 response: t.response.clone(),
                 state: format!("{:?}", t.state),
@@ -353,6 +353,7 @@ pub async fn chat_history_handler(
                         error: tc.error.clone(),
                     })
                     .collect(),
+                reasoning: None,
             })
             .collect();
 
@@ -574,11 +575,13 @@ mod tests {
 
         let turns = build_turns_from_db_messages(&messages);
         assert_eq!(turns.len(), 2);
+        assert_eq!(turns[0].turn_number, 1);
         assert_eq!(turns[0].user_input, "Hello");
         assert_eq!(turns[0].response.as_deref(), Some("Hi there!"));
         assert_eq!(turns[0].state, "Completed");
         assert_eq!(turns[1].user_input, "How are you?");
         assert_eq!(turns[1].response.as_deref(), Some("Doing well!"));
+        assert_eq!(turns[1].turn_number, 2);
     }
 
     #[test]
@@ -607,6 +610,7 @@ mod tests {
 
         let turns = build_turns_from_db_messages(&messages);
         assert_eq!(turns.len(), 2);
+        assert_eq!(turns[1].turn_number, 2);
         assert_eq!(turns[1].user_input, "Lost message");
         assert!(turns[1].response.is_none());
         assert_eq!(turns[1].state, "Failed");

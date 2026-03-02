@@ -387,7 +387,7 @@ async def ironclaw_server():
         "CLI_ENABLED": "false",
         "GATEWAY_ENABLED": "true",
         "GATEWAY_PORT": "3001",
-        "GATEWAY_AUTH_TOKEN": "test-token-e2e",
+        "GATEWAY_AUTH_TOKEN": "changeme",
         "GATEWAY_USER_ID": "e2e-tester",
         "LLM_BACKEND": "openai_compatible",  # or mock
         "LLM_BASE_URL": "http://localhost:11434/v1",  # local Ollama
@@ -414,7 +414,7 @@ async def browser_agent(ironclaw_server):
     async with async_playwright() as p:
         browser = await p.chromium.launch(headless=True)
         page = await browser.new_page(viewport={"width": 1280, "height": 720})
-        await page.goto(f"{ironclaw_server}/?token=test-token-e2e")
+        await page.goto(f"{ironclaw_server}/?token=changeme")
         agent = ComputerUseAgent(page)
         yield agent
         await browser.close()
@@ -847,7 +847,7 @@ fn shell_env_scrubbing_removes_secrets() {
 #[test]
 fn leak_detector_catches_api_keys_in_output() {
     let detector = LeakDetector::default();
-    let output = "Here's your key: sk-1234567890abcdef1234567890abcdef";
+    let output = "Here's your key: changeme";
     let result = detector.scan(output);
     assert!(result.has_leaks());
 }

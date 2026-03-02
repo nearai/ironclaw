@@ -129,7 +129,7 @@ data: [DONE]
 GATEWAY_ENABLED=true
 GATEWAY_HOST=127.0.0.1
 GATEWAY_PORT=0
-GATEWAY_AUTH_TOKEN=e2e-test-token
+GATEWAY_AUTH_TOKEN=changeme
 GATEWAY_USER_ID=e2e-tester
 CLI_ENABLED=false
 LLM_BACKEND=openai_compatible
@@ -154,7 +154,7 @@ HEARTBEAT_ENABLED=false
 - Launches Playwright Chromium (headless)
 - Creates new browser context (isolated cookies/storage)
 - Creates new page with viewport 1280x720
-- Navigates to `{base_url}/?token=e2e-test-token`
+- Navigates to `{base_url}/?token=changeme`
 - Waits for network idle
 - Yields the `Page` object
 - Closes browser context on teardown

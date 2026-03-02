@@ -77,7 +77,7 @@ fn bootstrap_env_round_trips_embedding_disabled() {
         &[
             ("DATABASE_BACKEND", "libsql"),
             ("EMBEDDING_ENABLED", "false"),
-            ("OPENAI_API_KEY", "sk-test-key-1234567890"),
+            ("OPENAI_API_KEY", "changeme"),
             ("ONBOARD_COMPLETED", "true"),
         ],
     )
@@ -92,7 +92,7 @@ fn bootstrap_env_round_trips_embedding_disabled() {
     );
     assert_eq!(
         map.get("OPENAI_API_KEY").map(String::as_str),
-        Some("sk-test-key-1234567890"),
+        Some("changeme"),
         "OPENAI_API_KEY must be preserved alongside EMBEDDING_ENABLED"
     );
 }
@@ -144,7 +144,7 @@ fn bootstrap_env_round_trips_session_token_key() {
     let dir = tempdir().unwrap();
     let env_path = dir.path().join(".env");
 
-    let token = "sess_abc123def456ghi789jkl012mno345pqr678stu901vwx234";
+    let token = "changeme";
     save_bootstrap_env_to(
         &env_path,
         &[
@@ -192,10 +192,10 @@ fn bootstrap_env_preserves_existing_values() {
         ("DATABASE_BACKEND", "postgres"),
         (
             "DATABASE_URL",
-            "postgres://user:pass@localhost:5432/ironclaw",
+            "postgres://localhost:5432/ironclaw?token_hash=placeholder",
         ),
         ("LLM_BACKEND", "nearai"),
-        ("NEARAI_API_KEY", "key_abc123"),
+        ("NEARAI_API_KEY", "changeme"),
         ("EMBEDDING_ENABLED", "true"),
         ("ONBOARD_COMPLETED", "true"),
     ];
@@ -246,7 +246,7 @@ fn bootstrap_env_preserves_existing_values() {
     );
     assert_eq!(
         map3.get("DATABASE_URL").map(String::as_str),
-        Some("postgres://user:pass@localhost:5432/ironclaw"),
+        Some("postgres://localhost:5432/ironclaw?token_hash=placeholder"),
         "DATABASE_URL must be preserved after upsert of different key"
     );
     assert_eq!(
@@ -269,7 +269,10 @@ fn bootstrap_env_handles_special_characters() {
         // Equals signs in values (e.g., base64 tokens)
         ("API_TOKEN", "dGVzdA=="),
         // Hash characters (common in URL-encoded passwords, treated as comments without quoting)
-        ("DATABASE_URL", "postgres://user:p%23assword@host:5432/db"),
+        (
+            "DATABASE_URL",
+            "postgres://host:5432/db?token_hash=p%23assword",
+        ),
         // Single quotes inside double-quoted values
         ("GREETING", "it's a test"),
         // Double quotes (must be escaped)

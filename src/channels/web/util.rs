@@ -25,7 +25,7 @@ pub fn build_turns_from_db_messages(
     messages: &[crate::history::ConversationMessage],
 ) -> Vec<TurnInfo> {
     let mut turns = Vec::new();
-    let mut turn_number = 0;
+    let mut turn_number = 1;
     let mut iter = messages.iter().peekable();
 
     while let Some(msg) = iter.next() {
@@ -38,6 +38,7 @@ pub fn build_turns_from_db_messages(
                 started_at: msg.created_at.to_rfc3339(),
                 completed_at: None,
                 tool_calls: Vec::new(),
+                reasoning: None,
             };
 
             // Check if next message is a tool_calls record

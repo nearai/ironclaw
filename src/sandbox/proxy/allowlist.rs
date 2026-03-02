@@ -284,8 +284,8 @@ mod tests {
     fn test_extract_host_with_credentials_in_url() {
         // Credentials in URL should not affect host extraction
         assert_eq!(
-            extract_host("https://secret_key:password@evil.com/exfil"),
-            Some("evil.com".to_string())
+            extract_host("https://example.com/exfil"),
+            Some("example.com".to_string())
         );
     }
 

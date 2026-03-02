@@ -161,6 +161,8 @@ async fn handle_client_message(
             if let Some(ref tid) = thread_id {
                 incoming = incoming.with_thread(tid);
             }
+            let metadata_thread_id = thread_id.clone().unwrap_or_else(|| incoming.id.to_string());
+            incoming = incoming.with_metadata(serde_json::json!({"thread_id": metadata_thread_id}));
 
             let tx_guard = state.msg_tx.read().await;
             if let Some(ref tx) = *tx_guard {
@@ -231,6 +233,8 @@ async fn handle_client_message(
             if let Some(ref tid) = thread_id {
                 msg = msg.with_thread(tid);
             }
+            let metadata_thread_id = thread_id.clone().unwrap_or_else(|| msg.id.to_string());
+            msg = msg.with_metadata(serde_json::json!({"thread_id": metadata_thread_id}));
             let tx_guard = state.msg_tx.read().await;
             if let Some(ref tx) = *tx_guard {
                 let _ = tx.send(msg).await;
@@ -361,6 +365,30 @@ mod tests {
         assert_eq!(incoming.thread_id.as_deref(), Some("t1"));
         assert_eq!(incoming.channel, "gateway");
         assert_eq!(incoming.user_id, "user1");
+        assert_eq!(incoming.metadata["thread_id"], "t1");
+    }
+
+    #[tokio::test]
+    async fn test_handle_client_message_adds_fallback_thread_metadata() {
+        let (agent_tx, mut agent_rx) = mpsc::channel(16);
+        let state = make_test_state(Some(agent_tx)).await;
+        let (direct_tx, _direct_rx) = mpsc::channel(16);
+
+        handle_client_message(
+            WsClientMessage::Message {
+                content: "hello".to_string(),
+                thread_id: None,
+            },
+            &state,
+            "user1",
+            &direct_tx,
+        )
+        .await;
+
+        let incoming = agent_rx.recv().await.unwrap();
+        assert!(incoming.metadata.get("thread_id").is_some());
+        let tid = incoming.metadata["thread_id"].as_str().unwrap();
+        assert!(!tid.is_empty());
     }
 
     #[tokio::test]
@@ -413,6 +441,7 @@ mod tests {
         assert!(incoming.content.contains("ExecApproval"));
         // Thread should be forwarded onto the IncomingMessage.
         assert_eq!(incoming.thread_id.as_deref(), Some("thread-42"));
+        assert_eq!(incoming.metadata["thread_id"], "thread-42");
     }
 
     #[tokio::test]

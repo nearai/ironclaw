@@ -401,6 +401,69 @@ body {
   border-bottom-left-radius: 2px;
 }
 
+.reasoning-block {
+  margin-top: 10px;
+  padding-top: 8px;
+  border-top: 1px dashed var(--border);
+  color: var(--text-secondary);
+  font-size: 12px;
+}
+
+.reasoning-title {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--text-tertiary);
+  margin-bottom: 4px;
+}
+
+.reasoning-narrative {
+  margin-bottom: 4px;
+  color: var(--text-secondary);
+  white-space: pre-wrap;
+}
+
+.reasoning-list {
+  margin: 4px 0 0;
+  padding-left: 16px;
+}
+
+.reasoning-item {
+  margin: 2px 0;
+}
+
+.reasoning-item-parallel {
+  list-style: none;
+}
+
+.reasoning-parallel-header {
+  margin: 4px 0 2px;
+  list-style: none;
+  color: var(--text-tertiary);
+  text-transform: lowercase;
+  letter-spacing: 0.02em;
+}
+
+.reasoning-parallel-list {
+  margin: 0;
+  padding-left: 14px;
+}
+
+.reasoning-parallel-arrow {
+  color: var(--text-tertiary);
+  margin-right: 6px;
+}
+
+.reasoning-tool {
+  color: var(--accent);
+}
+
+.reasoning-id,
+.reasoning-outcome,
+.reasoning-parallel {
+  color: var(--text-tertiary);
+}
+
 .message.system {
   align-self: center;
   background: var(--bg-tertiary);
@@ -2674,6 +2737,43 @@ body {
   max-height: 200px;
   overflow-y: auto;
   background: var(--bg);
+}
+
+.activity-reasoning {
+  margin: 4px 0;
+  padding: 6px 10px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--bg-secondary);
+}
+
+.activity-reasoning-title {
+  font-size: 11px;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--text-tertiary);
+  margin-bottom: 4px;
+}
+
+.activity-reasoning-narrative {
+  color: var(--text-secondary);
+  margin-bottom: 4px;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.activity-reasoning-list {
+  margin: 0;
+  padding-left: 16px;
+}
+
+.activity-reasoning-tool {
+  color: var(--accent);
+}
+
+.activity-reasoning-id,
+.activity-reasoning-parallel {
+  color: var(--text-tertiary);
 }
 
 .activity-input-bar {

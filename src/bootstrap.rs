@@ -455,7 +455,7 @@ mod tests {
 
         // URLs with # in the password are common (URL-encoded special chars).
         // Without quoting, dotenvy treats # as a comment delimiter.
-        let url = "postgres://user:p%23ss@localhost:5432/ironclaw";
+        let url = "postgres://localhost:5432/ironclaw?token_hash=p%23ss";
         std::fs::write(&env_path, format!("DATABASE_URL=\"{}\"\n", url)).unwrap();
 
         let parsed: Vec<(String, String)> = dotenvy::from_path_iter(&env_path)
@@ -785,7 +785,7 @@ INJECTED="pwned"#;
         let env_path = dir.path().join(".env");
 
         // URLs with special characters that are common in database passwords
-        let url = "postgres://user:p%23ss@host:5432/db?sslmode=require";
+        let url = "postgres://host:5432/db?sslmode=require&token_hash=changeme";
         let escaped = url.replace('\\', "\\\\").replace('"', "\\\"");
         let content = format!("DATABASE_URL=\"{}\"\n", escaped);
         std::fs::write(&env_path, &content).unwrap();

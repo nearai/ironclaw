@@ -378,7 +378,7 @@ Report when the job is complete or if you encounter issues you cannot resolve."#
                             .map(|tc| ToolSelection {
                                 tool_name: tc.name.clone(),
                                 parameters: tc.arguments.clone(),
-                                reasoning: String::new(),
+                                reasoning: crate::llm::normalize_tool_reasoning(&tc.reasoning),
                                 alternatives: vec![],
                                 tool_call_id: tc.id.clone(),
                             })
