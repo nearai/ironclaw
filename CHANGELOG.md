@@ -7,6 +7,74 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.13.0](https://github.com/nearai/ironclaw/compare/v0.12.0...v0.13.0) - 2026-03-02
+
+### Added
+
+- *(cli)* add tool setup command + GitHub setup schema ([#438](https://github.com/nearai/ironclaw/pull/438))
+- add web_fetch built-in tool ([#435](https://github.com/nearai/ironclaw/pull/435))
+- *(web)* DB-backed Jobs tab + scheduler-dispatched local jobs ([#436](https://github.com/nearai/ironclaw/pull/436))
+- *(extensions)* add OAuth setup UI for WASM tools + display name labels ([#437](https://github.com/nearai/ironclaw/pull/437))
+- *(bootstrap)* auto-detect libsql when ironclaw.db exists ([#399](https://github.com/nearai/ironclaw/pull/399))
+- *(web)* slash command autocomplete + /status /list + fix chat input locking ([#404](https://github.com/nearai/ironclaw/pull/404))
+- *(routines)* deliver notifications to all installed channels ([#398](https://github.com/nearai/ironclaw/pull/398))
+- *(web)* persist tool calls, restore approvals on thread switch, and UI fixes ([#382](https://github.com/nearai/ironclaw/pull/382))
+- add IRONCLAW_BASE_DIR env var with LazyLock caching ([#397](https://github.com/nearai/ironclaw/pull/397))
+- feat(signal) attachment upload  + message tool ([#375](https://github.com/nearai/ironclaw/pull/375))
+
+### Fixed
+
+- *(channels)* add host-based credential injection to WASM channel wrapper ([#421](https://github.com/nearai/ironclaw/pull/421))
+- pre-validate Cloudflare tunnel token by spawning cloudflared ([#446](https://github.com/nearai/ironclaw/pull/446))
+- batch of quick fixes (#417, #338, #330, #358, #419, #344) ([#428](https://github.com/nearai/ironclaw/pull/428))
+- persist channel activation state across restarts ([#432](https://github.com/nearai/ironclaw/pull/432))
+- init WASM runtime eagerly regardless of tools directory existence ([#401](https://github.com/nearai/ironclaw/pull/401))
+- add TLS support for PostgreSQL connections ([#363](https://github.com/nearai/ironclaw/pull/363)) ([#427](https://github.com/nearai/ironclaw/pull/427))
+- scan inbound messages for leaked secrets ([#433](https://github.com/nearai/ironclaw/pull/433))
+- use tailscale funnel --bg for proper tunnel setup ([#430](https://github.com/nearai/ironclaw/pull/430))
+- normalize secret names to lowercase for case-insensitive matching ([#413](https://github.com/nearai/ironclaw/pull/413)) ([#431](https://github.com/nearai/ironclaw/pull/431))
+- persist model name to .env so dotted names survive restart ([#426](https://github.com/nearai/ironclaw/pull/426))
+- *(setup)* check cloudflared binary and validate tunnel token ([#424](https://github.com/nearai/ironclaw/pull/424))
+- *(setup)* validate PostgreSQL version and pgvector availability before migrations ([#423](https://github.com/nearai/ironclaw/pull/423))
+- guard zsh compdef call to prevent error before compinit ([#422](https://github.com/nearai/ironclaw/pull/422))
+- *(telegram)* remove restart button, validate token on setup ([#434](https://github.com/nearai/ironclaw/pull/434))
+- web UI routines tab shows all routines regardless of creating channel ([#391](https://github.com/nearai/ironclaw/pull/391))
+- Discord Ed25519 signature verification and capabilities header alias ([#148](https://github.com/nearai/ironclaw/pull/148)) ([#372](https://github.com/nearai/ironclaw/pull/372))
+- prevent duplicate WASM channel activation on startup ([#390](https://github.com/nearai/ironclaw/pull/390))
+
+### Other
+
+- rename WasmBuildable::repo_url to source_dir ([#445](https://github.com/nearai/ironclaw/pull/445))
+- Improve --help: add detailed about/examples/color, snapshot test (clo… ([#371](https://github.com/nearai/ironclaw/pull/371))
+- Add automated QA: schema validator, CI matrix, Docker build, and P1 test coverage ([#353](https://github.com/nearai/ironclaw/pull/353))
+
+## [0.12.0](https://github.com/nearai/ironclaw/compare/v0.11.1...v0.12.0) - 2026-02-26
+
+### Added
+
+- *(web)* improve WASM channel setup flow ([#380](https://github.com/nearai/ironclaw/pull/380))
+- *(web)* inline tool activity cards with auto-collapsing ([#376](https://github.com/nearai/ironclaw/pull/376))
+- *(web)* display logs newest-first in web gateway UI ([#369](https://github.com/nearai/ironclaw/pull/369))
+- *(signal)* tool approval workflow and status updates ([#350](https://github.com/nearai/ironclaw/pull/350))
+- add OpenRouter preset to setup wizard ([#270](https://github.com/nearai/ironclaw/pull/270))
+- *(channels)* add native Signal channel via signal-cli HTTP daemon ([#271](https://github.com/nearai/ironclaw/pull/271))
+
+### Fixed
+
+- correct MCP registry URLs and remove non-existent Google endpoints ([#370](https://github.com/nearai/ironclaw/pull/370))
+- resolve_thread adopts existing session threads by UUID ([#377](https://github.com/nearai/ironclaw/pull/377))
+- resolve telegram/slack name collision between tool and channel registries ([#346](https://github.com/nearai/ironclaw/pull/346))
+- make onboarding installs prefer release artifacts with source fallback ([#323](https://github.com/nearai/ironclaw/pull/323))
+- copy missing files in Dockerfile to fix build ([#322](https://github.com/nearai/ironclaw/pull/322))
+- fall back to build-from-source when extension download fails ([#312](https://github.com/nearai/ironclaw/pull/312))
+
+### Other
+
+- Add --version flag with clap built-in support and test ([#342](https://github.com/nearai/ironclaw/pull/342))
+- Update FEATURE_PARITY.md ([#337](https://github.com/nearai/ironclaw/pull/337))
+- add brew install ironclaw instructions ([#310](https://github.com/nearai/ironclaw/pull/310))
+- Fix skills system: enable by default, fix registry and install ([#300](https://github.com/nearai/ironclaw/pull/300))
+
 ## [0.11.1](https://github.com/nearai/ironclaw/compare/v0.11.0...v0.11.1) - 2026-02-23
 
 ### Other

@@ -9,7 +9,7 @@ use ironclaw::{
     agent::{Agent, AgentDeps},
     app::{AppBuilder, AppBuilderFlags},
     channels::{
-        ChannelManager, GatewayChannel, HttpChannel, ReplChannel, WebhookServer,
+        ChannelManager, GatewayChannel, HttpChannel, ReplChannel, SignalChannel, WebhookServer,
         WebhookServerConfig,
         wasm::{
             RegisteredEndpoint, SharedWasmChannel, WasmChannelLoader, WasmChannelRouter,
@@ -44,8 +44,19 @@ fn init_cli_tracing() {
         .init();
 }
 
-#[tokio::main]
-async fn main() -> anyhow::Result<()> {
+/// Synchronous entry point. Loads `.env` files before the Tokio runtime
+/// starts so that `std::env::set_var` is safe (no worker threads yet).
+fn main() -> anyhow::Result<()> {
+    let _ = dotenvy::dotenv();
+    ironclaw::bootstrap::load_ironclaw_env();
+
+    tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()?
+        .block_on(async_main())
+}
+
+async fn async_main() -> anyhow::Result<()> {
     let cli = Cli::parse();
 
     // Handle non-agent commands first (they don't need full setup)
@@ -80,14 +91,10 @@ async fn main() -> anyhow::Result<()> {
         }
         Some(Command::Doctor) => {
             init_cli_tracing();
-            let _ = dotenvy::dotenv();
-            ironclaw::bootstrap::load_ironclaw_env();
             return ironclaw::cli::run_doctor_command().await;
         }
         Some(Command::Status) => {
             init_cli_tracing();
-            let _ = dotenvy::dotenv();
-            ironclaw::bootstrap::load_ironclaw_env();
             return run_status_command().await;
         }
         Some(Command::Completion(completion)) => {
@@ -115,9 +122,6 @@ async fn main() -> anyhow::Result<()> {
             skip_auth,
             channels_only,
         }) => {
-            let _ = dotenvy::dotenv();
-            ironclaw::bootstrap::load_ironclaw_env();
-
             #[cfg(any(feature = "postgres", feature = "libsql"))]
             {
                 let config = SetupConfig {
@@ -140,11 +144,6 @@ async fn main() -> anyhow::Result<()> {
     }
 
     // ── Agent startup ──────────────────────────────────────────────────
-
-    // Load .env files early so DATABASE_URL (and any other vars) are
-    // available to all subsequent env-based config resolution.
-    let _ = dotenvy::dotenv();
-    ironclaw::bootstrap::load_ironclaw_env();
 
     // Enhanced first-run detection
     #[cfg(any(feature = "postgres", feature = "libsql"))]
@@ -348,6 +347,7 @@ async fn main() -> anyhow::Result<()> {
             &config,
             &components.secrets_store,
             components.extension_manager.as_ref(),
+            components.db.as_ref(),
         )
         .await;
 
@@ -365,6 +365,25 @@ async fn main() -> anyhow::Result<()> {
             if let Some(routes) = result.webhook_routes {
                 webhook_routes.push(routes);
             }
+        }
+    }
+
+    // Add Signal channel if configured and not CLI-only mode.
+    if !cli.cli_only
+        && let Some(ref signal_config) = config.channels.signal
+    {
+        let signal_channel = SignalChannel::new(signal_config.clone())?;
+        channel_names.push("signal".to_string());
+        channels.add(Box::new(signal_channel)).await;
+        let safe_url = SignalChannel::redact_url(&signal_config.http_url);
+        tracing::info!(
+            url = %safe_url,
+            "Signal channel enabled"
+        );
+        if signal_config.allow_from.is_empty() {
+            tracing::warn!(
+                "Signal channel has empty allow_from list - ALL messages will be DENIED."
+            );
         }
     }
 
@@ -437,9 +456,16 @@ async fn main() -> anyhow::Result<()> {
     let session_manager =
         Arc::new(ironclaw::agent::SessionManager::new().with_hooks(components.hooks.clone()));
 
+    // Lazy scheduler slot — filled after Agent::new creates the Scheduler.
+    // Allows CreateJobTool to dispatch local jobs via the Scheduler even though
+    // the Scheduler is created after tools are registered (chicken-and-egg).
+    let scheduler_slot: ironclaw::tools::builtin::SchedulerSlot =
+        Arc::new(tokio::sync::RwLock::new(None));
+
     // Register job tools (sandbox deps auto-injected when container_job_manager is available)
     components.tools.register_job_tools(
         Arc::clone(&components.context_manager),
+        Some(scheduler_slot.clone()),
         container_job_manager.clone(),
         components.db.clone(),
         job_event_tx.clone(),
@@ -455,6 +481,11 @@ async fn main() -> anyhow::Result<()> {
     // ── Gateway channel ────────────────────────────────────────────────
 
     let mut gateway_url: Option<String> = None;
+    let mut sse_sender: Option<
+        tokio::sync::broadcast::Sender<ironclaw::channels::web::types::SseEvent>,
+    > = None;
+    let mut gateway_state: Option<std::sync::Arc<ironclaw::channels::web::server::GatewayState>> =
+        None;
     if let Some(ref gw_config) = config.channels.gateway {
         let mut gw =
             GatewayChannel::new(gw_config.clone()).with_llm_provider(Arc::clone(&components.llm));
@@ -506,6 +537,12 @@ async fn main() -> anyhow::Result<()> {
         ));
 
         tracing::info!("Web UI: http://{}:{}/", gw_config.host, gw_config.port);
+
+        // Capture SSE sender before moving gw into channels.
+        // IMPORTANT: This must come after all `with_*` calls since `rebuild_state`
+        // creates a new SseManager, which would orphan this sender.
+        sse_sender = Some(gw.state().sse.sender());
+        gateway_state = Some(Arc::clone(gw.state()));
 
         channel_names.push("gateway".to_string());
         channels.add(Box::new(gw)).await;
@@ -562,10 +599,19 @@ async fn main() -> anyhow::Result<()> {
 
     let channels = Arc::new(channels);
 
+    // Register message tool for sending messages to connected channels
+    components
+        .tools
+        .register_message_tools(Arc::clone(&channels))
+        .await;
+
     // Wire up channel runtime for hot-activation of WASM channels.
     if let Some(ref ext_mgr) = components.extension_manager
         && let Some((rt, ps, router)) = wasm_channel_runtime_state.take()
     {
+        let active_at_startup: std::collections::HashSet<String> =
+            loaded_wasm_channel_names.iter().cloned().collect();
+        ext_mgr.set_active_channels(loaded_wasm_channel_names).await;
         ext_mgr
             .set_channel_runtime(
                 Arc::clone(&channels),
@@ -577,12 +623,35 @@ async fn main() -> anyhow::Result<()> {
             .await;
         tracing::info!("Channel runtime wired into extension manager for hot-activation");
 
-        // Tell extension manager which WASM channels are active so `list()` reports correctly.
-        if !loaded_wasm_channel_names.is_empty() {
-            ext_mgr
-                .set_active_channels(loaded_wasm_channel_names.clone())
-                .await;
+        // Auto-activate channels that were active in a previous session.
+        let persisted = ext_mgr.load_persisted_active_channels().await;
+        for name in &persisted {
+            if !active_at_startup.contains(name) {
+                match ext_mgr.activate(name).await {
+                    Ok(result) => {
+                        tracing::info!(
+                            channel = %name,
+                            message = %result.message,
+                            "Auto-activated persisted channel"
+                        );
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            channel = %name,
+                            error = %e,
+                            "Failed to auto-activate persisted channel"
+                        );
+                    }
+                }
+            }
         }
+    }
+
+    // Wire SSE sender into extension manager for broadcasting status events.
+    if let Some(ref ext_mgr) = components.extension_manager
+        && let Some(sender) = sse_sender
+    {
+        ext_mgr.set_sse_sender(sender).await;
     }
 
     let deps = AgentDeps {
@@ -611,6 +680,9 @@ async fn main() -> anyhow::Result<()> {
         Some(session_manager),
     );
 
+    // Fill the scheduler slot now that Agent (and its Scheduler) exist.
+    *scheduler_slot.write().await = Some(agent.scheduler());
+
     agent.run().await?;
 
     // ── Shutdown ────────────────────────────────────────────────────────
@@ -627,6 +699,17 @@ async fn main() -> anyhow::Result<()> {
     }
 
     tracing::info!("Agent shutdown complete");
+
+    // Check if a restart was requested via the gateway API.
+    if let Some(ref gw_state) = gateway_state
+        && gw_state
+            .restart_requested
+            .load(std::sync::atomic::Ordering::Relaxed)
+    {
+        eprintln!("Restarting IronClaw (exit code 75)...");
+        std::process::exit(75);
+    }
+
     Ok(())
 }
 
@@ -815,6 +898,7 @@ async fn setup_wasm_channels(
     config: &ironclaw::config::Config,
     secrets_store: &Option<Arc<dyn SecretsStore + Send + Sync>>,
     extension_manager: Option<&Arc<ironclaw::extensions::ExtensionManager>>,
+    database: Option<&Arc<dyn ironclaw::db::Database>>,
 ) -> Option<WasmChannelSetup> {
     let runtime = match WasmChannelRuntime::new(WasmChannelRuntimeConfig::default()) {
         Ok(r) => Arc::new(r),
@@ -825,7 +909,13 @@ async fn setup_wasm_channels(
     };
 
     let pairing_store = Arc::new(PairingStore::new());
-    let loader = WasmChannelLoader::new(Arc::clone(&runtime), Arc::clone(&pairing_store));
+    let settings_store: Option<Arc<dyn ironclaw::db::SettingsStore>> =
+        database.map(|db| Arc::clone(db) as Arc<dyn ironclaw::db::SettingsStore>);
+    let loader = WasmChannelLoader::new(
+        Arc::clone(&runtime),
+        Arc::clone(&pairing_store),
+        settings_store,
+    );
 
     let results = match loader
         .load_from_dir(&config.channels.wasm_channels_dir)
@@ -839,7 +929,6 @@ async fn setup_wasm_channels(
     };
 
     let wasm_router = Arc::new(WasmChannelRouter::new());
-    let mut has_webhook_channels = false;
     let mut channels: Vec<(String, Box<dyn ironclaw::channels::Channel>)> = Vec::new();
     let mut channel_names: Vec<String> = Vec::new();
 
@@ -849,6 +938,7 @@ async fn setup_wasm_channels(
         tracing::info!("Loaded WASM channel: {}", channel_name);
 
         let secret_name = loaded.webhook_secret_name();
+        let sig_key_secret_name = loaded.signature_key_secret_name();
 
         let webhook_secret = if let Some(secrets) = secrets_store {
             secrets
@@ -938,7 +1028,24 @@ async fn setup_wasm_channels(
                 secret_header,
             )
             .await;
-        has_webhook_channels = true;
+
+        // Register Ed25519 signature key if declared in capabilities
+        if let Some(ref sig_key_name) = sig_key_secret_name
+            && let Some(secrets) = secrets_store
+            && let Ok(key_secret) = secrets.get_decrypted("default", sig_key_name).await
+        {
+            match wasm_router
+                .register_signature_key(&channel_name, key_secret.expose())
+                .await
+            {
+                Ok(()) => {
+                    tracing::info!(channel = %channel_name, "Registered Ed25519 signature key")
+                }
+                Err(e) => {
+                    tracing::error!(channel = %channel_name, error = %e, "Invalid signature key in secrets store")
+                }
+            }
+        }
 
         {
             let exclude_secrets: Vec<String> = socket_mode_app_token_secret.into_iter().collect();
@@ -976,13 +1083,13 @@ async fn setup_wasm_channels(
         tracing::warn!("Failed to load WASM channel {}: {}", path.display(), err);
     }
 
-    let webhook_routes = if has_webhook_channels {
+    // Always create webhook routes (even with no channels loaded) so that
+    // channels hot-added at runtime can receive webhooks without a restart.
+    let webhook_routes = {
         Some(create_wasm_channel_router(
             Arc::clone(&wasm_router),
             extension_manager.map(Arc::clone),
         ))
-    } else {
-        None
     };
 
     Some(WasmChannelSetup {

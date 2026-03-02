@@ -172,7 +172,18 @@ env-var mode or skipped secrets.
 | Anthropic | API key | `anthropic_api_key` | `ANTHROPIC_API_KEY` |
 | OpenAI | API key | `openai_api_key` | `OPENAI_API_KEY` |
 | Ollama | None | - | - |
-| OpenAI-compatible | Optional API key | `llm_compatible_api_key` | `LLM_API_KEY` |
+| OpenRouter¹ | API key | `llm_compatible_api_key` | `LLM_API_KEY` |
+| OpenAI-compatible¹ | Optional API key | `llm_compatible_api_key` | `LLM_API_KEY` |
+
+¹ OpenRouter and OpenAI-compatible share the same secret name and env var because
+OpenRouter is stored as `llm_backend = "openai_compatible"` under the hood.
+Switching between them overwrites the same credential slot.
+
+**OpenRouter** (`setup_openrouter`):
+- Pre-configured OpenAI-compatible preset with base URL `https://openrouter.ai/api/v1`
+- Delegates to `setup_api_key_provider()` with a display name override ("OpenRouter")
+- Sets `llm_backend = "openai_compatible"` and `openai_compatible_base_url` automatically
+- Clears `selected_model` so Step 4 prompts for a model name (manual text input, no API-based model fetching)
 
 **API-key providers** (`setup_api_key_provider`):
 1. Check env var → if set, ask to reuse, persist to secrets store
@@ -258,7 +269,7 @@ key first, then falls back to the standard env var.
 6c. Build channel options: discovered + bundled + registry catalog
 6d. Multi-select: CLI/TUI, HTTP, all available channels
 6e. Install missing bundled channels (copy WASM binaries)
-6f. Install missing registry channels (build from source)
+6f. Install missing registry channels (download artifacts, fallback to source build)
 6g. Initialize SecretsContext (for token storage)
 6h. Setup HTTP webhook (if selected)
 6i. Setup each WASM channel (secrets, owner binding)
@@ -267,7 +278,7 @@ key first, then falls back to the standard env var.
 **Channel sources** (priority order for installation):
 1. Already installed in `~/.ironclaw/channels/`
 2. Bundled channels (pre-compiled in `channels-src/`)
-3. Registry channels (`registry/channels/*.json`, built from source)
+3. Registry channels (`registry/channels/*.json`, download-first with source fallback)
 
 **Tunnel setup** (`setup_tunnel`):
 - Options: ngrok, Cloudflare Tunnel, localtunnel, custom URL
@@ -305,8 +316,9 @@ key first, then falls back to the standard env var.
 4. Discover already-installed tools in `~/.ironclaw/tools/`
 5. Multi-select: show all registry tools with display name, auth method,
    and description. Pre-check tools tagged `"default"` and already installed.
-6. For each selected tool not yet installed, build from source via
-   `RegistryInstaller::install_from_source()`
+6. For each selected tool not yet installed, install via
+   `RegistryInstaller::install_with_source_fallback()` (download-first,
+   fallback to source build)
 7. Print consolidated auth hints (deduplicated by provider, e.g. one hint
    for all Google tools sharing `google_oauth_token`)
 

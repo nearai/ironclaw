@@ -8,17 +8,20 @@
 
 use std::sync::Arc;
 
+use base64::Engine;
 use reqwest::Client;
 use secrecy::{ExposeSecret, SecretString};
 use serde::Deserialize;
+use url::Url;
+use uuid::Uuid;
 
 #[cfg(feature = "postgres")]
 use crate::secrets::SecretsCrypto;
 use crate::secrets::{CreateSecretParams, SecretsStore};
 use crate::settings::{Settings, TunnelSettings};
 use crate::setup::prompts::{
-    confirm, input, optional_input, print_error, print_info, print_success, secret_input,
-    select_one,
+    confirm, input, optional_input, print_error, print_info, print_success, print_warning,
+    secret_input, select_one,
 };
 
 /// Typed errors for channel setup flows.
@@ -35,6 +38,9 @@ pub enum ChannelSetupError {
 
     #[error("{0}")]
     Validation(String),
+
+    #[error("Setup cancelled by user")]
+    Cancelled,
 }
 
 /// Context for saving secrets during setup.
@@ -359,7 +365,7 @@ async fn bind_telegram_owner_flow(
 /// This is shared across all channels that need webhook endpoints.
 /// Returns a `TunnelSettings` with provider config (managed tunnel)
 /// or a static URL.
-pub fn setup_tunnel(settings: &Settings) -> Result<TunnelSettings, ChannelSetupError> {
+pub async fn setup_tunnel(settings: &Settings) -> Result<TunnelSettings, ChannelSetupError> {
     // Show existing config
     let has_existing = settings.tunnel.public_url.is_some() || settings.tunnel.provider.is_some();
     if has_existing {
@@ -439,7 +445,7 @@ pub fn setup_tunnel(settings: &Settings) -> Result<TunnelSettings, ChannelSetupE
 
     match choice {
         0 => setup_tunnel_ngrok(),
-        1 => setup_tunnel_cloudflare(),
+        1 => setup_tunnel_cloudflare().await,
         2 => setup_tunnel_tailscale(),
         3 => setup_tunnel_custom(),
         4 => setup_tunnel_static(),
@@ -464,20 +470,186 @@ fn setup_tunnel_ngrok() -> Result<TunnelSettings, ChannelSetupError> {
     })
 }
 
-fn setup_tunnel_cloudflare() -> Result<TunnelSettings, ChannelSetupError> {
+async fn setup_tunnel_cloudflare() -> Result<TunnelSettings, ChannelSetupError> {
+    // Check if cloudflared binary is on PATH
+    let cloudflared_found = crate::skills::gating::binary_exists("cloudflared");
+
+    if !cloudflared_found {
+        print_error("cloudflared not found in PATH.");
+        print_info("Install it:");
+        print_info("  macOS:   brew install cloudflared");
+        print_info("  Ubuntu:  https://pkg.cloudflare.com/");
+        print_info(
+            "  Other:   https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/downloads/",
+        );
+        println!();
+        if !confirm(
+            "Continue anyway (you can install cloudflared later)?",
+            false,
+        )? {
+            return Err(ChannelSetupError::Validation(
+                "cloudflared binary not found. Install it and re-run setup.".to_string(),
+            ));
+        }
+    }
+
+    // Detect existing cloudflared services that may conflict
+    if let Some(warning) = detect_existing_cloudflared() {
+        print_warning(&warning);
+        if !confirm("Continue anyway?", true)? {
+            return Err(ChannelSetupError::Cancelled);
+        }
+        println!();
+    }
+
     print_info("Get your tunnel token from the Cloudflare Zero Trust dashboard:");
     print_info("  https://one.dash.cloudflare.com/ > Networks > Tunnels");
     println!();
 
     let token = secret_input("Cloudflare tunnel token")?;
 
-    print_success("Cloudflare tunnel configured. Tunnel will start automatically at boot.");
+    let token_valid = validate_cloudflare_token_format(token.expose_secret());
+
+    if !token_valid {
+        print_error("Token does not appear to be a valid Cloudflare tunnel token.");
+        print_info("Tokens are base64-encoded and contain account/tunnel identifiers.");
+        print_info(
+            "Copy the full token from: Zero Trust dashboard > Networks > Tunnels > your tunnel",
+        );
+        println!();
+        if !confirm("Save this token anyway?", false)? {
+            return Err(ChannelSetupError::Validation(
+                "Invalid Cloudflare tunnel token format.".to_string(),
+            ));
+        }
+    }
+
+    // Live-validate the token by briefly spawning cloudflared (if available)
+    if cloudflared_found && token_valid {
+        print_info("Verifying token with cloudflared...");
+        match validate_cloudflare_token_live(token.expose_secret()).await {
+            Ok(()) => {
+                print_success("Token verified -- cloudflared connected successfully.");
+            }
+            Err(stderr_output) => {
+                print_error(&format!(
+                    "cloudflared rejected the token: {}",
+                    stderr_output
+                ));
+                println!();
+                if !confirm("Save this token anyway?", false)? {
+                    return Err(ChannelSetupError::Validation(
+                        "Cloudflare tunnel token failed live validation.".to_string(),
+                    ));
+                }
+            }
+        }
+    }
+
+    print_success("Cloudflare tunnel token saved.");
+    if cloudflared_found {
+        print_info("Start the tunnel with: cloudflared tunnel --no-autoupdate run --token <token>");
+        print_info("For auto-start, install cloudflared as a system service:");
+        print_info("  sudo cloudflared service install <token>");
+    } else {
+        print_info("After installing cloudflared, start the tunnel with:");
+        print_info("  cloudflared tunnel --no-autoupdate run --token <token>");
+    }
 
     Ok(TunnelSettings {
         provider: Some("cloudflare".to_string()),
         cf_token: Some(token.expose_secret().to_string()),
         ..Default::default()
     })
+}
+
+/// Detect running cloudflared processes or managed services that could conflict
+/// with IronClaw's tunnel management.
+fn detect_existing_cloudflared() -> Option<String> {
+    let mut conflicts: Vec<String> = Vec::new();
+
+    // Check for running cloudflared processes (all platforms)
+    #[cfg(unix)]
+    {
+        let output = std::process::Command::new("pgrep")
+            .args(["-x", "cloudflared"])
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null())
+            .output();
+        if let Ok(out) = output
+            && out.status.success()
+        {
+            let pids = String::from_utf8_lossy(&out.stdout);
+            let pids: Vec<&str> = pids.trim().lines().collect();
+            if !pids.is_empty() {
+                conflicts.push(format!(
+                    "Running cloudflared process(es): PID {}",
+                    pids.join(", ")
+                ));
+            }
+        }
+    }
+
+    // macOS: check brew services
+    #[cfg(target_os = "macos")]
+    {
+        let output = std::process::Command::new("brew")
+            .args(["services", "list"])
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null())
+            .output();
+        if let Ok(out) = output {
+            let stdout = String::from_utf8_lossy(&out.stdout);
+            for line in stdout.lines() {
+                if line.contains("cloudflared") && line.contains("started") {
+                    conflicts.push("Homebrew service: cloudflared (started)".to_string());
+                    break;
+                }
+            }
+        }
+
+        let output = std::process::Command::new("launchctl")
+            .args(["list"])
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null())
+            .output();
+        if let Ok(out) = output {
+            let stdout = String::from_utf8_lossy(&out.stdout);
+            for line in stdout.lines() {
+                if line.contains("cloudflared") {
+                    conflicts.push("launchd service: cloudflared detected".to_string());
+                    break;
+                }
+            }
+        }
+    }
+
+    // Linux: check systemd
+    #[cfg(target_os = "linux")]
+    {
+        let output = std::process::Command::new("systemctl")
+            .args(["is-active", "cloudflared"])
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null())
+            .output();
+        if let Ok(out) = output {
+            let stdout = String::from_utf8_lossy(&out.stdout);
+            if stdout.trim() == "active" {
+                conflicts.push("systemd service: cloudflared (active)".to_string());
+            }
+        }
+    }
+
+    if conflicts.is_empty() {
+        None
+    } else {
+        Some(format!(
+            "Detected existing cloudflared service(s) that may conflict:\n  {}\n\
+             Consider stopping them first (e.g., `brew services stop cloudflared` or \
+             `sudo systemctl stop cloudflared`).",
+            conflicts.join("\n  ")
+        ))
+    }
 }
 
 fn setup_tunnel_tailscale() -> Result<TunnelSettings, ChannelSetupError> {
@@ -639,6 +811,19 @@ pub struct HttpSetupResult {
     pub host: String,
 }
 
+/// Result of Signal channel setup.
+#[derive(Debug, Clone)]
+pub struct SignalSetupResult {
+    pub enabled: bool,
+    pub http_url: String,
+    pub account: String,
+    pub allow_from: String,
+    pub allow_from_groups: String,
+    pub dm_policy: String,
+    pub group_policy: String,
+    pub group_allow_from: String,
+}
+
 /// Set up HTTP webhook channel.
 pub async fn setup_http(secrets: &SecretsContext) -> Result<HttpSetupResult, ChannelSetupError> {
     println!("HTTP Webhook Setup:");
@@ -682,6 +867,188 @@ pub async fn setup_http(secrets: &SecretsContext) -> Result<HttpSetupResult, Cha
 /// Generate a random webhook secret.
 pub fn generate_webhook_secret() -> String {
     generate_secret_with_length(32)
+}
+
+fn validate_e164(account: &str) -> Result<(), String> {
+    if !account.starts_with('+') {
+        return Err("E.164 account must start with '+'".to_string());
+    }
+    let digits = &account[1..];
+    if digits.is_empty() {
+        return Err("E.164 account must have digits after '+'".to_string());
+    }
+    if !digits.chars().all(|c| c.is_ascii_digit()) {
+        return Err("E.164 account must contain only digits after '+'".to_string());
+    }
+    if digits.len() < 7 || digits.len() > 15 {
+        return Err("E.164 account must be 7-15 digits after '+'".to_string());
+    }
+    Ok(())
+}
+
+fn validate_allow_from_list(list: &str) -> Result<(), String> {
+    if list.is_empty() {
+        return Ok(());
+    }
+    for (i, item) in list.split(',').enumerate() {
+        let trimmed = item.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        if trimmed == "*" {
+            continue;
+        }
+        if let Some(uuid_part) = trimmed.strip_prefix("uuid:") {
+            if Uuid::parse_str(uuid_part).is_err() {
+                return Err(format!(
+                    "allow_from[{}]: '{}' is not a valid UUID (after 'uuid:' prefix)",
+                    i, trimmed
+                ));
+            }
+            continue;
+        }
+        if validate_e164(trimmed).is_ok() {
+            continue;
+        }
+        if Uuid::parse_str(trimmed).is_ok() {
+            continue;
+        }
+        return Err(format!(
+            "allow_from[{}]: '{}' must be '*', E.164 phone number, UUID, or 'uuid:<id>'",
+            i, trimmed
+        ));
+    }
+    Ok(())
+}
+
+fn validate_allow_from_groups_list(list: &str) -> Result<(), String> {
+    if list.is_empty() {
+        return Ok(());
+    }
+    for (i, item) in list.split(',').enumerate() {
+        let trimmed = item.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        if trimmed == "*" {
+            continue;
+        }
+        if trimmed.is_empty() {
+            return Err(format!(
+                "allow_from_groups[{}]: group ID cannot be empty",
+                i
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Set up Signal channel.
+/// `Settings` is reserved for future use
+pub async fn setup_signal(_settings: &Settings) -> Result<SignalSetupResult, ChannelSetupError> {
+    println!("Signal Channel Setup:");
+    println!();
+    print_info("Signal channel connects to a signal-cli daemon running in HTTP mode.");
+    println!();
+
+    let http_url = input("Signal-cli HTTP URL")?;
+    match Url::parse(&http_url) {
+        Ok(url) if url.scheme() == "http" || url.scheme() == "https" => {}
+        Ok(_) => {
+            print_error("URL must use http or https scheme");
+            return Err(ChannelSetupError::Validation(
+                "Invalid HTTP URL: must use http or https scheme".to_string(),
+            ));
+        }
+        Err(e) => {
+            print_error(&format!("Invalid URL: {}", e));
+            return Err(ChannelSetupError::Validation(format!(
+                "Invalid HTTP URL: {}",
+                e
+            )));
+        }
+    }
+
+    let account = input("Signal account (E.164)")?;
+    if let Err(e) = validate_e164(&account) {
+        print_error(&e);
+        return Err(ChannelSetupError::Validation(e));
+    }
+
+    let allow_from = optional_input(
+        "Allow from (comma-separated: E.164 numbers, '*' for anyone, UUIDs or 'uuid:<id>'; empty for self-only)",
+        Some(&format!("default: {} (self-only)", account)),
+    )?
+    .unwrap_or_else(|| account.clone());
+
+    let dm_policy = optional_input(
+        "DM policy (open, allowlist, pairing)",
+        Some("default: pairing"),
+    )?
+    .unwrap_or_else(|| "pairing".to_string());
+
+    let allow_from_groups = optional_input(
+        "Allow from groups (comma-separated group IDs, '*' for any group; empty for none)",
+        Some("default: (none)"),
+    )?
+    .unwrap_or_default();
+
+    let group_policy = optional_input(
+        "Group policy (allowlist, open, disabled)",
+        Some("default: allowlist"),
+    )?
+    .unwrap_or_else(|| "allowlist".to_string());
+
+    let group_allow_from = optional_input(
+        "Group allow from (comma-separated member IDs; empty to inherit from allow_from)",
+        Some("default: (inherit from allow_from)"),
+    )?
+    .unwrap_or_default();
+
+    if let Err(e) = validate_allow_from_list(&allow_from) {
+        print_error(&e);
+        return Err(ChannelSetupError::Validation(e));
+    }
+
+    if let Err(e) = validate_allow_from_groups_list(&allow_from_groups) {
+        print_error(&e);
+        return Err(ChannelSetupError::Validation(e));
+    }
+
+    println!();
+    print_success(&format!(
+        "Signal channel configured for account: {}",
+        account
+    ));
+    print_info(&format!("HTTP URL: {}", http_url));
+    if allow_from == account {
+        print_info("Allow from: self-only");
+    } else {
+        print_info(&format!("Allow from: {}", allow_from));
+    }
+    print_info(&format!("DM policy: {}", dm_policy));
+    if allow_from_groups.is_empty() {
+        print_info("Allow from groups: (none)");
+    } else {
+        print_info(&format!("Allow from groups: {}", allow_from_groups));
+    }
+    print_info(&format!("Group policy: {}", group_policy));
+    if group_allow_from.is_empty() {
+        print_info("Group allow from: (inherits from allow_from)");
+    } else {
+        print_info(&format!("Group allow from: {}", group_allow_from));
+    }
+
+    Ok(SignalSetupResult {
+        enabled: true,
+        http_url,
+        account,
+        allow_from,
+        allow_from_groups,
+        dm_policy,
+        group_policy,
+        group_allow_from,
+    })
 }
 
 /// Result of WASM channel setup.
@@ -788,6 +1155,84 @@ pub async fn setup_wasm_channel(
     })
 }
 
+/// Validate a Cloudflare tunnel token by briefly running `cloudflared`.
+///
+/// Spawns `cloudflared tunnel run` with a dummy local URL and watches stderr
+/// for up to 10 seconds. If a connection URL appears, the token is valid.
+/// If error indicators appear first, returns the error message.
+async fn validate_cloudflare_token_live(token: &str) -> Result<(), String> {
+    use tokio::io::AsyncBufReadExt;
+    use tokio::process::Command;
+
+    let mut child = Command::new("cloudflared")
+        .args([
+            "tunnel",
+            "--no-autoupdate",
+            "run",
+            "--token",
+            token,
+            "--url",
+            "http://localhost:1",
+        ])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped())
+        .kill_on_drop(true)
+        .spawn()
+        .map_err(|e| format!("Failed to spawn cloudflared: {}", e))?;
+
+    let stderr = child
+        .stderr
+        .take()
+        .ok_or_else(|| "Failed to capture cloudflared stderr".to_string())?;
+    let mut reader = tokio::io::BufReader::new(stderr).lines();
+
+    let result = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        while let Ok(Some(line)) = reader.next_line().await {
+            // A successful connection logs a URL like "https://xxx.cfargotunnel.com"
+            if line.contains("https://")
+                && (line.contains("cfargotunnel.com") || line.contains("trycloudflare.com"))
+            {
+                return Ok(());
+            }
+            // Error indicators that appear before a URL mean the token is bad
+            let lower = line.to_lowercase();
+            if lower.starts_with("err")
+                || lower.contains("failed to unmarshal")
+                || lower.contains("unauthorized")
+            {
+                return Err(line);
+            }
+        }
+        // Process exited without clear signal -- check exit status
+        Err("cloudflared exited without establishing a connection".to_string())
+    })
+    .await;
+
+    // Ensure the process is killed regardless of outcome
+    let _ = child.kill().await;
+
+    match result {
+        Ok(inner) => inner,
+        Err(_elapsed) => {
+            // Timed out without error or success -- benefit of the doubt
+            Ok(())
+        }
+    }
+}
+
+/// Validate that a Cloudflare tunnel token has the expected format.
+///
+/// Cloudflare tunnel tokens are base64-encoded JSON objects containing
+/// at least `"a"` (account tag) and `"t"` (tunnel ID) fields.
+fn validate_cloudflare_token_format(token: &str) -> bool {
+    base64::engine::general_purpose::STANDARD
+        .decode(token)
+        .or_else(|_| base64::engine::general_purpose::URL_SAFE.decode(token))
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
+        .is_some_and(|json| json.get("a").is_some() && json.get("t").is_some())
+}
+
 /// Generate a random secret of specified length (in bytes).
 fn generate_secret_with_length(length: usize) -> String {
     use rand::RngCore;
@@ -799,7 +1244,9 @@ fn generate_secret_with_length(length: usize) -> String {
 
 #[cfg(test)]
 mod tests {
-    use crate::setup::channels::generate_webhook_secret;
+    use base64::Engine;
+
+    use crate::setup::channels::{generate_webhook_secret, validate_cloudflare_token_format};
 
     #[test]
     fn test_generate_webhook_secret() {
@@ -817,5 +1264,39 @@ mod tests {
 
         let s2 = generate_secret_with_length(1);
         assert_eq!(s2.len(), 2);
+    }
+
+    #[test]
+    fn test_validate_cloudflare_token_valid() {
+        // Simulate a valid Cloudflare tunnel token: base64-encoded JSON with "a" and "t" fields
+        let payload = serde_json::json!({"a": "account-tag", "t": "tunnel-id", "s": "secret"});
+        let token =
+            base64::engine::general_purpose::STANDARD.encode(payload.to_string().as_bytes());
+        assert!(validate_cloudflare_token_format(&token));
+    }
+
+    #[test]
+    fn test_validate_cloudflare_token_missing_fields() {
+        // JSON but missing required "a" and "t" fields
+        let payload = serde_json::json!({"foo": "bar"});
+        let token =
+            base64::engine::general_purpose::STANDARD.encode(payload.to_string().as_bytes());
+        assert!(!validate_cloudflare_token_format(&token));
+    }
+
+    #[test]
+    fn test_validate_cloudflare_token_not_base64() {
+        assert!(!validate_cloudflare_token_format("not-base64!!!"));
+    }
+
+    #[test]
+    fn test_validate_cloudflare_token_not_json() {
+        let token = base64::engine::general_purpose::STANDARD.encode(b"not json at all");
+        assert!(!validate_cloudflare_token_format(&token));
+    }
+
+    #[test]
+    fn test_validate_cloudflare_token_empty() {
+        assert!(!validate_cloudflare_token_format(""));
     }
 }

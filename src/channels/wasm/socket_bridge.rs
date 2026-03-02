@@ -40,7 +40,7 @@ use crate::secrets::SecretsStore;
 pub fn spawn_socket_bridge(
     channel: Arc<WasmChannel>,
     config: SocketModeConfig,
-    secrets_store: Option<Arc<dyn SecretsStore>>,
+    secrets_store: Option<Arc<dyn SecretsStore + Send + Sync>>,
     shutdown_rx: oneshot::Receiver<()>,
 ) {
     let channel_name = channel.channel_name().to_string();
@@ -60,7 +60,7 @@ pub fn spawn_socket_bridge(
 async fn run_bridge(
     channel: Arc<WasmChannel>,
     config: SocketModeConfig,
-    secrets_store: Option<Arc<dyn SecretsStore>>,
+    secrets_store: Option<Arc<dyn SecretsStore + Send + Sync>>,
     shutdown_rx: oneshot::Receiver<()>,
 ) -> Result<(), WasmChannelError> {
     let channel_name = channel.channel_name().to_string();
@@ -226,6 +226,9 @@ enum EventLoopExit {
     Error(String),
 }
 
+/// Client-side ping interval to detect half-open connections.
+const PING_INTERVAL: Duration = Duration::from_secs(30);
+
 /// Read WebSocket frames, ack envelopes, and forward events to WASM.
 async fn event_loop(
     channel: &Arc<WasmChannel>,
@@ -234,6 +237,10 @@ async fn event_loop(
     mut write: SplitSink<WebSocketStream<MaybeTlsStream<TcpStream>>, WsMessage>,
     shutdown: &mut std::pin::Pin<&mut oneshot::Receiver<()>>,
 ) -> EventLoopExit {
+    let mut ping_interval = tokio::time::interval(PING_INTERVAL);
+    // The first tick completes immediately — skip it so we don't ping on connect.
+    ping_interval.tick().await;
+
     loop {
         tokio::select! {
             frame = read.next() => {
@@ -334,6 +341,13 @@ async fn event_loop(
                     }
                 }
             }
+            _ = ping_interval.tick() => {
+                // Client-side keepalive: detect half-open connections (NAT timeout,
+                // network switch) instead of waiting for OS TCP keepalive (~2h).
+                if let Err(e) = write.send(WsMessage::Ping(vec![].into())).await {
+                    return EventLoopExit::Error(format!("Failed to send ping: {}", e));
+                }
+            }
             _ = &mut *shutdown => {
                 // Send close frame (best effort)
                 let _ = write.send(WsMessage::Close(None)).await;
@@ -400,7 +414,7 @@ async fn forward_event_to_wasm(
 async fn resolve_app_token(
     channel_name: &str,
     config: &SocketModeConfig,
-    secrets_store: Option<&dyn SecretsStore>,
+    secrets_store: Option<&(dyn SecretsStore + Send + Sync)>,
 ) -> Result<String, WasmChannelError> {
     // Try secrets store first
     if let Some(store) = secrets_store

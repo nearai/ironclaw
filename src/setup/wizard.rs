@@ -15,11 +15,10 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 #[cfg(feature = "postgres")]
-use deadpool_postgres::{Config as PoolConfig, Runtime};
+use deadpool_postgres::Config as PoolConfig;
 use secrecy::{ExposeSecret, SecretString};
-#[cfg(feature = "postgres")]
-use tokio_postgres::NoTls;
 
+use crate::bootstrap::ironclaw_base_dir;
 use crate::channels::wasm::{
     ChannelCapabilitiesFile, available_channel_names, install_bundled_channel,
 };
@@ -27,12 +26,17 @@ use crate::llm::{SessionConfig, SessionManager};
 use crate::secrets::{SecretsCrypto, SecretsStore};
 use crate::settings::{KeySource, Settings};
 use crate::setup::channels::{
-    SecretsContext, setup_http, setup_telegram, setup_tunnel, setup_wasm_channel,
+    SecretsContext, setup_http, setup_signal, setup_telegram, setup_tunnel, setup_wasm_channel,
 };
 use crate::setup::prompts::{
     confirm, input, optional_input, print_error, print_header, print_info, print_step,
     print_success, secret_input, select_many, select_one,
 };
+
+// unused const, keep commented for clarity / future use
+// const CHANNEL_INDEX_CLI: usize = 0;
+const CHANNEL_INDEX_HTTP: usize = 1;
+const CHANNEL_INDEX_SIGNAL: usize = 2;
 
 /// Setup wizard error.
 #[derive(Debug, thiserror::Error)]
@@ -537,6 +541,10 @@ impl SetupWizard {
     }
 
     /// Test PostgreSQL connection and store the pool.
+    ///
+    /// After connecting, validates:
+    /// 1. PostgreSQL version >= 15 (required for pgvector compatibility)
+    /// 2. pgvector extension is available (required for embeddings/vector search)
     #[cfg(feature = "postgres")]
     async fn test_database_connection_postgres(&mut self, url: &str) -> Result<(), SetupError> {
         let mut cfg = PoolConfig::new();
@@ -546,14 +554,59 @@ impl SetupWizard {
             ..Default::default()
         });
 
-        let pool = cfg
-            .create_pool(Some(Runtime::Tokio1), NoTls)
+        let pool = crate::db::tls::create_pool(&cfg, crate::config::SslMode::from_env())
             .map_err(|e| SetupError::Database(format!("Failed to create pool: {}", e)))?;
 
-        let _ = pool
+        let client = pool
             .get()
             .await
             .map_err(|e| SetupError::Database(format!("Failed to connect: {}", e)))?;
+
+        // Check PostgreSQL server version (need 15+ for pgvector)
+        let version_row = client
+            .query_one("SHOW server_version", &[])
+            .await
+            .map_err(|e| SetupError::Database(format!("Failed to query server version: {}", e)))?;
+        let version_str: &str = version_row.get(0);
+        let major_version = version_str
+            .split('.')
+            .next()
+            .and_then(|v| v.parse::<u32>().ok())
+            .unwrap_or(0);
+
+        const MIN_PG_MAJOR_VERSION: u32 = 15;
+
+        if major_version < MIN_PG_MAJOR_VERSION {
+            return Err(SetupError::Database(format!(
+                "PostgreSQL {} detected. IronClaw requires PostgreSQL {} or later for pgvector support.\n\
+                 Upgrade: https://www.postgresql.org/download/",
+                version_str, MIN_PG_MAJOR_VERSION
+            )));
+        }
+
+        // Check if pgvector extension is available
+        let pgvector_row = client
+            .query_opt(
+                "SELECT 1 FROM pg_available_extensions WHERE name = 'vector'",
+                &[],
+            )
+            .await
+            .map_err(|e| {
+                SetupError::Database(format!("Failed to check pgvector availability: {}", e))
+            })?;
+
+        if pgvector_row.is_none() {
+            return Err(SetupError::Database(format!(
+                "pgvector extension not found on your PostgreSQL server.\n\n\
+                 Install it:\n  \
+                 macOS:   brew install pgvector\n  \
+                 Ubuntu:  apt install postgresql-{0}-pgvector\n  \
+                 Docker:  use the pgvector/pgvector:pg{0} image\n  \
+                 Source:  https://github.com/pgvector/pgvector#installation\n\n\
+                 Then restart PostgreSQL and re-run: ironclaw onboard",
+                major_version
+            )));
+        }
 
         self.db_pool = Some(pool);
         Ok(())
@@ -730,13 +783,24 @@ impl SetupWizard {
     async fn step_inference_provider(&mut self) -> Result<(), SetupError> {
         // Show current provider if already configured
         if let Some(ref current) = self.settings.llm_backend {
-            let display = match current.as_str() {
-                "nearai" => "NEAR AI",
-                "anthropic" => "Anthropic (Claude)",
-                "openai" => "OpenAI",
-                "ollama" => "Ollama (local)",
-                "openai_compatible" => "OpenAI-compatible endpoint",
-                other => other,
+            let is_openrouter = current == "openai_compatible"
+                && self
+                    .settings
+                    .openai_compatible_base_url
+                    .as_deref()
+                    .is_some_and(|u| u.contains("openrouter.ai"));
+
+            let display = if is_openrouter {
+                "OpenRouter"
+            } else {
+                match current.as_str() {
+                    "nearai" => "NEAR AI",
+                    "anthropic" => "Anthropic (Claude)",
+                    "openai" => "OpenAI",
+                    "ollama" => "Ollama (local)",
+                    "openai_compatible" => "OpenAI-compatible endpoint",
+                    other => other,
+                }
             };
             print_info(&format!("Current provider: {}", display));
             println!();
@@ -748,6 +812,9 @@ impl SetupWizard {
 
             if is_known && confirm("Keep current provider?", true).map_err(SetupError::Io)? {
                 // Still run the auth sub-flow in case they need to update keys
+                if is_openrouter {
+                    return self.setup_openrouter().await;
+                }
                 match current.as_str() {
                     "nearai" => return self.setup_nearai().await,
                     "anthropic" => return self.setup_anthropic().await,
@@ -779,7 +846,8 @@ impl SetupWizard {
             "Anthropic        - Claude models (direct API key)",
             "OpenAI           - GPT models (direct API key)",
             "Ollama           - local models, no API key needed",
-            "OpenAI-compatible - custom endpoint (vLLM, LiteLLM, Together, etc.)",
+            "OpenRouter       - 200+ models via single API key",
+            "OpenAI-compatible - custom endpoint (vLLM, LiteLLM, etc.)",
         ];
 
         let choice = select_one("Provider:", options).map_err(SetupError::Io)?;
@@ -789,7 +857,8 @@ impl SetupWizard {
             1 => self.setup_anthropic().await?,
             2 => self.setup_openai().await?,
             3 => self.setup_ollama()?,
-            4 => self.setup_openai_compatible().await?,
+            4 => self.setup_openrouter().await?,
+            5 => self.setup_openai_compatible().await?,
             _ => return Err(SetupError::Config("Invalid provider selection".to_string())),
         }
 
@@ -863,6 +932,7 @@ impl SetupWizard {
             "llm_anthropic_api_key",
             "Anthropic API key",
             "https://console.anthropic.com/settings/keys",
+            None,
         )
         .await
     }
@@ -875,11 +945,12 @@ impl SetupWizard {
             "llm_openai_api_key",
             "OpenAI API key",
             "https://platform.openai.com/api-keys",
+            None,
         )
         .await
     }
 
-    /// Shared setup flow for API-key-based providers (Anthropic, OpenAI).
+    /// Shared setup flow for API-key-based providers (Anthropic, OpenAI, OpenRouter).
     async fn setup_api_key_provider(
         &mut self,
         backend: &str,
@@ -887,12 +958,13 @@ impl SetupWizard {
         secret_name: &str,
         prompt_label: &str,
         hint_url: &str,
+        override_display_name: Option<&str>,
     ) -> Result<(), SetupError> {
-        let display_name = match backend {
+        let display_name = override_display_name.unwrap_or(match backend {
             "anthropic" => "Anthropic",
             "openai" => "OpenAI",
             other => other,
-        };
+        });
 
         self.settings.llm_backend = Some(backend.to_string());
         if self.settings.selected_model.is_some() {
@@ -970,6 +1042,24 @@ impl SetupWizard {
 
         print_success(&format!("Ollama configured ({})", url));
         Ok(())
+    }
+
+    /// OpenRouter provider setup: pre-configured OpenAI-compatible endpoint.
+    ///
+    /// Sets the base URL to `https://openrouter.ai/api/v1` and delegates
+    /// API key collection to `setup_api_key_provider` with a display name
+    /// override so messages say "OpenRouter" instead of "openai_compatible".
+    async fn setup_openrouter(&mut self) -> Result<(), SetupError> {
+        self.settings.openai_compatible_base_url = Some("https://openrouter.ai/api/v1".to_string());
+        self.setup_api_key_provider(
+            "openai_compatible",
+            "LLM_API_KEY",
+            "llm_compatible_api_key",
+            "OpenRouter API key",
+            "https://openrouter.ai/settings/keys",
+            Some("OpenRouter"),
+        )
+        .await
     }
 
     /// OpenAI-compatible provider setup: base URL + optional API key.
@@ -1412,7 +1502,7 @@ impl SetupWizard {
     /// Step 6: Channel configuration.
     async fn step_channels(&mut self) -> Result<(), SetupError> {
         // First, configure tunnel (shared across all channels that need webhooks)
-        match setup_tunnel(&self.settings) {
+        match setup_tunnel(&self.settings).await {
             Ok(tunnel_settings) => {
                 self.settings.tunnel = tunnel_settings;
             }
@@ -1423,9 +1513,7 @@ impl SetupWizard {
         println!();
 
         // Discover available WASM channels
-        let channels_dir = dirs::home_dir()
-            .ok_or_else(|| SetupError::Config("Could not determine home directory".into()))?
-            .join(".ironclaw/channels");
+        let channels_dir = ironclaw_base_dir().join("channels");
 
         let mut discovered_channels = discover_wasm_channels(&channels_dir).await;
         let installed_names: HashSet<String> = discovered_channels
@@ -1443,7 +1531,10 @@ impl SetupWizard {
                 "HTTP webhook".to_string(),
                 self.settings.channels.http_enabled,
             ),
+            ("Signal".to_string(), self.settings.channels.signal_enabled),
         ];
+
+        let non_wasm_count = options.len();
 
         // Add available WASM channels (installed + bundled + registry)
         for name in &wasm_channel_names {
@@ -1466,7 +1557,7 @@ impl SetupWizard {
             .iter()
             .enumerate()
             .filter_map(|(idx, name)| {
-                if selected.contains(&(idx + 2)) {
+                if selected.contains(&(non_wasm_count + idx)) {
                     Some(name.clone())
                 } else {
                     None
@@ -1493,7 +1584,6 @@ impl SetupWizard {
             any_installed = true;
         }
 
-        // Then try registry channels (build from source for any still missing)
         let installed_from_registry = install_selected_registry_channels(
             &channels_dir,
             &selected_wasm_channels,
@@ -1515,7 +1605,8 @@ impl SetupWizard {
         }
 
         // Determine if we need secrets context
-        let needs_secrets = selected.contains(&1) || !selected_wasm_channels.is_empty();
+        let needs_secrets =
+            selected.contains(&CHANNEL_INDEX_HTTP) || !selected_wasm_channels.is_empty();
         let secrets = if needs_secrets {
             match self.init_secrets_context().await {
                 Ok(ctx) => Some(ctx),
@@ -1529,8 +1620,8 @@ impl SetupWizard {
             None
         };
 
-        // HTTP is index 1
-        if selected.contains(&1) {
+        // HTTP channel
+        if selected.contains(&CHANNEL_INDEX_HTTP) {
             println!();
             if let Some(ref ctx) = secrets {
                 let result = setup_http(ctx).await?;
@@ -1543,6 +1634,29 @@ impl SetupWizard {
             }
         } else {
             self.settings.channels.http_enabled = false;
+        }
+
+        // Signal channel
+        if selected.contains(&CHANNEL_INDEX_SIGNAL) {
+            println!();
+            let result = setup_signal(&self.settings).await?;
+            self.settings.channels.signal_enabled = result.enabled;
+            self.settings.channels.signal_http_url = Some(result.http_url);
+            self.settings.channels.signal_account = Some(result.account);
+            self.settings.channels.signal_allow_from = Some(result.allow_from);
+            self.settings.channels.signal_allow_from_groups = Some(result.allow_from_groups);
+            self.settings.channels.signal_dm_policy = Some(result.dm_policy);
+            self.settings.channels.signal_group_policy = Some(result.group_policy);
+            self.settings.channels.signal_group_allow_from = Some(result.group_allow_from);
+        } else {
+            self.settings.channels.signal_enabled = false;
+            self.settings.channels.signal_http_url = None;
+            self.settings.channels.signal_account = None;
+            self.settings.channels.signal_allow_from = None;
+            self.settings.channels.signal_allow_from_groups = None;
+            self.settings.channels.signal_dm_policy = None;
+            self.settings.channels.signal_group_policy = None;
+            self.settings.channels.signal_group_allow_from = None;
         }
 
         let discovered_by_name: HashMap<String, ChannelCapabilitiesFile> =
@@ -1629,9 +1743,7 @@ impl SetupWizard {
         println!();
 
         // Check which tools are already installed
-        let tools_dir = dirs::home_dir()
-            .ok_or_else(|| SetupError::Config("Could not determine home directory".into()))?
-            .join(".ironclaw/tools");
+        let tools_dir = ironclaw_base_dir().join("tools");
 
         let installed_tools = discover_installed_tools(&tools_dir).await;
 
@@ -1671,9 +1783,7 @@ impl SetupWizard {
         let installer = crate::registry::installer::RegistryInstaller::new(
             repo_root.to_path_buf(),
             tools_dir.clone(),
-            dirs::home_dir()
-                .unwrap_or_default()
-                .join(".ironclaw/channels"),
+            ironclaw_base_dir().join("channels"),
         );
 
         let mut installed_count = 0;
@@ -1685,9 +1795,12 @@ impl SetupWizard {
                 continue; // Already installed, skip
             }
 
-            match installer.install_from_source(tool, false).await {
+            match installer.install_with_source_fallback(tool, false).await {
                 Ok(outcome) => {
                     print_success(&format!("Installed {}", outcome.name));
+                    for warning in &outcome.warnings {
+                        print_info(&format!("{}: {}", outcome.name, warning));
+                    }
                     installed_count += 1;
 
                     // Track auth needs
@@ -1924,6 +2037,20 @@ impl SetupWizard {
             env_vars.push(("OLLAMA_BASE_URL", url.clone()));
         }
 
+        // Model name: same chicken-and-egg — Config::from_env() resolves the
+        // model before the DB is connected, so we must persist it to .env.
+        // Write the backend-specific env var so the correct resolution path
+        // picks it up.
+        if let Some(ref model) = self.settings.selected_model {
+            let backend: crate::config::LlmBackend = self
+                .settings
+                .llm_backend
+                .as_deref()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or_default();
+            env_vars.push((backend.model_env_var(), model.clone()));
+        }
+
         // Preserve NEARAI_API_KEY if present (set by API key auth flow)
         if let Ok(api_key) = std::env::var("NEARAI_API_KEY")
             && !api_key.is_empty()
@@ -1935,6 +2062,33 @@ impl SetupWizard {
         // (which runs before the DB is connected) knows to skip re-onboarding.
         if self.settings.onboard_completed {
             env_vars.push(("ONBOARD_COMPLETED", "true".to_string()));
+        }
+
+        // Signal channel env vars (chicken-and-egg: config resolves before DB).
+        if let Some(ref url) = self.settings.channels.signal_http_url {
+            env_vars.push(("SIGNAL_HTTP_URL", url.clone()));
+        }
+        if let Some(ref account) = self.settings.channels.signal_account {
+            env_vars.push(("SIGNAL_ACCOUNT", account.clone()));
+        }
+        if let Some(ref allow_from) = self.settings.channels.signal_allow_from {
+            env_vars.push(("SIGNAL_ALLOW_FROM", allow_from.clone()));
+        }
+        if let Some(ref allow_from_groups) = self.settings.channels.signal_allow_from_groups
+            && !allow_from_groups.is_empty()
+        {
+            env_vars.push(("SIGNAL_ALLOW_FROM_GROUPS", allow_from_groups.clone()));
+        }
+        if let Some(ref dm_policy) = self.settings.channels.signal_dm_policy {
+            env_vars.push(("SIGNAL_DM_POLICY", dm_policy.clone()));
+        }
+        if let Some(ref group_policy) = self.settings.channels.signal_group_policy {
+            env_vars.push(("SIGNAL_GROUP_POLICY", group_policy.clone()));
+        }
+        if let Some(ref group_allow_from) = self.settings.channels.signal_group_allow_from
+            && !group_allow_from.is_empty()
+        {
+            env_vars.push(("SIGNAL_GROUP_ALLOW_FROM", group_allow_from.clone()));
         }
 
         if !env_vars.is_empty() {
@@ -2657,8 +2811,6 @@ fn load_registry_catalog() -> Option<crate::registry::catalog::RegistryCatalog> 
 
 /// Install selected channels from the registry that aren't already on disk
 /// and weren't handled by the bundled installer.
-///
-/// This builds channels from source using `cargo component build`.
 async fn install_selected_registry_channels(
     channels_dir: &std::path::Path,
     selected_channels: &[String],
@@ -2699,12 +2851,18 @@ async fn install_selected_registry_channels(
 
         let installer = crate::registry::installer::RegistryInstaller::new(
             repo_root.clone(),
-            dirs::home_dir().unwrap_or_default().join(".ironclaw/tools"),
+            ironclaw_base_dir().join("tools"),
             channels_dir.to_path_buf(),
         );
 
-        match installer.install_from_source(manifest, false).await {
-            Ok(_) => {
+        match installer
+            .install_with_source_fallback(manifest, false)
+            .await
+        {
+            Ok(outcome) => {
+                for warning in &outcome.warnings {
+                    crate::setup::prompts::print_info(&format!("{}: {}", name, warning));
+                }
                 installed.push(name.clone());
             }
             Err(e) => {

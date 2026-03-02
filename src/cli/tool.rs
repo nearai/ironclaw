@@ -9,6 +9,7 @@ use std::sync::Arc;
 use clap::Subcommand;
 use tokio::fs;
 
+use crate::bootstrap::ironclaw_base_dir;
 use crate::config::Config;
 #[allow(unused_imports)]
 use crate::db::Database;
@@ -19,9 +20,7 @@ use crate::tools::wasm::{CapabilitiesFile, compute_binary_hash};
 
 /// Default tools directory.
 fn default_tools_dir() -> PathBuf {
-    dirs::home_dir()
-        .map(|h| h.join(".ironclaw").join("tools"))
-        .unwrap_or_else(|| PathBuf::from(".ironclaw/tools"))
+    ironclaw_base_dir().join("tools")
 }
 
 #[derive(Subcommand, Debug, Clone)]
@@ -100,6 +99,20 @@ pub enum ToolCommand {
         #[arg(short, long, default_value = "default")]
         user: String,
     },
+
+    /// Configure required secrets for a tool (from setup.required_secrets)
+    Setup {
+        /// Name of the tool
+        name: String,
+
+        /// Directory to look for tool (default: ~/.ironclaw/tools/)
+        #[arg(short, long)]
+        dir: Option<PathBuf>,
+
+        /// User ID for storing the secret (default: "default")
+        #[arg(short, long, default_value = "default")]
+        user: String,
+    },
 }
 
 /// Run a tool command.
@@ -118,6 +131,7 @@ pub async fn run_tool_command(cmd: ToolCommand) -> anyhow::Result<()> {
         ToolCommand::Remove { name, dir } => remove_tool(name, dir).await,
         ToolCommand::Info { name_or_path, dir } => show_tool_info(name_or_path, dir).await,
         ToolCommand::Auth { name, dir, user } => auth_tool(name, dir, user).await,
+        ToolCommand::Setup { name, dir, user } => setup_tool(name, dir, user).await,
     }
 }
 
@@ -524,43 +538,24 @@ fn print_capabilities_detail(caps: &CapabilitiesFile) {
     }
 }
 
-/// Configure authentication for a tool.
-async fn auth_tool(name: String, dir: Option<PathBuf>, user_id: String) -> anyhow::Result<()> {
-    let tools_dir = dir.unwrap_or_else(default_tools_dir);
-    let caps_path = tools_dir.join(format!("{}.capabilities.json", name));
-
-    if !caps_path.exists() {
+/// Validate a tool name to prevent path traversal.
+fn validate_tool_name(name: &str) -> anyhow::Result<()> {
+    if name.is_empty()
+        || name.contains('/')
+        || name.contains('\\')
+        || name.contains("..")
+        || name.contains('\0')
+    {
         anyhow::bail!(
-            "Tool '{}' not found or has no capabilities file at {}",
-            name,
-            caps_path.display()
+            "Invalid tool name '{}': must not contain path separators or '..'",
+            name
         );
     }
+    Ok(())
+}
 
-    // Parse capabilities
-    let content = fs::read_to_string(&caps_path).await?;
-    let caps = CapabilitiesFile::from_json(&content)
-        .map_err(|e| anyhow::anyhow!("Invalid capabilities file: {}", e))?;
-
-    // Check for auth section
-    let auth = caps.auth.ok_or_else(|| {
-        anyhow::anyhow!(
-            "Tool '{}' has no auth configuration.\n\
-             The tool may not require authentication, or auth setup is not defined.",
-            name
-        )
-    })?;
-
-    let display_name = auth.display_name.as_deref().unwrap_or(&name);
-
-    let header = format!("{} Authentication", display_name);
-    println!();
-    println!("╔════════════════════════════════════════════════════════════════╗");
-    println!("║  {:^62}║", header);
-    println!("╚════════════════════════════════════════════════════════════════╝");
-    println!();
-
-    // Initialize secrets store
+/// Initialize the secrets store from environment config.
+async fn init_secrets_store() -> anyhow::Result<Arc<dyn SecretsStore + Send + Sync>> {
     let config = Config::from_env().await?;
     let master_key = config.secrets.master_key().ok_or_else(|| {
         anyhow::anyhow!(
@@ -570,7 +565,7 @@ async fn auth_tool(name: String, dir: Option<PathBuf>, user_id: String) -> anyho
 
     let crypto = SecretsCrypto::new(master_key.clone())?;
 
-    let secrets_store: Arc<dyn SecretsStore + Send + Sync> = {
+    let store: Arc<dyn SecretsStore + Send + Sync> = {
         #[cfg(feature = "postgres")]
         {
             let store = crate::history::Store::new(&config.database).await?;
@@ -620,6 +615,47 @@ async fn auth_tool(name: String, dir: Option<PathBuf>, user_id: String) -> anyho
             );
         }
     };
+    Ok(store)
+}
+
+/// Configure authentication for a tool.
+async fn auth_tool(name: String, dir: Option<PathBuf>, user_id: String) -> anyhow::Result<()> {
+    validate_tool_name(&name)?;
+    let tools_dir = dir.unwrap_or_else(default_tools_dir);
+    let caps_path = tools_dir.join(format!("{}.capabilities.json", name));
+
+    if !caps_path.exists() {
+        anyhow::bail!(
+            "Tool '{}' not found or has no capabilities file at {}",
+            name,
+            caps_path.display()
+        );
+    }
+
+    // Parse capabilities
+    let content = fs::read_to_string(&caps_path).await?;
+    let caps = CapabilitiesFile::from_json(&content)
+        .map_err(|e| anyhow::anyhow!("Invalid capabilities file: {}", e))?;
+
+    // Check for auth section
+    let auth = caps.auth.ok_or_else(|| {
+        anyhow::anyhow!(
+            "Tool '{}' has no auth configuration.\n\
+             The tool may not require authentication, or auth setup is not defined.",
+            name
+        )
+    })?;
+
+    let display_name = auth.display_name.as_deref().unwrap_or(&name);
+
+    let header = format!("{} Authentication", display_name);
+    println!();
+    println!("╔════════════════════════════════════════════════════════════════╗");
+    println!("║  {:^62}║", header);
+    println!("╚════════════════════════════════════════════════════════════════╝");
+    println!();
+
+    let secrets_store = init_secrets_store().await?;
 
     // Check if already configured
     let already_configured = secrets_store
@@ -1158,6 +1194,117 @@ fn print_success(display_name: &str) {
     println!();
     println!("  The tool can now access the API.");
     println!();
+}
+
+/// Configure required secrets for a tool via its `setup.required_secrets` schema.
+async fn setup_tool(name: String, dir: Option<PathBuf>, user_id: String) -> anyhow::Result<()> {
+    validate_tool_name(&name)?;
+    let tools_dir = dir.unwrap_or_else(default_tools_dir);
+    let caps_path = tools_dir.join(format!("{}.capabilities.json", name));
+
+    if !caps_path.exists() {
+        anyhow::bail!(
+            "Tool '{}' not found or has no capabilities file at {}",
+            name,
+            caps_path.display()
+        );
+    }
+
+    let content = fs::read_to_string(&caps_path).await?;
+    let caps = CapabilitiesFile::from_json(&content)
+        .map_err(|e| anyhow::anyhow!("Invalid capabilities file: {}", e))?;
+
+    let setup = caps.setup.ok_or_else(|| {
+        anyhow::anyhow!(
+            "Tool '{}' has no setup configuration.\n\
+             The tool may not require setup, or setup is not defined.\n\
+             Try 'ironclaw tool auth {}' for OAuth-based authentication.",
+            name,
+            name
+        )
+    })?;
+
+    if setup.required_secrets.is_empty() {
+        println!("Tool '{}' has no required secrets.", name);
+        return Ok(());
+    }
+
+    let display_name = caps
+        .auth
+        .as_ref()
+        .and_then(|a| a.display_name.as_deref())
+        .unwrap_or(&name);
+
+    println!();
+    println!("╔════════════════════════════════════════════════════════════════╗");
+    println!("║  {:^62}║", format!("{} Setup", display_name));
+    println!("╚════════════════════════════════════════════════════════════════╝");
+    println!();
+
+    let secrets_store = init_secrets_store().await?;
+
+    let mut any_saved = false;
+
+    for secret in &setup.required_secrets {
+        let already_exists = secrets_store
+            .exists(&user_id, &secret.name)
+            .await
+            .unwrap_or(false);
+
+        if already_exists {
+            println!("  ✓ {} (already configured)", secret.prompt);
+
+            print!("    Replace? [y/N]: ");
+            std::io::stdout().flush()?;
+
+            let mut input = String::new();
+            std::io::stdin().read_line(&mut input)?;
+
+            if !input.trim().eq_ignore_ascii_case("y") {
+                continue;
+            }
+            print!("  {}: ", secret.prompt);
+        } else if secret.optional {
+            print!("  {} (optional, Enter to skip): ", secret.prompt);
+        } else {
+            print!("  {}: ", secret.prompt);
+        }
+
+        std::io::stdout().flush()?;
+        let value = read_hidden_input()?;
+        println!();
+
+        if value.is_empty() {
+            if secret.optional {
+                println!("    Skipped.");
+            } else {
+                println!(
+                    "    Warning: empty value for required secret '{}'.",
+                    secret.name
+                );
+            }
+            continue;
+        }
+
+        let params = CreateSecretParams::new(&secret.name, &value).with_provider(name.to_string());
+        secrets_store
+            .create(&user_id, params)
+            .await
+            .map_err(|e| anyhow::anyhow!("Failed to save secret: {}", e))?;
+
+        println!("    ✓ Saved.");
+        any_saved = true;
+    }
+
+    println!();
+    if any_saved {
+        println!("  ✓ {} setup complete!", display_name);
+    } else {
+        println!("  No changes made.");
+    }
+    println!();
+
+    Ok(())
 }
 
 #[cfg(test)]

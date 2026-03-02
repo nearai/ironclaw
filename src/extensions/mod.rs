@@ -83,9 +83,10 @@ pub enum ExtensionSource {
         #[serde(default)]
         capabilities_url: Option<String>,
     },
-    /// Build from source repository.
+    /// Build from local source directory.
     WasmBuildable {
-        repo_url: String,
+        #[serde(alias = "repo_url")]
+        source_dir: String,
         #[serde(default)]
         build_dir: Option<String>,
         /// Crate name used to locate the build artifact binary.
@@ -187,6 +188,9 @@ fn default_true() -> bool {
 pub struct InstalledExtension {
     pub name: String,
     pub kind: ExtensionKind,
+    /// Human-readable display name (e.g. "Telegram Channel" vs "Telegram Tool").
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub display_name: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
     /// Server or source URL (e.g. MCP server endpoint).
@@ -203,6 +207,9 @@ pub struct InstalledExtension {
     /// Whether this extension is installed locally (false = available in registry but not installed).
     #[serde(default = "default_true")]
     pub installed: bool,
+    /// Last activation error for WASM channels.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub activation_error: Option<String>,
 }
 
 /// Error type for extension operations.
@@ -237,6 +244,12 @@ pub enum ExtensionError {
 
     #[error("Config error: {0}")]
     Config(String),
+
+    #[error("Primary install failed: {primary}; fallback install also failed: {fallback}")]
+    FallbackFailed {
+        primary: Box<ExtensionError>,
+        fallback: Box<ExtensionError>,
+    },
 
     #[error("{0}")]
     Other(String),

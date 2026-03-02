@@ -31,6 +31,7 @@ mod channel;
 mod http;
 mod manager;
 mod repl;
+mod signal;
 pub mod wasm;
 pub mod web;
 mod webhook_server;
@@ -39,5 +40,6 @@ pub use channel::{Channel, IncomingMessage, MessageStream, OutgoingResponse, Sta
 pub use http::HttpChannel;
 pub use manager::ChannelManager;
 pub use repl::ReplChannel;
+pub use signal::SignalChannel;
 pub use web::GatewayChannel;
 pub use webhook_server::{WebhookServer, WebhookServerConfig};

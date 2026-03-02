@@ -62,7 +62,7 @@ pub fn prefilter_skills<'a>(
         .collect();
 
     // Sort by score descending
-    scored.sort_by(|a, b| b.score.cmp(&a.score));
+    scored.sort_by_key(|b| std::cmp::Reverse(b.score));
 
     // Apply candidate limit and context budget
     let mut result = Vec::new();

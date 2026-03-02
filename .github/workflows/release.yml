@@ -89,10 +89,12 @@ jobs:
   # Build and packages all the platform-specific things
   build-local-artifacts:
     name: build-local-artifacts (${{ join(matrix.targets, ', ') }})
-    # Let the initial task tell us to not run (currently very blunt)
+    # Wait for WASM extensions so we can patch manifests with SHA256 checksums
+    # before build.rs bakes them into the embedded catalog.
     needs:
       - plan
-    if: ${{ fromJson(needs.plan.outputs.val).ci.github.artifacts_matrix.include != null && (needs.plan.outputs.publishing == 'true' || fromJson(needs.plan.outputs.val).ci.github.pr_run_mode == 'upload') }}
+      - build-wasm-extensions
+    if: ${{ fromJson(needs.plan.outputs.val).ci.github.artifacts_matrix.include != null && (needs.plan.outputs.publishing == 'true' || fromJson(needs.plan.outputs.val).ci.github.pr_run_mode == 'upload') && (needs.build-wasm-extensions.result == 'skipped' || needs.build-wasm-extensions.result == 'success') }}
     strategy:
       fail-fast: false
       # Target platforms/runners are computed by dist in create-release.
@@ -139,6 +141,28 @@ jobs:
           pattern: artifacts-*
           path: target/distrib/
           merge-multiple: true
+      - name: Patch manifests with WASM checksums
+        if: ${{ needs.plan.outputs.publishing == 'true' }}
+        shell: bash
+        run: |
+          CHECKSUMS="target/distrib/checksums.txt"
+          if [ ! -f "$CHECKSUMS" ]; then
+            echo "No checksums.txt found, skipping manifest patching"
+            exit 0
+          fi
+
+          while IFS= read -r line; do
+            sha256=$(echo "$line" | awk '{print $1}')
+            filename=$(echo "$line" | awk '{print $2}')
+            name=$(echo "$filename" | sed 's/-wasm32-wasip2\.tar\.gz$//')
+
+            for manifest in registry/tools/${name}.json registry/channels/${name}.json; do
+              if [ -f "$manifest" ]; then
+                jq --arg sha "$sha256" '.artifacts["wasm32-wasip2"].sha256 = $sha' "$manifest" > "${manifest}.tmp" && mv "${manifest}.tmp" "$manifest"
+                echo "Patched $manifest with sha256=$sha256"
+              fi
+            done
+          done < "$CHECKSUMS"
       - name: Install dependencies
         run: |
           ${{ matrix.packages_install }}
@@ -379,6 +403,59 @@ jobs:
           echo "$ANNOUNCEMENT_BODY" > $RUNNER_TEMP/notes.txt
 
           gh release create "${{ needs.plan.outputs.tag }}" --target "$RELEASE_COMMIT" $PRERELEASE_FLAG --title "$ANNOUNCEMENT_TITLE" --notes-file "$RUNNER_TEMP/notes.txt" artifacts/*
+
+  # Commit patched manifest SHA256 checksums back to main so the repo
+  # stays in sync with the released artifacts.
+  update-registry-checksums:
+    needs:
+      - plan
+      - host
+      - build-wasm-extensions
+    if: ${{ always() && needs.host.result == 'success' && needs.build-wasm-extensions.result == 'success' }}
+    runs-on: "ubuntu-22.04"
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+      - name: Fetch WASM checksums
+        uses: actions/download-artifact@v4
+        with:
+          name: artifacts-wasm-extensions
+          path: target/wasm-bundles/
+      - name: Patch manifests with SHA256
+        shell: bash
+        run: |
+          CHECKSUMS="target/wasm-bundles/checksums.txt"
+          if [ ! -f "$CHECKSUMS" ]; then
+            echo "No checksums.txt found"
+            exit 0
+          fi
+
+          while IFS= read -r line; do
+            sha256=$(echo "$line" | awk '{print $1}')
+            filename=$(echo "$line" | awk '{print $2}')
+            name=$(echo "$filename" | sed 's/-wasm32-wasip2\.tar\.gz$//')
+
+            for manifest in registry/tools/${name}.json registry/channels/${name}.json; do
+              if [ -f "$manifest" ]; then
+                jq --arg sha "$sha256" '.artifacts["wasm32-wasip2"].sha256 = $sha' "$manifest" > "${manifest}.tmp" && mv "${manifest}.tmp" "$manifest"
+                echo "Patched $manifest with sha256=$sha256"
+              fi
+            done
+          done < "$CHECKSUMS"
+      - name: Commit updated manifests
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add registry/
+          if git diff --cached --quiet; then
+            echo "No manifest changes to commit"
+          else
+            git commit -m "chore: update WASM artifact SHA256 checksums [skip ci]"
+            git push
+          fi
 
   announce:
     needs:

@@ -8,6 +8,11 @@
         "name": "discord_bot_token",
         "prompt": "Enter your Discord Bot Token (from Developer Portal)",
         "optional": false
+      },
+      {
+        "name": "discord_public_key",
+        "prompt": "Enter your Discord Application Public Key (from Developer Portal > General Information)",
+        "optional": false
       }
     ]
   },
@@ -39,6 +44,9 @@
       "emit_rate_limit": {
         "messages_per_minute": 100,
         "messages_per_hour": 5000
+      },
+      "webhook": {
+        "signature_key_secret_name": "discord_public_key"
       }
     }
   },

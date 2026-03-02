@@ -20,7 +20,7 @@ use crate::tools::builtin::{
     JobStatusTool, JsonTool, ListDirTool, ListJobsTool, MemoryReadTool, MemorySearchTool,
     MemoryTreeTool, MemoryWriteTool, PromptQueue, ReadFileTool, ShellTool, SkillInstallTool,
     SkillListTool, SkillRemoveTool, SkillSearchTool, TimeTool, ToolActivateTool, ToolAuthTool,
-    ToolInstallTool, ToolListTool, ToolRemoveTool, ToolSearchTool, WriteFileTool,
+    ToolInstallTool, ToolListTool, ToolRemoveTool, ToolSearchTool, WebFetchTool, WriteFileTool,
 };
 use crate::tools::rate_limiter::RateLimiter;
 use crate::tools::tool::{Tool, ToolDomain};
@@ -67,6 +67,8 @@ const PROTECTED_TOOL_NAMES: &[&str] = &[
     "skill_search",
     "skill_install",
     "skill_remove",
+    "message",
+    "web_fetch",
 ];
 
 /// Registry of available tools.
@@ -80,6 +82,8 @@ pub struct ToolRegistry {
     secrets_store: Option<Arc<dyn SecretsStore + Send + Sync>>,
     /// Shared rate limiter for built-in tool invocations.
     rate_limiter: RateLimiter,
+    /// Reference to the message tool for setting context per-turn.
+    message_tool: RwLock<Option<Arc<crate::tools::builtin::MessageTool>>>,
 }
 
 impl ToolRegistry {
@@ -91,6 +95,7 @@ impl ToolRegistry {
             credential_registry: None,
             secrets_store: None,
             rate_limiter: RateLimiter::new(),
+            message_tool: RwLock::new(None),
         }
     }
 
@@ -213,6 +218,7 @@ impl ToolRegistry {
             http = http.with_credentials(Arc::clone(cr), Arc::clone(ss));
         }
         self.register_sync(Arc::new(http));
+        self.register_sync(Arc::new(WebFetchTool::new()));
 
         tracing::info!("Registered {} built-in tools", self.count());
     }
@@ -282,11 +288,13 @@ impl ToolRegistry {
     ///
     /// Job tools allow the LLM to create, list, check status, and cancel jobs.
     /// When sandbox deps are provided, `create_job` automatically delegates to
-    /// Docker containers. Otherwise it creates in-memory jobs via ContextManager.
+    /// Docker containers. Otherwise it dispatches via the Scheduler (which
+    /// persists to DB and spawns a worker).
     #[allow(clippy::too_many_arguments)]
     pub fn register_job_tools(
         &self,
         context_manager: Arc<ContextManager>,
+        scheduler_slot: Option<crate::tools::builtin::SchedulerSlot>,
         job_manager: Option<Arc<ContainerJobManager>>,
         store: Option<Arc<dyn Database>>,
         job_event_tx: Option<
@@ -297,6 +305,9 @@ impl ToolRegistry {
         secrets_store: Option<Arc<dyn SecretsStore + Send + Sync>>,
     ) {
         let mut create_tool = CreateJobTool::new(Arc::clone(&context_manager));
+        if let Some(slot) = scheduler_slot {
+            create_tool = create_tool.with_scheduler_slot(slot);
+        }
         if let Some(jm) = job_manager {
             create_tool = create_tool.with_sandbox(jm, store.clone());
         }
@@ -397,6 +408,33 @@ impl ToolRegistry {
         )));
         self.register_sync(Arc::new(RoutineHistoryTool::new(store)));
         tracing::info!("Registered 5 routine management tools");
+    }
+
+    /// Register message tool for sending messages to channels.
+    pub async fn register_message_tools(
+        &self,
+        channel_manager: Arc<crate::channels::ChannelManager>,
+    ) {
+        use crate::tools::builtin::MessageTool;
+        let tool = Arc::new(MessageTool::new(channel_manager));
+        *self.message_tool.write().await = Some(Arc::clone(&tool));
+        self.tools
+            .write()
+            .await
+            .insert(tool.name().to_string(), tool as Arc<dyn Tool>);
+        self.builtin_names
+            .write()
+            .await
+            .insert("message".to_string());
+        tracing::info!("Registered message tool");
+    }
+
+    /// Set the default channel and target for the message tool.
+    /// Call this before each agent turn with the current conversation's context.
+    pub async fn set_message_tool_context(&self, channel: Option<String>, target: Option<String>) {
+        if let Some(tool) = self.message_tool.read().await.as_ref() {
+            tool.set_context(channel, target).await;
+        }
     }
 
     /// Register the software builder tool.
