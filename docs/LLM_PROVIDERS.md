@@ -12,6 +12,7 @@ configurations.
 | Anthropic | `anthropic` | `ANTHROPIC_API_KEY` | Claude models |
 | OpenAI | `openai` | `OPENAI_API_KEY` | GPT models |
 | Ollama | `ollama` | No | Local inference |
+| Avian | `avian` | `AVIAN_API_KEY` | DeepSeek, Kimi, GLM |
 | OpenRouter | `openai_compatible` | `LLM_API_KEY` | 300+ models |
 | Together AI | `openai_compatible` | `LLM_API_KEY` | Fast inference |
 | Fireworks AI | `openai_compatible` | `LLM_API_KEY` | Fast inference |
@@ -65,6 +66,27 @@ OLLAMA_MODEL=llama3.2
 ```
 
 Pull a model first: `ollama pull llama3.2`
+
+---
+
+## Avian
+
+[Avian](https://avian.io) provides access to DeepSeek, Kimi, GLM, and MiniMax models.
+
+```env
+LLM_BACKEND=avian
+AVIAN_API_KEY=...
+AVIAN_MODEL=deepseek/deepseek-v3.2
+```
+
+Available models:
+
+| Model | ID | Context |
+|---|---|---|
+| DeepSeek V3.2 | `deepseek/deepseek-v3.2` | 164K |
+| Kimi K2.5 | `moonshotai/kimi-k2.5` | 131K |
+| GLM-5 | `z-ai/glm-5` | 131K |
+| MiniMax M2.5 | `minimax/minimax-m2.5` | 1M |
 
 ---
 

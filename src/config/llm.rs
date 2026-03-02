@@ -26,6 +26,8 @@ pub enum LlmBackend {
     OpenAiCompatible,
     /// Tinfoil private inference
     Tinfoil,
+    /// Avian AI inference
+    Avian,
 }
 
 impl std::str::FromStr for LlmBackend {
@@ -39,8 +41,9 @@ impl std::str::FromStr for LlmBackend {
             "ollama" => Ok(Self::Ollama),
             "openai_compatible" | "openai-compatible" | "compatible" => Ok(Self::OpenAiCompatible),
             "tinfoil" => Ok(Self::Tinfoil),
+            "avian" => Ok(Self::Avian),
             _ => Err(format!(
-                "invalid LLM backend '{}', expected one of: nearai, openai, anthropic, ollama, openai_compatible, tinfoil",
+                "invalid LLM backend '{}', expected one of: nearai, openai, anthropic, ollama, openai_compatible, tinfoil, avian",
                 s
             )),
         }
@@ -56,6 +59,7 @@ impl std::fmt::Display for LlmBackend {
             Self::Ollama => write!(f, "ollama"),
             Self::OpenAiCompatible => write!(f, "openai_compatible"),
             Self::Tinfoil => write!(f, "tinfoil"),
+            Self::Avian => write!(f, "avian"),
         }
     }
 }
@@ -120,6 +124,13 @@ pub struct TinfoilConfig {
     pub model: String,
 }
 
+/// Configuration for Avian AI inference.
+#[derive(Debug, Clone)]
+pub struct AvianConfig {
+    pub api_key: SecretString,
+    pub model: String,
+}
+
 /// LLM provider configuration.
 ///
 /// NEAR AI remains the default backend. Users can switch to other providers
@@ -140,6 +151,8 @@ pub struct LlmConfig {
     pub openai_compatible: Option<OpenAiCompatibleConfig>,
     /// Tinfoil config (populated when backend=tinfoil)
     pub tinfoil: Option<TinfoilConfig>,
+    /// Avian config (populated when backend=avian)
+    pub avian: Option<AvianConfig>,
 }
 
 /// NEAR AI configuration.
@@ -350,6 +363,20 @@ impl LlmConfig {
             None
         };
 
+        let avian = if backend == LlmBackend::Avian {
+            let api_key = optional_env("AVIAN_API_KEY")?
+                .map(SecretString::from)
+                .ok_or_else(|| ConfigError::MissingRequired {
+                    key: "AVIAN_API_KEY".to_string(),
+                    hint: "Set AVIAN_API_KEY when LLM_BACKEND=avian".to_string(),
+                })?;
+            let model = optional_env("AVIAN_MODEL")?
+                .unwrap_or_else(|| "deepseek/deepseek-v3.2".to_string());
+            Some(AvianConfig { api_key, model })
+        } else {
+            None
+        };
+
         Ok(Self {
             backend,
             nearai,
@@ -358,6 +385,7 @@ impl LlmConfig {
             ollama,
             openai_compatible,
             tinfoil,
+            avian,
         })
     }
 }

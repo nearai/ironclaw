@@ -798,6 +798,7 @@ impl SetupWizard {
                     "anthropic" => "Anthropic (Claude)",
                     "openai" => "OpenAI",
                     "ollama" => "Ollama (local)",
+                    "avian" => "Avian",
                     "openai_compatible" => "OpenAI-compatible endpoint",
                     other => other,
                 }
@@ -807,7 +808,7 @@ impl SetupWizard {
 
             let is_known = matches!(
                 current.as_str(),
-                "nearai" | "anthropic" | "openai" | "ollama" | "openai_compatible"
+                "nearai" | "anthropic" | "openai" | "ollama" | "openai_compatible" | "avian"
             );
 
             if is_known && confirm("Keep current provider?", true).map_err(SetupError::Io)? {
@@ -820,6 +821,7 @@ impl SetupWizard {
                     "anthropic" => return self.setup_anthropic().await,
                     "openai" => return self.setup_openai().await,
                     "ollama" => return self.setup_ollama(),
+                    "avian" => return self.setup_avian().await,
                     "openai_compatible" => return self.setup_openai_compatible().await,
                     _ => {
                         return Err(SetupError::Config(format!(
@@ -847,6 +849,7 @@ impl SetupWizard {
             "OpenAI           - GPT models (direct API key)",
             "Ollama           - local models, no API key needed",
             "OpenRouter       - 200+ models via single API key",
+            "Avian            - DeepSeek, Kimi, GLM models (direct API key)",
             "OpenAI-compatible - custom endpoint (vLLM, LiteLLM, etc.)",
         ];
 
@@ -858,7 +861,8 @@ impl SetupWizard {
             2 => self.setup_openai().await?,
             3 => self.setup_ollama()?,
             4 => self.setup_openrouter().await?,
-            5 => self.setup_openai_compatible().await?,
+            5 => self.setup_avian().await?,
+            6 => self.setup_openai_compatible().await?,
             _ => return Err(SetupError::Config("Invalid provider selection".to_string())),
         }
 
@@ -1062,6 +1066,19 @@ impl SetupWizard {
         .await
     }
 
+    /// Avian provider setup: just needs an API key.
+    async fn setup_avian(&mut self) -> Result<(), SetupError> {
+        self.setup_api_key_provider(
+            "avian",
+            "AVIAN_API_KEY",
+            "llm_avian_api_key",
+            "Avian API key",
+            "https://avian.io",
+            Some("Avian"),
+        )
+        .await
+    }
+
     /// OpenAI-compatible provider setup: base URL + optional API key.
     async fn setup_openai_compatible(&mut self) -> Result<(), SetupError> {
         self.settings.llm_backend = Some("openai_compatible".to_string());
@@ -1163,6 +1180,24 @@ impl SetupWizard {
                 if models.is_empty() {
                     print_info("No models found. Pull one first: ollama pull llama3");
                 }
+                self.select_from_model_list(&models)?;
+            }
+            "avian" => {
+                let models: Vec<(String, String)> = vec![
+                    (
+                        "deepseek/deepseek-v3.2".into(),
+                        "DeepSeek V3.2 (164K context)".into(),
+                    ),
+                    (
+                        "moonshotai/kimi-k2.5".into(),
+                        "Kimi K2.5 (131K context)".into(),
+                    ),
+                    ("z-ai/glm-5".into(), "GLM-5 (131K context)".into()),
+                    (
+                        "minimax/minimax-m2.5".into(),
+                        "MiniMax M2.5 (1M context)".into(),
+                    ),
+                ];
                 self.select_from_model_list(&models)?;
             }
             "openai_compatible" => {
@@ -1278,6 +1313,7 @@ impl SetupWizard {
             ollama: None,
             openai_compatible: None,
             tinfoil: None,
+            avian: None,
         };
 
         match create_llm_provider(&config, session) {
@@ -2296,6 +2332,7 @@ impl SetupWizard {
                 "anthropic" => "Anthropic",
                 "openai" => "OpenAI",
                 "ollama" => "Ollama",
+                "avian" => "Avian",
                 "openai_compatible" => "OpenAI-compatible",
                 other => other,
             };
