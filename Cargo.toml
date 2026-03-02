@@ -196,6 +196,7 @@ html-to-markdown = ["dep:html-to-markdown-rs", "dep:readabilityrs"]
 
 [[test]]
 name = "html_to_markdown"
+path = "test/html_to_markdown.rs"
 required-features = ["html-to-markdown"]
 
 # The profile that 'cargo dist' will build with
