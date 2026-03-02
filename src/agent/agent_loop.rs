@@ -13,6 +13,7 @@ use futures::StreamExt;
 
 use crate::agent::context_monitor::ContextMonitor;
 use crate::agent::heartbeat::spawn_heartbeat;
+use crate::agent::message_batcher::{BatchingConfig, MessageBatcher};
 use crate::agent::routine_engine::{RoutineEngine, spawn_cron_ticker};
 use crate::agent::self_repair::{DefaultSelfRepair, RepairResult, SelfRepair};
 use crate::agent::session_manager::SessionManager;
@@ -498,6 +499,24 @@ impl Agent {
         // Extract engine ref for use in message loop
         let routine_engine_for_loop = routine_handle.as_ref().map(|(_, e)| Arc::clone(e));
 
+        // Set up message batching for rapid inbound messages
+        let batching_config = BatchingConfig {
+            enabled: self.config.batching_enabled,
+            window_ms: self.config.batching_window_ms,
+            max_messages: self.config.batching_max_messages,
+        };
+        let batcher = Arc::new(MessageBatcher::new(batching_config));
+        let mut batched_rx = batcher.subscribe();
+
+        // Spawn task to forward raw messages to batcher
+        let batcher_clone = Arc::clone(&batcher);
+        let (raw_tx, mut raw_rx) = tokio::sync::mpsc::channel::<IncomingMessage>(64);
+        tokio::spawn(async move {
+            while let Some(msg) = raw_rx.recv().await {
+                batcher_clone.push(msg).await;
+            }
+        });
+
         // Main message loop
         tracing::info!("Agent {} ready and listening", self.config.name);
 
@@ -505,14 +524,37 @@ impl Agent {
             let message = tokio::select! {
                 biased;
                 _ = tokio::signal::ctrl_c() => {
-                    tracing::info!("Ctrl+C received, shutting down...");
+                    tracing::info!("Ctrl+C received, flushing pending batches...");
+                    batcher.flush_all().await;
                     break;
                 }
+                // Receive batched (merged) messages
+                batched = batched_rx.recv() => {
+                    match batched {
+                        Ok(m) => m,
+                        Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                            tracing::info!("Batcher channel closed, shutting down...");
+                            break;
+                        }
+                        Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                            tracing::warn!("Batcher channel lagged by {} messages", n);
+                            continue;
+                        }
+                    }
+                }
+                // Receive raw messages and forward to batcher
                 msg = message_stream.next() => {
                     match msg {
-                        Some(m) => m,
+                        Some(m) => {
+                            // Forward to batcher and continue to next iteration
+                            // The batcher will emit the (possibly merged) message
+                            // through the batched_rx channel
+                            let _ = raw_tx.send(m).await;
+                            continue;
+                        }
                         None => {
-                            tracing::info!("All channel streams ended, shutting down...");
+                            tracing::info!("All channel streams ended, flushing pending batches...");
+                            batcher.flush_all().await;
                             break;
                         }
                     }
@@ -573,7 +615,8 @@ impl Agent {
                 }
                 Ok(None) => {
                     // Shutdown signal received (/quit, /exit, /shutdown)
-                    tracing::info!("Shutdown command received, exiting...");
+                    tracing::info!("Shutdown command received, flushing pending batches...");
+                    batcher.flush_all().await;
                     break;
                 }
                 Err(e) => {

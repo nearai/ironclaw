@@ -11,6 +11,9 @@
 .sidecar/
 .todos/
 
+# Serena MCP plugin data
+.serena/
+
 target/
 
 # Benchmark results (local runs, not committed)
