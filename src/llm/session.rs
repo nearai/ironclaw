@@ -7,6 +7,7 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use crate::bootstrap::ironclaw_base_dir;
 use crate::cli::oauth_defaults::OAUTH_CALLBACK_PORT;
 
 use chrono::{DateTime, Utc};
@@ -46,10 +47,7 @@ impl Default for SessionConfig {
 
 /// Get the default session file path (~/.ironclaw/session.json).
 pub fn default_session_path() -> PathBuf {
-    dirs::home_dir()
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join(".ironclaw")
-        .join("session.json")
+    ironclaw_base_dir().join("session.json")
 }
 
 /// Manages NEAR AI session tokens with persistence and automatic renewal.

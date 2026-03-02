@@ -89,5 +89,17 @@
     "setup_url": "https://developer.okta.com/docs/guides/implement-oauth-for-okta/main/",
     "token_hint": "OAuth2 access token (JWT)",
     "env_var": "OKTA_OAUTH_TOKEN"
+  },
+  "setup": {
+    "required_secrets": [
+      {
+        "name": "okta_oauth_client_id",
+        "prompt": "Okta OAuth Client ID"
+      },
+      {
+        "name": "okta_oauth_client_secret",
+        "prompt": "Okta OAuth Client Secret"
+      }
+    ]
   }
 }

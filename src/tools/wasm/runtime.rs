@@ -347,4 +347,18 @@ mod tests {
         assert_eq!(limits.memory_bytes, 5 * 1024 * 1024);
         assert_eq!(limits.fuel, 500_000);
     }
+
+    /// The WASM runtime (Wasmtime engine) must initialise successfully even
+    /// when no tools directory exists on disk. The engine only configures the
+    /// compiler and epoch ticker — loading modules from a directory is a
+    /// separate step. Regression test for a bug where the runtime was gated
+    /// on `tools_dir.exists()`, causing extensions installed after startup
+    /// (e.g. via the web UI) to fail with "WASM runtime not available".
+    #[test]
+    fn test_runtime_creation_without_tools_dir() {
+        let config = WasmRuntimeConfig::for_testing();
+        // Runtime should succeed even though no tools directory exists.
+        let runtime = WasmToolRuntime::new(config).expect("runtime should init without tools dir");
+        assert!(runtime.config().fuel_config.enabled);
+    }
 }

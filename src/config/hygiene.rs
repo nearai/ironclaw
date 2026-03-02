@@ -1,3 +1,4 @@
+use crate::bootstrap::ironclaw_base_dir;
 use crate::config::helpers::{parse_bool_env, parse_optional_env};
 use crate::error::ConfigError;
 
@@ -41,9 +42,7 @@ impl HygieneConfig {
             enabled: self.enabled,
             retention_days: self.retention_days,
             cadence_hours: self.cadence_hours,
-            state_dir: dirs::home_dir()
-                .unwrap_or_else(|| std::path::PathBuf::from("."))
-                .join(".ironclaw"),
+            state_dir: ironclaw_base_dir(),
         }
     }
 }

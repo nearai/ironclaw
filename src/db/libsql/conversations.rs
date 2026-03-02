@@ -97,7 +97,7 @@ impl ConversationStore for LibSqlBackend {
                     c.started_at,
                     c.last_activity,
                     c.metadata,
-                    (SELECT COUNT(*) FROM conversation_messages m WHERE m.conversation_id = c.id) AS message_count,
+                    (SELECT COUNT(*) FROM conversation_messages m WHERE m.conversation_id = c.id AND m.role = 'user') AS message_count,
                     (SELECT substr(m2.content, 1, 100)
                      FROM conversation_messages m2
                      WHERE m2.conversation_id = c.id AND m2.role = 'user'
