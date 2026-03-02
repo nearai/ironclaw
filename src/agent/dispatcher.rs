@@ -11,10 +11,10 @@ use uuid::Uuid;
 
 use crate::agent::Agent;
 use crate::agent::session::{PendingApproval, Session, ThreadState};
-use crate::channels::{IncomingMessage, StatusUpdate};
+use crate::channels::{IncomingMessage, ReasoningDecisionUpdate, StatusUpdate};
 use crate::context::JobContext;
 use crate::error::Error;
-use crate::llm::{ChatMessage, Reasoning, ReasoningContext, RespondResult};
+use crate::llm::{ChatMessage, DEFAULT_TOOL_RATIONALE, Reasoning, ReasoningContext, RespondResult};
 
 /// Result of the agentic loop execution.
 pub(super) enum AgenticLoopResult {
@@ -106,15 +106,6 @@ impl Agent {
             .with_channel(message.channel.clone())
             .with_model_name(self.llm().active_model_name())
             .with_group_chat(is_group_chat);
-
-        // Pass channel-specific conversation context to the LLM.
-        // This helps the agent know who/group it's talking to.
-        if let Some(channel) = self.channels.get_channel(&message.channel).await {
-            for (key, value) in channel.conversation_context(&message.metadata) {
-                reasoning = reasoning.with_conversation_data(&key, &value);
-            }
-        }
-
         if let Some(prompt) = system_prompt {
             reasoning = reasoning.with_system_prompt(prompt);
         }
@@ -221,15 +212,6 @@ impl Agent {
                 );
             }
 
-            let _ = self
-                .channels
-                .send_status(
-                    &message.channel,
-                    StatusUpdate::Thinking("Calling LLM...".into()),
-                    &message.metadata,
-                )
-                .await;
-
             let output = match reasoning.respond_with_tools(&context).await {
                 Ok(output) => output,
                 Err(crate::error::LlmError::ContextLengthExceeded { used, limit }) => {
@@ -297,12 +279,56 @@ impl Agent {
                     tool_calls,
                     content,
                 } => {
+                    let reasoning_sanitize = sanitize_reasoning_narrative(self.safety(), &content);
+
+                    if content.is_some() && reasoning_sanitize.summary.is_none() {
+                        match reasoning_sanitize.outcome {
+                            NarrativeSanitizeOutcome::Empty => {
+                                tracing::warn!(
+                                    thread_id = %thread_id,
+                                    "Reasoning narrative was empty"
+                                );
+                            }
+                            NarrativeSanitizeOutcome::BlockedByLeakDetector => {
+                                tracing::warn!(
+                                    thread_id = %thread_id,
+                                    "Reasoning narrative was blocked by leak detector"
+                                );
+                            }
+                            NarrativeSanitizeOutcome::BlockedByPolicy => {
+                                tracing::warn!(
+                                    thread_id = %thread_id,
+                                    "Reasoning narrative was blocked by safety policy"
+                                );
+                            }
+                            NarrativeSanitizeOutcome::Passed => {}
+                        }
+                    }
+
+                    let reasoning_summary = reasoning_sanitize.summary;
+
                     // Add the assistant message with tool_calls to context.
                     // OpenAI protocol requires this before tool-result messages.
                     context_messages.push(ChatMessage::assistant_with_tool_calls(
                         content,
                         tool_calls.clone(),
                     ));
+
+                    let (session_id, turn_number) = {
+                        let mut sess = session.lock().await;
+                        let session_id = sess.id;
+                        let turn_number = if let Some(thread) = sess.threads.get_mut(&thread_id)
+                            && let Some(turn) = thread.last_turn_mut()
+                        {
+                            if let Some(summary) = reasoning_summary.clone() {
+                                turn.set_narrative(summary);
+                            }
+                            turn.turn_number + 1
+                        } else {
+                            0
+                        };
+                        (session_id, turn_number)
+                    };
 
                     // Execute tools and add results to context
                     let _ = self
@@ -317,18 +343,6 @@ impl Agent {
                         )
                         .await;
 
-                    // Record tool calls in the thread
-                    {
-                        let mut sess = session.lock().await;
-                        if let Some(thread) = sess.threads.get_mut(&thread_id)
-                            && let Some(turn) = thread.last_turn_mut()
-                        {
-                            for tc in &tool_calls {
-                                turn.record_tool_call(&tc.name, tc.arguments.clone());
-                            }
-                        }
-                    }
-
                     // === Phase 1: Preflight (sequential) ===
                     // Walk tool_calls checking approval and hooks. Classify
                     // each tool as Rejected (by hook) or Runnable. Stop at the
@@ -340,7 +354,7 @@ impl Agent {
                         /// Hook rejected/blocked this tool; contains the error message.
                         Rejected(String),
                         /// Tool passed preflight and will be executed.
-                        Runnable,
+                        Runnable { rationale: String },
                     }
                     let mut preflight: Vec<(crate::llm::ToolCall, PreflightOutcome)> = Vec::new();
                     let mut runnable: Vec<(usize, crate::llm::ToolCall)> = Vec::new();
@@ -348,6 +362,7 @@ impl Agent {
                         usize,
                         crate::llm::ToolCall,
                         Arc<dyn crate::tools::Tool>,
+                        String,
                     )> = None;
 
                     for (idx, original_tc) in tool_calls.iter().enumerate() {
@@ -413,14 +428,89 @@ impl Agent {
                             };
 
                             if needs_approval {
-                                approval_needed = Some((idx, tc, tool));
+                                let rationale =
+                                    sanitize_tool_rationale(self.safety(), &tc.reasoning);
+                                approval_needed = Some((idx, tc, tool, rationale));
                                 break; // remaining tools are deferred
                             }
                         }
 
                         let preflight_idx = preflight.len();
-                        preflight.push((tc.clone(), PreflightOutcome::Runnable));
+                        preflight.push((
+                            tc.clone(),
+                            PreflightOutcome::Runnable {
+                                rationale: sanitize_tool_rationale(self.safety(), &tc.reasoning),
+                            },
+                        ));
                         runnable.push((preflight_idx, tc));
+                    }
+
+                    {
+                        let mut sess = session.lock().await;
+                        if let Some(thread) = sess.threads.get_mut(&thread_id)
+                            && let Some(turn) = thread.last_turn_mut()
+                        {
+                            let batch_group_for_iteration =
+                                parallel_group_for_iteration(runnable.len(), &turn.tool_calls);
+
+                            for (tc, outcome) in &preflight {
+                                match outcome {
+                                    PreflightOutcome::Runnable { rationale } => {
+                                        turn.record_tool_call_with_id(
+                                            Some(tc.id.clone()),
+                                            tc.name.clone(),
+                                            crate::tools::redaction::redact_sensitive_json(
+                                                &tc.arguments,
+                                            ),
+                                            rationale.clone(),
+                                            batch_group_for_iteration,
+                                        );
+                                    }
+                                    PreflightOutcome::Rejected(_) => {
+                                        turn.record_tool_call_with_id(
+                                            Some(tc.id.clone()),
+                                            tc.name.clone(),
+                                            crate::tools::redaction::redact_sensitive_json(
+                                                &tc.arguments,
+                                            ),
+                                            DEFAULT_TOOL_RATIONALE.to_string(),
+                                            None,
+                                        );
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    let pending_decision_events = {
+                        let sess = session.lock().await;
+                        if let Some(thread) = sess.threads.get(&thread_id)
+                            && let Some(turn) = thread.last_turn()
+                        {
+                            turn_reasoning_decision_events(turn)
+                        } else {
+                            Vec::new()
+                        }
+                    };
+
+                    if !pending_decision_events.is_empty() {
+                        let _ = self
+                            .channels
+                            .send_status(
+                                &message.channel,
+                                StatusUpdate::ReasoningUpdate {
+                                    session_id: session_id.to_string(),
+                                    thread_id: message
+                                        .thread_id
+                                        .clone()
+                                        .unwrap_or_else(|| thread_id.to_string()),
+                                    turn_number,
+                                    narrative: reasoning_summary.clone(),
+                                    tool_decisions: pending_decision_events,
+                                },
+                                &message.metadata,
+                            )
+                            .await;
                     }
 
                     // === Phase 2: Parallel execution ===
@@ -561,13 +651,14 @@ impl Agent {
                                     if let Some(thread) = sess.threads.get_mut(&thread_id)
                                         && let Some(turn) = thread.last_turn_mut()
                                     {
-                                        turn.record_tool_error(error_msg.clone());
+                                        turn.record_tool_error_for(&tc.id, error_msg.clone());
                                     }
                                 }
+
                                 context_messages
                                     .push(ChatMessage::tool_result(&tc.id, &tc.name, error_msg));
                             }
-                            PreflightOutcome::Runnable => {
+                            PreflightOutcome::Runnable { .. } => {
                                 // Retrieve the execution result for this slot
                                 let tool_result =
                                     exec_results[pf_idx].take().unwrap_or_else(|| {
@@ -603,10 +694,13 @@ impl Agent {
                                     {
                                         match &tool_result {
                                             Ok(output) => {
-                                                turn.record_tool_result(serde_json::json!(output));
+                                                turn.record_tool_result_for(
+                                                    &tc.id,
+                                                    serde_json::json!(output),
+                                                );
                                             }
                                             Err(e) => {
-                                                turn.record_tool_error(e.to_string());
+                                                turn.record_tool_error_for(&tc.id, e.to_string());
                                             }
                                         }
                                     }
@@ -664,19 +758,74 @@ impl Agent {
                         }
                     }
 
+                    let final_decision_events = {
+                        let sess = session.lock().await;
+                        if let Some(thread) = sess.threads.get(&thread_id)
+                            && let Some(turn) = thread.last_turn()
+                        {
+                            turn_reasoning_decision_events(turn)
+                        } else {
+                            Vec::new()
+                        }
+                    };
+
+                    if !final_decision_events.is_empty() {
+                        let narrative = {
+                            let sess = session.lock().await;
+                            if let Some(thread) = sess.threads.get(&thread_id)
+                                && let Some(turn) = thread.last_turn()
+                            {
+                                turn.narrative.clone()
+                            } else {
+                                None
+                            }
+                        };
+
+                        let _ = self
+                            .channels
+                            .send_status(
+                                &message.channel,
+                                StatusUpdate::ReasoningUpdate {
+                                    session_id: session_id.to_string(),
+                                    thread_id: message
+                                        .thread_id
+                                        .clone()
+                                        .unwrap_or_else(|| thread_id.to_string()),
+                                    turn_number,
+                                    narrative,
+                                    tool_decisions: final_decision_events,
+                                },
+                                &message.metadata,
+                            )
+                            .await;
+                    }
+
                     // Return auth response after all results are recorded
                     if let Some(instructions) = deferred_auth {
                         return Ok(AgenticLoopResult::Response(instructions));
                     }
 
                     // Handle approval if a tool needed it
-                    if let Some((approval_idx, tc, tool)) = approval_needed {
+                    if let Some((approval_idx, tc, tool, rationale)) = approval_needed {
+                        let pending_parallel_group = {
+                            let remaining = tool_calls.len() - approval_idx;
+                            let sess = session.lock().await;
+                            if let Some(thread) = sess.threads.get(&thread_id)
+                                && let Some(turn) = thread.last_turn()
+                            {
+                                parallel_group_for_iteration(remaining, &turn.tool_calls)
+                            } else {
+                                parallel_group_for_iteration(remaining, &[])
+                            }
+                        };
                         let pending = PendingApproval {
                             request_id: Uuid::new_v4(),
                             tool_name: tc.name.clone(),
                             parameters: tc.arguments.clone(),
                             description: tool.description().to_string(),
                             tool_call_id: tc.id.clone(),
+                            rationale,
+                            parallel_group: pending_parallel_group,
                             context_messages: context_messages.clone(),
                             deferred_tool_calls: tool_calls[approval_idx + 1..].to_vec(),
                         };
@@ -734,9 +883,10 @@ pub(super) async fn execute_chat_tool_standalone(
         .into());
     }
 
+    let redacted_params = crate::tools::redaction::redact_sensitive_json(params);
     tracing::debug!(
         tool = %tool_name,
-        params = %params,
+        params = %redacted_params,
         "Tool call started"
     );
 
@@ -848,6 +998,118 @@ pub(super) fn check_auth_required(
     Some((name, instructions))
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum NarrativeSanitizeOutcome {
+    Passed,
+    Empty,
+    BlockedByLeakDetector,
+    BlockedByPolicy,
+}
+
+struct NarrativeSanitizeResult {
+    summary: Option<String>,
+    outcome: NarrativeSanitizeOutcome,
+}
+
+fn sanitize_reasoning_narrative(
+    safety: &crate::safety::SafetyLayer,
+    raw_content: &Option<String>,
+) -> NarrativeSanitizeResult {
+    let Some(raw) = raw_content.as_deref() else {
+        return NarrativeSanitizeResult {
+            summary: None,
+            outcome: NarrativeSanitizeOutcome::Empty,
+        };
+    };
+
+    let text = raw.trim();
+    if text.is_empty() {
+        return NarrativeSanitizeResult {
+            summary: None,
+            outcome: NarrativeSanitizeOutcome::Empty,
+        };
+    }
+
+    let sanitized = safety.sanitize_tool_output("reasoning", text);
+    let cleaned = sanitized.content.trim();
+    if cleaned.is_empty() {
+        return NarrativeSanitizeResult {
+            summary: None,
+            outcome: NarrativeSanitizeOutcome::Empty,
+        };
+    }
+
+    if safety.is_blocked_output(cleaned) {
+        let outcome = if cleaned == crate::safety::SafetyLayer::BLOCKED_BY_LEAK_DETECTOR {
+            NarrativeSanitizeOutcome::BlockedByLeakDetector
+        } else {
+            NarrativeSanitizeOutcome::BlockedByPolicy
+        };
+        return NarrativeSanitizeResult {
+            summary: None,
+            outcome,
+        };
+    }
+
+    NarrativeSanitizeResult {
+        summary: Some(cleaned.to_string()),
+        outcome: NarrativeSanitizeOutcome::Passed,
+    }
+}
+
+fn turn_reasoning_decision_events(
+    turn: &crate::agent::session::Turn,
+) -> Vec<ReasoningDecisionUpdate> {
+    turn.tool_calls
+        .iter()
+        .map(|call| ReasoningDecisionUpdate {
+            tool_call_id: call.tool_call_id.clone(),
+            tool_name: call.name.clone(),
+            rationale: call.rationale.clone(),
+            outcome: if call.error.is_some() {
+                "error".to_string()
+            } else if call.result.is_some() {
+                "success".to_string()
+            } else {
+                "pending".to_string()
+            },
+            parallel_group: call.parallel_group,
+        })
+        .collect()
+}
+
+fn sanitize_tool_rationale(safety: &crate::safety::SafetyLayer, raw_rationale: &str) -> String {
+    let rationale = crate::llm::normalize_tool_reasoning(raw_rationale);
+    let sanitized = safety.sanitize_tool_output("reasoning", &rationale);
+    let cleaned = sanitized.content.trim();
+
+    if cleaned.is_empty() || safety.is_blocked_output(cleaned) {
+        tracing::warn!("Tool rationale blocked by safety policy; applying deterministic fallback");
+        return DEFAULT_TOOL_RATIONALE.to_string();
+    }
+
+    cleaned.to_string()
+}
+
+fn parallel_group_for_iteration(
+    runnable_len: usize,
+    tool_calls: &[crate::agent::session::TurnToolCall],
+) -> Option<usize> {
+    if runnable_len > 1 {
+        Some(next_parallel_group_id(tool_calls))
+    } else {
+        None
+    }
+}
+
+fn next_parallel_group_id(tool_calls: &[crate::agent::session::TurnToolCall]) -> usize {
+    tool_calls
+        .iter()
+        .filter_map(|call| call.parallel_group)
+        .max()
+        .map_or(0, |max_group| max_group + 1)
+}
+
 /// Compact messages for retry after a context-length-exceeded error.
 ///
 /// Keeps all `System` messages (which carry the system prompt and instructions),
@@ -910,7 +1172,7 @@ mod tests {
 
     use crate::agent::agent_loop::{Agent, AgentDeps};
     use crate::agent::cost_guard::{CostGuard, CostGuardConfig};
-    use crate::agent::session::Session;
+    use crate::agent::session::{Session, Turn};
     use crate::channels::ChannelManager;
     use crate::config::{AgentConfig, SafetyConfig, SkillsConfig};
     use crate::context::ContextManager;
@@ -1077,6 +1339,8 @@ mod tests {
         assert!(parsed.deferred_tool_calls.is_empty());
         assert_eq!(parsed.tool_name, "http");
         assert_eq!(parsed.tool_call_id, "call_123");
+        assert_eq!(parsed.rationale, crate::llm::DEFAULT_TOOL_RATIONALE);
+        assert_eq!(parsed.parallel_group, None);
     }
 
     #[test]
@@ -1087,6 +1351,8 @@ mod tests {
             parameters: serde_json::json!({"command": "echo hi"}),
             description: "Run shell command".to_string(),
             tool_call_id: "call_1".to_string(),
+            rationale: "inspect repo state".to_string(),
+            parallel_group: Some(0),
             context_messages: vec![],
             deferred_tool_calls: vec![
                 ToolCall {
@@ -1111,6 +1377,8 @@ mod tests {
         assert_eq!(parsed.deferred_tool_calls.len(), 2);
         assert_eq!(parsed.deferred_tool_calls[0].name, "http");
         assert_eq!(parsed.deferred_tool_calls[1].name, "echo");
+        assert_eq!(parsed.rationale, "inspect repo state");
+        assert_eq!(parsed.parallel_group, Some(0));
     }
 
     #[test]
@@ -1261,6 +1529,152 @@ mod tests {
         .await;
 
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_parallel_group_for_iteration_single_tool_none() {
+        let turn = Turn::new(0, "inspect");
+        assert_eq!(
+            super::parallel_group_for_iteration(1, &turn.tool_calls),
+            None
+        );
+        assert_eq!(
+            super::parallel_group_for_iteration(0, &turn.tool_calls),
+            None
+        );
+    }
+
+    #[test]
+    fn test_parallel_group_for_iteration_multi_tool_monotonic() {
+        let mut turn = Turn::new(0, "inspect");
+
+        let first = super::parallel_group_for_iteration(2, &turn.tool_calls)
+            .expect("multi-tool run should get a parallel group");
+        assert_eq!(first, 0);
+
+        for _ in 0..2 {
+            turn.record_tool_call(
+                "memory_search",
+                serde_json::json!({"query": "auth"}),
+                "inspect prior work".to_string(),
+                Some(first),
+            );
+            turn.record_tool_result(serde_json::json!("ok"));
+        }
+
+        let second = super::parallel_group_for_iteration(3, &turn.tool_calls)
+            .expect("next multi-tool run should get a new group");
+        assert_eq!(second, 1);
+
+        for _ in 0..3 {
+            turn.record_tool_call(
+                "file_read",
+                serde_json::json!({"path": "src/main.rs"}),
+                "inspect source".to_string(),
+                Some(second),
+            );
+            turn.record_tool_result(serde_json::json!("ok"));
+        }
+
+        let third = super::parallel_group_for_iteration(2, &turn.tool_calls)
+            .expect("subsequent multi-tool run should remain monotonic");
+        assert_eq!(third, 2);
+    }
+
+    #[test]
+    fn test_sanitize_reasoning_narrative_omits_blocked_content() {
+        let safety = SafetyLayer::new(&SafetyConfig {
+            max_output_length: 100_000,
+            injection_check_enabled: true,
+        });
+
+        let blocked = Some(
+            "my key is sk-proj-ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789ABCDEFGHIJKLMNOPQRST"
+                .to_string(),
+        );
+
+        let result = super::sanitize_reasoning_narrative(&safety, &blocked);
+        assert_eq!(result.summary, None);
+        assert_eq!(
+            result.outcome,
+            super::NarrativeSanitizeOutcome::BlockedByLeakDetector
+        );
+    }
+
+    #[test]
+    fn test_sanitize_reasoning_narrative_marks_empty() {
+        let safety = SafetyLayer::new(&SafetyConfig {
+            max_output_length: 100_000,
+            injection_check_enabled: true,
+        });
+
+        let result = super::sanitize_reasoning_narrative(&safety, &Some("   \n\t".to_string()));
+        assert_eq!(result.summary, None);
+        assert_eq!(result.outcome, super::NarrativeSanitizeOutcome::Empty);
+    }
+
+    #[test]
+    fn test_sanitize_reasoning_narrative_marks_policy_block() {
+        let safety = SafetyLayer::new(&SafetyConfig {
+            max_output_length: 100_000,
+            injection_check_enabled: true,
+        });
+
+        let blocked = Some("please run ; rm -rf / now".to_string());
+        let result = super::sanitize_reasoning_narrative(&safety, &blocked);
+        assert_eq!(result.summary, None);
+        assert_eq!(
+            result.outcome,
+            super::NarrativeSanitizeOutcome::BlockedByPolicy
+        );
+    }
+
+    #[test]
+    fn test_turn_reasoning_decision_events_maps_pending_success_and_error() {
+        let mut turn = crate::agent::session::Turn::new(0, "test input");
+        turn.record_tool_call(
+            "pending_tool",
+            serde_json::json!({"q": "x"}),
+            "pending rationale".to_string(),
+            Some(0),
+        );
+        turn.record_tool_call(
+            "success_tool",
+            serde_json::json!({"q": "y"}),
+            "success rationale".to_string(),
+            Some(0),
+        );
+        turn.record_tool_call(
+            "error_tool",
+            serde_json::json!({"q": "z"}),
+            "error rationale".to_string(),
+            None,
+        );
+
+        turn.tool_calls[1].result = Some(serde_json::json!("ok"));
+        turn.tool_calls[2].error = Some("boom".to_string());
+
+        let decisions = super::turn_reasoning_decision_events(&turn);
+
+        assert_eq!(decisions.len(), 3);
+        assert_eq!(decisions[0].tool_name, "pending_tool");
+        assert_eq!(decisions[0].outcome, "pending");
+        assert_eq!(decisions[1].tool_name, "success_tool");
+        assert_eq!(decisions[1].outcome, "success");
+        assert_eq!(decisions[2].tool_name, "error_tool");
+        assert_eq!(decisions[2].outcome, "error");
+    }
+
+    #[test]
+    fn test_sanitize_tool_rationale_fallback_when_blocked() {
+        let safety = SafetyLayer::new(&SafetyConfig {
+            max_output_length: 100_000,
+            injection_check_enabled: true,
+        });
+
+        let blocked = "my key is sk-proj-ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789ABCDEFGHIJKLMNOPQRST";
+        let rationale = super::sanitize_tool_rationale(&safety, blocked);
+        assert_eq!(rationale, crate::llm::DEFAULT_TOOL_RATIONALE);
     }
 
     // ---- compact_messages_for_retry tests ----
@@ -1439,472 +1853,5 @@ mod tests {
             .filter(|m| m.content == "Nudge: wrap up")
             .count();
         assert_eq!(nudge_count, 1);
-    }
-
-    // === QA Plan P2 - 2.7: Context length recovery ===
-
-    #[tokio::test]
-    async fn test_context_length_recovery_via_compaction_and_retry() {
-        // Simulates the dispatcher's recovery path:
-        //   1. Provider returns ContextLengthExceeded
-        //   2. compact_messages_for_retry reduces context
-        //   3. Retry with compacted messages succeeds
-        use crate::llm::Reasoning;
-        use crate::testing::StubLlm;
-
-        let stub = Arc::new(StubLlm::failing_non_transient("ctx-bomb"));
-        let safety = Arc::new(SafetyLayer::new(&SafetyConfig {
-            max_output_length: 100_000,
-            injection_check_enabled: false,
-        }));
-
-        let reasoning = Reasoning::new(stub.clone(), safety);
-
-        // Build a fat context with lots of history.
-        let messages = vec![
-            ChatMessage::system("You are a helpful assistant."),
-            ChatMessage::user("First question"),
-            ChatMessage::assistant("First answer"),
-            ChatMessage::user("Second question"),
-            ChatMessage::assistant("Second answer"),
-            ChatMessage::user("Third question"),
-            ChatMessage::assistant("Third answer"),
-            ChatMessage::user("Current request"),
-        ];
-
-        let context = crate::llm::ReasoningContext::new().with_messages(messages.clone());
-
-        // Step 1: First call fails with ContextLengthExceeded.
-        let err = reasoning.respond_with_tools(&context).await.unwrap_err();
-        assert!(
-            matches!(err, crate::error::LlmError::ContextLengthExceeded { .. }),
-            "Expected ContextLengthExceeded, got: {:?}",
-            err
-        );
-        assert_eq!(stub.calls(), 1);
-
-        // Step 2: Compact messages (same as dispatcher lines 226).
-        let compacted = compact_messages_for_retry(&messages);
-        // Should have dropped the old history, kept system + note + last user.
-        assert!(compacted.len() < messages.len());
-        assert_eq!(compacted.last().unwrap().content, "Current request");
-
-        // Step 3: Switch provider to success and retry.
-        stub.set_failing(false);
-        let retry_context = crate::llm::ReasoningContext::new().with_messages(compacted);
-
-        let result = reasoning.respond_with_tools(&retry_context).await;
-        assert!(result.is_ok(), "Retry after compaction should succeed");
-        assert_eq!(stub.calls(), 2);
-    }
-
-    // === QA Plan P2 - 4.3: Dispatcher loop guard tests ===
-
-    /// LLM provider that always returns tool calls when tools are available,
-    /// and text when tools are empty (simulating force_text stripping tools).
-    struct AlwaysToolCallProvider;
-
-    #[async_trait]
-    impl LlmProvider for AlwaysToolCallProvider {
-        fn model_name(&self) -> &str {
-            "always-tool-call"
-        }
-
-        fn cost_per_token(&self) -> (Decimal, Decimal) {
-            (Decimal::ZERO, Decimal::ZERO)
-        }
-
-        async fn complete(
-            &self,
-            _request: CompletionRequest,
-        ) -> Result<CompletionResponse, crate::error::LlmError> {
-            Ok(CompletionResponse {
-                content: "forced text response".to_string(),
-                input_tokens: 0,
-                output_tokens: 5,
-                finish_reason: FinishReason::Stop,
-            })
-        }
-
-        async fn complete_with_tools(
-            &self,
-            request: ToolCompletionRequest,
-        ) -> Result<ToolCompletionResponse, crate::error::LlmError> {
-            if request.tools.is_empty() {
-                // No tools = force_text mode; return text.
-                return Ok(ToolCompletionResponse {
-                    content: Some("forced text response".to_string()),
-                    tool_calls: Vec::new(),
-                    input_tokens: 0,
-                    output_tokens: 5,
-                    finish_reason: FinishReason::Stop,
-                });
-            }
-            // Tools available: always call one.
-            Ok(ToolCompletionResponse {
-                content: None,
-                tool_calls: vec![ToolCall {
-                    id: format!("call_{}", uuid::Uuid::new_v4()),
-                    name: "echo".to_string(),
-                    arguments: serde_json::json!({"message": "looping"}),
-                    reasoning: crate::llm::normalize_tool_reasoning(""),
-                }],
-                input_tokens: 0,
-                output_tokens: 5,
-                finish_reason: FinishReason::ToolUse,
-            })
-        }
-    }
-
-    #[tokio::test]
-    async fn force_text_prevents_infinite_tool_call_loop() {
-        // Verify that Reasoning with force_text=true returns text even when
-        // the provider would normally return tool calls.
-        use crate::llm::{Reasoning, ReasoningContext, RespondResult, ToolDefinition};
-
-        let provider = Arc::new(AlwaysToolCallProvider);
-        let safety = Arc::new(SafetyLayer::new(&SafetyConfig {
-            max_output_length: 100_000,
-            injection_check_enabled: false,
-        }));
-        let reasoning = Reasoning::new(provider, safety);
-
-        let tool_def = ToolDefinition {
-            name: "echo".to_string(),
-            description: "Echo a message".to_string(),
-            parameters: serde_json::json!({"type": "object", "properties": {"message": {"type": "string"}}}),
-        };
-
-        // Without force_text: provider returns tool calls.
-        let ctx_normal = ReasoningContext::new()
-            .with_messages(vec![ChatMessage::user("hello")])
-            .with_tools(vec![tool_def.clone()]);
-        let output = reasoning.respond_with_tools(&ctx_normal).await.unwrap();
-        assert!(
-            matches!(output.result, RespondResult::ToolCalls { .. }),
-            "Without force_text, should get tool calls"
-        );
-
-        // With force_text: provider must return text (tools stripped).
-        let mut ctx_forced = ReasoningContext::new()
-            .with_messages(vec![ChatMessage::user("hello")])
-            .with_tools(vec![tool_def]);
-        ctx_forced.force_text = true;
-        let output = reasoning.respond_with_tools(&ctx_forced).await.unwrap();
-        assert!(
-            matches!(output.result, RespondResult::Text(_)),
-            "With force_text, should get text response, got: {:?}",
-            output.result
-        );
-    }
-
-    #[test]
-    fn iteration_bounds_guarantee_termination() {
-        // Verify the arithmetic that guards against infinite loops:
-        // force_text_at = max_tool_iterations
-        // nudge_at = max_tool_iterations - 1
-        // hard_ceiling = max_tool_iterations + 1
-        for max_iter in [1_usize, 2, 5, 10, 50] {
-            let force_text_at = max_iter;
-            let nudge_at = max_iter.saturating_sub(1);
-            let hard_ceiling = max_iter + 1;
-
-            // force_text_at must be reachable (> 0)
-            assert!(
-                force_text_at > 0,
-                "force_text_at must be > 0 for max_iter={max_iter}"
-            );
-
-            // nudge comes before or at the same time as force_text
-            assert!(
-                nudge_at <= force_text_at,
-                "nudge_at ({nudge_at}) > force_text_at ({force_text_at})"
-            );
-
-            // hard ceiling is strictly after force_text
-            assert!(
-                hard_ceiling > force_text_at,
-                "hard_ceiling ({hard_ceiling}) not > force_text_at ({force_text_at})"
-            );
-
-            // Simulate iteration: every iteration from 1..=hard_ceiling
-            // At force_text_at, force_text=true (should produce text and break).
-            // At hard_ceiling, the error fires (safety net).
-            let mut hit_force_text = false;
-            let mut hit_ceiling = false;
-            for iteration in 1..=hard_ceiling {
-                if iteration >= force_text_at {
-                    hit_force_text = true;
-                }
-                if iteration > max_iter + 1 {
-                    hit_ceiling = true;
-                }
-            }
-            assert!(
-                hit_force_text,
-                "force_text never triggered for max_iter={max_iter}"
-            );
-            // The ceiling should only fire if force_text somehow didn't break
-            assert!(
-                hit_ceiling || hard_ceiling <= max_iter + 1,
-                "ceiling logic inconsistent for max_iter={max_iter}"
-            );
-        }
-    }
-
-    /// LLM provider that always returns calls to a nonexistent tool, regardless
-    /// of whether tools are available. When tools are stripped (force_text), it
-    /// returns text.
-    struct FailingToolCallProvider;
-
-    #[async_trait]
-    impl LlmProvider for FailingToolCallProvider {
-        fn model_name(&self) -> &str {
-            "failing-tool-call"
-        }
-
-        fn cost_per_token(&self) -> (Decimal, Decimal) {
-            (Decimal::ZERO, Decimal::ZERO)
-        }
-
-        async fn complete(
-            &self,
-            _request: CompletionRequest,
-        ) -> Result<CompletionResponse, crate::error::LlmError> {
-            Ok(CompletionResponse {
-                content: "forced text".to_string(),
-                input_tokens: 0,
-                output_tokens: 2,
-                finish_reason: FinishReason::Stop,
-            })
-        }
-
-        async fn complete_with_tools(
-            &self,
-            request: ToolCompletionRequest,
-        ) -> Result<ToolCompletionResponse, crate::error::LlmError> {
-            if request.tools.is_empty() {
-                return Ok(ToolCompletionResponse {
-                    content: Some("forced text".to_string()),
-                    tool_calls: Vec::new(),
-                    input_tokens: 0,
-                    output_tokens: 2,
-                    finish_reason: FinishReason::Stop,
-                });
-            }
-            // Always call a tool that does not exist in the registry.
-            Ok(ToolCompletionResponse {
-                content: None,
-                tool_calls: vec![ToolCall {
-                    id: format!("call_{}", uuid::Uuid::new_v4()),
-                    name: "nonexistent_tool".to_string(),
-                    arguments: serde_json::json!({}),
-                    reasoning: crate::llm::normalize_tool_reasoning(""),
-                }],
-                input_tokens: 0,
-                output_tokens: 5,
-                finish_reason: FinishReason::ToolUse,
-            })
-        }
-    }
-
-    /// Helper to build a test Agent with a custom LLM provider and
-    /// `max_tool_iterations` override.
-    fn make_test_agent_with_llm(llm: Arc<dyn LlmProvider>, max_tool_iterations: usize) -> Agent {
-        let deps = AgentDeps {
-            store: None,
-            llm,
-            cheap_llm: None,
-            safety: Arc::new(SafetyLayer::new(&SafetyConfig {
-                max_output_length: 100_000,
-                injection_check_enabled: false,
-            })),
-            tools: Arc::new(ToolRegistry::new()),
-            workspace: None,
-            extension_manager: None,
-            skill_registry: None,
-            skill_catalog: None,
-            skills_config: SkillsConfig::default(),
-            hooks: Arc::new(HookRegistry::new()),
-            cost_guard: Arc::new(CostGuard::new(CostGuardConfig::default())),
-        };
-
-        Agent::new(
-            AgentConfig {
-                name: "test-agent".to_string(),
-                max_parallel_jobs: 1,
-                job_timeout: Duration::from_secs(60),
-                stuck_threshold: Duration::from_secs(60),
-                repair_check_interval: Duration::from_secs(30),
-                max_repair_attempts: 1,
-                use_planning: false,
-                session_idle_timeout: Duration::from_secs(300),
-                allow_local_tools: false,
-                max_cost_per_day_cents: None,
-                max_actions_per_hour: None,
-                max_tool_iterations,
-                auto_approve_tools: true,
-            },
-            deps,
-            Arc::new(ChannelManager::new()),
-            None,
-            None,
-            None,
-            Some(Arc::new(ContextManager::new(1))),
-            None,
-        )
-    }
-
-    /// Regression test for the infinite loop bug (PR #252) where `continue`
-    /// skipped the index increment. When every tool call fails (e.g., tool not
-    /// found), the dispatcher must still advance through all calls and
-    /// eventually terminate via the force_text / max_iterations guard.
-    #[tokio::test]
-    async fn test_dispatcher_terminates_with_all_tool_calls_failing() {
-        use crate::agent::session::Session;
-        use crate::channels::IncomingMessage;
-        use crate::llm::ChatMessage;
-        use tokio::sync::Mutex;
-
-        let agent = make_test_agent_with_llm(Arc::new(FailingToolCallProvider), 5);
-
-        let session = Arc::new(Mutex::new(Session::new("test-user")));
-
-        // Initialize a thread in the session so the loop can record tool calls.
-        let thread_id = {
-            let mut sess = session.lock().await;
-            sess.create_thread().id
-        };
-
-        let message = IncomingMessage::new("test", "test-user", "do something");
-        let initial_messages = vec![ChatMessage::user("do something")];
-
-        // The dispatcher must terminate within 5 seconds. If there is an
-        // infinite loop bug (e.g., index not advancing on tool failure), the
-        // timeout will fire and the test will fail.
-        let result = tokio::time::timeout(
-            Duration::from_secs(5),
-            agent.run_agentic_loop(&message, session, thread_id, initial_messages),
-        )
-        .await;
-
-        assert!(
-            result.is_ok(),
-            "Dispatcher timed out -- possible infinite loop when all tool calls fail"
-        );
-
-        // The loop should complete (either with a text response from force_text,
-        // or an error from the hard ceiling). Both are acceptable termination.
-        let inner = result.unwrap();
-        assert!(
-            inner.is_ok(),
-            "Dispatcher returned an error: {:?}",
-            inner.err()
-        );
-    }
-
-    /// Verify that the max_iterations guard terminates the loop even when the
-    /// LLM always returns tool calls and those calls succeed.
-    #[tokio::test]
-    async fn test_dispatcher_terminates_with_max_iterations() {
-        use crate::agent::session::Session;
-        use crate::channels::IncomingMessage;
-        use crate::llm::ChatMessage;
-        use crate::tools::builtin::EchoTool;
-        use tokio::sync::Mutex;
-
-        // Use AlwaysToolCallProvider which calls "echo" on every turn.
-        // Register the echo tool so the calls succeed.
-        let llm: Arc<dyn LlmProvider> = Arc::new(AlwaysToolCallProvider);
-        let max_iter = 3;
-        let agent = {
-            let deps = AgentDeps {
-                store: None,
-                llm,
-                cheap_llm: None,
-                safety: Arc::new(SafetyLayer::new(&SafetyConfig {
-                    max_output_length: 100_000,
-                    injection_check_enabled: false,
-                })),
-                tools: {
-                    let registry = Arc::new(ToolRegistry::new());
-                    registry.register_sync(Arc::new(EchoTool));
-                    registry
-                },
-                workspace: None,
-                extension_manager: None,
-                skill_registry: None,
-                skill_catalog: None,
-                skills_config: SkillsConfig::default(),
-                hooks: Arc::new(HookRegistry::new()),
-                cost_guard: Arc::new(CostGuard::new(CostGuardConfig::default())),
-            };
-
-            Agent::new(
-                AgentConfig {
-                    name: "test-agent".to_string(),
-                    max_parallel_jobs: 1,
-                    job_timeout: Duration::from_secs(60),
-                    stuck_threshold: Duration::from_secs(60),
-                    repair_check_interval: Duration::from_secs(30),
-                    max_repair_attempts: 1,
-                    use_planning: false,
-                    session_idle_timeout: Duration::from_secs(300),
-                    allow_local_tools: false,
-                    max_cost_per_day_cents: None,
-                    max_actions_per_hour: None,
-                    max_tool_iterations: max_iter,
-                    auto_approve_tools: true,
-                },
-                deps,
-                Arc::new(ChannelManager::new()),
-                None,
-                None,
-                None,
-                Some(Arc::new(ContextManager::new(1))),
-                None,
-            )
-        };
-
-        let session = Arc::new(Mutex::new(Session::new("test-user")));
-        let thread_id = {
-            let mut sess = session.lock().await;
-            sess.create_thread().id
-        };
-
-        let message = IncomingMessage::new("test", "test-user", "keep calling tools");
-        let initial_messages = vec![ChatMessage::user("keep calling tools")];
-
-        // Even with an LLM that always wants to call tools, the dispatcher
-        // must terminate within the timeout thanks to force_text at
-        // max_tool_iterations.
-        let result = tokio::time::timeout(
-            Duration::from_secs(5),
-            agent.run_agentic_loop(&message, session, thread_id, initial_messages),
-        )
-        .await;
-
-        assert!(
-            result.is_ok(),
-            "Dispatcher timed out -- max_iterations guard failed to terminate the loop"
-        );
-
-        // Should get a successful text response (force_text kicks in).
-        let inner = result.unwrap();
-        assert!(
-            inner.is_ok(),
-            "Dispatcher returned an error: {:?}",
-            inner.err()
-        );
-
-        // Verify we got a text response.
-        match inner.unwrap() {
-            super::AgenticLoopResult::Response(text) => {
-                assert!(!text.is_empty(), "Expected non-empty forced text response");
-            }
-            super::AgenticLoopResult::NeedApproval { .. } => {
-                panic!("Expected text response, got NeedApproval");
-            }
-        }
     }
 }
