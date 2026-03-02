@@ -468,7 +468,6 @@ mod tests {
         let error = outcome.error.unwrap();
         assert!(
             error.contains("Registry unreachable") ||
-            error.contains("error") ||
             error.contains("connect") ||
             error.contains("502") ||
             error.contains("503") ||
