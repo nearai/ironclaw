@@ -1,5 +1,7 @@
 # Building WASM Channels
 
+> Version baseline: IronClaw v0.12.0 (`v0.12.0` tag snapshot)
+
 This guide covers how to build WASM channel modules for IronClaw.
 
 ## Overview

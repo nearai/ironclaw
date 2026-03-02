@@ -1,5 +1,7 @@
 # LLM Provider Configuration
 
+> Version baseline: IronClaw v0.12.0 (`v0.12.0` tag snapshot)
+
 IronClaw defaults to NEAR AI for model access, but supports any OpenAI-compatible
 endpoint as well as Anthropic and Ollama directly. This guide covers the most common
 configurations.
@@ -12,7 +14,7 @@ configurations.
 | Anthropic | `anthropic` | `ANTHROPIC_API_KEY` | Claude models |
 | OpenAI | `openai` | `OPENAI_API_KEY` | GPT models |
 | Ollama | `ollama` | No | Local inference |
-| OpenRouter | `openai_compatible` | `LLM_API_KEY` | 300+ models |
+| OpenRouter | `openai_compatible` | `LLM_API_KEY` | 300+ models; dedicated wizard preset (v0.12.0) |
 | Together AI | `openai_compatible` | `LLM_API_KEY` | Fast inference |
 | Fireworks AI | `openai_compatible` | `LLM_API_KEY` | Fast inference |
 | vLLM / LiteLLM | `openai_compatible` | Optional | Self-hosted |
@@ -76,6 +78,8 @@ provider's OpenAI-compatible endpoint and `LLM_API_KEY` to your API key.
 ### OpenRouter
 
 [OpenRouter](https://openrouter.ai) routes to 300+ models from a single API key.
+
+As of v0.12.0, the setup wizard includes **OpenRouter** as a dedicated preset option (not just 'OpenAI-compatible'). Select **OpenRouter** during `ironclaw onboard` to have the base URL automatically configured as `https://openrouter.ai/api/v1`.
 
 ```env
 LLM_BACKEND=openai_compatible
@@ -167,6 +171,8 @@ Instead of editing `.env` manually, run the onboarding wizard:
 ironclaw onboard
 ```
 
-Select **"OpenAI-compatible"** for OpenRouter, Together AI, Fireworks, vLLM, LiteLLM,
-or LM Studio. You will be prompted for the base URL and (optionally) an API key.
+As of v0.12.0, select **OpenRouter** directly from the wizard for a one-step setup that
+automatically sets the base URL to `https://openrouter.ai/api/v1`. For other providers,
+select **"OpenAI-compatible"** (Together AI, Fireworks, vLLM, LiteLLM, or LM Studio).
+You will be prompted for the base URL and (optionally) an API key.
 The model name is configured in the following step.
