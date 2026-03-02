@@ -70,6 +70,9 @@ const PROTECTED_TOOL_NAMES: &[&str] = &[
     "message",
     "web_fetch",
     "collections_alter",
+    "collections_list",
+    "collections_register",
+    "collections_drop",
 ];
 
 /// Registry of available tools.

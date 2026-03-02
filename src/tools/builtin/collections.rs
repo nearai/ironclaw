@@ -77,10 +77,14 @@ pub fn generate_collection_tools(
 /// should never block collection registration.
 pub(crate) fn generate_collection_skill(schema: &CollectionSchema, skills_dir: &Path) {
     let name = &schema.collection;
-    let description = schema
+    let raw_description = schema
         .description
         .as_deref()
         .unwrap_or("Structured data collection");
+    // Sanitize for YAML: strip newlines and escape quotes to prevent injection.
+    let description = raw_description
+        .replace(['\n', '\r'], " ")
+        .replace('"', "\\\"");
 
     // Build activation keywords from schema metadata
     let mut keywords: Vec<String> = Vec::new();
@@ -134,7 +138,15 @@ pub(crate) fn generate_collection_skill(schema: &CollectionSchema, skills_dir: &
 
     let keywords_yaml: String = keywords
         .iter()
-        .map(|k| format!("    - {k}"))
+        .map(|k| {
+            // Quote keywords containing YAML-special characters.
+            if k.contains(':') || k.contains('#') || k.contains('"') {
+                let escaped = k.replace('"', "\\\"");
+                format!("    - \"{escaped}\"")
+            } else {
+                format!("    - {k}")
+            }
+        })
         .collect::<Vec<_>>()
         .join("\n");
 
@@ -293,7 +305,15 @@ pub(crate) fn generate_router_skill(schemas: &[CollectionSchema], skills_dir: &P
 
     let keywords_yaml: String = keywords
         .iter()
-        .map(|k| format!("    - {k}"))
+        .map(|k| {
+            // Quote keywords containing YAML-special characters.
+            if k.contains(':') || k.contains('#') || k.contains('"') {
+                let escaped = k.replace('"', "\\\"");
+                format!("    - \"{escaped}\"")
+            } else {
+                format!("    - {k}")
+            }
+        })
         .collect::<Vec<_>>()
         .join("\n");
 
@@ -630,6 +650,25 @@ impl Tool for CollectionRegisterTool {
             ToolError::InvalidParameters(format!("Invalid collection name: {e}"))
         })?;
 
+        // Validate field count limits
+        if schema.fields.len() > 50 {
+            return Err(ToolError::InvalidParameters(
+                "Schema exceeds maximum of 50 fields".to_string(),
+            ));
+        }
+        for (name, def) in &schema.fields {
+            if let FieldType::Enum { values } = &def.field_type && values.len() > 100 {
+                return Err(ToolError::InvalidParameters(format!(
+                    "Enum field '{name}' exceeds maximum of 100 values"
+                )));
+            }
+        }
+
+        // Validate default values match their declared types
+        schema.validate_defaults().map_err(|e| {
+            ToolError::InvalidParameters(format!("Invalid default value: {e}"))
+        })?;
+
         // Register in database
         self.db
             .register_collection(&ctx.user_id, &schema)
@@ -734,15 +773,8 @@ impl Tool for CollectionDropTool {
 
         let collection = require_str(&params, "collection")?;
 
-        // Verify the collection exists
-        self.db
-            .get_collection_schema(&ctx.user_id, collection)
-            .await
-            .map_err(|e| {
-                ToolError::ExecutionFailed(format!("Collection not found: {e}"))
-            })?;
-
-        // Drop from database (cascades to records)
+        // Drop from database (cascades to records). Returns NotFound if
+        // the collection doesn't exist — no need for a separate existence check.
         self.db
             .drop_collection(&ctx.user_id, collection)
             .await
@@ -1417,7 +1449,25 @@ impl Tool for CollectionQueryTool {
             _ => Vec::new(),
         };
 
+        // Validate filter fields exist in the schema.
+        for f in &filters {
+            if !self.schema.fields.contains_key(&f.field) {
+                return Err(ToolError::InvalidParameters(format!(
+                    "Unknown filter field '{}'. Available fields: {}",
+                    f.field,
+                    self.schema.fields.keys().cloned().collect::<Vec<_>>().join(", ")
+                )));
+            }
+        }
+
         let order_by = params.get("order_by").and_then(|v| v.as_str());
+        // Validate order_by field exists in schema.
+        if let Some(field) = order_by && !self.schema.fields.contains_key(field) {
+            return Err(ToolError::InvalidParameters(format!(
+                "Unknown order_by field '{field}'. Available fields: {}",
+                self.schema.fields.keys().cloned().collect::<Vec<_>>().join(", ")
+            )));
+        }
         // LLMs sometimes send limit as string "50" instead of 50.
         let limit = params
             .get("limit")
@@ -1586,6 +1636,18 @@ impl Tool for CollectionSummaryTool {
             }
             _ => Vec::new(),
         };
+
+        // Validate that sum/avg operations target numeric fields.
+        if matches!(operation, AggOp::Sum | AggOp::Avg)
+            && let Some(ref f) = field
+            && let Some(def) = self.schema.fields.get(f)
+            && !matches!(def.field_type, FieldType::Number)
+        {
+            return Err(ToolError::InvalidParameters(format!(
+                "Cannot use {op_str} on non-numeric field '{f}' (type: {})",
+                field_type_display(&def.field_type)
+            )));
+        }
 
         let aggregation = Aggregation {
             operation,

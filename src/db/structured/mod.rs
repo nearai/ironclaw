@@ -248,6 +248,16 @@ impl CollectionSchema {
         validate_identifier(name, "collection name")
     }
 
+    /// Validate that all field default values match their declared types.
+    pub fn validate_defaults(&self) -> Result<(), ValidationError> {
+        for (name, def) in &self.fields {
+            if let Some(ref default_val) = def.default {
+                validate_field_value(name, &def.field_type, default_val)?;
+            }
+        }
+        Ok(())
+    }
+
     /// Apply a targeted mutation to this schema, returning the updated schema.
     ///
     /// Supports four operations:
