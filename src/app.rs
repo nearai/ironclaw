@@ -360,6 +360,19 @@ impl AppBuilder {
             }
             let ws = Arc::new(ws);
             tools.register_memory_tools(Arc::clone(&ws));
+
+            // Register structured collection tools
+            let user_id = self
+                .config
+                .channels
+                .gateway
+                .as_ref()
+                .map(|g| g.user_id.as_str())
+                .unwrap_or("default");
+            tools
+                .register_collection_tools(Arc::clone(db), user_id, None, None)
+                .await;
+
             Some(ws)
         } else {
             None

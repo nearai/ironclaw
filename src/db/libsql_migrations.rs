@@ -523,6 +523,38 @@ CREATE INDEX IF NOT EXISTS idx_routine_runs_status ON routine_runs(status);
 -- heartbeat_state
 CREATE INDEX IF NOT EXISTS idx_heartbeat_next_run ON heartbeat_state(next_run);
 
+-- ==================== Structured Collections ====================
+
+CREATE TABLE IF NOT EXISTS structured_schemas (
+    user_id TEXT NOT NULL,
+    collection TEXT NOT NULL,
+    schema TEXT NOT NULL,
+    description TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+    PRIMARY KEY (user_id, collection)
+);
+
+CREATE TABLE IF NOT EXISTS structured_records (
+    id TEXT PRIMARY KEY,
+    user_id TEXT NOT NULL,
+    collection TEXT NOT NULL,
+    data TEXT NOT NULL,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+    FOREIGN KEY (user_id, collection) REFERENCES structured_schemas(user_id, collection) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_structured_records_lookup ON structured_records(user_id, collection, created_at);
+
+CREATE TRIGGER IF NOT EXISTS update_structured_schemas_updated_at
+    AFTER UPDATE ON structured_schemas FOR EACH ROW
+    BEGIN UPDATE structured_schemas SET updated_at = datetime('now') WHERE user_id = OLD.user_id AND collection = OLD.collection; END;
+
+CREATE TRIGGER IF NOT EXISTS update_structured_records_updated_at
+    AFTER UPDATE ON structured_records FOR EACH ROW
+    BEGIN UPDATE structured_records SET updated_at = datetime('now') WHERE id = OLD.id; END;
+
 -- ==================== Seed data ====================
 
 -- Pre-populate leak detection patterns (matches PostgreSQL V2 migration).
