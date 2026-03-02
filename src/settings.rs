@@ -63,6 +63,10 @@ pub struct Settings {
     #[serde(default)]
     pub bedrock_cross_region: Option<String>,
 
+    /// AWS profile name for Bedrock (when llm_backend = "bedrock").
+    #[serde(default)]
+    pub bedrock_profile: Option<String>,
+
     // === Step 4: Model Selection ===
     /// Currently selected model.
     #[serde(default)]

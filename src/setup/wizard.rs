@@ -1160,10 +1160,8 @@ impl SetupWizard {
                 let profile =
                     input("AWS profile name (from ~/.aws/config)").map_err(SetupError::Io)?;
                 if !profile.is_empty() {
-                    print_info(&format!(
-                        "Set AWS_PROFILE={} in your environment before running ironclaw.",
-                        profile
-                    ));
+                    self.settings.bedrock_profile = Some(profile.clone());
+                    print_success(&format!("AWS profile '{}' saved", profile));
                 }
             }
             _ => return Err(SetupError::Config("Invalid auth selection".to_string())),
@@ -2197,6 +2195,9 @@ impl SetupWizard {
             }
             if let Some(ref cross) = self.settings.bedrock_cross_region {
                 env_vars.push(("BEDROCK_CROSS_REGION", cross.clone()));
+            }
+            if let Some(ref profile) = self.settings.bedrock_profile {
+                env_vars.push(("AWS_PROFILE", profile.clone()));
             }
         }
 
