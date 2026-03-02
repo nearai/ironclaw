@@ -19,7 +19,7 @@ exclude = [
 
 [package]
 name = "ironclaw"
-version = "0.12.0"
+version = "0.13.0"
 edition = "2024"
 rust-version = "1.92"
 description = "Secure personal AI assistant that protects your data and expands its capabilities on the fly"
@@ -52,6 +52,9 @@ deadpool-postgres = { version = "0.14", optional = true }
 tokio-postgres = { version = "0.7", features = ["with-uuid-1", "with-chrono-0_4", "with-serde_json-1"], optional = true }
 postgres-types = { version = "0.2", features = ["with-serde_json-1"], optional = true }
 refinery = { version = "0.8", features = ["tokio-postgres"], optional = true }
+tokio-postgres-rustls = { version = "0.13", optional = true }
+rustls = { version = "0.23", optional = true, default-features = false }
+rustls-native-certs = { version = "0.8", optional = true }
 
 # Database - libSQL/Turso (optional embedded database)
 libsql = { version = "0.6", optional = true, default-features = false, features = ["core", "replication"] }
@@ -172,12 +175,16 @@ tokio-tungstenite = "0.26"
 testcontainers-modules = { version = "0.11", features = ["postgres"] }
 pretty_assertions = "1"
 tempfile = "3"
+insta = "1.46.3"
 
 [features]
 default = ["postgres", "libsql", "html-to-markdown"]
 postgres = [
     "dep:deadpool-postgres",
     "dep:tokio-postgres",
+    "dep:tokio-postgres-rustls",
+    "dep:rustls",
+    "dep:rustls-native-certs",
     "dep:postgres-types",
     "dep:refinery",
     "dep:pgvector",

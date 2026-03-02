@@ -12,6 +12,8 @@ use std::process::Command;
 
 use anyhow::{Context, Result, bail};
 
+use crate::bootstrap::ironclaw_base_dir;
+
 const SERVICE_LABEL: &str = "com.ironclaw.daemon";
 const SYSTEMD_UNIT: &str = "ironclaw.service";
 
@@ -57,7 +59,7 @@ fn install_macos() -> Result<()> {
     }
 
     let exe = std::env::current_exe().context("failed to resolve current executable")?;
-    let logs_dir = ironclaw_logs_dir()?;
+    let logs_dir = ironclaw_logs_dir();
     std::fs::create_dir_all(&logs_dir)?;
 
     let stdout = logs_dir.join("daemon.stdout.log");
@@ -250,9 +252,8 @@ fn linux_unit_path() -> Result<PathBuf> {
         .join(SYSTEMD_UNIT))
 }
 
-fn ironclaw_logs_dir() -> Result<PathBuf> {
-    let home = dirs::home_dir().context("could not find home directory")?;
-    Ok(home.join(".ironclaw").join("logs"))
+fn ironclaw_logs_dir() -> PathBuf {
+    ironclaw_base_dir().join("logs")
 }
 
 // ── Shell helpers ───────────────────────────────────────────────
@@ -350,7 +351,7 @@ mod tests {
 
     #[test]
     fn logs_dir_under_ironclaw() {
-        let path = ironclaw_logs_dir().unwrap();
+        let path = ironclaw_logs_dir();
         let s = path.to_string_lossy();
         assert!(s.ends_with(".ironclaw/logs"), "unexpected path: {s}");
     }

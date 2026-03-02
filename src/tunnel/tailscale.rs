@@ -4,8 +4,7 @@ use anyhow::{Result, bail};
 use tokio::process::Command;
 
 use crate::tunnel::{
-    SharedProcess, SharedUrl, Tunnel, TunnelProcess, kill_shared, new_shared_process,
-    new_shared_url,
+    SharedProcess, SharedUrl, Tunnel, kill_shared, new_shared_process, new_shared_url,
 };
 
 /// Uses `tailscale serve` (tailnet-only) or `tailscale funnel` (public).
@@ -66,13 +65,28 @@ impl Tunnel for TailscaleTunnel {
                 .to_string()
         };
 
-        let target = format!("http://{local_host}:{local_port}");
-        let child = Command::new("tailscale")
-            .args([subcommand, &target])
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped())
-            .kill_on_drop(true)
-            .spawn()?;
+        let target = format!("http://{}:{}", local_host, local_port);
+
+        // `tailscale funnel --bg <target>` configures the tunnel and exits.
+        // Without `--bg`, the command may hang without establishing the tunnel.
+        let output = tokio::time::timeout(
+            tokio::time::Duration::from_secs(15),
+            Command::new("tailscale")
+                .args([subcommand, "--bg", &target])
+                .output(),
+        )
+        .await
+        .map_err(|_| {
+            anyhow::anyhow!("tailscale {subcommand} --bg {target} timed out after 15s")
+        })??;
+
+        if !output.status.success() {
+            bail!(
+                "tailscale {} failed: {}",
+                subcommand,
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
 
         let public_url = format!("https://{hostname}");
 
@@ -80,20 +94,22 @@ impl Tunnel for TailscaleTunnel {
             *guard = Some(public_url.clone());
         }
 
-        let mut guard = self.proc.lock().await;
-        *guard = Some(TunnelProcess { child });
+        // No long-running child process: tailscale manages the tunnel as a daemon.
+        // The proc slot stays empty; health_check uses `tailscale status` instead.
 
         Ok(public_url)
     }
 
     async fn stop(&self) -> Result<()> {
         let subcommand = if self.funnel { "funnel" } else { "serve" };
+
+        // `tailscale <subcommand> off` removes the configuration set by `--bg`.
         if let Err(e) = Command::new("tailscale")
-            .args([subcommand, "reset"])
+            .args([subcommand, "off"])
             .output()
             .await
         {
-            tracing::warn!("tailscale {subcommand} reset failed: {e}");
+            tracing::warn!("tailscale {subcommand} off failed: {e}");
         }
 
         if let Ok(mut guard) = self.url.write() {
@@ -103,8 +119,20 @@ impl Tunnel for TailscaleTunnel {
     }
 
     async fn health_check(&self) -> bool {
-        let guard = self.proc.lock().await;
-        guard.as_ref().is_some_and(|tp| tp.child.id().is_some())
+        if self.url.read().ok().is_none_or(|g| g.is_none()) {
+            return false;
+        }
+        match tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            tokio::process::Command::new("tailscale")
+                .args(["status", "--json"])
+                .output(),
+        )
+        .await
+        {
+            Ok(Ok(output)) => output.status.success(),
+            _ => false,
+        }
     }
 
     fn public_url(&self) -> Option<String> {

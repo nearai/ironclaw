@@ -34,6 +34,14 @@
       ]
     }
   },
+  "setup": {
+    "required_secrets": [
+      {
+        "name": "github_token",
+        "prompt": "GitHub Personal Access Token (from github.com/settings/tokens)"
+      }
+    ]
+  },
   "config": {
     "default_limit": 30,
     "max_limit": 100

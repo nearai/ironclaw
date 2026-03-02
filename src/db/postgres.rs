@@ -21,8 +21,8 @@ use crate::db::{
 };
 use crate::error::{DatabaseError, WorkspaceError};
 use crate::history::{
-    ConversationMessage, ConversationSummary, JobEventRecord, LlmCallRecord, SandboxJobRecord,
-    SandboxJobSummary, SettingRow, Store,
+    AgentJobRecord, AgentJobSummary, ConversationMessage, ConversationSummary, JobEventRecord,
+    LlmCallRecord, SandboxJobRecord, SandboxJobSummary, SettingRow, Store,
 };
 use crate::workspace::{
     MemoryChunk, MemoryDocument, Repository, SearchConfig, SearchResult, WorkspaceEntry,
@@ -215,6 +215,14 @@ impl JobStore for PgBackend {
         self.store.get_stuck_jobs().await
     }
 
+    async fn list_agent_jobs(&self) -> Result<Vec<AgentJobRecord>, DatabaseError> {
+        self.store.list_agent_jobs().await
+    }
+
+    async fn agent_job_summary(&self) -> Result<AgentJobSummary, DatabaseError> {
+        self.store.agent_job_summary().await
+    }
+
     async fn save_action(&self, job_id: Uuid, action: &ActionRecord) -> Result<(), DatabaseError> {
         self.store.save_action(job_id, action).await
     }
@@ -371,6 +379,10 @@ impl RoutineStore for PgBackend {
 
     async fn list_routines(&self, user_id: &str) -> Result<Vec<Routine>, DatabaseError> {
         self.store.list_routines(user_id).await
+    }
+
+    async fn list_all_routines(&self) -> Result<Vec<Routine>, DatabaseError> {
+        self.store.list_all_routines().await
     }
 
     async fn list_event_routines(&self) -> Result<Vec<Routine>, DatabaseError> {

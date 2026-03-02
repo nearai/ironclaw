@@ -6,6 +6,8 @@
 
 use std::path::PathBuf;
 
+use crate::bootstrap::ironclaw_base_dir;
+
 /// Run all diagnostic checks and print results.
 pub async fn run_doctor_command() -> anyhow::Result<()> {
     println!("IronClaw Doctor");
@@ -169,11 +171,7 @@ async fn try_pg_connect() -> Result<(), String> {
         url: Some(url),
         ..Default::default()
     };
-    let pool = config
-        .create_pool(
-            Some(deadpool_postgres::Runtime::Tokio1),
-            tokio_postgres::NoTls,
-        )
+    let pool = crate::db::tls::create_pool(&config, crate::config::SslMode::from_env())
         .map_err(|e| format!("pool error: {e}"))?;
 
     let client = tokio::time::timeout(std::time::Duration::from_secs(5), pool.get())
@@ -195,9 +193,7 @@ async fn try_pg_connect() -> Result<(), String> {
 }
 
 fn check_workspace_dir() -> CheckResult {
-    let dir = dirs::home_dir()
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join(".ironclaw");
+    let dir = ironclaw_base_dir();
 
     if dir.exists() {
         if dir.is_dir() {

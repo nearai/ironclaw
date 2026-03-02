@@ -311,6 +311,15 @@ pub fn print_error(message: &str) {
     eprintln!(" {}", message);
 }
 
+/// Print a warning message with yellow exclamation.
+pub fn print_warning(message: &str) {
+    let mut stdout = io::stdout();
+    let _ = execute!(stdout, SetForegroundColor(Color::Yellow));
+    print!("!");
+    let _ = execute!(stdout, ResetColor);
+    println!(" {}", message);
+}
+
 /// Print an info message with blue info icon.
 pub fn print_info(message: &str) {
     let mut stdout = io::stdout();

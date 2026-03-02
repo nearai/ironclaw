@@ -55,6 +55,10 @@ pub struct ToolCallInfo {
     pub name: String,
     pub has_result: bool,
     pub has_error: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub result_preview: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -67,6 +71,21 @@ pub struct HistoryResponse {
     /// Cursor for the next page (ISO8601 timestamp of the oldest message returned).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub oldest_timestamp: Option<String>,
+    /// Pending tool approval that needs user action (re-rendered on thread switch).
+    ///
+    /// Only populated from in-memory state; not persisted to DB.
+    /// Server restart clears pending approvals.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pending_approval: Option<PendingApprovalInfo>,
+}
+
+/// Lightweight DTO for a pending tool approval (excludes context_messages).
+#[derive(Debug, Serialize)]
+pub struct PendingApprovalInfo {
+    pub request_id: String,
+    pub tool_name: String,
+    pub description: String,
+    pub parameters: String,
 }
 
 // --- Approval ---
@@ -348,6 +367,8 @@ pub struct TransitionInfo {
 #[derive(Debug, Serialize)]
 pub struct ExtensionInfo {
     pub name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub display_name: Option<String>,
     pub kind: String,
     pub description: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]

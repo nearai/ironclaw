@@ -20,7 +20,7 @@ use crate::tools::builtin::{
     JobStatusTool, JsonTool, ListDirTool, ListJobsTool, MemoryReadTool, MemorySearchTool,
     MemoryTreeTool, MemoryWriteTool, PromptQueue, ReadFileTool, ShellTool, SkillInstallTool,
     SkillListTool, SkillRemoveTool, SkillSearchTool, TimeTool, ToolActivateTool, ToolAuthTool,
-    ToolInstallTool, ToolListTool, ToolRemoveTool, ToolSearchTool, WriteFileTool,
+    ToolInstallTool, ToolListTool, ToolRemoveTool, ToolSearchTool, WebFetchTool, WriteFileTool,
 };
 use crate::tools::rate_limiter::RateLimiter;
 use crate::tools::tool::{Tool, ToolDomain};
@@ -68,6 +68,7 @@ const PROTECTED_TOOL_NAMES: &[&str] = &[
     "skill_install",
     "skill_remove",
     "message",
+    "web_fetch",
 ];
 
 /// Registry of available tools.
@@ -217,6 +218,7 @@ impl ToolRegistry {
             http = http.with_credentials(Arc::clone(cr), Arc::clone(ss));
         }
         self.register_sync(Arc::new(http));
+        self.register_sync(Arc::new(WebFetchTool::new()));
 
         tracing::info!("Registered {} built-in tools", self.count());
     }
@@ -286,11 +288,13 @@ impl ToolRegistry {
     ///
     /// Job tools allow the LLM to create, list, check status, and cancel jobs.
     /// When sandbox deps are provided, `create_job` automatically delegates to
-    /// Docker containers. Otherwise it creates in-memory jobs via ContextManager.
+    /// Docker containers. Otherwise it dispatches via the Scheduler (which
+    /// persists to DB and spawns a worker).
     #[allow(clippy::too_many_arguments)]
     pub fn register_job_tools(
         &self,
         context_manager: Arc<ContextManager>,
+        scheduler_slot: Option<crate::tools::builtin::SchedulerSlot>,
         job_manager: Option<Arc<ContainerJobManager>>,
         store: Option<Arc<dyn Database>>,
         job_event_tx: Option<
@@ -301,6 +305,9 @@ impl ToolRegistry {
         secrets_store: Option<Arc<dyn SecretsStore + Send + Sync>>,
     ) {
         let mut create_tool = CreateJobTool::new(Arc::clone(&context_manager));
+        if let Some(slot) = scheduler_slot {
+            create_tool = create_tool.with_scheduler_slot(slot);
+        }
         if let Some(jm) = job_manager {
             create_tool = create_tool.with_sandbox(jm, store.clone());
         }

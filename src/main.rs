@@ -44,8 +44,19 @@ fn init_cli_tracing() {
         .init();
 }
 
-#[tokio::main]
-async fn main() -> anyhow::Result<()> {
+/// Synchronous entry point. Loads `.env` files before the Tokio runtime
+/// starts so that `std::env::set_var` is safe (no worker threads yet).
+fn main() -> anyhow::Result<()> {
+    let _ = dotenvy::dotenv();
+    ironclaw::bootstrap::load_ironclaw_env();
+
+    tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()?
+        .block_on(async_main())
+}
+
+async fn async_main() -> anyhow::Result<()> {
     let cli = Cli::parse();
 
     // Handle non-agent commands first (they don't need full setup)
@@ -80,14 +91,10 @@ async fn main() -> anyhow::Result<()> {
         }
         Some(Command::Doctor) => {
             init_cli_tracing();
-            let _ = dotenvy::dotenv();
-            ironclaw::bootstrap::load_ironclaw_env();
             return ironclaw::cli::run_doctor_command().await;
         }
         Some(Command::Status) => {
             init_cli_tracing();
-            let _ = dotenvy::dotenv();
-            ironclaw::bootstrap::load_ironclaw_env();
             return run_status_command().await;
         }
         Some(Command::Completion(completion)) => {
@@ -115,9 +122,6 @@ async fn main() -> anyhow::Result<()> {
             skip_auth,
             channels_only,
         }) => {
-            let _ = dotenvy::dotenv();
-            ironclaw::bootstrap::load_ironclaw_env();
-
             #[cfg(any(feature = "postgres", feature = "libsql"))]
             {
                 let config = SetupConfig {
@@ -140,11 +144,6 @@ async fn main() -> anyhow::Result<()> {
     }
 
     // ── Agent startup ──────────────────────────────────────────────────
-
-    // Load .env files early so DATABASE_URL (and any other vars) are
-    // available to all subsequent env-based config resolution.
-    let _ = dotenvy::dotenv();
-    ironclaw::bootstrap::load_ironclaw_env();
 
     // Enhanced first-run detection
     #[cfg(any(feature = "postgres", feature = "libsql"))]
@@ -348,6 +347,7 @@ async fn main() -> anyhow::Result<()> {
             &config,
             &components.secrets_store,
             components.extension_manager.as_ref(),
+            components.db.as_ref(),
         )
         .await;
 
@@ -456,9 +456,16 @@ async fn main() -> anyhow::Result<()> {
     let session_manager =
         Arc::new(ironclaw::agent::SessionManager::new().with_hooks(components.hooks.clone()));
 
+    // Lazy scheduler slot — filled after Agent::new creates the Scheduler.
+    // Allows CreateJobTool to dispatch local jobs via the Scheduler even though
+    // the Scheduler is created after tools are registered (chicken-and-egg).
+    let scheduler_slot: ironclaw::tools::builtin::SchedulerSlot =
+        Arc::new(tokio::sync::RwLock::new(None));
+
     // Register job tools (sandbox deps auto-injected when container_job_manager is available)
     components.tools.register_job_tools(
         Arc::clone(&components.context_manager),
+        Some(scheduler_slot.clone()),
         container_job_manager.clone(),
         components.db.clone(),
         job_event_tx.clone(),
@@ -602,6 +609,8 @@ async fn main() -> anyhow::Result<()> {
     if let Some(ref ext_mgr) = components.extension_manager
         && let Some((rt, ps, router)) = wasm_channel_runtime_state.take()
     {
+        let active_at_startup: std::collections::HashSet<String> =
+            loaded_wasm_channel_names.iter().cloned().collect();
         ext_mgr.set_active_channels(loaded_wasm_channel_names).await;
         ext_mgr
             .set_channel_runtime(
@@ -613,6 +622,29 @@ async fn main() -> anyhow::Result<()> {
             )
             .await;
         tracing::info!("Channel runtime wired into extension manager for hot-activation");
+
+        // Auto-activate channels that were active in a previous session.
+        let persisted = ext_mgr.load_persisted_active_channels().await;
+        for name in &persisted {
+            if !active_at_startup.contains(name) {
+                match ext_mgr.activate(name).await {
+                    Ok(result) => {
+                        tracing::info!(
+                            channel = %name,
+                            message = %result.message,
+                            "Auto-activated persisted channel"
+                        );
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            channel = %name,
+                            error = %e,
+                            "Failed to auto-activate persisted channel"
+                        );
+                    }
+                }
+            }
+        }
     }
 
     // Wire SSE sender into extension manager for broadcasting status events.
@@ -647,6 +679,9 @@ async fn main() -> anyhow::Result<()> {
         Some(components.context_manager),
         Some(session_manager),
     );
+
+    // Fill the scheduler slot now that Agent (and its Scheduler) exist.
+    *scheduler_slot.write().await = Some(agent.scheduler());
 
     agent.run().await?;
 
@@ -863,6 +898,7 @@ async fn setup_wasm_channels(
     config: &ironclaw::config::Config,
     secrets_store: &Option<Arc<dyn SecretsStore + Send + Sync>>,
     extension_manager: Option<&Arc<ironclaw::extensions::ExtensionManager>>,
+    database: Option<&Arc<dyn ironclaw::db::Database>>,
 ) -> Option<WasmChannelSetup> {
     let runtime = match WasmChannelRuntime::new(WasmChannelRuntimeConfig::default()) {
         Ok(r) => Arc::new(r),
@@ -873,7 +909,13 @@ async fn setup_wasm_channels(
     };
 
     let pairing_store = Arc::new(PairingStore::new());
-    let loader = WasmChannelLoader::new(Arc::clone(&runtime), Arc::clone(&pairing_store));
+    let settings_store: Option<Arc<dyn ironclaw::db::SettingsStore>> =
+        database.map(|db| Arc::clone(db) as Arc<dyn ironclaw::db::SettingsStore>);
+    let loader = WasmChannelLoader::new(
+        Arc::clone(&runtime),
+        Arc::clone(&pairing_store),
+        settings_store,
+    );
 
     let results = match loader
         .load_from_dir(&config.channels.wasm_channels_dir)

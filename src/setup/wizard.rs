@@ -15,11 +15,10 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 #[cfg(feature = "postgres")]
-use deadpool_postgres::{Config as PoolConfig, Runtime};
+use deadpool_postgres::Config as PoolConfig;
 use secrecy::{ExposeSecret, SecretString};
-#[cfg(feature = "postgres")]
-use tokio_postgres::NoTls;
 
+use crate::bootstrap::ironclaw_base_dir;
 use crate::channels::wasm::{
     ChannelCapabilitiesFile, available_channel_names, install_bundled_channel,
 };
@@ -542,6 +541,10 @@ impl SetupWizard {
     }
 
     /// Test PostgreSQL connection and store the pool.
+    ///
+    /// After connecting, validates:
+    /// 1. PostgreSQL version >= 15 (required for pgvector compatibility)
+    /// 2. pgvector extension is available (required for embeddings/vector search)
     #[cfg(feature = "postgres")]
     async fn test_database_connection_postgres(&mut self, url: &str) -> Result<(), SetupError> {
         let mut cfg = PoolConfig::new();
@@ -551,14 +554,59 @@ impl SetupWizard {
             ..Default::default()
         });
 
-        let pool = cfg
-            .create_pool(Some(Runtime::Tokio1), NoTls)
+        let pool = crate::db::tls::create_pool(&cfg, crate::config::SslMode::from_env())
             .map_err(|e| SetupError::Database(format!("Failed to create pool: {}", e)))?;
 
-        let _ = pool
+        let client = pool
             .get()
             .await
             .map_err(|e| SetupError::Database(format!("Failed to connect: {}", e)))?;
+
+        // Check PostgreSQL server version (need 15+ for pgvector)
+        let version_row = client
+            .query_one("SHOW server_version", &[])
+            .await
+            .map_err(|e| SetupError::Database(format!("Failed to query server version: {}", e)))?;
+        let version_str: &str = version_row.get(0);
+        let major_version = version_str
+            .split('.')
+            .next()
+            .and_then(|v| v.parse::<u32>().ok())
+            .unwrap_or(0);
+
+        const MIN_PG_MAJOR_VERSION: u32 = 15;
+
+        if major_version < MIN_PG_MAJOR_VERSION {
+            return Err(SetupError::Database(format!(
+                "PostgreSQL {} detected. IronClaw requires PostgreSQL {} or later for pgvector support.\n\
+                 Upgrade: https://www.postgresql.org/download/",
+                version_str, MIN_PG_MAJOR_VERSION
+            )));
+        }
+
+        // Check if pgvector extension is available
+        let pgvector_row = client
+            .query_opt(
+                "SELECT 1 FROM pg_available_extensions WHERE name = 'vector'",
+                &[],
+            )
+            .await
+            .map_err(|e| {
+                SetupError::Database(format!("Failed to check pgvector availability: {}", e))
+            })?;
+
+        if pgvector_row.is_none() {
+            return Err(SetupError::Database(format!(
+                "pgvector extension not found on your PostgreSQL server.\n\n\
+                 Install it:\n  \
+                 macOS:   brew install pgvector\n  \
+                 Ubuntu:  apt install postgresql-{0}-pgvector\n  \
+                 Docker:  use the pgvector/pgvector:pg{0} image\n  \
+                 Source:  https://github.com/pgvector/pgvector#installation\n\n\
+                 Then restart PostgreSQL and re-run: ironclaw onboard",
+                major_version
+            )));
+        }
 
         self.db_pool = Some(pool);
         Ok(())
@@ -1454,7 +1502,7 @@ impl SetupWizard {
     /// Step 6: Channel configuration.
     async fn step_channels(&mut self) -> Result<(), SetupError> {
         // First, configure tunnel (shared across all channels that need webhooks)
-        match setup_tunnel(&self.settings) {
+        match setup_tunnel(&self.settings).await {
             Ok(tunnel_settings) => {
                 self.settings.tunnel = tunnel_settings;
             }
@@ -1465,9 +1513,7 @@ impl SetupWizard {
         println!();
 
         // Discover available WASM channels
-        let channels_dir = dirs::home_dir()
-            .ok_or_else(|| SetupError::Config("Could not determine home directory".into()))?
-            .join(".ironclaw/channels");
+        let channels_dir = ironclaw_base_dir().join("channels");
 
         let mut discovered_channels = discover_wasm_channels(&channels_dir).await;
         let installed_names: HashSet<String> = discovered_channels
@@ -1697,9 +1743,7 @@ impl SetupWizard {
         println!();
 
         // Check which tools are already installed
-        let tools_dir = dirs::home_dir()
-            .ok_or_else(|| SetupError::Config("Could not determine home directory".into()))?
-            .join(".ironclaw/tools");
+        let tools_dir = ironclaw_base_dir().join("tools");
 
         let installed_tools = discover_installed_tools(&tools_dir).await;
 
@@ -1739,9 +1783,7 @@ impl SetupWizard {
         let installer = crate::registry::installer::RegistryInstaller::new(
             repo_root.to_path_buf(),
             tools_dir.clone(),
-            dirs::home_dir()
-                .unwrap_or_default()
-                .join(".ironclaw/channels"),
+            ironclaw_base_dir().join("channels"),
         );
 
         let mut installed_count = 0;
@@ -1993,6 +2035,20 @@ impl SetupWizard {
         }
         if let Some(ref url) = self.settings.ollama_base_url {
             env_vars.push(("OLLAMA_BASE_URL", url.clone()));
+        }
+
+        // Model name: same chicken-and-egg — Config::from_env() resolves the
+        // model before the DB is connected, so we must persist it to .env.
+        // Write the backend-specific env var so the correct resolution path
+        // picks it up.
+        if let Some(ref model) = self.settings.selected_model {
+            let backend: crate::config::LlmBackend = self
+                .settings
+                .llm_backend
+                .as_deref()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or_default();
+            env_vars.push((backend.model_env_var(), model.clone()));
         }
 
         // Preserve NEARAI_API_KEY if present (set by API key auth flow)
@@ -2795,7 +2851,7 @@ async fn install_selected_registry_channels(
 
         let installer = crate::registry::installer::RegistryInstaller::new(
             repo_root.clone(),
-            dirs::home_dir().unwrap_or_default().join(".ironclaw/tools"),
+            ironclaw_base_dir().join("tools"),
             channels_dir.to_path_buf(),
         );
 

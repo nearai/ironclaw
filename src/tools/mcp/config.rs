@@ -9,6 +9,7 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 use tokio::fs;
 
+use crate::bootstrap::ironclaw_base_dir;
 use crate::tools::tool::ToolError;
 
 /// Configuration for connecting to a remote MCP server.
@@ -251,10 +252,7 @@ impl From<ConfigError> for ToolError {
 
 /// Get the default MCP servers configuration path.
 pub fn default_config_path() -> PathBuf {
-    dirs::home_dir()
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join(".ironclaw")
-        .join("mcp-servers.json")
+    ironclaw_base_dir().join("mcp-servers.json")
 }
 
 /// Load MCP server configurations from the default location.

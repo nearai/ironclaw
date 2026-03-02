@@ -85,7 +85,9 @@ impl Platform {
     /// Instructions to start the Docker daemon on this platform.
     pub fn start_hint(&self) -> &'static str {
         match self {
-            Platform::MacOS => "Start Docker Desktop from Applications, or run: open -a Docker",
+            Platform::MacOS => {
+                "Start Docker Desktop from Applications, or run: open -a Docker\n\n  To auto-start at login: System Settings > General > Login Items > add Docker.app"
+            }
             Platform::Linux => "Start the Docker daemon: sudo systemctl start docker",
             Platform::Windows => "Start Docker Desktop from the Start menu",
         }

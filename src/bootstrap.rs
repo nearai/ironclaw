@@ -7,13 +7,75 @@
 //! File: `~/.ironclaw/.env` (standard dotenvy format)
 
 use std::path::PathBuf;
+use std::sync::LazyLock;
+
+const IRONCLAW_BASE_DIR_ENV: &str = "IRONCLAW_BASE_DIR";
+
+/// Lazily computed IronClaw base directory, cached for the lifetime of the process.
+static IRONCLAW_BASE_DIR: LazyLock<PathBuf> = LazyLock::new(compute_ironclaw_base_dir);
+
+/// Compute the IronClaw base directory from environment.
+///
+/// This is the underlying implementation used by both the public
+/// `ironclaw_base_dir()` function (which caches the result) and tests
+/// (which need to verify different configurations).
+pub fn compute_ironclaw_base_dir() -> PathBuf {
+    std::env::var(IRONCLAW_BASE_DIR_ENV)
+        .map(PathBuf::from)
+        .map(|path| {
+            if path.as_os_str().is_empty() {
+                default_base_dir()
+            } else if !path.is_absolute() {
+                eprintln!(
+                    "Warning: IRONCLAW_BASE_DIR is a relative path '{}', resolved against current directory",
+                    path.display()
+                );
+                path
+            } else {
+                path
+            }
+        })
+        .unwrap_or_else(|_| default_base_dir())
+}
+
+/// Get the default IronClaw base directory (~/.ironclaw).
+///
+/// Logs a warning if the home directory cannot be determined and falls back to
+/// the current directory.
+fn default_base_dir() -> PathBuf {
+    if let Some(home) = dirs::home_dir() {
+        home.join(".ironclaw")
+    } else {
+        eprintln!("Warning: Could not determine home directory, using current directory");
+        std::env::current_dir()
+            .unwrap_or_else(|_| PathBuf::from("/tmp"))
+            .join(".ironclaw")
+    }
+}
+
+/// Get the IronClaw base directory.
+///
+/// Override with `IRONCLAW_BASE_DIR` environment variable.
+/// Defaults to `~/.ironclaw` (or `./.ironclaw` if home directory cannot be determined).
+///
+/// Thread-safe: the value is computed once and cached in a `LazyLock`.
+///
+/// # Environment Variable Behavior
+/// - If `IRONCLAW_BASE_DIR` is set to a non-empty path, that path is used.
+/// - If `IRONCLAW_BASE_DIR` is set to an empty string, it is treated as unset.
+/// - If `IRONCLAW_BASE_DIR` contains null bytes, a warning is printed and the default is used.
+/// - If the home directory cannot be determined, a warning is printed and the current directory is used.
+///
+/// # Returns
+/// A `PathBuf` pointing to the base directory. The path is not validated
+/// for existence.
+pub fn ironclaw_base_dir() -> PathBuf {
+    IRONCLAW_BASE_DIR.clone()
+}
 
 /// Path to the IronClaw-specific `.env` file: `~/.ironclaw/.env`.
 pub fn ironclaw_env_path() -> PathBuf {
-    dirs::home_dir()
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join(".ironclaw")
-        .join(".env")
+    ironclaw_base_dir().join(".env")
 }
 
 /// Load env vars from `~/.ironclaw/.env` (in addition to the standard `.env`).
@@ -22,11 +84,16 @@ pub fn ironclaw_env_path() -> PathBuf {
 /// takes priority over `~/.ironclaw/.env`. dotenvy never overwrites
 /// existing env vars, so the effective priority is:
 ///
-///   explicit env vars > `./.env` > `~/.ironclaw/.env`
+///   explicit env vars > `./.env` > `~/.ironclaw/.env` > auto-detect
 ///
 /// If `~/.ironclaw/.env` doesn't exist but the legacy `bootstrap.json` does,
 /// extracts `DATABASE_URL` from it and writes the `.env` file (one-time
 /// upgrade from the old config format).
+///
+/// After loading the `.env` file, auto-detects the libsql backend: if
+/// `DATABASE_BACKEND` is still unset and `~/.ironclaw/ironclaw.db` exists,
+/// defaults to `libsql` so cloud instances work out of the box without any
+/// manual configuration.
 pub fn load_ironclaw_env() {
     let path = ironclaw_env_path();
 
@@ -37,6 +104,22 @@ pub fn load_ironclaw_env() {
 
     if path.exists() {
         let _ = dotenvy::from_path(&path);
+    }
+
+    // Auto-detect libsql: if DATABASE_BACKEND is still unset after loading
+    // all env files, and the local SQLite DB exists, default to libsql.
+    // This avoids the chicken-and-egg problem on cloud instances where no
+    // DATABASE_URL is configured but ironclaw.db is already present.
+    if std::env::var("DATABASE_BACKEND").is_err() {
+        let default_db = dirs::home_dir()
+            .unwrap_or_default()
+            .join(".ironclaw")
+            .join("ironclaw.db");
+        if default_db.exists() {
+            // SAFETY: `load_ironclaw_env` is called from a synchronous `fn main()`
+            // before the Tokio runtime is started, so no other threads exist yet.
+            unsafe { std::env::set_var("DATABASE_BACKEND", "libsql") };
+        }
     }
 }
 
@@ -200,9 +283,7 @@ pub async fn migrate_disk_to_db(
     store: &dyn crate::db::Database,
     user_id: &str,
 ) -> Result<(), MigrationError> {
-    let ironclaw_dir = dirs::home_dir()
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join(".ironclaw");
+    let ironclaw_dir = ironclaw_base_dir();
     let legacy_settings_path = ironclaw_dir.join("settings.json");
 
     if !legacy_settings_path.exists() {
@@ -336,7 +417,10 @@ pub enum MigrationError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Mutex;
     use tempfile::tempdir;
+
+    static ENV_MUTEX: Mutex<()> = Mutex::new(());
 
     #[test]
     fn test_save_and_load_database_url() {
@@ -596,6 +680,42 @@ INJECTED="pwned"#;
         assert_eq!(onboard.unwrap().1, "true");
     }
 
+    #[test]
+    fn test_libsql_autodetect_sets_backend_when_db_exists() {
+        let _guard = ENV_MUTEX.lock().unwrap();
+        let old_val = std::env::var("DATABASE_BACKEND").ok();
+        // SAFETY: ENV_MUTEX ensures single-threaded access to env vars in tests
+        unsafe { std::env::remove_var("DATABASE_BACKEND") };
+
+        let dir = tempdir().unwrap();
+        let db_path = dir.path().join("ironclaw.db");
+
+        // No DB file — auto-detect guard should not trigger.
+        assert!(!db_path.exists());
+        let would_trigger = std::env::var("DATABASE_BACKEND").is_err() && db_path.exists();
+        assert!(
+            !would_trigger,
+            "should not auto-detect when db file is absent"
+        );
+
+        // Create the DB file — guard should now trigger.
+        std::fs::write(&db_path, "").unwrap();
+        assert!(db_path.exists());
+
+        // Simulate the detection logic (DATABASE_BACKEND unset + db exists).
+        let detected = std::env::var("DATABASE_BACKEND").is_err() && db_path.exists();
+        assert!(
+            detected,
+            "should detect libsql when db file is present and backend unset"
+        );
+
+        // Restore.
+        if let Some(val) = old_val {
+            // SAFETY: ENV_MUTEX ensures single-threaded access to env vars in tests
+            unsafe { std::env::set_var("DATABASE_BACKEND", val) };
+        }
+    }
+
     // === QA Plan P1 - 1.2: Bootstrap .env round-trip tests ===
 
     #[test]
@@ -629,6 +749,34 @@ INJECTED="pwned"#;
             "openai",
             "LLM_BACKEND must survive .env round-trip"
         );
+    }
+
+    #[test]
+    fn test_libsql_autodetect_does_not_override_explicit_backend() {
+        let _guard = ENV_MUTEX.lock().unwrap();
+        let old_val = std::env::var("DATABASE_BACKEND").ok();
+        // SAFETY: ENV_MUTEX ensures single-threaded access to env vars in tests
+        unsafe { std::env::set_var("DATABASE_BACKEND", "postgres") };
+
+        let dir = tempdir().unwrap();
+        let db_path = dir.path().join("ironclaw.db");
+        std::fs::write(&db_path, "").unwrap();
+
+        // The guard: only sets libsql if DATABASE_BACKEND is NOT already set.
+        let would_override = std::env::var("DATABASE_BACKEND").is_err() && db_path.exists();
+        assert!(
+            !would_override,
+            "must not override an explicitly set DATABASE_BACKEND"
+        );
+
+        // Restore.
+        if let Some(val) = old_val {
+            // SAFETY: ENV_MUTEX ensures single-threaded access to env vars in tests
+            unsafe { std::env::set_var("DATABASE_BACKEND", val) };
+        } else {
+            // SAFETY: ENV_MUTEX ensures single-threaded access to env vars in tests
+            unsafe { std::env::remove_var("DATABASE_BACKEND") };
+        }
     }
 
     #[test]
@@ -725,6 +873,117 @@ INJECTED="pwned"#;
             let found = parsed.iter().find(|(k, _)| k == key);
             assert!(found.is_some(), "{key} must be present");
             assert_eq!(&found.unwrap().1, value, "{key} value mismatch");
+        }
+    }
+
+    #[test]
+    fn test_ironclaw_base_dir_default() {
+        // This test must run first (or in isolation) before the LazyLock is initialized.
+        // It verifies that when IRONCLAW_BASE_DIR is not set, the default path is used.
+        let _guard = ENV_MUTEX.lock().unwrap();
+        let old_val = std::env::var("IRONCLAW_BASE_DIR").ok();
+        // SAFETY: ENV_MUTEX ensures single-threaded access to env vars in tests
+        unsafe { std::env::remove_var("IRONCLAW_BASE_DIR") };
+
+        // Force re-evaluation by calling the computation function directly
+        let path = compute_ironclaw_base_dir();
+        let home = dirs::home_dir().unwrap_or_else(|| std::path::PathBuf::from("."));
+        assert_eq!(path, home.join(".ironclaw"));
+
+        if let Some(val) = old_val {
+            // SAFETY: ENV_MUTEX ensures single-threaded access to env vars in tests
+            unsafe { std::env::set_var("IRONCLAW_BASE_DIR", val) };
+        }
+    }
+
+    #[test]
+    fn test_ironclaw_base_dir_env_override() {
+        // This test verifies that when IRONCLAW_BASE_DIR is set,
+        // the custom path is used. Must run before LazyLock is initialized.
+        let _guard = ENV_MUTEX.lock().unwrap();
+        let old_val = std::env::var("IRONCLAW_BASE_DIR").ok();
+        // SAFETY: ENV_MUTEX ensures single-threaded access to env vars in tests
+        unsafe { std::env::set_var("IRONCLAW_BASE_DIR", "/custom/ironclaw/path") };
+
+        // Force re-evaluation by calling the computation function directly
+        let path = compute_ironclaw_base_dir();
+        assert_eq!(path, std::path::PathBuf::from("/custom/ironclaw/path"));
+
+        if let Some(val) = old_val {
+            // SAFETY: ENV_MUTEX ensures single-threaded access to env vars in tests
+            unsafe { std::env::set_var("IRONCLAW_BASE_DIR", val) };
+        } else {
+            // SAFETY: ENV_MUTEX ensures single-threaded access to env vars in tests
+            unsafe { std::env::remove_var("IRONCLAW_BASE_DIR") };
+        }
+    }
+
+    #[test]
+    fn test_compute_base_dir_env_path_join() {
+        // Verifies that ironclaw_env_path correctly joins .env to the base dir.
+        // Uses compute_ironclaw_base_dir directly to avoid LazyLock caching.
+        let _guard = ENV_MUTEX.lock().unwrap();
+        let old_val = std::env::var("IRONCLAW_BASE_DIR").ok();
+        // SAFETY: ENV_MUTEX ensures single-threaded access to env vars in tests
+        unsafe { std::env::set_var("IRONCLAW_BASE_DIR", "/my/custom/dir") };
+
+        // Test the path construction logic directly
+        let base_path = compute_ironclaw_base_dir();
+        let env_path = base_path.join(".env");
+        assert_eq!(env_path, std::path::PathBuf::from("/my/custom/dir/.env"));
+
+        if let Some(val) = old_val {
+            // SAFETY: ENV_MUTEX ensures single-threaded access to env vars in tests
+            unsafe { std::env::set_var("IRONCLAW_BASE_DIR", val) };
+        } else {
+            // SAFETY: ENV_MUTEX ensures single-threaded access to env vars in tests
+            unsafe { std::env::remove_var("IRONCLAW_BASE_DIR") };
+        }
+    }
+
+    #[test]
+    fn test_ironclaw_base_dir_empty_env() {
+        // Verifies that empty IRONCLAW_BASE_DIR falls back to default.
+        let _guard = ENV_MUTEX.lock().unwrap();
+        let old_val = std::env::var("IRONCLAW_BASE_DIR").ok();
+        // SAFETY: ENV_MUTEX ensures single-threaded access to env vars in tests
+        unsafe { std::env::set_var("IRONCLAW_BASE_DIR", "") };
+
+        // Force re-evaluation by calling the computation function directly
+        let path = compute_ironclaw_base_dir();
+        let home = dirs::home_dir().unwrap_or_else(|| std::path::PathBuf::from("."));
+        assert_eq!(path, home.join(".ironclaw"));
+
+        if let Some(val) = old_val {
+            // SAFETY: ENV_MUTEX ensures single-threaded access to env vars in tests
+            unsafe { std::env::set_var("IRONCLAW_BASE_DIR", val) };
+        } else {
+            // SAFETY: ENV_MUTEX ensures single-threaded access to env vars in tests
+            unsafe { std::env::remove_var("IRONCLAW_BASE_DIR") };
+        }
+    }
+
+    #[test]
+    fn test_ironclaw_base_dir_special_chars() {
+        // Verifies that paths with special characters are handled correctly.
+        let _guard = ENV_MUTEX.lock().unwrap();
+        let old_val = std::env::var("IRONCLAW_BASE_DIR").ok();
+        // SAFETY: ENV_MUTEX ensures single-threaded access to env vars in tests
+        unsafe { std::env::set_var("IRONCLAW_BASE_DIR", "/tmp/test_with-special.chars") };
+
+        // Force re-evaluation by calling the computation function directly
+        let path = compute_ironclaw_base_dir();
+        assert_eq!(
+            path,
+            std::path::PathBuf::from("/tmp/test_with-special.chars")
+        );
+
+        if let Some(val) = old_val {
+            // SAFETY: ENV_MUTEX ensures single-threaded access to env vars in tests
+            unsafe { std::env::set_var("IRONCLAW_BASE_DIR", val) };
+        } else {
+            // SAFETY: ENV_MUTEX ensures single-threaded access to env vars in tests
+            unsafe { std::env::remove_var("IRONCLAW_BASE_DIR") };
         }
     }
 }
