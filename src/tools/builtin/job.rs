@@ -85,7 +85,7 @@ pub struct CreateJobTool {
     job_manager: Option<Arc<ContainerJobManager>>,
     store: Option<Arc<dyn Database>>,
     /// Broadcast sender for job events (used to subscribe a monitor).
-    event_tx: Option<tokio::sync::broadcast::Sender<(Uuid, SseEvent)>>,
+    event_tx: Option<tokio::sync::broadcast::Sender<(Uuid, String, SseEvent)>>,
     /// Injection channel for pushing messages into the agent loop.
     inject_tx: Option<tokio::sync::mpsc::Sender<IncomingMessage>>,
     /// Encrypted secrets store for validating credential grants.
@@ -120,7 +120,7 @@ impl CreateJobTool {
     /// monitor that forwards Claude Code output to the main agent loop.
     pub fn with_monitor_deps(
         mut self,
-        event_tx: tokio::sync::broadcast::Sender<(Uuid, SseEvent)>,
+        event_tx: tokio::sync::broadcast::Sender<(Uuid, String, SseEvent)>,
         inject_tx: tokio::sync::mpsc::Sender<IncomingMessage>,
     ) -> Self {
         self.event_tx = Some(event_tx);

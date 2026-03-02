@@ -11,11 +11,13 @@ use axum::{
 use serde::Deserialize;
 use uuid::Uuid;
 
+use crate::channels::web::auth::AuthenticatedUser;
 use crate::channels::web::server::GatewayState;
 use crate::channels::web::types::*;
 
 pub async fn jobs_list_handler(
     State(state): State<Arc<GatewayState>>,
+    AuthenticatedUser(user): AuthenticatedUser,
 ) -> Result<Json<JobListResponse>, (StatusCode, String)> {
     let store = state.store.as_ref().ok_or((
         StatusCode::SERVICE_UNAVAILABLE,
@@ -25,8 +27,8 @@ pub async fn jobs_list_handler(
     let mut jobs: Vec<JobInfo> = Vec::new();
     let mut seen_ids: HashSet<Uuid> = HashSet::new();
 
-    // Fetch sandbox jobs from database.
-    match store.list_sandbox_jobs().await {
+    // Fetch sandbox jobs scoped to this user.
+    match store.list_sandbox_jobs_for_user(&user.user_id).await {
         Ok(sandbox_jobs) => {
             for j in &sandbox_jobs {
                 let ui_state = match j.status.as_str() {
@@ -54,6 +56,9 @@ pub async fn jobs_list_handler(
     match store.list_agent_jobs().await {
         Ok(agent_jobs) => {
             for j in &agent_jobs {
+                if j.user_id != user.user_id {
+                    continue;
+                }
                 if seen_ids.contains(&j.id) {
                     continue;
                 }
@@ -80,6 +85,7 @@ pub async fn jobs_list_handler(
 
 pub async fn jobs_summary_handler(
     State(state): State<Arc<GatewayState>>,
+    AuthenticatedUser(_user): AuthenticatedUser,
 ) -> Result<Json<JobSummaryResponse>, (StatusCode, String)> {
     let store = state.store.as_ref().ok_or((
         StatusCode::SERVICE_UNAVAILABLE,
@@ -134,6 +140,7 @@ pub async fn jobs_summary_handler(
 
 pub async fn jobs_detail_handler(
     State(state): State<Arc<GatewayState>>,
+    AuthenticatedUser(user): AuthenticatedUser,
     Path(id): Path<String>,
 ) -> Result<Json<JobDetailResponse>, (StatusCode, String)> {
     let store = state.store.as_ref().ok_or((
@@ -145,143 +152,187 @@ pub async fn jobs_detail_handler(
         .map_err(|_| (StatusCode::BAD_REQUEST, "Invalid job ID".to_string()))?;
 
     // Try sandbox job from DB first.
-    if let Ok(Some(job)) = store.get_sandbox_job(job_id).await {
-        let browse_id = std::path::Path::new(&job.project_dir)
-            .file_name()
-            .map(|n| n.to_string_lossy().to_string())
-            .unwrap_or_else(|| job.id.to_string());
+    match store.get_sandbox_job(job_id).await {
+        Ok(Some(job)) => {
+            if job.user_id != user.user_id {
+                return Err((StatusCode::NOT_FOUND, "Job not found".to_string()));
+            }
+            let browse_id = std::path::Path::new(&job.project_dir)
+                .file_name()
+                .map(|n| n.to_string_lossy().to_string())
+                .unwrap_or_else(|| job.id.to_string());
 
-        let ui_state = match job.status.as_str() {
-            "creating" => "pending",
-            "running" => "in_progress",
-            s => s,
-        };
+            let ui_state = match job.status.as_str() {
+                "creating" => "pending",
+                "running" => "in_progress",
+                s => s,
+            };
 
-        let elapsed_secs = job.started_at.map(|start| {
-            let end = job.completed_at.unwrap_or_else(chrono::Utc::now);
-            (end - start).num_seconds().max(0) as u64
-        });
-
-        // Synthesize transitions from timestamps.
-        let mut transitions = Vec::new();
-        if let Some(started) = job.started_at {
-            transitions.push(TransitionInfo {
-                from: "creating".to_string(),
-                to: "running".to_string(),
-                timestamp: started.to_rfc3339(),
-                reason: None,
+            let elapsed_secs = job.started_at.map(|start| {
+                let end = job.completed_at.unwrap_or_else(chrono::Utc::now);
+                (end - start).num_seconds().max(0) as u64
             });
-        }
-        if let Some(completed) = job.completed_at {
-            transitions.push(TransitionInfo {
-                from: "running".to_string(),
-                to: job.status.clone(),
-                timestamp: completed.to_rfc3339(),
-                reason: job.failure_reason.clone(),
-            });
-        }
 
-        return Ok(Json(JobDetailResponse {
-            id: job.id,
-            title: job.task.clone(),
-            description: String::new(),
-            state: ui_state.to_string(),
-            user_id: job.user_id.clone(),
-            created_at: job.created_at.to_rfc3339(),
-            started_at: job.started_at.map(|dt| dt.to_rfc3339()),
-            completed_at: job.completed_at.map(|dt| dt.to_rfc3339()),
-            elapsed_secs,
-            project_dir: Some(job.project_dir.clone()),
-            browse_url: Some(format!("/projects/{}/", browse_id)),
-            job_mode: {
-                let mode = store.get_sandbox_job_mode(job.id).await.ok().flatten();
-                mode.filter(|m| m != "worker")
-            },
-            transitions,
-        }));
+            // Synthesize transitions from timestamps.
+            let mut transitions = Vec::new();
+            if let Some(started) = job.started_at {
+                transitions.push(TransitionInfo {
+                    from: "creating".to_string(),
+                    to: "running".to_string(),
+                    timestamp: started.to_rfc3339(),
+                    reason: None,
+                });
+            }
+            if let Some(completed) = job.completed_at {
+                transitions.push(TransitionInfo {
+                    from: "running".to_string(),
+                    to: job.status.clone(),
+                    timestamp: completed.to_rfc3339(),
+                    reason: job.failure_reason.clone(),
+                });
+            }
+
+            return Ok(Json(JobDetailResponse {
+                id: job.id,
+                title: job.task.clone(),
+                description: String::new(),
+                state: ui_state.to_string(),
+                user_id: job.user_id.clone(),
+                created_at: job.created_at.to_rfc3339(),
+                started_at: job.started_at.map(|dt| dt.to_rfc3339()),
+                completed_at: job.completed_at.map(|dt| dt.to_rfc3339()),
+                elapsed_secs,
+                project_dir: Some(job.project_dir.clone()),
+                browse_url: Some(format!("/projects/{}/", browse_id)),
+                job_mode: {
+                    let mode = store.get_sandbox_job_mode(job.id).await.ok().flatten();
+                    mode.filter(|m| m != "worker")
+                },
+                transitions,
+            }));
+        }
+        Ok(None) => {}
+        Err(e) => {
+            return Err((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Database error: {}", e),
+            ));
+        }
     }
 
     // Fall back to agent job from DB.
-    if let Ok(Some(ctx)) = store.get_job(job_id).await {
-        let elapsed_secs = ctx.started_at.map(|start| {
-            let end = ctx.completed_at.unwrap_or_else(chrono::Utc::now);
-            (end - start).num_seconds().max(0) as u64
-        });
+    match store.get_job(job_id).await {
+        Ok(Some(ctx)) => {
+            if ctx.user_id != user.user_id {
+                return Err((StatusCode::NOT_FOUND, "Job not found".to_string()));
+            }
+            let elapsed_secs = ctx.started_at.map(|start| {
+                let end = ctx.completed_at.unwrap_or_else(chrono::Utc::now);
+                (end - start).num_seconds().max(0) as u64
+            });
 
-        return Ok(Json(JobDetailResponse {
-            id: ctx.job_id,
-            title: ctx.title.clone(),
-            description: ctx.description.clone(),
-            state: ctx.state.to_string(),
-            user_id: ctx.user_id.clone(),
-            created_at: ctx.created_at.to_rfc3339(),
-            started_at: ctx.started_at.map(|dt| dt.to_rfc3339()),
-            completed_at: ctx.completed_at.map(|dt| dt.to_rfc3339()),
-            elapsed_secs,
-            project_dir: None,
-            browse_url: None,
-            job_mode: None,
-            transitions: Vec::new(),
-        }));
+            Ok(Json(JobDetailResponse {
+                id: ctx.job_id,
+                title: ctx.title.clone(),
+                description: ctx.description.clone(),
+                state: ctx.state.to_string(),
+                user_id: ctx.user_id.clone(),
+                created_at: ctx.created_at.to_rfc3339(),
+                started_at: ctx.started_at.map(|dt| dt.to_rfc3339()),
+                completed_at: ctx.completed_at.map(|dt| dt.to_rfc3339()),
+                elapsed_secs,
+                project_dir: None,
+                browse_url: None,
+                job_mode: None,
+                transitions: Vec::new(),
+            }))
+        }
+        Ok(None) => Err((StatusCode::NOT_FOUND, "Job not found".to_string())),
+        Err(e) => Err((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Database error: {}", e),
+        )),
     }
-
-    Err((StatusCode::NOT_FOUND, "Job not found".to_string()))
 }
 
 pub async fn jobs_cancel_handler(
     State(state): State<Arc<GatewayState>>,
+    AuthenticatedUser(user): AuthenticatedUser,
     Path(id): Path<String>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
     let job_id = Uuid::parse_str(&id)
         .map_err(|_| (StatusCode::BAD_REQUEST, "Invalid job ID".to_string()))?;
 
     // Try sandbox job cancellation.
-    if let Some(ref store) = state.store
-        && let Ok(Some(job)) = store.get_sandbox_job(job_id).await
-    {
-        if job.status == "running" || job.status == "creating" {
-            // Stop the container if we have a job manager.
-            if let Some(ref jm) = state.job_manager
-                && let Err(e) = jm.stop_job(job_id).await
-            {
-                tracing::warn!(job_id = %job_id, error = %e, "Failed to stop container during cancellation");
+    if let Some(ref store) = state.store {
+        match store.get_sandbox_job(job_id).await {
+            Ok(Some(job)) => {
+                if job.user_id != user.user_id {
+                    return Err((StatusCode::NOT_FOUND, "Job not found".to_string()));
+                }
+                if job.status == "running" || job.status == "creating" {
+                    if let Some(ref jm) = state.job_manager
+                        && let Err(e) = jm.stop_job(job_id).await
+                    {
+                        tracing::warn!(job_id = %job_id, error = %e, "Failed to stop container during cancellation");
+                    }
+                    store
+                        .update_sandbox_job_status(
+                            job_id,
+                            "failed",
+                            Some(false),
+                            Some("Cancelled by user"),
+                            None,
+                            Some(chrono::Utc::now()),
+                        )
+                        .await
+                        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+                }
+                return Ok(Json(serde_json::json!({
+                    "status": "cancelled",
+                    "job_id": job_id,
+                })));
             }
-            store
-                .update_sandbox_job_status(
-                    job_id,
-                    "failed",
-                    Some(false),
-                    Some("Cancelled by user"),
-                    None,
-                    Some(chrono::Utc::now()),
-                )
-                .await
-                .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+            Ok(None) => {}
+            Err(e) => {
+                return Err((
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("Database error: {}", e),
+                ));
+            }
         }
-        return Ok(Json(serde_json::json!({
-            "status": "cancelled",
-            "job_id": job_id,
-        })));
     }
 
     // Fall back to agent job cancellation via DB status update.
-    if let Some(ref store) = state.store
-        && let Ok(Some(job)) = store.get_job(job_id).await
-    {
-        if job.state.is_active() {
-            store
-                .update_job_status(
-                    job_id,
-                    crate::context::JobState::Cancelled,
-                    Some("Cancelled by user"),
-                )
-                .await
-                .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    if let Some(ref store) = state.store {
+        match store.get_job(job_id).await {
+            Ok(Some(job)) => {
+                if job.user_id != user.user_id {
+                    return Err((StatusCode::NOT_FOUND, "Job not found".to_string()));
+                }
+                if job.state.is_active() {
+                    store
+                        .update_job_status(
+                            job_id,
+                            crate::context::JobState::Cancelled,
+                            Some("Cancelled by user"),
+                        )
+                        .await
+                        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+                }
+                return Ok(Json(serde_json::json!({
+                    "status": "cancelled",
+                    "job_id": job_id,
+                })));
+            }
+            Ok(None) => {}
+            Err(e) => {
+                return Err((
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("Database error: {}", e),
+                ));
+            }
         }
-        return Ok(Json(serde_json::json!({
-            "status": "cancelled",
-            "job_id": job_id,
-        })));
     }
 
     Err((StatusCode::NOT_FOUND, "Job not found".to_string()))
@@ -289,6 +340,7 @@ pub async fn jobs_cancel_handler(
 
 pub async fn jobs_restart_handler(
     State(state): State<Arc<GatewayState>>,
+    AuthenticatedUser(user): AuthenticatedUser,
     Path(id): Path<String>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
     let store = state.store.as_ref().ok_or((
@@ -308,6 +360,10 @@ pub async fn jobs_restart_handler(
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
         .ok_or((StatusCode::NOT_FOUND, "Job not found".to_string()))?;
+
+    if old_job.user_id != user.user_id {
+        return Err((StatusCode::NOT_FOUND, "Job not found".to_string()));
+    }
 
     if old_job.status != "interrupted" && old_job.status != "failed" {
         return Err((
@@ -389,6 +445,7 @@ pub async fn jobs_restart_handler(
 /// Submit a follow-up prompt to a running Claude Code sandbox job.
 pub async fn jobs_prompt_handler(
     State(state): State<Arc<GatewayState>>,
+    AuthenticatedUser(user): AuthenticatedUser,
     Path(id): Path<String>,
     Json(body): Json<serde_json::Value>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
@@ -400,6 +457,26 @@ pub async fn jobs_prompt_handler(
     let job_id: uuid::Uuid = id
         .parse()
         .map_err(|_| (StatusCode::BAD_REQUEST, "Invalid job ID".to_string()))?;
+
+    // Verify ownership before queuing a prompt.
+    if let Some(ref store) = state.store {
+        match store.get_sandbox_job(job_id).await {
+            Ok(Some(job)) => {
+                if job.user_id != user.user_id {
+                    return Err((StatusCode::NOT_FOUND, "Job not found".to_string()));
+                }
+            }
+            Ok(None) => {
+                return Err((StatusCode::NOT_FOUND, "Job not found".to_string()));
+            }
+            Err(e) => {
+                return Err((
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("Database error: {}", e),
+                ));
+            }
+        }
+    }
 
     let content = body
         .get("content")
@@ -428,6 +505,7 @@ pub async fn jobs_prompt_handler(
 /// Load persisted job events for a job (for history replay on page open).
 pub async fn jobs_events_handler(
     State(state): State<Arc<GatewayState>>,
+    AuthenticatedUser(user): AuthenticatedUser,
     Path(id): Path<String>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
     let store = state.store.as_ref().ok_or((
@@ -438,6 +516,24 @@ pub async fn jobs_events_handler(
     let job_id: uuid::Uuid = id
         .parse()
         .map_err(|_| (StatusCode::BAD_REQUEST, "Invalid job ID".to_string()))?;
+
+    // Verify ownership before returning events.
+    match store.get_sandbox_job(job_id).await {
+        Ok(Some(job)) => {
+            if job.user_id != user.user_id {
+                return Err((StatusCode::NOT_FOUND, "Job not found".to_string()));
+            }
+        }
+        Ok(None) => {
+            return Err((StatusCode::NOT_FOUND, "Job not found".to_string()));
+        }
+        Err(e) => {
+            return Err((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Database error: {}", e),
+            ));
+        }
+    }
 
     let events = store
         .list_job_events(job_id, None)
@@ -471,6 +567,7 @@ pub struct FilePathQuery {
 
 pub async fn job_files_list_handler(
     State(state): State<Arc<GatewayState>>,
+    AuthenticatedUser(user): AuthenticatedUser,
     Path(id): Path<String>,
     Query(query): Query<FilePathQuery>,
 ) -> Result<Json<ProjectFilesResponse>, (StatusCode, String)> {
@@ -487,6 +584,10 @@ pub async fn job_files_list_handler(
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
         .ok_or((StatusCode::NOT_FOUND, "Job not found".to_string()))?;
+
+    if job.user_id != user.user_id {
+        return Err((StatusCode::NOT_FOUND, "Job not found".to_string()));
+    }
 
     let base = std::path::PathBuf::from(&job.project_dir);
     let rel_path = query.path.as_deref().unwrap_or("");
@@ -534,6 +635,7 @@ pub async fn job_files_list_handler(
 
 pub async fn job_files_read_handler(
     State(state): State<Arc<GatewayState>>,
+    AuthenticatedUser(user): AuthenticatedUser,
     Path(id): Path<String>,
     Query(query): Query<FilePathQuery>,
 ) -> Result<Json<ProjectFileReadResponse>, (StatusCode, String)> {
@@ -550,6 +652,10 @@ pub async fn job_files_read_handler(
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
         .ok_or((StatusCode::NOT_FOUND, "Job not found".to_string()))?;
+
+    if job.user_id != user.user_id {
+        return Err((StatusCode::NOT_FOUND, "Job not found".to_string()));
+    }
 
     let path = query.path.as_deref().ok_or((
         StatusCode::BAD_REQUEST,

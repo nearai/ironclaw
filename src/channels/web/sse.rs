@@ -17,9 +17,25 @@ use crate::channels::web::types::SseEvent;
 /// Prevents resource exhaustion from connection flooding.
 const MAX_CONNECTIONS: u64 = 100;
 
+/// Envelope for broadcast events: carries an optional user scope.
+///
+/// `user_id = None` means the event is global (e.g. Heartbeat) and delivered
+/// to all subscribers. `user_id = Some(id)` means the event is only delivered
+/// to subscribers that match that user_id.
+#[derive(Debug, Clone)]
+struct ScopedEvent {
+    user_id: Option<String>,
+    event: SseEvent,
+}
+
 /// Manages SSE broadcast to all connected browser tabs.
+///
+/// In multi-user mode, events are scoped by user_id so that each subscriber
+/// only receives events intended for their user (plus global events like
+/// Heartbeat). In single-user mode, all events are delivered to all subscribers
+/// (backwards compatible).
 pub struct SseManager {
-    tx: broadcast::Sender<SseEvent>,
+    tx: broadcast::Sender<ScopedEvent>,
     connection_count: Arc<AtomicU64>,
     max_connections: u64,
 }
@@ -36,15 +52,23 @@ impl SseManager {
         }
     }
 
-    /// Broadcast an event to all connected clients.
+    /// Broadcast an event to all connected clients (global/unscoped).
     pub fn broadcast(&self, event: SseEvent) {
-        // Ignore send errors (no receivers is fine)
-        let _ = self.tx.send(event);
+        let _ = self.tx.send(ScopedEvent {
+            user_id: None,
+            event,
+        });
     }
 
-    /// Get a clone of the broadcast sender for use by other components.
-    pub fn sender(&self) -> broadcast::Sender<SseEvent> {
-        self.tx.clone()
+    /// Broadcast an event scoped to a specific user.
+    ///
+    /// Only subscribers for this user_id (or unscoped subscribers) will
+    /// receive the event.
+    pub fn broadcast_for_user(&self, user_id: &str, event: SseEvent) {
+        let _ = self.tx.send(ScopedEvent {
+            user_id: Some(user_id.to_string()),
+            event,
+        });
     }
 
     /// Get current number of active connections.
@@ -54,11 +78,15 @@ impl SseManager {
 
     /// Create a raw broadcast subscription for non-SSE consumers (e.g. WebSocket).
     ///
-    /// Returns a stream of `SseEvent` values and increments/decrements the
-    /// connection counter on creation/drop, just like `subscribe()` does for SSE.
+    /// When `user_id` is `Some`, only events scoped to that user (or global
+    /// events) are delivered. When `None`, all events are delivered (single-user
+    /// backwards compatibility).
     ///
     /// Returns `None` if the maximum connection limit has been reached.
-    pub fn subscribe_raw(&self) -> Option<impl Stream<Item = SseEvent> + Send + 'static + use<>> {
+    pub fn subscribe_raw(
+        &self,
+        user_id: Option<String>,
+    ) -> Option<impl Stream<Item = SseEvent> + Send + 'static + use<>> {
         // Atomically increment only if below the limit. This prevents
         // concurrent callers from overshooting max_connections.
         let counter = Arc::clone(&self.connection_count);
@@ -74,7 +102,19 @@ impl SseManager {
             .ok()?;
         let rx = self.tx.subscribe();
 
-        let stream = BroadcastStream::new(rx).filter_map(|result| result.ok());
+        let stream = BroadcastStream::new(rx).filter_map(move |result| match result {
+            Ok(scoped) => {
+                // Global events (user_id=None) always pass through.
+                // Scoped events only pass if the subscriber matches (or subscriber is unscoped).
+                match (&user_id, &scoped.user_id) {
+                    (_, None) => Some(scoped.event),                          // global -> all
+                    (None, _) => Some(scoped.event),                          // unscoped subscriber -> all
+                    (Some(sub), Some(ev)) if sub == ev => Some(scoped.event), // match
+                    _ => None,                                                // different user -> skip
+                }
+            }
+            Err(_) => None,
+        });
 
         Some(CountedStream {
             inner: stream,
@@ -84,9 +124,13 @@ impl SseManager {
 
     /// Create a new SSE stream for a client connection.
     ///
+    /// When `user_id` is `Some`, only events for that user (or global events)
+    /// are delivered. When `None`, all events are delivered.
+    ///
     /// Returns `None` if the maximum connection limit has been reached.
     pub fn subscribe(
         &self,
+        user_id: Option<String>,
     ) -> Option<Sse<impl Stream<Item = Result<Event, Infallible>> + Send + 'static + use<>>> {
         // Atomically increment only if below the limit.
         let counter = Arc::clone(&self.connection_count);
@@ -103,7 +147,15 @@ impl SseManager {
         let rx = self.tx.subscribe();
 
         let stream = BroadcastStream::new(rx)
-            .filter_map(|result| result.ok())
+            .filter_map(move |result| match result {
+                Ok(scoped) => match (&user_id, &scoped.user_id) {
+                    (_, None) => Some(scoped.event),
+                    (None, _) => Some(scoped.event),
+                    (Some(sub), Some(ev)) if sub == ev => Some(scoped.event),
+                    _ => None,
+                },
+                Err(_) => None,
+            })
             .map(|event| {
                 let data = serde_json::to_string(&event).unwrap_or_default();
                 let event_type = match &event {
@@ -195,16 +247,14 @@ mod tests {
     #[tokio::test]
     async fn test_broadcast_to_receiver() {
         let manager = SseManager::new();
-        let mut rx = BroadcastStream::new(manager.tx.subscribe());
+        let mut stream = Box::pin(manager.subscribe_raw(None).expect("should subscribe"));
 
         manager.broadcast(SseEvent::Status {
             message: "test".to_string(),
             thread_id: None,
         });
 
-        let event = rx.next().await;
-        assert!(event.is_some());
-        let event = event.unwrap().unwrap();
+        let event = stream.next().await.unwrap();
         match event {
             SseEvent::Status { message, .. } => assert_eq!(message, "test"),
             _ => panic!("unexpected event type"),
@@ -214,7 +264,7 @@ mod tests {
     #[tokio::test]
     async fn test_subscribe_raw_receives_events() {
         let manager = SseManager::new();
-        let mut stream = Box::pin(manager.subscribe_raw().expect("should subscribe"));
+        let mut stream = Box::pin(manager.subscribe_raw(None).expect("should subscribe"));
 
         assert_eq!(manager.connection_count(), 1);
 
@@ -234,7 +284,7 @@ mod tests {
     async fn test_subscribe_raw_decrements_on_drop() {
         let manager = SseManager::new();
         {
-            let _stream = Box::pin(manager.subscribe_raw().expect("should subscribe"));
+            let _stream = Box::pin(manager.subscribe_raw(None).expect("should subscribe"));
             assert_eq!(manager.connection_count(), 1);
         }
         // Stream dropped, counter should decrement
@@ -244,8 +294,8 @@ mod tests {
     #[tokio::test]
     async fn test_subscribe_raw_multiple_subscribers() {
         let manager = SseManager::new();
-        let mut s1 = Box::pin(manager.subscribe_raw().expect("should subscribe"));
-        let mut s2 = Box::pin(manager.subscribe_raw().expect("should subscribe"));
+        let mut s1 = Box::pin(manager.subscribe_raw(None).expect("should subscribe"));
+        let mut s2 = Box::pin(manager.subscribe_raw(None).expect("should subscribe"));
         assert_eq!(manager.connection_count(), 2);
 
         manager.broadcast(SseEvent::Heartbeat);
@@ -266,12 +316,51 @@ mod tests {
         let mut manager = SseManager::new();
         manager.max_connections = 2; // Low limit for testing
 
-        let _s1 = Box::pin(manager.subscribe_raw().expect("first should succeed"));
-        let _s2 = Box::pin(manager.subscribe_raw().expect("second should succeed"));
+        let _s1 = Box::pin(manager.subscribe_raw(None).expect("first should succeed"));
+        let _s2 = Box::pin(manager.subscribe_raw(None).expect("second should succeed"));
         assert_eq!(manager.connection_count(), 2);
 
         // Third should be rejected
-        assert!(manager.subscribe_raw().is_none());
-        assert!(manager.subscribe().is_none());
+        assert!(manager.subscribe_raw(None).is_none());
+        assert!(manager.subscribe(None).is_none());
+    }
+
+    #[tokio::test]
+    async fn test_scoped_events_filtered_by_user() {
+        let manager = SseManager::new();
+        let mut alice = Box::pin(
+            manager
+                .subscribe_raw(Some("alice".to_string()))
+                .expect("subscribe"),
+        );
+        let mut bob = Box::pin(
+            manager
+                .subscribe_raw(Some("bob".to_string()))
+                .expect("subscribe"),
+        );
+
+        // Send event scoped to alice
+        manager.broadcast_for_user(
+            "alice",
+            SseEvent::Status {
+                message: "alice only".to_string(),
+                thread_id: None,
+            },
+        );
+
+        // Send global event
+        manager.broadcast(SseEvent::Heartbeat);
+
+        // Alice gets her scoped event
+        let e = alice.next().await.unwrap();
+        assert!(matches!(e, SseEvent::Status { .. }));
+
+        // Alice also gets the global heartbeat
+        let e = alice.next().await.unwrap();
+        assert!(matches!(e, SseEvent::Heartbeat));
+
+        // Bob only gets the global heartbeat (alice's event was filtered)
+        let e = bob.next().await.unwrap();
+        assert!(matches!(e, SseEvent::Heartbeat));
     }
 }

@@ -40,7 +40,8 @@ pub struct OrchestratorState {
     pub job_manager: Arc<ContainerJobManager>,
     pub token_store: TokenStore,
     /// Broadcast channel for job events (consumed by the web gateway SSE).
-    pub job_event_tx: Option<broadcast::Sender<(Uuid, SseEvent)>>,
+    /// Tuple: (job_id, user_id, event).
+    pub job_event_tx: Option<broadcast::Sender<(Uuid, String, SseEvent)>>,
     /// Buffered follow-up prompts for sandbox jobs, keyed by job_id.
     pub prompt_queue: Arc<Mutex<HashMap<Uuid, VecDeque<PendingPrompt>>>>,
     /// Database handle for persisting job events.
@@ -340,9 +341,24 @@ async fn job_event_handler(
         },
     };
 
-    // Broadcast via the channel (if configured)
+    // Broadcast via the channel (if configured).
+    // Look up the job owner so the gateway can scope delivery per-user.
     if let Some(ref tx) = state.job_event_tx {
-        let _ = tx.send((job_id, sse_event));
+        let user_id = match state.store.as_ref() {
+            Some(store) => store
+                .get_sandbox_job(job_id)
+                .await
+                .ok()
+                .flatten()
+                .map(|j| j.user_id),
+            None => None,
+        };
+        if let Some(uid) = user_id {
+            let _ = tx.send((job_id, uid, sse_event));
+        } else {
+            // Fallback: broadcast globally (single-user mode or job not found).
+            let _ = tx.send((job_id, String::new(), sse_event));
+        }
     }
 
     Ok(StatusCode::OK)
@@ -761,8 +777,10 @@ mod tests {
         let resp = router.oneshot(req).await.unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
 
-        let (recv_id, event) = rx.recv().await.unwrap();
+        let (recv_id, recv_uid, event) = rx.recv().await.unwrap();
         assert_eq!(recv_id, job_id);
+        // No store configured, so user_id falls back to empty string.
+        assert_eq!(recv_uid, "");
         match event {
             SseEvent::JobMessage {
                 job_id: jid,
@@ -816,7 +834,7 @@ mod tests {
         let resp = router.oneshot(req).await.unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
 
-        let (_recv_id, event) = rx.recv().await.unwrap();
+        let (_recv_id, _recv_uid, event) = rx.recv().await.unwrap();
         match event {
             SseEvent::JobToolUse { tool_name, .. } => {
                 assert_eq!(tool_name, "shell");
@@ -861,7 +879,7 @@ mod tests {
         let resp = router.oneshot(req).await.unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
 
-        let (_recv_id, event) = rx.recv().await.unwrap();
+        let (_recv_id, _recv_uid, event) = rx.recv().await.unwrap();
         // Unknown event types fall through to JobStatus
         assert!(matches!(event, SseEvent::JobStatus { .. }));
     }

@@ -20,14 +20,14 @@ pub async fn chat_send_handler(
     State(state): State<Arc<GatewayState>>,
     Json(req): Json<SendMessageRequest>,
 ) -> Result<(StatusCode, Json<SendMessageResponse>), (StatusCode, String)> {
-    if !state.chat_rate_limiter.check() {
+    if !state.chat_rate_limiter.check(&state.default_user_id) {
         return Err((
             StatusCode::TOO_MANY_REQUESTS,
             "Rate limit exceeded. Try again shortly.".to_string(),
         ));
     }
 
-    let mut msg = IncomingMessage::new("gateway", &state.user_id, &req.content);
+    let mut msg = IncomingMessage::new("gateway", &state.default_user_id, &req.content);
 
     if let Some(ref thread_id) = req.thread_id {
         msg = msg.with_thread(thread_id);
@@ -95,7 +95,7 @@ pub async fn chat_approval_handler(
         )
     })?;
 
-    let mut msg = IncomingMessage::new("gateway", &state.user_id, content);
+    let mut msg = IncomingMessage::new("gateway", &state.default_user_id, content);
 
     if let Some(ref thread_id) = req.thread_id {
         msg = msg.with_thread(thread_id);
@@ -194,7 +194,7 @@ pub async fn chat_auth_cancel_handler(
 /// Clear pending auth mode on the active thread.
 pub async fn clear_auth_mode(state: &GatewayState) {
     if let Some(ref sm) = state.session_manager {
-        let session = sm.get_or_create_session(&state.user_id).await;
+        let session = sm.get_or_create_session(&state.default_user_id).await;
         let mut sess = session.lock().await;
         if let Some(thread_id) = sess.active_thread
             && let Some(thread) = sess.threads.get_mut(&thread_id)
@@ -206,8 +206,9 @@ pub async fn clear_auth_mode(state: &GatewayState) {
 
 pub async fn chat_events_handler(
     State(state): State<Arc<GatewayState>>,
+    crate::channels::web::auth::AuthenticatedUser(user): crate::channels::web::auth::AuthenticatedUser,
 ) -> Result<impl IntoResponse, (StatusCode, String)> {
-    state.sse.subscribe().ok_or((
+    state.sse.subscribe(Some(user.user_id)).ok_or((
         StatusCode::SERVICE_UNAVAILABLE,
         "Too many connections".to_string(),
     ))
@@ -242,7 +243,13 @@ pub async fn chat_ws_handler(
             "WebSocket origin not allowed".to_string(),
         ));
     }
-    Ok(ws.on_upgrade(move |socket| crate::channels::web::ws::handle_ws_connection(socket, state)))
+    let user = crate::channels::web::auth::UserIdentity {
+        user_id: state.default_user_id.clone(),
+        workspace_read_scopes: Vec::new(),
+    };
+    Ok(ws.on_upgrade(move |socket| {
+        crate::channels::web::ws::handle_ws_connection(socket, state, user)
+    }))
 }
 
 #[derive(Deserialize)]
@@ -261,7 +268,7 @@ pub async fn chat_history_handler(
         "Session manager not available".to_string(),
     ))?;
 
-    let session = session_manager.get_or_create_session(&state.user_id).await;
+    let session = session_manager.get_or_create_session(&state.default_user_id).await;
     let sess = session.lock().await;
 
     let limit = query.limit.unwrap_or(50);
@@ -294,7 +301,7 @@ pub async fn chat_history_handler(
         && let Some(ref store) = state.store
     {
         let owned = store
-            .conversation_belongs_to_user(thread_id, &state.user_id)
+            .conversation_belongs_to_user(thread_id, &state.default_user_id)
             .await
             .unwrap_or(false);
         if !owned && !sess.threads.contains_key(&thread_id) {
@@ -413,19 +420,19 @@ pub async fn chat_threads_handler(
         "Session manager not available".to_string(),
     ))?;
 
-    let session = session_manager.get_or_create_session(&state.user_id).await;
+    let session = session_manager.get_or_create_session(&state.default_user_id).await;
     let sess = session.lock().await;
 
     // Try DB first for persistent thread list
     if let Some(ref store) = state.store {
         // Auto-create assistant thread if it doesn't exist
         let assistant_id = store
-            .get_or_create_assistant_conversation(&state.user_id, "gateway")
+            .get_or_create_assistant_conversation(&state.default_user_id, "gateway")
             .await
             .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
         if let Ok(summaries) = store
-            .list_conversations_with_preview(&state.user_id, "gateway", 50)
+            .list_conversations_with_preview(&state.default_user_id, "gateway", 50)
             .await
         {
             let mut assistant_thread = None;
@@ -500,7 +507,7 @@ pub async fn chat_new_thread_handler(
         "Session manager not available".to_string(),
     ))?;
 
-    let session = session_manager.get_or_create_session(&state.user_id).await;
+    let session = session_manager.get_or_create_session(&state.default_user_id).await;
     let mut sess = session.lock().await;
     let thread = sess.create_thread();
     let thread_id = thread.id;
@@ -517,7 +524,7 @@ pub async fn chat_new_thread_handler(
     // Persist the empty conversation row with thread_type metadata
     if let Some(ref store) = state.store {
         let store = Arc::clone(store);
-        let user_id = state.user_id.clone();
+        let user_id = state.default_user_id.clone();
         tokio::spawn(async move {
             if let Err(e) = store
                 .ensure_conversation(thread_id, "gateway", &user_id, None)

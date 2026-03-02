@@ -246,7 +246,7 @@ async fn async_main() -> anyhow::Result<()> {
     };
 
     let job_event_tx: Option<
-        tokio::sync::broadcast::Sender<(uuid::Uuid, ironclaw::channels::web::types::SseEvent)>,
+        tokio::sync::broadcast::Sender<(uuid::Uuid, String, ironclaw::channels::web::types::SseEvent)>,
     > = if config.sandbox.enabled && docker_status.is_ok() {
         let (tx, _) = tokio::sync::broadcast::channel(256);
         Some(tx)
@@ -481,16 +481,41 @@ async fn async_main() -> anyhow::Result<()> {
     // ── Gateway channel ────────────────────────────────────────────────
 
     let mut gateway_url: Option<String> = None;
-    let mut sse_sender: Option<
-        tokio::sync::broadcast::Sender<ironclaw::channels::web::types::SseEvent>,
-    > = None;
+    let mut sse_manager: Option<std::sync::Arc<ironclaw::channels::web::sse::SseManager>> = None;
     let mut gateway_state: Option<std::sync::Arc<ironclaw::channels::web::server::GatewayState>> =
         None;
     if let Some(ref gw_config) = config.channels.gateway {
-        let mut gw =
-            GatewayChannel::new(gw_config.clone()).with_llm_provider(Arc::clone(&components.llm));
+        // Build multi-user auth state if user_tokens is configured, else single-user.
+        let mut gw = if let Some(ref user_tokens) = gw_config.user_tokens {
+            use ironclaw::channels::web::auth::{MultiAuthState, UserIdentity};
+            let tokens = user_tokens
+                .iter()
+                .map(|(token, cfg)| {
+                    (
+                        token.clone(),
+                        UserIdentity {
+                            user_id: cfg.user_id.clone(),
+                            workspace_read_scopes: cfg.workspace_read_scopes.clone(),
+                        },
+                    )
+                })
+                .collect();
+            let auth = MultiAuthState::multi(tokens);
+            GatewayChannel::new_multi_auth(gw_config.clone(), auth)
+        } else {
+            GatewayChannel::new(gw_config.clone())
+        };
+        gw = gw.with_llm_provider(Arc::clone(&components.llm));
         if let Some(ref ws) = components.workspace {
             gw = gw.with_workspace(Arc::clone(ws));
+        }
+        // Create per-user workspace pool for multi-user mode.
+        if let Some(ref db) = components.db {
+            let pool = Arc::new(ironclaw::channels::web::server::WorkspacePool::new(
+                Arc::clone(db),
+                components.embeddings.clone(),
+            ));
+            gw = gw.with_workspace_pool(pool);
         }
         gw = gw.with_session_manager(Arc::clone(&session_manager));
         gw = gw.with_log_broadcaster(Arc::clone(&log_broadcaster));
@@ -522,8 +547,12 @@ async fn async_main() -> anyhow::Result<()> {
                 let mut rx = tx.subscribe();
                 let gw_state = Arc::clone(gw.state());
                 tokio::spawn(async move {
-                    while let Ok((_job_id, event)) = rx.recv().await {
-                        gw_state.sse.broadcast(event);
+                    while let Ok((_job_id, user_id, event)) = rx.recv().await {
+                        if user_id.is_empty() {
+                            gw_state.sse.broadcast(event);
+                        } else {
+                            gw_state.sse.broadcast_for_user(&user_id, event);
+                        }
                     }
                 });
             }
@@ -541,7 +570,7 @@ async fn async_main() -> anyhow::Result<()> {
         // Capture SSE sender before moving gw into channels.
         // IMPORTANT: This must come after all `with_*` calls since `rebuild_state`
         // creates a new SseManager, which would orphan this sender.
-        sse_sender = Some(gw.state().sse.sender());
+        sse_manager = Some(Arc::clone(&gw.state().sse));
         gateway_state = Some(Arc::clone(gw.state()));
 
         channel_names.push("gateway".to_string());
@@ -649,9 +678,9 @@ async fn async_main() -> anyhow::Result<()> {
 
     // Wire SSE sender into extension manager for broadcasting status events.
     if let Some(ref ext_mgr) = components.extension_manager
-        && let Some(sender) = sse_sender
+        && let Some(sse) = sse_manager
     {
-        ext_mgr.set_sse_sender(sender).await;
+        ext_mgr.set_sse_sender(sse).await;
     }
 
     let deps = AgentDeps {

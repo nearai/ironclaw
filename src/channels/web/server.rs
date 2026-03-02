@@ -28,7 +28,7 @@ use uuid::Uuid;
 use crate::agent::SessionManager;
 use crate::bootstrap::ironclaw_base_dir;
 use crate::channels::IncomingMessage;
-use crate::channels::web::auth::{AuthState, auth_middleware};
+use crate::channels::web::auth::{AuthenticatedUser, MultiAuthState, UserIdentity, auth_middleware};
 use crate::channels::web::handlers::jobs::{
     job_files_list_handler, job_files_read_handler, jobs_cancel_handler, jobs_detail_handler,
     jobs_events_handler, jobs_list_handler, jobs_prompt_handler, jobs_restart_handler,
@@ -60,8 +60,7 @@ pub type PromptQueue = Arc<
 /// Simple sliding-window rate limiter.
 ///
 /// Tracks the number of requests in the current window. Resets when the window expires.
-/// Not per-IP (since this is a single-user gateway with auth), but prevents flooding.
-pub struct RateLimiter {
+struct RateLimiter {
     /// Requests remaining in the current window.
     remaining: AtomicU64,
     /// Epoch second when the current window started.
@@ -73,7 +72,7 @@ pub struct RateLimiter {
 }
 
 impl RateLimiter {
-    pub fn new(max_requests: u64, window_secs: u64) -> Self {
+    fn new(max_requests: u64, window_secs: u64) -> Self {
         Self {
             remaining: AtomicU64::new(max_requests),
             window_start: AtomicU64::new(
@@ -88,7 +87,13 @@ impl RateLimiter {
     }
 
     /// Try to consume one request. Returns `true` if allowed, `false` if rate limited.
-    pub fn check(&self) -> bool {
+    ///
+    /// Note: There is a benign TOCTOU race between checking `window_start` and
+    /// resetting it — two concurrent threads may both see an expired window
+    /// and reset it, granting a few extra requests at the window boundary.
+    /// This is acceptable for chat rate limiting where approximate enforcement
+    /// is sufficient, and avoids the cost of a Mutex.
+    fn check(&self) -> bool {
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
@@ -120,14 +125,110 @@ impl RateLimiter {
     }
 }
 
+/// Per-user rate limiter that maintains a separate sliding window per user_id.
+///
+/// Prevents one user from exhausting the rate limit for all users in multi-tenant mode.
+pub struct PerUserRateLimiter {
+    limiters: std::sync::RwLock<std::collections::HashMap<String, RateLimiter>>,
+    max_requests: u64,
+    window_secs: u64,
+}
+
+impl PerUserRateLimiter {
+    pub fn new(max_requests: u64, window_secs: u64) -> Self {
+        Self {
+            limiters: std::sync::RwLock::new(std::collections::HashMap::new()),
+            max_requests,
+            window_secs,
+        }
+    }
+
+    /// Try to consume one request for the given user. Returns `true` if allowed.
+    pub fn check(&self, user_id: &str) -> bool {
+        // Fast path: check existing limiter under read lock.
+        // On lock poisoning (another thread panicked while holding the lock),
+        // allow the request rather than crashing the server.
+        {
+            let map = match self.limiters.read() {
+                Ok(m) => m,
+                Err(e) => e.into_inner(),
+            };
+            if let Some(limiter) = map.get(user_id) {
+                return limiter.check();
+            }
+        }
+        // Slow path: create limiter under write lock.
+        let mut map = match self.limiters.write() {
+            Ok(m) => m,
+            Err(e) => e.into_inner(),
+        };
+        let limiter = map
+            .entry(user_id.to_string())
+            .or_insert_with(|| RateLimiter::new(self.max_requests, self.window_secs));
+        limiter.check()
+    }
+}
+
+/// Per-user workspace pool: lazily creates and caches workspaces keyed by user_id.
+///
+/// In single-user mode, exactly one workspace is cached. In multi-user mode,
+/// each authenticated user gets their own workspace with appropriate scopes.
+pub struct WorkspacePool {
+    db: Arc<dyn Database>,
+    embeddings: Option<Arc<dyn crate::workspace::EmbeddingProvider>>,
+    cache: tokio::sync::RwLock<std::collections::HashMap<String, Arc<Workspace>>>,
+}
+
+impl WorkspacePool {
+    pub fn new(
+        db: Arc<dyn Database>,
+        embeddings: Option<Arc<dyn crate::workspace::EmbeddingProvider>>,
+    ) -> Self {
+        Self {
+            db,
+            embeddings,
+            cache: tokio::sync::RwLock::new(std::collections::HashMap::new()),
+        }
+    }
+
+    /// Get or create a workspace for the given user identity.
+    pub async fn get_or_create(&self, identity: &UserIdentity) -> Arc<Workspace> {
+        // Fast path: check read lock
+        {
+            let cache = self.cache.read().await;
+            if let Some(ws) = cache.get(&identity.user_id) {
+                return Arc::clone(ws);
+            }
+        }
+
+        // Slow path: create workspace under write lock
+        let mut cache = self.cache.write().await;
+        // Double-check after acquiring write lock
+        if let Some(ws) = cache.get(&identity.user_id) {
+            return Arc::clone(ws);
+        }
+
+        let mut ws = Workspace::new_with_db(&identity.user_id, Arc::clone(&self.db));
+        if let Some(ref emb) = self.embeddings {
+            ws = ws.with_embeddings(Arc::clone(emb));
+        }
+
+        let ws = Arc::new(ws);
+        cache.insert(identity.user_id.clone(), Arc::clone(&ws));
+        ws
+    }
+}
+
 /// Shared state for all gateway handlers.
 pub struct GatewayState {
     /// Channel to send messages to the agent loop.
     pub msg_tx: tokio::sync::RwLock<Option<mpsc::Sender<IncomingMessage>>>,
-    /// SSE broadcast manager.
-    pub sse: SseManager,
-    /// Workspace for memory API.
+    /// SSE broadcast manager (Arc-wrapped so extension manager can hold a reference).
+    pub sse: Arc<SseManager>,
+    /// Workspace for memory API (single-user fallback).
     pub workspace: Option<Arc<Workspace>>,
+    /// Per-user workspace pool for multi-user mode.
+    pub workspace_pool: Option<Arc<WorkspacePool>>,
     /// Session manager for thread info.
     pub session_manager: Option<Arc<SessionManager>>,
     /// Log broadcaster for the logs SSE endpoint.
@@ -144,8 +245,8 @@ pub struct GatewayState {
     pub job_manager: Option<Arc<ContainerJobManager>>,
     /// Prompt queue for Claude Code follow-up prompts.
     pub prompt_queue: Option<PromptQueue>,
-    /// User ID for this gateway.
-    pub user_id: String,
+    /// Default user ID (fallback for non-request contexts like heartbeat/routines).
+    pub default_user_id: String,
     /// Shutdown signal sender.
     pub shutdown_tx: tokio::sync::RwLock<Option<oneshot::Sender<()>>>,
     /// WebSocket connection tracker.
@@ -156,8 +257,8 @@ pub struct GatewayState {
     pub skill_registry: Option<Arc<std::sync::RwLock<crate::skills::SkillRegistry>>>,
     /// Skill catalog for searching the ClawHub registry.
     pub skill_catalog: Option<Arc<crate::skills::catalog::SkillCatalog>>,
-    /// Rate limiter for chat endpoints (30 messages per 60 seconds).
-    pub chat_rate_limiter: RateLimiter,
+    /// Per-user rate limiter for chat endpoints (30 messages per 60 seconds per user).
+    pub chat_rate_limiter: PerUserRateLimiter,
     /// Registry catalog entries for the available extensions API.
     /// Populated at startup from `registry/` manifests, independent of extension manager.
     pub registry_entries: Vec<crate::extensions::RegistryEntry>,
@@ -175,7 +276,7 @@ pub struct GatewayState {
 pub async fn start_server(
     addr: SocketAddr,
     state: Arc<GatewayState>,
-    auth_token: String,
+    auth: MultiAuthState,
 ) -> Result<SocketAddr, crate::error::ChannelError> {
     let listener = tokio::net::TcpListener::bind(addr).await.map_err(|e| {
         crate::error::ChannelError::StartupFailed {
@@ -195,7 +296,7 @@ pub async fn start_server(
     let public = Router::new().route("/api/health", get(health_handler));
 
     // Protected routes (require auth)
-    let auth_state = AuthState { token: auth_token };
+    let auth_state = auth;
     let protected = Router::new()
         // Chat
         .route("/api/chat/send", post(chat_send_handler))
@@ -430,21 +531,25 @@ async fn health_handler() -> Json<HealthResponse> {
 
 async fn chat_send_handler(
     State(state): State<Arc<GatewayState>>,
+    AuthenticatedUser(user): AuthenticatedUser,
     Json(req): Json<SendMessageRequest>,
 ) -> Result<(StatusCode, Json<SendMessageResponse>), (StatusCode, String)> {
-    if !state.chat_rate_limiter.check() {
+    if !state.chat_rate_limiter.check(&user.user_id) {
         return Err((
             StatusCode::TOO_MANY_REQUESTS,
             "Rate limit exceeded. Try again shortly.".to_string(),
         ));
     }
 
-    let mut msg = IncomingMessage::new("gateway", &state.user_id, &req.content);
+    let mut msg = IncomingMessage::new("gateway", &user.user_id, &req.content);
 
+    // Always include user_id in metadata so downstream SSE broadcasts can scope events.
+    let mut meta = serde_json::json!({"user_id": &user.user_id});
     if let Some(ref thread_id) = req.thread_id {
         msg = msg.with_thread(thread_id);
-        msg = msg.with_metadata(serde_json::json!({"thread_id": thread_id}));
+        meta["thread_id"] = serde_json::json!(thread_id);
     }
+    msg = msg.with_metadata(meta);
 
     let msg_id = msg.id;
 
@@ -472,6 +577,7 @@ async fn chat_send_handler(
 
 async fn chat_approval_handler(
     State(state): State<Arc<GatewayState>>,
+    AuthenticatedUser(user): AuthenticatedUser,
     Json(req): Json<ApprovalRequest>,
 ) -> Result<(StatusCode, Json<SendMessageResponse>), (StatusCode, String)> {
     let (approved, always) = match req.action.as_str() {
@@ -507,7 +613,7 @@ async fn chat_approval_handler(
         )
     })?;
 
-    let mut msg = IncomingMessage::new("gateway", &state.user_id, content);
+    let mut msg = IncomingMessage::new("gateway", &user.user_id, content);
 
     if let Some(ref thread_id) = req.thread_id {
         msg = msg.with_thread(thread_id);
@@ -542,6 +648,7 @@ async fn chat_approval_handler(
 /// The token never touches the LLM, chat history, or SSE stream.
 async fn chat_auth_token_handler(
     State(state): State<Arc<GatewayState>>,
+    AuthenticatedUser(user): AuthenticatedUser,
     Json(req): Json<AuthTokenRequest>,
 ) -> Result<Json<ActionResponse>, (StatusCode, String)> {
     let ext_mgr = state.extension_manager.as_ref().ok_or((
@@ -569,23 +676,29 @@ async fn chat_auth_token_handler(
         };
 
         // Clear auth mode on the active thread
-        clear_auth_mode(&state).await;
+        clear_auth_mode(&state, &user.user_id).await;
 
-        state.sse.broadcast(SseEvent::AuthCompleted {
-            extension_name: req.extension_name,
-            success: true,
-            message: msg.clone(),
-        });
+        state.sse.broadcast_for_user(
+            &user.user_id,
+            SseEvent::AuthCompleted {
+                extension_name: req.extension_name,
+                success: true,
+                message: msg.clone(),
+            },
+        );
 
         Ok(Json(ActionResponse::ok(msg)))
     } else {
         // Re-emit auth_required for retry
-        state.sse.broadcast(SseEvent::AuthRequired {
-            extension_name: req.extension_name.clone(),
-            instructions: result.instructions.clone(),
-            auth_url: result.auth_url.clone(),
-            setup_url: result.setup_url.clone(),
-        });
+        state.sse.broadcast_for_user(
+            &user.user_id,
+            SseEvent::AuthRequired {
+                extension_name: req.extension_name.clone(),
+                instructions: result.instructions.clone(),
+                auth_url: result.auth_url.clone(),
+                setup_url: result.setup_url.clone(),
+            },
+        );
         Ok(Json(ActionResponse::fail(
             result
                 .instructions
@@ -597,16 +710,17 @@ async fn chat_auth_token_handler(
 /// Cancel an in-progress auth flow.
 async fn chat_auth_cancel_handler(
     State(state): State<Arc<GatewayState>>,
+    AuthenticatedUser(user): AuthenticatedUser,
     Json(_req): Json<AuthCancelRequest>,
 ) -> Result<Json<ActionResponse>, (StatusCode, String)> {
-    clear_auth_mode(&state).await;
+    clear_auth_mode(&state, &user.user_id).await;
     Ok(Json(ActionResponse::ok("Auth cancelled")))
 }
 
 /// Clear pending auth mode on the active thread.
-pub async fn clear_auth_mode(state: &GatewayState) {
+pub async fn clear_auth_mode(state: &GatewayState, user_id: &str) {
     if let Some(ref sm) = state.session_manager {
-        let session = sm.get_or_create_session(&state.user_id).await;
+        let session = sm.get_or_create_session(user_id).await;
         let mut sess = session.lock().await;
         if let Some(thread_id) = sess.active_thread
             && let Some(thread) = sess.threads.get_mut(&thread_id)
@@ -618,8 +732,9 @@ pub async fn clear_auth_mode(state: &GatewayState) {
 
 async fn chat_events_handler(
     State(state): State<Arc<GatewayState>>,
+    AuthenticatedUser(user): AuthenticatedUser,
 ) -> Result<impl IntoResponse, (StatusCode, String)> {
-    let sse = state.sse.subscribe().ok_or((
+    let sse = state.sse.subscribe(Some(user.user_id)).ok_or((
         StatusCode::SERVICE_UNAVAILABLE,
         "Too many connections".to_string(),
     ))?;
@@ -629,7 +744,31 @@ async fn chat_events_handler(
     ))
 }
 
+/// Check whether an Origin header value points to a local address.
+///
+/// Extracts the host from the origin (handling both IPv4/hostname and IPv6
+/// literal formats) and compares it against known local addresses. Used to
+/// prevent cross-site WebSocket hijacking while allowing localhost access.
+fn is_local_origin(origin: &str) -> bool {
+    let host = origin
+        .strip_prefix("http://")
+        .or_else(|| origin.strip_prefix("https://"))
+        .and_then(|rest| {
+            if rest.starts_with('[') {
+                // IPv6 literal: extract "[::1]" up to and including ']'
+                rest.find(']').map(|i| &rest[..=i])
+            } else {
+                // IPv4 or hostname: take up to the first ':' (port) or '/' (path)
+                rest.split(':').next()?.split('/').next()
+            }
+        })
+        .unwrap_or("");
+
+    matches!(host, "localhost" | "127.0.0.1" | "[::1]")
+}
+
 async fn chat_ws_handler(
+    AuthenticatedUser(user): AuthenticatedUser,
     headers: axum::http::HeaderMap,
     ws: WebSocketUpgrade,
     State(state): State<Arc<GatewayState>>,
@@ -647,23 +786,16 @@ async fn chat_ws_handler(
             )
         })?;
 
-    // Extract the host from the origin and compare exactly, so that
-    // crafted origins like "http://localhost.evil.com" are rejected.
-    // Origin format is "scheme://host[:port]".
-    let host = origin
-        .strip_prefix("http://")
-        .or_else(|| origin.strip_prefix("https://"))
-        .and_then(|rest| rest.split(':').next()?.split('/').next())
-        .unwrap_or("");
-
-    let is_local = matches!(host, "localhost" | "127.0.0.1" | "[::1]");
+    let is_local = is_local_origin(origin);
     if !is_local {
         return Err((
             StatusCode::FORBIDDEN,
             "WebSocket origin not allowed".to_string(),
         ));
     }
-    Ok(ws.on_upgrade(move |socket| crate::channels::web::ws::handle_ws_connection(socket, state)))
+    Ok(ws.on_upgrade(move |socket| {
+        crate::channels::web::ws::handle_ws_connection(socket, state, user)
+    }))
 }
 
 #[derive(Deserialize)]
@@ -675,6 +807,7 @@ struct HistoryQuery {
 
 async fn chat_history_handler(
     State(state): State<Arc<GatewayState>>,
+    AuthenticatedUser(user): AuthenticatedUser,
     Query(query): Query<HistoryQuery>,
 ) -> Result<Json<HistoryResponse>, (StatusCode, String)> {
     let session_manager = state.session_manager.as_ref().ok_or((
@@ -682,7 +815,7 @@ async fn chat_history_handler(
         "Session manager not available".to_string(),
     ))?;
 
-    let session = session_manager.get_or_create_session(&state.user_id).await;
+    let session = session_manager.get_or_create_session(&user.user_id).await;
     let sess = session.lock().await;
 
     let limit = query.limit.unwrap_or(50);
@@ -717,9 +850,12 @@ async fn chat_history_handler(
         && let Some(ref store) = state.store
     {
         let owned = store
-            .conversation_belongs_to_user(thread_id, &state.user_id)
+            .conversation_belongs_to_user(thread_id, &user.user_id)
             .await
-            .unwrap_or(false);
+            .map_err(|e| {
+                tracing::error!(thread_id = %thread_id, error = %e, "DB error during thread ownership check");
+                (StatusCode::INTERNAL_SERVER_ERROR, "Database error".to_string())
+            })?;
         if !owned && !sess.threads.contains_key(&thread_id) {
             return Err((StatusCode::NOT_FOUND, "Thread not found".to_string()));
         }
@@ -830,27 +966,29 @@ async fn chat_history_handler(
 
 async fn chat_threads_handler(
     State(state): State<Arc<GatewayState>>,
+    AuthenticatedUser(user): AuthenticatedUser,
 ) -> Result<Json<ThreadListResponse>, (StatusCode, String)> {
     let session_manager = state.session_manager.as_ref().ok_or((
         StatusCode::SERVICE_UNAVAILABLE,
         "Session manager not available".to_string(),
     ))?;
 
-    let session = session_manager.get_or_create_session(&state.user_id).await;
+    let session = session_manager.get_or_create_session(&user.user_id).await;
     let sess = session.lock().await;
 
     // Try DB first for persistent thread list
     if let Some(ref store) = state.store {
         // Auto-create assistant thread if it doesn't exist
         let assistant_id = store
-            .get_or_create_assistant_conversation(&state.user_id, "gateway")
+            .get_or_create_assistant_conversation(&user.user_id, "gateway")
             .await
             .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
-        if let Ok(summaries) = store
-            .list_conversations_with_preview(&state.user_id, "gateway", 50)
+        match store
+            .list_conversations_with_preview(&user.user_id, "gateway", 50)
             .await
         {
+        Ok(summaries) => {
             let mut assistant_thread = None;
             let mut threads = Vec::new();
 
@@ -891,6 +1029,10 @@ async fn chat_threads_handler(
                 active_thread: sess.active_thread,
             }));
         }
+        Err(e) => {
+            tracing::error!(user_id = %user.user_id, error = %e, "DB error listing threads; falling back to in-memory");
+        }
+        }
     }
 
     // Fallback: in-memory only (no assistant thread without DB)
@@ -917,13 +1059,14 @@ async fn chat_threads_handler(
 
 async fn chat_new_thread_handler(
     State(state): State<Arc<GatewayState>>,
+    AuthenticatedUser(user): AuthenticatedUser,
 ) -> Result<Json<ThreadInfo>, (StatusCode, String)> {
     let session_manager = state.session_manager.as_ref().ok_or((
         StatusCode::SERVICE_UNAVAILABLE,
         "Session manager not available".to_string(),
     ))?;
 
-    let session = session_manager.get_or_create_session(&state.user_id).await;
+    let session = session_manager.get_or_create_session(&user.user_id).await;
     let mut sess = session.lock().await;
     let thread = sess.create_thread();
     let thread_id = thread.id;
@@ -940,7 +1083,7 @@ async fn chat_new_thread_handler(
     // Persist the empty conversation row with thread_type metadata
     if let Some(ref store) = state.store {
         let store = Arc::clone(store);
-        let user_id = state.user_id.clone();
+        let user_id = user.user_id.clone();
         tokio::spawn(async move {
             if let Err(e) = store
                 .ensure_conversation(thread_id, "gateway", &user_id, None)
@@ -963,6 +1106,27 @@ async fn chat_new_thread_handler(
 
 // --- Memory handlers ---
 
+/// Resolve the workspace for the authenticated user.
+///
+/// Prefers `workspace_pool` (multi-user mode) when available, falling back
+/// to the single-user `state.workspace`.
+async fn resolve_workspace(
+    state: &GatewayState,
+    user: &UserIdentity,
+) -> Result<Arc<Workspace>, (StatusCode, String)> {
+    if let Some(ref pool) = state.workspace_pool {
+        return Ok(pool.get_or_create(user).await);
+    }
+    state
+        .workspace
+        .as_ref()
+        .cloned()
+        .ok_or((
+            StatusCode::SERVICE_UNAVAILABLE,
+            "Workspace not available".to_string(),
+        ))
+}
+
 #[derive(Deserialize)]
 struct TreeQuery {
     #[allow(dead_code)]
@@ -971,12 +1135,10 @@ struct TreeQuery {
 
 async fn memory_tree_handler(
     State(state): State<Arc<GatewayState>>,
+    AuthenticatedUser(user): AuthenticatedUser,
     Query(_query): Query<TreeQuery>,
 ) -> Result<Json<MemoryTreeResponse>, (StatusCode, String)> {
-    let workspace = state.workspace.as_ref().ok_or((
-        StatusCode::SERVICE_UNAVAILABLE,
-        "Workspace not available".to_string(),
-    ))?;
+    let workspace = resolve_workspace(&state, &user).await?;
 
     // Build tree from list_all (flat list of all paths)
     let all_paths = workspace
@@ -1019,12 +1181,10 @@ struct ListQuery {
 
 async fn memory_list_handler(
     State(state): State<Arc<GatewayState>>,
+    AuthenticatedUser(user): AuthenticatedUser,
     Query(query): Query<ListQuery>,
 ) -> Result<Json<MemoryListResponse>, (StatusCode, String)> {
-    let workspace = state.workspace.as_ref().ok_or((
-        StatusCode::SERVICE_UNAVAILABLE,
-        "Workspace not available".to_string(),
-    ))?;
+    let workspace = resolve_workspace(&state, &user).await?;
 
     let path = query.path.as_deref().unwrap_or("");
     let entries = workspace
@@ -1055,12 +1215,10 @@ struct ReadQuery {
 
 async fn memory_read_handler(
     State(state): State<Arc<GatewayState>>,
+    AuthenticatedUser(user): AuthenticatedUser,
     Query(query): Query<ReadQuery>,
 ) -> Result<Json<MemoryReadResponse>, (StatusCode, String)> {
-    let workspace = state.workspace.as_ref().ok_or((
-        StatusCode::SERVICE_UNAVAILABLE,
-        "Workspace not available".to_string(),
-    ))?;
+    let workspace = resolve_workspace(&state, &user).await?;
 
     let doc = workspace
         .read(&query.path)
@@ -1076,12 +1234,10 @@ async fn memory_read_handler(
 
 async fn memory_write_handler(
     State(state): State<Arc<GatewayState>>,
+    AuthenticatedUser(user): AuthenticatedUser,
     Json(req): Json<MemoryWriteRequest>,
 ) -> Result<Json<MemoryWriteResponse>, (StatusCode, String)> {
-    let workspace = state.workspace.as_ref().ok_or((
-        StatusCode::SERVICE_UNAVAILABLE,
-        "Workspace not available".to_string(),
-    ))?;
+    let workspace = resolve_workspace(&state, &user).await?;
 
     workspace
         .write(&req.path, &req.content)
@@ -1096,12 +1252,10 @@ async fn memory_write_handler(
 
 async fn memory_search_handler(
     State(state): State<Arc<GatewayState>>,
+    AuthenticatedUser(user): AuthenticatedUser,
     Json(req): Json<MemorySearchRequest>,
 ) -> Result<Json<MemorySearchResponse>, (StatusCode, String)> {
-    let workspace = state.workspace.as_ref().ok_or((
-        StatusCode::SERVICE_UNAVAILABLE,
-        "Workspace not available".to_string(),
-    ))?;
+    let workspace = resolve_workspace(&state, &user).await?;
 
     let limit = req.limit.unwrap_or(10);
     let results = workspace
@@ -1376,20 +1530,55 @@ async fn extensions_activate_handler(
 
 /// Redirect `/projects/{id}` to `/projects/{id}/` so relative paths in
 /// the served HTML resolve within the project namespace.
-async fn project_redirect_handler(Path(project_id): Path<String>) -> impl IntoResponse {
-    axum::response::Redirect::permanent(&format!("/projects/{project_id}/"))
+async fn project_redirect_handler(
+    State(state): State<Arc<GatewayState>>,
+    super::auth::AuthenticatedUser(user): super::auth::AuthenticatedUser,
+    Path(project_id): Path<String>,
+) -> impl IntoResponse {
+    if !verify_project_ownership(&state, &project_id, &user.user_id).await {
+        return (StatusCode::NOT_FOUND, "Not found").into_response();
+    }
+    axum::response::Redirect::permanent(&format!("/projects/{project_id}/")).into_response()
 }
 
 /// Serve `index.html` when hitting `/projects/{project_id}/`.
-async fn project_index_handler(Path(project_id): Path<String>) -> impl IntoResponse {
+async fn project_index_handler(
+    State(state): State<Arc<GatewayState>>,
+    super::auth::AuthenticatedUser(user): super::auth::AuthenticatedUser,
+    Path(project_id): Path<String>,
+) -> impl IntoResponse {
+    if !verify_project_ownership(&state, &project_id, &user.user_id).await {
+        return (StatusCode::NOT_FOUND, "Not found").into_response();
+    }
     serve_project_file(&project_id, "index.html").await
 }
 
 /// Serve any file under `/projects/{project_id}/{path}`.
 async fn project_file_handler(
+    State(state): State<Arc<GatewayState>>,
+    super::auth::AuthenticatedUser(user): super::auth::AuthenticatedUser,
     Path((project_id, path)): Path<(String, String)>,
 ) -> impl IntoResponse {
+    if !verify_project_ownership(&state, &project_id, &user.user_id).await {
+        return (StatusCode::NOT_FOUND, "Not found").into_response();
+    }
     serve_project_file(&project_id, &path).await
+}
+
+/// Check that a project directory belongs to a job owned by the given user.
+/// Returns false if the store is unavailable or the project is not found.
+async fn verify_project_ownership(state: &GatewayState, project_id: &str, user_id: &str) -> bool {
+    let Some(ref store) = state.store else {
+        return false;
+    };
+    // The project_id is a sandbox job UUID used as the directory name.
+    let Ok(job_id) = project_id.parse::<uuid::Uuid>() else {
+        return false;
+    };
+    match store.get_sandbox_job(job_id).await {
+        Ok(Some(job)) => job.user_id == user_id,
+        _ => false,
+    }
 }
 
 /// Shared logic: resolve the file inside `~/.ironclaw/projects/{project_id}/`,
@@ -1638,6 +1827,7 @@ async fn pairing_approve_handler(
 
 async fn routines_list_handler(
     State(state): State<Arc<GatewayState>>,
+    AuthenticatedUser(user): AuthenticatedUser,
 ) -> Result<Json<RoutineListResponse>, (StatusCode, String)> {
     let store = state.store.as_ref().ok_or((
         StatusCode::SERVICE_UNAVAILABLE,
@@ -1645,7 +1835,7 @@ async fn routines_list_handler(
     ))?;
 
     let routines = store
-        .list_all_routines()
+        .list_routines(&user.user_id)
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
@@ -1656,6 +1846,7 @@ async fn routines_list_handler(
 
 async fn routines_summary_handler(
     State(state): State<Arc<GatewayState>>,
+    AuthenticatedUser(user): AuthenticatedUser,
 ) -> Result<Json<RoutineSummaryResponse>, (StatusCode, String)> {
     let store = state.store.as_ref().ok_or((
         StatusCode::SERVICE_UNAVAILABLE,
@@ -1663,7 +1854,7 @@ async fn routines_summary_handler(
     ))?;
 
     let routines = store
-        .list_all_routines()
+        .list_routines(&user.user_id)
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
@@ -1699,6 +1890,7 @@ async fn routines_summary_handler(
 
 async fn routines_detail_handler(
     State(state): State<Arc<GatewayState>>,
+    AuthenticatedUser(user): AuthenticatedUser,
     Path(id): Path<String>,
 ) -> Result<Json<RoutineDetailResponse>, (StatusCode, String)> {
     let store = state.store.as_ref().ok_or((
@@ -1714,6 +1906,10 @@ async fn routines_detail_handler(
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
         .ok_or((StatusCode::NOT_FOUND, "Routine not found".to_string()))?;
+
+    if routine.user_id != user.user_id {
+        return Err((StatusCode::NOT_FOUND, "Routine not found".to_string()));
+    }
 
     let runs = store
         .list_routine_runs(routine_id, 20)
@@ -1753,6 +1949,7 @@ async fn routines_detail_handler(
 
 async fn routines_trigger_handler(
     State(state): State<Arc<GatewayState>>,
+    AuthenticatedUser(user): AuthenticatedUser,
     Path(id): Path<String>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
     let store = state.store.as_ref().ok_or((
@@ -1769,6 +1966,10 @@ async fn routines_trigger_handler(
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
         .ok_or((StatusCode::NOT_FOUND, "Routine not found".to_string()))?;
 
+    if routine.user_id != user.user_id {
+        return Err((StatusCode::NOT_FOUND, "Routine not found".to_string()));
+    }
+
     // Send the routine prompt through the message pipeline as a manual trigger.
     let prompt = match &routine.action {
         crate::agent::routine::RoutineAction::Lightweight { prompt, .. } => prompt.clone(),
@@ -1778,7 +1979,7 @@ async fn routines_trigger_handler(
     };
 
     let content = format!("[routine:{}] {}", routine.name, prompt);
-    let msg = IncomingMessage::new("gateway", &state.user_id, content);
+    let msg = IncomingMessage::new("gateway", &user.user_id, content);
 
     let tx_guard = state.msg_tx.read().await;
     let tx = tx_guard.as_ref().ok_or((
@@ -1806,6 +2007,7 @@ struct ToggleRequest {
 
 async fn routines_toggle_handler(
     State(state): State<Arc<GatewayState>>,
+    AuthenticatedUser(user): AuthenticatedUser,
     Path(id): Path<String>,
     body: Option<Json<ToggleRequest>>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
@@ -1822,6 +2024,10 @@ async fn routines_toggle_handler(
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
         .ok_or((StatusCode::NOT_FOUND, "Routine not found".to_string()))?;
+
+    if routine.user_id != user.user_id {
+        return Err((StatusCode::NOT_FOUND, "Routine not found".to_string()));
+    }
 
     // If a specific value was provided, use it; otherwise toggle.
     routine.enabled = match body {
@@ -1842,6 +2048,7 @@ async fn routines_toggle_handler(
 
 async fn routines_delete_handler(
     State(state): State<Arc<GatewayState>>,
+    AuthenticatedUser(user): AuthenticatedUser,
     Path(id): Path<String>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
     let store = state.store.as_ref().ok_or((
@@ -1851,6 +2058,17 @@ async fn routines_delete_handler(
 
     let routine_id = Uuid::parse_str(&id)
         .map_err(|_| (StatusCode::BAD_REQUEST, "Invalid routine ID".to_string()))?;
+
+    // Verify ownership before deleting.
+    let routine = store
+        .get_routine(routine_id)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+        .ok_or((StatusCode::NOT_FOUND, "Routine not found".to_string()))?;
+
+    if routine.user_id != user.user_id {
+        return Err((StatusCode::NOT_FOUND, "Routine not found".to_string()));
+    }
 
     let deleted = store
         .delete_routine(routine_id)
@@ -1869,6 +2087,7 @@ async fn routines_delete_handler(
 
 async fn routines_runs_handler(
     State(state): State<Arc<GatewayState>>,
+    AuthenticatedUser(user): AuthenticatedUser,
     Path(id): Path<String>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
     let store = state.store.as_ref().ok_or((
@@ -1878,6 +2097,17 @@ async fn routines_runs_handler(
 
     let routine_id = Uuid::parse_str(&id)
         .map_err(|_| (StatusCode::BAD_REQUEST, "Invalid routine ID".to_string()))?;
+
+    // Verify ownership before listing runs.
+    let routine = store
+        .get_routine(routine_id)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+        .ok_or((StatusCode::NOT_FOUND, "Routine not found".to_string()))?;
+
+    if routine.user_id != user.user_id {
+        return Err((StatusCode::NOT_FOUND, "Routine not found".to_string()));
+    }
 
     let runs = store
         .list_routine_runs(routine_id, 50)
@@ -1955,12 +2185,13 @@ fn routine_to_info(r: &crate::agent::routine::Routine) -> RoutineInfo {
 
 async fn settings_list_handler(
     State(state): State<Arc<GatewayState>>,
+    AuthenticatedUser(user): AuthenticatedUser,
 ) -> Result<Json<SettingsListResponse>, StatusCode> {
     let store = state
         .store
         .as_ref()
         .ok_or(StatusCode::SERVICE_UNAVAILABLE)?;
-    let rows = store.list_settings(&state.user_id).await.map_err(|e| {
+    let rows = store.list_settings(&user.user_id).await.map_err(|e| {
         tracing::error!("Failed to list settings: {}", e);
         StatusCode::INTERNAL_SERVER_ERROR
     })?;
@@ -1979,6 +2210,7 @@ async fn settings_list_handler(
 
 async fn settings_get_handler(
     State(state): State<Arc<GatewayState>>,
+    AuthenticatedUser(user): AuthenticatedUser,
     Path(key): Path<String>,
 ) -> Result<Json<SettingResponse>, StatusCode> {
     let store = state
@@ -1986,7 +2218,7 @@ async fn settings_get_handler(
         .as_ref()
         .ok_or(StatusCode::SERVICE_UNAVAILABLE)?;
     let row = store
-        .get_setting_full(&state.user_id, &key)
+        .get_setting_full(&user.user_id, &key)
         .await
         .map_err(|e| {
             tracing::error!("Failed to get setting '{}': {}", key, e);
@@ -2003,6 +2235,7 @@ async fn settings_get_handler(
 
 async fn settings_set_handler(
     State(state): State<Arc<GatewayState>>,
+    AuthenticatedUser(user): AuthenticatedUser,
     Path(key): Path<String>,
     Json(body): Json<SettingWriteRequest>,
 ) -> Result<StatusCode, StatusCode> {
@@ -2011,7 +2244,7 @@ async fn settings_set_handler(
         .as_ref()
         .ok_or(StatusCode::SERVICE_UNAVAILABLE)?;
     store
-        .set_setting(&state.user_id, &key, &body.value)
+        .set_setting(&user.user_id, &key, &body.value)
         .await
         .map_err(|e| {
             tracing::error!("Failed to set setting '{}': {}", key, e);
@@ -2023,6 +2256,7 @@ async fn settings_set_handler(
 
 async fn settings_delete_handler(
     State(state): State<Arc<GatewayState>>,
+    AuthenticatedUser(user): AuthenticatedUser,
     Path(key): Path<String>,
 ) -> Result<StatusCode, StatusCode> {
     let store = state
@@ -2030,7 +2264,7 @@ async fn settings_delete_handler(
         .as_ref()
         .ok_or(StatusCode::SERVICE_UNAVAILABLE)?;
     store
-        .delete_setting(&state.user_id, &key)
+        .delete_setting(&user.user_id, &key)
         .await
         .map_err(|e| {
             tracing::error!("Failed to delete setting '{}': {}", key, e);
@@ -2042,12 +2276,13 @@ async fn settings_delete_handler(
 
 async fn settings_export_handler(
     State(state): State<Arc<GatewayState>>,
+    AuthenticatedUser(user): AuthenticatedUser,
 ) -> Result<Json<SettingsExportResponse>, StatusCode> {
     let store = state
         .store
         .as_ref()
         .ok_or(StatusCode::SERVICE_UNAVAILABLE)?;
-    let settings = store.get_all_settings(&state.user_id).await.map_err(|e| {
+    let settings = store.get_all_settings(&user.user_id).await.map_err(|e| {
         tracing::error!("Failed to export settings: {}", e);
         StatusCode::INTERNAL_SERVER_ERROR
     })?;
@@ -2057,6 +2292,7 @@ async fn settings_export_handler(
 
 async fn settings_import_handler(
     State(state): State<Arc<GatewayState>>,
+    AuthenticatedUser(user): AuthenticatedUser,
     Json(body): Json<SettingsImportRequest>,
 ) -> Result<StatusCode, StatusCode> {
     let store = state
@@ -2064,7 +2300,7 @@ async fn settings_import_handler(
         .as_ref()
         .ok_or(StatusCode::SERVICE_UNAVAILABLE)?;
     store
-        .set_all_settings(&state.user_id, &body.settings)
+        .set_all_settings(&user.user_id, &body.settings)
         .await
         .map_err(|e| {
             tracing::error!("Failed to import settings: {}", e);
@@ -2217,5 +2453,37 @@ mod tests {
     fn test_build_turns_from_db_messages_empty() {
         let turns = build_turns_from_db_messages(&[]);
         assert!(turns.is_empty());
+    }
+
+    #[test]
+    fn test_is_local_origin_localhost() {
+        assert!(is_local_origin("http://localhost:3001"));
+        assert!(is_local_origin("http://localhost"));
+        assert!(is_local_origin("https://localhost:3001"));
+    }
+
+    #[test]
+    fn test_is_local_origin_ipv4() {
+        assert!(is_local_origin("http://127.0.0.1:3001"));
+        assert!(is_local_origin("http://127.0.0.1"));
+    }
+
+    #[test]
+    fn test_is_local_origin_ipv6() {
+        assert!(is_local_origin("http://[::1]:3001"));
+        assert!(is_local_origin("http://[::1]"));
+    }
+
+    #[test]
+    fn test_is_local_origin_rejects_remote() {
+        assert!(!is_local_origin("http://evil.com"));
+        assert!(!is_local_origin("http://localhost.evil.com"));
+        assert!(!is_local_origin("http://192.168.1.1:3001"));
+    }
+
+    #[test]
+    fn test_is_local_origin_rejects_garbage() {
+        assert!(!is_local_origin("not-a-url"));
+        assert!(!is_local_origin(""));
     }
 }
