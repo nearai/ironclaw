@@ -23,7 +23,8 @@
 - **Persistent memory**: Workspace with hybrid search (FTS + vector via RRF)
 - **Prompt injection defense**: Sanitizer, validator, policy rules, leak detection, shell env scrubbing
 - **Multi-provider LLM**: NEAR AI, OpenAI, Anthropic, Ollama, OpenAI-compatible, Tinfoil private inference
-- **Setup wizard**: 7-step interactive onboarding for first-run configuration
+- **Setup wizard**: 8-step interactive onboarding for first-run configuration
+- **Psychographic profiling**: Conversational first-interaction profiling with 9-dimension analysis and confidence-gated personalization
 - **Heartbeat system**: Proactive periodic execution with checklist
 
 ## Build & Test
@@ -209,9 +210,13 @@ src/
 │   ├── store.rs        # Secret storage
 │   └── types.rs        # Credential types
 │
+├── profile.rs          # Psychographic profile types, 9-dimension analysis framework
+│
 ├── setup/              # Onboarding wizard (spec: src/setup/README.md)
 │   ├── mod.rs          # Entry point, check_onboard_needed()
-│   ├── wizard.rs       # 7-step interactive wizard
+│   ├── wizard.rs       # 8-step interactive wizard
+│   ├── onboarding_chat.rs # Conversational "Getting to Know You" engine
+│   ├── profile_evolution.rs # Weekly profile update prompts
 │   ├── channels.rs     # Channel setup helpers
 │   └── prompts.rs      # Terminal prompts (select, confirm, secret)
 │

@@ -27,6 +27,10 @@ pub mod paths {
     pub const DAILY_DIR: &str = "daily/";
     /// Context directory (for identity-related docs).
     pub const CONTEXT_DIR: &str = "context/";
+    /// User psychographic profile (JSON).
+    pub const PROFILE: &str = "context/profile.json";
+    /// Assistant behavioral directives (derived from profile).
+    pub const ASSISTANT_DIRECTIVES: &str = "context/assistant-directives.md";
 }
 
 /// A memory document stored in the database.

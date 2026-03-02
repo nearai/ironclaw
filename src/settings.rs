@@ -79,6 +79,21 @@ pub struct Settings {
     #[serde(default)]
     pub heartbeat: HeartbeatSettings,
 
+    // === Conversational Profile Onboarding ===
+    /// Reserved flag for whether the conversational profile onboarding has
+    /// been completed.
+    ///
+    /// Intended semantics (not yet wired into the agent loop): this will be
+    /// set during the user's first interaction with the running assistant
+    /// (not during the setup wizard), after the agent builds a psychographic
+    /// profile via `memory_write`.
+    ///
+    // TODO: Wire into agent loop — currently the system uses `is_populated()`
+    // (content check) to gate First Contact. This flag will eventually
+    // distinguish "never onboarded" from "onboarded but profile was reset".
+    #[serde(default, alias = "personal_onboarding_completed")]
+    pub profile_onboarding_completed: bool,
+
     // === Advanced Settings (not asked during setup, editable via CLI) ===
     /// Agent behavior configuration.
     #[serde(default)]
