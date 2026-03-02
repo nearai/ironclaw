@@ -68,7 +68,8 @@ pub fn model_cost(model_id: &str) -> Option<(Decimal, Decimal)> {
         "claude-3-haiku-20240307" => Some((dec!(0.00000025), dec!(0.00000125))),
 
         // Ollama / local models -- free
-        _ if is_local_model(id) => Some((Decimal::ZERO, Decimal::ZERO)),
+        // OpenRouter free tier models (e.g., "openrouter/free", "stepfun/step-3.5-flash:free")
+        _ if is_local_model(id) || is_free_model(id) => Some((Decimal::ZERO, Decimal::ZERO)),
 
         _ => None,
     }
@@ -96,6 +97,11 @@ fn is_local_model(model_id: &str) -> bool {
         || lower.starts_with("yi")
         || lower.contains(":latest")
         || lower.contains(":instruct")
+}
+
+/// Check if model is a free tier model (e.g., OpenRouter's :free suffix)
+fn is_free_model(model_id: &str) -> bool {
+    model_id.to_lowercase().ends_with(":free")
 }
 
 #[cfg(test)]
@@ -146,5 +152,29 @@ mod tests {
     fn test_provider_prefix_stripped() {
         // "openai/gpt-4o" should resolve to same as "gpt-4o"
         assert_eq!(model_cost("openai/gpt-4o"), model_cost("gpt-4o"));
+    }
+
+    #[test]
+    fn test_openrouter_free_model() {
+        // OpenRouter free tier models should return zero cost
+        let (input, output) = model_cost("openrouter/free").unwrap();
+        assert_eq!(input, Decimal::ZERO);
+        assert_eq!(output, Decimal::ZERO);
+    }
+
+    #[test]
+    fn test_openrouter_free_suffix() {
+        // Models with :free suffix should return zero cost
+        let (input, output) = model_cost("stepfun/step-3.5-flash:free").unwrap();
+        assert_eq!(input, Decimal::ZERO);
+        assert_eq!(output, Decimal::ZERO);
+    }
+
+    #[test]
+    fn test_openrouter_free_case_insensitive() {
+        // :FREE suffix should also work (case insensitive)
+        let (input, output) = model_cost("some/model:FREE").unwrap();
+        assert_eq!(input, Decimal::ZERO);
+        assert_eq!(output, Decimal::ZERO);
     }
 }
