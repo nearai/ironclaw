@@ -19,3 +19,8 @@ bench-results/
 # WASM build artifacts (loaded from disk, not bundled)
 *.wasm
 
+# Local Factory configuration and local planning artifacts
+.factory/
+droidz/
+docs/specs/
+
