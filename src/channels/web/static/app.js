@@ -193,7 +193,12 @@ function connectSSE() {
     const data = JSON.parse(e.data);
     if (!isCurrentThread(data.thread_id)) return;
     finalizeActivityGroup();
-    appendToLastAssistant(data.content);
+    const chunkType = data.chunk_type || 'content';
+    if (chunkType === 'reasoning') {
+      appendReasoningChunk(data.content);
+    } else {
+      appendToLastAssistant(data.content);
+    }
   });
 
   eventSource.addEventListener('status', (e) => {
@@ -469,6 +474,27 @@ function appendToLastAssistant(chunk) {
   } else {
     addMessage('assistant', chunk);
   }
+}
+
+// Append a reasoning/chain-of-thought chunk inside a collapsible <details> block
+// adjacent to the last assistant message. Creates the block on first call.
+function appendReasoningChunk(chunk) {
+  const container = document.getElementById('chat-messages');
+  let details = container.querySelector('.reasoning-block:last-of-type');
+  if (!details) {
+    details = document.createElement('details');
+    details.className = 'reasoning-block';
+    const summary = document.createElement('summary');
+    summary.textContent = 'Reasoning';
+    details.appendChild(summary);
+    const pre = document.createElement('pre');
+    pre.className = 'reasoning-content';
+    details.appendChild(pre);
+    container.appendChild(details);
+  }
+  const pre = details.querySelector('.reasoning-content');
+  pre.textContent += chunk;
+  container.scrollTop = container.scrollHeight;
 }
 
 // --- Inline Tool Activity Cards ---

@@ -101,6 +101,20 @@ pub struct ApprovalRequest {
 
 // --- SSE Event Types ---
 
+/// Classifies a streaming text chunk so the UI can render each kind distinctly.
+///
+/// - `Content`  — regular assistant text (rendered inline in the chat bubble).
+/// - `Reasoning` — chain-of-thought / thinking tokens (rendered in a collapsible section).
+/// - `ToolCall`  — inline tool invocation notification emitted before execution.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ChunkType {
+    #[default]
+    Content,
+    Reasoning,
+    ToolCall,
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "type")]
 pub enum SseEvent {
@@ -135,6 +149,11 @@ pub enum SseEvent {
     #[serde(rename = "stream_chunk")]
     StreamChunk {
         content: String,
+        /// Classifies the chunk so the UI can render content, reasoning, and
+        /// tool-call notifications differently. Defaults to `Content` for
+        /// backward compatibility with existing producers.
+        #[serde(default)]
+        chunk_type: ChunkType,
         #[serde(skip_serializing_if = "Option::is_none")]
         thread_id: Option<String>,
     },
