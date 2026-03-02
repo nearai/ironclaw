@@ -23,6 +23,36 @@ const SENSITIVE_EXACT: &[&str] = &[
     "apisecret",
 ];
 
+const SENSITIVE_PARTS: &[&str] = &[
+    "password",
+    "passwd",
+    "secret",
+    "credential",
+    "authorization",
+    "cookie",
+    "apikey",
+    "apisecret",
+];
+const TOKEN_PARTS: &[&str] = &["token", "jwt"];
+const KEY_PARTS: &[&str] = &["key"];
+const CONTEXT_PARTS: &[&str] = &[
+    "auth",
+    "oauth",
+    "authorization",
+    "api",
+    "access",
+    "refresh",
+    "session",
+    "bearer",
+    "private",
+    "client",
+    "id",
+    "app",
+    "user",
+    "application",
+    "account",
+];
+
 fn split_camel_case_key_parts(key: &str) -> Vec<String> {
     if key.is_empty() {
         return Vec::new();
@@ -62,23 +92,41 @@ fn tokenize_key_parts(key: &str) -> Vec<String> {
             continue;
         }
 
-        if segment
-            .chars()
-            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit())
-        {
-            parts.push(segment.to_string());
-        } else {
-            parts.extend(split_camel_case_key_parts(segment));
-        }
+        parts.extend(split_camel_case_key_parts(segment));
     }
 
     parts.into_iter().map(|p| p.to_ascii_lowercase()).collect()
 }
 
-fn has_any(parts: &[String], candidates: &[&str]) -> bool {
+fn has_exact(parts: &[String], candidates: &[&str]) -> bool {
     parts
         .iter()
         .any(|part| candidates.iter().any(|candidate| part == candidate))
+}
+
+fn has_candidate_or_numbered_variant(parts: &[String], candidates: &[&str]) -> bool {
+    parts.iter().any(|part| {
+        candidates.iter().any(|candidate| {
+            if part == candidate {
+                return true;
+            }
+            let Some(suffix) = part.strip_prefix(candidate) else {
+                return false;
+            };
+            !suffix.is_empty() && suffix.chars().all(|c| c.is_ascii_digit())
+        })
+    })
+}
+
+fn has_contextual_suffix(parts: &[String], candidates: &[&str]) -> bool {
+    parts.iter().any(|part| {
+        candidates.iter().any(|candidate| {
+            let Some(prefix) = part.strip_suffix(candidate) else {
+                return false;
+            };
+            !prefix.is_empty() && CONTEXT_PARTS.contains(&prefix)
+        })
+    })
 }
 
 fn is_sensitive_key(key: &str) -> bool {
@@ -92,33 +140,22 @@ fn is_sensitive_key(key: &str) -> bool {
         return false;
     }
 
-    if has_any(&parts, &["password", "passwd", "secret", "credential"]) {
+    if has_candidate_or_numbered_variant(&parts, SENSITIVE_PARTS) {
         return true;
     }
 
-    if has_any(&parts, &["authorization", "cookie"]) {
+    let has_token = has_candidate_or_numbered_variant(&parts, TOKEN_PARTS);
+    let has_key = has_candidate_or_numbered_variant(&parts, KEY_PARTS);
+
+    if has_token && has_key {
         return true;
     }
 
-    let has_token = has_any(&parts, &["token", "jwt"]);
-    let has_key = has_any(&parts, &["key"]);
-    let has_context = has_any(
-        &parts,
-        &[
-            "auth",
-            "oauth",
-            "authorization",
-            "api",
-            "access",
-            "refresh",
-            "session",
-            "bearer",
-            "private",
-            "client",
-            "id",
-        ],
-    );
+    if has_contextual_suffix(&parts, TOKEN_PARTS) || has_contextual_suffix(&parts, KEY_PARTS) {
+        return true;
+    }
 
+    let has_context = has_exact(&parts, CONTEXT_PARTS);
     has_context && (has_token || has_key)
 }
 
@@ -200,5 +237,15 @@ mod tests {
         assert!(is_sensitive_key("oauth_token"));
         assert!(is_sensitive_key("accessToken"));
         assert!(is_sensitive_key("apiKey"));
+        assert!(is_sensitive_key("token_key"));
+        assert!(is_sensitive_key("appTokenKey"));
+        assert!(is_sensitive_key("userJwt"));
+    }
+
+    #[test]
+    fn redacts_lowercase_digit_suffix_segments() {
+        assert!(is_sensitive_key("password123"));
+        assert!(is_sensitive_key("secret99"));
+        assert!(is_sensitive_key("accounttoken2"));
     }
 }
