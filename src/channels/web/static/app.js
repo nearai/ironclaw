@@ -359,6 +359,9 @@ function selectSlashItem(cmd) {
 function updateSlashHighlight() {
   const items = document.querySelectorAll('#slash-autocomplete .slash-ac-item');
   items.forEach((el, i) => el.classList.toggle('selected', i === _slashSelected));
+  if (_slashSelected >= 0 && items[_slashSelected]) {
+    items[_slashSelected].scrollIntoView({ block: 'nearest' });
+  }
 }
 
 function filterSlashCommands(value) {
@@ -1196,7 +1199,7 @@ chatInput.addEventListener('keydown', (e) => {
       updateSlashHighlight();
       return;
     }
-    if (e.key === 'Tab' || (e.key === 'Enter' && _slashSelected >= 0)) {
+    if (e.key === 'Tab' || e.key === 'Enter') {
       e.preventDefault();
       const pick = _slashSelected >= 0 ? _slashMatches[_slashSelected] : _slashMatches[0];
       if (pick) selectSlashItem(pick.cmd);
