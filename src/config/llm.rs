@@ -26,6 +26,8 @@ pub enum LlmBackend {
     OpenAiCompatible,
     /// Tinfoil private inference
     Tinfoil,
+    /// Venice.ai uncensored inference
+    VeniceAi,
 }
 
 impl std::str::FromStr for LlmBackend {
@@ -39,6 +41,7 @@ impl std::str::FromStr for LlmBackend {
             "ollama" => Ok(Self::Ollama),
             "openai_compatible" | "openai-compatible" | "compatible" => Ok(Self::OpenAiCompatible),
             "tinfoil" => Ok(Self::Tinfoil),
+            "venice" | "venice_ai" | "veniceai" => Ok(Self::VeniceAi),
             _ => Err(format!(
                 "invalid LLM backend '{}', expected one of: nearai, openai, anthropic, ollama, openai_compatible, tinfoil",
                 s
@@ -56,6 +59,7 @@ impl std::fmt::Display for LlmBackend {
             Self::Ollama => write!(f, "ollama"),
             Self::OpenAiCompatible => write!(f, "openai_compatible"),
             Self::Tinfoil => write!(f, "tinfoil"),
+            Self::VeniceAi => write!(f, "veniceai"),
         }
     }
 }
@@ -73,6 +77,7 @@ impl LlmBackend {
             Self::Ollama => "OLLAMA_MODEL",
             Self::OpenAiCompatible => "LLM_MODEL",
             Self::Tinfoil => "TINFOIL_MODEL",
+            Self::VeniceAi => "VENICE_MODEL",
         }
     }
 }
@@ -120,6 +125,19 @@ pub struct TinfoilConfig {
     pub model: String,
 }
 
+/// Configuration for Venice.ai uncensored inference.
+#[derive(Debug, Clone)]
+pub struct VeniceAiConfig {
+    pub api_key: SecretString,
+    pub model: String,
+    /// Optional base URL override (default: https://api.venice.ai/api/v1)
+    pub base_url: Option<String>,
+    /// Web search mode: "on", "off", or "auto" (default: "off")
+    pub web_search: Option<String>,
+    /// Enable web scraping for URLs in prompts (default: false)
+    pub web_scraping: bool,
+}
+
 /// LLM provider configuration.
 ///
 /// NEAR AI remains the default backend. Users can switch to other providers
@@ -140,6 +158,8 @@ pub struct LlmConfig {
     pub openai_compatible: Option<OpenAiCompatibleConfig>,
     /// Tinfoil config (populated when backend=tinfoil)
     pub tinfoil: Option<TinfoilConfig>,
+    /// Venice.ai config (populated when backend=veniceai)
+    pub veniceai: Option<VeniceAiConfig>,
 }
 
 /// NEAR AI configuration.
@@ -350,6 +370,29 @@ impl LlmConfig {
             None
         };
 
+        let veniceai = if backend == LlmBackend::VeniceAi {
+            let api_key = optional_env("VENICE_API_KEY")?
+                .map(SecretString::from)
+                .ok_or_else(|| ConfigError::MissingRequired {
+                    key: "VENICE_API_KEY".to_string(),
+                    hint: "Set VENICE_API_KEY when LLM_BACKEND=veniceai".to_string(),
+                })?;
+            let model =
+                optional_env("VENICE_MODEL")?.unwrap_or_else(|| "llama-3.3-70b".to_string());
+            let base_url = optional_env("VENICE_BASE_URL")?;
+            let web_search = optional_env("VENICE_WEB_SEARCH")?;
+            let web_scraping = parse_optional_env("VENICE_WEB_SCRAPING", false)?;
+            Some(VeniceAiConfig {
+                api_key,
+                model,
+                base_url,
+                web_search,
+                web_scraping,
+            })
+        } else {
+            None
+        };
+
         Ok(Self {
             backend,
             nearai,
@@ -358,6 +401,7 @@ impl LlmConfig {
             ollama,
             openai_compatible,
             tinfoil,
+            veniceai,
         })
     }
 }

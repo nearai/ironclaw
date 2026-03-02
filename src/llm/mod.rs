@@ -60,6 +60,7 @@ pub fn create_llm_provider(
         LlmBackend::Ollama => create_ollama_provider(config),
         LlmBackend::OpenAiCompatible => create_openai_compatible_provider(config),
         LlmBackend::Tinfoil => create_tinfoil_provider(config),
+        LlmBackend::VeniceAi => create_veniceai_provider(config),
     }
 }
 
@@ -208,6 +209,42 @@ fn create_tinfoil_provider(config: &LlmConfig) -> Result<Arc<dyn LlmProvider>, L
     let model = client.completion_model(&tf.model);
     tracing::info!("Using Tinfoil private inference (model: {})", tf.model);
     Ok(Arc::new(RigAdapter::new(model, &tf.model)))
+}
+
+const VENICEAI_BASE_URL: &str = "https://api.venice.ai/api/v1";
+
+fn create_veniceai_provider(config: &LlmConfig) -> Result<Arc<dyn LlmProvider>, LlmError> {
+    let venice = config
+        .veniceai
+        .as_ref()
+        .ok_or_else(|| LlmError::AuthFailed {
+            provider: "veniceai".to_string(),
+        })?;
+
+    use rig::providers::openai;
+
+    let base_url = venice
+        .base_url
+        .as_deref()
+        .unwrap_or(VENICEAI_BASE_URL);
+
+    let client: openai::CompletionsClient = openai::Client::builder()
+        .base_url(base_url)
+        .api_key(venice.api_key.expose_secret())
+        .build()
+        .map_err(|e| LlmError::RequestFailed {
+            provider: "veniceai".to_string(),
+            reason: format!("Failed to create Venice.ai client: {}", e),
+        })?
+        .completions_api();
+
+    let model = client.completion_model(&venice.model);
+    tracing::info!(
+        "Using Venice.ai (model: {}, base_url: {})",
+        venice.model,
+        base_url
+    );
+    Ok(Arc::new(RigAdapter::new(model, &venice.model)))
 }
 
 fn create_openai_compatible_provider(config: &LlmConfig) -> Result<Arc<dyn LlmProvider>, LlmError> {
@@ -472,6 +509,7 @@ mod tests {
             ollama: None,
             openai_compatible: None,
             tinfoil: None,
+            veniceai: None,
         }
     }
 
