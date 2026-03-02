@@ -1,7 +1,7 @@
 //! Per-model cost lookup table for multi-provider LLM support.
 //!
 //! Returns (input_cost_per_token, output_cost_per_token) as Decimal pairs.
-//! Ollama and other local models return zero cost.
+//! Ollama/local models and OpenRouter free-tier models return zero cost.
 
 use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
@@ -70,6 +70,9 @@ pub fn model_cost(model_id: &str) -> Option<(Decimal, Decimal)> {
         // Ollama / local models -- free
         _ if is_local_model(id) => Some((Decimal::ZERO, Decimal::ZERO)),
 
+        // OpenRouter free-tier: ":free" suffix or the "free" router
+        _ if is_free_model(id) => Some((Decimal::ZERO, Decimal::ZERO)),
+
         _ => None,
     }
 }
@@ -96,6 +99,12 @@ fn is_local_model(model_id: &str) -> bool {
         || lower.starts_with("yi")
         || lower.contains(":latest")
         || lower.contains(":instruct")
+}
+
+/// Detect free-tier models (OpenRouter `:free` suffix convention).
+fn is_free_model(model_id: &str) -> bool {
+    let lower = model_id.to_lowercase();
+    lower == "free" || lower.ends_with(":free")
 }
 
 #[cfg(test)]
@@ -146,5 +155,19 @@ mod tests {
     fn test_provider_prefix_stripped() {
         // "openai/gpt-4o" should resolve to same as "gpt-4o"
         assert_eq!(model_cost("openai/gpt-4o"), model_cost("gpt-4o"));
+    }
+
+    #[test]
+    fn test_openrouter_free_router_zero_cost() {
+        let (input, output) = model_cost("openrouter/free").unwrap();
+        assert_eq!(input, Decimal::ZERO);
+        assert_eq!(output, Decimal::ZERO);
+    }
+
+    #[test]
+    fn test_openrouter_free_suffix_zero_cost() {
+        let (input, output) = model_cost("stepfun/step-3.5-flash:free").unwrap();
+        assert_eq!(input, Decimal::ZERO);
+        assert_eq!(output, Decimal::ZERO);
     }
 }
