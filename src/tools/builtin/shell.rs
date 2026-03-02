@@ -1663,9 +1663,12 @@ mod tests {
 
     #[test]
     fn test_approval_with_mixed_case_destructive() {
-        // Case-insensitive destructive command detection
-        assert!(requires_explicit_approval("RM -RF /tmp"));
-        assert!(requires_explicit_approval("Git Push --Force origin main"));
-        assert!(requires_explicit_approval("DROP table users;"));
+        // Case-insensitive destructive command detection → must be High risk
+        assert_eq!(classify_command_risk("RM -RF /tmp"), RiskLevel::High);
+        assert_eq!(
+            classify_command_risk("Git Push --Force origin main"),
+            RiskLevel::High
+        );
+        assert_eq!(classify_command_risk("DROP table users;"), RiskLevel::High);
     }
 }
