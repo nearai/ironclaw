@@ -1143,7 +1143,7 @@ impl Tool for CollectionAddTool {
             .db
             .insert_record(&ctx.user_id, &self.schema.collection, params)
             .await
-            .map_err(|e| ToolError::ExecutionFailed(format!("Insert failed: {e}")))?;
+            .map_err(|e| ToolError::ExecutionFailed(format!("Failed to insert record: {e}")))?;
 
         Ok(ToolOutput::success(
             json!({
@@ -1251,7 +1251,7 @@ impl Tool for CollectionUpdateTool {
                 serde_json::Value::Object(updates),
             )
             .await
-            .map_err(|e| ToolError::ExecutionFailed(format!("Update failed: {e}")))?;
+            .map_err(|e| ToolError::ExecutionFailed(format!("Failed to update record: {e}")))?;
 
         Ok(ToolOutput::success(
             json!({
@@ -1328,7 +1328,7 @@ impl Tool for CollectionDeleteTool {
         self.db
             .delete_record(&ctx.user_id, record_id)
             .await
-            .map_err(|e| ToolError::ExecutionFailed(format!("Delete failed: {e}")))?;
+            .map_err(|e| ToolError::ExecutionFailed(format!("Failed to delete record: {e}")))?;
 
         Ok(ToolOutput::success(
             json!({
@@ -1488,7 +1488,7 @@ impl Tool for CollectionQueryTool {
                 limit,
             )
             .await
-            .map_err(|e| ToolError::ExecutionFailed(format!("Query failed: {e}")))?;
+            .map_err(|e| ToolError::ExecutionFailed(format!("Failed to query records: {e}")))?;
 
         let results: Vec<serde_json::Value> = records
             .iter()
@@ -1660,7 +1660,7 @@ impl Tool for CollectionSummaryTool {
             .db
             .aggregate(&ctx.user_id, &self.schema.collection, &aggregation)
             .await
-            .map_err(|e| ToolError::ExecutionFailed(format!("Aggregation failed: {e}")))?;
+            .map_err(|e| ToolError::ExecutionFailed(format!("Failed to aggregate: {e}")))?;
 
         Ok(ToolOutput::success(
             json!({

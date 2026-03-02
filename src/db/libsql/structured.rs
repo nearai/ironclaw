@@ -226,7 +226,8 @@ impl StructuredStore for LibSqlBackend {
     ) -> Result<(), DatabaseError> {
         let conn = self.connect().await?;
 
-        // Delete records first (FK cascade may not be enforced by default in SQLite).
+        // Defensive: delete records explicitly rather than relying on FK cascade,
+        // since PRAGMA foreign_keys may not be enabled on every connection.
         conn.execute(
             "DELETE FROM structured_records WHERE user_id = ?1 AND collection = ?2",
             params![user_id, collection],
