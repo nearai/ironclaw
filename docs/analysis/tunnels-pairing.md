@@ -1,6 +1,6 @@
 # IronClaw Codebase Analysis — Tunnels & Mobile Pairing
 
-> Updated: 2026-02-26 | Version: v0.12.0
+> Updated: 2026-02-26 | Version: v0.13.0
 
 ## 1. Overview
 
