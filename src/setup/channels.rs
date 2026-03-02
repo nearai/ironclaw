@@ -365,7 +365,7 @@ async fn bind_telegram_owner_flow(
 /// This is shared across all channels that need webhook endpoints.
 /// Returns a `TunnelSettings` with provider config (managed tunnel)
 /// or a static URL.
-pub fn setup_tunnel(settings: &Settings) -> Result<TunnelSettings, ChannelSetupError> {
+pub async fn setup_tunnel(settings: &Settings) -> Result<TunnelSettings, ChannelSetupError> {
     // Show existing config
     let has_existing = settings.tunnel.public_url.is_some() || settings.tunnel.provider.is_some();
     if has_existing {
@@ -445,7 +445,7 @@ pub fn setup_tunnel(settings: &Settings) -> Result<TunnelSettings, ChannelSetupE
 
     match choice {
         0 => setup_tunnel_ngrok(),
-        1 => setup_tunnel_cloudflare(),
+        1 => setup_tunnel_cloudflare().await,
         2 => setup_tunnel_tailscale(),
         3 => setup_tunnel_custom(),
         4 => setup_tunnel_static(),
@@ -470,7 +470,7 @@ fn setup_tunnel_ngrok() -> Result<TunnelSettings, ChannelSetupError> {
     })
 }
 
-fn setup_tunnel_cloudflare() -> Result<TunnelSettings, ChannelSetupError> {
+async fn setup_tunnel_cloudflare() -> Result<TunnelSettings, ChannelSetupError> {
     // Check if cloudflared binary is on PATH
     let cloudflared_found = crate::skills::gating::binary_exists("cloudflared");
 
@@ -521,6 +521,28 @@ fn setup_tunnel_cloudflare() -> Result<TunnelSettings, ChannelSetupError> {
             return Err(ChannelSetupError::Validation(
                 "Invalid Cloudflare tunnel token format.".to_string(),
             ));
+        }
+    }
+
+    // Live-validate the token by briefly spawning cloudflared (if available)
+    if cloudflared_found && token_valid {
+        print_info("Verifying token with cloudflared...");
+        match validate_cloudflare_token_live(token.expose_secret()).await {
+            Ok(()) => {
+                print_success("Token verified -- cloudflared connected successfully.");
+            }
+            Err(stderr_output) => {
+                print_error(&format!(
+                    "cloudflared rejected the token: {}",
+                    stderr_output
+                ));
+                println!();
+                if !confirm("Save this token anyway?", false)? {
+                    return Err(ChannelSetupError::Validation(
+                        "Cloudflare tunnel token failed live validation.".to_string(),
+                    ));
+                }
+            }
         }
     }
 
@@ -1131,6 +1153,71 @@ pub async fn setup_wasm_channel(
         enabled: true,
         channel_name: channel_name.to_string(),
     })
+}
+
+/// Validate a Cloudflare tunnel token by briefly running `cloudflared`.
+///
+/// Spawns `cloudflared tunnel run` with a dummy local URL and watches stderr
+/// for up to 10 seconds. If a connection URL appears, the token is valid.
+/// If error indicators appear first, returns the error message.
+async fn validate_cloudflare_token_live(token: &str) -> Result<(), String> {
+    use tokio::io::AsyncBufReadExt;
+    use tokio::process::Command;
+
+    let mut child = Command::new("cloudflared")
+        .args([
+            "tunnel",
+            "--no-autoupdate",
+            "run",
+            "--token",
+            token,
+            "--url",
+            "http://localhost:1",
+        ])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped())
+        .kill_on_drop(true)
+        .spawn()
+        .map_err(|e| format!("Failed to spawn cloudflared: {}", e))?;
+
+    let stderr = child
+        .stderr
+        .take()
+        .ok_or_else(|| "Failed to capture cloudflared stderr".to_string())?;
+    let mut reader = tokio::io::BufReader::new(stderr).lines();
+
+    let result = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        while let Ok(Some(line)) = reader.next_line().await {
+            // A successful connection logs a URL like "https://xxx.cfargotunnel.com"
+            if line.contains("https://")
+                && (line.contains("cfargotunnel.com") || line.contains("trycloudflare.com"))
+            {
+                return Ok(());
+            }
+            // Error indicators that appear before a URL mean the token is bad
+            let lower = line.to_lowercase();
+            if lower.starts_with("err")
+                || lower.contains("failed to unmarshal")
+                || lower.contains("unauthorized")
+            {
+                return Err(line);
+            }
+        }
+        // Process exited without clear signal -- check exit status
+        Err("cloudflared exited without establishing a connection".to_string())
+    })
+    .await;
+
+    // Ensure the process is killed regardless of outcome
+    let _ = child.kill().await;
+
+    match result {
+        Ok(inner) => inner,
+        Err(_elapsed) => {
+            // Timed out without error or success -- benefit of the doubt
+            Ok(())
+        }
+    }
 }
 
 /// Validate that a Cloudflare tunnel token has the expected format.

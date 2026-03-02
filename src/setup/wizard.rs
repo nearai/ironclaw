@@ -1502,7 +1502,7 @@ impl SetupWizard {
     /// Step 6: Channel configuration.
     async fn step_channels(&mut self) -> Result<(), SetupError> {
         // First, configure tunnel (shared across all channels that need webhooks)
-        match setup_tunnel(&self.settings) {
+        match setup_tunnel(&self.settings).await {
             Ok(tunnel_settings) => {
                 self.settings.tunnel = tunnel_settings;
             }
