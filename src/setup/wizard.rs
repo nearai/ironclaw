@@ -797,6 +797,7 @@ impl SetupWizard {
                     "nearai" => "NEAR AI",
                     "anthropic" => "Anthropic (Claude)",
                     "openai" => "OpenAI",
+                    "venice" | "veniceai" => "Venice AI",
                     "ollama" => "Ollama (local)",
                     "openai_compatible" => "OpenAI-compatible endpoint",
                     other => other,
@@ -807,7 +808,7 @@ impl SetupWizard {
 
             let is_known = matches!(
                 current.as_str(),
-                "nearai" | "anthropic" | "openai" | "ollama" | "openai_compatible"
+                "nearai" | "anthropic" | "openai" | "veniceai" | "ollama" | "openai_compatible"
             );
 
             if is_known && confirm("Keep current provider?", true).map_err(SetupError::Io)? {
@@ -819,6 +820,7 @@ impl SetupWizard {
                     "nearai" => return self.setup_nearai().await,
                     "anthropic" => return self.setup_anthropic().await,
                     "openai" => return self.setup_openai().await,
+                    "venice" | "veniceai" => return self.setup_veniceai().await,
                     "ollama" => return self.setup_ollama(),
                     "openai_compatible" => return self.setup_openai_compatible().await,
                     _ => {
@@ -848,6 +850,7 @@ impl SetupWizard {
             "Ollama           - local models, no API key needed",
             "OpenRouter       - 200+ models via single API key",
             "OpenAI-compatible - custom endpoint (vLLM, LiteLLM, etc.)",
+            "Venice AI        - uncensored inference (uses same auth as Venice LLM backend)",
         ];
 
         let choice = select_one("Provider:", options).map_err(SetupError::Io)?;
@@ -859,6 +862,7 @@ impl SetupWizard {
             3 => self.setup_ollama()?,
             4 => self.setup_openrouter().await?,
             5 => self.setup_openai_compatible().await?,
+            6 => self.setup_veniceai().await?,
             _ => return Err(SetupError::Config("Invalid provider selection".to_string())),
         }
 
@@ -946,6 +950,19 @@ impl SetupWizard {
             "OpenAI API key",
             "https://platform.openai.com/api-keys",
             None,
+        )
+        .await
+    }
+
+    /// Venice AI provider setup: collect API key and store in secrets.
+    async fn setup_veniceai(&mut self) -> Result<(), SetupError> {
+        self.setup_api_key_provider(
+            "veniceai",
+            "VENICE_API_KEY",
+            "llm_venice_api_key",
+            "Venice API key",
+            "https://venice.ai/settings/api-keys",
+            Some("Venice AI"),
         )
         .await
     }
@@ -1278,6 +1295,7 @@ impl SetupWizard {
             ollama: None,
             openai_compatible: None,
             tinfoil: None,
+            veniceai: None,
         };
 
         match create_llm_provider(&config, session) {
