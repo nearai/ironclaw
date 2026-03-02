@@ -92,6 +92,7 @@ impl LlmProvider for MockLlmProvider {
                     id: "call_mock_001".to_string(),
                     name: tool.name.clone(),
                     arguments: serde_json::json!({"test": true}),
+                    reasoning: "tool selected for integration test coverage".to_string(),
                 }],
                 input_tokens: 15,
                 output_tokens: 8,
