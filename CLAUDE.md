@@ -404,7 +404,7 @@ SKILLS_AUTO_DISCOVER=true              # Scan skill directories on startup
 TINFOIL_API_KEY=...                    # Required when LLM_BACKEND=tinfoil
 TINFOIL_MODEL=kimi-k2-5               # Default model
 
-# AWS Bedrock (native Converse API)
+# AWS Bedrock (native Converse API, requires --features bedrock)
 LLM_BACKEND=bedrock
 BEDROCK_REGION=us-east-1                    # AWS region
 BEDROCK_MODEL=anthropic.claude-opus-4-6-v1  # Required model ID
@@ -425,7 +425,7 @@ IronClaw supports multiple LLM backends via the `LLM_BACKEND` env var: `nearai` 
 
 **Tinfoil** -- Private inference via `https://inference.tinfoil.sh/v1`. Runs models inside hardware-attested TEEs so neither Tinfoil nor the cloud provider can see prompts or responses. Uses the OpenAI-compatible Chat Completions API. Configure with `TINFOIL_API_KEY` and `TINFOIL_MODEL` (default: `kimi-k2-5`).
 
-**AWS Bedrock** -- Uses the native Converse API via `aws-sdk-bedrockruntime`. Supports all Bedrock auth methods: bearer token (`AWS_BEARER_TOKEN_BEDROCK`), IAM credentials (`AWS_ACCESS_KEY_ID`/`AWS_SECRET_ACCESS_KEY`), SSO profiles (`AWS_PROFILE`), and instance roles. Configure with `BEDROCK_REGION` (default: `us-east-1`), `BEDROCK_MODEL` (required, e.g., `anthropic.claude-opus-4-6-v1`), and `BEDROCK_CROSS_REGION` (optional: `us`, `eu`, `apac`, `global` for cross-region inference profiles). The SDK credential chain resolves auth automatically from the environment.
+**AWS Bedrock** -- Uses the native Converse API via `aws-sdk-bedrockruntime`. Requires `--features bedrock` at build time (not included in default features due to heavy AWS SDK dependencies). Supports all Bedrock auth methods: bearer token (`AWS_BEARER_TOKEN_BEDROCK`), IAM credentials (`AWS_ACCESS_KEY_ID`/`AWS_SECRET_ACCESS_KEY`), SSO profiles (`AWS_PROFILE`), and instance roles. Configure with `BEDROCK_REGION` (default: `us-east-1`), `BEDROCK_MODEL` (required, e.g., `anthropic.claude-opus-4-6-v1`), and `BEDROCK_CROSS_REGION` (optional: `us`, `eu`, `apac`, `global` for cross-region inference profiles). The SDK credential chain resolves auth automatically from the environment.
 
 ## Database
 

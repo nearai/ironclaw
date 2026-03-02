@@ -8,6 +8,7 @@
 //! - **OpenAI-compatible**: Any endpoint that speaks the OpenAI API
 //! - **AWS Bedrock**: Native Converse API via aws-sdk-bedrockruntime
 
+#[cfg(feature = "bedrock")]
 mod bedrock;
 pub mod circuit_breaker;
 pub mod costs;
@@ -62,7 +63,13 @@ pub fn create_llm_provider(
         LlmBackend::Ollama => create_ollama_provider(config),
         LlmBackend::OpenAiCompatible => create_openai_compatible_provider(config),
         LlmBackend::Tinfoil => create_tinfoil_provider(config),
+        #[cfg(feature = "bedrock")]
         LlmBackend::Bedrock => create_bedrock_provider(config),
+        #[cfg(not(feature = "bedrock"))]
+        LlmBackend::Bedrock => Err(LlmError::RequestFailed {
+            provider: "bedrock".to_string(),
+            reason: "Bedrock support not compiled. Rebuild with --features bedrock".to_string(),
+        }),
     }
 }
 
@@ -213,6 +220,7 @@ fn create_tinfoil_provider(config: &LlmConfig) -> Result<Arc<dyn LlmProvider>, L
     Ok(Arc::new(RigAdapter::new(model, &tf.model)))
 }
 
+#[cfg(feature = "bedrock")]
 fn create_bedrock_provider(config: &LlmConfig) -> Result<Arc<dyn LlmProvider>, LlmError> {
     let br = config
         .bedrock

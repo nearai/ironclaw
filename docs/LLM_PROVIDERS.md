@@ -69,7 +69,7 @@ Pull a model first: `ollama pull llama3.2`
 
 ---
 
-## AWS Bedrock
+## AWS Bedrock (requires `--features bedrock`)
 
 Uses the native AWS Converse API via `aws-sdk-bedrockruntime`. Supports all Bedrock
 authentication methods: API key (bearer token), IAM credentials, SSO profiles, and
