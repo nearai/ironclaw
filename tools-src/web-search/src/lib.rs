@@ -284,8 +284,12 @@ fn is_valid_country_code(s: &str) -> bool {
 
 /// Validate a UI locale string (e.g. "en-US").
 fn is_valid_ui_lang(s: &str) -> bool {
-    let parts: Vec<&str> = s.split('-').collect();
-    parts.len() == 2 && is_valid_lang_code(parts[0]) && is_valid_country_code(parts[1])
+    let mut parts = s.split('-');
+    if let (Some(lang), Some(country), None) = (parts.next(), parts.next(), parts.next()) {
+        is_valid_lang_code(lang) && is_valid_country_code(country)
+    } else {
+        false
+    }
 }
 
 /// Validate a freshness filter value.
